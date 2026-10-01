@@ -2249,6 +2249,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 }
             }
             if (ybState.IsValid()) ActivateBestChain(ybState, chainparams);
+            // Make the un-rejection durable before the record that drives it is erased: a crash
+            // in between would otherwise reload BLOCK_FAILED_VALID from disk with no record left
+            // to reconsider it (6.20.0 reaches ReconsiderBlock here; v4.5.0's RewindBlockIndex
+            // had already erased the entry, so it took the "skipped" branch).
+            FlushStateToDisk();
             yellowback::g_yellowback->ClearRejected();
         }
         RegisterValidationInterface(yellowback::g_yellowback);

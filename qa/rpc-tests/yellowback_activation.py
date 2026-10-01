@@ -126,6 +126,7 @@ class YellowbackActivationTest(YellowbackTestFramework):
         print('  rewind the forged branch (invalidateblock on every node): UNDO restores Activation')
         for node in nodes:
             node.invalidateblock(forged[0])
+        self.refresh_peer_views()      # 6.20.0: peers' best-known block still points into the rewound branch
         self.sync_all(blocks_only=True)
         assert_equal(nodes[2].getblockcount(), base)
         for i in ENFORCING:
