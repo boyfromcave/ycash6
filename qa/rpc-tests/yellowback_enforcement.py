@@ -1243,6 +1243,13 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.rejected_hashes.append(blockhash)
         enforcing_tip = self.nodes[POOLS[0]].getbestblockhash()
 
+        # 6.20.0 keeps a failed, never-connected block across a restart (v4.5.0's RewindBlockIndex
+        # erased it), so the restarted node's next getheaders reply opens on that known-invalid
+        # block; its odometer must read on past it (mapping 19).
+        print('  node %d restarted with the rejection live' % POOLS[1])
+        self.restart(POOLS[1])
+        assert self.nodes[POOLS[1]].yed_getinfo()['rejectedBlocks'] >= 1
+
         print('  five blocks of stock lead must not trip the valve')
         for _ in range(4):                      # the rejected block plus four = five of lead
             stock.generate(1)

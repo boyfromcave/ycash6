@@ -8620,6 +8620,14 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
             }
             if (!AcceptBlockHeader(header, state, chainparams, &pindexLast)) {
                 int nDoS;
+                // Yellowback ACT-7: read on past the rejected block and its refused descendants so the
+                // odometer sees every header (6.20.0 fetches blocks only after their headers).
+                if (yellowback::g_yellowback && !yellowback::g_yellowback->ValveTripped() &&
+                    (state.GetRejectReason() == "bad-prevblk-yellowback" ||
+                     (state.GetRejectReason() == "duplicate" && yellowback::g_yellowback->IsRejectedAncestor(pindexLast)))) {
+                    pindexLast = NULL;
+                    continue;
+                }
                 if (state.IsInvalid(nDoS)) {
                     if (nDoS > 0)
                         Misbehaving(pfrom->GetId(), nDoS);
