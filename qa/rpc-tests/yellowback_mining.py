@@ -18,7 +18,6 @@ from test_framework.util import (
     hex_str_to_bytes,
     start_node,
     stop_node,
-    sync_mempools,
 )
 from test_framework.yellowback_util import (
     unlock_all,
@@ -569,7 +568,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
                                        expiry=expiry, selector=b"\x52")  # OP_2
         assert_equal(user.yed_validaterawtransaction(ok_hex)['wouldBeRejected'], False)
         ok_txid = user.sendrawtransaction(ok_hex)
-        sync_mempools(self.nodes)
+        self.sync_mempools(self.nodes)
         for i in POOLS:
             assert ok_txid in self.nodes[i].getrawmempool()
             assert ok_txid not in gbt_hashes(self.nodes[i].getblocktemplate())

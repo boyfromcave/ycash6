@@ -40,6 +40,7 @@ from test_framework.yellowback_util import (
     node_pubkey,
     set_quote,
     term_class_of,
+    wallet_network_fee,
 )
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint
@@ -359,8 +360,8 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         yec_before = user.getbalance()
         released = user.yed_redeem(void_col)
         assert_equal((released['burnedCents'], released['feeZat'], released['payee']), (0, 0, None))
-        assert_equal(released['collateralOut'], v['collateralZat'] - YELLOWBACK_FEE)
         raw = user.getrawtransaction(released['txid'], 1)
+        assert_equal(released['collateralOut'], v['collateralZat'] - wallet_network_fee(raw))
         assert_equal(len(raw['vin']), 1)
         assert_equal(len(raw['vout']), 1)
         assert_equal(raw['vout'][0]['scriptPubKey']['addresses'], [released['to']])

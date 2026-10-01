@@ -331,3 +331,14 @@ qa/yellowback-audit.sh
 Regtest runs all six Ycash upgrades at height 1, as on the v4.5.0 line: baseline fix 3 keeps regtest's
 Equihash at (48,5) under every upgrade (6.20.0 had dropped v4.5.0's regtest exemption). The stock node
 for parity tests is built from branch `ycash6-stock` (all three baseline fixes, no Yellowback).
+
+The inherited functional suite at the pin is classified script by script in
+[`yellowback-baseline.md`, "Inherited functional suite at the pin"](yellowback-baseline.md#inherited-functional-suite-at-the-pin).
+Of the 119 `BASE_SCRIPTS`, 39 pass against the stock node. 77 of the failures come from
+upstream-Zcash assumptions in the harness (branch ids, explicit fees above the 0.00004 cap, mininode,
+addresses, caches, branding) or from intended Ycash policy. Three are defects in the pin (findings
+7–9), and the fee-error message bug is finding 10. None of them is fixed in this port; they are
+reported to miodragpop. The 42 entries that pass twice, including `zmq_test`, `invalidateblock` and
+`getblocktemplate_longpoll`, are the `STOCK_BASELINE` that CI runs against the fork binary without
+`-yellowback`. One operator note follows from finding 7: on 6.20.0, `-lightwalletd` must be run
+together with `-insightexplorer`.

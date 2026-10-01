@@ -15,6 +15,7 @@
 
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
+#include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/params.h"
 #include "yellowback/payload.h"
@@ -39,6 +40,7 @@
 #include "script/sign.h"
 #include "test/test_bitcoin.h"
 #include "util/test.h"
+#include "zip317.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -1249,6 +1251,109 @@ BOOST_AUTO_TEST_CASE(outpoint_selector_is_the_serialised_outpoint)
     BOOST_CHECK(std::vector<unsigned char>(sel.begin(), sel.begin() + 32) == std::vector<unsigned char>(o.hash.begin(), o.hash.end()));
     BOOST_CHECK_EQUAL((int)sel[32], 7);
     BOOST_CHECK_EQUAL((int)sel[33], 0);
+}
+
+// ---------------------------------------------------------------- P-2: the network fee under ZIP-317
+
+// P-2: a transparent MINT with three P2PKH funding inputs, the carrier, both fees and YEC change
+// pays exactly the conventional fee of the signed transaction (more than the 1000-zat floor), and
+// the stand-in signatures never undercount, whatever lengths the real signatures come out at.
+BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
+{
+    Armed a;
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const std::vector<unsigned char> bundle = a.BundleFor(std::vector<unsigned char>(), a.x);
+    const CarrierRecord c = a.Carrier(bundle, std::vector<unsigned char>(), uint256S("ca"));
+    for (int round = 0; round < 16; round++) {
+        CBasicKeyStore ks;
+        a.AddKeys(ks);
+        MintShape m;
+        m.cents = 100000;
+        m.termClass = 0;
+        m.lockHeight = (uint32_t)(a.R + 48);
+        m.claimHeight = m.lockHeight + a.P.grace;
+        m.refHeight = a.R;
+        m.owner = NewKey().GetPubKey();
+        m.collateralZat = 251 * COIN;
+        m.payee = NewKey().GetPubKey().GetID();
+        m.feeZat = FeeZat(m.collateralZat, a.P.feeMin, a.P.feeBps);
+        m.attestPayee = a.bond[0].GetPubKey().GetID();
+        m.attestFeeZat = AttestFeeZat(m.feeZat, a.P.attestFeeBps);
+        int feeVout = -1, attestFeeVout = -1;
+        CMutableTransaction mtx = Shell((uint32_t)(a.R + REF_WINDOW));
+        mtx.vout = MintOutputs(m, feeVout, &attestFeeVout);
+        mtx.vout.push_back(CTxOut(1 * COIN, GetScriptForDestination(NewKey().GetPubKey().GetID())));   // YEC change
+        std::vector<CScript> funding;
+        for (int i = 0; i < 3; i++) {
+            const CKey k = NewKey();
+            ks.AddKey(k);
+            funding.push_back(GetScriptForDestination(k.GetPubKey().GetID()));
+            mtx.vin.push_back(CTxIn(COutPoint(uint256S(strprintf("f%d", i)), (uint32_t)round)));
+        }
+        mtx.vin.push_back(CTxIn(c.outpoint));
+        // The wallet's probe (Context::FeeOf): stand-ins for every input, priced before signing.
+        CMutableTransaction probe = mtx;
+        for (int i = 0; i < 3; i++) probe.vin[i].scriptSig = PendingP2PKHSig(funding[i], ks);
+        probe.vin[3].scriptSig = PendingCarrierSig(c);
+        const CAmount fee = NetworkFee(probe);
+        // Signed for real.
+        const PrecomputedTransactionData txdata(CTransaction(mtx), {});
+        for (int i = 0; i < 3; i++) BOOST_REQUIRE(SignSignature(ks, funding[i], mtx, txdata, i, 50 * COIN, SIGHASH_ALL, branchId));
+        SignCarrierInput(mtx, 3, c, ks, branchId);
+        const CTransaction tx(mtx);
+        BOOST_CHECK_GT(fee, DEFAULT_YELLOWBACK_FEE);
+        BOOST_CHECK_EQUAL(fee, tx.GetConventionalFee());   // the six outputs set the action count
+        for (size_t i = 0; i < mtx.vin.size(); i++) BOOST_CHECK_GE(probe.vin[i].scriptSig.size(), mtx.vin[i].scriptSig.size());
+    }
+    // The stand-in for a key the keystore does not hold counts it uncompressed.
+    CBasicKeyStore empty;
+    const CScript unknown = GetScriptForDestination(NewKey().GetPubKey().GetID());
+    BOOST_CHECK_EQUAL(PendingP2PKHSig(unknown, empty).size(), 1 + MAX_SIG_SIZE + 1 + CPubKey::PUBLIC_KEY_SIZE);
+}
+
+// P-2: a REDEEM burning three YED coins with change and a pool fee pays exactly the conventional
+// fee of the signed transaction out of the collateral; the Sapling destination counts its note
+// padded to two outputs; -yellowbackfee above the conventional fee still wins.
+BOOST_AUTO_TEST_CASE(p2_redeem_fee_is_the_conventional_fee)
+{
+    Fixture f;
+    CBasicKeyStore ks;
+    f.AddKeys(ks);
+    std::vector<YedCoin> yed = { Coin(uint256S("e1"), 1, 40000, f.yedKey), Coin(uint256S("e2"), 1, 40000, f.yedKey), Coin(uint256S("e3"), 1, 30000, f.yedKey) };
+    VaultSpendShape s = f.Shape(true, true, true, true, yed, 10000);
+    VaultSpendPlan plan = PlanPricedVaultSpend(s, ks, std::nullopt);
+    BOOST_CHECK_GT(s.networkFee, DEFAULT_YELLOWBACK_FEE);
+    BOOST_CHECK_EQUAL(plan.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - s.networkFee - s.feeZat - TOKEN_VALUE);
+    BuiltTx b = f.Built(s, plan);
+    SignVaultSpend(b, ks, f.branchId, true);
+    const CTransaction tx(b.tx);
+    BOOST_CHECK_EQUAL(s.networkFee, tx.GetConventionalFee());
+    // Repricing is idempotent: the shape's own fee prices it again at the same amount.
+    VaultSpendShape again = s;
+    BOOST_CHECK_EQUAL(PlanPricedVaultSpend(again, ks, std::nullopt).collateralOut, plan.collateralOut);
+    BOOST_CHECK_EQUAL(again.networkFee, s.networkFee);
+
+    // Sapling destination: the transparent part plus one note, padded to two Sapling outputs.
+    VaultSpendShape z = f.Shape(true, true, false, true, yed, 10000);
+    VaultSpendPlan zp = PlanPricedVaultSpend(z, ks, std::nullopt);
+    BuiltTx zb = f.Built(z, zp);
+    SignVaultSpend(zb, ks, f.branchId, true);
+    const size_t zActions = CalculateLogicalActionCount(zb.tx.vin, zb.tx.vout, 0, 0, 2, 0);
+    BOOST_CHECK_EQUAL(z.networkFee, CalculateConventionalFee(zActions));
+    BOOST_CHECK_EQUAL(zp.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - z.networkFee - z.feeZat - TOKEN_VALUE);
+
+    // A release (one input, one output) is at the 1000-zat floor; a higher -yellowbackfee wins.
+    VaultSpendShape r = f.Shape(true, false, true, false, {});
+    PlanPricedVaultSpend(r, ks, std::nullopt);
+    BOOST_CHECK_EQUAL(r.networkFee, DEFAULT_YELLOWBACK_FEE);
+    const CAmount saved = g_yellowbackFee;
+    g_yellowbackFee = 50000;
+    VaultSpendShape h = f.Shape(true, true, true, true, yed, 10000);
+    h.networkFee = g_yellowbackFee;
+    VaultSpendPlan hp = PlanPricedVaultSpend(h, ks, std::nullopt);
+    g_yellowbackFee = saved;
+    BOOST_CHECK_EQUAL(h.networkFee, 50000);
+    BOOST_CHECK_EQUAL(hp.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - 50000 - h.feeZat - TOKEN_VALUE);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

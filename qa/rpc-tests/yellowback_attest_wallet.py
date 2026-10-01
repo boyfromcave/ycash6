@@ -32,7 +32,7 @@ from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes, wait_and_assert_operationid_status
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
-    TOKEN_VALUE, YELLOWBACK_FEE, YellowbackTestFramework, assert_same_statehash, pubkey_to_address, set_quote,
+    TOKEN_VALUE, YellowbackTestFramework, wallet_network_fee, assert_same_statehash, pubkey_to_address, set_quote,
     usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW,
 )
 from test_framework.yellowback_attest import (
@@ -304,7 +304,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_greater_than(len(carrierz['vShieldedSpend']), 0)
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mz['txid'])['status'], 'ACTIVE')
-        spent = 2 * YELLOWBACK_FEE + mz['collateralZat'] + TOKEN_VALUE + mz['feeZat'] + mz['attestFeeZat']
+        spent = wallet_network_fee(carrierz) + wallet_network_fee(rawz) + mz['collateralZat'] + TOKEN_VALUE + mz['feeZat'] + mz['attestFeeZat']
         assert_equal(user.z_getbalance(ys), z_before - Decimal(spent) / COIN)
 
 # Rule: W7
@@ -321,8 +321,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(user.gettxout(orphan['carrierTxid'], 0)['value'], Decimal(CARRIER_VALUE) / COIN)
         self.mine_round_robin(POOLS, REF_WINDOW)
         swept = user.yed_sweepcarriers()
-        assert_equal((swept['count'], swept['reclaimedZat'], swept['outstanding']), (1, CARRIER_VALUE - YELLOWBACK_FEE, 0))
         rawsw = user.getrawtransaction(swept['txid'], 1)
+        assert_equal((swept['count'], swept['reclaimedZat'], swept['outstanding']), (1, CARRIER_VALUE - wallet_network_fee(rawsw), 0))
         assert_equal([v['txid'] for v in rawsw['vin']], [orphan['carrierTxid']])
         self.sync_all()
         self.mine(POOLS[2])
@@ -440,7 +440,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         afee = [o for o in rawc1['vout'] if o['valueZat'] == c1['attestFeeZat'] and o['scriptPubKey']['addresses'] == [c1['attestPayee']]]
         assert_equal(len(afee), 1)
         vault1 = user.yed_getvault(v1['txid'])
-        assert_equal(c1['collateralOut'], vault1['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - YELLOWBACK_FEE - c1['feeZat'] - c1['attestFeeZat'])
+        assert_equal(c1['collateralOut'], vault1['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - wallet_network_fee(rawc1) - c1['feeZat'] - c1['attestFeeZat'])
         assert_equal(user.yed_validaterawtransaction(rawc1['hex'])['verdict'], 'ok')
         self.mine(POOLS[1])
         assert_equal(user.yed_getvault(v1['txid'])['status'], 'CLAIMED')
@@ -503,7 +503,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(len(residual_out), 1)
         assert_equal(residual_out[0]['valueZat'], c2['residualZat'])
         assert_equal(rawc2['vin'][-1]['txid'], c2['carrierTxid'])
-        assert_equal(c2['collateralOut'], vault2['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - YELLOWBACK_FEE - c2['feeZat'] - c2['attestFeeZat'] - c2['residualZat'])
+        assert_equal(c2['collateralOut'], vault2['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - wallet_network_fee(rawc2) - c2['feeZat'] - c2['attestFeeZat'] - c2['residualZat'])
         self.mine(POOLS[0])
         vault2 = user.yed_getvault(v2['txid'])
         assert_equal(vault2['status'], 'CLAIMED')
@@ -527,8 +527,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_rpc_error('bond-locked', claimant.yed_withdrawbond, 0)
         self.mine_round_robin(POOLS, reg[0]['bondLocktime'] - user.getblockcount())
         wd = claimant.yed_withdrawbond(0)
-        assert_equal((wd['seq'], wd['bondZat'], wd['bondOut']), (0, 10 * COIN, 10 * COIN - YELLOWBACK_FEE))
         rawwd = claimant.getrawtransaction(wd['txid'], 1)
+        assert_equal((wd['seq'], wd['bondZat'], wd['bondOut']), (0, 10 * COIN, 10 * COIN - wallet_network_fee(rawwd)))
         assert_equal((rawwd['vin'][0]['txid'], rawwd['vin'][0]['vout'], rawwd['locktime']), (reg[0]['txid'], 0, reg[0]['bondLocktime']))
         assert_equal(rawwd['vout'][0]['scriptPubKey']['addresses'], [wd['to']])
         self.sync_all()

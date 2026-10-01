@@ -25,6 +25,7 @@
 #include "crypto/sha256.h"
 #include "zcash/Address.hpp"
 #include "zcash/address/zip32.h"
+#include "zip317.h"
 
 #include <algorithm>
 #include <variant>
@@ -180,6 +181,51 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     if (out.changeVout >= 0) out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), out.changeVout));
 }
 
+// ---------------------------------------------------------------- P-2: the network fee under ZIP-317
+
+CAmount NetworkFee(const CMutableTransaction& probe, size_t saplingSpends, size_t saplingOutputs)
+{
+    // sapling-crypto BundleType::DEFAULT: a bundle with any spend or output has at least two outputs.
+    if (saplingSpends + saplingOutputs > 0) saplingOutputs = std::max<size_t>(saplingOutputs, 2);
+    const size_t actions = CalculateLogicalActionCount(probe.vin, probe.vout, probe.vJoinSplit.size(), saplingSpends, saplingOutputs, 0);
+    return std::max(g_yellowbackFee, CalculateConventionalFee(actions));
+}
+
+CScript PendingP2PKHSig(const CScript& spentScript, const CKeyStore& keystore)
+{
+    CTxDestination dest;
+    CPubKey pk;
+    if (ExtractDestination(spentScript, dest)) {
+        if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
+            if (keystore.GetPubKey(*id, pk)) return CScript() << valtype(MAX_SIG_SIZE, 0x30) << ToByteVector(pk);
+        }
+    }
+    return CScript() << valtype(MAX_SIG_SIZE, 0x30) << valtype(CPubKey::PUBLIC_KEY_SIZE, 0x04);   // unknown key: count it uncompressed
+}
+
+CScript PendingCarrierSig(const CarrierRecord& c)
+{
+    return CarrierScriptSig(c.bundle, valtype(MAX_SIG_SIZE, 0x30), CarrierScript(c.pk, BundleHash(c.bundle)));
+}
+
+VaultSpendPlan PlanPricedVaultSpend(VaultSpendShape& shape, const CKeyStore& keystore, const std::optional<CarrierRecord>& carrier)
+{
+    // The fee moves collateralOut alone, never the shape, so one repricing settles it.
+    VaultSpendPlan plan = PlanVaultSpend(shape);
+    CMutableTransaction probe;
+    probe.vin = plan.vin;
+    probe.vout = plan.vout;
+    probe.vin[0].scriptSig = shape.ownerPath ? OwnerScriptSig(valtype(MAX_SIG_SIZE, 0x30), shape.vaultScript) : ClaimScriptSig(shape.vaultScript);
+    for (size_t i = 0; i < shape.yedInputs.size(); i++) probe.vin[i + 1].scriptSig = PendingP2PKHSig(shape.yedInputs[i].token.scriptPubKey, keystore);
+    if (carrier.has_value()) probe.vin.push_back(CTxIn(carrier->outpoint, PendingCarrierSig(carrier.value())));
+    const CAmount fee = NetworkFee(probe, 0, shape.collateralScript.has_value() ? 0 : 1);
+    if (fee > shape.networkFee) {
+        shape.networkFee = fee;
+        plan = PlanVaultSpend(shape);
+    }
+    return plan;
+}
+
 // ---------------------------------------------------------------- v3 pure pieces (§3.4, §3.5, §4.6)
 
 uint256 BundleHash(const std::vector<unsigned char>& bundle)
@@ -315,10 +361,11 @@ struct Context
     int refHeight;                          //!< R for a MINT / TRANSFER: indexTip - REF_LAG (§3.5)
     int spendRefHeight;                     //!< R for a vault spend: the index tip (the snapshot yed_listclaimable reads; RED-1's window holds at H = tip + 1)
     uint32_t branchId;
+    CAmount fee;                            //!< P-2: the network fee the builder is pricing at (Reprice raises it)
 
     explicit Context(YellowbackWallet& yw_)
         : yw(yw_), wallet(*yw_.Wallet()), index(*yw_.Index()), params(yw_.Index()->GetParams()), st(yw_.Index()->View()),
-          chainHeight(0), indexHeight(-1), refHeight(-1), spendRefHeight(-1), branchId(0)
+          chainHeight(0), indexHeight(-1), refHeight(-1), spendRefHeight(-1), branchId(0), fee(g_yellowbackFee)
     {
         AssertLockHeld(cs_main);
         AssertLockHeld(wallet.cs_wallet);
@@ -367,8 +414,28 @@ struct Context
         const uint256 anchor = saplingAnchor.has_value() ? saplingAnchor.value() : pcoinsTip->GetBestAnchor(SAPLING);
         TransactionBuilder& b = slot.emplace(::Params(), chainHeight + 1, std::nullopt, anchor);
         b.SetExpiryHeight(expiry);
-        b.SetFee(g_yellowbackFee);
+        b.SetFee(fee);
         return b;
+    }
+
+    /**
+     * P-2: the NetworkFee() of `probe` once signed — vin[first .. first + prevs.size()) as P2PKH of
+     * prevs, the carrier at `carrierVin` — with the Sapling spends/outputs still to come.
+     */
+    CAmount FeeOf(CMutableTransaction probe, const std::vector<std::pair<CScript, CAmount>>& prevs, unsigned int first,
+                  const CarrierRecord* carrier = nullptr, int carrierVin = -1, size_t saplingSpends = 0, size_t saplingOutputs = 0) const
+    {
+        for (size_t i = 0; i < prevs.size(); i++) probe.vin[first + i].scriptSig = PendingP2PKHSig(prevs[i].first, wallet);
+        if (carrier && carrierVin >= 0) probe.vin[carrierVin].scriptSig = PendingCarrierSig(*carrier);
+        return NetworkFee(probe, saplingSpends, saplingOutputs);
+    }
+
+    /** P-2: raise the fee to `needed`; true when it rose, and the caller rebuilds at the new fee (it only rises, so this ends). */
+    bool Reprice(CAmount needed)
+    {
+        if (needed <= fee) return false;
+        fee = needed;
+        return true;
     }
 
     /** The real scriptPubKey of a coin the transaction spends unsigned (needed by the 6.20.0 builder), else `fallback`. */
@@ -625,7 +692,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     shape.ownerPath = ownerPath;
     shape.withPayload = withPayload;
     shape.refHeight = R;
-    shape.networkFee = g_yellowbackFee;
+    shape.networkFee = ctx.fee;
     if (extras) {
         shape.attestPayee = extras->attestKey;
         shape.attestFeeZat = extras->attestFeeZat;
@@ -676,11 +743,21 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     }
 
     const uint32_t expiry = ctx.Expiry(R);
+    if (dest.kind == AddressChoice::TRANSPARENT) {
+        shape.collateralScript = GetScriptForDestination(dest.keyId);
+        out.collateralTo = dest.text;
+    } else if (dest.kind != AddressChoice::SAPLING) {
+        CPubKey fresh = ctx.FreshKey("yellowback-collateral");
+        if (!out.freshKey.IsValid()) out.freshKey = fresh;
+        shape.collateralScript = GetScriptForDestination(fresh.GetID());
+        out.collateralTo = KeyIO(::Params()).EncodeDestination(CTxDestination(fresh.GetID()));
+    }
+    // P-2: the fee is the conventional fee of this shape; it comes out of the collateral.
+    VaultSpendPlan plan = PlanPricedVaultSpend(shape, ctx.wallet, extras ? std::optional<CarrierRecord>(extras->carrier) : std::nullopt);
+    ctx.fee = shape.networkFee;
     if (dest.kind == AddressChoice::SAPLING) {
         // Sapling shape (§4.6): the collateral is one Sapling note; vault, YED and carrier inputs go
         // in unsigned and are signed by SignVaultSpend() after FinishSapling().
-        shape.collateralScript = std::nullopt;
-        VaultSpendPlan plan = PlanVaultSpend(shape);
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry);
         b.SetLockTime(plan.nLockTime);
         b.AddTransparentInputUnsigned(vaultOut, ctx.SpentScript(vaultOut, P2SHScript(shape.vaultScript)), vault.collateralZat, 0xFFFFFFFE);
@@ -705,16 +782,6 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         return out;
     }
 
-    if (dest.kind == AddressChoice::TRANSPARENT) {
-        shape.collateralScript = GetScriptForDestination(dest.keyId);
-        out.collateralTo = dest.text;
-    } else {
-        CPubKey fresh = ctx.FreshKey("yellowback-collateral");
-        if (!out.freshKey.IsValid()) out.freshKey = fresh;
-        shape.collateralScript = GetScriptForDestination(fresh.GetID());
-        out.collateralTo = KeyIO(::Params()).EncodeDestination(CTxDestination(fresh.GetID()));
-    }
-    VaultSpendPlan plan = PlanVaultSpend(shape);
     CMutableTransaction mtx = ctx.NewTx(expiry);
     mtx.nLockTime = plan.nLockTime;
     mtx.vin = plan.vin;
@@ -1078,14 +1145,20 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
     rec.bundle = bundle;
     rec.pk = key;
     rec.createdHeight = ctx.chainHeight;
-    const CAmount needed = CARRIER_VALUE + g_yellowbackFee;
 
     if (source.kind == AddressChoice::SAPLING) {
         libzcash::SaplingExtendedSpendingKey extsk;
         std::vector<SaplingNoteEntry> notes;
         std::vector<SaplingWitness> witnesses;
         uint256 anchor;
-        ctx.SelectSapling(source, needed, extsk, notes, witnesses, anchor);
+        do {   // P-2: priced at the conventional fee of the notes the fee itself selects
+            notes.clear();
+            witnesses.clear();
+            ctx.SelectSapling(source, CARRIER_VALUE + ctx.fee, extsk, notes, witnesses, anchor);
+            CMutableTransaction probe;
+            probe.vout.push_back(carrierOut);
+            if (!ctx.Reprice(NetworkFee(probe, notes.size(), 1))) break;
+        } while (true);
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
         for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
         b.AddTransparentOutput(carrierOut.scriptPubKey, carrierOut.nValue);
@@ -1095,23 +1168,28 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
         return out;
     }
 
-    CMutableTransaction mtx = ctx.NewTx(expiry);
-    mtx.vout.push_back(carrierOut);
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
     if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
-    const CAmount selected = ctx.SelectYec(needed, mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
-    const CAmount change = selected - needed;
-    if (change > 0) {
-        // An s1... `from` keeps its change: the main transaction is funded "from this address" too.
-        if (source.kind == AddressChoice::TRANSPARENT) {
-            mtx.vout.push_back(CTxOut(change, onlyScript));
-        } else {
-            CPubKey changeKey;
-            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(expiry);
+        mtx.vout.push_back(carrierOut);
+        prevs.clear();
+        const CAmount needed = CARRIER_VALUE + ctx.fee;
+        const CAmount selected = ctx.SelectYec(needed, mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
+        const CAmount change = selected - needed;
+        if (change > 0) {
+            // An s1... `from` keeps its change: the main transaction is funded "from this address" too.
+            if (source.kind == AddressChoice::TRANSPARENT) {
+                mtx.vout.push_back(CTxOut(change, onlyScript));
+            } else {
+                CPubKey changeKey;
+                if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+                mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+            }
         }
-    }
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
     ctx.SignInputs(mtx, prevs, 0);
     out.tx = mtx;
     out.fundedFrom = "transparent";
@@ -1159,7 +1237,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     std::vector<CTxOut> vout = MintOutputs(shape, feeVout, &attestFeeVout);
     CAmount outputs = 0;
     for (const CTxOut& o : vout) outputs += o.nValue;
-    const CAmount needed = outputs + g_yellowbackFee - CARRIER_VALUE;   // the carrier input pays CARRIER_VALUE
+    // P-2: the outputs plus the network fee, less CARRIER_VALUE (the carrier input pays it); ctx.fee is repriced below.
 
     out.freshKey = owner;
     out.termClass = g.termClass;
@@ -1181,7 +1259,15 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
         std::vector<SaplingNoteEntry> notes;
         std::vector<SaplingWitness> witnesses;
         uint256 anchor;
-        ctx.SelectSapling(source, std::max<CAmount>(needed, 0), extsk, notes, witnesses, anchor);
+        do {   // P-2: priced at the conventional fee of the notes the fee itself selects
+            notes.clear();
+            witnesses.clear();
+            ctx.SelectSapling(source, std::max<CAmount>(outputs + ctx.fee - CARRIER_VALUE, 0), extsk, notes, witnesses, anchor);
+            CMutableTransaction probe;
+            probe.vin.push_back(CTxIn(carrier.outpoint));
+            probe.vout = vout;
+            if (!ctx.Reprice(ctx.FeeOf(probe, {}, 0, &carrier, 0, notes.size(), 1))) break;
+        } while (true);
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
         for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
         b.AddTransparentInputUnsigned(carrier.outpoint, ctx.SpentScript(carrier.outpoint, CarrierOutput(carrier.pk, carrier.bundle, CARRIER_VALUE).scriptPubKey), CARRIER_VALUE);
@@ -1192,20 +1278,25 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
         return out;
     }
 
-    CMutableTransaction mtx = ctx.NewTx(expiry);
-    mtx.vout = vout;
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
     if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
-    const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
-    const CAmount change = selected - needed;
-    if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-    }
-    mtx.vin.push_back(CTxIn(carrier.outpoint));   // vin[last] (§3.5); appended before any signature, since ZIP-243 commits to every prevout
-    out.carrierVin = (int)mtx.vin.size() - 1;
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(expiry);
+        mtx.vout = vout;
+        prevs.clear();
+        const CAmount needed = outputs + ctx.fee - CARRIER_VALUE;
+        const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
+        const CAmount change = selected - needed;
+        if (change > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
+        mtx.vin.push_back(CTxIn(carrier.outpoint));   // vin[last] (§3.5); appended before any signature, since ZIP-243 commits to every prevout
+        out.carrierVin = (int)mtx.vin.size() - 1;
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0, &carrier, out.carrierVin)));
     ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
 
@@ -1287,16 +1378,26 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     // YEC accounting: token inputs carry TOKEN_VALUE each; outputs need TOKEN_VALUE each plus the fee.
     const CAmount tokenIn = (CAmount)sel.size() * TOKEN_VALUE;
     const CAmount tokenOut = (CAmount)(recipients.size() + (change > 0 ? 1 : 0)) * TOKEN_VALUE;
-    const CAmount yecNeeded = tokenOut + g_yellowbackFee - tokenIn;
     std::vector<std::pair<CScript, CAmount>> prevs;
     const unsigned int firstYec = mtx.vin.size();
-    CAmount selectedYec = ctx.SelectYec(yecNeeded, mtx, prevs);
-    CAmount yecChange = selectedYec - yecNeeded;
-    if (yecChange > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(yecChange, GetScriptForDestination(changeKey.GetID())));
-    }
+    std::vector<std::pair<CScript, CAmount>> yedPrevs;
+    for (const YedCoin& c : sel) yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));
+    std::vector<std::pair<CScript, CAmount>> allPrevs;
+    const CMutableTransaction unfunded = mtx;
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = unfunded;
+        prevs.clear();
+        const CAmount yecNeeded = tokenOut + ctx.fee - tokenIn;
+        CAmount selectedYec = ctx.SelectYec(yecNeeded, mtx, prevs);
+        CAmount yecChange = selectedYec - yecNeeded;
+        if (yecChange > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(yecChange, GetScriptForDestination(changeKey.GetID())));
+        }
+        allPrevs = yedPrevs;   // vin[0 .. firstYec) are the YED inputs, the YEC inputs follow
+        allPrevs.insert(allPrevs.end(), prevs.begin(), prevs.end());
+    } while (ctx.Reprice(ctx.FeeOf(mtx, allPrevs, 0)));
     // Sign YED inputs (P2PKH, mine) then YEC inputs.
     for (size_t i = 0; i < sel.size(); i++) {
         if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, V4TxData(CTransaction(mtx)), i, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId)) {
@@ -1387,19 +1488,23 @@ BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserv
     out.emergencyOpenAt = R + ctx.params.emergencyPersist;
     std::vector<unsigned char> payload = EncodePayload(Payload::ClaimNotice(vaultOut, (uint32_t)R));
     if (payload.empty()) throw std::runtime_error("cannot encode the notice payload");
-    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry(R));
-    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
-    const CAmount needed = g_yellowbackFee - CARRIER_VALUE;
-    const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs);
-    const CAmount change = selected - needed;
-    if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-    }
-    mtx.vin.push_back(CTxIn(carrier.outpoint));
-    out.carrierVin = (int)mtx.vin.size() - 1;
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(ctx.Expiry(R));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+        prevs.clear();
+        const CAmount needed = ctx.fee - CARRIER_VALUE;
+        const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs);
+        const CAmount change = selected - needed;
+        if (change > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
+        mtx.vin.push_back(CTxIn(carrier.outpoint));
+        out.carrierVin = (int)mtx.vin.size() - 1;
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0, &carrier, out.carrierVin)));
     ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
     out.tx = mtx;
@@ -1432,18 +1537,22 @@ BuiltTx BuildRegisterAttestor(YellowbackWallet& yw, CAmount bondZat, int lockBlo
     out.bondLocktime = (uint32_t)locktime;
     out.flags = flags;
     out.warning = ctx.KeypoolWarning();
-    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry(ctx.chainHeight));
-    mtx.vout.push_back(CTxOut(bondZat, P2SHScript(bondScript)));       // vout[0] the bond
-    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));             // vout[1] the payload
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
-    const CAmount needed = bondZat + g_yellowbackFee;
-    const CAmount selected = ctx.SelectYec(needed, mtx, prevs);
-    const CAmount change = selected - needed;
-    if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-    }
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(ctx.Expiry(ctx.chainHeight));
+        mtx.vout.push_back(CTxOut(bondZat, P2SHScript(bondScript)));       // vout[0] the bond
+        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));             // vout[1] the payload
+        prevs.clear();
+        const CAmount needed = bondZat + ctx.fee;
+        const CAmount selected = ctx.SelectYec(needed, mtx, prevs);
+        const CAmount change = selected - needed;
+        if (change > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
     ctx.SignInputs(mtx, prevs, 0);
     out.tx = mtx;
     DryRunOrThrow(ctx, out);   // REG-A1 at the next height
@@ -1462,7 +1571,12 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
     if ((int64_t)ctx.chainHeight < (int64_t)rec->bondLocktime) {
         throw std::runtime_error(strprintf("bond-locked: the bond is locked until height %u (tip %d)", rec->bondLocktime, ctx.chainHeight));
     }
-    const CAmount bondOut = rec->bondZat - g_yellowbackFee;
+    // P-2: one bond input, one P2PKH output or one (padded) Sapling note; the fee never moves the shape.
+    CMutableTransaction probe;
+    probe.vin.push_back(CTxIn(rec->bondOutpoint, CScript() << valtype(MAX_SIG_SIZE, 0x30) << ToByteVector(BondScript(bond, rec->bondLocktime))));
+    if (dest.kind != AddressChoice::SAPLING) probe.vout.push_back(CTxOut(0, GetScriptForDestination(CKeyID())));
+    ctx.Reprice(NetworkFee(probe, 0, dest.kind == AddressChoice::SAPLING ? 1 : 0));
+    const CAmount bondOut = rec->bondZat - ctx.fee;
     if (bondOut <= 0) throw std::runtime_error("vault-value-too-small: the bond does not cover the network fee");
 
     BuiltTx out;
@@ -1565,16 +1679,20 @@ BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, 
     out.attestation = a;
     std::vector<unsigned char> payload = EncodePayload(Payload::AttestorRevive(a.seq, a.priceMicroUsd, a.citedHeight, a.sig));
     if (payload.empty()) throw std::runtime_error("cannot encode the revive payload");
-    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry(cited));
-    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
-    const CAmount selected = ctx.SelectYec(g_yellowbackFee, mtx, prevs);
-    const CAmount change = selected - g_yellowbackFee;
-    if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-    }
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(ctx.Expiry(cited));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+        prevs.clear();
+        const CAmount selected = ctx.SelectYec(ctx.fee, mtx, prevs);
+        const CAmount change = selected - ctx.fee;
+        if (change > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
     ctx.SignInputs(mtx, prevs, 0);
     out.tx = mtx;
     DryRunOrThrow(ctx, out);   // REV-1 at the next height
@@ -1619,19 +1737,23 @@ BuiltTx BuildEquivocation(YellowbackWallet& yw, const Attestation& a, const Atte
     out.attestationB = b;
     std::vector<unsigned char> payload = EncodePayload(Payload::Equivocation());
     if (payload.empty()) throw std::runtime_error("cannot encode the equivocation payload");
-    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry(carrier.refHeight));
-    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+    CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
-    const CAmount needed = g_yellowbackFee - CARRIER_VALUE;
-    const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs);
-    const CAmount change = selected - needed;
-    if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-    }
-    mtx.vin.push_back(CTxIn(carrier.outpoint));
-    out.carrierVin = (int)mtx.vin.size() - 1;
+    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
+        mtx = ctx.NewTx(ctx.Expiry(carrier.refHeight));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+        prevs.clear();
+        const CAmount needed = ctx.fee - CARRIER_VALUE;
+        const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs);
+        const CAmount change = selected - needed;
+        if (change > 0) {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
+        mtx.vin.push_back(CTxIn(carrier.outpoint));
+        out.carrierVin = (int)mtx.vin.size() - 1;
+    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0, &carrier, out.carrierVin)));
     ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
     out.tx = mtx;
@@ -1651,7 +1773,12 @@ BuiltTx BuildSweepCarriers(YellowbackWallet& yw, const std::vector<CarrierRecord
     }
     if (out.sweptRecords.empty()) throw std::runtime_error("nothing-to-sweep: no lapsed carrier is spendable");
     const CAmount total = (CAmount)out.sweptRecords.size() * CARRIER_VALUE;
-    const CAmount value = total - g_yellowbackFee;
+    // P-2: the carriers in, one P2PKH out; the fee never moves the shape.
+    CMutableTransaction probe;
+    for (const CarrierRecord& c : out.sweptRecords) probe.vin.push_back(CTxIn(c.outpoint, PendingCarrierSig(c)));
+    probe.vout.push_back(CTxOut(0, GetScriptForDestination(CKeyID())));
+    ctx.Reprice(NetworkFee(probe));
+    const CAmount value = total - ctx.fee;
     if (value <= 0) throw std::runtime_error("nothing-to-sweep: the carriers do not cover the network fee");
     const CPubKey dest = ctx.FreshKey("yellowback-carrier-sweep");
     out.freshKey = dest;
