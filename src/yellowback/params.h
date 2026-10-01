@@ -75,7 +75,7 @@ static const int MAX_REF_LAG = 36;
 
 /** YEC carried by every Yellowback output: 10,000 zat, >= 100x the dust floor. */
 static const CAmount TOKEN_VALUE = 10000;
-/** Flat network fee; equals policy DEFAULT_FEE (policy/fees.h). -yellowbackfee may not go below it. */
+/** The network fee floor (-yellowbackfee may not go below it); a wallet-built transaction pays max(-yellowbackfee, its ZIP-317 conventional fee) (P-2, txbuilder.h NetworkFee). */
 static const CAmount DEFAULT_YELLOWBACK_FEE = 1000;
 
 /** Term classes (V19): A = 30-90 d, B = 90-365 d, C = 1-5 y. */

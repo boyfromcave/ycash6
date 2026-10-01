@@ -56,6 +56,7 @@ BASE_SCRIPTS= [
     'yellowback_void_mint.py',
     'yellowback_wallet_restore.py',
     'yellowback_claim.py',
+    'yellowback_fee.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
     'yellowback_enforcement.py',

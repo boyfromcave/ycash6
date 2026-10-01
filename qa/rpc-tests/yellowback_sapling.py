@@ -28,7 +28,7 @@ from test_framework.yellowback_util import (
     POOLS,
     REF_LAG,
     TOKEN_VALUE,
-    YELLOWBACK_FEE,
+    wallet_network_fee,
     YellowbackTestFramework,
     fee_zat,
 )
@@ -90,7 +90,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal([v['txid'] for v in raw['vin']], [mint1['carrierTxid']])    # v3: the carrier is the one transparent input
         assert_greater_than(len(raw['vShieldedSpend']), 0)
         assert_equal(len(raw['vShieldedOutput']), 2)   # 6.20.0: the Sapling builder pads a bundle to two outputs (one dummy)                        # change back to ys
-        assert_equal(zat(raw['valueBalance']), mint1['collateralZat'] + TOKEN_VALUE + mint1['feeZat'] + mint1['attestFeeZat'] + YELLOWBACK_FEE - CARRIER_VALUE)
+        assert_equal(zat(raw['valueBalance']), mint1['collateralZat'] + TOKEN_VALUE + mint1['feeZat'] + mint1['attestFeeZat'] + wallet_network_fee(raw) - CARRIER_VALUE)
         assert_equal(len(raw['vout']), 4 + (1 if self.armed else 0))      # vault, token, payload, fee, [attestor fee]
         carrier = user.getrawtransaction(mint1['carrierTxid'], 1)
         assert_equal(carrier['vin'], [])                                   # the carrier step was funded from ys too
@@ -104,7 +104,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_getvault(vault1)['status'], 'ACTIVE')
         assert_equal(user.yed_getbalance()['confirmedCents'], 10000)
         # the carrier step (CARRIER_VALUE + fee) and the mint (outputs + fee - CARRIER_VALUE) both came out of ys
-        assert_equal(user.z_getbalance(ys), z_before - Decimal(mint1['collateralZat'] + TOKEN_VALUE + mint1['feeZat'] + mint1['attestFeeZat'] + 2 * YELLOWBACK_FEE) / COIN)
+        assert_equal(user.z_getbalance(ys), z_before - Decimal(mint1['collateralZat'] + TOKEN_VALUE + mint1['feeZat'] + mint1['attestFeeZat'] + wallet_network_fee(raw) + wallet_network_fee(carrier)) / COIN)
 
 # Rule: MINT-1
         print('mint from one s1... address only')
@@ -176,7 +176,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         payload = user.yed_decodepayload(rraw['vout'][1]['scriptPubKey']['hex'][4:])
         assert_equal((payload['type'], payload['feeVout']), ('redeem', 2))
         assert_equal(payload['assignments'], [{'vout': 0, 'cents': 9900}])
-        collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - YELLOWBACK_FEE - red1['feeZat'] - TOKEN_VALUE
+        collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - wallet_network_fee(rraw) - red1['feeZat'] - TOKEN_VALUE
         assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
         assert_equal(rraw['locktime'], mint1['lockHeight'])
@@ -202,7 +202,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(rraw2['vout'][1]['scriptPubKey']['addresses'], [red2['payee']])
         payload2 = user.yed_decodepayload(rraw2['vout'][0]['scriptPubKey']['hex'][4:])
         assert_equal((payload2['type'], payload2['feeVout'], payload2['assignments']), ('redeem', 1, []))
-        collateral_out2 = mint2['collateralZat'] + 2 * TOKEN_VALUE - YELLOWBACK_FEE - red2['feeZat']
+        collateral_out2 = mint2['collateralZat'] + 2 * TOKEN_VALUE - wallet_network_fee(rraw2) - red2['feeZat']
         assert_equal(red2['collateralOut'], collateral_out2)
         assert_equal(zat(rraw2['valueBalance']), -collateral_out2)
         self.sync_all()

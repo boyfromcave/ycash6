@@ -199,7 +199,7 @@ MAX_MINT = 1_000_000
 MIN_OUTPUT = 100
 MAX_OUTPUT = 10_000_000
 TOKEN_VALUE = 10_000           # zat carried by every YED output
-YELLOWBACK_FEE = 1_000         # the network fee, zat (distinct from the enforcement fee)
+YELLOWBACK_FEE = 1_000         # the network fee floor, zat (distinct from the enforcement fee); the wallet pays wallet_network_fee()
 MAX_PAYLOAD = 80
 UNDO_KEEP = 4_096
 FEE_VOUT_NONE = ym.FEE_VOUT_NONE
@@ -786,6 +786,62 @@ def assert_banscore_zero(nodes):
     for node in nodes:
         for peer in node.getpeerinfo():
             assert_equal(peer['banscore'], 0)
+
+
+# --- P-2 (ycash6 plan): the wallet pays max(YELLOWBACK_FEE, the ZIP-317 conventional fee) --------
+MARGINAL_FEE = 500             # zip317.h
+GRACE_ACTIONS = 2
+MAX_SIG_SIZE = 72              # txbuilder.h: a signature is counted at its largest before signing
+
+
+def _compact_size_len(n):
+    return 1 if n < 0xfd else 3 if n <= 0xffff else 5 if n <= 0xffffffff else 9
+
+
+def _sig_slack(script_hex):
+    """Bytes a scriptSig's DER signatures fall short of MAX_SIG_SIZE each (push-only scripts)."""
+    b, i, slack = bytes.fromhex(script_hex), 0, 0
+    while i < len(b):
+        op = b[i]
+        i += 1
+        if 0 < op <= 0x4b:
+            n = op
+        elif op == 0x4c:
+            n, i = b[i], i + 1
+        elif op == 0x4d:
+            n, i = int.from_bytes(b[i:i + 2], 'little'), i + 2
+        elif op == 0x4e:
+            n, i = int.from_bytes(b[i:i + 4], 'little'), i + 4
+        else:
+            continue
+        d = b[i:i + n]
+        i += n
+        if 9 <= len(d) <= MAX_SIG_SIZE and d[0] == 0x30 and d[1] == len(d) - 3:
+            slack += MAX_SIG_SIZE - len(d)
+    return slack
+
+
+def conventional_fee(raw, pending_sigs=False):
+    """ZIP-317's conventional fee of a decoded transaction (getrawtransaction <txid> 1 or
+    decoderawtransaction); ``pending_sigs`` counts every signature at MAX_SIG_SIZE, as the wallet does."""
+    tin = 0
+    for v in raw['vin']:
+        h = v.get('scriptSig', {}).get('hex', '')
+        n = len(h) // 2 + (_sig_slack(h) if pending_sigs else 0)
+        tin += 32 + 4 + _compact_size_len(n) + n + 4
+    tout = sum(8 + _compact_size_len(len(o['scriptPubKey']['hex']) // 2) + len(o['scriptPubKey']['hex']) // 2 for o in raw['vout'])
+    actions = (max(-(-tin // 150), -(-tout // 34)) + 2 * len(raw.get('vjoinsplit', []))
+               + max(len(raw.get('vShieldedSpend', [])), len(raw.get('vShieldedOutput', []))))
+    return MARGINAL_FEE * max(GRACE_ACTIONS, actions)
+
+
+def wallet_network_fee(raw):
+    """P-2: the network fee a wallet-built Yellowback transaction pays — max(YELLOWBACK_FEE, the
+    conventional fee with its signatures counted at MAX_SIG_SIZE) — never below the conventional
+    fee of the transaction as signed, so it has no unpaid ZIP-317 actions."""
+    fee = max(YELLOWBACK_FEE, conventional_fee(raw, pending_sigs=True))
+    assert fee >= conventional_fee(raw), (fee, conventional_fee(raw))
+    return fee
 
 
 def unlock_all(node):
