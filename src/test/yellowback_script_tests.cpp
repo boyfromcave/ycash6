@@ -39,7 +39,7 @@ using namespace yellowback;
 
 namespace {
 
-const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;   // main.cpp:2931
+const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;   // main.cpp:3412 (v4.5.0 :2931)
 
 /** A Sapling-format transaction spending vaultValue from a P2SH(vaultScript) output at input 0. */
 CMutableTransaction SpendingTx(CAmount vaultValue, uint32_t nLockTime, uint32_t nExpiryHeight = 1000)

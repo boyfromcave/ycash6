@@ -1268,11 +1268,11 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
 BOOST_AUTO_TEST_CASE(coinbase_flags_empty_without_flag)
 {
     // Plan §8.4 item 2, the central claim of §1 (a): the two `+ COINBASE_FLAGS` appends in
-    // miner.cpp (CreateCoinbaseTransaction :328 and IncrementExtraNonce :725) are the only
+    // miner.cpp (CreateCoinbaseTransaction :289 and IncrementExtraNonce :788) are the only
     // unguarded behaviour-bearing insertions in the mining path, and without -yellowback they
-    // must be byte-level no-ops, so a node without the flag builds v4.5.0's coinbase exactly.
+    // must be byte-level no-ops, so a node without the flag builds the stock coinbase exactly.
     //
-    // COINBASE_FLAGS is assigned only at miner.cpp:370, from the module when g_yellowback is
+    // COINBASE_FLAGS is assigned only at miner.cpp:352, from the module when g_yellowback is
     // non-null and from a default-constructed CScript otherwise; in this binary nothing ever
     // sets the module, which is the without-the-flag configuration.
     BOOST_CHECK(g_yellowback == nullptr);
@@ -1293,7 +1293,7 @@ BOOST_AUTO_TEST_CASE(coinbase_flags_empty_without_flag)
             const CScript forkIncr = (CScript() << nHeight << CScriptNum(nExtraNonce)) + COINBASE_FLAGS;
             BOOST_CHECK_MESSAGE(forkIncr == stockIncr,
                                 "IncrementExtraNonce scriptSig differs at height " << nHeight);
-            // The coinbase length limit of main.cpp:1456 is 100 bytes; the stock form is far
+            // The coinbase length limit of main.cpp:1750 is 100 bytes; the stock form is far
             // below it and the empty append cannot move it.
             BOOST_CHECK(forkIncr.size() <= 100u);
         }
