@@ -29,7 +29,7 @@ import errno
 from . import coverage
 from .authproxy import AuthServiceProxy, JSONRPCException
 
-ZCASHD_BINARY = os.path.join('src', 'zcashd')
+ZCASHD_BINARY = os.path.join('src', 'ycashd')
 
 COVERAGE_DIR = None
 PRE_BLOSSOM_BLOCK_TARGET_SPACING = 150
@@ -200,7 +200,7 @@ def initialize_datadir(dirname, n, clock_offset=0):
     if not os.path.isdir(datadir):
         os.makedirs(datadir)
     rpc_u, rpc_p = rpc_auth_pair(n)
-    with open(os.path.join(datadir, "zcash.conf"), 'w', encoding='utf8') as f:
+    with open(os.path.join(datadir, "ycash.conf"), 'w', encoding='utf8') as f:
         f.write("regtest=1\n")
         f.write("showmetrics=0\n")
         f.write("rpcuser=" + rpc_u + "\n")
