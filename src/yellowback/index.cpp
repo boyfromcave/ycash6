@@ -37,7 +37,7 @@ int g_yellowbackMintLag = DEFAULT_REF_LAG;
 
 TemplateView::TemplateView(YellowbackIndex& indexIn)
     : index(&indexIn),
-      lock(new CCriticalBlock(indexIn.cs_yellowback, "cs_yellowback", __FILE__, __LINE__)),
+      lock(new UniqueLock<CCriticalSection>(indexIn.cs_yellowback, "cs_yellowback", __FILE__, __LINE__)),
       overlay(new OverlayStateView(indexIn.MutableView())),
       nextHeight(indexIn.TipHeight() + 1)
 {
@@ -188,7 +188,7 @@ bool YellowbackIndex::ApplyOne(const CBlock& block, int height, const uint256& h
     if (testBeforeApply) testBeforeApply();
     UndoRecord undo;
     // The block subsidy is EvaluateBlock's argument (N22): state.cpp links against nothing in main.cpp.
-    const CAmount subsidy = GetBlockSubsidy(height, ::Params().GetConsensus());
+    const CAmount subsidy = ::Params().GetConsensus().GetBlockSubsidy(height);
     std::optional<std::string> err = ApplyBlock(*db, ParamsAt(height), block, height, hash, subsidy, undo, &sigCache);
     if (err.has_value()) {
         db->Discard();
@@ -318,7 +318,7 @@ const YellowbackIndex::Evaluation& YellowbackIndex::Evaluate(const CBlock& block
     if (testBeforeApply) testBeforeApply();
     cache = Evaluation();
     OverlayStateView overlay(*db);
-    const CAmount subsidy = GetBlockSubsidy(height, ::Params().GetConsensus());
+    const CAmount subsidy = ::Params().GetConsensus().GetBlockSubsidy(height);
     cache.ev = EvaluateBlock(overlay, p, block, height, blockHash, subsidy, &sigCache);
     cache.writes = overlay.Pending();
     cache.blockHash = blockHash;
@@ -609,7 +609,7 @@ void YellowbackIndex::TripValve(const uint256& root)
     // P1: the stock fork warning never fires for refused headers, so the valve raises its own
     // through the same two calls (the timestamp is the tip's block time: no clock in this file).
     SetMiscWarning(text, tip ? tip->GetBlockTime() : 0);
-    CAlert::Notify(text, true);
+    AlertNotify(text, true);   // 6.20.0: CAlert::Notify became the free function AlertNotify
 }
 
 int YellowbackIndex::RejectedCount() const
@@ -850,7 +850,7 @@ UniValue YellowbackIndex::TemplateInfo(int64_t now) const
 // ---------------------------------------------------------------------------
 // The CValidationInterface subscriber, reduced to wallet locking (V2)
 
-void YellowbackIndex::ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added)
+void YellowbackIndex::ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<MerkleFrontiers> added)
 {
     // The state was applied synchronously in ConnectBlock; here only stage (iii) of coin
     // locking runs after every connected block, outside cs_yellowback and never under cs_main.

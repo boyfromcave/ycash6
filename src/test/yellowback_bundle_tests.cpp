@@ -96,7 +96,7 @@ uint256 Sha256(const std::vector<unsigned char>& d)
 CPubKey SomeKey()
 {
     CKey k;
-    k.MakeNewKey(true);
+    k = CKey::TestOnlyRandomKey(true);
     return k.GetPubKey();
 }
 

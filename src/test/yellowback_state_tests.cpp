@@ -123,8 +123,8 @@ struct Fixture
     explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int until = 0, int armMin = 3)
         : P(RegtestParams(start, sigmaRef, capBps, until, armMin)), tip(start - 1), fakeCounter(0)
     {
-        ownerKey.MakeNewKey(true);
-        userKey.MakeNewKey(true);
+        ownerKey = CKey::TestOnlyRandomKey(true);
+        userKey = CKey::TestOnlyRandomKey(true);
         for (int i = 0; i < 8; i++) {
             hotKeys.push_back(DeterministicKey("yellowback-state-test-hot", i));
             bondKeys.push_back(DeterministicKey("yellowback-state-test-bond", i));
@@ -531,7 +531,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         CBlock block;
         for (size_t j = 0; j < b["txs"].size(); j++) {
             CTransaction tx;
-            BOOST_REQUIRE(DecodeHexTx(tx, b["txs"][j].get_str()));
+            BOOST_REQUIRE_NO_THROW(DecodeHexTx(tx, b["txs"][j].get_str()));   // 6.20.0: throws on failure
             block.vtx.push_back(tx);
         }
         const int height = b["height"].get_int();
@@ -1863,7 +1863,7 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     // tokens all get verdicts, nothing throws, and the block is never invalid.
     yellowback::Params P = RegtestParams(1, 0, 0, 0);
     MemoryStateView view;
-    CKey k; k.MakeNewKey(true);
+    CKey k; k = CKey::TestOnlyRandomKey(true);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(1, std::nullopt)));
     CMutableTransaction mint;
@@ -3217,7 +3217,7 @@ BOOST_AUTO_TEST_CASE(selection_ignores_owner_key)
     // Two mints at one R with different owner keys share selected(R, ""): one bundle serves both.
     const int R = f.tip - 1;
     CKey other;
-    other.MakeNewKey(true);
+    other = CKey::TestOnlyRandomKey(true);
     MintOpts a, b;
     b.owner = other.GetPubKey();
     CMutableTransaction m1 = f.MintV3(10000, 50000, a);

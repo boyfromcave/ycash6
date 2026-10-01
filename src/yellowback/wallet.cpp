@@ -91,7 +91,8 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
             if (!wallet->mapWallet.count(in.prevout.hash)) foreign.insert(in.prevout.hash);
         }
     }
-    const bool ok = wallet->CommitTransaction(wtx, reservekey);
+    CValidationState state;   // 6.20.0: CommitTransaction reports the mempool rejection here (and logs it)
+    const bool ok = wallet->CommitTransaction(wtx, reservekey, state);
     if (!foreign.empty()) {
         LOCK(wallet->cs_wallet);
         for (const uint256& hash : foreign) {
@@ -385,7 +386,7 @@ std::vector<YedCoin> YellowbackWallet::SpendableCoins() const
     AssertLockHeld(wallet->cs_wallet);
     std::vector<YedCoin> out;
     for (const YedCoin& c : AllCoins()) {
-        if (wallet->IsSpent(c.outpoint.hash, c.outpoint.n)) continue; // spent by one of our unconfirmed transactions (D3)
+        if (wallet->IsSpent(c.outpoint.hash, c.outpoint.n, std::nullopt)) continue; // spent by one of our unconfirmed transactions (D3)
         out.push_back(c);
     }
     return out;

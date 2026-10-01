@@ -374,7 +374,7 @@ bool CarrierConfirmed(const COutPoint& out)
     const CCoins* c = pcoinsTip->AccessCoins(out.hash);
     if (!(c && c->IsAvailable(out.n))) return false;
     std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(out.hash);
-    return it == pwalletMain->mapWallet.end() || it->second.GetDepthInMainChain() >= 1;
+    return it == pwalletMain->mapWallet.end() || it->second.GetDepthInMainChain(std::nullopt) >= 1;
 }
 
 /** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600). */
@@ -557,7 +557,7 @@ UniValue CompleteEquivocation(YellowbackWallet& yw, const Attestation& a, const 
  */
 void SchedulePending(YellowbackWallet& yw, const CarrierRecord& carrier, std::function<UniValue()> complete, const char* what)
 {
-    yw.AddPendingCompletion(carrier.outpoint, [=, &yw]() -> bool {
+    yw.AddPendingCompletion(carrier.outpoint, [=]() -> bool {
         int tip;
         {
             LOCK(cs_main);
@@ -588,9 +588,9 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
         throw std::runtime_error("yed_getnewaddress\n\nA fresh Yellowback (YED) address from the keypool, added to the address book.\n");
     YellowbackWallet& yw = EnsureYW();
     LOCK2(cs_main, pwalletMain->cs_wallet);
-    if (!pwalletMain->IsLocked()) pwalletMain->TopUpKeyPool();
-    CPubKey key;
-    if (!pwalletMain->GetKeyFromPool(key)) throw JSONRPCError(RPC_WALLET_ERROR, "keypool ran out; call keypoolrefill first");
+    // 6.20.0: no keypool draw; a fresh HD key, exactly as stock getnewaddress (needs an unlocked wallet).
+    EnsureWalletIsUnlocked();
+    CPubKey key = pwalletMain->GenerateNewKey(true);
     pwalletMain->SetAddressBook(key.GetID(), "", "receive");
     return EncodeAddress(key.GetID(), yw.Index()->GetParams());
 }
@@ -671,7 +671,7 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
         o.pushKV("address", ScriptToYedAddress(c.token.scriptPubKey, index.GetParams()));
         o.pushKV("height", c.token.height);
         o.pushKV("confirmations", IndexHeight(index) - c.token.height + 1);
-        o.pushKV("spentUnconfirmed", pwalletMain->IsSpent(c.outpoint.hash, c.outpoint.n));
+        o.pushKV("spentUnconfirmed", pwalletMain->IsSpent(c.outpoint.hash, c.outpoint.n, std::nullopt));
         o.pushKV("locked", pwalletMain->IsLockedCoin(c.outpoint.hash, c.outpoint.n));
         arr.push_back(o);
     }
@@ -1385,7 +1385,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         if (!fp.has_value()) continue;
         if (st.GetTxLog(kv.first).has_value() || mempool.exists(kv.first)) continue;
         if (wtx.nExpiryHeight == 0 || (int64_t)wtx.nExpiryHeight > (int64_t)chainActive.Height()) continue;
-        if (wtx.GetDepthInMainChain() > 0) continue;
+        if (wtx.GetDepthInMainChain(std::nullopt) > 0) continue;
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", kv.first.GetHex());
         o.pushKV("height", -1);

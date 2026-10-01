@@ -51,7 +51,7 @@ const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOC
 CKey NewKey()
 {
     CKey k;
-    k.MakeNewKey(true);
+    k = CKey::TestOnlyRandomKey(true);
     return k;
 }
 
@@ -70,8 +70,8 @@ bool Verify(const CMutableTransaction& mtx, unsigned int nIn, const CScript& scr
             ScriptError* err = nullptr, unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS)
 {
     const CTransaction tx(mtx);
-    PrecomputedTransactionData txdata(tx);
-    return VerifyScript(tx.vin[nIn].scriptSig, scriptPubKey, flags, TransactionSignatureChecker(&tx, nIn, amount, txdata), branchId, err);
+    PrecomputedTransactionData txdata(tx, {});
+    return VerifyScript(tx.vin[nIn].scriptSig, scriptPubKey, flags, TransactionSignatureChecker(&tx, txdata, nIn, amount), branchId, err);
 }
 
 YedCoin Coin(const uint256& txid, uint32_t n, Cents cents, const CKey& key)
@@ -1185,7 +1185,7 @@ BOOST_AUTO_TEST_CASE(v3_carrier_templates_are_standard)
     fund.vout.push_back(CTxOut(10000 * COIN, userP2PKH));                                 // 0: YEC
     fund.vout.push_back(CarrierOutput(a.carrierKey.GetPubKey(), bundle, CARRIER_VALUE));  // 1: a carrier
     fund.vout.push_back(CarrierOutput(a.carrierKey.GetPubKey(), bundle, CARRIER_VALUE));  // 2: another
-    CCoinsView dummy;
+    CCoinsViewDummy dummy;
     CCoinsViewCache view(&dummy);
     view.ModifyCoins(fund.GetHash())->FromTx(fund, 1);
     const uint256 fundHash = fund.GetHash();
@@ -1200,7 +1200,7 @@ BOOST_AUTO_TEST_CASE(v3_carrier_templates_are_standard)
     CMutableTransaction mint = ArmedMint(a, 100000, bundle, ks, branchId, a.x);
     mint.vin[0] = CTxIn(COutPoint(fundHash, 0));
     mint.vin[1] = CTxIn(c1.outpoint);
-    BOOST_CHECK(SignSignature(ks, userP2PKH, mint, 0, 10000 * COIN, SIGHASH_ALL, branchId));
+    BOOST_CHECK(SignSignature(ks, userP2PKH, mint, PrecomputedTransactionData(CTransaction(mint), {}), 0, 10000 * COIN, SIGHASH_ALL, branchId));
     SignCarrierInput(mint, 1, c1, ks, branchId);
     checkStandard(mint, "MINT");
     // CLAIM_NOTICE: the carrier alone funds it (CARRIER_VALUE covers the network fee).

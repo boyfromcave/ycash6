@@ -1319,7 +1319,7 @@ UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
             const CWalletTx& wtx = it->second;
             std::optional<FoundPayload> fp = FindPayload(wtx);
             if (fp.has_value() && wtx.nExpiryHeight != 0 && (int64_t)wtx.nExpiryHeight <= (int64_t)chainActive.Height()
-                && !mempool.exists(txid) && wtx.GetDepthInMainChain() <= 0) {
+                && !mempool.exists(txid) && wtx.GetDepthInMainChain(std::nullopt) <= 0) {
                 TxLogRecord expired;
                 expired.height = -1;
                 expired.verdict = "expired";
@@ -1360,7 +1360,9 @@ UniValue yed_decodepayload(const UniValue& params, bool fHelp)
         if (data.has_value() && DecodePayload(data.value(), p)) return PayloadToJSON(p);
     }
     CTransaction tx;
-    if (DecodeHexTx(tx, hex)) {
+    bool decoded = false;
+    try { DecodeHexTx(tx, hex); decoded = true; } catch (const std::exception&) {}   // 6.20.0: DecodeHexTx throws
+    if (decoded) {
         auto fp = FindPayload(tx);
         if (fp.has_value()) {
             UniValue o = PayloadToJSON(fp->payload);
@@ -1404,7 +1406,11 @@ UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
 
     YellowbackIndex& index = EnsureIndex();
     CTransaction tx;
-    if (!DecodeHexTx(tx, params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    try {
+        DecodeHexTx(tx, params[0].get_str());   // 6.20.0: throws instead of returning false
+    } catch (const std::exception&) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
     LOCK(cs_main);
     LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
@@ -1483,7 +1489,7 @@ UniValue yed_getblockverdict(const UniValue& params, bool fHelp)
     if (!ReadBlockFromDisk(block, pindex, ::Params().GetConsensus())) throw JSONRPCError(RPC_INVALID_PARAMETER, "block not on disk");
     const int h = pindex->nHeight;
     OverlayStateView overlay(index.MutableView());
-    BlockEvaluation ev = EvaluateBlock(overlay, index.ParamsAt(h), block, h, hash, GetBlockSubsidy(h, ::Params().GetConsensus()), index.GetSigCache());
+    BlockEvaluation ev = EvaluateBlock(overlay, index.ParamsAt(h), block, h, hash, ::Params().GetConsensus().GetBlockSubsidy(h), index.GetSigCache());
     UniValue o(UniValue::VOBJ);
     o.pushKV("blockInvalid", ev.blockInvalid);
     o.pushKV("reason", ev.reason);

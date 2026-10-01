@@ -27,7 +27,7 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
     ids.push_back(CKeyID(uint160(std::vector<unsigned char>(20, 0xff))));
     for (int i = 0; i < 20; i++) {
         CKey key;
-        key.MakeNewKey(true);
+        key = CKey::TestOnlyRandomKey(true);
         ids.push_back(key.GetPubKey().GetID());
     }
 
@@ -69,7 +69,7 @@ BOOST_AUTO_TEST_CASE(rejects_garbage)
     BOOST_CHECK(!DecodeAddress("s1RyNzGjPzkgc7jP6uvjJx8tmv7gY9dvRbP", main, id));
     // Checksum damage.
     CKey key;
-    key.MakeNewKey(true);
+    key = CKey::TestOnlyRandomKey(true);
     std::string a = EncodeAddress(key.GetPubKey().GetID(), main);
     std::string damaged = a;
     damaged[damaged.size() - 1] = (damaged.back() == '1') ? '2' : '1';

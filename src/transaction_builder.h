@@ -22,6 +22,7 @@
 #include "zcash/NoteEncryption.hpp"
 
 #include <optional>
+#include <set>
 
 #include <rust/bridge.h>
 #include <rust/builder.h>
@@ -255,6 +256,7 @@ private:
     std::vector<libzcash::JSInput> jsInputs;
     std::vector<libzcash::JSOutput> jsOutputs;
     std::vector<CTxOut> tIns;
+    std::set<size_t> tInsUnsigned;   // Yellowback (plan I2): inputs the caller signs after Build()
 
     std::optional<std::pair<uint256, libzcash::SaplingPaymentAddress>> saplingChangeAddr;
     std::optional<std::pair<uint256, libzcash::OrchardRawAddress>> orchardChangeAddr;
@@ -300,6 +302,7 @@ public:
         jsInputs(std::move(builder.jsInputs)),
         jsOutputs(std::move(builder.jsOutputs)),
         tIns(std::move(builder.tIns)),
+        tInsUnsigned(std::move(builder.tInsUnsigned)),
         orchardChangeAddr(std::move(builder.orchardChangeAddr)),
         saplingChangeAddr(std::move(builder.saplingChangeAddr)),
         sproutChangeAddr(std::move(builder.sproutChangeAddr)),
@@ -326,6 +329,7 @@ public:
             jsInputs = std::move(builder.jsInputs);
             jsOutputs = std::move(builder.jsOutputs);
             tIns = std::move(builder.tIns);
+            tInsUnsigned = std::move(builder.tInsUnsigned);
             orchardChangeAddr = std::move(builder.orchardChangeAddr);
             saplingChangeAddr = std::move(builder.saplingChangeAddr);
             sproutChangeAddr = std::move(builder.sproutChangeAddr);
@@ -381,6 +385,18 @@ public:
     void AddTransparentInput(COutPoint utxo, CScript scriptPubKey, CAmount value);
 
     void AddTransparentOutput(const CTxDestination& to, CAmount value);
+
+    // Yellowback (plan I2): a raw-script output (the OP_RETURN payload).
+    void AddTransparentOutput(const CScript& scriptPubKey, CAmount value);
+
+    // Yellowback (plan I2): an input counted for value but left unsigned by Build() — a script
+    // the keystore cannot solve (the vault P2SH), signed by the caller afterwards. Needs no
+    // keystore. The real scriptPubKey is required: 6.20.0 feeds every spent output to the
+    // sighash precompute (ZIP-244), and a scriptSig is never covered by it.
+    void AddTransparentInputUnsigned(COutPoint utxo, CScript scriptPubKey, CAmount value, uint32_t nSequence = 0xFFFFFFFF);
+
+    // Yellowback (plan I2): nLockTime (a vault spend sets it to lockHeight).
+    void SetLockTime(uint32_t nLockTime);
 
     void SendChangeTo(const libzcash::RecipientAddress& changeAddr, const uint256& ovk);
     void SendChangeToSprout(const libzcash::SproutPaymentAddress& changeAddr);

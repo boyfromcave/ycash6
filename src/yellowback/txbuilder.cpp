@@ -133,6 +133,23 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
     return plan;
 }
 
+namespace {
+/**
+ * 6.20.0 (plan P-3): every sighash takes a PrecomputedTransactionData. The overlay builds Sapling v4
+ * transactions only (CreateNewContextualCMutableTransaction(..., requireV4 = true)), whose ZIP-243
+ * digest never reads the spent outputs (script/interpreter.cpp SetPrecomputed), so no prevout list
+ * is needed. A v5 transaction would need all of them (ZIP-244); refuse it here rather than sign over
+ * an incomplete precompute, so nothing is silently wrong if NU5 ever activates.
+ */
+PrecomputedTransactionData V4TxData(const CTransaction& tx)
+{
+    if (!(tx.fOverwintered && tx.nVersionGroupId == SAPLING_VERSION_GROUP_ID && tx.nVersion == SAPLING_TX_VERSION)) {
+        throw std::runtime_error("Yellowback signs Sapling v4 transactions only");
+    }
+    return PrecomputedTransactionData(tx, std::vector<CTxOut>());
+}
+} // namespace
+
 void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, bool ownerPath)
 {
     if (out.builder.has_value()) throw std::runtime_error("FinishSapling must run before SignVaultSpend");
@@ -143,7 +160,8 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
         // branch id (both bound by the digest, mapping §13.1), as rpc/atomicswap.cpp signs by hand.
         CKey ownerKey;
         if (!keystore.GetKey(out.ownerPubKey.GetID(), ownerKey)) throw std::runtime_error("vault-not-owned: owner key not available");
-        uint256 hash = SignatureHash(out.vaultScript, CTransaction(out.tx), 0, SIGHASH_ALL, out.vaultValue, branchId);
+        const CTransaction txc(out.tx);
+        uint256 hash = SignatureHash(out.vaultScript, txc, 0, SIGHASH_ALL, out.vaultValue, branchId, V4TxData(txc));
         valtype ownerSig;
         if (!ownerKey.Sign(hash, ownerSig)) throw std::runtime_error("owner signature failed");
         ownerSig.push_back((unsigned char)SIGHASH_ALL);
@@ -152,7 +170,7 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
         out.tx.vin[0].scriptSig = ClaimScriptSig(out.vaultScript);
     }
     for (size_t i = 0; i < out.yedPrevs.size(); i++) {
-        if (!SignSignature(keystore, out.yedPrevs[i].first, out.tx, i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
+        if (!SignSignature(keystore, out.yedPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
         }
     }
@@ -185,7 +203,8 @@ void SignCarrierInput(CMutableTransaction& mtx, unsigned int nIn, const CarrierR
     if (!keystore.GetKey(c.pk.GetID(), key)) throw std::runtime_error("carrier-key-missing: the carrier key is not in this wallet");
     const CScript redeem = CarrierScript(c.pk, BundleHash(c.bundle));
     if (redeem.empty()) throw std::runtime_error("carrier key is not compressed");
-    const uint256 hash = SignatureHash(redeem, CTransaction(mtx), nIn, SIGHASH_ALL, CARRIER_VALUE, branchId);
+    const CTransaction txc(mtx);
+    const uint256 hash = SignatureHash(redeem, txc, nIn, SIGHASH_ALL, CARRIER_VALUE, branchId, V4TxData(txc));
     valtype sig;
     if (!key.Sign(hash, sig)) throw std::runtime_error("carrier signature failed");
     sig.push_back((unsigned char)SIGHASH_ALL);
@@ -200,7 +219,8 @@ void SignBondInput(CMutableTransaction& mtx, unsigned int nIn, const CPubKey& pk
     if (!keystore.GetKey(pk.GetID(), key)) throw std::runtime_error("attest-key-not-held: the bond key is not in this wallet");
     const CScript bond = BondScript(pk, locktime);
     if (bond.empty()) throw std::runtime_error("cannot build the bond script");
-    const uint256 hash = SignatureHash(bond, CTransaction(mtx), nIn, SIGHASH_ALL, value, branchId);
+    const CTransaction txc(mtx);
+    const uint256 hash = SignatureHash(bond, txc, nIn, SIGHASH_ALL, value, branchId, V4TxData(txc));
     valtype sig;
     if (!key.Sign(hash, sig)) throw std::runtime_error("bond signature failed");
     sig.push_back((unsigned char)SIGHASH_ALL);
@@ -268,13 +288,17 @@ AddressChoice ParseAddressChoice(const std::string& s, const char* what)
         return c;
     }
     if (keyIO.IsValidPaymentAddressString(s)) {
-        libzcash::PaymentAddress pa = keyIO.DecodePaymentAddress(s);
-        if (const libzcash::SaplingPaymentAddress* sa = std::get_if<libzcash::SaplingPaymentAddress>(&pa)) {
-            c.kind = AddressChoice::SAPLING;
-            c.sapling = *sa;
-            return c;
+        std::optional<libzcash::PaymentAddress> pa = keyIO.DecodePaymentAddress(s);   // 6.20.0: optional
+        if (pa.has_value()) {
+            if (const libzcash::SaplingPaymentAddress* sa = std::get_if<libzcash::SaplingPaymentAddress>(&pa.value())) {
+                c.kind = AddressChoice::SAPLING;
+                c.sapling = *sa;
+                return c;
+            }
+            if (std::holds_alternative<libzcash::SproutPaymentAddress>(pa.value())) {
+                throw std::runtime_error(std::string("bad-address: ") + what + ": Sprout addresses are not supported; use an s1… or ys1… address");
+            }
         }
-        throw std::runtime_error(std::string("bad-address: ") + what + ": Sprout addresses are not supported; use an s1… or ys1… address");
     }
     throw std::runtime_error(std::string("bad-address: ") + what + ": not a transparent (s1…) or Sapling (ys1…) address of this network");
 }
@@ -324,25 +348,40 @@ struct Context
     CMutableTransaction NewTx(uint32_t expiry) const
     {
         CheckExpiry(expiry);
-        CMutableTransaction mtx = CreateNewContextualCMutableTransaction(::Params().GetConsensus(), chainHeight + 1);
+        CMutableTransaction mtx = CreateNewContextualCMutableTransaction(::Params().GetConsensus(), chainHeight + 1, /* requireV4 */ true);
         mtx.nExpiryHeight = expiry;
         return mtx;
     }
 
-    /** A TransactionBuilder for the Sapling shapes: same version/expiry/fee as NewTx, no keystore. */
-    TransactionBuilder NewBuilder(uint32_t expiry) const
+    /**
+     * A TransactionBuilder for the Sapling shapes, constructed in place in `slot`: same expiry/fee as
+     * NewTx, no keystore, no Orchard anchor (so a v4 transaction while NU5 is inactive). 6.20.0 takes
+     * the Sapling anchor in the constructor: the spend shapes pass the one their witnesses were taken
+     * at, the output-only shapes the tip's (as the stock wallet does). Never moved afterwards: the
+     * 6.20.0 builder is move-only and its move constructor does not carry firstSaplingSpendAddr.
+     */
+    TransactionBuilder& NewBuilder(std::optional<TransactionBuilder>& slot, uint32_t expiry,
+                                   std::optional<uint256> saplingAnchor = std::nullopt) const
     {
         CheckExpiry(expiry);
-        TransactionBuilder b(::Params().GetConsensus(), chainHeight + 1);
+        const uint256 anchor = saplingAnchor.has_value() ? saplingAnchor.value() : pcoinsTip->GetBestAnchor(SAPLING);
+        TransactionBuilder& b = slot.emplace(::Params(), chainHeight + 1, std::nullopt, anchor);
         b.SetExpiryHeight(expiry);
         b.SetFee(g_yellowbackFee);
         return b;
     }
 
+    /** The real scriptPubKey of a coin the transaction spends unsigned (needed by the 6.20.0 builder), else `fallback`. */
+    CScript SpentScript(const COutPoint& o, const CScript& fallback) const
+    {
+        const CCoins* c = pcoinsTip->AccessCoins(o.hash);
+        return (c && c->IsAvailable(o.n)) ? c->vout[o.n].scriptPubKey : fallback;
+    }
+
     CPubKey FreshKey(const std::string& purpose) const
     {
-        CPubKey key;
-        if (!wallet.GetKeyFromPool(key)) throw std::runtime_error("keypool-empty: keypool ran out; keypoolrefill first");
+        if (wallet.IsLocked()) throw std::runtime_error("wallet-locked: unlock the wallet first (walletpassphrase)");
+        CPubKey key = wallet.GenerateNewKey(true);   // 6.20.0: a fresh HD key, as stock getnewaddress
         wallet.SetAddressBook(key.GetID(), "", purpose);
         return key;
     }
@@ -400,7 +439,7 @@ struct Context
     {
         if (needed <= 0) return 0;
         std::vector<COutput> coins;
-        wallet.AvailableCoins(coins, true, nullptr, false, true, false, 1);
+        wallet.AvailableCoins(coins, std::nullopt, true, nullptr, false, true, false, 1);
         std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() < b.Value(); });
         CAmount selected = 0;
         for (const COutput& c : coins) {
@@ -431,19 +470,15 @@ struct Context
     void SelectSapling(const AddressChoice& addr, CAmount needed, libzcash::SaplingExtendedSpendingKey& extsk,
                        std::vector<SaplingNoteEntry>& sel, std::vector<SaplingWitness>& witnesses, uint256& anchor) const
     {
-        libzcash::PaymentAddress pa = addr.sapling;
-        if (!std::visit(HaveSpendingKeyForPaymentAddress(&wallet), pa)) {
+        if (!wallet.HaveSaplingSpendingKeyForAddress(addr.sapling) || !wallet.GetSaplingExtendedSpendingKey(addr.sapling, extsk)) {
             throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
         }
-        std::optional<libzcash::SpendingKey> sk = std::visit(GetSpendingKeyForPaymentAddress(&wallet), pa);
-        if (!sk.has_value()) throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
-        extsk = std::get<libzcash::SaplingExtendedSpendingKey>(sk.value());
 
         std::vector<SproutNoteEntry> sprout;
         std::vector<SaplingNoteEntry> notes;
-        std::set<libzcash::PaymentAddress> filter;
-        filter.insert(pa);
-        wallet.GetFilteredNotes(sprout, notes, filter, 1, INT_MAX, true, true, true);
+        std::vector<OrchardNoteMetadata> orchard;
+        const NoteFilter filter = NoteFilter::ForPaymentAddresses({libzcash::PaymentAddress(addr.sapling)});
+        wallet.GetFilteredNotes(sprout, notes, orchard, filter, std::nullopt, 1, INT_MAX, true, true, true);
         std::sort(notes.begin(), notes.end(), [](const SaplingNoteEntry& a, const SaplingNoteEntry& b) { return a.note.value() > b.note.value(); });
         CAmount sum = 0;
         CAmount available = 0;
@@ -462,7 +497,9 @@ struct Context
         std::vector<SaplingOutPoint> ops;
         for (const SaplingNoteEntry& e : sel) ops.push_back(e.op);
         std::vector<std::optional<SaplingWitness>> maybe;
-        wallet.GetSaplingNoteWitnesses(ops, maybe, anchor);
+        if (!wallet.GetSaplingNoteWitnesses(ops, 1, maybe, anchor)) {   // 1 = the newest witness, as v4.5.0
+            throw std::runtime_error("missing witness for a Sapling note; retry after the next block");
+        }
         for (size_t i = 0; i < maybe.size(); i++) {
             if (!maybe[i].has_value()) throw std::runtime_error("missing witness for a Sapling note; retry after the next block");
             witnesses.push_back(maybe[i].value());
@@ -474,7 +511,7 @@ struct Context
     {
         for (unsigned int i = first; i < first + prevs.size() && i < mtx.vin.size(); i++) {
             const auto& p = prevs[i - first];
-            if (!SignSignature(wallet, p.first, mtx, i, p.second, SIGHASH_ALL, branchId)) {
+            if (!SignSignature(wallet, p.first, mtx, V4TxData(CTransaction(mtx)), i, p.second, SIGHASH_ALL, branchId)) {
                 throw std::runtime_error(strprintf("failed to sign input %u", i));
             }
         }
@@ -644,20 +681,20 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         // in unsigned and are signed by SignVaultSpend() after FinishSapling().
         shape.collateralScript = std::nullopt;
         VaultSpendPlan plan = PlanVaultSpend(shape);
-        TransactionBuilder b = ctx.NewBuilder(expiry);
+        TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry);
         b.SetLockTime(plan.nLockTime);
-        b.AddTransparentInputUnsigned(vaultOut, vault.collateralZat, 0xFFFFFFFE);
-        for (const YedCoin& c : shape.yedInputs) b.AddTransparentInputUnsigned(c.outpoint, c.token.nValue);
+        b.AddTransparentInputUnsigned(vaultOut, ctx.SpentScript(vaultOut, P2SHScript(shape.vaultScript)), vault.collateralZat, 0xFFFFFFFE);
+        for (const YedCoin& c : shape.yedInputs) b.AddTransparentInputUnsigned(c.outpoint, c.token.scriptPubKey, c.token.nValue);
         if (extras) {
-            b.AddTransparentInputUnsigned(extras->carrier.outpoint, CARRIER_VALUE);
+            const CarrierRecord& cr = extras->carrier;
+            b.AddTransparentInputUnsigned(cr.outpoint, ctx.SpentScript(cr.outpoint, CarrierOutput(cr.pk, cr.bundle, CARRIER_VALUE).scriptPubKey), CARRIER_VALUE);
             out.carrierVin = 1 + (int)shape.yedInputs.size();
         }
         for (const CTxOut& o : plan.vout) b.AddTransparentOutput(o.scriptPubKey, o.nValue);
         // Encrypt the note under the seed-derived key z_sendmany uses for t->z, so it is recoverable
         // from the seed whether or not the destination belongs to this wallet.
         HDSeed seed = ctx.wallet.GetHDSeedForRPC();
-        b.AddSaplingOutput(ovkForShieldingFromTaddr(seed), dest.sapling, plan.collateralOut);
-        out.builder = b;
+        b.AddSaplingOutput(ovkForShieldingFromTaddr(seed), dest.sapling, plan.collateralOut, std::nullopt);
         out.collateralTo = dest.text;
         out.collateralOut = plan.collateralOut;
         out.burnCents = plan.burnCents;
@@ -962,7 +999,7 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
     Context ctx(yw);
     // The funding address is judged before any price: bad-address precedes bundle-insufficient.
     const AddressChoice source = ParseAddressChoice(from, "from");
-    if (source.kind == AddressChoice::SAPLING && !std::visit(HaveSpendingKeyForPaymentAddress(&ctx.wallet), libzcash::PaymentAddress(source.sapling))) {
+    if (source.kind == AddressChoice::SAPLING && !ctx.wallet.HaveSaplingSpendingKeyForAddress(source.sapling)) {
         throw std::runtime_error("bad-address: from: no spending key for " + source.text + " in this wallet");
     }
     MintPreflight pf;
@@ -1049,11 +1086,10 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
         std::vector<SaplingWitness> witnesses;
         uint256 anchor;
         ctx.SelectSapling(source, needed, extsk, notes, witnesses, anchor);
-        TransactionBuilder b = ctx.NewBuilder(expiry);
-        for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk.expsk, notes[i].note, anchor, witnesses[i]);
+        TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
+        for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
         b.AddTransparentOutput(carrierOut.scriptPubKey, carrierOut.nValue);
         b.SendChangeTo(source.sapling, extsk.expsk.full_viewing_key().ovk);
-        out.builder = b;
         out.fundedFrom = "sapling";
         out.carrier = rec;   // the outpoint is filled by FinishSapling()
         return out;
@@ -1146,12 +1182,11 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
         std::vector<SaplingWitness> witnesses;
         uint256 anchor;
         ctx.SelectSapling(source, std::max<CAmount>(needed, 0), extsk, notes, witnesses, anchor);
-        TransactionBuilder b = ctx.NewBuilder(expiry);
-        for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk.expsk, notes[i].note, anchor, witnesses[i]);
-        b.AddTransparentInputUnsigned(carrier.outpoint, CARRIER_VALUE);
+        TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
+        for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
+        b.AddTransparentInputUnsigned(carrier.outpoint, ctx.SpentScript(carrier.outpoint, CarrierOutput(carrier.pk, carrier.bundle, CARRIER_VALUE).scriptPubKey), CARRIER_VALUE);
         for (const CTxOut& o : vout) b.AddTransparentOutput(o.scriptPubKey, o.nValue);
         b.SendChangeTo(source.sapling, extsk.expsk.full_viewing_key().ovk);
-        out.builder = b;
         out.carrierVin = 0;
         out.fundedFrom = "sapling";
         return out;
@@ -1264,7 +1299,7 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     }
     // Sign YED inputs (P2PKH, mine) then YEC inputs.
     for (size_t i = 0; i < sel.size(); i++) {
-        if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, i, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId)) {
+        if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, V4TxData(CTransaction(mtx)), i, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
         }
     }
@@ -1442,12 +1477,11 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
     out.bondVin = 0;
     const uint32_t expiry = ctx.Expiry(ctx.chainHeight);
     if (dest.kind == AddressChoice::SAPLING) {
-        TransactionBuilder b = ctx.NewBuilder(expiry);
+        TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry);
         b.SetLockTime(rec->bondLocktime);
-        b.AddTransparentInputUnsigned(rec->bondOutpoint, rec->bondZat, 0xFFFFFFFE);
+        b.AddTransparentInputUnsigned(rec->bondOutpoint, ctx.SpentScript(rec->bondOutpoint, P2SHScript(out.bondScript)), rec->bondZat, 0xFFFFFFFE);
         HDSeed seed = ctx.wallet.GetHDSeedForRPC();
-        b.AddSaplingOutput(ovkForShieldingFromTaddr(seed), dest.sapling, bondOut);
-        out.builder = b;
+        b.AddSaplingOutput(ovkForShieldingFromTaddr(seed), dest.sapling, bondOut, std::nullopt);
         out.collateralTo = dest.text;
         return out;
     }

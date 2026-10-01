@@ -412,6 +412,23 @@ void TransactionBuilder::AddTransparentOutput(const CTxDestination& to, CAmount 
     mtx.vout.push_back(out);
 }
 
+void TransactionBuilder::AddTransparentOutput(const CScript& scriptPubKey, CAmount value)
+{
+    mtx.vout.push_back(CTxOut(value, scriptPubKey));
+}
+
+void TransactionBuilder::AddTransparentInputUnsigned(COutPoint utxo, CScript scriptPubKey, CAmount value, uint32_t nSequence)
+{
+    mtx.vin.emplace_back(utxo, CScript(), nSequence);
+    tInsUnsigned.insert(tIns.size());
+    tIns.emplace_back(value, scriptPubKey);
+}
+
+void TransactionBuilder::SetLockTime(uint32_t nLockTime)
+{
+    mtx.nLockTime = nLockTime;
+}
+
 void TransactionBuilder::SetFee(CAmount fee)
 {
     this->fee = fee;
@@ -617,6 +634,7 @@ TransactionBuilderResult TransactionBuilder::Build()
     const PrecomputedTransactionData txdata(txNewConst, tIns);
     for (int nIn = 0; nIn < mtx.vin.size(); nIn++) {
         auto tIn = tIns[nIn];
+        if (tInsUnsigned.count(nIn)) continue;   // Yellowback (plan I2): signed by the caller after Build()
         SignatureData sigdata;
         bool signSuccess = ProduceSignature(
             TransactionSignatureCreator(

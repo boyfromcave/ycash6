@@ -233,7 +233,7 @@ public:
 
 private:
     YellowbackIndex* index;
-    std::unique_ptr<CCriticalBlock> lock;
+    std::unique_ptr<UniqueLock<CCriticalSection>> lock;   // 6.20.0: CCriticalBlock became UniqueLock
     std::unique_ptr<OverlayStateView> overlay;
     int nextHeight;
 };
@@ -426,7 +426,7 @@ public:
     std::function<void()> testBeforeApply;
 
 protected:
-    void ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added) override;
+    void ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<MerkleFrontiers> added) override;
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock, const int nHeight) override;
 
 private:

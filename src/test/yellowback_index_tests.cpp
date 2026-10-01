@@ -30,6 +30,7 @@
 
 #include "chain.h"
 #include "chainparams.h"
+#include "consensus/merkle.h"
 #include "consensus/validation.h"
 #include "key.h"
 #include "main.h"
@@ -115,7 +116,7 @@ struct Chain
         Node& n = nodes.back();
         n.block = block;
         if (parent->phashBlock) n.block.hashPrevBlock = parent->GetBlockHash();
-        n.block.hashMerkleRoot = n.block.BuildMerkleTree();     // the hash must depend on the transactions
+        n.block.hashMerkleRoot = BlockMerkleRoot(n.block);     // the hash must depend on the transactions
         n.hash = n.block.GetHash();
         n.idx.reset(new CBlockIndex());
         n.idx->pprev = parent;
@@ -140,8 +141,8 @@ struct Builder
 
     Builder(const yellowback::Params& p, YellowbackIndex& i) : P(p), index(i), fakeCounter(0)
     {
-        ownerKey.MakeNewKey(true);
-        userKey.MakeNewKey(true);
+        ownerKey = CKey::TestOnlyRandomKey(true);
+        userKey = CKey::TestOnlyRandomKey(true);
         for (int k = 0; k < 6; k++) {
             hotKeys.push_back(DeterministicKey("yellowback-index-test-hot", k));
             bondKeys.push_back(DeterministicKey("yellowback-index-test-bond", k));
@@ -725,14 +726,14 @@ BOOST_AUTO_TEST_CASE(check_null_hash)
     dummy.nHeight = dummy.pprev->nHeight + 1;
     dummy.phashBlock = nullptr;
     CBlock good = Builder::Block(dummy.nHeight, Builder::Quote(50000, 0));
-    good.hashMerkleRoot = good.BuildMerkleTree();
+    good.hashMerkleRoot = BlockMerkleRoot(good);
     {
         LOCK(cs_main);
         BOOST_CHECK(!live.index->CheckConnect(good, &dummy, true).has_value());
     }
     CMutableTransaction s = live.b->SpendTx(live.vault, dummy.nHeight - 2, false);
     CBlock badBlock = Builder::Block(dummy.nHeight, std::nullopt, { s });
-    badBlock.hashMerkleRoot = badBlock.BuildMerkleTree();
+    badBlock.hashMerkleRoot = BlockMerkleRoot(badBlock);
     {
         LOCK(cs_main);
         std::optional<std::string> bad = live.index->CheckConnect(badBlock, &dummy, true);
@@ -1631,7 +1632,7 @@ BOOST_AUTO_TEST_CASE(sigcache_lru_and_hit_equals_cold)
     CMutableTransaction m = b.MintV3(10000, R, 50000);
     CBlock block = Builder::Block(live.Tip() + 1, Builder::Quote(50000, 0), { m });
     block.hashPrevBlock = live.tip->GetBlockHash();
-    block.hashMerkleRoot = block.BuildMerkleTree();
+    block.hashMerkleRoot = BlockMerkleRoot(block);
     // Cold: a fresh verification with no cache; warm: through the index's cache twice.
     BlockEvaluation cold, warm1, warm2;
     {
@@ -1662,7 +1663,7 @@ BOOST_AUTO_TEST_CASE(sigcache_lru_and_hit_equals_cold)
     CMutableTransaction mBad = b.MintV3(10000, R, 50000, EncodeBundle(bad));
     CBlock blockBad = Builder::Block(live.Tip() + 1, Builder::Quote(50000, 0), { mBad });
     blockBad.hashPrevBlock = live.tip->GetBlockHash();
-    blockBad.hashMerkleRoot = blockBad.BuildMerkleTree();
+    blockBad.hashMerkleRoot = BlockMerkleRoot(blockBad);
     {
         LOCK(cs_main);
         LOCK(index.cs_yellowback);

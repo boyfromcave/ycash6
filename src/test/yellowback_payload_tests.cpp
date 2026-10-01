@@ -24,7 +24,7 @@ namespace {
 CPubKey TestKey()
 {
     CKey key;
-    key.MakeNewKey(true);
+    key = CKey::TestOnlyRandomKey(true);
     return key.GetPubKey();
 }
 
@@ -274,7 +274,7 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
     BOOST_CHECK(EncodePayload(Payload::Transfer({ Assignment(1, 0) })).empty());
     BOOST_CHECK(EncodePayload(Payload::Transfer({ Assignment(1, 1), Assignment(1, 2) })).empty());
     CPubKey unc;
-    { CKey k; k.MakeNewKey(false); unc = k.GetPubKey(); }
+    { CKey k; k = CKey::TestOnlyRandomKey(false); unc = k.GetPubKey(); }
     const CPubKey good(Hex(KEYHEX));
     BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, unc, 0xFF)).empty());
     BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, CPubKey(), 0xFF)).empty());

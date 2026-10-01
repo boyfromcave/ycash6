@@ -315,7 +315,7 @@ BOOST_AUTO_TEST_CASE(p2sh_yellowback_outputs_are_never_mine)
     // the Yellowback builders can never spend one as plain YEC, and no coin lock is needed.
     CBasicKeyStore ks;
     CKey k;
-    k.MakeNewKey(true);
+    k = CKey::TestOnlyRandomKey(true);
     ks.AddKey(k);
     const CPubKey pk = k.GetPubKey();
     std::vector<unsigned char> h(32, 0x11);

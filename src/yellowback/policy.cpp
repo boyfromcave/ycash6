@@ -150,17 +150,23 @@ uint32_t SignerBranchId()
 
 bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32_t branchId, std::string& error)
 {
-    PrecomputedTransactionData txdata(tx);
+    // 6.20.0: PrecomputedTransactionData needs every spent output (ZIP-244), so gather them first.
+    std::vector<CTxOut> prevouts;
+    prevouts.reserve(tx.vin.size());
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
         if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n)) {
             error = strprintf("input %u is unknown or spent", i);
             return false;
         }
-        const CTxOut& prev = coins->vout[tx.vin[i].prevout.n];
+        prevouts.push_back(coins->vout[tx.vin[i].prevout.n]);
+    }
+    const PrecomputedTransactionData txdata(tx, prevouts);
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CTxOut& prev = prevouts[i];
         ScriptError serror = SCRIPT_ERR_OK;
         if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS,
-                          TransactionSignatureChecker(&tx, i, prev.nValue, txdata), branchId, &serror)) {
+                          TransactionSignatureChecker(&tx, txdata, i, prev.nValue), branchId, &serror)) {
             error = strprintf("input %u fails script verification: %s", i, ScriptErrorString(serror));
             return false;
         }

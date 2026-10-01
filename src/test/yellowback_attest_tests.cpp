@@ -184,7 +184,7 @@ BOOST_AUTO_TEST_CASE(invalid_vectors_rejected)
     const std::array<unsigned char, 64> sig = Sig64(v0["sig"].get_str());
     BOOST_CHECK(!VerifyCompactSig(CPubKey(), msg, sig));
     CKey unc;
-    unc.MakeNewKey(false);
+    unc = CKey::TestOnlyRandomKey(false);
     BOOST_CHECK(!VerifyCompactSig(unc.GetPubKey(), msg, sig));
     std::array<unsigned char, 64> zero;
     zero.fill(0);
@@ -194,7 +194,7 @@ BOOST_AUTO_TEST_CASE(invalid_vectors_rejected)
     BOOST_CHECK(!VerifyCompactSig(CPubKey(ParseHex(v0["pubkey"].get_str())), msg, ff));
     // A fresh key signing through CKey (DER) then converted verifies; a flipped bit does not.
     CKey k;
-    k.MakeNewKey(true);
+    k = CKey::TestOnlyRandomKey(true);
     std::vector<unsigned char> der;
     BOOST_REQUIRE(k.Sign(msg, der));
     std::array<unsigned char, 64> compact;

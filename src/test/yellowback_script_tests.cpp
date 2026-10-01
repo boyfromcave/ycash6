@@ -57,7 +57,8 @@ CMutableTransaction SpendingTx(CAmount vaultValue, uint32_t nLockTime, uint32_t 
 
 valtype Sign(const CKey& key, const CScript& scriptCode, const CMutableTransaction& mtx, unsigned int nIn, CAmount amount, uint32_t branchId)
 {
-    uint256 hash = SignatureHash(scriptCode, CTransaction(mtx), nIn, SIGHASH_ALL, amount, branchId);
+    const CTransaction txc(mtx);
+    uint256 hash = SignatureHash(scriptCode, txc, nIn, SIGHASH_ALL, amount, branchId, PrecomputedTransactionData(txc, {}));
     valtype sig;
     BOOST_REQUIRE(key.Sign(hash, sig));
     sig.push_back((unsigned char)SIGHASH_ALL);
@@ -68,7 +69,7 @@ bool Verify(const CMutableTransaction& mtx, const CScript& scriptPubKey, CAmount
             unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS)
 {
     ScriptError e = SCRIPT_ERR_OK;
-    bool ok = VerifyScript(mtx.vin[0].scriptSig, scriptPubKey, flags, MutableTransactionSignatureChecker(&mtx, 0, amount), branchId, &e);
+    bool ok = VerifyScript(mtx.vin[0].scriptSig, scriptPubKey, flags, MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, amount), branchId, &e);
     if (err) *err = e;
     return ok;
 }
@@ -76,7 +77,7 @@ bool Verify(const CMutableTransaction& mtx, const CScript& scriptPubKey, CAmount
 CKey NewKey(bool compressed = true)
 {
     CKey k;
-    k.MakeNewKey(compressed);
+    k = CKey::TestOnlyRandomKey(compressed);
     return k;
 }
 
@@ -477,7 +478,7 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
     fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 1: a YED token output
     fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 2: another
     fund.vout.push_back(CTxOut(vaultValue, vaultSpk));      // 3: a vault
-    CCoinsView dummy;
+    CCoinsViewDummy dummy;
     CCoinsViewCache view(&dummy);
     view.ModifyCoins(fund.GetHash())->FromTx(fund, height);
     const uint256 fundHash = fund.GetHash();
@@ -507,7 +508,7 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3)))));
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(10000 * COIN - vaultValue - TOKEN_VALUE - feeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 0, 10000 * COIN, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, 10000 * COIN, SIGHASH_ALL, branchId));
         checkStandard(mtx, "MINT");
         BOOST_CHECK_EQUAL(mtx.vout.size(), 5u);
         BOOST_CHECK_EQUAL(FindPayload(CTransaction(mtx))->payload.feeVout, 3);
@@ -528,7 +529,7 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(0, PayloadScript(data)));
         mtx.vout.push_back(CTxOut(COIN, userP2PKH));
         for (unsigned int i = 0; i < 3; i++) {
-            BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, i, fund.vout[mtx.vin[i].prevout.n].nValue, SIGHASH_ALL, branchId));
+            BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), i, fund.vout[mtx.vin[i].prevout.n].nValue, SIGHASH_ALL, branchId));
         }
         checkStandard(mtx, "TRANSFER");
     }
@@ -542,11 +543,11 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem(refHeight, 1, { Assignment(2, 100) })))));
         mtx.vin[0].scriptSig = OwnerScriptSig(Sign(ownerKey, vault, mtx, 0, vaultValue, branchId), vault);
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
         checkStandard(mtx, "REDEEM");
         ScriptError err;
         BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[0].scriptSig, vaultSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
-                                         MutableTransactionSignatureChecker(&mtx, 0, vaultValue), branchId, &err),
+                                         MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, vaultValue), branchId, &err),
                             ScriptErrorString(err));
         BOOST_CHECK(ParseVaultSpendPath(mtx.vin[0].scriptSig)->ownerPath);
     }
@@ -559,11 +560,11 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem(refHeight, 1, { Assignment(2, 100) })))));
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
         checkStandard(mtx, "CLAIM");
         ScriptError err;
         BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[0].scriptSig, vaultSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
-                                         MutableTransactionSignatureChecker(&mtx, 0, vaultValue), branchId, &err),
+                                         MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, vaultValue), branchId, &err),
                             ScriptErrorString(err));
         BOOST_CHECK(!ParseVaultSpendPath(mtx.vin[0].scriptSig)->ownerPath);
     }
@@ -891,7 +892,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
     fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 1: a YED token
     fund.vout.push_back(CTxOut(vaultValue, vaultSpk));      // 2: a vault
     fund.vout.push_back(CTxOut(carrierValue, carrierSpk));  // 3: a carrier
-    CCoinsView dummy;
+    CCoinsViewDummy dummy;
     CCoinsViewCache view(&dummy);
     view.ModifyCoins(fund.GetHash())->FromTx(fund, height);
     const uint256 fundHash = fund.GetHash();
@@ -915,7 +916,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         BOOST_CHECK(FindCarrierInput(CTransaction(mtx), false) == std::optional<size_t>(carrierIndex));
         ScriptError err;
         BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[carrierIndex].scriptSig, carrierSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
-                                         MutableTransactionSignatureChecker(&mtx, carrierIndex, carrierValue), branchId, &err),
+                                         MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), carrierIndex, carrierValue), branchId, &err),
                             what + ": carrier " + ScriptErrorString(err));
     };
 
@@ -930,7 +931,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
         mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - vaultValue - TOKEN_VALUE - feeZat - attestFeeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 0, 10000 * COIN, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, 10000 * COIN, SIGHASH_ALL, branchId));
         signCarrier(mtx, 1);
         checkStandard(mtx, "MINT+carrier", 1);
         BOOST_CHECK(mtx.vin[1].scriptSig.size() < 1650);
@@ -948,7 +949,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
         mtx.vout.push_back(CTxOut(residual, ownerP2PKH));
         mtx.vout.push_back(CTxOut(vaultValue + carrierValue - feeZat - attestFeeZat - residual - DEFAULT_YELLOWBACK_FEE, userP2PKH));
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
         signCarrier(mtx, 2);
         checkStandard(mtx, "CLAIM+carrier+residual", 2);
         // The vault input is the claim path and is never the carrier, with or without skipVin0.
@@ -957,7 +958,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         BOOST_CHECK(FindCarrierInput(CTransaction(mtx), true) == std::optional<size_t>(2));
         ScriptError err;
         BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[0].scriptSig, vaultSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
-                                         MutableTransactionSignatureChecker(&mtx, 0, vaultValue), branchId, &err), ScriptErrorString(err));
+                                         MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, vaultValue), branchId, &err), ScriptErrorString(err));
     }
     // CLAIM_NOTICE: a YEC input and the carrier; payload and change only.
     {
@@ -966,7 +967,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 0)));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::ClaimNotice(COutPoint(fundHash, 2), refHeight)))));
         mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - DEFAULT_YELLOWBACK_FEE, userP2PKH));
-        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, 10000 * COIN, SIGHASH_ALL, branchId));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 1, 10000 * COIN, SIGHASH_ALL, branchId));
         signCarrier(mtx, 0);
         checkStandard(mtx, "CLAIM_NOTICE+carrier", 0);
     }
@@ -991,7 +992,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         BOOST_CHECK(!AreInputsStandard(CTransaction(mtx), view, branchId));
         ScriptError err;
         BOOST_CHECK(!VerifyScript(mtx.vin[0].scriptSig, P2SHScript(bigCarrier), STANDARD_SCRIPT_VERIFY_FLAGS,
-                                  MutableTransactionSignatureChecker(&mtx, 0, carrierValue), branchId, &err));
+                                  MutableTransactionSignatureChecker(&mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, carrierValue), branchId, &err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PUSH_SIZE);
     }
 }
@@ -1022,17 +1023,17 @@ BOOST_AUTO_TEST_CASE(transaction_builder_extension)
     const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
     CBasicKeyStore keystore;
     CKey key;
-    key.MakeNewKey(true);
+    key = CKey::TestOnlyRandomKey(true);
     keystore.AddKey(key);
     const CScript p2pkh = GetScriptForDestination(key.GetPubKey().GetID());
     const CScript payload = CScript() << OP_RETURN << valtype(4, 0x42);
 
-    TransactionBuilder b(::Params().GetConsensus(), height, &keystore);
+    TransactionBuilder b(::Params(), height, std::nullopt, uint256(), &keystore);
     b.SetExpiryHeight(height + 20);
     b.SetFee(1000);
     b.SetLockTime(123);
     b.AddTransparentInput(COutPoint(uint256S("01"), 0), p2pkh, 2 * COIN);
-    b.AddTransparentInputUnsigned(COutPoint(uint256S("02"), 3), 5 * COIN, 0xFFFFFFFE);
+    b.AddTransparentInputUnsigned(COutPoint(uint256S("02"), 3), GetScriptForDestination(CScriptID(payload)), 5 * COIN, 0xFFFFFFFE);
     b.AddTransparentOutput(payload, 0);
     CTxDestination dest = key.GetPubKey().GetID();
     b.AddTransparentOutput(dest, 7 * COIN - 1000);
@@ -1052,8 +1053,8 @@ BOOST_AUTO_TEST_CASE(transaction_builder_extension)
     BOOST_CHECK(tx.vout[0].scriptPubKey == payload);
     BOOST_CHECK_EQUAL(tx.vout[0].nValue, 0);
     BOOST_CHECK(tx.vout[1].scriptPubKey == p2pkh);
-    BOOST_CHECK(tx.vShieldedSpend.empty() && tx.vShieldedOutput.empty());
-    BOOST_CHECK_EQUAL(tx.valueBalance, 0);
+    BOOST_CHECK(tx.GetSaplingSpendsCount() == 0 && tx.GetSaplingOutputsCount() == 0);   // 6.20.0: the Sapling bundle
+    BOOST_CHECK_EQUAL(tx.GetValueBalanceSapling(), 0);
     ScriptError err;
     BOOST_CHECK_MESSAGE(Verify(CMutableTransaction(tx), p2pkh, 2 * COIN, branchId, &err), ScriptErrorString(err));
     RegtestDeactivateSapling();
