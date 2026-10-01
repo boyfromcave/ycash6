@@ -248,11 +248,15 @@ public:
      * Bring the database in line with chainActive at startup: undo while the
      * stored tip is not in the active chain (covers the index being ahead of
      * an unflushed chainstate after a crash, V2), then apply forward from
-     * disk. Wipes and rebuilds when the schema or network differs, an undo
+     * disk. Wipes and rebuilds on -reindex-yellowback (reconsidering the blocks
+     * Rejected names first), when the schema or network differs, an undo
      * record is missing, or the chain is below startHeight. Takes cs_main.
      * Returns false only when the index ends up unhealthy.
      */
     bool SyncToChain();
+
+    /** Rejected blocks a wipe in SyncToChain reconsidered (init re-judges them; set only during init). */
+    int ReconsideredOnWipe() const { return reconsideredOnWipe; }
 
     /** Make every later hook return at once (shutdown). */
     void Stop();
@@ -474,6 +478,8 @@ private:
     std::string unhealthyReason;
     bool stopped;
     bool rebuilt;
+    bool pendingWipe;      //!< -reindex-yellowback: SyncToChain wipes (under cs_main, after reconsidering Rejected)
+    int reconsideredOnWipe;
 
     MinerConfig miner;
     PayeePolicy payeePolicy;

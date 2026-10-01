@@ -1250,6 +1250,25 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.restart(POOLS[1])
         assert self.nodes[POOLS[1]].yed_getinfo()['rejectedBlocks'] >= 1
 
+        # -reindex-yellowback erases Rejected with the rest of the index.  On v4.5.0 the block's
+        # never-connected entry was erased at start as well, so the node fetched it again and the
+        # rebuilt index re-judged it: rejected anew, on record, a root for the valve below.  On
+        # 6.20.0 the entry keeps its FAILED mark, so the wipe must reconsider it first; without
+        # that the node holds a mark with no record, the valve never trips on it and it never
+        # follows node 1 (the trip loop below names it).
+        print('  node %d restarted with -reindex-yellowback: the block is re-judged and re-recorded' % POOLS[2])
+        self.restart(POOLS[2], ['-reindex-yellowback'])
+        node = self.nodes[POOLS[2]]
+        deadline = time.time() + 60
+        while node.yed_getinfo()['rejectedBlocks'] < 1:
+            assert time.time() < deadline, \
+                'node %d did not re-reject the block after -reindex-yellowback' % POOLS[2]
+            time.sleep(0.5)
+        assert_equal(node.yed_getblockverdict(blockhash)['blockInvalid'], True)
+        assert_equal(node.getbestblockhash(), enforcing_tip)
+        assert debug_log_contains(self.options.tmpdir, POOLS[2], 'wipe: reconsidered %s' % blockhash), \
+            'node %d: the wipe did not reconsider the rejected block' % POOLS[2]
+
         print('  five blocks of stock lead must not trip the valve')
         for _ in range(4):                      # the rejected block plus four = five of lead
             stock.generate(1)

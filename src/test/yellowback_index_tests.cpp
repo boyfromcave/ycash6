@@ -1039,6 +1039,33 @@ BOOST_AUTO_TEST_CASE(valve_trips_at_six_blocks)
     BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad3.idx->nHeight);
 }
 
+BOOST_AUTO_TEST_CASE(reindex_yellowback_reconsiders_rejected)
+{
+    // -reindex-yellowback erases Rejected, so it first clears the FAILED marks Rejected accounts for,
+    // durably (6.20.0 keeps a never-connected entry's mark across a restart; v4.5.0's
+    // RewindBlockIndex erased the entry, so the block was fetched and judged again).
+    fs::path dir = pathTemp / "yb-wipe-reconsider";
+    Live live(dir);
+    live.Activate();
+    live.MintActive();
+    Chain::Node& bad = live.BadBlock();
+    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
+    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
+    bad.idx->nStatus |= BLOCK_FAILED_VALID;
+    MapGuard guard;
+    guard.Insert(bad.idx.get());
+    live.index.reset();                                            // close the directory first
+    live.index.reset(new YellowbackIndex(live.P, dir, 1 << 20, true));
+    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);             // read before the wipe
+    BOOST_CHECK(live.index->SyncToChain());
+    BOOST_CHECK_EQUAL(live.index->ReconsideredOnWipe(), 1);
+    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
+    BOOST_CHECK(!(bad.idx->nStatus & BLOCK_FAILED_MASK));
+    CDiskBlockIndex onDisk;
+    BOOST_REQUIRE(pblocktree->Read(std::make_pair('b', bad.hash), onDisk));   // flushed before the wipe
+    BOOST_CHECK(!(onDisk.nStatus & BLOCK_FAILED_MASK));
+}
+
 // Rule: ACT-7
 BOOST_AUTO_TEST_CASE(check_tripped_valve_never_rejects)
 {
