@@ -19,12 +19,12 @@ venv's** Python: they import the inherited test framework from `qa/rpc-tests/`, 
 per terminal, make every command in this file work verbatim from any directory:
 
 ```bash
-cd <workspace>/ycash-dd
+cd <workspace>/ycash6
 source ../.venv/bin/activate
 export PATH="$PWD/contrib/yellowback/devnet:$PATH"
 ```
 
-Or skip them and spell each command out from the `ycash-dd` directory: `../.venv/bin/python
+Or skip them and spell each command out from the `ycash6` directory: `../.venv/bin/python
 contrib/yellowback/devnet/yellowback-devnet <command>`. Running `./yellowback-devnet` from this
 directory does **not** work on its own — the shebang then picks the system Python and dies on
 `ModuleNotFoundError: simplejson`.
@@ -35,7 +35,7 @@ You also need `src/ycashd` built and `contrib/yellowback/attest` built (`cargo b
 ## 1. The plain devnet (v2 demo and v3 arming)
 
 ```bash
-yellowback-devnet up                # ~2 min: 8 nodes, node 0 funded, 3 pools quoting, 3 attestors registered, ARMED
+yellowback-devnet up                # ~6 min on 6.20.0: 8 nodes, node 0 funded, 3 pools quoting, 3 attestors registered, ARMED
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
 yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
 yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
@@ -166,7 +166,7 @@ Node 8 is funded (13 YEC) and unregistered; `<dir>/attest-8.toml` is your agent'
 
 ## 3. The regression suite
 
-`qa/rpc-tests/yellowback_devnet_roles.py` (nightly, `EXTENDED_SCRIPTS`) drives this script as a subprocess — `up --role` for each preset — and asserts, per preset: the seat is empty and the node map is the one above; the heartbeat advances the chain on the automated pools only, with no help from the test; every persona performs its characteristic action, a vault is redeemed at maturity, and after a −70 % shock **the liquidator claims a leveraged vault**; the walk keeps the pools' and attestors' prices byte-equal and nothing ends pinned; `check` passes before the shock, and the state hash agrees across every enforcing node after. Fixed seed; SKIPs without the Rust binary; about 30 minutes for the three presets (`--presets user` for one).
+`qa/rpc-tests/yellowback_devnet_roles.py` (nightly, `EXTENDED_SCRIPTS`) drives this script as a subprocess — `up --role` for each preset — and asserts, per preset: the seat is empty and the node map is the one above; the heartbeat advances the chain on the automated pools only, with no help from the test; every persona performs its characteristic action, a vault is redeemed at maturity, and after a −70 % shock **the liquidator claims a leveraged vault**; the walk keeps the pools' and attestors' prices byte-equal and nothing ends pinned; `check` passes before the shock, and the state hash agrees across every enforcing node after. Fixed seed; SKIPs without the Rust binary; about 40 minutes for the three presets on 6.20.0 (`--presets user` for one).
 
 ## 4. Two devnets at once
 

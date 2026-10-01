@@ -9,12 +9,12 @@ the system Python 3.9 that macOS ships. Three lines, once per terminal, make eve
 work verbatim from any directory:
 
 ```bash
-cd <workspace>/ycash-dd
+cd <workspace>/ycash6
 source ../.venv/bin/activate
 export PATH="$PWD/contrib/yellowback/devnet:$PATH"
 ```
 
-Or skip them and spell each command out from the `ycash-dd` directory: `../.venv/bin/python
+Or skip them and spell each command out from the `ycash6` directory: `../.venv/bin/python
 contrib/yellowback/devnet/yellowback-devnet <command>`.
 
 You also need `src/ycashd` built and the attestor agent built (`cd contrib/yellowback/attest &&
