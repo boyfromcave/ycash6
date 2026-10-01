@@ -1,7 +1,19 @@
 # ycashd 6.20.0 port of the Yellowback CI (ycash6, branch feature/yellowback). Copied from ycash-dd's
 # feature/yellowback-price-attest on 2026-09-30 and adapted: baseline = tag ycash6-baseline, the
-# audit gates are qa/yellowback-audit.sh, ZCASHD replaces BITCOIND. Jobs other than `audit` and `python` are
-# skipped (`if: false && …`) until the plan phase that switches them on removes the prefix.
+# audit gates are qa/yellowback-audit.sh, ZCASHD replaces BITCOIND. Every job is on since 2026-10-01
+# (plan Phase 6: each one's steps green locally on 6.20.0 first; `audit` and `python` since Phase 4).
+#
+# Runner: ubuntu-22.04 for every job, as upstream's own .github/workflows/ci.yml builds natively
+# (its tier-1 `ubuntu-22.04` row, no container, no apt packages) and doc/book/src/user/
+# platform-support.md lists Ubuntu 22.04 as tier 1. Upstream bumped depends to LLVM 22 (9a83cdcf0)
+# and the next day dropped only Debian 11 (glibc 2.31) as unbuildable (5bde251fd), keeping 22.04
+# (glibc 2.35) and Debian 12 (2.36) native, so native_clang.mk's "its output requires glibc 2.38"
+# is not upstream's experience. LEGACY_GLIBC=1 is not used: it swaps in Clang 18.1.8 for building
+# INSIDE an Ubuntu 18.04 image (contrib/legacy-glibc-build/README.md), which would test a toolchain
+# no release uses. apt's lcov on 22.04 is 1.15, the version the coverage step is written for.
+# libtinfo5 is no longer installed from apt: depends stages its own (native_libtinfo5.mk, a
+# dependency of native_clang on Linux), so moving to ubuntu-24.04 -- the fallback if a 22.04 link
+# ever reports a GLIBC_2.38 symbol -- is a runs-on change only.
 name: yellowback tests
 
 # Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
@@ -96,7 +108,7 @@ env:
 
 jobs:
   main:
-    if: false && (github.event_name != 'schedule' && inputs.weekly_fuzz != true)   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
@@ -107,7 +119,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake libtinfo5
+            automake
 
       - uses: actions/setup-python@v5
         # 3.11, not the runner's 3.10: yellowback_quote and the devnet role presets start the quote
@@ -231,10 +243,15 @@ jobs:
         # does not have to glob all of /tmp (root-only /tmp/snap-private-tmp on the GitHub runners
         # makes upload-artifact fail with EACCES). --nocleanup is forwarded to every script:
         # without it test_framework.py rmtree()s its tmpdir even when the test fails.
+        # No REF_YCASHD here: this merge gate builds no stock binary, so node 1 of the standard
+        # topology (yellowback_stock_node, yellowback_enforcement's adversary) is the fork binary
+        # WITHOUT -yellowback -- the P9 fallback the scripts print. The real stock-6.20.0 runs
+        # (ycash6-stock build: stockparity, stock_node, the demonstration) are the nightly's.
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
+          test -z "${REF_YCASHD:-}"
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
 
       - name: Functional tests (inherited stock baseline, without -yellowback)
@@ -288,13 +305,13 @@ jobs:
             for x in src/yellowback/$f.cpp src/yellowback/$f.h; do test -f "$x" && pure="$pure $x"; done
           done
           echo "pure modules:$pure"
-          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # libsecp256k1 is reached through one wrapper only, VerifyCompactSig in attest.cpp (v3 §3.10,
           # §8.4 item 2), so the fuzz harness can stub it and low-S is enforced in one place. Comment
           # lines are skipped; nothing else under src/yellowback or src/rpc/yellowback* may name it.
-          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
-          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # The clock has three homes: the quote RPC (stamps receivedAt), policy.cpp (BuildTagScript,
           # M11), and the wallet RPC's carrier wait (A3's two-step mint -- a user-facing deadline in
           # wallet-tier code, never a consensus input).  The patterns are anchored: an unescaped
@@ -303,7 +320,7 @@ jobs:
           homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -vE 'yellowback/policy\.cpp$|rpc/yellowback\.cpp$|rpc/yellowbackwallet\.cpp$' || true)
           test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
           # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
-          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis"
+          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis" || exit 1
           # Every yellowback script the runner knows must be executable (rpc-tests.py exec's it
           # directly) and must be run by some job: registered-but-never-run is how the v2
           # enforcement suite and then the whole v3 attestation suite sat silent in CI.
@@ -325,21 +342,26 @@ jobs:
           grep -qF "'$STOCK_BASELINE_MINEBLOCK'" qa/pull-tester/rpc-tests.py || { echo "$STOCK_BASELINE_MINEBLOCK is not in qa/pull-tester/rpc-tests.py"; exit 1; }
           # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
           # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
-          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n'
-          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever.
-          ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp src/main.cpp
+          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n' || exit 1
+          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever. main.cpp's own
+          # inserted lines are checked against the baseline diff in "v2 gates" below; the whole of
+          # stock main.cpp is full of DoS(100) and must not be grepped here.
+          # Every `! check` in these steps carries `|| exit 1`: bash -e ignores the status of a
+          # command negated with `!`, so until 2026-10-01 only the last line of a step could fail.
+          # That hid this grep's inclusion of src/main.cpp and the comment hit below (ci6).
+          ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp || exit 1
           # EvaluateBlock is total (K1): no throw, no assert in the state machine or the arithmetic.
-          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h
+          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h || exit 1
           # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
-          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp
+          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
-          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*'
+          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || exit 1
 
       - name: Documents (fork-local only, P4)
         # Staleness against the plan is a workspace check (make status -> spec-check), not a fork check.
         run: |
           set -e
-          ! grep -q 'no consensus change' doc/yellowback.md
+          ! grep -q 'no consensus change' doc/yellowback.md || exit 1
           grep -q 'federation prototype, being replaced' doc/yellowback.md
           grep -q 'Build and test baseline' doc/yellowback.md
           # The published spec copy was not hand-edited: its header hash equals the hash of its body.
@@ -358,7 +380,7 @@ jobs:
           registered=$(grep -oh '"yed_[a-z]*"' src/rpc/yellowback*.cpp | tr -d '"' | sort -u)
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
-          ! git grep -in roster -- src/yellowback
+          ! git grep -in roster -- src/yellowback || exit 1
           test -f doc/yellowback-rpc.md && grep -q 'rpcversion 3' doc/yellowback-rpc.md
           python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
           # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
@@ -429,7 +451,7 @@ jobs:
   # GitHub's `paths:` filter is workflow-wide, not per job, so the gate is the presence check below
   # plus a cargo cache keyed on Cargo.lock; the crate is small and the job is cheap.
   agent:
-    if: false && (github.event_name != 'schedule' && inputs.weekly_fuzz != true)   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -487,8 +509,8 @@ jobs:
       - name: No agent crate in the node's build (v3 plan §8.4 item 14)
         if: steps.crate.outputs.present == 'true' && !cancelled()
         run: |
-          ! grep -q 'iroh' Cargo.lock
-          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest'
+          ! grep -q 'iroh' Cargo.lock || exit 1
+          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest' || exit 1
 
   python:
     if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
@@ -560,7 +582,7 @@ jobs:
   # never the node's depends/. Also proves fixtures/expected.json is still what the Python
   # aggregator (the reference) computes, so the Rust/Python cross-check cannot drift silently.
   nightly:
-    if: false && ((github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true))   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -573,7 +595,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake libtinfo5
+            automake
       - uses: actions/setup-python@v5
         # 3.11 for the quote agent's tomllib (see the main job); the devnet role presets need it.
         with:
@@ -599,6 +621,37 @@ jobs:
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
       - run: ./zcutil/build.sh -j$(nproc)
+      - name: Build the stock 6.20.0 binary (branch ycash6-stock) for the stock-parity scripts
+        # Plan P-5: the reference node is ycash6-stock (= tag ycash6-baseline + baseline fix 3, the
+        # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. Same
+        # depends tree and Cargo.lock as this branch, so the worktree links this checkout's built
+        # triple and shares its cargo target (no second depends or Rust build), as the workspace's
+        # wt/ worktrees do. Exported as STOCK_YCASHD, NOT REF_YCASHD: the framework hands
+        # REF_YCASHD to node 1 of every standard-topology script, so it is set per step below.
+        run: |
+          set -e
+          git fetch --no-tags --depth 1 origin ycash6-stock
+          stock="$RUNNER_TEMP/ycash6-stock"
+          git worktree add --detach "$stock" FETCH_HEAD
+          ln -s "$PWD/depends/x86_64-pc-linux-gnu" "$stock/depends/x86_64-pc-linux-gnu"
+          export CARGO_TARGET_DIR="$PWD/target"
+          (cd "$stock" && ./autogen.sh && CONFIG_SITE="$stock/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --quiet)
+          qa/yellowback-cxxbridge-headers.sh "$stock" -j$(nproc)
+          make -C "$stock/src" -j$(nproc) ycashd
+          "$stock/src/ycashd" --version | head -1
+          echo "STOCK_YCASHD=$stock/src/ycashd" >> "$GITHUB_ENV"
+      - name: Stock parity and the stock node against the real stock binary
+        # yellowback_stockparity: a ycash6-stock node and this fork without -yellowback are
+        # byte-identical over 300 blocks, transactions and a reorg (plan section 4 item, F-24).
+        # yellowback_stock_node: node 1 is the stock binary (the main job runs it fork-vs-fork).
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+          REF_YCASHD: ${{ env.STOCK_YCASHD }}
+        run: |
+          mkdir -p "$TMPDIR"
+          test -x "$REF_YCASHD" || { echo "the ycash6-stock binary was not built; the scripts would fall back to fork-vs-fork"; exit 1; }
+          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_stockparity yellowback_stock_node
       - name: Full make check (minus the pin's broken ycash-tx vectors)
         # `make check` is check-TESTS (test_bitcoin and ycash-gtest, every suite) then check-local:
         # test/bitcoin-util-test.py, secp256k1 check, univalue check. The util script cannot pass
@@ -657,14 +710,16 @@ jobs:
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
-        # line per item (yellowback_demo_v6.py, ~25 minutes). This job builds no stock binary, so node 1
-        # is the fork binary without -yellowback and the item 9 spot check is fork-vs-fork; the
-        # transcript says so. The demonstration of record runs with REF_YCASHD = the ycash6-stock build.
+        # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from
+        # the step above (REF_YCASHD), so the item 9 spot check is fork-vs-stock, as in the
+        # demonstration of record.
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
+          REF_YCASHD: ${{ env.STOCK_YCASHD }}
         run: |
           mkdir -p "$TMPDIR"
+          test -x "$REF_YCASHD" || { echo "the ycash6-stock binary was not built; node 1 would be the fork binary"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_demo_v6
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet,
@@ -682,11 +737,9 @@ jobs:
           export PATH="$RUNNER_TEMP/go/bin:$PATH"
           YCASH_DD="$PWD" YELLOWBACK_LWD_REPO="$RUNNER_TEMP/lightwalletd-dd" LWD_PYTHON="$(command -v python3)" LWD_DEVNET_DIR="$RUNNER_TEMP/yb-devnet-lwd" \
             "$RUNNER_TEMP/lightwalletd-dd/scripts/devnet-test.sh" --up --down --dir "$RUNNER_TEMP/yb-devnet-lwd" --portseed 8
-      # Later phases add here (§6.0 item 6): the STOCK_BASELINE a second time with
-      # ZCASHD=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
-      # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
-      # the ycash-legacy worktree build, yellowback_stockparity.py, yellowback_stock_node.py and
-      # yellowback_enforcement.py --stock-binary (Phase 3+).
+      # Not yet here (§6.0 item 6): the STOCK_BASELINE a second time with
+      # ZCASHD=qa/yellowback-wrapped-ycashd.sh; yellowback_enforcement.py --extended and
+      # yellowback_runbook.py; yellowback_enforcement.py with REF_YCASHD (the stock adversary).
       - name: Fuzz smoke (N34)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
@@ -765,7 +818,7 @@ jobs:
   # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
   # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
   lockorder:
-    if: false && ((github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true))   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -778,7 +831,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake libtinfo5
+            automake
       - uses: actions/setup-python@v5
         # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
         # at import (exit 1) and the suite reports "agent 2 exited with 1".
@@ -819,7 +872,11 @@ jobs:
         run: |
           qa/yellowback-lockorder-logonly.sh .
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug
+          # --disable-werror: 6.20.0 defaults --enable-werror to yes (v4.5.0: no); this variant
+          # judges lock order at run time, the main job keeps -Werror on the release flags.
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug --disable-werror
+          # A target-only make on a fresh tree needs the generated cxx bridge headers first.
+          qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
       - name: Yellowback unit tests under DEBUG_LOCKORDER (AssertLockHeld aborts)
         run: src/test/test_bitcoin --run_test='yellowback_*'
@@ -851,7 +908,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   sanitizers:
-    if: false && ((github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true))   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -867,7 +924,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake libtinfo5 clang
+            automake clang
+      - uses: actions/setup-python@v5
+        # The same interpreter as every other job that runs functional scripts.
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
           python3 -m pip install --user simplejson
@@ -875,6 +936,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, simplejson, pyblake2'
       - uses: actions/cache@v4
         with:
           path: |
@@ -888,6 +950,10 @@ jobs:
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
       - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - name: Sanitizer-friendly ASLR
+        # The runner kernels' vm.mmap_rnd_bits=32 breaks the ASan/TSan shadow mapping of older
+        # compiler-rt ("unexpected memory mapping"); LLVM 18+ re-execs around it, 28 makes it moot.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: address + undefined (configure.ac:211)
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -895,7 +961,7 @@ jobs:
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
           # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # variant builds with depends' clang (22 at 6.20.0) targeting x86_64-pc-linux-gnu, while the LLVM
           # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
           # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
           # works around for libc++'s __config_site. Without the link the runtime archives are not
@@ -903,20 +969,34 @@ jobs:
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
-          # --with-sanitizers=address appends -static-libasan and configure.ac (frozen at the
-          # v4.5.0 pin) aborts when the probe fails. depends' clang 18 rejects that GCC flag
-          # ("unknown argument '-static-libasan'"); compiler-rt's asan archive is already static.
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure \
+          # --with-sanitizers=address appends -static-libasan and configure.ac (configure.ac:293,
+          # frozen) aborts when the probe fails: depends' clang rejects that GCC flag ("unknown
+          # argument '-static-libasan'"); compiler-rt's asan archive is already static. So the
+          # flags go in by hand. --disable-werror: 6.20.0 defaults --enable-werror to yes (v4.5.0:
+          # no); this variant judges run-time reports, the main job keeps -Werror.
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --disable-werror \
             CXXFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
             LDFLAGS='-fsanitize=address,undefined' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+          qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
+          # ycashd_LDFLAGS is overridden, as in the fuzz jobs, to drop 6.20.0's Linux-only
+          # '-Wl,--whole-archive -ljemalloc' (src/Makefile.am, `if TARGET_LINUX`): a whole-archive
+          # jemalloc defines malloc/free in the executable and pre-empts ASan's interceptors, so
+          # heap errors go unseen, the allocators mix, or the link fails on a duplicate malloc.
+          # -lpthread -ldl went with it; glibc 2.34+ carries both in libc. test_bitcoin and
+          # ycash-cli never linked jemalloc.
+          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS)'
+          # Prove it: jemalloc's internals carry its private namespace (jemalloc.mk:
+          # --with-private-namespace=ycash_je_). The binary may sit under .libs (libtool).
+          bin=src/.libs/ycashd; test -f "$bin" || bin=src/ycashd
+          nm "$bin" | grep -c . >/dev/null
+          ! nm "$bin" | grep -q 'ycash_je_' || exit 1
           src/test/test_bitcoin --run_test='yellowback_*'
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
           make -C src clean
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread \
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread --disable-werror \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
@@ -936,7 +1016,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   coverage:
-    if: false && ((github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true))   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -949,7 +1029,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake libtinfo5 lcov
+            automake lcov
       - uses: actions/setup-python@v5
         # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
         # at import (exit 1) and the suite reports "agent 2 exited with 1".
@@ -991,8 +1071,11 @@ jobs:
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov \
+          # --disable-werror: 6.20.0 defaults --enable-werror to yes (v4.5.0: no); -O0 --coverage
+          # builds are not where warnings are judged (the main job keeps -Werror).
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov --disable-werror \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
+          qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
           make check || true
           src/test/test_bitcoin
@@ -1006,6 +1089,10 @@ jobs:
           # does not stage llvm-cov; it is in the cached LLVM tarball, and the staged native lib/
           # satisfies its $ORIGIN/../lib lookup. 6.20.0 renamed the default tarball
           # LLVM-<v>-Linux-X64.tar.xz; the v4.5.0 name survives only under LEGACY_GLIBC=1.
+          # That llvm-cov needs glibc 2.34 to run (native_clang.mk), which ubuntu-22.04 (2.35) has,
+          # and apt's lcov there is 1.15, whose --gcov-tool and lcov_branch_coverage rc this uses
+          # (lcov 2.x on 24.04 would also need --ignore-errors for clang's gcov output).
+          lcov --version
           tar=$(ls depends/sources/LLVM-*-Linux-X64.tar.xz depends/sources/clang-llvm-*-x86_64-linux-gnu-ubuntu-18.04.tar.xz 2>/dev/null | head -1)
           test -n "$tar"
           inner=$(tar -tJf "$tar" | awk '/\/bin\/llvm-cov$/{print; exit}')
@@ -1050,7 +1137,7 @@ jobs:
     # first run (36377015194) died in the third target with nothing committed. The budget starts
     # small to get baseline runs through; raise -max_total_time only while 6 x budget + relinks
     # stays under the cap, or split the targets into a matrix.
-    if: false && ((github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz == true))   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz == true)
     runs-on: ubuntu-22.04
     timeout-minutes: 330
     permissions:
@@ -1063,7 +1150,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake libtinfo5 clang
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake clang
       - uses: actions/cache@v4
         with:
           path: |
@@ -1096,6 +1183,8 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
+          # No full build ran in this job, so the target-only make needs the cxx bridge headers.
+          qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
@@ -1140,10 +1229,9 @@ jobs:
           git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d))"
           git push origin "$branch"
           # The branch of record, which must stay the same as the push/pull_request lists at the
-          # top of this file. It was feature/yellowback-sf until 2026-09-20; that branch is now a
-          # frozen v2 baseline, so a corpus PR against it targeted something nobody merges into
-          # and that nothing may be committed to.
-          gh pr create --repo "$GITHUB_REPOSITORY" --base feature/yellowback-price-attest --head "$branch" \
+          # top of this file: feature/yellowback in ycash6 (the copy from ycash-dd still named
+          # ycash-dd's feature/yellowback-price-attest, which does not exist in this repository).
+          gh pr create --repo "$GITHUB_REPOSITORY" --base feature/yellowback --head "$branch" \
             --title "fuzz: weekly corpus update $(date +%Y-%m-%d)" \
             --body "$(printf '%s\n' \
               '## 1. What and why' '' \
