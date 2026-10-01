@@ -16,8 +16,8 @@ name: yellowback tests
 # return at Phase 6, N26). SANITIZER_SCRIPTS is the subset the sanitizers job runs (§6.0 item 6:
 # yellowback_index yellowback_enforcement yellowback_mining once the latter two exist).
 # STOCK_BASELINE is the inherited Ycash suite that must keep passing against
-# the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
-# doc/yellowback.md "Build and test baseline".
+# the fork binary without -yellowback (P5); the 6.20.0 list and why every other inherited script
+# is out are in doc/yellowback-baseline.md "Inherited functional suite at the pin".
 
 # feature/yellowback-sf was dropped from both trigger lists on 2026-09-20. It is the delivered v2
 # fork and is now a *baseline*, not a workspace: nothing is committed to it, and the v3 plan
@@ -70,13 +70,27 @@ env:
   # out and built the same way, exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
   CHAINVIZ_REPO: boyfromcave/chain-viz
   CHAINVIZ_REF: main
-  # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
-  # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
-  # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
-  # changed) because a stock regtest node activates no Ycash upgrade, and p2p-acceptblock expects
-  # Bitcoin's unrequested-block behaviour. They rejoin the list when the Phase 3 wrapper passes
-  # the six -nuparams to every node.
-  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend
+  # The inherited scripts green twice against the stock 6.20.0 pin (branch ycash6-stock, recorded
+  # 2026-09-30; table and failure classes in doc/yellowback-baseline.md "Inherited functional suite
+  # at the pin"). 42 entries: 39 BASE_SCRIPTS, zmq_test and two EXTENDED. v4.5.0 ran 7 and
+  # excluded 4: six of the 7 carry over, mempool_tx_expiry drops out (its explicit 0.0001 fee is
+  # above 6.20.0's 4x-conventional cap of 0.00004); two of the 4 exclusions (invalidateblock,
+  # getblocktemplate_longpoll) are green now, getblocktemplate_proposals (Bitcoin-format block)
+  # and p2p-acceptblock (mininode protocol 170006 < 270013) stay out. The other inherited scripts
+  # fail at the pin on upstream-Zcash assumptions in the harness (branch ids, fees, mininode,
+  # addresses, caches, branding) or on the three pin defects recorded there; none is the
+  # overlay's to fix.
+  #
+  # zmq_test is named, so rpc-tests.py runs it whatever --nozmq says (--nozmq only trims the
+  # default, unnamed list). The runs of this list therefore drop --nozmq, so rpc-tests.py's own
+  # `import zmq` check fails early instead of zmq_test dying mid-run, and every job that runs it
+  # installs pyzmq (depends builds zeromq, so ENABLE_ZMQ is on).
+  #
+  # `txn_doublespend.py --mineblock` is one ALL_SCRIPTS entry with an argument: an unquoted
+  # space-separated variable would split it and hand `--mineblock` to every script as a pass-on
+  # flag, so it is its own variable, always passed quoted.
+  STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock getblocktemplate_longpoll zmq_test
+  STOCK_BASELINE_MINEBLOCK: txn_doublespend.py --mineblock
 
 jobs:
   main:
@@ -227,7 +241,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
+          qa/pull-tester/rpc-tests.py -j4 --nocleanup $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
 
       - name: Upload node logs on failure
         if: failure()
@@ -302,9 +316,11 @@ jobs:
           done
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
+          # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
           for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE; do
-            grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
+            grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
+          grep -qF "'$STOCK_BASELINE_MINEBLOCK'" qa/pull-tester/rpc-tests.py || { echo "$STOCK_BASELINE_MINEBLOCK is not in qa/pull-tester/rpc-tests.py"; exit 1; }
           # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
           # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
           ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n'
@@ -592,16 +608,17 @@ jobs:
           make -C src check-TESTS
           make -C src/secp256k1 check
           make -C src/univalue check
-      - name: Inherited functional tests recorded as passing in Phase 0
+      - name: Inherited functional tests recorded as passing at the 6.20.0 pin
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
-        # The list is STOCK_BASELINE above, recorded by name in doc/yellowback.md "Build and test baseline".
+        # The list is STOCK_BASELINE above, recorded by name in doc/yellowback-baseline.md
+        # "Inherited functional suite at the pin" (no --nozmq: the list names zmq_test).
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
+          qa/pull-tester/rpc-tests.py -j4 --nocleanup $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
       # ycash6 port: yellowback_reorg_stress.py is retired (plan P-7). History: it was still the v1
       # federation script (rosters, anchors, cosigned price transactions) and dies at its first
       # yed_getinfo field. Its v2 adaptation is the unchecked item of the v2 plan's Phase 6
@@ -750,12 +767,13 @@ jobs:
           python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
-          python3 -m pip install --user simplejson
+          # pyzmq: STOCK_BASELINE names zmq_test.
+          python3 -m pip install --user simplejson pyzmq
           site=$(python3 -c 'import site; print(site.getusersitepackages())')
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, simplejson, pyblake2, tomllib'
+          python3 -c 'import asyncore, zmq, simplejson, pyblake2, tomllib'
       - uses: actions/cache@v4
         with:
           path: |
@@ -784,7 +802,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $YELLOWBACK_SCRIPTS $STOCK_BASELINE
+          qa/pull-tester/rpc-tests.py -j2 --nocleanup $YELLOWBACK_SCRIPTS $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
       - name: No potential deadlock involving Yellowback in any debug.log
         if: always()
         # qa/yellowback-lockorder-check.py groups every report; the inherited getpeerinfo/SendMessages
