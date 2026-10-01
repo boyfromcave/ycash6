@@ -378,10 +378,10 @@ def load(directory):
     except OSError: sys.exit("no devnet at %s (run `up` first)" % directory)
     PortSeed.n = state["portseed"]
     # Every command that restarts a node (`pool N configure`, `signal`, …) starts it through the
-    # framework, which reads BITCOIND from the environment; only `up` used to export it, so a
+    # framework, which reads ZCASHD from the environment; only `up` used to export it, so a
     # restart from a fresh shell silently launched `bitcoind` from PATH. The recorded binary wins
     # unless the caller set one deliberately.
-    os.environ.setdefault("BITCOIND", state["bitcoind"])
+    os.environ.setdefault("ZCASHD", state["bitcoind"])
     return state
 def save(directory, state):
     tmp = path(directory) + ".tmp"
@@ -697,9 +697,9 @@ def up(args):
         print("killing %d stray ycashd process(es) of an earlier run: %s" % (len(stray), " ".join(str(p) for p in stray)))
         kill_nodes(directory)
     if os.path.exists(directory): shutil.rmtree(directory)
-    binary = args.bitcoind or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd")
+    binary = args.bitcoind or os.environ.get("ZCASHD") or os.path.join(REPO, "src", "ycashd")
     if not os.access(binary, os.X_OK): sys.exit("ycashd not found at %s" % binary)
-    os.environ["BITCOIND"], PortSeed.n = binary, args.portseed
+    os.environ["ZCASHD"], PortSeed.n = binary, args.portseed
     attest = not args.no_attest
     agents_wanted = args.agents or role != "none"          # the role presets always run the real quote agents
     preset = ROLES[role]

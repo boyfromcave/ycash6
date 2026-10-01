@@ -91,7 +91,7 @@ class YellowbackStratumTest(BitcoinTestFramework):
     def __init__(self):
         super().__init__()
         self.num_nodes = 2
-        self.setup_clean_chain = True
+        self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.yolo = None
         self.procs = []
         self.pool_address = address_of(POOL_WIFS[0])
@@ -159,7 +159,7 @@ class YellowbackStratumTest(BitcoinTestFramework):
 
     def check_coinbase(self, height):
         """check-coinbase's exit code: 0 a tag was found, 1 none."""
-        cli = os.path.join(os.path.dirname(os.environ.get('BITCOIND', os.path.join(REPO, 'src', 'ycashd'))), 'ycash-cli')
+        cli = os.path.join(os.path.dirname(os.environ.get('ZCASHD', os.path.join(REPO, 'src', 'ycashd'))), 'ycash-cli')
         argv = [sys.executable, CHECK_COINBASE, '--cli', cli, str(height), '--', '-regtest',
                 '-datadir=%s' % os.path.join(self.options.tmpdir, 'node0')]
         out = subprocess.run(argv, capture_output=True, text=True, timeout=60)

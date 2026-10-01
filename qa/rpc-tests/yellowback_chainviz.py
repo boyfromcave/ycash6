@@ -117,7 +117,7 @@ class YellowbackChainVizTest(BitcoinTestFramework):
     def __init__(self):
         super().__init__()
         self.num_nodes = NODES
-        self.setup_clean_chain = True
+        self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.chainviz = None
         self.proc = None
         self.started_at = None

@@ -926,7 +926,7 @@ def SignatureHash(script, txTo, inIdx, hashtype, amount, consensusBranchId):
         digest.update(hashShieldedOutputs)
         digest.update(struct.pack('<I', txTo.nLockTime))
         digest.update(struct.pack('<I', txTo.nExpiryHeight))
-        digest.update(struct.pack('<Q', txTo.valueBalance))
+        digest.update(struct.pack('<q', txTo.valueBalance))
         digest.update(struct.pack('<I', hashtype))
 
         if inIdx is not None:

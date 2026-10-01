@@ -51,7 +51,7 @@ class YellowbackStockParityTest(BitcoinTestFramework):
     def __init__(self):
         super().__init__()
         self.num_nodes = 2
-        self.setup_clean_chain = True
+        self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.steps = 0
 
     def add_options(self, parser):

@@ -42,6 +42,29 @@ FLAKY_SCRIPTS = [
 ]
 
 BASE_SCRIPTS= [
+    # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
+    'yellowback_index.py',
+    'yellowback_activation.py',
+    'yellowback_mining.py',
+    'yellowback_quote.py',
+    'yellowback_rpc_contract.py',
+    'yellowback_attest.py',
+    'yellowback_attest_enforcement.py',
+    'yellowback_attest_wallet.py',
+    'yellowback_lifecycle.py',
+    'yellowback_wallet_lifecycle.py',
+    'yellowback_void_mint.py',
+    'yellowback_wallet_restore.py',
+    'yellowback_claim.py',
+    'yellowback_pricefeed.py',
+    'yellowback_hardening.py',
+    'yellowback_enforcement.py',
+    'yellowback_stock_node.py',
+    'yellowback_framework_smoke.py',
+    # Real pool software (yolo, Rust); SKIPs without YOLO_BIN (plan Phase 7).
+    'yellowback_stratum.py',
+    # chain-viz (Rust); SKIPs without CHAINVIZ_BIN (plan Phase 7).
+    'yellowback_chainviz.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',
@@ -174,6 +197,12 @@ ZMQ_SCRIPTS = [
     "zmq_test.py"]
 
 EXTENDED_SCRIPTS = [
+    # Needs a release build of contrib/yellowback/attest (Rust); SKIPs without one.
+    'yellowback_attest_agent.py',
+    # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
+    'yellowback_devnet_roles.py',
+    'yellowback_sapling.py',
+    'yellowback_stockparity.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',
@@ -329,12 +358,15 @@ def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enabl
 
     #Set env vars
     if "ZCASHD" not in os.environ:
-        os.environ["ZCASHD"] = build_dir + '/src/zcashd' + exeext
+        os.environ["ZCASHD"] = build_dir + '/src/ycashd' + exeext
 
     tests_dir = src_dir + '/qa/rpc-tests/'
 
     flags = ["--srcdir={}/src".format(build_dir)] + args
-    flags.append("--cachedir=%s/qa/cache" % build_dir)
+    # Yellowback: a --cachedir/--portseed the user passed wins over the runner's own, so two
+    # runners in one worktree can isolate their chains and ports.
+    if not any(a.startswith("--cachedir=") for a in args):
+        flags.append("--cachedir=%s/qa/cache" % build_dir)
 
     if enable_coverage:
         coverage = RPCCoverage()
@@ -446,6 +478,8 @@ class RPCTestHandler:
             self.num_running += 1
             t = self.test_list.pop(0)
             port_seed = ["--portseed={}".format(len(self.test_list) + self.portseed_offset)]
+            if any(a.startswith("--portseed=") for a in self.flags):
+                port_seed = []
             log_stdout = tempfile.SpooledTemporaryFile(max_size=2**16)
             log_stderr = tempfile.SpooledTemporaryFile(max_size=2**16)
             self.jobs.append((t,

@@ -465,9 +465,13 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def __init__(self, num_nodes=6):
         super().__init__()
         self.num_nodes = num_nodes        # v3 scripts pass 8 (nodes 6-7 the attestor wallets)
-        self.setup_clean_chain = True
+        self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.is_network_split = False
-        self.mock_time = None
+        # 6.20.0: setmocktime needs a node started with a non-zero -mocktime (it installs a fixed
+        # clock; rpc/misc.cpp setmocktime). Every node starts at clock_base and advance_clock /
+        # restart move them together, as v4.5.0's switch-to-mock-on-first-call did.
+        self.clock_base = int(time.time())
+        self.mock_time = self.clock_base
         self.pool_addresses = [address_of(w) for w in POOL_WIFS]
         self.quotes = {}          # node index -> (usd, source_mask): re-applied by restart()
 
@@ -475,7 +479,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
 
     def add_options(self, parser):
         parser.add_option('--stock-binary', dest='stock_binary', default=os.getenv('REF_YCASHD') or None,
-                          help='ycashd binary for node 1, the stock node (default: $REF_YCASHD, else BITCOIND)')
+                          help='ycashd binary for node 1, the stock node (default: $REF_YCASHD, else ZCASHD)')
 
     def stock_binary(self):
         """The path from --stock-binary / REF_YCASHD, or None for the fork binary (P9)."""
@@ -486,13 +490,14 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def node_args(self, i, extra=None):
         """Role-based arguments for node ``i`` (section 6.0 item 2)."""
         kw = {'sigma_ref': self.sigma_ref}
+        clock = ['-mocktime=%d' % self.clock_base]
         if not self.yellowback_enabled or i == STOCK:
-            return yellowback_node_args(extra, yellowback=False)
+            return yellowback_node_args(extra, yellowback=False) + clock
         if i in POOLS:
-            return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw)
+            return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw) + clock
         if i == OBSERVER:
-            return observer_args(extra, **kw)
-        return yellowback_node_args(extra, **kw)
+            return observer_args(extra, **kw) + clock
+        return yellowback_node_args(extra, **kw) + clock
 
     def node_binaries(self):
         binaries = [None] * self.num_nodes
@@ -714,10 +719,8 @@ class YellowbackTestFramework(BitcoinTestFramework):
                 connect_nodes_bi(self.nodes, a, b)
 
     def advance_clock(self, seconds):
-        """``setmocktime`` on every node (rpc/misc.cpp:1202); never ``sleep`` for a wall-clock
-        case (P12).  The first call starts from now."""
-        if self.mock_time is None:
-            self.mock_time = int(time.time())
+        """``setmocktime`` on every node; never ``sleep`` for a wall-clock case (P12).  Every
+        node starts with ``-mocktime=clock_base`` (6.20.0), so this continues from there."""
         self.mock_time += int(seconds)
         for node in self.nodes:
             if node is not None:
@@ -1031,7 +1034,7 @@ def mine_block_raw(node, txs, coinbase=None, gbt=None, n_time=None):
     block = CBlock()
     block.nVersion = gbt['version']
     block.hashPrevBlock = int(gbt['previousblockhash'], 16)
-    block.hashFinalSaplingRoot = int(gbt['finalsaplingroothash'], 16)
+    block.hashBlockCommitments = int(gbt['finalsaplingroothash'], 16)   # 6.20.0 mininode name; gbt keeps the field (gbt_oldhashes, default-allowed)
     block.nTime = gbt['curtime'] if n_time is None else n_time
     block.nBits = int(gbt['bits'], 16)
     block.vtx = [coinbase]

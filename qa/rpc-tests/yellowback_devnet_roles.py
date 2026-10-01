@@ -33,7 +33,7 @@ It runs with a fixed seed (``--seed``) so a failure is reproducible.  Like
 (YELLOWBACK_ATTEST_BIN, or the CARGO_TARGET_DIR / crate-local search) and the nightly job
 builds the crate first.  Zero C++: contrib/ and qa/ only.
 
-    BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_devnet_roles.py --srcdir=<src> --tmpdir=<dir> --portseed=<n> [--presets user,attestor,pool]
+    ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_devnet_roles.py --srcdir=<src> --tmpdir=<dir> --portseed=<n> [--presets user,attestor,pool]
 
 Nodes (every preset): 0 user/funder, 1 stock, 2-4 pools, 5-7 attestors, 8 fourth attestor or
 your attestor seat, 9 the simulated population, 10 the simulated liquidator.
@@ -114,13 +114,13 @@ class Preset:
     def devnet(self, *args, timeout=600):
         """Run one devnet command; stdout and stderr go to the per-preset log."""
         argv = [sys.executable, DEVNET] + list(args) + ['--dir', self.directory]
-        env = dict(os.environ, BITCOIND=self.bitcoind, YELLOWBACK_ATTEST_BIN=self.agent)
+        env = dict(os.environ, ZCASHD=self.bitcoind, YELLOWBACK_ATTEST_BIN=self.agent)
         self.log.write('\n$ %s\n' % ' '.join(argv)); self.log.flush()
         return subprocess.run(argv, stdout=self.log, stderr=subprocess.STDOUT, env=env, timeout=timeout).returncode
 
     def devnet_output(self, *args):
         argv = [sys.executable, DEVNET] + list(args) + ['--dir', self.directory]
-        env = dict(os.environ, BITCOIND=self.bitcoind, YELLOWBACK_ATTEST_BIN=self.agent)
+        env = dict(os.environ, ZCASHD=self.bitcoind, YELLOWBACK_ATTEST_BIN=self.agent)
         return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120)
 
     def node(self, i):
@@ -392,7 +392,7 @@ def main():
     # the runner's other flags, accepted and ignored
     parser.add_argument('--cachedir'); parser.add_argument('--tracerpc', action='store_true'); parser.add_argument('--coveragedir')
     options, _ = parser.parse_known_args()
-    bitcoind = os.environ.get('BITCOIND') or os.path.join(options.srcdir, 'ycashd')
+    bitcoind = os.environ.get('ZCASHD') or os.path.join(options.srcdir, 'ycashd')
     if not os.access(bitcoind, os.X_OK):
         print('ycashd not found at %s' % bitcoind); return 1
     agent = find_agent()

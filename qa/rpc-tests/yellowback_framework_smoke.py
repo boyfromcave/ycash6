@@ -10,7 +10,7 @@ take a mock clock.  Every node runs as a stock node (``yellowback_enabled = Fals
 script runs against any ycashd — including the Phase 1 binary, whose regtest ``-yellowback``
 still needs the federation genesis arguments — and no ``yed_*`` call is made.
 
-    BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_framework_smoke.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
+    ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_framework_smoke.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
 from test_framework.util import assert_equal, assert_greater_than

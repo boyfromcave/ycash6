@@ -69,7 +69,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         user.sendtoaddress(other.getnewaddress(), 5)
         self.sync_all()
         self.mine(POOLS[0])
-        opid = user.z_sendmany(taddr, [{'address': ys, 'amount': Decimal('30')}], 1, Decimal('0.0001'))
+        opid = user.z_sendmany(taddr, [{'address': ys, 'amount': Decimal('30')}], 1, None)   # 6.20.0: the per-output fee policy picks the fee (an explicit 0.0001 exceeds 4x its conventional fee)
         wait_and_assert_operationid_status(user, opid)
         self.sync_all()
         self.mine(POOLS[1])
