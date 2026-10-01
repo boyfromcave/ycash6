@@ -11,6 +11,12 @@ Nothing here changes Ycash consensus. An enforcing pool produces blocks that eve
 accepts; the only thing it ever refuses is a block that spends a Yellowback vault in a way the
 rules forbid, and only after the network has activated the rules by signalling.
 
+**This runbook is for ycashd 6.20.0** (`ycash6`, branch `feature/yellowback`). The overlay, its
+options, RPCs and procedures are the v4.5.0 ones; what 6.20.0 changes for a pool — the
+`getblocktemplate` field names, the template selection and the fee rules (§3.1, §3.2), how blocks
+reach the valve (§6), the wallet backup (§11) — is marked **[6.20.0]**. Line numbers below are in
+this tree.
+
 ## 1. What a pool does, in one paragraph
 
 Run the release `ycashd` with the module on and a payout address, run the **quote agent** beside
@@ -45,6 +51,15 @@ yellowbackenforce=1                # default; set 0 to leave the enforcing set (
 | `-reindex-yellowback` | off | wipe and rebuild the index from the blocks on disk; clears the rejected-block memory |
 | `-debug=yellowback` | off | log category |
 
+**[6.20.0] Stock options a pool now meets.** None needs setting for Yellowback; know what they do:
+
+| Option | Ycash 6.20.0 default | Meaning for a pool |
+|---|---|---|
+| `-allowdeprecated=<feature>` | every deprecated feature allowed (`src/deprecation.h:47-53`), including `gbt_oldhashes` | `-allowdeprecated=none` removes the three old root keys from `getblocktemplate` (§3.1) — read `defaultroots` and it does not matter |
+| `-blockunpaidactionlimit` / `-txunpaidactionlimit` | `SIZE_MAX`: ZIP-317 unpaid-action limits **off** on Ycash (`src/zip317.h:24-54`) | `=0` turns ZIP-317 on for this node's templates / mempool; Yellowback transactions pay the conventional fee (P-2, §3.2), so they are mined either way |
+| `-feepolicy=peroutput\|zip317` | `peroutput` | how this node's **wallet** funds a transaction sent with no explicit fee (`src/init.cpp:548`); not relay policy. Yellowback RPCs compute their own fee (§3.2) |
+| `-mineraddress` | unset | a Sapling, transparent P2PKH or (6.20.0) Unified Address (`src/init.cpp:1513-1530`); the tag's payout default (`-yellowbackpayoutaddress`) takes it only when it is transparent P2PKH (`src/init.cpp:2198-2203`), otherwise set the payout address explicitly or the node emits no tag |
+
 `-prune` is refused with the module on (the index needs every block on disk). `-datacarrier` stays
 at its default (`-datacarrier=0` drops every `OP_RETURN` transaction from the mempool of a relaying
 node; the index does not care either way).
@@ -74,6 +89,74 @@ Refresh the template every block: the tag's price changes as the agent publishes
 caches a template for up to 5 s and rebuilds it on a new tip or a mempool change, not on a new
 quote, so the first template after a quote update can still carry the previous price — at most
 one block's worth.)
+
+### 3.1 [6.20.0] `getblocktemplate` field names
+
+6.20.0 renames the block-header roots and trims the founders' fields. What changed against v4.5.0
+(the full emitter is `src/rpc/mining.cpp:733-840`):
+
+| Key | v4.5.0 | 6.20.0 | Read it as |
+|---|---|---|---|
+| `defaultroots` | absent | **new** object: `merkleroot`, `chainhistoryroot`, and from NU5 `authdataroot`, `blockcommitmentshash` (`:808-820`) | the upstream-recommended source; valid only for the template used unmodified (help text `:449-452`). Recompute `merkleroot` once you change the coinbase: it commits to *this* node's coinbase and its tag. NU5 is not active on Ycash, so expect `merkleroot` and `chainhistoryroot` only |
+| `blockcommitmentshash`, `lightclientroothash`, `finalsaplingroothash` (top level) | `lightclientroothash`, `finalsaplingroothash` | all three, one value (the header's `hashBlockCommitments`), **emitted only while the `gbt_oldhashes` deprecation is allowed** (`:802-807`, flag `src/deprecation.cpp:14`) — the Ycash default (`src/deprecation.h:47-53`) | deprecated, still "put this in the header" semantics; gone under `-allowdeprecated=none` and in some future release |
+
+**Which value goes in the header's commitments field** (`src/miner.cpp:434-470`): from Heartwood
+(active on Ycash mainnet since height 1,100,003 and testnet since 661,622,
+`src/chainparams.cpp:136,431`) until NU5 it is `defaultroots.chainhistoryroot`; at the
+Heartwood activation block it is null; under NU5 it is `defaultroots.blockcommitmentshash`. **Before
+Heartwood — the regtest the functional suite and the devnet run (Overwinter + Sapling only) — it
+is the final Sapling root, which only the deprecated top-level keys carry** (`chainhistoryroot` is
+null there). So: read `defaultroots`, take the header value by the rule above, and fall back to
+`blockcommitmentshash` when the network is pre-Heartwood; keep `gbt_oldhashes` allowed (the
+default) on any node a pre-Heartwood pool reads. Software written against v4.5.0's
+`finalsaplingroothash` keeps working while the deprecation is allowed.
+
+| Key | v4.5.0 | 6.20.0 | Read it as |
+|---|---|---|---|
+| `coinbasetxn.foundersreward` | always (0 when the coinbase has one output) | only before the Ycash upgrade within the founders' period (subsidy/5) or during the YDF mandate (subsidy/20) (`:766-776`) | `get()`, never index it |
+| `coinbasetxn.ydfpercentage`, `coinbasetxn.foundersaddress` | always | **gone** | the post-mandate YDF share is still `-ydf=<n>` (`src/init.cpp:562`) and is already inside `coinbasetxn.data`; `getblocksubsidy <height>` reports the amounts (`miner`, `founders`, `totalblocksubsidy`) |
+| `coinbasetxn.required` | `height < YDF mandate end` | **always `true`** (`:777`) | a pool that builds its own coinbase must still pay the YDF output while the mandate runs — consensus enforces it |
+| `coinbaseaux.flags` | with `-yellowback` only on the `coinbasetxn` path | unchanged (`:822-829`) | the tag bytes (§3 table) |
+| `mutable` | gains `coinbase/append` with `-yellowback` | unchanged (`:795`) | |
+| `yellowback` | overlay summary with `-yellowback` | unchanged (`:840`) | |
+| template cache | rebuilt on a new tip, a long-poll, or a mempool change after 5 s | unchanged (`:686-687`) | the quote-lag note above still holds |
+
+Each transaction entry also carries `authdigest` (`:751`), used only for NU5's auth-data root; a
+Ycash pool can ignore it. Nothing about the tag changes: it is still `coinbaseaux.flags` and the start of
+`coinbasetxn.data`'s scriptSig.
+
+### 3.2 [6.20.0] Which transactions your template carries, and the fees they pay
+
+**Selection.** v4.5.0 filled a template by priority, then fee rate. 6.20.0 fills it by ZIP-317
+weighted random sampling in two tiers — transactions paying at least the conventional fee first,
+then the rest — each sampled by weight ratio (`BlockAssembler::constructZIP317BlockTemplate` /
+`addTransactions`, `src/miner.cpp:614-690`). Every candidate goes through
+`BlockAssembler::TestForBlock` (`:497`): size, sigops, finality, expiry, then **the Yellowback
+template filter (TPL-1/2) at `:545-546`**, then the ZIP-209 turnstile check; the finished template
+is validated by `ConnectBlock` in template mode, which runs the module's own block check. The
+filter's behaviour (strict / consensus, §2) is unchanged; only where it sits moved, from
+`CreateNewBlock`'s priority loop into `TestForBlock`. Two templates built from the same mempool can
+now differ in order and, near a full block, in content — expected, not a fault.
+
+**Fees.** Two rules apply at mempool admission, both relay policy, not consensus:
+
+- **The Ycash per-Sapling-output floor** (`PerSaplingOutputFees`, `src/policy/policy.cpp:16-37`;
+  applied `src/main.cpp:1958-1970`): a transaction with Sapling outputs pays at least 1000 zat
+  (`DEFAULT_PER_SAPLING_OUTPUT_FEE`) when it has up to 50 (`DEFAULT_EXEMPT_SAPLING_OUTPUTS`,
+  `src/policy/policy.h:22-23`), else 1000 zat per output beyond 50; refused as
+  `insufficient per-Sapling-output fee` otherwise. Note that 6.20.0's Sapling builder pads every
+  bundle to two outputs, so a "one-output" shielded transaction has two.
+- **ZIP-317 unpaid actions** (`src/main.cpp:1972-1985`): off by default on Ycash (limits at
+  `SIZE_MAX`, §2) but the conventional fee still decides the template tier above.
+
+**The Yellowback network fee (P-2).** Every transaction the module builds pays
+`max(-yellowbackfee, ZIP-317 conventional fee)` (`NetworkFee`, `src/yellowback/txbuilder.cpp:185-192`;
+`-yellowbackfee` ≥ 1000 zat), computed from the built transaction with the Sapling padding counted.
+So Yellowback mints, transfers, redemptions and carriers land in the **conventional-fee tier** and
+survive `-blockunpaidactionlimit=0` / `-txunpaidactionlimit=0` (proven by
+`qa/rpc-tests/yellowback_fee.py`). This is the base-layer fee only; the protocol's enforcement fee
+to the payee pool (FEE_MIN 0.5 YEC) is unchanged. A zero-fee transaction is refused at admission
+(`min relay fee not met`, `src/main.cpp:1955`).
 
 **A verified stack:** `yolo` (`boyfromcave/yolo`, Rust, the rewrite of the Perl
 `stratumsolo`/`stratumpool`/`cenote`, one program with `--payout` and `--text` flags) carries
@@ -150,6 +233,10 @@ contrib/yellowback/pool/monitor-quote.sh       # exit 0 iff the next tag is a fr
 cleared), keeps its index, keeps filtering its own templates, and rejects nothing. At start it
 reconsiders every block it had rejected and clears that memory, so it rejoins the network's chain on
 its own. This is also *filter-only mode* (§10). Nothing else is needed to leave the enforcing set.
+**[6.20.0]** A rejected block now keeps its block-index entry across a clean restart (6.20.0's
+`RewindBlockIndex` keeps never-connected entries, upstream Ycash commit `1770fce16`), so the start-up
+log shows the reconsider branch for it; on v4.5.0 the entry was gone and the log said it was skipped.
+Both are the kill switch working.
 
 **The work valve (L7, P1).** An enforcing node that rejects a block the rest of the network
 accepts would, left alone, stay on its own shorter chain. It does not: once the chain rooted at a
@@ -167,6 +254,18 @@ through `-alertnotify` and `getinfo.errors`; `yed_getinfo.enforcing` is `false` 
 fire here: it counts only blocks the node stored, and descendants of a rejected block are refused as
 headers.) The node is never stranded for more than six blocks and never bans the peers that relayed
 the other chain, neither for the rejected block nor for its descendants.
+
+**[6.20.0] How the valve sees the other chain.** v4.5.0 fetched an announced block directly, so
+every block of the other chain reached the valve's counter. 6.20.0 downloads blocks only through
+the header index (an `inv` only triggers a `getheaders`), and its `headers` handler stops reading a
+message at the first header it refuses. This release therefore reads on past the headers it refuses
+for Yellowback reasons — the rejected block and its descendants — while the valve is untripped
+(`src/main.cpp:8621-8636`), so every header of the other chain is counted and the valve trips as on
+v4.5.0, including after a restart with the rejection still live. After the trip the stock handling
+applies. One limit, the same as on v4.5.0: the counter notes at most 64 headers per rejected root
+(`VALVE_NOTE_CAP`, `src/yellowback/index.h:65`), and a refused run longer than that in one message can
+draw the stock `prev block not found` misbehaviour score (10, `src/main.cpp:5980`) against the
+relaying peer, far below the ban threshold (the valve needs about six blocks' work, not 64 headers).
 
 The operator's job after a trip is to find out *why the network did not follow*: `ycash-cli
 yed_getblockverdict <hash>` for the rejected root explains the verdict; the causes are a bug in this
@@ -275,7 +374,11 @@ after the first mint. Filter-only mode closes that at no risk to you.
 The payout address is a hot-wallet key of the node the pool runs. Enforcement fees arrive there as
 ordinary transparent YEC outputs; nothing about the module is stored in the wallet. **Back up that
 node's `wallet.dat` like any other hot wallet**, and back it up again after `importprivkey` or a
-new keypool. Losing the key loses the fees paid to it; it changes nothing for the users who paid
+new keypool. **[6.20.0]** The wallet also carries an emergency recovery phrase
+(`ycashd-wallet-tool`); Ycash leaves `-walletrequirebackup` off on every network
+(`src/chainparams.h:200-211`), so the node issues addresses without the phrase being confirmed — back
+up `wallet.dat` regardless, because a payout key imported with `importprivkey` is not recoverable from
+the phrase (`getwalletinfo.has_external_imports`). Losing the key loses the fees paid to it; it changes nothing for the users who paid
 them (an unspendable payout key only sends the payer's fee to nobody). A pool may quote from many
 keys; the launch bar counts operators, not keys.
 
@@ -286,6 +389,8 @@ keys; the launch bar counts operators, not keys.
 experimentalfeatures=1 yellowback=1 yellowbackpayoutaddress=s1… yellowbacksignal=<per §2> ; yellowback-quote --conf …
 # watch
 yed_getinfo (healthy, enforcing, valveTripped, sunset, rejectedBlocks, suppressedBlocks, miner.*) ; yed_listminers ; yed_getactivation ; monitor-quote.sh
+# 6.20.0 templates
+getblocktemplate: header roots from defaultroots (blockcommitmentshash fallback pre-Heartwood, gbt_oldhashes allowed); coinbasetxn.foundersreward may be absent
 # verify a block
 contrib/yellowback/pool/check-coinbase <height> ; ycash-cli yed_gettag <height>
 # leave the enforcing set / filter-only
