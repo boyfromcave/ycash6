@@ -741,6 +741,29 @@ class YellowbackTestFramework(BitcoinTestFramework):
                     and self.nodes[a] is not None and self.nodes[b] is not None:
                 connect_nodes_bi(self.nodes, a, b)
 
+    def refresh_peer_views(self, timeout=30):
+        """Drop and re-make every live edge of the current topology, so each node starts a fresh
+        per-peer download state.  Needed after an ``invalidateblock`` that rewinds every node below
+        a branch all of them had announced: 6.20.0 downloads blocks only through
+        FindNextBlocksToDownload (main.cpp), which walks toward the peer's pindexBestKnownBlock, and
+        UpdateBlockAvailability only ever raises that pointer by chain work -- so it stays pinned on
+        the invalidated, higher-work branch, the walk stops at its first invalid block, and a new
+        shorter-chain block is accepted as a header but never fetched.  v4.5.0 also fetched an
+        inv-announced block directly (its ProcessMessage "inv" handler), which 6.20.0's
+        headers-first relay removed (mapping section 19)."""
+        edges = [(a, b) for a, b in self.live_edges()
+                 if self.nodes[a] is not None and self.nodes[b] is not None
+                 and (not self.is_network_split or (a, b) not in self._cross_edges())]
+        for a, b in edges:
+            self._disconnect_pair(a, b)
+        deadline = time.time() + timeout
+        for a, b in edges:
+            while self._connected(a, b) or self._connected(b, a):
+                assert time.time() < deadline, 'nodes %d and %d did not disconnect' % (a, b)
+                time.sleep(0.1)
+        for a, b in edges:
+            connect_nodes_bi(self.nodes, a, b)
+
     def advance_clock(self, seconds):
         """``setmocktime`` on every node; never ``sleep`` for a wall-clock case (P12).  Needs the
         class attribute ``mock_clock = True`` (6.20.0: nodes must start with -mocktime)."""
