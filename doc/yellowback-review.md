@@ -961,7 +961,7 @@ line per plan §4 checkbox.
 - command: <exact invocation, portseed, tmpdir>
 - result: <PASS lines, duration>
 
-transcript: <to be attached by the coordinator>
+transcript: [`yellowback-demo-transcript.txt`](yellowback-demo-transcript.txt) — `qa/rpc-tests/yellowback_demo_v6.py` run of record, 2026-10-01, on `feature/yellowback` @ df409ade8 with node 1 the real stock binary (`ycash6-stock` e98128239, `REF_YCASHD`), portseed 161, 1229 s, **Tests successful**: items 1-7 and 9 PASS; item 8 points to `yellowback_devnet_roles.py` (green on all three presets, d1d1ac9e5); item 10 points to the CI gates.
 
 The plan §4 checkboxes that the script covers by pointer rather than in its own run:
 

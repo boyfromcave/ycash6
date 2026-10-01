@@ -1,0 +1,89 @@
+Initializing test directory <tmpdir>/161
+====================================================================================================
+Yellowback on ycashd 6.20.0 -- the plan section 4 demonstration (yellowback_demo_v6.py)
+node 1 binary: /Users/boy/projects/yellowback-workspace/wt/ycash6-stock/src/ycashd
+====================================================================================================
+[    36s] [1] every node starts from genesis; node 0 mined 101 blocks before the run
+[    36s] [1] node 0 (user): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 2 (pool): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 3 (pool): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 4 (pool): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 5 (observer): rpcversion 3 healthy True index height 101 enforcing False statehash 4f4e32a283ec34f3
+[    36s] [1] node 6 (attestor wallet): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 7 (attestor wallet): rpcversion 3 healthy True index height 101 enforcing True statehash 4f4e32a283ec34f3
+[    36s] [1] node 1 (stock): /YcashCpp:6.20.0/, height 101, no yed_* RPCs (help yed_getinfo: unknown command)
+[    36s] [1] PASS -- every node starts with -yellowback, syncs the index, rpcversion 3 healthy :: 7 overlay nodes at height 101, one state hash 4f4e32a283ec34f3; node 1 stock (/YcashCpp:6.20.0/)
+[    36s] [2] pools 2-4 quote $50 (yed_setquote) and mine 12 blocks round robin
+[    60s] [2] height 111: tag kind=quote price=50000000 signal=True payout=smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk
+[    60s] [2] height 112: tag kind=quote price=50000000 signal=True payout=smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn
+[    60s] [2] height 113: tag kind=quote price=50000000 signal=True payout=smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4
+[    60s] [2] yed_getprice at 113: pFast=50000000 pMid=None pSlow=None (mid/slow fill later)
+[    62s] [2] node 1 mined 001ba03e8bcb5efa at 114 with a forged quote tag $100 for smWCbhgSJsoLmJ1wvJ6eWe91XfTf85KZdPz: decoded, pFast still 50000000 (lower median of 8)
+[    64s] [2] node 1 mined 0137155e18714940 at 115 with a malformed tag (flags 0x02): yed_gettag found=false, block valid everywhere
+[    76s] [2] PASS -- pools tag quotes; yed_getprice median; a forged tag from a non-pool is outvoted :: pFast 50000000 at 121; forged $100 tag at 114 penalised until 130 (REG-4), price unmoved; malformed tag ignored; statehash d0e7729cb346ebe1
+[    76s] [3] at 121: status=signaling signalCount=18 (window 64, threshold 48)
+[   136s] [3] height 151: signaling -> locked_in (signalCount 48, lockInHeight 151, activateHeight 215)
+[   264s] [3] height 215: locked_in -> active (signalCount 64, lockInHeight 151, activateHeight 215)
+[   270s] [3] every overlay node: active, lock-in 151, activate 215 = lock-in + 64; minting open at 218
+[   278s] [3] node 4 restarted with -yellowbackenforceuntil=217: sunset=true enforcing=false; its block 219 tags a quote without the signal bit
+[   284s] [3] node 4 restarted without it: sunset=false enforcing=true signal=true; state hashes equal again
+[   290s] [3] PASS -- signalling -> locked_in -> active at the plan heights; the sunset behaves :: locked_in at 151, active at 215 (+64); node 4 sunset at -yellowbackenforceuntil=217 and back; statehash 8107c1081b5256fc
+[   290s] [4] wallet mints (yed_mint, two steps: carrier then mint): A redeem, B claim, C sweep, E/F kept for items 5-6
+[   296s] [4] yed_mint A: txid 4731abcd79daf88275f3a400a3e48cae39fc05861fb7617615006c4bac0b3c0a class A collateral 1000000000 zat fee 50000000 to smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn lock 266 claim 290
+[   301s] [4] yed_mint B: txid 41d78d59139bdbf596cf6de88f598fdab80d3b9874f291058d43e7348ae2bdce class A collateral 1000000000 zat fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4 lock 267 claim 291
+[   308s] [4] yed_mint C: txid 878c7b808c71855ffcbce838fc6b8fa7bfb249c860c459ce8df7f458dcbe0606 class A collateral 1000000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 268 claim 292
+[   313s] [4] yed_mint E: txid 7693717877f2fb6149e2dc51aac387958cd8fca12f4235b7602e1aea5f2a46ad class A collateral 1000000000 zat fee 50000000 to smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn lock 269 claim 293
+[   319s] [4] yed_mint F: txid 8ad73798b2b2240454a82c492c160ba5c8c4ca646b4b77a895bf82f90ff71872 class A collateral 1000000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 270 claim 294
+[   328s] [4] raw build_mint_tx D: a7861f6edd168be6489ed71d9ee5dc2818d2bbc34e3a5232ce0e0bb5c4727d7e ACTIVE; raw Z (1000 zat short): verdict bad-mint-collateral, mined in a hand-built block 00a8c8f8ac0260b8: VOID (bad-mint-collateral)
+[   335s] [4] yed_send 10100 cents user -> observer: a7f65ecff3c12e73d7755f718bc00512ed804abe1ebdb5b581e9f7267d546f7d (change 9900)
+[   425s] [4] yed_redeem A: e8706a643ba3f74aabc96dd32a96d6f004497c0ccbfae4f198e35c9757e6d552 burned 10000, fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4, collateral 950008500 back
+[   431s] [4] raw owner-path redemption of D (build_vault_spend_raw, REDEEM payload, FEE-W payee): 794f9bc1be3729b860994ba9ae817aaa1e7e072bdc2ecdcf72beeea52ef9d6d6 CLOSED
+[   435s] [4] VOID release of Z with yed_redeem: d82fc0e6d258668935219eca6fcaa3b77f39d601c4d5142508447fb339599281, no burn, no fee, 999998000 zat back
+[   435s] [4] crash: every pool quotes $1 until B is claimable (pClaim = max(pMid, pSlow))
+[   499s] [4] 32 crash blocks: pClaim 1000000 at 307, B claimable
+[   513s] [4] yed_claim B by the observer: b27231d9b465d983cf6f048d558d328fbe65ff096639fdb9e85e9a1b8b4d5d2c burned 10000, collateral 950008000 to the claimant, fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4
+[   579s] [4] pools back at $50: 33 blocks to re-open minting (no halt, nothing claimable)
+[   579s] [4] the pools restart with -yellowbacksignal=0; the sweep waits for abandonment (L10)
+[   914s] [4] suspended after 33 blocks, abandoned 127 blocks later (height 502); sweep refused before that
+[   922s] [4] yed_sweep C: 85b38b9e34a337496fb12c7909f32f627e26b452ccd7a86c18989559fe60b4da, 999999000 zat back, 10000 cents now unbacked
+[  1038s] [4] signalling resumed: enforcement back and minting open after 48 blocks (height 551)
+[  1041s] [4] yellowback_model full=True on nodes 0, 2, 5: every tx, vault, stat and the state hash agree; wallet balances sum 30000 = supplyCents 30000; active 2 void 0 closed 4 claimed 1 unbacked 10000
+[  1041s] [4] PASS -- mint, send, redeem, claim, sweep, VOID release from the wallet RPCs and the raw builders; the model agrees :: redeem e8706a643ba3f74a, raw redeem 794f9bc1be3729b8, claim b27231d9b465d983, sweep 85b38b9e34a33749, release d82fc0e6d2586689; model statehash ae136c23c16dbac5
+[  1046s] [5] UNARMED at 552; five attestors register (raw ATTESTOR_REGISTER, 10 YEC bonds, hot keys on nodes 6-7)
+[  1057s] [5] seqs [0, 1, 2, 3, 4] ELIGIBLE; TRIGGERED at 561, ARMED at 569 (+8) on every enforcing node; seated 5
+[  1064s] [5] armed yed_mint aadaab07e481caffac61420d7f409b2691914cfd5287ffc8ec36d8a2733a9fac: carrier dfe67b63c24be6ab7d789a9dc4027e93ac87c57c2fd043394a7b10988dda9b64, bundle seqs [0, 2, 4], aMint 50000500 xMint 50000000 pMint 50000000, attestor fee 12500000 to smNX5MWvpJWrqTP864qz1e3LQy8ZP8CUbL9: ACTIVE everywhere
+[  1075s] [5] stale-bundle mint 93ce28070c212d8c0f6906e1808f37e7bd94995df1959d8d7484957f2cfd29c0: verdict mint9-bundle-stale; in pool 3 mempool True, absent from its template (TPL-2), its block 575 left it out
+[  1077s] [5] node 1 mined it in 0daadd8c469e3706: every node records the vault VOID (mint9-bundle-stale) -- no YED issued, the block itself is valid (a mint verdict is VOID, not invalid)
+[  1085s] [5] bundle-less claim of E 55e349a3f06f10e9970c038c23fb26a861bae31a4951c1bbfd011b12e8d7db59: MP-1 refused (64: yellowback-vault-spend); node 1 mined 00e4a566b8e75cb2: rejected by nodes [0, 2, 3, 4, 6, 7] with red1-bundle-shape:55e349a3f06f10e9970c038c23fb26a861bae31a4951c1bbfd011b12e8d7db59 at DoS 0; observer follows
+[  1096s] [5] PASS -- attestors register, bundles carried; bad bundles refused at the template and at block validity, DoS 0 :: ARMED at 569; good mint aadaab07e481caff; stale-bundle mint VOID 93ce28070c212d8c; bundle-less claim block 00e4a566b8e75cb2 rejected (red1-bundle-shape), out-mined in 2; statehash 6830b63826e58565
+[  1096s] [6] owner-path spend of F with no burn: verdict vault-spend-malformed; every enforcing mempool refuses it (MP-1)
+[  1104s] [6] node 1 mined 019e16e2862c156b (tx ed794cb1869bd30d) at 579: rejected by [0, 2, 3, 4, 6, 7] (vault-spend-malformed:ed794cb1869bd30d3c586cdef5f652b0cec7f36e607054d578103427116bb855); the observer follows it and records F unbacked
+[  1108s] [6] node 1 mined 2 descendants ['0295833d750ca137', '0b81bc03efda7aac']: refused at DoS 0 (bad-prevblk-yellowback), banscore 0 on every connection, node 1 still a peer, valve not tripped (3 < 6)
+[  1123s] [6] PASS -- the stock node mines an unburned vault spend: rejected, not banned, the enforcing chain continues; BLK-2 holds :: block 019e16e2862c156b rejected by 6 enforcing nodes, 2 descendants refused at DoS 0; pools out-mined in 4 blocks, node 1 and 5 reorged back, F ACTIVE; statehash 3bb1f47d9b1f228e
+[  1135s] [7] 2-block reorg: fork at 582, the enforcing branch (2 blocks, yed_send e6f04e03d3ec8dd1) replaced by node 1's 3; state hash 275245ab1aa36574 on every overlay node after the join (was fb6541253b70e748 on the losing branch); the send re-mined at 586, statehash e1c298c945e88a0f
+[  1163s] [7] 10-block reorg: fork at 586, the enforcing branch (10 blocks, yed_send b40c8a38045cb921) replaced by node 1's 11; state hash 7cda7aa655355170 on every overlay node after the join (was 76290976b4942286 on the losing branch); the send re-mined at 598, statehash 7017543bf2458b28
+[  1177s] [7] node 3 restarted: index tip 602, statehash a257f36ee4959734
+[  1182s] [7] node 4 restarted with -reindex: blocks and index rebuilt from disk, statehash a257f36ee4959734
+[  1190s] [7] PASS -- a 2-block and a 10-block reorg leave every state hash equal; restart and -reindex rebuild the same index :: 2-block e1c298c945e88a0f, 10-block 7017543bf2458b28; restart (node 3, node 5) and -reindex (node 4) = a257f36ee4959734; then 5c698c7ab5f7e385 at 604
+[  1190s] [8] POINTER -- the price walk and six yellowback-sim personas for 30 minutes on all three presets is qa/rpc-tests/yellowback_devnet_roles.py (devnet launcher, nightly) -- not run here
+[  1200s] [9] node 5 restarted as the fork binary with -yellowback=0 (a plain start refuses: the datadir holds an index): no yed_* RPCs (help yed_getinfo: unknown command)
+[  1229s] [9] node 1 (/YcashCpp:6.20.0/) vs node 5 (fork binary, no -yellowback): 20 blocks alternating miners with transactions, 5 comparison points equal (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); utxo hash 5d3ce45d941690bb at 625
+[  1229s] [9] PASS -- stock-parity spot check (the full 300 blocks: yellowback_stockparity.py) :: 20 blocks, 5 comparison points equal; the enforcing nodes followed, statehash dde47803c21b6f26
+[  1229s] [10] POINTER -- every yellowback_*.py unarmed and --armed, the full test_bitcoin, the frozen set, the section 2 budgets and the lockorder / sanitizer / coverage jobs are the CI gates (.github/workflows/yellowback-tests.yml, qa/yellowback-audit.sh) -- not run here
+====================================================================================================
+SUMMARY (625 blocks, 1229 s)
+  [1] PASS     every node starts with -yellowback, syncs the index, rpcversion 3 healthy
+  [2] PASS     pools tag quotes; yed_getprice median; a forged tag from a non-pool is outvoted
+  [3] PASS     signalling -> locked_in -> active at the plan heights; the sunset behaves
+  [4] PASS     mint, send, redeem, claim, sweep, VOID release from the wallet RPCs and the raw builders; the model agrees
+  [5] PASS     attestors register, bundles carried; bad bundles refused at the template and at block validity, DoS 0
+  [6] PASS     the stock node mines an unburned vault spend: rejected, not banned, the enforcing chain continues; BLK-2 holds
+  [7] PASS     a 2-block and a 10-block reorg leave every state hash equal; restart and -reindex rebuild the same index
+  [8] POINTER  the 30-minute persona economy
+  [9] PASS     stock-parity spot check (the full 300 blocks: yellowback_stockparity.py)
+  [10] POINTER  the CI gates
+====================================================================================================
+Stopping nodes
+Cleaning up
+Tests successful
+EXIT=0
