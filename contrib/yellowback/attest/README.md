@@ -77,7 +77,7 @@ scenarios: `../../../../.venv/bin/python fixtures/expected.py && cargo test --lo
 
 ## Toolchain, and why it is separate from `depends`
 
-`.cargo/config.toml` re-points crates.io at the real index because a built node checkout carries an untracked `ycash-dd/.cargo/config` that redirects it to the depends vendored directory (a worktree without a depends build does not, which is why the crate builds there without it). `rust-toolchain.toml` pins stable **1.91.0**; `cargo` run from this directory picks it up (the
+`.cargo/config.toml` re-points crates.io at the real index because a built node checkout carries an untracked `.cargo/config` (v4.5.0; `.cargo/config.toml` on 6.20.0) that redirects it to the depends vendored directory (a worktree without a depends build does not, which is why the crate builds there without it). `rust-toolchain.toml` pins stable **1.91.0**; `cargo` run from this directory picks it up (the
 machine's default cargo may be older). The node's `depends/` builds with Rust 1.63 and a vendored
 crate set; `iroh` needs far newer. This crate never enters that build — no `cargo vendor`,
 nothing from the node's `Cargo.toml` — and its CI job is its own (`agent` in

@@ -11,17 +11,28 @@ Two ways to run Yellowback on one machine.
 The devnet's full command set, the role presets, the personas and the regression suite are
 documented in `contrib/yellowback/devnet/README.md`; this page is the crash course.
 
-Every command below was run on 2026-09-20 against `feature/yellowback-price-attest`.
+Every command below was first run on 2026-09-20 against v4.5.0 (`ycash-dd`,
+`feature/yellowback-price-attest`) and re-run on 2026-09-30 against ycashd 6.20.0 (`ycash6`,
+`feature/yellowback`). Section 6 lists what is different on 6.20.0.
 
 ---
 
 ## 0. Build once
 
 ```bash
-cd ycash-dd
+cd ycash6
 export PATH="/opt/homebrew/opt/libtool/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
 export CARGO_TARGET_DIR="$PWD/target"
+# 6.20.0 only, once after configure: generate the cxx bridge headers before any target-only make
+awk '/^CXXBRIDGE_H = /{f=1;next} f&&/^ *rust\/gen/{gsub(/[ \\]/,"");print;next} f{exit}' src/Makefile.am | xargs make -C src -j8
 make -C src -j8 ycashd ycash-cli test/test_bitcoin     # ~2 min incremental
+```
+
+The devnet's attestor seats need the Rust agent. It has its own toolchain (`rust-toolchain.toml`,
+1.91.0) and its own target directory; do not point it at the node's `CARGO_TARGET_DIR`:
+
+```bash
+(cd contrib/yellowback/attest && CARGO_TARGET_DIR="$PWD/target" cargo build --release)   # ~6 min cold
 ```
 
 A failed `make` leaves the old binaries in place — check the exit code, not the test output.
@@ -32,7 +43,7 @@ Python is always the workspace venv (`../.venv/bin/python`), never the system in
 ## 1. The devnet, in one command
 
 ```bash
-../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up          # ~2 min: 8 nodes, funded, activated, ARMED
+../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up          # ~6 min on 6.20.0: 8 nodes, funded, activated, ARMED
 ```
 
 Node 0 is the funded wallet, node 1 is a stock (unpatched) node, nodes 2–4 are signalling pools,
@@ -97,6 +108,7 @@ nuparams=19bd2d2f:1
 EOF
 src/ycashd -datadir=$D -daemon
 alias C="src/ycash-cli -datadir=$D"
+C -rpcwait getblockcount   # 6.20.0 takes ~12 s to answer RPC (Orchard parameters); earlier calls get -28
 C yed_getinfo          # rpcversion 3; attest.status "UNARMED"
 ```
 
@@ -209,6 +221,11 @@ see `contrib/yellowback/attest/attest.toml.sample`, which documents every field.
   5 %, PIN-1 marks those pools pinned and drops them from the medians. Jitter the price, or expect
   `xMint` to go undefined.
 - **Ports:** regtest RPC is 18832. Use `--portseed`/`--dir` to run two devnets at once.
+- **A devnet seed is not a test seed.** The devnet raises the framework's `MAX_NODES` to 12, so
+  devnet seed *s* takes RPC ports 16000 + 12·*s* … +11, while a functional test's seed *t* takes
+  16000 + 8·*t* … +7 (p2p the same, 5000 lower). Devnet seed 213 and test seed 320 share ports
+  18560-18565; the symptom is `401 Unauthorized` while `up` starts its nodes. Beside functional
+  tests, pick devnet seed ≈ ⅔ of your test seed band (test seeds 210-229 ↔ devnet seeds 140-152).
 
 ---
 
@@ -233,7 +250,7 @@ For the full automated coverage, the functional suite exercises the attestation 
 
 ```bash
 cd qa/rpc-tests
-BITCOIND=$PWD/../../src/ycashd ../../../.venv/bin/python -u yellowback_attest.py \
+ZCASHD=$PWD/../../src/ycashd ../../../.venv/bin/python -u yellowback_attest.py \
     --srcdir=$PWD/../../src --tmpdir=/tmp/yb1 --portseed=9001
 ```
 
@@ -242,6 +259,34 @@ BITCOIND=$PWD/../../src/ycashd ../../../.venv/bin/python -u yellowback_attest.py
 in the merge gate; `yellowback_attest_agent.py` (the real Rust agent) and
 `yellowback_devnet_roles.py` (the devnet's role presets) run nightly. Give each run a unique
 `--portseed`.
+
+---
+
+## 6. What is different on ycashd 6.20.0
+
+The devnet, the simulator, the agents and `devnet.json` (schema, ports, field names) are the
+v4.5.0 ones; only the following changed or was checked:
+
+- **`ZCASHD`, not `BITCOIND`.** The 6.20.0 test framework reads the node binary from `ZCASHD`;
+  `yellowback-devnet` exports it on `up` and every later command re-reads the recorded binary
+  from `devnet.json` (`"bitcoind"`, the key name kept for the components that read it).
+  `--bitcoind PATH` still overrides it.
+- **Inherited start flags.** The framework's `start_node` now also passes `-rest` and
+  `-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025` (ycashd ignores the latter).
+  Neither affects the devnet.
+- **No wallet-backup gate on regtest.** 6.20.0's `-walletrequirebackup` defaults to off on regtest
+  (`CRegTestParams`), so fresh devnet wallets call `getnewaddress` without
+  `-walletrequirebackup=false`; the devnet does not pass it.
+- **Node 0's `-insightexplorer -txindex`** and every node's `-zmqpubhashblock`/`-zmqpubhashtx`
+  work unchanged (`getaddresstxids` answers on node 0; a ZMQ subscriber sees both topics).
+- **Slower blocks to settle.** A mined block takes ~2 s until every node reports `fullyNotified`
+  (v4.5.0: ~1 s; the wallet notifier runs on whole seconds and 6.20.0 needs two ticks), and the
+  framework's `sync_blocks` waits for it. So `up` takes ~6 min for eight nodes (~6½ for the
+  eleven of a role preset), `mine N` ~2 s a block, and `yellowback_devnet_roles.py` ~40 min
+  for the three presets.
+- **Slower start.** A node answers RPC ~12 s after launch; use `ycash-cli -rpcwait` by hand.
+- The devnet never calls `setmocktime` or one-argument `lockunspent`, the two harness calls whose
+  behaviour 6.20.0 changed.
 
 See also: `doc/yellowback.md` (user guide), `doc/yellowback-attestor.md` (running an attestor for
 real), `doc/yellowback-mining.md` (running a pool).

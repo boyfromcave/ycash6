@@ -226,8 +226,11 @@ class Preset:
         samples = []
         for _ in range(3):
             time.sleep(WALK_TICK + 1)
-            pool = open(os.path.join(self.directory, 'mock-price')).read().strip()
-            attest = {a: open(os.path.join(self.directory, 'attest-price-%d' % a)).read().strip() for a in auto}
+            for _ in range(5):      # the walk writes the pool file, then each attestor's: re-read across a tick
+                pool = open(os.path.join(self.directory, 'mock-price')).read().strip()
+                attest = {a: open(os.path.join(self.directory, 'attest-price-%d' % a)).read().strip() for a in auto}
+                if open(os.path.join(self.directory, 'mock-price')).read().strip() == pool and set(attest.values()) == {pool}: break
+                time.sleep(0.5)
             for a, value in attest.items():
                 check(value == pool, 'the walk let node%d attest $%s while the pools quote $%s' % (a, value, pool))
             samples.append(pool)

@@ -666,6 +666,7 @@ def _teardown(state, nodes):
         try: bitcoind_processes[index].wait(timeout=10)
         except Exception: pass
         del bitcoind_processes[index]
+    kill_nodes(state["dir"], grace=10)      # a node started before the one that failed is not in `nodes` yet
 
 def footprint(role, count, args):
     agents = len(ROLES[role]["auto_attestors"]) + (3 if role != "none" else 1)     # attest + subscribe
@@ -1488,7 +1489,7 @@ def make_session(state):
               "- started: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
               "- seed: %s (`up --role %s --seed %s` replays the personas and the walk)" % (state.get("seed"), role, state.get("seed")),
               "- your node: node%d (rpc port %s)" % (seat_of(state), state["rpc"][str(seat_of(state))]["port"]),
-              "- ycash-dd: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
+              "- ycash6: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
               "- price at start: $%s" % state["price_usd"], "",
               "Type observations under the step that prompted them. `yellowback-devnet report` bundles this",
               "directory with every log and the simulator's tally.", ""]
@@ -1520,7 +1521,7 @@ def report(args):
              "- generated: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
              "- devnet created: %s in %s" % (state.get("created"), directory),
              "- seed: %s; heartbeat rate: %s s; walk: %s" % (state.get("seed"), (state.get("heartbeat") or {}).get("rate"), json.dumps({k: v for k, v in (state.get("walk") or {}).items() if k in ("drift", "vol", "tick")})),
-             "- ycash-dd: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
+             "- ycash6: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
              "- price now: $%s" % read_mock(directory), ""]
     if alive(state, USER):
         node = rpc(state, USER)
