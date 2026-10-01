@@ -97,9 +97,12 @@ were excluded on v4.5.0, where they aborted in `GetFoundersRewardAddressAtHeight
 `getblocktemplate_proposals` still fails as it did on v4.5.0, because it builds a Bitcoin-format block.
 `p2p-acceptblock` still hangs, because it uses the mininode.
 
-**The stock baseline**, i.e. the 42 entries that passed twice. CI runs them against the fork binary
-without `-yellowback` (`STOCK_BASELINE` plus `STOCK_BASELINE_MINEBLOCK` in
-`.github/workflows/yellowback-tests.yml`):
+**The stock baseline**, i.e. the 42 entries that passed twice. All 42 also pass on the fork binary
+without `-yellowback`. CI runs 41 of them against the fork binary (`STOCK_BASELINE` plus
+`STOCK_BASELINE_MINEBLOCK` in `.github/workflows/yellowback-tests.yml`).
+`getblocktemplate_longpoll` was dropped in `ed9bcfcc7` because it flakes on any binary: its
+`random_transaction(min_fee=0.0)` draws a zero fee about 1 run in 21, and relay refuses it. The
+42 recorded entries:
 
 ```
 wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex
