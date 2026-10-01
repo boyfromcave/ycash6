@@ -789,17 +789,24 @@ jobs:
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
       - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
-      - name: Build with --enable-debug (defines DEBUG_LOCKORDER, configure.ac:249)
-        # DEBUG_LOCKORDER_LOGONLY (sync.cpp): Ycash v4.5.0 itself trips the deadlock assertion on
-        # the first peer connection (getpeerinfo vs SendMessages, all four sites byte-identical to
-        # the pin; doc/yellowback.md "Build and test baseline"), so an aborting detector never
-        # reaches Yellowback code. With the switch every inversion is still detected and written
-        # to debug.log; the step after the suite fails on any that names Yellowback.
+      - name: Build with --enable-debug (defines DEBUG_LOCKORDER, configure.ac:244)
+        # 6.20.0 has no DEBUG_LOCKORDER_LOGONLY switch and sync.cpp stays at zero delta (mapping §19 S3).
+        # Stock 6.20.0 aborts on the first block relay between two peers (cs_vNodes vs the
+        # pnode->cs_vRecvMsg TRY_LOCK, net.cpp; g_debug_lockorder_abort defaults to true and ycashd
+        # cannot clear it, and clearing it only turns the abort into a std::logic_error out of LOCK),
+        # and every debug node with a peer then corrupts its heap at exit (the lock bookkeeping is
+        # destroyed before CNetCleanup takes LOCK(cs_hSocket)). qa/yellowback-lockorder-logonly.sh
+        # patches the CI checkout's sync.cpp, never the repository: log-only reports and never-destroyed
+        # bookkeeping; it fails if the four stock lines it rewrites have moved. The step after the
+        # suite then fails on any report that names Yellowback.
         run: |
+          qa/yellowback-lockorder-logonly.sh .
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug CPPFLAGS=-DDEBUG_LOCKORDER_LOGONLY
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
-      - name: Functional suite under DEBUG_LOCKORDER (sync.cpp aborts on a potential deadlock)
+      - name: Yellowback unit tests under DEBUG_LOCKORDER (AssertLockHeld aborts)
+        run: src/test/test_bitcoin --run_test='yellowback_*'
+      - name: Functional suite under DEBUG_LOCKORDER (log-only; the next step judges the reports)
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
@@ -807,8 +814,8 @@ jobs:
           qa/pull-tester/rpc-tests.py -j2 --nocleanup $YELLOWBACK_SCRIPTS $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
       - name: No potential deadlock involving Yellowback in any debug.log
         if: always()
-        # qa/yellowback-lockorder-check.py groups every report; the inherited getpeerinfo/SendMessages
-        # pair is counted, the provably-benign cs_yellowback/ControlMutex pair (both under cs_main;
+        # qa/yellowback-lockorder-check.py groups every report; the inherited net.cpp TRY_LOCK pairs
+        # are counted, the provably-benign cs_yellowback/ControlMutex pair (both under cs_main;
         # F-37) is allow-listed with its proof in the script, anything else naming Yellowback fails.
         run: qa/yellowback-lockorder-check.py "${{ runner.temp }}/yellowback-tests"
       - name: Upload node logs on failure
