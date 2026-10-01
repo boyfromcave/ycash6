@@ -601,6 +601,12 @@ void YellowbackIndex::TripValve(const uint256& root)
         ReconsiderBlock(state, mi->second);
         LogPrintf("yellowback: valve: reconsidered %s\n", hash.ToString());
     }
+    // Make the cleared failure flags durable before erasing the records that drive them: 6.20.0
+    // keeps never-connected index entries with their FAILED marks across restarts (Ycash
+    // 1770fce16), so a crash in between would reload BLOCK_FAILED_VALID with no record left to
+    // reconsider it (the startup kill switch's 83e6c1cb2). cs_main is recursive and held;
+    // FlushStateToDisk adds only cs_LastBlockFile, whose holders never call into the overlay.
+    FlushStateToDisk();
     for (const uint256& hash : rejected) db->Erase(keys::Rejected(hash));
     db->Commit(true);
     rejected.clear();
