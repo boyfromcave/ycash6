@@ -1,0 +1,20 @@
+# Files the Yellowback port to ycashd 6.20.0 must leave at ZERO delta against the tag
+# `ycash6-baseline` (plan docs/plans/yellowback-ycash6-plan.md §2, decision P-4).
+# One path per line, directories allowed. The four budgeted mining/validation files
+# (src/main.cpp ≤ 40, src/miner.cpp ≤ 35, src/rpc/mining.cpp ≤ 35, src/chainparams.cpp = 4)
+# are checked by line budget in qa/yellowback-audit.sh, not here.
+src/consensus/
+src/script/
+src/primitives/
+src/pow/
+src/pow.cpp
+src/pow.h
+src/policy/
+src/txdb.cpp
+src/txdb.h
+src/wallet/wallet.h
+src/wallet/wallet.cpp
+src/rust/
+Cargo.toml
+Cargo.lock
+configure.ac
