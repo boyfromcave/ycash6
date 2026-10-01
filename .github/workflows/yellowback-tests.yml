@@ -1,6 +1,6 @@
 # ycashd 6.20.0 port of the Yellowback CI (ycash6, branch feature/yellowback). Copied from ycash-dd's
 # feature/yellowback-price-attest on 2026-09-30 and adapted: baseline = tag ycash6-baseline, the
-# audit gates are qa/yellowback-audit.sh, ZCASHD replaces BITCOIND. Jobs other than `audit` are
+# audit gates are qa/yellowback-audit.sh, ZCASHD replaces BITCOIND. Jobs other than `audit` and `python` are
 # skipped (`if: false && …`) until the plan phase that switches them on removes the prefix.
 name: yellowback tests
 
@@ -57,7 +57,10 @@ env:
   # exec's them directly, so an un-chmodded script dies with PermissionError before the framework
   # starts) -- the identical omission recorded above for mining/enforcement/stock_node/hardening
   # on 2026-09-11, repeated for v3. The audit job now greps for both halves so it cannot recur.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz
+  # ycash6 port (plan Phase 4): every BASE_SCRIPTS yellowback script of qa/pull-tester/rpc-tests.py,
+  # i.e. the v4.5.0 list plus yellowback_wallet_lifecycle and the port's yellowback_framework_smoke;
+  # yellowback_reorg_stress is retired (plan P-7). The four EXTENDED ones run in nightly or not at all.
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
@@ -281,7 +284,7 @@ jobs:
           # wallet-tier code, never a consensus input).  The patterns are anchored: an unescaped
           # 'rpc/yellowback.cpp' also matched nothing but itself, which is how the third home
           # surfaced as a failure rather than a decision.
-          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy\.cpp$\|rpc/yellowback\.cpp$\|rpc/yellowbackwallet\.cpp$' || true)
+          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -vE 'yellowback/policy\.cpp$|rpc/yellowback\.cpp$|rpc/yellowbackwallet\.cpp$' || true)
           test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
           # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
           ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis"
@@ -291,10 +294,16 @@ jobs:
           for f in qa/rpc-tests/yellowback_*.py; do
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_reorg_stress yellowback_stockparity yellowback_quote yellowback_runbook yellowback_rc1 yellowback_rc2 yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_attest_stress " in
+            grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
+          done
+          # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
+          # name a job passes it must be registered there.
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE; do
+            grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
           # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
           # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
@@ -379,7 +388,7 @@ jobs:
                     MINT-1 MINT-2 MINT-3 MINT-4 MINT-5 MINT-6 MINT-7 MINT-8 XFER-1 XFER-2 XFER-3 RED-1 RED-2 RED-3 RED-4 \
                     ACT-1 ACT-2 ACT-3 ACT-4 ACT-5 ACT-6 ACT-7 HALT-1 HALT-2 HALT-3 HALT-4 BLK-1 BLK-2 BLK-3 TPL-1 TPL-2 TPL-3 \
                     MP-1 MINER-1 MINER-2 MINER-3 MINTPOL-1 SNAP UNDO; do
-            git grep -qE "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged: $id"; rc=1; }
+            git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged: $id"; rc=1; }
           done
           exit $rc
 
@@ -392,7 +401,7 @@ jobs:
           set -e
           rc=0
           for id in ARM-1 ARM-2 REG-A1 BUNDLE-1 MINT-9 MINT-10 NOT-1 EQV-1 REV-1 PIN-1 PIN-2 AFEE-0 AFEE-1 RED-5; do
-            git grep -qE "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (v3): $id"; rc=1; }
+            git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (v3): $id"; rc=1; }
           done
           exit $rc
 
@@ -464,7 +473,7 @@ jobs:
           ! ls depends/packages | grep -qi 'iroh\|yellowback-attest'
 
   python:
-    if: false && (github.event_name != 'schedule' && inputs.weekly_fuzz != true)   # ycash6 port: remove 'false && ' in the plan phase that switches this job on
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -507,7 +516,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest -v
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest test_framework.test_yellowback_model test_framework.test_yellowback_util -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
@@ -521,6 +530,13 @@ jobs:
         if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
         run: python3 src/test/gen_yellowback_corpus.py --check
+      - name: The attestation known-answer vectors regenerate byte for byte (BUNDLE-1, R13)
+        # The generator has no --check mode: regenerate, then require a clean tree.
+        if: ${{ !cancelled() }}
+        run: |
+          python3 src/test/gen_yellowback_attest_vectors.py
+          git diff --exit-code -- src/test/data/yellowback_attest_vectors.json src/fuzzing/YellowbackBundle
+          test -z "$(git status --porcelain -- src/fuzzing/YellowbackBundle)"
 
   # The attestor agent (plan §5, W13): its own toolchain (rust-toolchain.toml), its own lock,
   # never the node's depends/. Also proves fixtures/expected.json is still what the Python
@@ -586,7 +602,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
-      # Reorg stress (extended) is not run: qa/rpc-tests/yellowback_reorg_stress.py is still the v1
+      # ycash6 port: yellowback_reorg_stress.py is retired (plan P-7). History: it was still the v1
       # federation script (rosters, anchors, cosigned price transactions) and dies at its first
       # yed_getinfo field. Its v2 adaptation is the unchecked item of the v2 plan's Phase 6
       # checklist; reorgs themselves are exercised by index, lifecycle, enforcement, mining,
