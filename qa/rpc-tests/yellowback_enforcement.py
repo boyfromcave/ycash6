@@ -1305,6 +1305,26 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_equal(info['valveTripped'], False)
         assert_equal(info['enforcing'], True)
 
+        # The trip must be crash-durable.  Node %d was last stopped cleanly with the rejection
+        # live, so its on-disk block index marks the block BLOCK_FAILED_VALID, and nothing has
+        # flushed the index since (-dbwriteinterval defaults to an hour).  The valve's
+        # ReconsiderBlock clears the mark in memory only; 6.20.0 keeps that never-connected entry
+        # with its mark across a restart (Ycash 1770fce16), so unless the trip flushes the index
+        # before it erases Rejected, a kill -9 leaves the mark on disk with no record to undo it
+        # and the node refuses the stock chain for good (the kill switch's 83e6c1cb2, the same race).
+        print('  kill -9 of node %d after the trip: it restarts re-armed and still follows node %d' % (POOLS[1], STOCK))
+        self.kill9(POOLS[1])
+        self.restart(POOLS[1])
+        node = self.nodes[POOLS[1]]
+        assert_equal(node.yed_getinfo()['enforcing'], True)
+        deadline = time.time() + 180
+        while node.getbestblockhash() != stock.getbestblockhash():
+            assert time.time() < deadline, \
+                'node %d did not rejoin the stock chain after a kill -9 following the trip' % POOLS[1]
+            stock.generate(1)
+            time.sleep(1.0)
+        assert_equal(node.getblock(blockhash)['confirmations'] >= 1, True)
+
     # ------------------------------------------------------------------ case 8 (--extended)
 
     def case8_extended_random_activity(self):

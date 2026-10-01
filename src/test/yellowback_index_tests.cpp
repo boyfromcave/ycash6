@@ -38,6 +38,7 @@
 #include "primitives/block.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
+#include "txdb.h"
 #include "txmempool.h"
 #include "util/time.h"
 #include "warnings.h"
@@ -118,7 +119,12 @@ struct Chain
         if (parent->phashBlock) n.block.hashPrevBlock = parent->GetBlockHash();
         n.block.hashMerkleRoot = BlockMerkleRoot(n.block);     // the hash must depend on the transactions
         n.hash = n.block.GetHash();
-        n.idx.reset(new CBlockIndex());
+        // A non-empty Equihash solution, as every real entry holds until written: the valve
+        // flushes the block index (TripValve), and CBlockTreeDB::WriteBatchSync re-reads a
+        // solution-less entry from disk, which a fake entry never was.
+        CBlockHeader solved;
+        solved.nSolution.assign(1, 0);
+        n.idx.reset(new CBlockIndex(solved));
         n.idx->pprev = parent;
         n.idx->nHeight = parent->nHeight + 1;
         n.idx->phashBlock = &n.hash;
@@ -1016,6 +1022,13 @@ BOOST_AUTO_TEST_CASE(valve_trips_at_six_blocks)
     BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 0u);
     BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);             // cleared, bad2 skipped (not in mapBlockIndex)
     BOOST_CHECK(!(bad.idx->nStatus & BLOCK_FAILED_MASK));          // ReconsiderBlock ran
+    {
+        // ... and durably, before Rejected was erased: the block index entry on disk is clear too
+        // (6.20.0 keeps a never-connected entry's FAILED mark across a restart).
+        CDiskBlockIndex onDisk;
+        BOOST_REQUIRE(pblocktree->Read(std::make_pair('b', bad.hash), onDisk));   // txdb.cpp DB_BLOCK_INDEX
+        BOOST_CHECK(!(onDisk.nStatus & BLOCK_FAILED_MASK));
+    }
     const std::string warning = GetMiscWarning().first;
     BOOST_CHECK_MESSAGE(warning.find(strprintf("Yellowback: work valve tripped at height %d (rejected root %s); enforcement off until restart", tip->nHeight, bad.hash.ToString())) != std::string::npos, warning);
     BOOST_CHECK(!live.index->GetMinerStatus(0).signal);            // MINER-1: the signal bit is dropped
