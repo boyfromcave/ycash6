@@ -690,7 +690,7 @@ jobs:
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
           # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
           # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # variant builds with depends' clang (22 at 6.20.0) targeting x86_64-pc-linux-gnu, while the LLVM
           # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
           # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
           # works around for libc++'s __config_site. Without the link the runtime archives are not
@@ -704,7 +704,9 @@ jobs:
           # -DFUZZ_WITH_LIBFUZZER compiles LLVMFuzzerTestOneInput (zcutil/libfuzzer/zcash-wrapper
           # does the same). Without it, fuzz.cpp contributes no entry point.
           make -C src clean
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
+          # --disable-werror: 6.20.0's configure defaults --enable-werror to yes (v4.5.0: no), and under
+          # ZCASH_FUZZ bitcoind.cpp's own '#warning BUILDING A FUZZER' is then an error (-W#warnings).
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
@@ -715,7 +717,11 @@ jobs:
             # compiles, bitcoind.lo. The binary may be src/ycashd or src/.libs/ycashd.
             # GNU make stats the symlink target, so a new fuzz.cpp that is older than the
             # object is not a reason to rebuild. Remove every product of this one file.
-            rm -f src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
+            # The object is src/ycashd-bitcoind.o (ycashd_CPPFLAGS gives it a per-program name); before
+            # 2026-09-30 this line missed it, so every target after the first re-linked the first one.
+            rm -f src/ycashd-bitcoind.o src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
+            # Overriding ycashd_LDFLAGS also drops 6.20.0's Linux '--whole-archive -ljemalloc' (src/Makefile.am),
+            # which is wanted: a jemalloc malloc would shadow ASan's allocator.
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=600
@@ -957,7 +963,7 @@ jobs:
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
           # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # variant builds with depends' clang (22 at 6.20.0) targeting x86_64-pc-linux-gnu, while the LLVM
           # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
           # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
           # works around for libc++'s __config_site. Without the link the runtime archives are not
@@ -975,11 +981,13 @@ jobs:
       - name: lcov over src/yellowback and src/rpc/yellowback*, the floors of qa/yellowback-coverage-floor.sh
         run: |
           set -e
-          # --enable-lcov compiles with depends' clang 18, which writes .gcno notes as gcov
-          # version '408*'. The runner's gcov is GCC 11.4 ('B14*') and refuses them
-          # ("GCOV failed"). native_clang.mk does not stage llvm-cov; it is in the cached
-          # clang tarball, and the staged native lib/ satisfies its $ORIGIN/../lib lookup.
-          tar=$(echo depends/sources/clang-llvm-*-x86_64-linux-gnu-ubuntu-18.04.tar.xz)
+          # --enable-lcov compiles with depends' clang (22.1.7 at 6.20.0; 18.1.8 with LEGACY_GLIBC=1),
+          # whose .gcno notes the runner's GCC 11.4 gcov refuses ("GCOV failed"). native_clang.mk
+          # does not stage llvm-cov; it is in the cached LLVM tarball, and the staged native lib/
+          # satisfies its $ORIGIN/../lib lookup. 6.20.0 renamed the default tarball
+          # LLVM-<v>-Linux-X64.tar.xz; the v4.5.0 name survives only under LEGACY_GLIBC=1.
+          tar=$(ls depends/sources/LLVM-*-Linux-X64.tar.xz depends/sources/clang-llvm-*-x86_64-linux-gnu-ubuntu-18.04.tar.xz 2>/dev/null | head -1)
+          test -n "$tar"
           inner=$(tar -tJf "$tar" | awk '/\/bin\/llvm-cov$/{print; exit}')
           test -n "$inner"
           tar -xJf "$tar" -C "$RUNNER_TEMP" "$inner"
@@ -1052,7 +1060,7 @@ jobs:
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
           # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
           # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # variant builds with depends' clang (22 at 6.20.0) targeting x86_64-pc-linux-gnu, while the LLVM
           # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
           # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
           # works around for libc++'s __config_site. Without the link the runtime archives are not
@@ -1063,7 +1071,9 @@ jobs:
           # BUILD_STAGE=depends exits before autogen.sh, so a checkout has no ./configure.
           # The nightly fuzz step inherits one from the earlier full build; this job does not.
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
+          # --disable-werror: 6.20.0's configure defaults --enable-werror to yes (v4.5.0: no), and under
+          # ZCASH_FUZZ bitcoind.cpp's own '#warning BUILDING A FUZZER' is then an error (-W#warnings).
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
@@ -1072,7 +1082,11 @@ jobs:
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
             # See the nightly fuzz step: retargeting the symlink does not rebuild, and
             # libtool may have left bitcoind.lo and .libs/ycashd beside the .o.
-            rm -f src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
+            # The object is src/ycashd-bitcoind.o (ycashd_CPPFLAGS gives it a per-program name); before
+            # 2026-09-30 this line missed it, so every target after the first re-linked the first one.
+            rm -f src/ycashd-bitcoind.o src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
+            # Overriding ycashd_LDFLAGS also drops 6.20.0's Linux '--whole-archive -ljemalloc' (src/Makefile.am),
+            # which is wanted: a jemalloc malloc would shadow ASan's allocator.
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=1800 || true
