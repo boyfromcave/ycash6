@@ -299,6 +299,7 @@ BITCOIN_CORE_H = \
   rpc/common.h \
   rpc/protocol.h \
   rpc/server.h \
+  rpc/yellowbackrpc.h \
   rpc/register.h \
   scheduler.h \
   script/atomicswap.h \
@@ -306,6 +307,22 @@ BITCOIN_CORE_H = \
   script/sign.h \
   script/standard.h \
   script/ismine.h \
+  yellowback/address.h \
+  yellowback/attest.h \
+  yellowback/bundle.h \
+  yellowback/coinselect.h \
+  yellowback/db.h \
+  yellowback/index.h \
+  yellowback/math.h \
+  yellowback/params.h \
+  yellowback/policy.h \
+  yellowback/payload.h \
+  yellowback/script.h \
+  yellowback/state.h \
+  yellowback/tag.h \
+  yellowback/txbuilder.h \
+  yellowback/view.h \
+  yellowback/wallet.h \
   spentindex.h \
   streams.h \
   support/allocators/secure.h \
@@ -407,6 +424,10 @@ libbitcoin_server_a_SOURCES = \
   mempool_limit.cpp \
   txmempool.cpp \
   validationinterface.cpp \
+  yellowback/db.cpp \
+  yellowback/index.cpp \
+  yellowback/policy.cpp \
+  rpc/yellowback.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
@@ -449,6 +470,9 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
   wallet/wallet.cpp \
+  yellowback/txbuilder.cpp \
+  yellowback/wallet.cpp \
+  rpc/yellowbackwallet.cpp \
   wallet/walletdb.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
@@ -596,6 +620,16 @@ libbitcoin_common_a_SOURCES = \
   transaction_builder.cpp \
   util/test.cpp \
   warnings.cpp \
+  yellowback/address.cpp \
+  yellowback/attest.cpp \
+  yellowback/bundle.cpp \
+  yellowback/coinselect.cpp \
+  yellowback/params.cpp \
+  yellowback/payload.cpp \
+  yellowback/script.cpp \
+  yellowback/state.cpp \
+  yellowback/tag.cpp \
+  yellowback/view.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
