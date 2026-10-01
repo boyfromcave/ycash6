@@ -49,11 +49,12 @@ TemplateView::~TemplateView() {}
 // Construction, health, storage
 
 YellowbackIndex::YellowbackIndex(const Params& paramsIn, const fs::path& dir, size_t cacheSize, bool fWipe)
-    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false), rebuilt(false),
-      payeePolicy(PayeePolicy::Defaults(paramsIn)), valveTripped(false), suppressedBlocks(0), sunsetLogged(false)
+    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, false)), healthy(true), stopped(false), rebuilt(false),
+      pendingWipe(fWipe), reconsideredOnWipe(0), payeePolicy(PayeePolicy::Defaults(paramsIn)), valveTripped(false), suppressedBlocks(0), sunsetLogged(false)
 {
     paramSets.push_back(paramsIn);
-    if (fWipe) LogPrintf("yellowback: index wiped (-reindex-yellowback; Rejected cleared)\n");
+    // -reindex-yellowback opens the directory as is and wipes it in SyncToChain, under cs_main:
+    // Wipe() must read Rejected first, to reconsider the blocks it names (6.20.0, see Wipe).
     LoadRejected();
 }
 
@@ -110,7 +111,26 @@ uint256 YellowbackIndex::GetStateHash() const
 
 void YellowbackIndex::Wipe(const std::string& why)
 {
-    LogPrintf("yellowback: wiping index (%s)\n", why);
+    AssertLockHeld(cs_main);
+    LogPrintf("yellowback: wiping index (%s; Rejected cleared)\n", why);
+    // A wipe erases Rejected, so first clear the FAILED marks it accounts for, durably (the valve's
+    // order, eda580983). v4.5.0's RewindBlockIndex erased those never-connected entries at every
+    // start, so after any wipe the block was fetched again and re-judged by the rebuilt index;
+    // 6.20.0 keeps them (Ycash 1770fce16), and a mark with no record has no valve root and no kill
+    // switch. Reconsidered, the block is re-judged at the next ActivateBestChain as on v4.5.0: an
+    // enforcing node re-rejects it (and records it again), -yellowbackenforce=0 connects it. Init
+    // runs that ActivateBestChain itself (ReconsideredOnWipe): ThreadImport's runs under fImporting.
+    if (!rejected.empty()) {
+        CValidationState state;
+        for (const uint256& hash : rejected) {
+            BlockMap::iterator mi = mapBlockIndex.find(hash);
+            if (mi == mapBlockIndex.end()) continue;
+            ReconsiderBlock(state, mi->second);
+            reconsideredOnWipe++;
+            LogPrintf("yellowback: wipe: reconsidered %s\n", hash.ToString());
+        }
+        FlushStateToDisk();
+    }
     db->Wipe();
     rejected.clear();
     cache.valid = false;
@@ -232,6 +252,10 @@ bool YellowbackIndex::SyncToChain()
 {
     LOCK(cs_main);
     LOCK(cs_yellowback);
+    if (pendingWipe) {
+        pendingWipe = false;
+        Wipe("-reindex-yellowback");
+    }
     if (!params.IsConfigured()) {
         SetUnhealthy("yellowback parameters are not configured for this network (no start height)");
         return false;

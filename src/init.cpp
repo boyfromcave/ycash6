@@ -2231,6 +2231,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!yellowback::g_yellowback->SyncToChain()) {
             LogPrintf("yellowback: index is unhealthy at startup: %s\n", yellowback::g_yellowback->UnhealthyReason());
         }
+        // A wipe reconsidered the blocks Rejected named (YellowbackIndex::Wipe): re-judge them here,
+        // as v4.5.0 did when it fetched them again. ThreadImport's ActivateBestChain would connect
+        // them under fImporting (6.20.0 holds CImportingNow across it), which N2 accepts unjudged.
+        if (yellowback::g_yellowback->ReconsideredOnWipe() > 0) {
+            CValidationState ybState;
+            ActivateBestChain(ybState, chainparams);
+        }
         // The kill switch (V13 iii, K21): with enforcement off, un-reject every recorded block under
         // one LOCK(cs_main), then ActivateBestChain outside it (the reconsiderblock RPC's pattern),
         // then clear Rejected. Skipped on a null tip or an empty Rejected.
