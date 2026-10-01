@@ -107,7 +107,7 @@ __all__ = [
     'YellowbackTestFramework', 'yellowback_node_args', 'pool_args', 'POOL_WIFS', 'address_of',
     'wif_to_secret', 'set_quote', 'round_robin_schedule', 'build_mint_tx', 'vault_from_mint',
     'build_vault_spend_raw', 'template_coinbase', 'mine_block_raw', 'assert_same_statehash',
-    'assert_best_hash', 'assert_rejected', 'assert_banscore_zero', 'wait_yed_healthy',
+    'assert_best_hash', 'assert_rejected', 'assert_banscore_zero', 'wait_yed_healthy', 'unlock_all',
     'snapshot_ledger', 'format_ledger', 'assert_model_matches', 'assert_start_raises_init_error',
     'restart_with_yellowback', 'sync_all_nodes', 'node_pubkey', 'term_class_of', 'fee_zat',
     'mint_vault_raw', 'redeem_vault_raw', 'malformed_vault_spend', 'mine_rejected_block',
@@ -461,17 +461,22 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # ``run_test`` (docs/mapping.md section 13.2).  Every node is therefore in IBD only until that
     # first block (P12).
     initial_blocks = 101
+    # 6.20.0: True starts every node on a fixed mock clock (advance_clock); see __init__.
+    mock_clock = False
 
     def __init__(self, num_nodes=6):
         super().__init__()
         self.num_nodes = num_nodes        # v3 scripts pass 8 (nodes 6-7 the attestor wallets)
         self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.is_network_split = False
-        # 6.20.0: setmocktime needs a node started with a non-zero -mocktime (it installs a fixed
-        # clock; rpc/misc.cpp setmocktime). Every node starts at clock_base and advance_clock /
-        # restart move them together, as v4.5.0's switch-to-mock-on-first-call did.
+        # 6.20.0: setmocktime needs a node started with a non-zero -mocktime (a fixed clock;
+        # rpc/misc.cpp setmocktime), and a fixed clock also freezes transaction relay (the inventory
+        # trickle fires on the node clock). So nodes run on the real clock, as upstream's harness
+        # does, unless the script sets the class attribute mock_clock = True: then every node starts
+        # at clock_base, advance_clock / restart move them together, and sync_all nudges the clock
+        # while mempools converge.
         self.clock_base = int(time.time())
-        self.mock_time = self.clock_base
+        self.mock_time = self.clock_base if self.mock_clock else None
         self.pool_addresses = [address_of(w) for w in POOL_WIFS]
         self.quotes = {}          # node index -> (usd, source_mask): re-applied by restart()
 
@@ -490,14 +495,18 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def node_args(self, i, extra=None):
         """Role-based arguments for node ``i`` (section 6.0 item 2)."""
         kw = {'sigma_ref': self.sigma_ref}
-        clock = ['-mocktime=%d' % self.clock_base]
         if not self.yellowback_enabled or i == STOCK:
-            return yellowback_node_args(extra, yellowback=False) + clock
+            return yellowback_node_args(extra, yellowback=False)
         if i in POOLS:
-            return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw) + clock
+            return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw)
         if i == OBSERVER:
-            return observer_args(extra, **kw) + clock
-        return yellowback_node_args(extra, **kw) + clock
+            return observer_args(extra, **kw)
+        return yellowback_node_args(extra, **kw)
+
+    def clock_args(self):
+        """6.20.0: ``-mocktime=clock_base`` under ``mock_clock`` (added where nodes start, so a
+        script's own node_args override keeps it)."""
+        return ['-mocktime=%d' % self.clock_base] if self.mock_clock else []
 
     def node_binaries(self):
         binaries = [None] * self.num_nodes
@@ -506,7 +515,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
 
     def setup_nodes(self):
         nodes = start_nodes(self.num_nodes, self.options.tmpdir,
-                            extra_args=[self.node_args(i) for i in range(self.num_nodes)],
+                            extra_args=[self.node_args(i) + self.clock_args() for i in range(self.num_nodes)],
                             binary=self.node_binaries())
         self.import_pool_keys(nodes)
         return nodes
@@ -607,7 +616,21 @@ class YellowbackTestFramework(BitcoinTestFramework):
             nodes = [self.nodes[i] for i in g if self.nodes[i] is not None]
             sync_blocks(nodes)
             if not blocks_only:
-                sync_mempools(nodes)
+                self.sync_mempools(nodes)
+
+    def sync_mempools(self, nodes, timeout=60):
+        """sync_mempools, except that under mock_clock the clock is nudged forward while the
+        pools differ: 6.20.0 announces transactions on a Poisson timer read from the node clock
+        (main.cpp SendMessages, fSendTrickle), which a fixed clock never advances."""
+        if not self.mock_clock:
+            return sync_mempools(nodes)
+        for _ in range(int(timeout / 0.5)):
+            pools = [set(n.getrawmempool()) for n in nodes]
+            if all(p == pools[0] for p in pools):
+                return sync_mempools(nodes)
+            self.advance_clock(3)
+            time.sleep(0.5)
+        raise AssertionError("Mempool sync failed (mock clock)")
 
     def enforcing_nodes(self):
         return [self.nodes[i] for i in ENFORCING_V3 if i < len(self.nodes)]
@@ -696,7 +719,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         reconnect its edges of the current topology."""
         if self.nodes[i] is not None:
             stop_node(self.nodes[i], i)
-        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i, extra),
+        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i, extra) + self.clock_args(),
                                    binary=self.node_binaries()[i], timewait=timewait)
         if i in POOLS:
             self.import_pool_keys(self.nodes)
@@ -719,8 +742,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
                 connect_nodes_bi(self.nodes, a, b)
 
     def advance_clock(self, seconds):
-        """``setmocktime`` on every node; never ``sleep`` for a wall-clock case (P12).  Every
-        node starts with ``-mocktime=clock_base`` (6.20.0), so this continues from there."""
+        """``setmocktime`` on every node; never ``sleep`` for a wall-clock case (P12).  Needs the
+        class attribute ``mock_clock = True`` (6.20.0: nodes must start with -mocktime)."""
+        assert self.mock_clock, "advance_clock needs mock_clock = True on the test class (6.20.0)"
         self.mock_time += int(seconds)
         for node in self.nodes:
             if node is not None:
@@ -762,6 +786,20 @@ def assert_banscore_zero(nodes):
     for node in nodes:
         for peer in node.getpeerinfo():
             assert_equal(peer['banscore'], 0)
+
+
+def unlock_all(node):
+    """v4.5.0's ``lockunspent true`` (no second argument): unlock every coin the overlay does not
+    hold.  6.20.0's server-side parameter table requires both lockunspent arguments, so the
+    one-argument form is refused; unlocking each locked outpoint, skipping the overlay's own
+    (yed-locked-outpoint), reaches the same end state."""
+    from .authproxy import JSONRPCException
+    for o in node.listlockunspent():
+        try:
+            node.lockunspent(True, [{'txid': o['txid'], 'vout': o['vout']}])
+        except JSONRPCException as e:
+            if 'yed-locked-outpoint' not in e.error['message']:
+                raise
 
 
 def wait_yed_healthy(node, timeout=30):

@@ -16,6 +16,7 @@ from decimal import Decimal
 from test_framework.util import (assert_equal, assert_start_raises_init_error, start_node,
                                  stop_node, bitcoind_processes)
 from test_framework.yellowback_attest import wallet_mint
+from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_util import (
     MIN_OUTPUT,
     POOLS,
@@ -161,8 +162,15 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         assert plain not in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
 
 # Rule: H5
-        print('h5_lockunspent_true_reapplies_the_locks')
-        user.lockunspent(True)
+        print('h5_lockunspent_true_cannot_unlock_yed (6.20.0: the one-argument form is refused)')
+        # v4.5.0 accepted `lockunspent true` (unlock everything) and re-applied the Yellowback
+        # locks; 6.20.0's server-side parameter table requires both arguments, so the form never
+        # reaches the handler. Either way the YED output stays locked.
+        try:
+            user.lockunspent(True)
+            raise AssertionError('lockunspent with one argument was accepted')
+        except JSONRPCException as e:
+            assert 'Needed exactly 2' in e.error['message'], e.error['message']
         assert token in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
 
 # Rule: H5

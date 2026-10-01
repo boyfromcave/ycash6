@@ -89,7 +89,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         raw = user.getrawtransaction(vault1, 1)
         assert_equal([v['txid'] for v in raw['vin']], [mint1['carrierTxid']])    # v3: the carrier is the one transparent input
         assert_greater_than(len(raw['vShieldedSpend']), 0)
-        assert_equal(len(raw['vShieldedOutput']), 1)                        # change back to ys
+        assert_equal(len(raw['vShieldedOutput']), 2)   # 6.20.0: the Sapling builder pads a bundle to two outputs (one dummy)                        # change back to ys
         assert_equal(zat(raw['valueBalance']), mint1['collateralZat'] + TOKEN_VALUE + mint1['feeZat'] + mint1['attestFeeZat'] + YELLOWBACK_FEE - CARRIER_VALUE)
         assert_equal(len(raw['vout']), 4 + (1 if self.armed else 0))      # vault, token, payload, fee, [attestor fee]
         carrier = user.getrawtransaction(mint1['carrierTxid'], 1)
@@ -165,7 +165,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(red1['to'], ys)
         assert_equal(red1['burnedCents'], 10000)
         rraw = user.getrawtransaction(red1['txid'], 1)
-        assert_equal(len(rraw['vShieldedOutput']), 1)
+        assert_equal(len(rraw['vShieldedOutput']), 2)   # 6.20.0: the Sapling builder pads a bundle to two outputs (one dummy)
         assert_equal(rraw['vShieldedSpend'], [])
         assert_equal(rraw['vin'][0]['txid'], vault1)
         assert_equal(len(rraw['vin']), 2)                                  # the vault and the one 199 YED coin (H1: fewest inputs)

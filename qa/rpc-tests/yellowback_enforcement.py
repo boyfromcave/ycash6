@@ -31,6 +31,7 @@ from test_framework.util import (
     sync_blocks,
 )
 from test_framework.yellowback_util import (
+    unlock_all,
     ENFORCING,
     GRACE,
     OBSERVER,
@@ -423,7 +424,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.sync_all()
         self.pools_mine(1, 'token split')
         short['short_token'] = (split_txid, 0)     # 4,000 cents of a 10,000-cent debt
-        self.nodes[USER].lockunspent(True)
+        unlock_all(self.nodes[USER])   # 6.20.0: lockunspent needs both arguments
         # past lockHeight and claimHeight so both paths are spendable
         self.pools_mine(LOCK + GRACE + 2, 'to the claim height')
         tip = self.nodes[USER].getblockcount()

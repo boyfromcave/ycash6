@@ -26,6 +26,7 @@ from test_framework.yellowback_util import (
 
 
 class FrameworkSmokeTest(YellowbackTestFramework):
+    mock_clock = True   # 6.20.0: advance_clock needs nodes started on a fixed mock clock
     yellowback_enabled = False
 
     def run_test(self):

@@ -326,7 +326,10 @@ class YellowbackIndexTest(YellowbackTestFramework):
             wait_yed_healthy(nodes[i], timeout=120)
         self.sync_all(blocks_only=True)
         assert_best_hash(nodes)
-        assert debug_log_contains(tmpdir, 3, 'is not in the block index; skipped')
+        # 6.20.0 keeps the rejected block's index entry across a clean restart, so the kill switch
+        # takes its ReconsiderBlock branch here; v4.5.0's RewindBlockIndex always erased it (skipped).
+        assert (debug_log_contains(tmpdir, 3, 'is not in the block index; skipped') or
+                debug_log_contains(tmpdir, 3, 'kill switch: reconsidered')), 'expected a kill-switch branch on node 3'
         for i in ENFORCING:
             assert_equal(nodes[i].yed_getinfo()['rejectedBlocks'], 0)
         assert_same_statehash(self.enforcing_nodes() + [nodes[OBSERVER]])

@@ -39,11 +39,13 @@ from test_framework.yellowback_util import (
     ym,
 )
 
-# The v4.5.0 getblocktemplate key set (ref/ycash/src/rpc/mining.cpp:754-781, coinbasetxn = true).
+# The stock getblocktemplate key set of the baseline (ycashd 6.20.0, coinbasetxn = true): v4.5.0's
+# (ref/ycash/src/rpc/mining.cpp:754-781) plus 6.20.0's blockcommitmentshash and defaultroots
+# (ref/ycash6/src/rpc/mining.cpp:797-815; the old hash names stay under the default-allowed gbt_oldhashes).
 V450_GBT_KEYS = sorted([
     'capabilities', 'version', 'previousblockhash', 'lightclientroothash', 'finalsaplingroothash',
     'transactions', 'coinbasetxn', 'longpollid', 'target', 'mintime', 'mutable', 'noncerange',
-    'sigoplimit', 'sizelimit', 'curtime', 'bits', 'height',
+    'sigoplimit', 'sizelimit', 'curtime', 'bits', 'height', 'blockcommitmentshash', 'defaultroots',
 ])
 V450_MUTABLE = ['time', 'transactions', 'prevblock']
 PRICE = '20.00'

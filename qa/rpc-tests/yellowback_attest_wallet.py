@@ -498,7 +498,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(c2['residualZat'], expected_residual)
         assert_greater_than(c2['residualZat'], 100000)
         rawc2 = claimant.getrawtransaction(c2['txid'], 1)
-        assert_equal(len(rawc2['vShieldedOutput']), 1)
+        assert_equal(len(rawc2['vShieldedOutput']), 2)   # 6.20.0: the Sapling builder pads a bundle to two outputs (one dummy)
         residual_out = [o for o in rawc2['vout'] if o['scriptPubKey'].get('addresses') == [owner_t]]
         assert_equal(len(residual_out), 1)
         assert_equal(residual_out[0]['valueZat'], c2['residualZat'])

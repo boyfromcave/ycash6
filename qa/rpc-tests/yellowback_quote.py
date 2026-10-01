@@ -59,6 +59,7 @@ path = "price"
 
 
 class YellowbackQuoteTest(YellowbackTestFramework):
+    mock_clock = True   # 6.20.0: advance_clock needs nodes started on a fixed mock clock
 
     def __init__(self):
         super().__init__()

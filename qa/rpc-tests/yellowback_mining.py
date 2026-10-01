@@ -21,6 +21,7 @@ from test_framework.util import (
     sync_mempools,
 )
 from test_framework.yellowback_util import (
+    unlock_all,
     POOLS,
     PRICE_MAX,
     REF_LAG,
@@ -44,11 +45,13 @@ from test_framework.yellowback_util import (
     ym,
 )
 
-# The v4.5.0 getblocktemplate key set (ref/ycash/src/rpc/mining.cpp:754-781 with coinbasetxn = true).
+# The stock getblocktemplate key set of the baseline (ycashd 6.20.0, coinbasetxn = true): v4.5.0's
+# (ref/ycash/src/rpc/mining.cpp:754-781) plus 6.20.0's blockcommitmentshash and defaultroots
+# (ref/ycash6/src/rpc/mining.cpp:797-815; the old hash names stay under the default-allowed gbt_oldhashes).
 V450_GBT_KEYS = sorted([
     'capabilities', 'version', 'previousblockhash', 'lightclientroothash', 'finalsaplingroothash',
     'transactions', 'coinbasetxn', 'longpollid', 'target', 'mintime', 'mutable', 'noncerange',
-    'sigoplimit', 'sizelimit', 'curtime', 'bits', 'height',
+    'sigoplimit', 'sizelimit', 'curtime', 'bits', 'height', 'blockcommitmentshash', 'defaultroots',
 ])
 V450_MUTABLE = ['time', 'transactions', 'prevblock']
 PRICE = 2_000_000       # $2.00
@@ -87,6 +90,7 @@ def wait_for_mempool(node, txid, present=True, timeout=10):
 
 
 class YellowbackMiningTest(YellowbackTestFramework):
+    mock_clock = True   # 6.20.0: advance_clock needs nodes started on a fixed mock clock
     """# Rule: MINER-1 MINER-2 MINER-3 TPL-1 TPL-2 MP-1 TAG-1 TAG-2 TAG-4 TX-0 UNDO RED-2 RED-3 FEE-2 XFER-2"""
 
     initial_blocks = 220     # node 0 funds four hand-built mints of ~250 YEC each (2 YEC/USD, class A 500 %)
@@ -104,7 +108,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
 
     def start_custom(self, i, args):
         """Start node ``i`` (stopped) with ``args`` instead of its role arguments; reconnect."""
-        self.nodes[i] = start_node(i, self.options.tmpdir, args, binary=self.node_binaries()[i])
+        self.nodes[i] = start_node(i, self.options.tmpdir, args + self.clock_args(), binary=self.node_binaries()[i])
         if self.mock_time is not None:
             self.nodes[i].setmocktime(self.mock_time)
         self.reconnect(i)
@@ -462,7 +466,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(info['verdict'], 'burned')
         assert_equal(info['burned'], 6_000)
         assert_equal(info['yedOut'], 4_000)
-        user.lockunspent(True)
+        unlock_all(user)   # 6.20.0: lockunspent needs both arguments
         self.checkpoint('consensus template mined')
 
     def tpl1_template_includes_chained_mint_transfer(self):
@@ -492,7 +496,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(info['verdict'], 'ok')
         assert_equal(info['yedOut'], CENTS)
         assert_equal(info['burned'], 0)
-        user.lockunspent(True)
+        unlock_all(user)   # 6.20.0: lockunspent needs both arguments
         self.checkpoint('chained mint + transfer')
 
     def redeem_payload(self, ref, fee_vout=1):
