@@ -367,6 +367,9 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
  * Is the carrier a confirmed unspent coin that the wallet, too, has seen in a block? Both are
  * needed: the block connects before the notifier thread tells the wallet, and until then the
  * carrier's own funding input still looks unspent to AvailableCoins (its spender has depth -1).
+ * A carrier funded from a Sapling address also needs its change note witnessed: the notifier
+ * syncs the block's transactions (depth 1) before ChainTip increments the witnesses, and the
+ * main transaction spends that note (6.20.0 widens the window between the two; mapping §19).
  */
 bool CarrierConfirmed(const COutPoint& out)
 {
@@ -374,7 +377,12 @@ bool CarrierConfirmed(const COutPoint& out)
     const CCoins* c = pcoinsTip->AccessCoins(out.hash);
     if (!(c && c->IsAvailable(out.n))) return false;
     std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(out.hash);
-    return it == pwalletMain->mapWallet.end() || it->second.GetDepthInMainChain(std::nullopt) >= 1;
+    if (it == pwalletMain->mapWallet.end()) return true;
+    if (it->second.GetDepthInMainChain(std::nullopt) < 1) return false;
+    for (const auto& nd : it->second.mapSaplingNoteData) {
+        if (nd.second.witnesses.empty()) return false;
+    }
+    return true;
 }
 
 /** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600). */
