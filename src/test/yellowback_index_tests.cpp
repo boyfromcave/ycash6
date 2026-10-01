@@ -775,7 +775,7 @@ BOOST_FIXTURE_TEST_CASE(check_reverify, TestChain100Setup)
         CBlock block;
         BOOST_REQUIRE(ReadBlockFromDisk(block, tip, ::Params().GetConsensus()));
         BOOST_CHECK(index.UndoDisconnect(tip));
-        BOOST_CHECK_EQUAL(index.TipHeight(), 99);
+        BOOST_CHECK_EQUAL(TipHeightOf(index), 99);
         // A block whose parent is the tip but which is not in chainActive[100]'s slot: a fake sibling entry.
         CBlockIndex sibling = *tip;
         sibling.phashBlock = tip->phashBlock;
@@ -1414,15 +1414,18 @@ BOOST_AUTO_TEST_CASE(tpl3_template_fault_keeps_block_invalid_spend)
     const CTransaction tx(s);
 
     {   // TPL-1: skipped, and the overlay is not advanced
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = live.index->TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, tx, h));
     }
     BOOST_REQUIRE(!live.index->SetTestFault("template").has_value());
     {   // the fault keeps it
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = live.index->TemplateView();
         BOOST_CHECK(policy::FilterTemplate(view, tx, h));
     }
     {   // one shot only: the next candidate is skipped again
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = live.index->TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, tx, h));
     }
@@ -1757,14 +1760,17 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     CMutableTransaction diverged = b.MintV3(10000, R0, 100000);                      // attestors at 2x the pools
     CMutableTransaction good = b.MintV3(10000, R0, 50000);
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(noBundle), live.Tip() + 1));
     }
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(diverged), live.Tip() + 1));
     }
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(policy::FilterTemplate(view, CTransaction(good), live.Tip() + 1));
     }
@@ -1777,10 +1783,12 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     CMutableTransaction healthyNotice = b.NoticeTx(vault, R1, b.BundleFor(R1, selector, 50000));
     CMutableTransaction notice = b.NoticeTx(vault, R1, b.BundleFor(R1, selector, 10000));
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(healthyNotice), live.Tip() + 1));
     }
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(policy::FilterTemplate(view, CTransaction(notice), live.Tip() + 1));
     }
@@ -1795,6 +1803,7 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     // A second notice while one stands is not registered (the reset attack) and is skipped by TPL-2.
     {
         const int R2 = live.Tip() - 1;
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
     }
@@ -1813,10 +1822,12 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     BOOST_CHECK_EQUAL(index.MempoolCheckReason(CTransaction(shortResidual)).value_or("admitted"), "red5-residual");
     BOOST_CHECK_EQUAL(index.MempoolCheckReason(CTransaction(withResidual)).value_or("admitted"), "admitted");
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(noResidual), live.Tip() + 1));
     }
     {
+        LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
         BOOST_CHECK(policy::FilterTemplate(view, CTransaction(withResidual), live.Tip() + 1));
     }
