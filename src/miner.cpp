@@ -36,6 +36,7 @@
 #include "util/moneystr.h"
 #include "validationinterface.h"
 #include "zip317.h"
+#include "yellowback/policy.h"
 
 #include <librustzcash.h>
 #include <rust/bridge.h>
@@ -285,7 +286,7 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
             AddOutputsToCoinbaseTxAndSign(mtx, chainparams, nHeight, nFees),
             minerAddress);
 
-        mtx.vin[0].scriptSig = CScript() << nHeight << OP_0;
+        mtx.vin[0].scriptSig = (CScript() << nHeight << OP_0) + COINBASE_FLAGS;
         return mtx;
 }
 
@@ -348,6 +349,9 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(
     blockFinished = blockFinished || next_cb_mtx;
 
     LOCK2(cs_main, mempool.cs);
+    COINBASE_FLAGS = yellowback::g_yellowback ? yellowback::policy::TagScript(*yellowback::g_yellowback) : CScript();
+    std::optional<yellowback::TemplateView> ybviewHolder;   // holds cs_yellowback until this frame ends, before LOCK2's release
+    if (yellowback::g_yellowback) ybview = &ybviewHolder.emplace(yellowback::g_yellowback->TemplateView());
     CBlockIndex* pindexPrev = chainActive.Tip();
     nHeight = pindexPrev->nHeight + 1;
     uint32_t consensusBranchId = CurrentEpochBranchId(nHeight, chainparams.GetConsensus());
@@ -537,6 +541,9 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     // Must check that expiry heights are still valid.
     if (IsExpiredTx(iter->GetTx(), nHeight))
         return false;
+
+    // Yellowback TPL-1/2, last refusal before AddToBlock (only a turnstile violation follows, mapping §19)
+    if (ybview && !yellowback::policy::FilterTemplate(*ybview, iter->GetTx(), nHeight)) return false;
 
     if (chainparams.ZIP209Enabled()) {
         // Does this transaction lead to a turnstile violation?
@@ -906,7 +913,10 @@ void static BitcoinMiner(const CChainParams& chainparams)
                 return;
             }
             CBlock *pblock = &pblocktemplate->block;
-            IncrementExtraNonce(pblocktemplate.get(), pindexPrev, nExtraNonce, chainparams.GetConsensus());
+            {
+                LOCK(cs_main);   // K17: COINBASE_FLAGS is assigned under cs_main
+                IncrementExtraNonce(pblocktemplate.get(), pindexPrev, nExtraNonce, chainparams.GetConsensus());
+            }
 
             LogPrintf("Running ZcashMiner with %u transactions in block (%u bytes)\n", pblock->vtx.size(),
                 ::GetSerializeSize(*pblock, SER_NETWORK, PROTOCOL_VERSION));

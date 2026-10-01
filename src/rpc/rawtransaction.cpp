@@ -16,6 +16,9 @@
 #include "net.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
+#ifdef ENABLE_WALLET
+#include "yellowback/wallet.h"
+#endif
 #include "rpc/server.h"
 #include "script/script.h"
 #include "script/script_error.h"
@@ -1248,14 +1251,17 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
 
 UniValue sendrawtransaction(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 2)
+    if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
-            "sendrawtransaction \"hexstring\" ( allowhighfees )\n"
+            "sendrawtransaction \"hexstring\" ( allowhighfees allowyedburn )\n"
             "\nSubmits raw transaction (serialized, hex-encoded) to local node and network.\n"
             "\nAlso see createrawtransaction and signrawtransaction calls.\n"
             "\nArguments:\n"
             "1. \"hexstring\"    (string, required) The hex string of the raw transaction)\n"
             "2. allowhighfees    (boolean, optional, default=false) Allow high fees\n"
+            "3. allowyedburn     (boolean, optional, default=false) With -yellowback: allow a transaction that spends a\n"
+            "                    YED output of this wallet without a payload reassigning it. Such a transaction destroys\n"
+            "                    the YED; without this flag it is refused (yed-burn-refused).\n"
             "\nResult:\n"
             "\"hex\"             (string) The transaction hash in hex\n"
             "\nExamples:\n"
@@ -1270,7 +1276,7 @@ UniValue sendrawtransaction(const UniValue& params, bool fHelp)
         );
 
     LOCK(cs_main);
-    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR)(UniValue::VBOOL));
+    RPCTypeCheck(params, boost::assign::list_of(UniValue::VSTR)(UniValue::VBOOL)(UniValue::VBOOL));
 
     // parse hex string from parameter
     CTransaction tx;
@@ -1299,6 +1305,20 @@ UniValue sendrawtransaction(const UniValue& params, bool fHelp)
     bool fOverrideFees = false;
     if (params.size() > 1)
         fOverrideFees = params[1].get_bool();
+
+#ifdef ENABLE_WALLET
+    // H7: with -yellowback, guard the wallet's own YED. A raw transaction that spends a Tokens
+    // outpoint that is mine and carries no payload assigning cents to an output destroys that YED
+    // (XFER-1 assigns nothing, so the state machine burns it); refuse unless the caller says so.
+    // Wallet tier: nothing here changes what any node accepts, only what this RPC will submit.
+    if (!(params.size() > 2 && params[2].get_bool())) {
+        std::string burns;
+        if (yellowback::YedBurnedByRawTransaction(tx, burns)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "yed-burn-refused: " + burns +
+                               " Pass allowyedburn = true to send it anyway.");
+        }
+    }
+#endif
 
     CCoinsViewCache &view = *pcoinsTip;
     const CCoins* existingCoins = view.AccessCoins(hashTx);

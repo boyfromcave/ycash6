@@ -42,6 +42,10 @@
 #include "util/system.h"
 #include "util/moneystr.h"
 #include "validationinterface.h"
+#include "yellowback/index.h"
+#ifdef ENABLE_WALLET
+#include "yellowback/wallet.h"
+#endif
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -204,6 +208,12 @@ void Shutdown()
     StopREST();
     StopRPC();
     StopHTTPServer();
+    // Yellowback (plan D2): unregister, then stop and flush under cs_yellowback; never deleted here.
+    if (yellowback::g_yellowback) {
+        UnregisterValidationInterface(yellowback::g_yellowback);
+        yellowback::g_yellowback->Stop();
+        yellowback::g_yellowback->Flush(true);
+    }
 #ifdef ENABLE_WALLET
     if (pwalletMain)
         pwalletMain->Flush(false);
@@ -390,6 +400,30 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     strUsage += HelpMessageOpt("-txexpirynotify=<cmd>", _("Execute command when transaction expires (%s in cmd is replaced by transaction id)"));
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
+    strUsage += HelpMessageOpt("-yellowback", _("Enable the Yellowback overlay index and yed_* RPCs (requires -experimentalfeatures; incompatible with -prune)"));
+    strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
+    strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
+    strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
+    strUsage += HelpMessageOpt("-yellowbackenforce", _("Reject blocks whose vault spends break the Yellowback rules once activation has occurred (default: 1; 0 keeps the tag and the template filter only)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for enforcement fees (default: -mineraddress when that is a transparent P2PKH address)"));
+    strUsage += HelpMessageOpt("-yellowbacksignal", _("Set the activation signal bit in the coinbase tag (default: 1 on testnet and regtest, 0 on mainnet; effective only with -yellowbackenforce=1)"));
+    strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
+    strUsage += HelpMessageOpt("-yellowbacktemplatepolicy=<policy>", _("Template filter mode: strict (default) or consensus"));
+    strUsage += HelpMessageOpt("-yellowbackrequirehealthy", _("Refuse getblocktemplate while the Yellowback index is unhealthy (default: 0)"));
+    strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays enforcement fees to when it is eligible"));
+    strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
+    strUsage += HelpMessageOpt("-yellowbackpayeeaccuracywindow=<n>", _("Wallet payee policy: accuracy window in blocks (default: the network's ACCURACY_WINDOW)"));
+    strUsage += HelpMessageOpt("-yellowbackpayeetiltbps=<bps>", _("Wallet payee policy: accuracy weighting tilt in bps (default: the network's PAYEE_TILT_BPS)"));
+    strUsage += HelpMessageOpt("-yellowbackpreferredattestor=<seq>", _("Attestor seq the wallet pays attestation fees to when it is in the bundle (AFEE-W)"));
+    if (showDebug) {
+        strUsage += HelpMessageOpt("-yellowbackstartheight=<h>", "Yellowback start height (regtest only; required with -yellowback)");
+        strUsage += HelpMessageOpt("-yellowbacksigmaref=<bps>", "Yellowback SIGMA_REF_BPS override, 0 = multiplier fixed at 1 (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacksupplycapbps=<bps>", "Yellowback supply cap as bps of market cap, 0 = none (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbackenforceuntil=<h>", "Yellowback enforcement sunset height, 0 = none (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
+        strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], template, novalve or schema (regtest only)");
+    }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
     strUsage += HelpMessageOpt("-addnode=<ip>", _("Add a node to connect to and attempt to keep the connection open"));
@@ -475,7 +509,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-regtestenablezip209", "Enable ZIP 209 turnstile enforcement on regtest without zeroing shielded pool balances (regtest-only)");
     }
     std::string debugCategories = "addrman, antispam, bench, coindb, db, deletetx, http, libevent, lock, mempool, mempoolrej, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, valuepool, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, valuepool, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ". " +
         _("For multiple specific categories use -debug=<category> multiple times."));
@@ -1237,11 +1271,83 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         fPruneMode = true;
     }
 
+    // Yellowback overlay (plan §4.3, §4.5): the index rebuilds from blocks on disk, so it refuses
+    // -prune; the flat fee may not go below DEFAULT_FEE; the regtest parameter flags and the test
+    // fault are regtest-only; the payout and payee addresses must be P2PKH (K22).
+    // H6 (Phase 8): a datadir that already holds a Yellowback index must not be started without
+    // -yellowback — the wallet's YED outputs would be unlocked and an ordinary sendtoaddress could
+    // burn them. -yellowback=0 given explicitly is the acknowledgement and starts normally.
+    // -disablewallet cannot burn anything, so it is exempt.
+    if (!fExperimentalYellowback && !GetBoolArg("-disablewallet", false) && !mapArgs.count("-yellowback") &&
+        boost::filesystem::exists(GetDataDir() / "yellowback")) {
+        return InitError(_("This datadir holds a Yellowback index, so this wallet may hold YED. "
+                           "Start with -experimentalfeatures -yellowback to keep those outputs locked, "
+                           "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
+    }
+    if (!fExperimentalYellowback && mapArgs.count("-yellowback") && !GetBoolArg("-yellowback", false) &&
+        boost::filesystem::exists(GetDataDir() / "yellowback")) {
+        LogPrintf("Yellowback: -yellowback=0 with an index present — any YED outputs in this wallet are spendable as plain YEC (H6).\n");
+    }
+    if (fExperimentalYellowback) {
+        if (fPruneMode) {
+            return InitError(_("-yellowback is incompatible with -prune."));
+        }
+        if (mapArgs.count("-yellowbacktestfault") && chainparams.NetworkIDString() != "regtest") {
+            return InitError(_("-yellowbacktestfault is regtest-only."));
+        }
+        {
+            KeyIO yellowbackKeyIO(chainparams);
+            for (const char* opt : { "-yellowbackpayoutaddress", "-yellowbackpreferredpayee" }) {
+                if (!mapArgs.count(opt)) continue;
+                CTxDestination dest = yellowbackKeyIO.DecodeDestination(mapArgs[opt]);
+                if (!std::get_if<CKeyID>(&dest)) {
+                    return InitError(strprintf(_("%s must be a transparent P2PKH address: '%s'"), opt, mapArgs[opt]));
+                }
+            }
+            const std::string policy = GetArg("-yellowbacktemplatepolicy", "strict");
+            if (policy != "strict" && policy != "consensus") {
+                return InitError(_("-yellowbacktemplatepolicy must be strict or consensus."));
+            }
+            if (GetArg("-yellowbackquotemaxage", 1800) < 0) return InitError(_("-yellowbackquotemaxage must be >= 0."));
+            if (GetArg("-yellowbackpayeepenaltyblocks", 0) < 0 || GetArg("-yellowbackpayeeaccuracywindow", 0) < 0 || GetArg("-yellowbackpayeetiltbps", 0) < 0) {
+                return InitError(_("The -yellowbackpayee* overrides must be >= 0."));
+            }
+            if (mapArgs.count("-yellowbackpreferredattestor") && (GetArg("-yellowbackpreferredattestor", -1) < 0 || GetArg("-yellowbackpreferredattestor", 0) > 0xFFFF)) {
+                return InitError(_("-yellowbackpreferredattestor must be a seq between 0 and 65535."));
+            }
+        }
+        yellowback::g_yellowbackFee = GetArg("-yellowbackfee", yellowback::DEFAULT_YELLOWBACK_FEE);
+        if (yellowback::g_yellowbackFee < yellowback::DEFAULT_YELLOWBACK_FEE) {
+            return InitError(strprintf(_("-yellowbackfee must be at least %d zatoshi."), yellowback::DEFAULT_YELLOWBACK_FEE));
+        }
+        yellowback::g_yellowbackMintLag = GetArg("-yellowbackmintlag", yellowback::DEFAULT_REF_LAG);
+        if (yellowback::g_yellowbackMintLag < 0 || yellowback::g_yellowbackMintLag > yellowback::MAX_REF_LAG) {
+            return InitError(strprintf(_("-yellowbackmintlag must be between 0 and %d."), yellowback::MAX_REF_LAG));
+        }
+        yellowback::Params yellowbackParams;
+        auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), yellowbackParams);
+        if (yellowbackErr.has_value()) {
+            return InitError(yellowbackErr.value());
+        }
+        if (!yellowbackParams.IsConfigured()) {
+            return InitError(_("Yellowback has no start height for this network yet."));
+        }
+    } else if (mapArgs.count("-yellowbackstartheight") || mapArgs.count("-yellowbacksigmaref") || mapArgs.count("-yellowbacksupplycapbps") || mapArgs.count("-yellowbackenforceuntil") || mapArgs.count("-reindex-yellowback") ||
+               mapArgs.count("-yellowbackattestarmmin") || mapArgs.count("-yellowbackbundlecarrier") ||
+               mapArgs.count("-yellowbackenforce") || mapArgs.count("-yellowbackpayoutaddress") || mapArgs.count("-yellowbacksignal") || mapArgs.count("-yellowbacktestfault")) {
+        return InitError(_("Yellowback options require -yellowback."));
+    }
+
+
     RegisterAllCoreRPCCommands(tableRPC);
 #ifdef ENABLE_WALLET
     bool fDisableWallet = GetBoolArg("-disablewallet", false);
-    if (!fDisableWallet)
+    if (!fDisableWallet) {
         RegisterWalletRPCCommands(tableRPC);
+        // as for the node-context commands (rpc/yellowback.cpp): a node without -yellowback
+        // shows the baseline RPC surface exactly (plan section 8.3)
+        if (fExperimentalYellowback) RegisterYellowbackWalletRPCCommands(tableRPC);
+    }
 #endif
 
     nConnectTimeout = GetArg("-timeout", DEFAULT_CONNECT_TIMEOUT);
@@ -2075,6 +2181,86 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         GetMainSignals().AddressForMining.connect(GetMinerAddress);
     }
 #endif // ENABLE_MINING
+
+    // Yellowback index (plan §4.3, V2): constructed after RewindBlockIndex and VerifyDB have run
+    // (neither touches it), synced to chainActive, configured, then the kill-switch loop, all
+    // before the notifier thread (Step 8) and ThreadImport (Step 10). The ConnectBlock /
+    // DisconnectBlock hooks in main.cpp keep it at the tip from here on; the subscriber below
+    // only reconciles wallet coin locks.
+    if (fExperimentalYellowback) {
+        yellowback::Params yellowbackParams;
+        yellowback::ParamsFromArgs(chainparams.NetworkIDString(), yellowbackParams); // validated in step 3
+        yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
+        {
+            // MINER-1..3, V13, L4, L6 (validated in step 3).
+            KeyIO yellowbackKeyIO(chainparams);
+            yellowback::MinerConfig cfg;
+            std::string payout = GetArg("-yellowbackpayoutaddress", "");
+            if (payout.empty() && mapArgs.count("-mineraddress")) payout = mapArgs["-mineraddress"];   // MINER-2's default (K22)
+            if (!payout.empty()) {
+                CTxDestination dest = yellowbackKeyIO.DecodeDestination(payout);
+                if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) cfg.payoutKey = *keyID;
+            }
+            cfg.enforce = GetBoolArg("-yellowbackenforce", true);
+            cfg.signal = GetBoolArg("-yellowbacksignal", chainparams.NetworkIDString() != "main");
+            cfg.quoteMaxAge = GetArg("-yellowbackquotemaxage", 1800);
+            cfg.templatePolicy = GetArg("-yellowbacktemplatepolicy", "strict");
+            cfg.requireHealthy = GetBoolArg("-yellowbackrequirehealthy", false);
+            yellowback::g_yellowback->SetMinerConfig(cfg);
+            yellowback::PayeePolicy pp = yellowback::PayeePolicy::Defaults(yellowbackParams);
+            pp.penaltyBlocks = GetArg("-yellowbackpayeepenaltyblocks", pp.penaltyBlocks);
+            pp.accuracyWindow = GetArg("-yellowbackpayeeaccuracywindow", pp.accuracyWindow);
+            pp.tiltBps = GetArg("-yellowbackpayeetiltbps", pp.tiltBps);
+            if (mapArgs.count("-yellowbackpreferredpayee")) {
+                CTxDestination dest = yellowbackKeyIO.DecodeDestination(mapArgs["-yellowbackpreferredpayee"]);
+                if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) pp.preferred = *keyID;
+            }
+            yellowback::g_yellowback->SetPayeePolicy(pp);
+            if (mapArgs.count("-yellowbackpreferredattestor")) {          // AFEE-W (validated in step 3)
+                yellowback::AttestPolicy ap;
+                ap.preferred = (uint16_t)GetArg("-yellowbackpreferredattestor", 0);
+                yellowback::g_yellowback->SetAttestPolicy(ap);
+            }
+            if (mapArgs.count("-yellowbacktestfault")) {
+                auto faultErr = yellowback::g_yellowback->SetTestFault(mapArgs["-yellowbacktestfault"]);
+                if (faultErr.has_value()) return InitError(faultErr.value());
+            }
+            LogPrintf("yellowback: enforce=%d signal=%d payout=%s policy=%s\n", cfg.enforce, cfg.signal,
+                      cfg.payoutKey.has_value() ? yellowbackKeyIO.EncodeDestination(CTxDestination(cfg.payoutKey.value())) : std::string("none"), cfg.templatePolicy);
+        }
+        if (!yellowback::g_yellowback->SyncToChain()) {
+            LogPrintf("yellowback: index is unhealthy at startup: %s\n", yellowback::g_yellowback->UnhealthyReason());
+        }
+        // The kill switch (V13 iii, K21): with enforcement off, un-reject every recorded block under
+        // one LOCK(cs_main), then ActivateBestChain outside it (the reconsiderblock RPC's pattern),
+        // then clear Rejected. Skipped on a null tip or an empty Rejected.
+        if (!yellowback::g_yellowback->EnforceFlag() && yellowback::g_yellowback->RejectedCount() > 0 && chainActive.Tip() != nullptr) {
+            CValidationState ybState;
+            {
+                LOCK(cs_main);
+                for (const uint256& hash : yellowback::g_yellowback->RejectedHashes()) {
+                    BlockMap::iterator mi = mapBlockIndex.find(hash);
+                    if (mi == mapBlockIndex.end()) {
+                        LogPrintf("yellowback: kill switch: rejected block %s is not in the block index; skipped\n", hash.ToString());
+                        continue;
+                    }
+                    ReconsiderBlock(ybState, mi->second);
+                    LogPrintf("yellowback: kill switch: reconsidered %s\n", hash.ToString());
+                }
+            }
+            if (ybState.IsValid()) ActivateBestChain(ybState, chainparams);
+            yellowback::g_yellowback->ClearRejected();
+        }
+        RegisterValidationInterface(yellowback::g_yellowback);
+#ifdef ENABLE_WALLET
+        if (pwalletMain) {
+            yellowback::g_yellowbackWallet = new yellowback::YellowbackWallet(pwalletMain, yellowback::g_yellowback);
+            yellowback::g_yellowbackWallet->Attach();
+            yellowback::g_yellowbackWallet->Reconcile(); // stage (iii) at startup: re-lock every YED output that is mine
+        }
+#endif
+    }
+
 
     // Spawn a thread that will wait for the chain state needed for
     // ThreadNotifyWallets to become available.

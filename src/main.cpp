@@ -37,6 +37,7 @@
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
 #include "warnings.h"
+#include "yellowback/index.h"
 #include "zip317.h"
 
 #include <algorithm>
@@ -1887,6 +1888,8 @@ bool AcceptToMemoryPool(
 
         // we have all inputs cached now, so switch back to dummy
         view.SetBackend(dummy);
+        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
+            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
 
         // Check for non-standard pay-to-script-hash in inputs
         try {
@@ -3155,6 +3158,7 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
             return DISCONNECT_FAILED;
         }
     }
+    if (updateIndices && yellowback::g_yellowback) yellowback::g_yellowback->UndoDisconnect(pindex);
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
 }
 
@@ -4040,6 +4044,9 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime2 = GetTimeMicros(); nTimeVerify += nTime2 - nTimeStart;
     LogPrint("bench", "    - Verify %u txins: %.2fms (%.3fms/txin) [%.2fs]\n", nInputs - 1, 0.001 * (nTime2 - nTimeStart), nInputs <= 1 ? 0 : 0.001 * (nTime2 - nTimeStart) / (nInputs-1), nTimeVerify * 0.000001);
 
+    if (yellowback::g_yellowback) {
+        if (auto ybBad = yellowback::g_yellowback->CheckConnect(block, pindex, fJustCheck)) return state.DoS(0, error("ConnectBlock(): %s", ybBad->c_str()), REJECT_INVALID, "yellowback-vault-spend");
+    }
     if (fJustCheck)
         return true;
 
@@ -4113,6 +4120,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     // add this block to the view's block chain
     view.SetBestBlock(pindex->GetBlockHash());
+    if (yellowback::g_yellowback) yellowback::g_yellowback->CommitConnect(block, pindex);
 
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;
     LogPrint("bench", "    - Index writing: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeIndex * 0.000001);
@@ -4515,6 +4523,7 @@ bool static ConnectTip(CValidationState& state, const CChainParams& chainparams,
 
     // Remove transactions that expire at new block height from mempool
     auto ids = mempool.removeExpired(pindexNew->nHeight);
+    if (yellowback::g_yellowback) yellowback::g_yellowback->RemoveInvalidVaultSpends(mempool);
 
     for (auto id : ids) {
         uiInterface.NotifyTxExpiration(id);
@@ -5964,6 +5973,8 @@ static bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state
     // Get prev block index
     CBlockIndex* pindexPrev = NULL;
     if (hash != chainparams.GetConsensus().hashGenesisBlock) {
+        if (yellowback::g_yellowback && yellowback::g_yellowback->NoteHeaderOnRejectedChain(block))
+            return state.DoS(0, error("%s: descends from a Yellowback-rejected block", __func__), REJECT_INVALID, "bad-prevblk-yellowback", BodyCorruption::HeaderOnly);
         BlockMap::iterator mi = mapBlockIndex.find(block.hashPrevBlock);
         if (mi == mapBlockIndex.end())
             return state.DoS(10, error("%s: prev block not found", __func__), 0, "bad-prevblk", BodyCorruption::HeaderOnly);

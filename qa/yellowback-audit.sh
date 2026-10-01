@@ -18,4 +18,6 @@ for f in src/main.cpp:40 src/miner.cpp:35 src/miner.h:10 src/rpc/mining.cpp:35 s
   printf '%-22s %3d changed lines (budget %d)\n' "$p" "$n" "$b"
   [ "$n" -le "$b" ] || rc=1
 done
+# S1: every registered yed_* RPC has an exact-arity rpcCvtTable row (the server rejects it otherwise)
+../.venv/bin/python qa/yellowback-rpc-cvt.py --check 2>/dev/null || python3 qa/yellowback-rpc-cvt.py --check || rc=1
 exit $rc

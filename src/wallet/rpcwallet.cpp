@@ -30,6 +30,7 @@
 #include "wallet.h"
 #include "walletdb.h"
 #include "primitives/transaction.h"
+#include "yellowback/wallet.h"
 #include "zcbenchmarks.h"
 #include "script/interpreter.h"
 #include "zcash/Zcash.h"
@@ -2798,6 +2799,9 @@ UniValue lockunspent(const UniValue& params, bool fHelp)
             "\nUpdates list of temporarily unspendable outputs.\n"
             "Temporarily lock (unlock=false) or unlock (unlock=true) specified transparent transaction outputs.\n"
             "A locked transaction output will not be chosen by automatic coin selection, when spending Ycash.\n"
+            "With -yellowback, an outpoint the Yellowback wallet layer holds cannot be unlocked here (yed-locked-outpoint):\n"
+            "spending it outside the overlay would burn its YED. Use yed_unlockcoin for that, deliberately. Unlocking\n"
+            "everything (lockunspent true, with no second argument) still works and re-applies the Yellowback locks.\n"
             "Locks are stored in memory only. Nodes start with zero locked outputs, and the locked output list\n"
             "is always cleared (by virtue of process exit) when a node stops or fails.\n"
             "Also see the listunspent call\n"
@@ -2838,12 +2842,16 @@ UniValue lockunspent(const UniValue& params, bool fHelp)
     bool fUnlock = params[0].get_bool();
 
     if (params.size() == 1) {
-        if (fUnlock)
+        if (fUnlock) {
             pwalletMain->UnlockAllCoins();
+            // H5: never leave YED spendable as plain YEC — re-apply the overlay's own locks.
+            if (yellowback::g_yellowbackWallet) yellowback::g_yellowbackWallet->ReapplyLocks();
+        }
         return true;
     }
 
     UniValue outputs = params[1].get_array();
+    std::vector<COutPoint> outpoints;
     for (size_t idx = 0; idx < outputs.size(); idx++) {
         const UniValue& output = outputs[idx];
         if (!output.isObject())
@@ -2862,6 +2870,18 @@ UniValue lockunspent(const UniValue& params, bool fHelp)
 
         COutPoint outpt(uint256S(txid), nOutput);
 
+        // H5: a Yellowback-held outpoint is not *unlockable* here, and a call naming one applies
+        // nothing at all (the loop is checked before any lock is touched below). Only unlocking is
+        // guarded: unlocking would expose the coin to automatic selection and burn its YED, while
+        // locking one is harmless and is what the overlay itself does, so fUnlock gates the check.
+        if (fUnlock && yellowback::g_yellowbackWallet && yellowback::g_yellowbackWallet->IsYellowbackLocked(outpt)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "yed-locked-outpoint: " + outpt.ToString() +
+                               " holds YED; spending it outside the overlay would burn it. Use"
+                               " yed_unlockcoin \"<txid>\" <n> \"I understand this burns YED\" to release it deliberately.");
+        }
+        outpoints.push_back(outpt);
+    }
+    for (COutPoint& outpt : outpoints) {
         if (fUnlock)
             pwalletMain->UnlockCoin(outpt);
         else

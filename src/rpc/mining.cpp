@@ -30,6 +30,7 @@
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #endif
+#include "yellowback/index.h"
 
 #include <stdint.h>
 #include <variant>
@@ -516,6 +517,9 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
 
     LOCK(cs_main);
 
+    if (yellowback::g_yellowback && yellowback::g_yellowback->GetMinerConfig().requireHealthy && !yellowback::g_yellowback->IsHealthy())
+        throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; -yellowbackrequirehealthy refuses templates until -reindex-yellowback");
+
     // Wallet or miner address is required because we support coinbasetxn
     if (GetArg("-mineraddress", "").empty()) {
 #ifdef ENABLE_WALLET
@@ -788,6 +792,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
         aMutable.push_back("time");
         aMutable.push_back("transactions");
         aMutable.push_back("prevblock");
+        if (yellowback::g_yellowback) aMutable.push_back("coinbase/append");
     }
 
     UniValue result(UniValue::VOBJ);
@@ -817,6 +822,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     if (coinbasetxn) {
         assert(txCoinbase.isObject());
         result.pushKV("coinbasetxn", txCoinbase);
+        if (yellowback::g_yellowback) result.pushKV("coinbaseaux", aux);
     } else {
         result.pushKV("coinbaseaux", aux);
         result.pushKV("coinbasevalue", (int64_t)pblock->vtx[0].vout[0].nValue);
@@ -831,6 +837,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     result.pushKV("curtime", pblock->GetBlockTime());
     result.pushKV("bits", strprintf("%08x", pblock->nBits));
     result.pushKV("height", (int64_t)(pindexPrev->nHeight+1));
+    if (yellowback::g_yellowback) result.pushKV("yellowback", yellowback::g_yellowback->TemplateInfo(GetTime()));
 
     return result;
 }

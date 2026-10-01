@@ -22,6 +22,7 @@ class CChainParams;
 class CScript;
 
 namespace Consensus { struct Params; };
+namespace yellowback { class TemplateView; }
 
 static const bool DEFAULT_GENERATE = false;
 static const int DEFAULT_GENERATE_THREADS = 1;
@@ -127,6 +128,9 @@ private:
     int nHeight;
     int64_t nLockTimeCutoff;
     const CChainParams& chainparams;
+
+    // Yellowback (TPL-1/2): the template's overlay view; points into CreateNewBlock's frame, valid only during it
+    yellowback::TemplateView* ybview = nullptr;
 
     // Variables used for addScoreTxs and addPriorityTxs
     int lastFewTxs;

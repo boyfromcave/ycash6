@@ -18,6 +18,7 @@
 #include "util/match.h"
 #include "util/time.h"
 #include "wallet.h"
+#include "yellowback/wallet.h"
 
 #include <cerrno>
 #include <cstring>
@@ -84,6 +85,20 @@ std::string DecodeDumpString(const std::string &str) {
     return ret.str();
 }
 
+/**
+ * H8 (Phase 8): after an import and its rescan, YED that has just become mine must be locked
+ * before anything can spend it as plain YEC. Declared *before* the LOCK2 of each import RPC so
+ * that its destructor runs after cs_wallet is released — Reconcile() takes cs_yellowback and then
+ * cs_wallet, exactly as yed_lockcoins calls it, and must not be entered holding cs_wallet.
+ */
+struct YellowbackReconcileOnExit
+{
+    ~YellowbackReconcileOnExit()
+    {
+        if (yellowback::g_yellowbackWallet) yellowback::g_yellowbackWallet->Reconcile();
+    }
+};
+
 UniValue importprivkey(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -112,6 +127,7 @@ UniValue importprivkey(const UniValue& params, bool fHelp)
     if (fPruneMode)
         throw JSONRPCError(RPC_WALLET_ERROR, "Importing keys is disabled in pruned mode");
 
+    YellowbackReconcileOnExit yellowbackReconcile;   // H8: lock imported YED once the wallet lock is gone
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     EnsureWalletIsUnlocked();
@@ -243,6 +259,7 @@ UniValue importaddress(const UniValue& params, bool fHelp)
     if (params.size() > 3)
         fP2SH = params[3].get_bool();
 
+    YellowbackReconcileOnExit yellowbackReconcile;   // H8: lock imported YED once the wallet lock is gone
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     const auto& chainparams = Params();
@@ -377,6 +394,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
     if (fPruneMode)
         throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled in pruned mode");
 
+    YellowbackReconcileOnExit yellowbackReconcile;   // H8 (6.20.0 port: importwallet imports spending keys and rescans, as importprivkey does)
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     EnsureWalletIsUnlocked();
@@ -822,6 +840,7 @@ UniValue z_importkey(const UniValue& params, bool fHelp)
     if (fPruneMode)
         throw JSONRPCError(RPC_WALLET_ERROR, "Importing keys is disabled in pruned mode");
 
+    YellowbackReconcileOnExit yellowbackReconcile;   // H8: lock imported YED once the wallet lock is gone
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     EnsureWalletIsUnlocked();
