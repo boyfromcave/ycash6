@@ -41,7 +41,7 @@ from test_framework.yellowback_util import (
     REF_LAG,
     STOCK,
     TOKEN_VALUE,
-    YELLOWBACK_FEE,
+    wallet_network_fee,
     YellowbackTestFramework,
     assert_banscore_zero,
     assert_best_hash,
@@ -240,10 +240,10 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(claimed['feeZat'], payees['feeZat'])
         assert_equal(claimed['payee'], payees['default']['payoutAddress'])
         # v3: the carrier's CARRIER_VALUE joins the inputs; armed, the attestor fee leaves (clause (a): no residual)
-        assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] + CARRIER_VALUE + 2 * TOKEN_VALUE - YELLOWBACK_FEE - claimed['feeZat']
+        raw = claimant.getrawtransaction(claimed['txid'], 1)
+        assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] + CARRIER_VALUE + 2 * TOKEN_VALUE - wallet_network_fee(raw) - claimed['feeZat']
                      - claimed['attestFeeZat'] - claimed['residualZat'] - TOKEN_VALUE)
         assert_equal((claimed['claimPath'], claimed['residualZat'], claimed['pending']), ('a', 0, False))
-        raw = claimant.getrawtransaction(claimed['txid'], 1)
         assert_equal(raw['locktime'], v3_claim_height)
         assert_equal(raw['vin'][0]['txid'], mint_v3['txid'])
         assert_equal(len(raw['vin']), 4)                               # the vault, 1 YED, 100.50 YED, the carrier (never vin[0])
@@ -332,7 +332,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         unbacked_before = nodes[2].yed_getstats()['unbackedCents']
         swept = user.yed_sweep(mints['U']['txid'], SWEEP_ACK)
         assert_equal(swept['unbackedCents'], 10000)
-        assert_equal(swept['collateralOut'], vault_u['collateralZat'] - YELLOWBACK_FEE)
+        assert_equal(swept['collateralOut'], vault_u['collateralZat'] - wallet_network_fee(user.decoderawtransaction(swept['hex'])))
         assert_equal(user.decoderawtransaction(swept['hex'])['txid'], swept['txid'])
         decoded = user.decoderawtransaction(swept['hex'])
         assert_equal((len(decoded['vin']), len(decoded['vout'])), (1, 1))

@@ -230,6 +230,32 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& shape);
  */
 void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, bool ownerPath);
 
+// ---------------------------------------------------------------- P-2: the network fee under ZIP-317
+
+/** The largest signature signing can produce (a 71-byte low-S DER signature + the hashtype byte). */
+static const size_t MAX_SIG_SIZE = 72;
+
+/**
+ * P-2: the network fee of a transaction shaped like `probe` — max(-yellowbackfee, the ZIP-317
+ * conventional fee) — with `saplingSpends` spends and `saplingOutputs` outputs still to be added by
+ * the builder (padded to two outputs, as 6.20.0's Sapling builder pads them). Every input of `probe`
+ * must already carry its scriptSig or the Pending*Sig() stand-in of it, so the fee never falls short
+ * of the conventional fee of the signed transaction (it is equal unless a signature comes out
+ * shorter across a 150-byte input boundary).
+ */
+CAmount NetworkFee(const CMutableTransaction& probe, size_t saplingSpends = 0, size_t saplingOutputs = 0);
+
+/** P-2 stand-ins: the largest scriptSig a P2PKH input of `spentScript` (its key looked up in `keystore`) / the carrier `c` will carry. */
+CScript PendingP2PKHSig(const CScript& spentScript, const CKeyStore& keystore);
+CScript PendingCarrierSig(const CarrierRecord& c);
+
+/**
+ * P-2: PlanVaultSpend at the shape's own network fee — shape.networkFee is raised to the
+ * NetworkFee() of the transaction the plan describes (vault, YED inputs, then `carrier` when given;
+ * one padded Sapling output when shape.collateralScript is nullopt) and the plan rebuilt.
+ */
+VaultSpendPlan PlanPricedVaultSpend(VaultSpendShape& shape, const CKeyStore& keystore, const std::optional<CarrierRecord>& carrier);
+
 // ---------------------------------------------------------------- v3 pure pieces (§3.4, §3.5)
 
 /**
