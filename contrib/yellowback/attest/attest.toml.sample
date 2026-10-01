@@ -1,0 +1,95 @@
+# yellowback-attest configuration (plan §4.7, §5). Copy to attest.toml and edit.
+#
+#   yellowback-attest attest --conf attest.toml       # an attestor: poll, yed_signattestation, publish
+#   yellowback-attest subscribe --conf attest.toml    # beside a minting node: topic -> yed_addattestation
+#   yellowback-attest sources --conf attest.toml      # check what every source resolves to
+#   yellowback-attest check-config --conf attest.toml
+#
+# The agent holds no key. `attest` asks its own node to sign (`yed_signattestation`, RPC-auth
+# only) and publishes the returned 74 bytes; `subscribe` pushes what it hears into its own
+# node's pool. Nothing inbound: no listening socket, no TLS server, no domain.
+
+[node]
+rpc_url = "http://127.0.0.1:8832"
+# Either the node's cookie file (re-read on every call) ...
+rpc_cookie = "~/.ycash/.cookie"
+# ... or rpcuser / rpcpassword from ycash.conf (not both):
+# rpc_user = "ycashrpc"
+# rpc_password = "change-me"
+# rpc_timeout = 30
+
+[attest]
+seq = 0                  # REQUIRED for `attest`: your registration sequence number (yed_listattestors after yed_registerattestor)
+every_blocks = 10        # sign every N new blocks (regtest devnet: 4)
+fail_polls = 2           # after this many consecutive failed aggregates at a due tick: publish nothing until a good one (L5)
+ref_lag = 2              # citedHeight = tip - ref_lag
+poll_seconds = 15        # yed_getinfo cadence; the sources are polled at the same cadence to fill the window
+# The aggregator's settings, as the quote agent's [quote] table:
+twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
+min_sources = 3          # live sources needed after the outlier filter (fail closed below)
+min_venues = 2           # distinct venues among them
+min_btc_sources = 2      # live BTC/USD references before a BTC-quoted pair is converted
+outlier_bps = 1000       # sources more than 10 % from the median are dropped
+# silence_seconds = 120  # a source with no sample this long is dropped from the median
+# fetch_timeout = 15
+
+# [[sources]] rows are exactly the quote agent's (contrib/yellowback/pool/yellowback-quote.toml.sample
+# documents every field). Presets: coingecko_simple, coingecko_ticker, nonkyc_market, peatio_ticker,
+# kraken_ticker, coinbase_ticker, generic.
+
+[[sources]]
+name = "coingecko"
+kind = "coingecko_simple"        # CoinGecko's aggregate YEC/USD
+max_age = 900
+# api_key = "..."                # optional demo key
+
+[[sources]]
+name = "safetrade"
+kind = "coingecko_ticker"        # SafeTrade's YEC/USDT as CoinGecko reports it
+market = "safe_trade"
+target = "USDT"
+max_age = 3600
+max_spread_bps = 2000
+
+[[sources]]
+name = "nonkyc"
+kind = "nonkyc_market"           # Nonkyc's own API
+symbol = "YEC_USDT"
+max_age = 3600
+max_spread_bps = 500
+
+# A BTC-quoted pair is converted with the median of the [[btc_usd_sources]] below.
+# [[sources]]
+# name = "nonkyc-btc"
+# kind = "nonkyc_market"
+# symbol = "YEC_BTC"
+# max_age = 3600
+
+[[btc_usd_sources]]
+name = "kraken"
+kind = "kraken_ticker"
+
+[[btc_usd_sources]]
+name = "coinbase"
+kind = "coinbase_ticker"
+max_age = 600
+
+[[btc_usd_sources]]
+name = "coingecko-btc"
+kind = "coingecko_simple"
+coin = "bitcoin"
+max_age = 900
+
+[transport]
+kind = "iroh"                    # "iroh" (production) or "dir" (tests and the devnet)
+# relays = []                    # empty: iroh's default relays; ["none"]: no relay, direct only; or your own list
+# peers = []                     # bootstrap endpoint ids of other attestors/subscribers (the agent prints its own at startup)
+# secret_key_file = "~/.ycash/yellowback-attest.key"   # keeps this agent's endpoint id stable across restarts
+# topic_override = ""            # default: "yellowback/attest/<network>/3"
+# kind = "dir"
+# path = "/var/lib/yellowback/attest-bus"   # dir transport: <seq>-<citedHeight>.att files
+
+[subscribe]
+listattestors_seconds = 60       # refresh the registered set (messages with an unknown seq are dropped before the RPC)
+# endpoints = ["https://attestor.example/yellowback/attestation"]   # optional HTTPS second path: raw 74 bytes or hex
+# endpoints_seconds = 30

@@ -1,0 +1,85 @@
+# yellowback-quote configuration (plan §5). Copy to yellowback-quote.toml and edit.
+#
+#   yellowback-quote --conf yellowback-quote.toml            # the daemon
+#   yellowback-quote sources --conf yellowback-quote.toml    # check what every source resolves to
+#
+# The agent pushes `yed_setquote <priceMicroUsd> <sourceMask>` into the pool's ycashd.
+# It needs the node's RPC and nothing else: no listening socket, nothing inbound.
+
+[node]
+rpc_url = "http://127.0.0.1:8832"
+# Either the node's cookie file (default location shown) ...
+# rpc_cookie = "~/.ycash/.cookie"
+# ... or rpcuser / rpcpassword from ycash.conf:
+rpc_user = "ycashrpc"
+rpc_password = "change-me"
+# rpc_timeout = 30
+
+[quote]
+poll_seconds = 30        # aggregate and push every 30 s
+fail_polls = 2           # after this many consecutive failed aggregates: `yed_setquote 0` (signal-only, L5)
+twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
+min_sources = 3          # live sources needed after the outlier filter (fail closed below)
+min_venues = 2           # distinct venues among them
+min_btc_sources = 2      # live BTC/USD references before a BTC-quoted pair is converted
+outlier_bps = 1000       # sources more than 10 % from the median are dropped
+# silence_seconds = 120  # a source with no sample this long is dropped from the median
+# fetch_timeout = 15
+
+# Source-mask bits (§5 registry): 0 SafeTrade, 1 CoinGecko, 2 CoinMarketCap, 3 Nonkyc; 4-15 unassigned.
+# A preset's venue picks its bit; `mask_bit` overrides it (needed for `generic` rows).
+
+[[sources]]
+name = "coingecko"
+kind = "coingecko_simple"        # CoinGecko's aggregate YEC/USD; bit 1
+max_age = 900
+# api_key = "..."                # optional demo key
+
+[[sources]]
+name = "safetrade"
+kind = "coingecko_ticker"        # SafeTrade's YEC/USDT as CoinGecko reports it; venue safe_trade, bit 0
+market = "safe_trade"
+target = "USDT"
+max_age = 3600
+max_spread_bps = 2000
+
+[[sources]]
+name = "nonkyc"
+kind = "nonkyc_market"           # Nonkyc's own API; bit 3
+symbol = "YEC_USDT"
+max_age = 3600
+max_spread_bps = 500
+
+# A BTC-quoted pair is converted with the median of the [[btc_usd_sources]] below.
+# [[sources]]
+# name = "nonkyc-btc"
+# kind = "nonkyc_market"
+# symbol = "YEC_BTC"
+# max_age = 3600
+
+# A venue without a preset: url + JSON path (dotted; `[field=value]` selects a list element).
+# [[sources]]
+# name = "myvenue"
+# kind = "generic"
+# venue = "myvenue"
+# url = "https://api.example/ticker/YEC-USDT"
+# path = "data.last"
+# timestamp_path = "data.ts"
+# timestamp_unit = "ms"
+# max_age = 900
+# mask_bit = 4                    # unassigned bits 4-15 only by spec revision; leave unset otherwise
+
+[[btc_usd_sources]]
+name = "kraken"
+kind = "kraken_ticker"
+
+[[btc_usd_sources]]
+name = "coinbase"
+kind = "coinbase_ticker"
+max_age = 600
+
+[[btc_usd_sources]]
+name = "coingecko-btc"
+kind = "coingecko_simple"
+coin = "bitcoin"
+max_age = 900

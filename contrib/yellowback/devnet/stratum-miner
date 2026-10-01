@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""A headless stratum miner for the regtest pool seat (docs/plans/role-pool-regtest-plan.md 3.3).
+
+Speaks the client half of the Ycash stratum dialect the yolo pools serve (`ref/yolo/stratumsolo`):
+mining.subscribe, mining.authorize, mining.extranonce.subscribe, then mining.set_target /
+mining.notify from the pool, and mining.submit back.  The solver is the test framework's
+pure-Python Wagner (`test_framework.equihash.gbp_basic`), so it only makes sense at regtest's
+Equihash 48,5 -- it is a fixture standing in for a GPU rig, not a miner.
+
+    stratum-miner --pool 127.0.0.1:3334 [--user s1...] [--password x] [--blocks 1]
+                  [--equihash 48,5] [--nonce-start 0] [--once] [--verbose] [--record FILE]
+
+`--record FILE` appends every line sent and received as JSONL ({"ts","dir","line"}) -- the wire
+fixtures the Rust rewrite's tests replay.  Exit 0 after `--blocks` accepted submissions, 1 on a
+rejection with `--once`, 2 on a protocol error.
+"""
+import argparse
+import hashlib
+import json
+import os
+import select
+import socket
+import struct
+import sys
+import time
+from hashlib import blake2b
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+from test_framework.equihash import gbp_basic, gbp_validate, zcash_person  # noqa: E402
+
+HEADER_LEN = 108        # version, prevhash, merkle, saplingroot, time, bits: the blake2b prefix (mininode.CBlock.solve)
+NONCE_LEN = 32          # nonce1 (pool) + nonce2 (ours)
+
+
+def compact_size(n):
+    if n < 253: return struct.pack("<B", n)
+    if n < 0x10000: return b"\xfd" + struct.pack("<H", n)
+    return b"\xfe" + struct.pack("<I", n)
+
+
+def sha256d(b):
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+
+class Stratum:
+    """One TCP line protocol connection with a JSONL recorder."""
+
+    def __init__(self, host, port, record, verbose):
+        self.sock = socket.create_connection((host, port), timeout=30)
+        self.buf = b""
+        self.next_id = 1
+        self.record = open(record, "a") if record else None
+        self.verbose = verbose
+
+    def _log(self, direction, line):
+        if self.record:
+            self.record.write(json.dumps({"ts": round(time.time(), 3), "dir": direction, "line": line}) + "\n")
+            self.record.flush()
+        if self.verbose:
+            print("%s %s" % ("->" if direction == "send" else "<-", line), flush=True)
+
+    def call(self, method, params):
+        msg = {"id": self.next_id, "method": method, "params": params}
+        self.next_id += 1
+        line = json.dumps(msg, separators=(",", ":"))
+        self.sock.sendall((line + "\n").encode())
+        self._log("send", line)
+        return msg["id"]
+
+    def readable(self, timeout=0):
+        if b"\n" in self.buf: return True
+        r, _, _ = select.select([self.sock], [], [], timeout)
+        return bool(r)
+
+    def recv(self, timeout=30):
+        """The next message (dict) or None on timeout; raises on disconnect."""
+        deadline = time.time() + timeout
+        while b"\n" not in self.buf:
+            left = deadline - time.time()
+            if left <= 0: return None
+            if not self.readable(left): return None
+            chunk = self.sock.recv(65536)
+            if not chunk: raise ConnectionError("pool closed the connection")
+            self.buf += chunk
+        raw, self.buf = self.buf.split(b"\n", 1)
+        line = raw.decode(errors="replace").rstrip("\r")
+        self._log("recv", line)
+        try:
+            return json.loads(line)
+        except ValueError:
+            raise ConnectionError("pool sent a non-JSON line: %r" % line)
+
+
+class Miner:
+    def __init__(self, args):
+        host, port = args.pool.rsplit(":", 1)
+        self.n, self.k = (int(x) for x in args.equihash.split(","))
+        self.args = args
+        self.st = Stratum(host, int(port), args.record, args.verbose)
+        self.nonce1 = None
+        self.target = None
+        self.job = None            # the current mining.notify params
+        self.accepted = self.rejected = 0
+        self.done = set()          # prevhashes already built on: the Perl re-notifies an accepted job until its next
+                                   # template poll, yolo re-issues the stale template under new job ids (Y-F9)
+        self.nonce2 = args.nonce_start
+
+    # -- protocol -----------------------------------------------------------------------------
+
+    def expect_reply(self, rid):
+        """Wait for the reply to request `rid`, applying any notifications that arrive first."""
+        while True:
+            msg = self.st.recv()
+            if msg is None: raise ConnectionError("no reply to request %d" % rid)
+            if msg.get("id") == rid: return msg
+            self.notification(msg)
+
+    def notification(self, msg):
+        method = msg.get("method")
+        if method == "mining.set_target":
+            self.target = int(msg["params"][0], 16)
+        elif method == "mining.notify":
+            p = msg["params"]
+            if len(p) != 9 or p[8] != "ZcashPoW":
+                raise ConnectionError("unexpected mining.notify shape: %r" % (p,))
+            if p[2] in self.done: return       # stale: we already found the block on this tip
+            if self.job is None or p[0] != self.job[0]:     # a re-notify of the same job id is a keepalive
+                self.job = p
+                self.fresh = True
+        elif "id" in msg and msg.get("id") is not None:
+            pass                   # a stray reply (a submit the pool answered late)
+        else:
+            raise ConnectionError("unexpected message: %r" % (msg,))
+
+    def handshake(self):
+        rid = self.st.call("mining.subscribe", ["stratum-miner/0.1", None, self.args.pool.split(":")[0], self.args.pool.split(":")[1]])
+        reply = self.expect_reply(rid)
+        self.nonce1 = bytes.fromhex(reply["result"][1])
+        if len(self.nonce1) >= NONCE_LEN: raise ConnectionError("nonce1 leaves no room for nonce2")
+        rid = self.st.call("mining.authorize", [self.args.user, self.args.password])
+        reply = self.expect_reply(rid)
+        if reply.get("result") is not True: raise ConnectionError("authorize refused: %r" % (reply,))
+        rid = self.st.call("mining.extranonce.subscribe", [])
+        self.expect_reply(rid)
+
+    def wait_for_work(self):
+        while self.job is None or self.target is None:
+            msg = self.st.recv()
+            if msg is None: raise ConnectionError("no work from the pool")
+            self.notification(msg)
+
+    # -- solving --------------------------------------------------------------------------------
+
+    def solve(self):
+        """Loop nonce2 until a solution's block hash <= target or a clean job arrives.
+        Returns (ntime hex as received, nonce2 hex, solution hex with compact size) or None."""
+        job = self.job
+        self.fresh = False
+        header = bytes.fromhex("".join(job[1:7]))
+        if len(header) != HEADER_LEN: raise ConnectionError("header is %d bytes, not %d" % (len(header), HEADER_LEN))
+        base = blake2b(digest_size=(512 // self.n) * self.n // 8, person=zcash_person(self.n, self.k))
+        base.update(header)
+        nonce2_len = NONCE_LEN - len(self.nonce1)
+        target = self.target
+        started = time.time()
+        while True:
+            nonce2 = self.nonce2.to_bytes(nonce2_len, "little")
+            self.nonce2 += 1
+            digest = base.copy()
+            digest.update(self.nonce1 + nonce2)
+            for soln in gbp_basic(digest, self.n, self.k):
+                assert gbp_validate(digest, soln, self.n, self.k)
+                encoded = compact_size(len(soln)) + soln
+                h = sha256d(header + self.nonce1 + nonce2 + encoded)
+                if int.from_bytes(h, "little") <= target:
+                    if self.args.verbose:
+                        print("solved job %s in %.1fs, nonce2 %s, hash %s" % (job[0], time.time() - started, nonce2.hex(), h[::-1].hex()), flush=True)
+                    return job[5], nonce2.hex(), encoded.hex()
+            # Between nonces, look at the wire: a clean job abandons this one.
+            while self.st.readable(0):
+                msg = self.st.recv(timeout=1)
+                if msg is not None: self.notification(msg)
+            if self.fresh and self.job[7]:
+                if self.args.verbose: print("clean job %s: abandoning %s" % (self.job[0], job[0]), flush=True)
+                return None
+
+    def run(self):
+        self.handshake()
+        while self.accepted < self.args.blocks:
+            self.wait_for_work()
+            found = self.solve()
+            if found is None: continue
+            job = self.job
+            ntime, nonce2, solution = found
+            rid = self.st.call("mining.submit", [self.args.user, job[0], ntime, nonce2, solution])
+            reply = self.expect_reply(rid)
+            if reply.get("result") is True:
+                self.accepted += 1
+                self.done.add(job[2])
+                print("accepted job %s (%d/%d)" % (job[0], self.accepted, self.args.blocks), flush=True)
+            else:
+                self.rejected += 1
+                print("rejected job %s: %r" % (job[0], reply), flush=True)
+                if self.args.once: return 1
+            if self.args.once: return 0
+            # The pool re-issues work after a submit; the old job is done either way.
+            if self.job is job: self.job = None
+        return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--pool", default="127.0.0.1:3334", help="host:port of the stratum server (default 127.0.0.1:3334)")
+    ap.add_argument("--user", default="stratum-miner", help="worker name; a transparent address for pool/cenote modes")
+    ap.add_argument("--password", default="x")
+    ap.add_argument("--blocks", type=int, default=1, help="exit after this many accepted submissions (default 1)")
+    ap.add_argument("--equihash", default="48,5", help="n,k (default 48,5; nothing else is solvable in Python)")
+    ap.add_argument("--nonce-start", type=int, default=0, help="first nonce2 value (default 0)")
+    ap.add_argument("--once", action="store_true", help="exit after the first submission, whatever the verdict")
+    ap.add_argument("--verbose", action="store_true", help="print every line sent and received")
+    ap.add_argument("--record", metavar="FILE", help="append every line sent and received as JSONL")
+    args = ap.parse_args()
+    if args.blocks < 1: ap.error("--blocks must be >= 1")
+    try:
+        miner = Miner(args)
+        rc = miner.run()
+    except (ConnectionError, OSError) as e:
+        print("stratum-miner: %s" % e, file=sys.stderr)
+        return 2
+    print("accepted %d rejected %d" % (miner.accepted, miner.rejected), flush=True)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

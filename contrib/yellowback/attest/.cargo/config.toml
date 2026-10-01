@@ -1,0 +1,10 @@
+# The node's depends build writes an untracked ycash-dd/.cargo/config that redirects crates.io
+# to its vendored directory (Rust 1.63, no iroh). Cargo merges configs from the crate directory
+# upward, so inside a built node checkout this crate would inherit that redirect and fail with
+# "no matching package". Undo it here by replacing crates.io with a registry that is crates.io
+# again; this crate never enters the node's build (v3 plan W13).
+[registries.crates-io-direct]
+index = "sparse+https://index.crates.io/"
+
+[source.crates-io]
+replace-with = "crates-io-direct"

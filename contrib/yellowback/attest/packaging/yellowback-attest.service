@@ -1,0 +1,30 @@
+# systemd unit for the Yellowback attestor agent (plan §4.7). Install as
+# /etc/systemd/system/yellowback-attest.service, adjust User/paths, then
+#   systemctl daemon-reload && systemctl enable --now yellowback-attest
+#
+# One agent per hot key. Two agents signing with one key (two machines, or this unit twice) is
+# the one way an honest attestor gets ejected for equivocation (plan §4.6).
+[Unit]
+Description=Yellowback attestor agent (polls sources, yed_signattestation, gossips)
+After=network-online.target ycashd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ycash
+ExecStart=/usr/local/bin/yellowback-attest attest --conf /etc/yellowback/attest.toml
+Restart=always
+RestartSec=5
+# The agent never exits on an RPC or source failure; a non-zero exit means a bad configuration.
+Environment=RUST_LOG=info
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/yellowback
+# The iroh secret_key_file, if configured, must be writable once:
+# ReadWritePaths=/var/lib/yellowback
+# StateDirectory=yellowback
+
+[Install]
+WantedBy=multi-user.target

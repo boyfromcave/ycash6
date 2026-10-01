@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Build a signed MINT transaction from raw parts against devnet node 0, for the lightwalletd
+integration test (docs/plans/yellowback-lightwalletd-plan.md, Phase L2, section 5 item 5).
+
+The Go test drives the *server*: EstimateCollateral, GetFeePayee, BuildBundle, GetSelection,
+ValidateRawTransaction, SendTransaction, GetTxInfo. What it cannot do in Go is assemble and
+sign the transaction the way a light client would; this helper does that with the functional
+test framework's builders (the same code every yellowback_*.py script uses), taking every
+number the Go test obtained through the server as an argument, so nothing the mint needs came
+from anywhere but the gRPC surface. It never broadcasts the mint.
+
+    lwd-rawmint --dir DEVNET_DIR --cents N --lock-blocks N --ref-height R --collateral-zat Z
+                [--fee-addr ADDR] [--bundle-hex HEX --attest-fee-addr ADDR --attest-fee-zat Z]
+
+Without --bundle-hex: the v2 shape (build_mint_tx), what an unarmed regtest devnet accepts.
+With it: the v3 shape — the carrier step first (build_carrier_tx, broadcast by node 0 and
+mined by node 0 so it is confirmed), then build_mint_tx_v3 spending the carrier as vin[last].
+Prints one JSON object: {"hex", "txid", "ownerPubKey", "carrierTxid"|null}.
+"""
+import argparse
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+import test_framework.util as _util                                                      # noqa: E402
+_util.MAX_NODES = 12
+from test_framework.util import PortSeed, get_rpc_proxy, hex_str_to_bytes                # noqa: E402
+from test_framework.yellowback_util import build_mint_tx                                 # noqa: E402
+from test_framework.yellowback_attest import build_carrier_tx, build_mint_tx_v3          # noqa: E402
+import test_framework.yellowback_model as ym                                             # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dir", required=True); ap.add_argument("--node", type=int, default=0)
+    ap.add_argument("--cents", type=int, required=True); ap.add_argument("--lock-blocks", type=int, required=True)
+    ap.add_argument("--ref-height", type=int, required=True); ap.add_argument("--collateral-zat", type=int, required=True)
+    ap.add_argument("--fee-addr"); ap.add_argument("--bundle-hex"); ap.add_argument("--attest-fee-addr"); ap.add_argument("--attest-fee-zat", type=int)
+    args = ap.parse_args()
+    with open(os.path.join(os.path.abspath(args.dir), "devnet.json")) as f:
+        state = json.load(f)
+    PortSeed.n = state["portseed"]
+    url = state["rpc"][str(args.node)]["url"]
+    node = get_rpc_proxy(url, args.node, timeout=60)
+    carrier_txid = None
+    if args.bundle_hex:
+        carrier = build_carrier_tx(node, hex_str_to_bytes(args.bundle_hex))
+        node.generate(1)                                              # the carrier must be confirmed (v3 section 3.5)
+        carrier_txid = carrier["txid"]
+        attest_fee = (args.attest_fee_addr, args.attest_fee_zat) if args.attest_fee_addr else None
+        hex_, owner = build_mint_tx_v3(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat,
+                                       fee_addr=args.fee_addr, carrier=carrier, attest_fee=attest_fee)
+    else:
+        hex_, owner = build_mint_tx(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat, fee_addr=args.fee_addr)
+    json.dump({"hex": hex_, "txid": ym.tx_from_hex(hex_).txid, "ownerPubKey": owner, "carrierTxid": carrier_txid}, sys.stdout)
+    print()
+
+
+if __name__ == "__main__":
+    main()

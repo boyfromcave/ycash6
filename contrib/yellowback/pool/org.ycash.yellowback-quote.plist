@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd unit for the Yellowback quote agent (plan §5). Install as
+     ~/Library/LaunchAgents/org.ycash.yellowback-quote.plist, adjust the paths, then
+       launchctl load -w ~/Library/LaunchAgents/org.ycash.yellowback-quote.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.ycash.yellowback-quote</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>/usr/local/yellowback/yellowback-quote</string>
+    <string>--conf</string>
+    <string>/usr/local/etc/yellowback-quote.toml</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/usr/local/var/log/yellowback-quote.log</string>
+</dict>
+</plist>

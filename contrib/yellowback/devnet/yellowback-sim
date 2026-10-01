@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Synthetic users for the Yellowback devnet: six personas, not a random walk.
+
+`yellowback-devnet up --role ...` starts one of these beside the devnet (`sim start|stop|stats`
+drive it by hand). It reads the devnet's `devnet.json` for the two wallet nodes it owns -- the
+**population** node, hosting the five minter/holder personas on distinct YED addresses, and
+the **liquidator** node, which owns none of their vaults, because claiming someone else's
+underwater vault (RED-4 clause (b) through a notice, or clause (a)) is a different path from
+an owner redeeming and is the one the attested price actually governs.
+
+Personas (docs/plans/role-based-regtest-plan.md section 3.4; revision 3 item I-3 on why risk
+appetite is the term class):
+
+  leveraged     class C (300 %, the longest terms): the first underwater on a downswing; never redeems early
+  conservative  class A (500 %, short terms): the happy path; redeems at maturity
+  exiter        redeems the moment lockHeight passes; releases VOID vaults with yed_redeem;
+                runs yed_sweepcarriers as housekeeping
+  trader        never mints: moves YED between its addresses (and to the liquidator) with
+                yed_send / yed_sendmany
+  absentee      mints, then goes quiet: never redeems, never sweeps
+  liquidator    (its own node) watches every vault it does not own, posts yed_claimnotice when
+                one is under the emergency ratio, claims after EMERGENCY_PERSIST -- and claims
+                by clause (a) whenever yed_listclaimable lists one
+
+Every bundle-carrying command (yed_mint, yed_claim, yed_claimnotice) is two-step; each persona
+calls it with wait=true and relies on the heartbeat to mine the carrier, so without a heartbeat
+the personas simply block (the plan's R1-before-R3 ordering). A refused action is logged and
+tallied by its stable identifier (`bundle-insufficient`, `mintpol-…`, `insufficient-yec`, …),
+never retried blindly: those refusals are the signal the attestor and pool scenarios exist to
+show. The RNG is seeded (`--seed`), so a run is reproducible.
+
+    yellowback-sim run --dir DIR [--seed N] [--profile demo|fast]
+    yellowback-sim stats --dir DIR         # the tally, from <dir>/sim-stats.json
+"""
+import argparse
+import json
+import os
+import random
+import sys
+import threading
+import time
+from decimal import Decimal
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+from test_framework.authproxy import AuthServiceProxy, JSONRPCException   # noqa: E402
+
+REF_LAG = 2
+EMERGENCY_PERSIST = 4            # regtest (v3 plan section 3.1)
+EMERGENCY_RATIO_BPS, CLAIM_THRESHOLD_BPS = 10_500, 11_000
+CLASS_A, CLASS_B, CLASS_C = (48, 96), (97, 144), (145, 240)
+MIN_MINT = 10_000                # cents
+RPC_TIMEOUT = 700                # wait=true blocks until the carrier confirms (-yellowbackcarriertimeout 600)
+
+PROFILES = {
+    # cadences in blocks; the demo profile paces a half-hour walk-through at 15 s blocks, the
+    # fast profile the regression suite at 2 s blocks
+    "demo": {"leveraged": 10, "conservative": 14, "exiter": 12, "trader": 6, "absentee": 40, "liquidator": 2, "first": (3, 12)},
+    "fast": {"leveraged": 6, "conservative": 8, "exiter": 7, "trader": 4, "absentee": 20, "liquidator": 1, "first": (1, 6)},
+}
+
+
+def identifier(error):
+    """The stable identifier a refusal begins with (doc/yellowback-rpc.md, Error identifiers)."""
+    if isinstance(error, JSONRPCException):
+        message = str(error.error.get("message", "")) if isinstance(error.error, dict) else str(error)
+    else:
+        message = str(error)
+    head = message.split(":")[0].strip().split(" ")[0]
+    return head[:48] if head else "rpc-error"
+
+
+class Tally:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = {}
+
+    def persona(self, name, node):
+        with self.lock:
+            self.data.setdefault(name, {"node": node, "ok": {}, "refused": {}, "last": "", "vaults": [], "notes": []})
+
+    def ok(self, name, action, detail=""):
+        with self.lock:
+            record = self.data[name]
+            record["ok"][action] = record["ok"].get(action, 0) + 1
+            record["last"] = "%s %s ok %s" % (time.strftime("%H:%M:%S"), action, detail)
+
+    def refused(self, name, action, error):
+        ident = identifier(error)
+        with self.lock:
+            record = self.data[name]
+            record["refused"].setdefault(action, {})
+            record["refused"][action][ident] = record["refused"][action].get(ident, 0) + 1
+            record["last"] = "%s %s refused: %s" % (time.strftime("%H:%M:%S"), action, str(error)[:160])
+        return ident
+
+    def note(self, name, text):
+        with self.lock:
+            self.data[name]["notes"] = (self.data[name]["notes"] + ["%s %s" % (time.strftime("%H:%M:%S"), text)])[-8:]
+
+    def vault(self, name, txid):
+        with self.lock:
+            self.data[name]["vaults"].append(txid)
+
+    def snapshot(self):
+        with self.lock:
+            return json.loads(json.dumps(self.data))
+
+
+class Persona(threading.Thread):
+    """One strategy on one wallet node. `wallet_lock` serialises the spending calls of the
+    personas that share a wallet: two two-step mints selecting the same coins at once would
+    only produce refusals that mean nothing."""
+    cadence_key = None
+
+    def __init__(self, sim, name, node, url):
+        super().__init__(name=name, daemon=True)
+        self.sim, self.name, self.node, self.url = sim, name, node, url
+        self.rng = random.Random(sim.seed * 1_000_003 + sum(ord(c) for c in name))
+        self.rpc = AuthServiceProxy(url, timeout=RPC_TIMEOUT)
+        self.log = sim.log
+        self.tally = sim.tally
+        self.tally.persona(name, node)
+        self.next_height = None
+        self.vaults = []          # txids of the vaults this persona minted
+        self.address = None
+
+    # -- helpers
+    def cadence(self):
+        return self.sim.profile[self.cadence_key]
+
+    def height(self):
+        return self.rpc.getblockcount()
+
+    def call(self, action, method, *args):
+        """One spending RPC under the wallet lock; refusals are tallied and returned as None."""
+        with self.sim.wallet_lock(self.node):
+            try:
+                result = getattr(self.rpc, method)(*args)
+            except Exception as error:
+                ident = self.tally.refused(self.name, action, error)
+                self.log("%-12s %s refused (%s): %s" % (self.name, action, ident, str(error)[:200]))
+                return None
+        self.tally.ok(self.name, action, self.describe(result))
+        return result
+
+    @staticmethod
+    def describe(result):
+        if isinstance(result, dict):
+            return " ".join("%s=%s" % (k, str(result[k])[:16]) for k in ("txid", "vault", "termClass", "burnedCents", "claimPath", "changeCents") if k in result)
+        return str(result)[:60]
+
+    def mint(self, cents, lock_blocks):
+        result = self.call("mint", "yed_mint", cents, lock_blocks, "", "", True)
+        if result and result.get("txid"):
+            self.vaults.append(result["txid"])
+            self.tally.vault(self.name, result["txid"])
+            self.log("%-12s minted %s YED, class %s, lock %d, claim opens at %s, vault %s"
+                     % (self.name, Decimal(cents) / 100, result.get("termClass"), lock_blocks, result.get("claimHeight"), result["txid"][:16]))
+        return result
+
+    def my_positions(self, status=None):
+        mine = set(self.vaults)
+        try:
+            rows = self.rpc.yed_listpositions(status) if status else self.rpc.yed_listpositions()
+        except Exception:
+            return []
+        return [row for row in rows if row["txid"] in mine]
+
+    def redeem_matured(self):
+        """The owner path: redeem every own vault whose lockHeight has passed (and release VOID ones)."""
+        done = 0
+        for row in self.my_positions():
+            if row["status"] in ("ACTIVE", "VOID") and row.get("canRedeem"):
+                action = "release-void" if row["status"] == "VOID" else "redeem"
+                if self.call(action, "yed_redeem", row["txid"]):
+                    done += 1
+                    self.vaults.remove(row["txid"])
+                    self.log("%-12s %s vault %s (%s YED)" % (self.name, action, row["txid"][:16], Decimal(row["mintedCents"]) / 100))
+        return done
+
+    # -- the loop
+    def run(self):
+        first_low, first_high = self.sim.profile["first"]
+        try:
+            self.address = self.rpc.yed_getnewaddress()
+            self.setup()
+            self.next_height = self.height() + self.rng.randint(first_low, first_high)
+        except Exception as error:
+            self.tally.note(self.name, "setup failed: %s" % error)
+            self.log("%-12s setup failed: %s" % (self.name, error))
+            return
+        while not self.sim.stopping.is_set():
+            try:
+                tip = self.height()
+            except Exception as error:
+                self.tally.note(self.name, "node unreachable: %s" % error)
+                time.sleep(5)
+                continue
+            if tip >= self.next_height:
+                try:
+                    self.act(tip)
+                except Exception as error:               # never let one persona's bug stop the others
+                    self.tally.refused(self.name, "act", error)
+                    self.log("%-12s act() raised: %r" % (self.name, error))
+                self.next_height = self.height() + self.cadence() + self.rng.randint(0, 2)
+            time.sleep(2)
+
+    def setup(self):
+        pass
+
+    def act(self, tip):
+        raise NotImplementedError
+
+
+class Leveraged(Persona):
+    cadence_key = "leveraged"
+    max_open = 2
+
+    def act(self, tip):
+        if len([r for r in self.my_positions("ACTIVE")]) >= self.max_open:
+            self.tally.note(self.name, "holding %d vaults, rides them out (a vault cannot be topped up)" % self.max_open)
+            return
+        cents = self.rng.choice([MIN_MINT, MIN_MINT * 3 // 2, MIN_MINT * 2])
+        lock = CLASS_C[0] + self.rng.randint(0, 8)          # class C: the lowest ratio, the longest term
+        self.mint(cents, lock)
+
+
+class Conservative(Persona):
+    cadence_key = "conservative"
+
+    def act(self, tip):
+        if self.redeem_matured():
+            return
+        if len(self.my_positions("ACTIVE")) >= 1:
+            return
+        cents = self.rng.choice([MIN_MINT, MIN_MINT * 2])
+        lock = CLASS_A[0] + self.rng.randint(0, 8)          # class A: the highest ratio, the shortest term
+        self.mint(cents, lock)
+
+
+class Exiter(Persona):
+    cadence_key = "exiter"
+
+    def act(self, tip):
+        self.redeem_matured()
+        if tip % 20 < self.cadence():
+            swept = self.call("sweepcarriers", "yed_sweepcarriers")
+            if swept and (swept.get("count") or swept.get("outstanding")):
+                self.log("%-12s sweepcarriers: swept %s, outstanding %s" % (self.name, swept["count"], swept["outstanding"]))
+        if len(self.my_positions("ACTIVE")) >= 2:
+            return
+        lock = self.rng.choice([CLASS_A[0], CLASS_A[0] + 12, CLASS_B[0]])
+        self.mint(MIN_MINT, lock)
+
+
+class Trader(Persona):
+    cadence_key = "trader"
+
+    def setup(self):
+        self.second = self.rpc.yed_getnewaddress()
+
+    def act(self, tip):
+        try:
+            balance = self.rpc.yed_getbalance()["confirmedCents"]
+        except Exception as error:
+            self.tally.refused(self.name, "balance", error)
+            return
+        if balance < 300:
+            self.tally.note(self.name, "no YED to move (%s cents confirmed); most holders are not minters" % balance)
+            return
+        amount = self.rng.randint(100, max(100, min(balance // 2, 5_000)))
+        liquidator = self.sim.liquidator_address
+        roll = self.rng.random()
+        if roll < 0.25 and liquidator:
+            self.call("send", "yed_send", liquidator, amount)
+        elif roll < 0.55:
+            self.call("send", "yed_send", self.second, amount)
+        elif roll < 0.8:
+            self.call("send", "yed_send", self.address, amount)
+        else:
+            half = max(100, amount // 2)
+            self.call("sendmany", "yed_sendmany", {self.address: half, self.second: half})
+
+
+class Absentee(Persona):
+    cadence_key = "absentee"
+
+    def act(self, tip):
+        if self.vaults:
+            self.tally.note(self.name, "quiet: %d vault(s) left alone, never swept, never redeemed" % len(self.vaults))
+            return
+        lock = CLASS_B[0] + self.rng.randint(0, 20)
+        self.mint(self.rng.choice([MIN_MINT, MIN_MINT * 3]), lock)
+
+
+class Liquidator(Persona):
+    """A third party with YED inventory of its own. Clause (a) claims come from yed_listclaimable;
+    the emergency path is a notice once a foreign vault is under EMERGENCY_RATIO_BPS (judged from
+    `underwaterAt`, the clause-(a) price, scaled to the emergency ratio) and a claim once
+    emergencyOpenAt <= tip - REF_LAG."""
+    cadence_key = "liquidator"
+    inventory_cents = 100_000     # the owner's first walk-through ran the 400 YED inventory dry: `insufficient-yed x6`
+    top_up_below = 30_000         # mint more once the spendable YED could not cover a MIN_MINT*3 vault
+
+    def setup(self):
+        self.sim.liquidator_address = self.address
+        self.noticed = {}         # vault txid -> height of the last notice attempt
+        self.inventory_tried = False
+
+    def act(self, tip):
+        if not self.inventory_tried:
+            self.inventory_tried = True
+            result = self.mint(self.inventory_cents, CLASS_C[1])      # the longest lock: inventory, not a bet
+            if result is None:
+                self.inventory_tried = False                          # try again next time (a halt, an empty pool)
+        else:
+            # Claims burn the inventory; top it up before it runs dry. Class A, the shortest lock:
+            # the one class a recapitalisation floor would keep open during a global-ratio halt.
+            try:
+                spendable = self.rpc.yed_getbalance()["confirmedCents"]
+            except Exception:
+                spendable = None
+            if spendable is not None and spendable < self.top_up_below and tip - getattr(self, "last_top_up", -100) >= 10:
+                self.last_top_up = tip
+                self.mint(self.inventory_cents // 2, CLASS_A[0])
+        own = set(self.vaults)
+        try:
+            claimable = [row for row in self.rpc.yed_listclaimable() if row["vault"].split(":")[0] not in own]
+        except Exception as error:
+            self.tally.refused(self.name, "listclaimable", error)
+            claimable = []
+        for row in claimable:
+            vault = row["vault"].split(":")[0]
+            if not row.get("claimPath"):
+                self.tally.note(self.name, "vault %s is claimable but no bundle can be built yet" % vault[:16])
+                continue
+            result = self.call("claim", "yed_claim", vault, "", "", True)
+            if result:
+                self.log("%-12s CLAIMED vault %s by clause (%s): burned %s YED, collateral out %s zat"
+                         % (self.name, vault[:16], result.get("claimPath"), Decimal(result.get("burnedCents", 0)) / 100, result.get("collateralOut")))
+        # the emergency path: a notice on any foreign vault under the emergency ratio
+        try:
+            price = self.rpc.yed_getprice()
+            active = self.rpc.yed_listvaults("ACTIVE", 500, 0)
+        except Exception as error:
+            self.tally.refused(self.name, "listvaults", error)
+            return
+        x_claim = price.get("xClaim")
+        for row in active:
+            vault = row["txid"]
+            if vault in own or row.get("underwaterAt") is None:
+                continue
+            if row.get("noticed"):
+                continue
+            if tip < row["claimHeight"] - EMERGENCY_PERSIST:
+                continue                                              # a notice before the claim can open would only expire
+            emergency_at = row["underwaterAt"] * EMERGENCY_RATIO_BPS // CLAIM_THRESHOLD_BPS
+            judged = [p for p in (x_claim, self.attested_claim(tip)) if p]
+            if not judged or min(judged) >= emergency_at:
+                continue
+            if tip - self.noticed.get(vault, -100) < 8:
+                continue
+            self.noticed[vault] = tip
+            result = self.call("notice", "yed_claimnotice", vault, "", True)
+            if result:
+                self.log("%-12s NOTICE on vault %s: pEmerg %s, emergency claim opens at %s"
+                         % (self.name, vault[:16], result.get("pEmerg"), result.get("emergencyOpenAt")))
+
+    def attested_claim(self, tip):
+        try:
+            return self.rpc.yed_buildbundle(tip - REF_LAG, "").get("aClaim")
+        except Exception:
+            return None
+
+
+class Simulator:
+    def __init__(self, directory, seed, profile):
+        self.directory = directory
+        self.state = json.load(open(os.path.join(directory, "devnet.json")))
+        self.seed, self.profile_name = seed, profile
+        self.profile = PROFILES[profile]
+        self.tally = Tally()
+        self.stopping = threading.Event()
+        self.liquidator_address = None
+        self._locks = {}
+        self.started = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def wallet_lock(self, node):
+        return self._locks.setdefault(node, threading.Lock())
+
+    def log(self, text):
+        print("%s %s" % (time.strftime("%H:%M:%S"), text), flush=True)
+
+    def url(self, node):
+        return self.state["rpc"][str(node)]["url"]
+
+    def stats_path(self):
+        return os.path.join(self.directory, "sim-stats.json")
+
+    def write_stats(self):
+        data = self.tally.snapshot()
+        for name, record in data.items():
+            attempts = sum(record["ok"].values()) + sum(sum(v.values()) for v in record["refused"].values())
+            record["all_failing"] = attempts >= 3 and not record["ok"]
+        try:
+            tip = AuthServiceProxy(self.url(self.state["population"]), timeout=10).getblockcount()
+        except Exception:
+            tip = None
+        payload = {"seed": self.seed, "profile": self.profile_name, "started": self.started, "written": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "height": tip, "personas": data}
+        tmp = self.stats_path() + ".tmp"
+        with open(tmp, "w") as file:
+            json.dump(payload, file, indent=1)
+        os.replace(tmp, self.stats_path())
+
+    def run(self):
+        population, liquidator = self.state["population"], self.state["liquidator"]
+        if population is None or liquidator is None:
+            sys.exit("this devnet has no population/liquidator nodes (it was not brought up with --role)")
+        self.log("simulator up: seed %d, profile %s, population node%d, liquidator node%d" % (self.seed, self.profile_name, population, liquidator))
+        personas = [Liquidator(self, "liquidator", liquidator, self.url(liquidator)),
+                    Leveraged(self, "leveraged", population, self.url(population)),
+                    Conservative(self, "conservative", population, self.url(population)),
+                    Exiter(self, "exiter", population, self.url(population)),
+                    Trader(self, "trader", population, self.url(population)),
+                    Absentee(self, "absentee", population, self.url(population))]
+        for persona in personas:
+            persona.start()
+            time.sleep(0.5)
+        try:
+            while True:
+                self.write_stats()
+                time.sleep(5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stopping.set()
+            self.write_stats()
+
+
+def print_stats(directory):
+    try:
+        data = json.load(open(os.path.join(directory, "sim-stats.json")))
+    except OSError:
+        sys.exit("no sim-stats.json in %s: the simulator has not run here" % directory)
+    print("simulator: seed %s, profile %s, started %s, tally written %s at height %s"
+          % (data["seed"], data["profile"], data["started"], data["written"], data["height"]))
+    loud = []
+    for name, record in data["personas"].items():
+        ok = ", ".join("%s x%d" % (k, v) for k, v in sorted(record["ok"].items())) or "nothing yet"
+        refused = "; ".join("%s: %s" % (action, ", ".join("%s x%d" % (i, n) for i, n in sorted(idents.items())))
+                            for action, idents in sorted(record["refused"].items())) or "none"
+        print("%-12s node%-2s ok: %s" % (name, record["node"], ok))
+        print("%-12s        refused: %s" % ("", refused))
+        if record.get("last"): print("%-12s        last: %s" % ("", record["last"]))
+        for note in record.get("notes", [])[-2:]: print("%-12s        note: %s" % ("", note))
+        if record.get("all_failing"): loud.append(name)
+    if loud:
+        print("\n*** EVERY action of %s is failing: that persona is not busy, it is broken or starved -- read its refusals above ***" % ", ".join(loud))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run"); run.add_argument("--dir", required=True); run.add_argument("--seed", type=int, default=1)
+    run.add_argument("--profile", choices=sorted(PROFILES), default="demo")
+    stats = sub.add_parser("stats"); stats.add_argument("--dir", required=True)
+    args = parser.parse_args()
+    if args.command == "stats":
+        return print_stats(os.path.abspath(args.dir))
+    Simulator(os.path.abspath(args.dir), args.seed, args.profile).run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

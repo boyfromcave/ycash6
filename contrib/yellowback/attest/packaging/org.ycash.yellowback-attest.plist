@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd unit for the Yellowback attestor agent (plan §4.7). Install as
+     ~/Library/LaunchAgents/org.ycash.yellowback-attest.plist, adjust the paths, then
+       launchctl load -w ~/Library/LaunchAgents/org.ycash.yellowback-attest.plist
+     For the subscriber beside a minting node, copy this file, change the Label and
+     replace "attest" with "subscribe" in ProgramArguments. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.ycash.yellowback-attest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/yellowback-attest</string>
+    <string>attest</string>
+    <string>--conf</string>
+    <string>/usr/local/etc/yellowback/attest.toml</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>RUST_LOG</key><string>info</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/usr/local/var/log/yellowback-attest.log</string>
+</dict>
+</plist>

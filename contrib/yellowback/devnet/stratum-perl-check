@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Prove `stratum-miner` against the Perl reference pools (role-pool-regtest-plan.md 3.3, Y2).
+
+Starts a two-node regtest (`-yellowback` on, a quote set so the coinbase carries a tag), puts a
+`ycash-cli` shim first on PATH (the Perl shells out to a bare `ycash-cli`, `ref/yolo/stratumsolo`
+`node_rpc`), runs each Perl variant, drives it with `stratum-miner`, and checks:
+
+    stratumsolo    block accepted, both nodes at the new height, yed_gettag found: true
+    cenote         the unpatched Perl: it assumes a 5-byte coinbase scriptSig (cenote:522-527), so
+                   with the 37-byte tag in it the block does not even decode; the node answers
+                   "Block decode failed" and the Perl still tells the miner true (Y-F1, Y-F5)
+    cenote-fixed   cenote with only that length assumption fixed (a scratch copy): block accepted,
+                   both nodes at the new height, yed_gettag found: false -- the tag is dropped (Y-F1)
+
+    stratum-perl-check [--yolo DIR] [--scratch DIR] [--record-dir DIR] [--variants solo,cenote]
+                       [--blocks 1] [--rpc-base 24101] [--p2p-base 25101] [--stratum-base 24201]
+
+The wire exchanges go to `<record-dir>/stratum-perl-<variant>.jsonl` (default: fixtures/ beside
+this script; a fresh file each run).  Needs `perl -MJSON`.  Exit 0 iff every check passed.
+"""
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+WORKSPACE = os.path.dirname(REPO)
+if os.path.basename(os.path.dirname(REPO)) == "wt":               # a worktree: wt/<name>/ -> the workspace
+    WORKSPACE = os.path.dirname(WORKSPACE)
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+from test_framework.yellowback_util import usd_to_micro, yellowback_node_args  # noqa: E402
+
+YCASHD = os.environ.get("YCASHD", os.path.join(REPO, "src", "ycashd"))
+YCASH_CLI = os.environ.get("YCASH_CLI", os.path.join(REPO, "src", "ycash-cli"))
+RPC_USER, RPC_PASS = "u", "p"
+QUOTE_USD = "0.05"
+
+procs = []
+
+
+def log(msg):
+    print("[stratum-perl-check] " + msg, flush=True)
+
+
+class Node:
+    def __init__(self, i, scratch, rpc_port, p2p_port, connect=None):
+        self.i, self.rpc_port, self.p2p_port = i, rpc_port, p2p_port
+        self.datadir = os.path.join(scratch, "node%d" % i)
+        os.makedirs(os.path.join(self.datadir, "regtest"), exist_ok=True)
+        self.conf = os.path.join(self.datadir, "ycash.conf")
+        self.extra = ["regtest=1", "server=1", "rpcuser=%s" % RPC_USER, "rpcpassword=%s" % RPC_PASS,
+                      "rpcport=%d" % rpc_port, "port=%d" % p2p_port, "listen=1", "discover=0", "keypool=1",
+                      "rpcallowip=127.0.0.1"] + (["connect=127.0.0.1:%d" % connect] if connect else [])
+        self.write_conf()
+        self.proc = None
+
+    def write_conf(self, more=()):
+        with open(self.conf, "w") as f:
+            f.write("\n".join(self.extra + list(more)) + "\n")
+
+    def cli_args(self):
+        return ["-regtest", "-datadir=" + self.datadir, "-rpcuser=" + RPC_USER, "-rpcpassword=" + RPC_PASS,
+                "-rpcport=%d" % self.rpc_port]
+
+    def start(self):
+        args = [YCASHD, "-datadir=" + self.datadir, "-nuparams=5ba81b19:1", "-nuparams=76b809bb:1"] + yellowback_node_args()
+        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(os.path.join(self.datadir, "stderr.log"), "ab"))
+        procs.append(self.proc)
+        for _ in range(600):
+            time.sleep(0.25)
+            if self.proc.poll() is not None: sys.exit("node %d exited at start; see %s/stderr.log" % (self.i, self.datadir))
+            try:
+                self.rpc("getblockcount"); return
+            except subprocess.CalledProcessError:
+                pass
+        sys.exit("node %d never answered RPC" % self.i)
+
+    def rpc(self, *cmd):
+        out = subprocess.run([YCASH_CLI] + self.cli_args() + list(cmd), check=True, capture_output=True, text=True).stdout.strip()
+        try:
+            return json.loads(out)
+        except ValueError:
+            return out
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            try: self.rpc("stop")
+            except subprocess.CalledProcessError: self.proc.kill()
+            try: self.proc.wait(30)
+            except subprocess.TimeoutExpired: self.proc.kill()
+
+
+def write_shim(scratch, node):
+    """`ycash-cli` first on PATH that execs the real one with the node's network flags."""
+    shim_dir = os.path.join(scratch, "shim")
+    os.makedirs(shim_dir, exist_ok=True)
+    shim = os.path.join(shim_dir, "ycash-cli")
+    real = "%s %s" % (YCASH_CLI, " ".join("'%s'" % a for a in node.cli_args()))
+    with open(shim, "w") as f:
+        # submitblock calls are logged (the raw block and the node's verdict) so a rejected block
+        # can be replayed by hand; every other call is exec'd straight through.
+        f.write("#!/bin/sh\n"
+                "if [ \"$1\" = submitblock ]; then\n"
+                "  out=$(%s \"$@\" 2>&1); rc=$?\n"
+                "  printf 'submitblock %%s\\n-> rc=%%s %%s\\n' \"$2\" \"$rc\" \"$(printf '%%s' \"$out\" | tr '\\n' ' ')\" >> %s/submitblock.log\n"
+                "  printf '%%s' \"$out\"; exit $rc\n"
+                "fi\n"
+                "exec %s \"$@\"\n" % (real, shim_dir, real))
+    os.chmod(shim, 0o755)
+    return shim_dir
+
+
+def wait_height(nodes, height, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if all(n.rpc("getblockcount") >= height for n in nodes): return True
+        time.sleep(0.5)
+    return False
+
+
+CENOTE_OLD = ("\tmy $coinbase_script = substr($block->{'current'}->{'coinbasetxn'}->{'data'},92,10) . unpack('H*',$config->{'text'});"
+              "\t# new coinbase script \n")
+CENOTE_FIX = """\tmy $script_len = hex(substr($block->{'current'}->{'coinbasetxn'}->{'data'},90,2)) * 2;\t\t# stratum-perl-check: real scriptSig length
+\tmy $height_push = 2 + 2 * hex(substr($block->{'current'}->{'coinbasetxn'}->{'data'},92,2));\t# the height push (n <= 0x4b)
+\tmy $coinbase_script = substr($block->{'current'}->{'coinbasetxn'}->{'data'},92,$height_push) . unpack('H*',$config->{'text'});
+"""
+CENOTE_OLD_TAIL = "       \t$coinbase .= substr($block->{'current'}->{'coinbasetxn'}->{'data'},102);\n"
+CENOTE_FIX_TAIL = "       \t$coinbase .= substr($block->{'current'}->{'coinbasetxn'}->{'data'},92 + $script_len);\n"
+
+
+def perl_script(variant, args, port):
+    """The Perl to run: stratumsolo with its default port patched (it has no --port), cenote as
+    is, or cenote-fixed: a scratch copy of cenote whose scriptSig rebuild reads the real script
+    length instead of assuming 5 bytes (cenote:522-527) -- the minimum to get a decodable block
+    out of it on a tagging node, so the tag loss itself can be observed (Y-F1)."""
+    if variant == "solo":
+        src = open(os.path.join(args.yolo, "stratumsolo")).read()
+        patched = src.replace("$config->{'port'}     = 3334;", "$config->{'port'}     = %d;" % port)
+        assert patched != src, "stratumsolo default port line not found"
+        path = os.path.join(args.scratch, "stratumsolo-%d" % port)
+        open(path, "w").write(patched)
+        return ["perl", path]
+    if variant == "cenote":
+        return ["perl", os.path.join(args.yolo, "cenote"), "--port", str(port), "--text", "stratum-perl-check"]
+    if variant == "cenote-fixed":
+        src = open(os.path.join(args.yolo, "cenote")).read()
+        assert CENOTE_OLD in src and CENOTE_OLD_TAIL in src, "cenote scriptSig lines not found (ref/yolo moved off its pin?)"
+        path = os.path.join(args.scratch, "cenote-fixed")
+        open(path, "w").write(src.replace(CENOTE_OLD, CENOTE_FIX).replace(CENOTE_OLD_TAIL, CENOTE_FIX_TAIL))
+        return ["perl", path, "--port", str(port), "--text", "stratum-perl-check"]
+    sys.exit("unknown variant %s" % variant)
+
+
+VARIANTS = ("solo", "cenote", "cenote-fixed")
+
+
+def run_variant(variant, args, nodes, shim_dir, miner_addr):
+    a = nodes[0]
+    port = args.stratum_base + VARIANTS.index(variant)
+    perl_cmd = perl_script(variant, args, port)
+    env = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ.get("PATH", ""))
+    perl_log = open(os.path.join(args.scratch, "perl-%s.log" % variant), "wb")
+    log("%s: starting %s on port %d" % (variant, " ".join(perl_cmd), port))
+    perl = subprocess.Popen(perl_cmd, env=env, stdout=perl_log, stderr=subprocess.STDOUT, cwd=args.scratch)
+    procs.append(perl)
+    record = os.path.join(args.record_dir, "stratum-perl-%s.jsonl" % variant)
+    if os.path.exists(record): os.remove(record)
+    submit_log = os.path.join(shim_dir, "submitblock.log")
+    if os.path.exists(submit_log): os.remove(submit_log)
+    before = a.rpc("getblockcount")
+    time.sleep(2.5)                                   # the Perl polls the template once a second before it serves work
+    miner = [sys.executable, os.path.join(HERE, "stratum-miner"), "--pool", "127.0.0.1:%d" % port, "--user", miner_addr,
+             "--blocks", str(args.blocks), "--record", record, "--verbose"]
+    log("%s: running %s" % (variant, " ".join(miner)))
+    rc = subprocess.run(miner, env=env).returncode
+    ok = rc == 0
+    log("%s: miner exit %d (the Perl answered result: true %d times)" % (variant, rc, args.blocks if ok else -1))
+    verdicts = [l[len("-> rc="):].strip() for l in open(submit_log) if l.startswith("-> rc=")] if os.path.exists(submit_log) else []
+    log("%s: submitblock verdicts through the shim: %s" % (variant, verdicts))
+    if variant == "cenote":
+        # The unpatched Perl assembles an undecodable coinbase on a tagging node (see perl_script);
+        # the node says "Block decode failed" and the Perl tells the miner true anyway.
+        synced = wait_height(nodes, before, timeout=3) and a.rpc("getblockcount") == before
+        decode_failed = all("Block decode failed" in v for v in verdicts) and len(verdicts) == args.blocks
+        log("%s: heights %s (expected unchanged, %d): %s; every submit 'Block decode failed': %s"
+            % (variant, [n.rpc("getblockcount") for n in nodes], before, "ok" if synced else "FAIL", "ok" if decode_failed else "FAIL"))
+        ok = ok and synced and decode_failed
+    else:
+        height = before + args.blocks
+        synced = wait_height(nodes, height)
+        log("%s: heights %s (expected %d): %s" % (variant, [n.rpc("getblockcount") for n in nodes], height, "ok" if synced else "FAIL"))
+        ok = ok and synced
+        for h in range(before + 1, height + 1):
+            tag = a.rpc("yed_gettag", str(h))
+            expect = variant == "solo"
+            good = tag.get("found") is expect
+            log("%s: yed_gettag %d -> %s   expected found=%s: %s" % (variant, h, json.dumps(tag), expect, "ok" if good else "FAIL"))
+            ok = ok and good
+            sig = a.rpc("getblock", str(h), "2")["tx"][0]["vin"][0]["coinbase"]
+            log("%s: coinbase scriptSig at %d: %s" % (variant, h, sig))
+    perl.send_signal(signal.SIGINT)
+    try: perl.wait(10)
+    except subprocess.TimeoutExpired: perl.kill()
+    perl_log.close()
+    return ok
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--yolo", default=os.path.join(WORKSPACE, "ref", "yolo"), help="the Perl reference checkout")
+    ap.add_argument("--scratch", help="datadirs, shim and logs (default: a fresh temp dir, removed on success)")
+    ap.add_argument("--record-dir", default=os.path.join(HERE, "fixtures"))
+    ap.add_argument("--variants", default=",".join(VARIANTS), help="any of %s" % ", ".join(VARIANTS))
+    ap.add_argument("--blocks", type=int, default=1)
+    ap.add_argument("--rpc-base", type=int, default=24101)
+    ap.add_argument("--p2p-base", type=int, default=25101)
+    ap.add_argument("--stratum-base", type=int, default=24201)
+    args = ap.parse_args()
+    for f in ("stratumsolo", "cenote"):
+        if not os.path.exists(os.path.join(args.yolo, f)): sys.exit("no %s in %s (--yolo)" % (f, args.yolo))
+    if subprocess.run(["perl", "-MJSON", "-e", "1"]).returncode != 0: sys.exit("perl -MJSON is not available")
+    cleanup = args.scratch is None
+    args.scratch = args.scratch or tempfile.mkdtemp(prefix="stratum-perl-check-")
+    os.makedirs(args.record_dir, exist_ok=True)
+    log("scratch %s" % args.scratch)
+
+    a = Node(0, args.scratch, args.rpc_base, args.p2p_base)
+    b = Node(1, args.scratch, args.rpc_base + 1, args.p2p_base + 1, connect=args.p2p_base)
+    ok = False
+    try:
+        a.start()
+        miner_addr = a.rpc("getnewaddress")           # the Perl's mineraddress= (must be a wallet t-addr, ref/yolo/README.md)
+        a.stop()
+        a.write_conf(["mineraddress=%s" % miner_addr])
+        a.start()
+        b.start()
+        # A burst of 101 generated blocks stamps each with median-time-past + 1, leaving the tip
+        # about a minute ahead of the wall clock; the Perl stamps its header with `time` (not the
+        # template's curtime/mintime), so the node would reject it with time-too-old.  Generate
+        # the chain an hour in the past instead.
+        a.rpc("setmocktime", str(int(time.time()) - 3600))
+        a.rpc("generate", "101")
+        a.rpc("setmocktime", "0")
+        if not wait_height([a, b], 101): sys.exit("node 1 did not sync the initial chain")
+        log("chain at 101 on both nodes; mineraddress=%s" % miner_addr)
+        a.rpc("yed_setquote", str(usd_to_micro(QUOTE_USD)), "1")
+        tpl = a.rpc("getblocktemplate")
+        log("template flags (coinbaseaux) %s" % tpl.get("coinbaseaux", {}).get("flags"))
+        shim_dir = write_shim(args.scratch, a)
+        results = {}
+        for v in args.variants.split(","):
+            results[v] = run_variant(v, args, [a, b], shim_dir, miner_addr)
+        ok = all(results.values())
+        log("RESULT %s: %s" % ("PASS" if ok else "FAIL", results))
+    finally:
+        a.stop(); b.stop()
+        for p in procs:
+            if p.poll() is None: p.kill()
+        if ok and cleanup: shutil.rmtree(args.scratch, ignore_errors=True)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

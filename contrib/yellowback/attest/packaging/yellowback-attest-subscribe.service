@@ -1,0 +1,23 @@
+# systemd unit for the Yellowback subscriber beside a minting node (plan §5). Install as
+# /etc/systemd/system/yellowback-attest-subscribe.service, adjust User/paths, then
+#   systemctl daemon-reload && systemctl enable --now yellowback-attest-subscribe
+[Unit]
+Description=Yellowback attestation subscriber (topic -> yed_addattestation)
+After=network-online.target ycashd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ycash
+ExecStart=/usr/local/bin/yellowback-attest subscribe --conf /etc/yellowback/attest.toml
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/yellowback
+
+[Install]
+WantedBy=multi-user.target

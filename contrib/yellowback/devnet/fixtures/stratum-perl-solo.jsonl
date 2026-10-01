@@ -1,0 +1,12 @@
+{"ts": 1790582451.74, "dir": "send", "line": "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"stratum-miner/0.1\",null,\"127.0.0.1\",\"24201\"]}"}
+{"ts": 1790582451.76, "dir": "recv", "line": "{\"id\":1,\"result\":[null,\"000094e6b550edb9bd052ceac8af\"],\"error\":null}"}
+{"ts": 1790582451.76, "dir": "send", "line": "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"smL32kpCAfydHEXQUzSV7yTCorrPt79f6ZN\",\"x\"]}"}
+{"ts": 1790582451.81, "dir": "recv", "line": "{\"id\":2,\"result\": true,\"error\": null}"}
+{"ts": 1790582451.81, "dir": "send", "line": "{\"id\":3,\"method\":\"mining.extranonce.subscribe\",\"params\":[]}"}
+{"ts": 1790582451.81, "dir": "recv", "line": "{\"id\":null,\"method\":\"mining.set_target\",\"params\":[\"0f0f0f0000000000000000000000000000000000000000000000000000000000\"]}"}
+{"ts": 1790582451.868, "dir": "recv", "line": "{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"1\",\"04000000\",\"64319b6c4db79a64e06c320d9effe256d75cb59a8ae8d74a329ce06d344c8c08\",\"55fc9dcf7c48a98a7100252362326bd6d1884097e4775c4e90a4728a56b11a79\",\"beec3bd46c3e6dc0c3ad2e5bdde2df3bcbb13fa23b9bb9c891e0ab7a739daa5f\",\"b11eba6a\",\"0f0f0f20\",true,\"ZcashPoW\"]}"}
+{"ts": 1790582451.868, "dir": "recv", "line": "{\"id\":3,\"result\": true,\"error\": null}"}
+{"ts": 1790582451.877, "dir": "send", "line": "{\"id\":4,\"method\":\"mining.submit\",\"params\":[\"smL32kpCAfydHEXQUzSV7yTCorrPt79f6ZN\",\"1\",\"b11eba6a\",\"000000000000000000000000000000000000\",\"24045a587ad4d3114ee7253f2d9a03bf5dd1f52a60584f448f96dbb346f7db7e38c53707c4\"]}"}
+{"ts": 1790582451.877, "dir": "recv", "line": "{\"id\":null,\"method\":\"mining.set_target\",\"params\":[\"0f0f0f0000000000000000000000000000000000000000000000000000000000\"]}"}
+{"ts": 1790582451.921, "dir": "recv", "line": "{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"1\",\"04000000\",\"64319b6c4db79a64e06c320d9effe256d75cb59a8ae8d74a329ce06d344c8c08\",\"55fc9dcf7c48a98a7100252362326bd6d1884097e4775c4e90a4728a56b11a79\",\"beec3bd46c3e6dc0c3ad2e5bdde2df3bcbb13fa23b9bb9c891e0ab7a739daa5f\",\"b11eba6a\",\"0f0f0f20\",true,\"ZcashPoW\"]}"}
+{"ts": 1790582451.945, "dir": "recv", "line": "{\"id\":4,\"result\": true}"}

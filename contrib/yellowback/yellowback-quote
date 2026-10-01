@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""
+yellowback-quote: the Yellowback quote agent (plan §5, M9, L5).
+
+One process beside a pool's ycashd. Every `poll_seconds` it fetches the
+configured price sources, computes the aggregate (per-source 15-minute
+VWAP/TWAP, outlier filter, median over min_sources / min_venues) and pushes it
+into the node with `yed_setquote <priceMicroUsd> <sourceMask>`. The node puts
+the quote into its coinbase tag while it is younger than -yellowbackquotemaxage.
+
+  * After `fail_polls` (default 2) consecutive failed aggregates the agent calls
+    `yed_setquote 0`, so the pool goes signal-only at once (L5); the node's
+    staleness clock remains the backstop for a dead agent. Publishing resumes on
+    the next good aggregate.
+  * An RPC failure (connection refused, auth, `yellowback-unhealthy`, ...) is
+    logged at error and retried on the next poll, with no backoff; it never
+    exits the daemon. The exit code is non-zero only for a bad configuration
+    (2) or, with --once / --dry-run, for a poll that published nothing (1).
+  * Nothing inbound: no listening socket, no TLS server.
+
+Usage:
+  yellowback-quote --conf yellowback-quote.toml                   # the daemon
+  yellowback-quote --conf ... --once                              # one poll; exit 0 iff a quote was published (cron)
+  yellowback-quote --conf ... --dry-run [--once]                  # aggregate and print, no RPC; exit 0 iff an aggregate exists
+  yellowback-quote --conf ... --mock-price /path/to/file          # tests and devnet: the file holds one USD price, re-read every poll
+  yellowback-quote sources --conf ...                             # fetch every source once and show what resolved
+
+Configuration (TOML, Python >= 3.11):
+  [node]   rpc_url = "http://127.0.0.1:8832"; rpc_cookie = "~/.ycash/.cookie" | rpc_user, rpc_password
+  [quote]  poll_seconds (30), fail_polls (2), twap_seconds (900), min_sources (3), min_venues (2),
+           min_btc_sources (2), outlier_bps (1000), silence_seconds (120), fetch_timeout (15)
+  [[sources]]          preset rows: name, kind, url, path, max_age, max_spread_bps, reject_paths, mask_bit, ...
+  [[btc_usd_sources]]  USD references for BTC-quoted pairs (same fields)
+"""
+
+import argparse
+import json
+import logging
+import os
+import signal
+import sys
+import time
+import tomllib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import yellowback_price as yp  # noqa: E402
+
+LOG = logging.getLogger("yellowback-quote")
+
+EXIT_OK, EXIT_NOT_PUBLISHED, EXIT_BAD_CONFIG = 0, 1, 2
+QUOTE_DEFAULTS = {"fail_polls": 2}
+QUOTE_KEYS = ("fail_polls",) + yp.FEED_KEYS
+NODE_KEYS = {"rpc_url", "rpc_cookie", "rpc_user", "rpc_password", "rpc_timeout"}
+
+
+class ConfigError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# configuration
+
+def load_config(path):
+    """Parse the TOML file into {node: {...}, quote: {...settings}, sources: [...], btc_usd_sources: [...]}.
+    Raises ConfigError on anything the daemon could not run with."""
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except OSError as e:
+        raise ConfigError("cannot read %s: %s" % (path, e))
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError("%s: %s" % (path, e))
+    return validate_config(raw)
+
+
+def validate_config(raw):
+    if not isinstance(raw, dict):
+        raise ConfigError("top level must be a table")
+    unknown = set(raw) - {"node", "quote", "sources", "btc_usd_sources"}
+    if unknown:
+        raise ConfigError("unknown top-level key(s): %s" % ", ".join(sorted(unknown)))
+    node = dict(raw.get("node") or {})
+    bad = set(node) - NODE_KEYS
+    if bad:
+        raise ConfigError("[node]: unknown key(s) %s" % ", ".join(sorted(bad)))
+    if node.get("rpc_cookie") and (node.get("rpc_user") or node.get("rpc_password")):
+        raise ConfigError("[node]: give rpc_cookie or rpc_user/rpc_password, not both")
+    if node.get("rpc_password") and not node.get("rpc_user"):
+        raise ConfigError("[node]: rpc_password needs rpc_user")
+    if node.get("rpc_cookie"):
+        node["rpc_cookie"] = os.path.expanduser(node["rpc_cookie"])
+    quote = dict(raw.get("quote") or {})
+    bad = set(quote) - set(QUOTE_KEYS)
+    if bad:
+        raise ConfigError("[quote]: unknown key(s) %s" % ", ".join(sorted(bad)))
+    try:
+        settings = yp.feed_settings(quote)
+        fail_polls = int(quote.get("fail_polls", QUOTE_DEFAULTS["fail_polls"]))
+        if fail_polls < 1:
+            raise ValueError("fail_polls must be >= 1")
+        sources = yp.normalize_sources(raw.get("sources", []))
+        btc = yp.normalize_btc_sources(raw.get("btc_usd_sources", []))
+    except (ValueError, TypeError) as e:
+        raise ConfigError(str(e))
+    settings["fail_polls"] = fail_polls
+    return {"node": node, "quote": settings, "sources": sources, "btc_usd_sources": btc}
+
+
+def make_node(node_cfg):
+    url = node_cfg.get("rpc_url")
+    if not url:
+        raise ConfigError("[node] rpc_url is required (not for --dry-run)")
+    return yp.Node(url, timeout=int(node_cfg.get("rpc_timeout", 30)), user=node_cfg.get("rpc_user"),
+                   password=node_cfg.get("rpc_password"), cookie=node_cfg.get("rpc_cookie"))
+
+
+def make_feed(cfg, mock_price=None):
+    # The feed's own poll_seconds gate is disabled: the agent's loop is the cadence.
+    settings = dict(cfg["quote"], poll_seconds=0)
+    return yp.PriceFeed(cfg["sources"], mock_price, settings, cfg["btc_usd_sources"])
+
+
+# ---------------------------------------------------------------------------
+# the agent
+
+class QuoteAgent:
+    """One poll = fetch, aggregate, push. `node` is anything with call(method, *params) (injectable)."""
+
+    def __init__(self, feed, node=None, fail_polls=2, dry_run=False):
+        self.feed = feed
+        self.node = node
+        self.fail_polls = fail_polls
+        self.dry_run = dry_run
+        self.failures = 0            # consecutive failed aggregates
+        self.pending_clear = False   # `yed_setquote 0` owed to the node (L5) and not yet acknowledged
+        self.published = None        # (micro, mask) last acknowledged by the node, None after a clear
+        self.polls = 0
+
+    def _setquote(self, micro, mask):
+        try:
+            reply = self.node.call("yed_setquote", micro, mask)
+        except yp.RpcError as e:
+            LOG.error("yed_setquote %d %d refused by the node: %s", micro, mask, e)
+            return None
+        except Exception as e:                       # connection refused, timeout, bad reply ...
+            LOG.error("yed_setquote %d %d failed: %s: %s", micro, mask, e.__class__.__name__, e)
+            return None
+        return reply if reply is not None else {}
+
+    def poll(self):
+        """Returns one of: 'published', 'cleared', 'failed' (no aggregate, nothing owed yet),
+        'rpc-error', 'dry-run'."""
+        self.polls += 1
+        self.feed.poll(force=True)
+        agg = self.feed.aggregate()
+        if agg is None:
+            self.failures += 1
+            r = self.feed.report()
+            LOG.warning("no aggregate (%d/%d failed polls): %d live source(s) from %d venue(s), need %d/%d",
+                        self.failures, self.fail_polls, r["live_sources"], r["live_venues"],
+                        self.feed.settings["min_sources"], self.feed.settings["min_venues"])
+            if self.failures == self.fail_polls:
+                self.pending_clear = True             # L5: clear once the threshold is reached
+            if self.dry_run:
+                print(json.dumps({"aggregate": None, "liveSources": r["live_sources"], "liveVenues": r["live_venues"]}))
+                return "dry-run"
+            if self.pending_clear:
+                reply = self._setquote(0, 0)
+                if reply is None:
+                    return "rpc-error"
+                self.pending_clear = False
+                self.published = None
+                LOG.warning("quote cleared: the node is signal-only until the next good aggregate (L5)")
+                return "cleared"
+            return "failed"
+        micro, mask, names = agg
+        self.failures = 0
+        self.pending_clear = False
+        if self.dry_run:
+            print(json.dumps({"priceMicroUsd": micro, "priceUsd": micro / yp.MICRO, "sourceMask": mask,
+                              "sources": names}))
+            return "dry-run"
+        reply = self._setquote(micro, mask)
+        if reply is None:
+            return "rpc-error"
+        self.published = (micro, mask)
+        nxt = reply.get("nextTag") if isinstance(reply, dict) else None
+        LOG.info("published %d µUSD ($%.6f) mask 0x%04x from %s%s", micro, micro / yp.MICRO, mask, ",".join(names),
+                 "" if not nxt else " -> next tag %s" % nxt.get("kind"))
+        return "published"
+
+
+class _Stop(Exception):
+    pass
+
+
+def run_loop(agent, poll_seconds, sleep=time.sleep):
+    def _stop(signum, frame):
+        raise _Stop()
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    LOG.info("yellowback-quote running: poll every %d s, clear after %d failed polls%s",
+             poll_seconds, agent.fail_polls, " (mock price %s)" % agent.feed.mock_file if agent.feed.mock_file else "")
+    try:
+        while True:
+            started = time.time()
+            agent.poll()
+            delay = poll_seconds - (time.time() - started)
+            if delay > 0:
+                sleep(delay)
+    except _Stop:
+        LOG.info("stopping")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# `sources`
+
+def _print_sources(title, table):
+    if not table:
+        return
+    w = max(len(n) for n in table)
+    print(title)
+    print("  %-*s  %-12s  %-16s  %-7s  %-5s  %4s  %12s  %8s  %9s  %s" % (w, "source", "venue", "kind", "state", "quote", "bit", "micro_usd", "age_s", "spread", "detail"))
+    for name, h in table.items():
+        ok = h["state"] == "ok"
+        print("  %-*s  %-12s  %-16s  %-7s  %-5s  %4s  %12s  %8s  %9s  %s" % (
+            w, name, h["venue"], h["kind"], h["state"], h["quote"],
+            "" if h.get("mask_bit") is None else h["mask_bit"],
+            "" if not ok or h["last_price_micro_usd"] is None else h["last_price_micro_usd"],
+            "" if not ok or h["last_age_seconds"] is None else "%.0f" % h["last_age_seconds"],
+            "" if not ok or h["last_spread_bps"] is None else "%.0f bps" % h["last_spread_bps"],
+            h["last_error"] or ""))
+
+
+def sources_command(feed):
+    """Fetch every configured source once and print what resolved; exit 1 if no price results."""
+    if not feed.sources:
+        print("no [[sources]] configured", file=sys.stderr)
+        return EXIT_NOT_PUBLISHED
+    feed.poll(force=True)
+    r = feed.report()
+    st = r["settings"]
+    if feed.btc_sources:
+        _print_sources("BTC/USD references (for BTC-quoted pairs):", r["btc_usd"]["sources"])
+        ref = r["btc_usd"]["reference_usd"]
+        print("  reference: %s (%d live, need min_btc_sources=%d)" % (
+            "none" if ref is None else "$%.2f" % ref, r["btc_usd"]["live"], st["min_btc_sources"]))
+    _print_sources("YEC/USD sources:", r["sources"])
+    print("live: %d source(s) from %d venue(s); need min_sources=%d, min_venues=%d; outlier_bps=%d" % (
+        r["live_sources"], r["live_venues"], st["min_sources"], st["min_venues"], st["outlier_bps"]))
+    if r["median_micro_usd"] is None:
+        print("median: none (no quote would be published)")
+        return EXIT_NOT_PUBLISHED
+    print("median: %d micro-USD ($%.6f), sourceMask 0x%04x from %s" % (
+        r["median_micro_usd"], r["median_micro_usd"] / yp.MICRO, r["source_mask"], ",".join(r["contributing"])))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(prog="yellowback-quote", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "sources"])
+    ap.add_argument("--conf", required=True, help="TOML configuration file")
+    ap.add_argument("--mock-price", dest="mock_price", metavar="FILE",
+                    help="TEST/DEVNET: read one USD price from FILE every poll instead of the sources (/dev/stdin allowed)")
+    ap.add_argument("--once", action="store_true", help="one poll; exit 0 iff a quote was published (1 otherwise)")
+    ap.add_argument("--dry-run", dest="dry_run", action="store_true", help="one poll: aggregate and print as JSON, no RPC; exit 0 iff an aggregate exists")
+    ap.add_argument("--log-level", dest="log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    ap.add_argument("-v", "--verbose", action="store_true", help="same as --log-level DEBUG")
+    return ap.parse_args(argv)
+
+
+def main(argv=None, node_factory=make_node, feed_factory=make_feed, sleep=time.sleep):
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else getattr(logging, args.log_level),
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
+    try:
+        cfg = load_config(args.conf)
+        feed = feed_factory(cfg, args.mock_price)
+        if args.command == "sources":
+            return sources_command(feed)
+        node = None if args.dry_run else node_factory(cfg["node"])
+    except ConfigError as e:
+        LOG.error("bad configuration: %s", e)
+        return EXIT_BAD_CONFIG
+    agent = QuoteAgent(feed, node, fail_polls=cfg["quote"]["fail_polls"], dry_run=args.dry_run)
+    if args.dry_run:
+        agent.poll()
+        return EXIT_OK if agent.feed.aggregate() is not None else EXIT_NOT_PUBLISHED
+    if args.once:
+        return EXIT_OK if agent.poll() == "published" else EXIT_NOT_PUBLISHED
+    return run_loop(agent, cfg["quote"]["poll_seconds"], sleep=sleep)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

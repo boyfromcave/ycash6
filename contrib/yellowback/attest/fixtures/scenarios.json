@@ -1,0 +1,78 @@
+{
+  "_readme": "Input side of the Rust/Python aggregator cross-check (plan §5). Each scenario names the [[sources]] rows exactly as attest.toml would, the fixture file answering each source, the feed settings and the clock. expected.json holds the Python aggregator's answers (the reference); the Rust unit test fixtures::tests and test_yellowback_price.py's FixtureCrossCheck both assert them. Regenerate expected.json with `python3 contrib/yellowback/attest/fixtures/expected.py` (the workspace venv) after changing anything here.",
+  "now": 1789341900,
+  "scenarios": [
+    {
+      "name": "usd_three_venues_one_outlier",
+      "about": "Four USD readings from three venues; SafeTrade's own ticker (fixture hand-written from a 2026-09-05 capture, the venue answers curl with 403) is 24 % below the market and falls to the outlier filter.",
+      "settings": {},
+      "sources": [
+        {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
+        {"name": "safetrade", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "max_age": 3600},
+        {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 500},
+        {"name": "safetrade-direct", "kind": "peatio_ticker", "market": "yecusdt"}
+      ],
+      "btc_usd_sources": [],
+      "replies": {
+        "coingecko": "cg_simple.json",
+        "safetrade": "cg_tickers.json",
+        "nonkyc": "nonkyc_yec_usdt.json",
+        "safetrade-direct": "peatio.json"
+      }
+    },
+    {
+      "name": "btc_pairs_with_reference_median",
+      "about": "Two BTC-quoted readings converted with the median of four BTC/USD references, beside three USD readings.",
+      "settings": {"min_sources": 3, "min_venues": 2},
+      "sources": [
+        {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
+        {"name": "safetrade", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "max_age": 3600},
+        {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 500},
+        {"name": "nonkyc-btc-pair", "kind": "nonkyc_market", "symbol": "YEC_BTC", "max_age": 3600},
+        {"name": "cg-nonkyc-btc", "kind": "coingecko_ticker", "market": "nonkyc_io", "target": "BTC", "max_age": 3600}
+      ],
+      "btc_usd_sources": [
+        {"name": "coingecko-btc", "kind": "coingecko_simple", "coin": "bitcoin", "max_age": 900},
+        {"name": "nonkyc-btc", "kind": "nonkyc_market", "symbol": "BTC_USDT", "max_age": 3600},
+        {"name": "kraken", "kind": "kraken_ticker"},
+        {"name": "coinbase", "kind": "coinbase_ticker", "max_age": 600}
+      ],
+      "replies": {
+        "coingecko": "cg_simple.json",
+        "safetrade": "cg_tickers.json",
+        "nonkyc": "nonkyc_yec_usdt.json",
+        "nonkyc-btc-pair": "nonkyc_yec_btc.json",
+        "cg-nonkyc-btc": "cg_tickers.json",
+        "coingecko-btc": "cg_btc.json",
+        "nonkyc-btc": "nonkyc_btc_usdt.json",
+        "kraken": "kraken.json",
+        "coinbase": "coinbase.json"
+      }
+    },
+    {
+      "name": "guards_fail_closed",
+      "about": "A tight max_age drops the CoinGecko SafeTrade ticker, a tight max_spread_bps drops Nonkyc, one reference short of min_btc_sources drops the BTC pair (btcref), a fetch failure drops the direct SafeTrade read: only CoinGecko is left and nothing is published.",
+      "settings": {"min_btc_sources": 3},
+      "sources": [
+        {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
+        {"name": "safetrade", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "max_age": 300},
+        {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 20},
+        {"name": "nonkyc-btc-pair", "kind": "nonkyc_market", "symbol": "YEC_BTC", "max_age": 3600},
+        {"name": "safetrade-direct", "kind": "peatio_ticker", "market": "yecusdt"}
+      ],
+      "btc_usd_sources": [
+        {"name": "kraken", "kind": "kraken_ticker"},
+        {"name": "coinbase", "kind": "coinbase_ticker", "max_age": 10}
+      ],
+      "replies": {
+        "coingecko": "cg_simple.json",
+        "safetrade": "cg_tickers.json",
+        "nonkyc": "nonkyc_yec_usdt.json",
+        "nonkyc-btc-pair": "nonkyc_yec_btc.json",
+        "safetrade-direct": null,
+        "kraken": "kraken.json",
+        "coinbase": "coinbase.json"
+      }
+    }
+  ]
+}

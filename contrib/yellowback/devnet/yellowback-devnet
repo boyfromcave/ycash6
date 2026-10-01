@@ -1,0 +1,1845 @@
+#!/usr/bin/env python3
+"""A one-laptop Yellowback v3 regtest network, ARMED when `up` returns, with a seat left empty.
+
+The plain devnet (`up`, today's behaviour) is eight nodes: node 0 the funded wallet, node 1
+stock, nodes 2-4 signalling pools with fixed payout addresses, nodes 5-7 attestor nodes that
+register (10 YEC, 200 blocks) and arm the layer, each with a real `yellowback-attest attest`
+beside it and one `subscribe` beside node 0, all on the `dir` transport. `--no-attest` gives
+back the five-node v2 devnet.
+
+`up --role {user,attestor,pool}` (docs/plans/role-based-regtest-plan.md) is the same chain
+with **one seat deliberately left unautomated** and the world kept moving around it: eleven
+nodes, a heartbeat that mines a block every N seconds on the automated pools only, a price
+that walks, and a simulated population of personas (`yellowback-sim`) minting, redeeming,
+trading and liquidating on nodes 9 and 10.
+
+    node  0  you (`user`) or the funding + subscriber node   5-7  attestors, automated
+          1  stock, no -yellowback                          8    4th attestor, or YOU (`attestor`)
+          2-3 pools, automated                              9    the simulated population
+          4  pool, automated, or YOU (`pool`)               10   the simulated liquidator
+
+YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devnets run side by
+side; YELLOWBACK_WALLET_BIN, YELLOWBACK_ATTEST_BIN and CHAINVIZ_BIN name the binaries.
+
+Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
+[--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
+price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
+attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
+sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
+cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
+(JSON signing/address/template vectors for the YEW core, wallet plan W0c).
+"""
+import argparse
+import glob
+import json
+import math
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+from decimal import Decimal
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+WORKSPACE = os.path.dirname(REPO)
+if os.path.basename(WORKSPACE) == "wt":                 # a worktree: wt/<name>/ -> the workspace
+    WORKSPACE = os.path.dirname(WORKSPACE)
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+import test_framework.util as _util
+# The inherited framework asserts n <= MAX_NODES (8) in p2p_port; the role presets run eleven
+# nodes. Raised here, once, before any port is computed; every other process reads the ports
+# this process publishes in devnet.json rather than recomputing them (docs/mapping.md 14.2).
+_util.MAX_NODES = 12
+from test_framework.util import (PortSeed, bitcoind_processes, connect_nodes_bi,          # noqa: E402
+                                 get_rpc_proxy, hex_str_to_bytes, initialize_chain_clean, rpc_auth_pair,
+                                 rpc_port, rpc_url, start_node, sync_blocks, sync_mempools)
+from test_framework.yellowback_util import (ACTIVATION_BLOCKS, ATTEST_ARM_DELAY, ATTEST_ARM_MIN,  # noqa: E402
+                                            BOND_MATURITY, M_SELECT, POOL_WIFS, REF_LAG, SIGNING_BRANCH_ID,
+                                            address_of, pool_args, set_quote, wait_yed_healthy,
+                                            yellowback_node_args)
+import test_framework.yellowback_model as ym                                                # noqa: E402
+
+NODES, USER, POOLS = 5, 0, (2, 3, 4)          # the v2 core; ATTESTORS extend it to eight
+STOCK = 1
+ATTESTORS = (5, 6, 7)
+ATTEST_NODES = NODES + len(ATTESTORS)
+ATTESTOR4, POPULATION, LIQUIDATOR = 8, 9, 10   # the role presets' three extra nodes
+ROLE_NODES = 11
+
+# The seat each preset leaves empty, and what is withheld from the automation for it.
+ROLES = {
+    "none": {"seat": USER, "auto_pools": POOLS, "auto_attestors": ATTESTORS, "what": "nothing: the fully automated demo"},
+    "user": {"seat": USER, "auto_pools": POOLS, "auto_attestors": ATTESTORS + (ATTESTOR4,),
+             "what": "a minter and holder of YED; nothing is withheld, the whole economy runs around you"},
+    "attestor": {"seat": ATTESTOR4, "auto_pools": POOLS, "auto_attestors": ATTESTORS,
+                 "what": "one bonded attestor; your registration, your bond and your agent are yours to do"},
+    "pool": {"seat": 4, "auto_pools": (2, 3), "auto_attestors": ATTESTORS + (ATTESTOR4,),
+             "what": "one mining pool; your payout address, your signalling, your quote and your blocks are yours to do"},
+}
+
+def _default_dir():
+    return os.path.expanduser(os.environ.get("YELLOWBACK_DEVNET_DIR") or "~/yb-devnet")
+
+def _default_portseed():
+    """The plan (v3 section 5) names YELLOWBACK_DEVNET_PORTBASE, but every port here comes from
+    the inherited framework's PortSeed (test_framework/util.py:89) -- PORT_MIN + n + a function of
+    the seed -- not from a base. The seed is the real knob, so PORTSEED is read first and a
+    PORTBASE is folded into a distinct seed rather than rejected: two devnets started by the
+    plan's text still land on disjoint ports. See docs/mapping.md section 13.4."""
+    seed = os.environ.get("YELLOWBACK_DEVNET_PORTSEED")
+    if seed: return int(seed)
+    base = os.environ.get("YELLOWBACK_DEVNET_PORTBASE")
+    if base: return int(base) % 4096
+    return 7
+
+DEFAULT_DIR = _default_dir()
+AGENT = os.path.join(REPO, "contrib", "yellowback", "yellowback-quote")
+SIM = os.path.join(HERE, "yellowback-sim")
+SCENARIOS = os.path.join(HERE, "scenarios")
+ATTEST_CRATE = os.path.join(REPO, "contrib", "yellowback", "attest")
+
+def _attest_agent():
+    """The yellowback-attest binary. CARGO_TARGET_DIR is commonly set to a shared directory here
+    (the v3 A4 incident: a `cargo clean` against one), so the crate-local target/ is only the
+    first candidate. YELLOWBACK_ATTEST_BIN overrides everything."""
+    override = os.environ.get("YELLOWBACK_ATTEST_BIN")
+    if override: return os.path.expanduser(override)
+    roots = [os.path.join(ATTEST_CRATE, "target")]
+    shared = os.environ.get("CARGO_TARGET_DIR")
+    if shared: roots.insert(0, os.path.expanduser(shared))
+    for root in roots:
+        for profile in ("release", "debug"):
+            candidate = os.path.join(root, profile, "yellowback-attest")
+            if os.access(candidate, os.X_OK): return candidate
+    return os.path.join(ATTEST_CRATE, "target", "release", "yellowback-attest")
+
+ATTEST_AGENT = _attest_agent()
+STRATUM_MINER = os.path.join(HERE, "stratum-miner")
+STRATUM_WORKER = "devnet-worker"  # the miner's stratum username: with --payout set it is a free worker name, not an address
+STRATUM_PORT_BASE = 21000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, above 11000-21000 (p2p/rpc) and below 32768, where Linux's ephemeral range starts (a 30000 base collided with client sockets on CI)
+STRATUM_STATUS_OFFSET = 5000  # yolo's GET /status port = stratum port + this
+# ZMQ and chain-viz (chain-viz-plan.md C-11, N-4). The rpc formula spreads a seed over 5000
+# ports, and the only 5000-wide band left under 32768 is taken (stratum + status), so these two
+# follow the seed modulo a small period instead: every port stays below Linux's ephemeral floor.
+# One endpoint per node: ycashd binds a single PUB socket per address and publishes hashblock
+# and hashtx on it (src/zmq/zmqpublishnotifier.cpp, "Reusing socket for address").
+ZMQ_PORT_BASE = 31000        # zmq_port(n) = 31000 + 12 * (portseed % 140) + n : 31000-32679
+ZMQ_SEED_PERIOD = 140
+CHAINVIZ_PORT_BASE = 32680   # chainviz_port() = 32680 + portseed % 88 : 32680-32767
+CHAINVIZ_SEED_PERIOD = 88
+CHAINVIZ_START_TIMEOUT = 15  # seconds to wait for "listening on http://..." on its stdout
+
+def _yolo_binary():
+    """The yolo (Rust) pool: YOLO_BIN, then the workspace build, then PATH (role-pool-regtest-plan.md 3.4)."""
+    override = os.environ.get("YOLO_BIN")
+    if override: return os.path.expanduser(override)
+    candidate = os.path.join(WORKSPACE, "yolo", "target", "release", "yolo")
+    if os.access(candidate, os.X_OK): return candidate
+    return shutil.which("yolo") or candidate
+
+YOLO = _yolo_binary()
+ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
+ATTEST_LOCK_BLOCKS = 200      # regtest bondMinLock
+ATTEST_FUND_YEC = 11          # the bond plus room for the fee
+ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
+POPULATION_FUND_YEC = 260     # the five minter/holder personas share this wallet (yellowback-sim)
+LIQUIDATOR_FUND_YEC = 160     # the liquidator's own inventory mint plus carriers and notices
+SEAT_ATTESTOR_FUND_YEC = 13   # the owner's bond (10), its fee, and a few YEC for a yed_revive
+FUND_COINS = 6                # the population's and the liquidator's YEC arrive as this many coins
+HEARTBEAT_RATE = 15           # seconds per block (plan section 3.3); --lean doubles it
+WALK_TICK, WALK_VOL, WALK_DRIFT = 5, 1.0, 0.0   # seconds; % per tick; % per minute (plan section 3.5)
+ATTEST_CONF = """# written by yellowback-devnet for attestor node %(node)d
+[node]
+rpc_url = "http://127.0.0.1:%(port)d"
+rpc_user = "%(user)s"
+rpc_password = "%(password)s"
+
+[attest]
+seq = %(seq)s
+every_blocks = %(every)d
+fail_polls = 2
+ref_lag = %(ref_lag)d
+poll_seconds = 2
+min_sources = 1
+min_venues = 1
+
+[transport]
+kind = "dir"
+path = "%(bus)s"
+
+[subscribe]
+listattestors_seconds = 5
+"""
+SUBSCRIBE_CONF = """# written by yellowback-devnet: the subscriber beside node %(node)d
+[node]
+rpc_url = "http://127.0.0.1:%(port)d"
+rpc_user = "%(user)s"
+rpc_password = "%(password)s"
+
+[transport]
+kind = "dir"
+path = "%(bus)s"
+
+[subscribe]
+listattestors_seconds = 5
+"""
+QUOTE_MAX_AGE = 120     # -yellowbackquotemaxage on the pools under --agents (plan section 5 f): a stopped agent shows within two minutes
+AGENT_CONF = """# written by yellowback-devnet for pool node %(node)d
+[node]
+rpc_url = "http://127.0.0.1:%(port)d"
+rpc_user = "%(user)s"
+rpc_password = "%(password)s"
+
+[quote]
+poll_seconds = 5
+fail_polls = 2
+min_sources = 1
+min_venues = 1
+
+[[sources]]
+name = "nowhere"
+kind = "generic"
+venue = "nowhere"
+url = "http://127.0.0.1:1/never"
+path = "price"
+"""
+
+# ---------------------------------------------------------------------------------- state and rpc
+
+def path(directory): return os.path.join(directory, "devnet.json")
+def node_dir(directory, node): return os.path.join(directory, "node%d" % node)
+def rpc(state, node, timeout=30):
+    url = (state.get("rpc") or {}).get(str(node), {}).get("url") or rpc_url(node)
+    return get_rpc_proxy(url, node, timeout=timeout)
+def alive(state, node):
+    try: rpc(state, node).getblockcount(); return True
+    except Exception: return False
+def mock_path(directory): return os.path.join(directory, "mock-price")
+def agent_pids(state): return {int(k): v for k, v in (state.get("agents") or {}).items()}
+def agent_alive(pid):
+    if not pid: return False
+    try: os.kill(pid, 0); return True
+    except OSError: return False
+def read_mock(directory):
+    try: return Decimal(open(mock_path(directory)).read().strip())
+    except (OSError, ArithmeticError): return None
+def write_mock(directory, usd):
+    tmp = mock_path(directory) + ".tmp"
+    with open(tmp, "w") as file: file.write("%s\n" % usd)
+    os.replace(tmp, mock_path(directory))
+def role_of(state): return state.get("role") or "none"
+def seat_of(state): return state.get("seat", USER)
+def auto_pools(state): return tuple(state.get("auto_pools") or POOLS)
+def all_pools(state): return tuple(state.get("pools") or POOLS)
+def auto_attestors(state): return tuple(state.get("auto_attestors") or attestors_of(state))
+def attestors_of(state): return tuple(state.get("attestors") or ())
+def minting_nodes(state):
+    """The nodes that carry a subscriber: every wallet that builds bundles from its own pool."""
+    nodes = [USER]
+    for key in ("population", "liquidator"):
+        if state.get(key) is not None: nodes.append(state[key])
+    return nodes
+def pool_address(state, node):
+    return state["pool_addresses"][all_pools(state).index(node)]
+
+def start_agent(directory, node):
+    """One yellowback-quote per pool, detached, reading the shared mock price file; returns its pid."""
+    user, password = rpc_auth_pair(node)
+    conf = os.path.join(directory, "quote-%d.toml" % node)
+    with open(conf, "w") as file: file.write(AGENT_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password})
+    return _spawn(directory, "quote-%d" % node, [sys.executable, AGENT, "--conf", conf, "--mock-price", mock_path(directory)])
+def stop_agents(state, only=None):
+    for node, pid in agent_pids(state).items():
+        if only is not None and node != only: continue
+        if agent_alive(pid):
+            try: os.kill(pid, 15); print("stopping quote agent of node%d (pid %d)" % (node, pid))
+            except OSError as error: print("agent of node%d: %s" % (node, error))
+def wait_quotes(state, since=None, timeout=60, pools=None):
+    """Wait until every automated pool's next tag is a quote; with `since` (a wall-clock time),
+    until each pool's quote was stamped at least two seconds after it, so the agents have re-read
+    the mock."""
+    pools = auto_pools(state) if pools is None else pools
+    deadline = time.time() + timeout
+    while True:
+        miners = {node: rpc(state, node).yed_getinfo()["miner"] for node in pools}
+        def fresh(miner):
+            if miner["quoteKind"] != "quote": return False
+            return since is None or (time.time() - since) - miner["quoteAgeSeconds"] >= 2
+        if all(fresh(miner) for miner in miners.values()): return
+        if time.time() > deadline: raise RuntimeError("quote agents did not publish within %ds: %s" % (timeout, {node: miner["quoteKind"] for node, miner in miners.items()}))
+        time.sleep(0.5)
+def bus_path(directory): return os.path.join(directory, "attest-bus")
+def attest_mock_path(directory, node): return os.path.join(directory, "attest-price-%d" % node)
+def attest_pids(state): return {k: v for k, v in (state.get("attest_agents") or {}).items()}
+
+def write_attest_mock(directory, node, usd):
+    tmp = attest_mock_path(directory, node) + ".tmp"
+    with open(tmp, "w") as file: file.write("%s\n" % usd)
+    os.replace(tmp, attest_mock_path(directory, node))
+
+def _spawn(directory, name, argv, env=None):
+    """One detached agent process logging to <dir>/<name>.log; returns its pid."""
+    log = open(os.path.join(directory, "%s.log" % name), "a")
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, env=env,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    log.close()
+    return process.pid
+
+def mark_stopped(state, name, stopped):
+    """Record a deliberate stop (`attestor N stop`, `pool N quote stop`) so the heartbeat's
+    liveness check and `check` do not read the dead process as a broken devnet."""
+    names = set(state.get("stopped_agents") or [])
+    (names.add if stopped else names.discard)(name)
+    state["stopped_agents"] = sorted(names)
+
+def node_pids(directory):
+    """Every ycashd whose -datadir is under this devnet, by process, not by RPC. A node whose RPC
+    is broken (one answered 500 to getblockcount after its directory was wiped under it) looks
+    "down" to `alive()` yet still holds its ports, and the next `up` dies with "Unable to start
+    HTTP server" (F-14)."""
+    try:
+        out = subprocess.run(["pgrep", "-f", "ycashd.*-datadir=%s/node" % directory], capture_output=True, text=True).stdout
+    except OSError:
+        return []
+    return [int(x) for x in out.split() if x.isdigit()]
+
+def kill_nodes(directory, grace=30):
+    """SIGTERM every remaining node process of this devnet, wait for them, SIGKILL the rest."""
+    pids = node_pids(directory)
+    for pid in pids:
+        try: os.kill(pid, 15)
+        except OSError: pass
+    deadline = time.time() + grace
+    while node_pids(directory) and time.time() < deadline: time.sleep(0.5)
+    for pid in node_pids(directory):
+        try: os.kill(pid, 9); print("killed node process %d (did not stop within %ds)" % (pid, grace))
+        except OSError: pass
+    return pids
+
+def _kill(pid, label):
+    if agent_alive(pid):
+        try: os.kill(pid, 15); print("stopping %s (pid %d)" % (label, pid))
+        except OSError as error: print("%s: %s" % (label, error))
+
+def attest_conf_text(directory, node, seq):
+    user, password = rpc_auth_pair(node)
+    return ATTEST_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password,
+                          "seq": seq, "every": ATTEST_INTERVAL, "ref_lag": REF_LAG, "bus": bus_path(directory)}
+
+def start_attest_agent(directory, node, seq):
+    """`yellowback-attest attest` beside attestor `node`, reading that attestor's own mock price
+    file so `attestor N price USD` can diverge one of them."""
+    conf = os.path.join(directory, "attest-%d.toml" % node)
+    with open(conf, "w") as file: file.write(attest_conf_text(directory, node, seq))
+    return _spawn(directory, "attest-%d" % node,
+                  [ATTEST_AGENT, "--conf", conf, "attest", "--mock-price", attest_mock_path(directory, node)])
+
+def start_subscriber(directory, node=USER):
+    """`yellowback-attest subscribe` beside a minting node: the dir bus into yed_addattestation."""
+    user, password = rpc_auth_pair(node)
+    conf = os.path.join(directory, "subscribe-%d.toml" % node)
+    with open(conf, "w") as file:
+        file.write(SUBSCRIBE_CONF % {"node": node, "port": rpc_port(node), "user": user,
+                                     "password": password, "bus": bus_path(directory)})
+    return _spawn(directory, "subscribe-%d" % node, [ATTEST_AGENT, "--conf", conf, "subscribe"])
+
+def stop_attest_agents(state, only=None):
+    """Stop every attest agent, or just the one named `only` (`attest-5`, `subscribe-0`)."""
+    for name, pid in sorted(attest_pids(state).items()):
+        if only is not None and name != only: continue
+        _kill(pid, name)
+
+def wait_pool_fresh(state, want=None, timeout=90, node=USER):
+    """Wait until `node`'s pool holds a fresh attestation from at least `want` seated attestors --
+    what the mint path needs (attest.poolFresh >= M_SELECT)."""
+    want = M_SELECT if want is None else want
+    deadline, last = time.time() + timeout, None
+    while True:
+        last = rpc(state, node).yed_getinfo()["attest"]
+        if last["poolFresh"] >= want: return last
+        if time.time() > deadline:
+            raise RuntimeError("node%d: poolFresh stayed at %d (< %d) for %ds; see %s/attest-*.log and subscribe-*.log"
+                               % (node, last["poolFresh"], want, timeout, state["dir"]))
+        time.sleep(1)
+
+def seq_of(node_rpc, attestor_pubkey):
+    """yed_registerattestor returns seq null until the registration confirms; resolve it by key."""
+    for rec in node_rpc.yed_listattestors():
+        if rec["attestorPubKey"] == attestor_pubkey: return int(rec["seq"])
+    return None
+
+def load(directory):
+    try:
+        with open(path(directory)) as file: state = json.load(file)
+    except OSError: sys.exit("no devnet at %s (run `up` first)" % directory)
+    PortSeed.n = state["portseed"]
+    # Every command that restarts a node (`pool N configure`, `signal`, …) starts it through the
+    # framework, which reads BITCOIND from the environment; only `up` used to export it, so a
+    # restart from a fresh shell silently launched `bitcoind` from PATH. The recorded binary wins
+    # unless the caller set one deliberately.
+    os.environ.setdefault("BITCOIND", state["bitcoind"])
+    return state
+def save(directory, state):
+    tmp = path(directory) + ".tmp"
+    with open(tmp, "w") as file: json.dump(state, file, indent=2)
+    os.replace(tmp, path(directory))
+
+def start_quiet(directory, node, arguments):
+    import functools
+    log = open(os.path.join(node_dir(directory, node), "ycashd.log"), "a")
+    output, popen = os.dup(1), _util.subprocess.Popen
+    _util.subprocess.Popen = functools.partial(popen, start_new_session=True, stdin=subprocess.DEVNULL)
+    try:
+        os.dup2(log.fileno(), 1)
+        return start_node(node, directory, arguments, stderr=log)
+    finally:
+        _util.subprocess.Popen = popen
+        os.dup2(output, 1); os.close(output); log.close()
+
+def restart_node(state, node, arguments, label):
+    """Stop `node` cleanly and start it again with `arguments` (recorded for the next restart)."""
+    directory = state["dir"]
+    if alive(state, node):
+        try: rpc(state, node).stop()
+        except Exception: pass
+        deadline = time.time() + 60
+        while alive(state, node):
+            if time.time() > deadline: sys.exit("node%d did not stop within 60 s" % node)
+            time.sleep(0.5)
+        time.sleep(1)
+    start_quiet(directory, node, arguments)
+    state.setdefault("node_args", {})[str(node)] = arguments
+    proxy = rpc(state, node)
+    others = [n for n in range(state["num_nodes"]) if n != node and alive(state, n)]
+    for other in others:
+        try: proxy.addnode("127.0.0.1:%d" % _util.p2p_port(other), "onetry")
+        except Exception: pass
+    print("node%d restarted %s" % (node, label))
+
+def wallet_command(directory, node=USER, app=None):
+    if not app:
+        app = os.environ.get("YELLOWBACK_WALLET_BIN") or os.path.join(
+            WORKSPACE, "yecwallet-dd", "build", "macos-arm64", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet")
+    return [os.path.expanduser(app), "--conf", os.path.join(node_dir(directory, node), "ycash.conf"), "--no-embedded"]
+
+# ---------------------------------------------------------------------------------- lightwalletd
+
+LWD_REPO = os.environ.get("YELLOWBACK_LWD_REPO") or os.path.join(WORKSPACE, "lightwalletd-dd")   # cmd/lwdinfo lives there
+LWD_PORT = 9067
+
+def lightwalletd_binary(baseline=False, override=None):
+    """The server to run: the fork's build (built here with `go build` if missing), or the baseline
+    binary scripts/build-baseline.sh makes from lightwalletd-legacy (plan section 6.3's gate)."""
+    if override: return os.path.expanduser(override)
+    if baseline: return os.path.join(WORKSPACE, "wt", "lightwalletd-legacy-bin", "lightwalletd-legacy")
+    return os.environ.get("YELLOWBACK_LWD_BIN") or os.path.join(WORKSPACE, "wt", "lightwalletd-dd-bin", "lightwalletd")
+
+def lightwalletd_command(directory, binary, port, node=USER, extra=None):
+    """The zcash/lightwalletd 0.4.6 lineage (yodl): the four --rpc* flags bypass its conf file
+    (frontend/rpc_client.go), --data-dir must be writable (its default is /var/lib/lightwalletd),
+    --no-tls-very-insecure serves plaintext gRPC on --grpc-bind-addr, metrics on --http-bind-addr."""
+    user, password = rpc_auth_pair(node)
+    data_dir = os.path.join(node_dir(directory, node), "lightwalletd")
+    os.makedirs(data_dir, exist_ok=True)
+    return [binary, "--rpcuser", user, "--rpcpassword", password, "--rpchost", "127.0.0.1", "--rpcport", str(rpc_port(node)),
+            "--no-tls-very-insecure", "--grpc-bind-addr", "127.0.0.1:%d" % port, "--http-bind-addr", "127.0.0.1:%d" % (port + 2000),
+            "--data-dir", data_dir, "--log-file", os.path.join(node_dir(directory, node), "lightwalletd.log")] + list(extra or [])
+
+def lightwalletd_probe(port, timeout=5, yellowback=False):
+    """GetLightdInfo + GetLatestBlock (and, with yellowback, every YellowbackStreamer method once)
+    through the fork's cmd/lwdinfo (needs go); dict or raises."""
+    command = ["go", "run", "-mod=vendor", "./testtools/lwdinfo", "-server", "127.0.0.1:%d" % port, "-timeout", "%ds" % timeout]
+    if yellowback: command.append("-yellowback")
+    out = subprocess.check_output(command, cwd=LWD_REPO, text=True, stderr=subprocess.PIPE)
+    return json.loads(out)
+
+def lightwalletd_check(state):
+    """None when the recorded server answers and follows node 0; else the problem."""
+    lwd = state.get("lightwalletd") or {}
+    if not agent_alive(lwd.get("pid")): return "lightwalletd (pid %s) is not running" % lwd.get("pid")
+    # The ingestor polls the node every 5 s; right after `start` the cache is legitimately empty.
+    for _ in range(4):
+        try: info = lightwalletd_probe(lwd["port"])
+        except subprocess.CalledProcessError as error: return "lightwalletd probe failed: %s" % error.stderr.strip()
+        if "latestHeight" in info: break
+        time.sleep(5)
+    if info.get("chainName") != "regtest": return "lightwalletd reports chain %r, not regtest" % info.get("chainName")
+    height = rpc(state, USER).getblockcount()
+    if "latestHeight" not in info: return "lightwalletd has no cached block after 20s (%s)" % info.get("latestError")
+    if abs(int(info["latestHeight"]) - height) > 2: return "lightwalletd is at %s, node0 at %d" % (info["latestHeight"], height)
+    if "--yellowback" in (lwd.get("extra") or []):   # this lineage's cobra flag (the yecdev build took -yellowback)
+        # Started with the flag: every YellowbackStreamer method must answer (ok, or the node's own
+        # FailedPrecondition for a harmless input); Unimplemented means the service is not registered.
+        try: yed = lightwalletd_probe(lwd["port"], yellowback=True)["yellowback"]
+        except subprocess.CalledProcessError as error: return "lightwalletd yellowback probe failed: %s" % error.stderr.strip()
+        bad = {k: v for k, v in yed.items() if "#" not in k and not (v == "ok" or v.startswith("FailedPrecondition"))}
+        if bad: return "lightwalletd Yellowback methods not answering: %s" % json.dumps(bad, sort_keys=True)
+        if yed.get("GetYellowbackInfo#rpcversion") != "3": return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
+    return None
+
+def lightwalletd(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    lwd = state.get("lightwalletd") or {}
+    if args.action == "status":
+        if not lwd: print("no lightwalletd started (`lightwalletd start`)"); return
+        print("lightwalletd pid %s port %s %s, %s" % (lwd.get("pid"), lwd.get("port"), lwd.get("binary"), "running" if agent_alive(lwd.get("pid")) else "not running"))
+        if agent_alive(lwd.get("pid")):
+            try: print(json.dumps(lightwalletd_probe(lwd["port"]), indent=2))
+            except subprocess.CalledProcessError as error: print("probe failed: %s" % error.stderr.strip()); return 1
+        return
+    if args.action == "stop":
+        _kill(lwd.get("pid"), "lightwalletd"); state.pop("lightwalletd", None); save(directory, state); return
+    binary = lightwalletd_binary(args.baseline, args.bin)
+    if not args.baseline and not args.bin and not os.access(binary, os.X_OK):
+        os.makedirs(os.path.dirname(binary), exist_ok=True)
+        print("building %s from %s" % (binary, LWD_REPO))
+        subprocess.check_call(["go", "build", "-mod=vendor", "-o", binary, "."], cwd=LWD_REPO, env=dict(os.environ, CGO_ENABLED="0"))
+    if not os.access(binary, os.X_OK):
+        sys.exit("lightwalletd not found at %s%s" % (binary, "; build it with lightwalletd-dd/scripts/build-baseline.sh" if args.baseline else ""))
+    import shlex
+    extra = shlex.split(args.extra)
+    command = lightwalletd_command(directory, binary, args.port, extra=extra)
+    if args.print: print(" ".join(command)); return
+    if agent_alive(lwd.get("pid")): sys.exit("lightwalletd already running (pid %d); `lightwalletd stop` first" % lwd["pid"])
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    state["lightwalletd"] = {"pid": process.pid, "port": args.port, "binary": binary, "baseline": bool(args.baseline), "extra": extra}
+    save(directory, state)
+    print("lightwalletd started on 127.0.0.1:%d against node0 (pid %d): %s" % (args.port, process.pid, binary))
+    for _ in range(30):
+        time.sleep(1)
+        try: info = lightwalletd_probe(args.port, timeout=3)
+        except subprocess.CalledProcessError: continue
+        print("GetLightdInfo: %s %s chain=%s height=%s" % (info.get("vendor"), info.get("version"), info.get("chainName"), info.get("latestHeight", info.get("blockHeight"))))
+        return
+    print("started, but GetLightdInfo did not answer within 30s (see node0/lightwalletd.log)", file=sys.stderr); return 1
+
+def wait(nodes, state=None):
+    sync_blocks(nodes)
+    pools = auto_pools(state) if state else POOLS
+    attestors = auto_attestors(state) if state else ATTESTORS
+    for index in (USER,) + tuple(pools) + tuple(a for a in attestors if a < len(nodes)):
+        wait_yed_healthy(nodes[index])
+
+# ---------------------------------------------------------------------------------- check
+
+def check(state, verbose=True):
+    node = rpc(state, USER)
+    activation, stats = node.yed_getactivation(), node.yed_getstats()
+    # Only the automated pools are promised eligible: in the pool preset your own pool starts as a
+    # plain miner, and its eligibility is your work, not the devnet's.
+    expected = {pool_address(state, pool) for pool in auto_pools(state)}
+    eligible = {row["payoutAddress"] for row in node.yed_listminers() if row["eligible"]}
+    errors = []
+    if activation["status"] != "active": errors.append("activation is %s" % activation["status"])
+    if not stats["mintingAllowed"]: errors.append("minting is not allowed (halts: %s)" % ",".join(stats.get("haltMask") or []) )
+    if not expected <= eligible: errors.append("not all automated pools are eligible")
+    if node.getbalance() <= 0 and role_of(state) == "none": errors.append("node0 has no mature balance")
+    if verbose: print("activation: %s; minting: %s; eligible pools: %d/%d automated; node0 balance: %s YEC" % (activation["status"], "yes" if stats["mintingAllowed"] else "no", len(eligible & expected), len(expected), node.getbalance()))
+    if attestors_of(state):
+        attest = node.yed_getinfo()["attest"]
+        if attest["status"] != "ARMED": errors.append("attestation is %s, not ARMED" % attest["status"])
+        if attest["poolFresh"] < M_SELECT:
+            errors.append("poolFresh is %d, below M_SELECT (%d): no mint can build a bundle" % (attest["poolFresh"], M_SELECT))
+        seated = attest["seatedCount"]
+        if seated < ATTEST_ARM_MIN: errors.append("only %d attestors seated (need %d)" % (seated, ATTEST_ARM_MIN))
+        stopped = set(state.get("stopped_agents") or [])
+        dead = [name for name, pid in attest_pids(state).items() if not agent_alive(pid)]
+        if dead: errors.append("attest agents not running: %s%s" % (", ".join(sorted(dead)), " (stopped deliberately)" if set(dead) <= stopped else ""))
+        if verbose: print("attestation: %s; seated %d; poolFresh %d/%d; pool size %d; agents %d up"
+                          % (attest["status"], seated, attest["poolFresh"], M_SELECT, attest["poolSize"],
+                             len([1 for pid in attest_pids(state).values() if agent_alive(pid)])))
+    for name in ("heartbeat", "walk", "sim"):
+        record = state.get(name) or {}
+        if record.get("pid") and not agent_alive(record["pid"]) and not record.get("stopped"):
+            errors.append("%s process (pid %d) is not running; see %s/%s.log" % (name, record["pid"], state["dir"], name))
+    for node, record in sorted((state.get("stratum") or {}).items()):
+        if record.get("pid") and not agent_alive(record["pid"]) and not record.get("stopped"):
+            errors.append("yolo beside node%s (pid %d) is not running; see %s/stratum-%s.log" % (node, record["pid"], state["dir"], node))
+        elif agent_alive(record.get("pid")) and not stratum_status(record):
+            errors.append("yolo beside node%s answers nothing on /status (port %s)" % (node, record.get("status_port")))
+    if errors: raise RuntimeError("devnet check failed: " + "; ".join(errors))
+
+def liveness(state):
+    """What the heartbeat needs to keep mining: cheaper and narrower than `check`. A halted mint
+    (a price shock trips DIVERGENCE for a window) is weather the scenarios want to live through;
+    a dead node, a lost arming or a dead automated agent is a broken devnet to stop burying."""
+    errors = []
+    if not alive(state, USER): return ["node0 is down"]
+    node = rpc(state, USER)
+    try:
+        info = node.yed_getinfo()
+        if info["activation"]["status"] != "active": errors.append("activation is %s" % info["activation"]["status"])
+        if attestors_of(state) and info["attest"]["status"] != "ARMED": errors.append("attestation is %s" % info["attest"]["status"])
+    except Exception as error:
+        errors.append("yed_getinfo on node0: %s" % error)
+    stopped = set(state.get("stopped_agents") or [])       # `attestor N stop` / `pool N quote stop`: deliberate, not a crash
+    for name, pid in attest_pids(state).items():
+        if name not in stopped and not agent_alive(pid): errors.append("%s is dead" % name)
+    for pool, pid in agent_pids(state).items():
+        if pool in auto_pools(state) and ("quote-%d" % pool) not in stopped and not agent_alive(pid): errors.append("quote agent of node%d is dead" % pool)
+    for pool in auto_pools(state):
+        if not alive(state, pool): errors.append("node%d (automated pool) is down" % pool)
+    return errors
+
+# ---------------------------------------------------------------------------------- up
+
+def arm_attestors(state, nodes, price, steps=6):
+    """Register the automated attestor nodes with yed_registerattestor, mine through
+    BOND_MATURITY and ATTEST_ARM_DELAY so the devnet ends ARMED (ARM-1/ARM-2), then start one
+    `attest` agent per attestor and one `subscribe` beside every minting node on the `dir`
+    transport and wait for poolFresh >= M_SELECT.
+
+    Registration is the wallet RPC each attestor runs for itself (yed_registerattestor), not a
+    raw builder: this is the path a real attestor follows, and the devnet exists to demonstrate
+    it.  Blocks are mined by the automated pools, round-robin, so every height keeps a tagged
+    quote."""
+    directory, attestors = state["dir"], attestors_of(state)
+    pools = list(auto_pools(state))
+    def pool_mine(n, label):
+        for block in range(n):
+            nodes[pools[block % len(pools)]].generate(1); sync_blocks(nodes)
+        wait(nodes, state)
+        print("      %s -> height %d" % (label, nodes[USER].getblockcount()))
+
+    print("[5/%d] registering %d attestors (%d YEC bonded for %d blocks each)"
+          % (steps, len(attestors), ATTEST_BOND_YEC, ATTEST_LOCK_BLOCKS))
+    for node in attestors:
+        nodes[USER].sendtoaddress(nodes[node].getnewaddress(), ATTEST_FUND_YEC)
+    # sync_blocks alone is not enough: the funding transactions must reach the pool that mines the
+    # next block, and mempools are only synced explicitly (the third registration once found
+    # "insufficient-yec: have 0.00" because its funding was still on node 0).
+    sync_mempools(nodes); pool_mine(1, "funded the attestor wallets")
+    for node in attestors:
+        have = nodes[node].getbalance()
+        if have < ATTEST_BOND_YEC:
+            raise RuntimeError("node%d holds %s YEC after funding, needs %d" % (node, have, ATTEST_BOND_YEC))
+    pubkeys = {}
+    for node in attestors:
+        result = nodes[node].yed_registerattestor(ATTEST_BOND_YEC, ATTEST_LOCK_BLOCKS)
+        pubkeys[node] = result["attestorPubKey"]
+        print("      node%d registered: txid %s, bond %s" % (node, result["txid"][:16], result["bondAddress"]))
+    sync_mempools(nodes)
+    pool_mine(1, "registrations confirmed")
+    pool_mine(BOND_MATURITY, "bonds matured (BOND_MATURITY=%d)" % BOND_MATURITY)
+    info = nodes[USER].yed_getinfo()["attest"]
+    if info["status"] != "TRIGGERED":
+        raise RuntimeError("attestation is %s after BOND_MATURITY, expected TRIGGERED "
+                           "(%d of %d bonds mature)" % (info["status"], info["seatedCount"], len(attestors)))
+    print("      TRIGGERED at height %d; arms at %d" % (info["triggerHeight"], info["armHeight"]))
+    pool_mine(ATTEST_ARM_DELAY, "arming delay elapsed (ATTEST_ARM_DELAY=%d)" % ATTEST_ARM_DELAY)
+    info = nodes[USER].yed_getinfo()["attest"]
+    if info["status"] != "ARMED":
+        raise RuntimeError("attestation is %s after ATTEST_ARM_DELAY, expected ARMED" % info["status"])
+    seqs = {}
+    for node in attestors:
+        seq = seq_of(nodes[USER], pubkeys[node])
+        if seq is None: raise RuntimeError("node%d's registration is not in yed_listattestors" % node)
+        seqs[str(node)] = seq
+    state["attest_seqs"] = seqs
+
+    subscribers = minting_nodes(state)
+    print("[6/%d] starting %d `attest` agents and %d `subscribe` (beside node %s), dir transport at %s"
+          % (steps, len(attestors), len(subscribers), ", ".join(str(n) for n in subscribers), bus_path(directory)))
+    os.makedirs(bus_path(directory), exist_ok=True)
+    for node in attestors:
+        write_attest_mock(directory, node, price)
+        state["attest_agents"]["attest-%d" % node] = start_attest_agent(directory, node, seqs[str(node)])
+    for node in subscribers:
+        state["attest_agents"]["subscribe-%d" % node] = start_subscriber(directory, node)
+    # The agents sign only at a due tick (every ATTEST_INTERVAL blocks), so mine into one.
+    pool_mine(ATTEST_INTERVAL + REF_LAG, "mined into an attestation tick")
+    for node in subscribers:
+        info = wait_pool_fresh(state, node=node)
+    print("      ARMED: %d seated, poolFresh %d, pool holds %d attestation(s)"
+          % (info["seatedCount"], info["poolFresh"], info["poolSize"]))
+
+def _teardown(state, nodes):
+    stop_agents(state); stop_attest_agents(state)
+    for node in nodes:
+        try: node.stop()
+        except Exception: pass
+    for index in list(bitcoind_processes):
+        try: bitcoind_processes[index].wait(timeout=10)
+        except Exception: pass
+        del bitcoind_processes[index]
+
+def footprint(role, count, args):
+    agents = len(ROLES[role]["auto_attestors"]) + (3 if role != "none" else 1)     # attest + subscribe
+    quotes = len(ROLES[role]["auto_pools"]) if (args.agents or role != "none") else 0
+    extra = []
+    if role != "none":
+        if not args.no_heartbeat: extra.append("heartbeat")
+        if not (args.no_walk or args.lean): extra.append("price walk")
+        if not args.no_sim: extra.append("simulator")
+    return "%d ycashd, %d attest/subscribe agents, %d quote agents%s" % (
+        count, agents, quotes, (", " + ", ".join(extra)) if extra else "")
+
+def up(args):
+    directory = os.path.abspath(args.dir)
+    role = args.role
+    if role != "none" and args.no_attest: sys.exit("--role needs the attestors; drop --no-attest")
+    if args.stratum and role != "pool": sys.exit("--stratum is the pool seat's: `up --role pool --stratum`")
+    if args.stratum and not os.access(YOLO, os.X_OK):
+        sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it, or drop --stratum)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
+    if os.path.exists(path(directory)):
+        state = load(directory)
+        if any(alive(state, node) for node in range(state["num_nodes"])): sys.exit("a devnet is already running in %s; `down` it first" % directory)
+        if not args.force: sys.exit("%s holds a stopped devnet; pass --force to rebuild" % directory)
+    elif os.path.exists(directory) and os.listdir(directory) and not args.force: sys.exit("%s exists and is not empty; pass --force" % directory)
+    stray = node_pids(directory)
+    if stray:
+        # a node that no longer answers RPC (or a half-started `up`) still holds its ports
+        if not args.force: sys.exit("%d ycashd process(es) still run out of %s (pids %s); `down` them, or pass --force to kill them" % (len(stray), directory, " ".join(str(p) for p in stray)))
+        print("killing %d stray ycashd process(es) of an earlier run: %s" % (len(stray), " ".join(str(p) for p in stray)))
+        kill_nodes(directory)
+    if os.path.exists(directory): shutil.rmtree(directory)
+    binary = args.bitcoind or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd")
+    if not os.access(binary, os.X_OK): sys.exit("ycashd not found at %s" % binary)
+    os.environ["BITCOIND"], PortSeed.n = binary, args.portseed
+    attest = not args.no_attest
+    agents_wanted = args.agents or role != "none"          # the role presets always run the real quote agents
+    preset = ROLES[role]
+    if role == "none":
+        count = ATTEST_NODES if attest else NODES
+        attestors = list(ATTESTORS) if attest else []
+        population = liquidator = None
+    else:
+        count = ROLE_NODES
+        attestors = list(preset["auto_attestors"])
+        population, liquidator = POPULATION, LIQUIDATOR
+    steps = 7 if role != "none" else (6 if attest else 4)
+    addresses = [address_of(wif) for wif in POOL_WIFS]
+    pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agents_wanted else None
+    # node 0 also serves lightwalletd (`lightwalletd` below): the server's getaddresstxids needs the
+    # address index, which is experimental and needs -txindex (both are only ever set on a fresh datadir here).
+    node_args = {USER: yellowback_node_args() + ["-insightexplorer", "-txindex"], STOCK: yellowback_node_args(yellowback=False)}
+    for index, pool in enumerate(POOLS):
+        if pool in preset["auto_pools"] or role == "none": node_args[pool] = pool_args(addresses[index], pool_extra)
+        else: node_args[pool] = yellowback_node_args(pool_extra)      # your pool: a plain miner, no payout, no signal
+    for node in range(NODES, count):
+        node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: enforcing, no payout, no signal
+    for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
+    if agents_wanted and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
+    if attest and not os.access(ATTEST_AGENT, os.X_OK):
+        sys.exit("yellowback-attest not found at %s\n  build it with: cd %s && cargo build --release\n"
+                 "  (or point YELLOWBACK_ATTEST_BIN at it, or run `up --no-attest` for the five-node v2 devnet)"
+                 % (ATTEST_AGENT, ATTEST_CRATE))
+    if role != "none" and not args.no_sim and not os.access(SIM, os.X_OK): sys.exit("simulator not found at %s" % SIM)
+    seed = args.seed if args.seed is not None else random.randrange(1, 10 ** 6)
+    print("footprint: %s (--lean drops the walk and halves the heartbeat)" % footprint(role, count, args))
+    os.makedirs(directory); nodes = []; agents = {}; attest_agents = {}
+    state = {"portseed": args.portseed, "bitcoind": binary, "num_nodes": count, "pools": list(POOLS),
+             "auto_pools": list(preset["auto_pools"]), "pool_addresses": addresses, "price_usd": str(args.price),
+             "agents": agents, "attestors": attestors, "auto_attestors": attestors, "attest_agents": attest_agents,
+             "attest_seqs": {}, "dir": directory, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "role": role, "seat": preset["seat"], "population": population, "liquidator": liquidator,
+             "seed": seed, "node_args": {str(k): v for k, v in node_args.items()},
+             "rpc": {str(n): {"url": rpc_url(n), "port": rpc_port(n), "user": rpc_auth_pair(n)[0], "password": rpc_auth_pair(n)[1]} for n in range(count)},
+             "nodes": {str(n): {"zmq": zmq_record(n)} for n in range(count)},
+             "heartbeat": {}, "walk": {}, "sim": {}, "session": None,
+             "pool_signal": {str(pool): pool in preset["auto_pools"] or role == "none" for pool in POOLS}}
+    try:
+        print("[1/%d] starting %d regtest nodes in %s (role: %s)" % (steps, count, directory, role))
+        initialize_chain_clean(directory, count)
+        nodes = [start_quiet(directory, index, node_args[index]) for index in range(count)]
+        for left in range(count):
+            for right in range(left + 1, count): connect_nodes_bi(nodes, left, right)
+        for index, node in enumerate(POOLS): nodes[node].importprivkey(POOL_WIFS[index], "yellowback-payout", False)
+        print("[2/%d] funding node0 with 101 untagged blocks" % steps)
+        nodes[USER].generate(101); wait(nodes, state)
+        if nodes[USER].getbalance() <= 0: raise RuntimeError("node0 has no mature balance")
+        write_mock(directory, args.price)
+        if agents_wanted:
+            print("[3/%d] starting one yellowback-quote per automated pool at $%s (mock price %s)" % (steps, args.price, mock_path(directory)))
+            for node in auto_pools(state): agents[node] = start_agent(directory, node)
+            wait_quotes(state)
+        else:
+            print("[3/%d] setting $%s quotes on pools 2-4" % (steps, args.price))
+            for node in POOLS: set_quote(nodes[node], args.price)
+        print("[4/%d] mining %d signalling blocks round-robin across the automated pools" % (steps, ACTIVATION_BLOCKS + 2))
+        auto = auto_pools(state)
+        for block in range(ACTIVATION_BLOCKS + 2):
+            nodes[auto[block % len(auto)]].generate(1); sync_blocks(nodes)
+        wait(nodes, state)
+        if attest:
+            arm_attestors(state, nodes, args.price, steps)
+        if role != "none":
+            print("[7/%d] funding the population (node%d, %d YEC), the liquidator (node%d, %d YEC)%s"
+                  % (steps, POPULATION, POPULATION_FUND_YEC, LIQUIDATOR, LIQUIDATOR_FUND_YEC,
+                     " and your attestor seat (node%d, %d YEC)" % (ATTESTOR4, SEAT_ATTESTOR_FUND_YEC) if role == "attestor" else ""))
+            # Several coins each, not one: a two-step mint spends a whole coin and its change is
+            # unconfirmed for a block, so a single-coin wallet starves every other persona
+            # (`insufficient-yec: have 0.00 confirmed and unlocked`) after each action.
+            for _ in range(FUND_COINS):
+                nodes[USER].sendtoaddress(nodes[POPULATION].getnewaddress(), POPULATION_FUND_YEC // FUND_COINS)
+                nodes[USER].sendtoaddress(nodes[LIQUIDATOR].getnewaddress(), LIQUIDATOR_FUND_YEC // FUND_COINS)
+            if role == "attestor":
+                nodes[USER].sendtoaddress(nodes[ATTESTOR4].getnewaddress(), SEAT_ATTESTOR_FUND_YEC)
+                with open(os.path.join(directory, "attest-%d.toml" % ATTESTOR4), "w") as file:
+                    file.write(attest_conf_text(directory, ATTESTOR4, "0   # <- REPLACE with your seq from yed_listattestors once your registration confirms"))
+                write_attest_mock(directory, ATTESTOR4, args.price)
+            sync_mempools(nodes)
+            nodes[auto[0]].generate(1); sync_blocks(nodes); wait(nodes, state)
+            state["session"] = make_session(state)
+    except Exception:
+        _teardown(state, nodes)
+        raise
+    save(directory, state); check(state, False)
+    print("ready at height %d: node0 has %s YEC" % (nodes[USER].getblockcount(), nodes[USER].getbalance()))
+    if attest:
+        info = rpc(state, USER).yed_getinfo()["attest"]
+        print("attestation %s: %d seated, poolFresh %d" % (info["status"], info["seatedCount"], info["poolFresh"]))
+    if role != "none":
+        if args.stratum:
+            print("[stratum] starting yolo --payout <node%d's payout address> beside node%d (your seat); `mine N %d` goes through it" % ((seat_of(state),) * 3))
+            stratum_start(state, seat_of(state), args.stratum_text); save(directory, state)
+        if not args.no_heartbeat:
+            heartbeat_start(state, (HEARTBEAT_RATE * 2 if args.lean else HEARTBEAT_RATE) if args.heartbeat_rate is None else args.heartbeat_rate)
+        if not (args.no_walk or args.lean):
+            walk_start(state, args.walk_drift, args.walk_vol, args.walk_tick)
+        if not args.no_sim:
+            sim_start(state, args.sim_profile)
+        save(directory, state)
+        print(banner(state))
+        print("session: %s (NOTES.md seeded with the walk-through; `report` bundles it)" % state["session"])
+    if not args.no_viz:
+        chainviz_start(state); save(directory, state)      # last: it reads the finished devnet.json
+    print("wallet: " + " ".join(wallet_command(directory, seat_of(state))))
+
+# ---------------------------------------------------------------------------------- heartbeat (R1)
+
+def heartbeat_start(state, rate):
+    record = state.get("heartbeat") or {}
+    if agent_alive(record.get("pid")): print("heartbeat is already running (pid %d)" % record["pid"]); return
+    if not auto_pools(state): sys.exit("no automated pool to mine on")
+    state["heartbeat"] = {"pid": None, "rate": rate, "started": time.time(), "stopped": False}
+    save(state["dir"], state)
+    pid = _spawn(state["dir"], "heartbeat", [sys.executable, os.path.abspath(__file__), "_heartbeat", "--dir", state["dir"]])
+    state["heartbeat"]["pid"] = pid
+    save(state["dir"], state)
+    print("heartbeat started (pid %d): one block every %d s on node %s, round-robin"
+          % (pid, rate, ", ".join(str(p) for p in auto_pools(state))))
+
+def heartbeat_stop(state):
+    record = state.get("heartbeat") or {}
+    _kill(record.get("pid"), "heartbeat")
+    record["stopped"] = True
+    state["heartbeat"] = record
+    save(state["dir"], state)
+
+def heartbeat_json(directory): return os.path.join(directory, "heartbeat.json")
+
+def _heartbeat_run(args):
+    """The heartbeat process: `mine 1 <next automated pool>` every `rate` seconds, forever, until
+    `liveness` fails -- then say why in heartbeat.log and exit, so a broken devnet is not buried
+    under a thousand blocks. The rate is re-read from devnet.json every tick (`heartbeat rate N`)."""
+    directory = os.path.abspath(args.dir)
+    state = load(directory)
+    log = lambda text: print("%s %s" % (time.strftime("%H:%M:%S"), text), flush=True)
+    log("heartbeat up: pools %s" % list(auto_pools(state)))
+    turn, since_check = 0, 0
+    while True:
+        state = load(directory)
+        rate = max(1, int((state.get("heartbeat") or {}).get("rate") or HEARTBEAT_RATE))
+        time.sleep(rate)
+        pools = auto_pools(state)
+        pool = pools[turn % len(pools)]; turn += 1
+        try:
+            node = rpc(state, pool, timeout=60)
+            blockhash = node.generate(1)[0]
+            height = node.getblockcount()
+            with open(heartbeat_json(directory) + ".tmp", "w") as file:
+                json.dump({"height": height, "pool": pool, "time": time.time(), "rate": rate, "blockhash": blockhash}, file)
+            os.replace(heartbeat_json(directory) + ".tmp", heartbeat_json(directory))
+            log("block %d by node%d" % (height, pool))
+        except Exception as error:
+            log("node%d could not mine this tick: %s" % (pool, error))
+        since_check += 1
+        if since_check >= 10:
+            since_check = 0
+            errors = liveness(state)
+            if errors:
+                log("HALTING: the devnet is no longer live: %s" % "; ".join(errors))
+                log("fix it (or `down`/`up --force`) and run `heartbeat start` again")
+                return 3
+
+def heartbeat(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    record = state.get("heartbeat") or {}
+    if args.action == "start": heartbeat_start(state, args.rate or record.get("rate") or HEARTBEAT_RATE); return
+    if args.action == "stop":
+        if not agent_alive(record.get("pid")): print("heartbeat is not running"); return
+        heartbeat_stop(state); print("heartbeat stopped; the chain now advances only when you `mine`"); return
+    if args.action == "rate":
+        if not args.rate: sys.exit("heartbeat rate needs a number of seconds")
+        record["rate"] = args.rate; state["heartbeat"] = record; save(directory, state)
+        print("heartbeat rate is now one block every %d s%s" % (args.rate, "" if agent_alive(record.get("pid")) else " (it is not running; `heartbeat start`)"))
+        return
+    print(heartbeat_line(state))
+
+def heartbeat_line(state):
+    record = state.get("heartbeat") or {}
+    running = agent_alive(record.get("pid"))
+    last = {}
+    try: last = json.load(open(heartbeat_json(state["dir"])))
+    except (OSError, ValueError): pass
+    if not record: return "heartbeat: never started (`heartbeat start`; the chain advances only when you `mine`)"
+    return "heartbeat: %s, one block every %s s; last block %s by node%s, %s ago" % (
+        "running (pid %d)" % record["pid"] if running else "STOPPED (see %s/heartbeat.log)" % state["dir"],
+        record.get("rate"), last.get("height", "?"), last.get("pool", "?"),
+        ("%d s" % (time.time() - last["time"])) if last else "never")
+
+# ---------------------------------------------------------------------------------- price and the walk (R4)
+
+def apply_price(state, value, wait_agents=False):
+    """Move the market: the pool quote (through the agents' mock file, or yed_setquote when the
+    pools run without agents) and every *automated* attestor's mock price, together. Your own
+    attestor (the `attestor` preset) is never written: what you attest is your decision."""
+    directory = state["dir"]
+    since = time.time()
+    write_mock(directory, value)
+    if not agent_pids(state):
+        for node in all_pools(state):
+            if alive(state, node) and (state["pool_signal"].get(str(node), True) or role_of(state) == "none"):
+                try: set_quote(rpc(state, node), value)
+                except Exception: pass
+    elif wait_agents:
+        wait_quotes(state, since)
+    for attestor in auto_attestors(state): write_attest_mock(directory, attestor, value)
+
+def price(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    if args.shock is not None:
+        pct = Decimal(args.shock.rstrip("%"))
+        current = read_mock(directory) or Decimal(state["price_usd"])
+        value = (current * (1 + pct / 100)).quantize(Decimal("0.000001"))
+        if value <= 0: sys.exit("a shock of %s%% from $%s leaves no price" % (pct, current))
+        apply_price(state, value)
+        print("shock %+s%%: $%s -> $%s on every pool quote and every automated attestor%s"
+              % (pct, current, value, "; the walk continues from here" if agent_alive((state.get("walk") or {}).get("pid")) else ""))
+        return
+    if args.walk is not None:
+        if args.walk == "stop":
+            record = state.get("walk") or {}
+            if not agent_alive(record.get("pid")): print("the price walk is not running"); return
+            _kill(record["pid"], "price walk"); record["stopped"] = True; state["walk"] = record; save(directory, state)
+            print("price frozen at $%s" % read_mock(directory)); return
+        walk_start(state, args.drift, args.vol, args.tick); save(directory, state); return
+    if args.usd is None: sys.exit("price needs a USD amount, --walk or --shock")
+    value = Decimal(args.usd)
+    if value <= 0: sys.exit("price must be positive")
+    if agent_alive((state.get("walk") or {}).get("pid")):
+        print("note: the walk is running and will keep moving from $%s; `price --walk stop` to freeze it" % value)
+    try: apply_price(state, value, wait_agents=bool(agent_pids(state)))
+    except RuntimeError as error: sys.exit(str(error))
+    state["price_usd"] = str(value); save(directory, state)
+    print("set the price to $%s on every pool quote%s; mine a pool block to publish each quote"
+          % (value, " and every automated attestor's mock price" if attestors_of(state) else ""))
+
+def walk_start(state, drift, vol, tick):
+    record = state.get("walk") or {}
+    if agent_alive(record.get("pid")): print("the price walk is already running (pid %d)" % record["pid"]); return
+    state["walk"] = {"pid": None, "drift": drift, "vol": vol, "tick": tick, "started": time.time(), "stopped": False,
+                     "seed": state.get("seed", 1)}
+    save(state["dir"], state)
+    pid = _spawn(state["dir"], "walk", [sys.executable, os.path.abspath(__file__), "_walk", "--dir", state["dir"]])
+    state["walk"]["pid"] = pid
+    save(state["dir"], state)
+    print("price walk started (pid %d): drift %+.2f %%/min, volatility %.2f %%/tick, tick %d s, seed %s, from $%s"
+          % (pid, drift, vol, tick, state["walk"]["seed"], read_mock(state["dir"])))
+
+def _walk_run(args):
+    """The price walk: a seeded geometric random walk over the mock price file, applied to the
+    pools and the automated attestors together every tick (so the two populations move
+    *honestly* in agreement). `price --shock` writes the same file; the next tick continues from
+    it. Divergence stays a deliberate act (`attestor N price USD`)."""
+    directory = os.path.abspath(args.dir)
+    state = load(directory)
+    record = state["walk"]
+    rng = random.Random(record.get("seed", 1) * 7919 + 17)
+    drift_per_tick = math.log1p(record["drift"] / 100.0) * record["tick"] / 60.0
+    vol = record["vol"] / 100.0
+    log = lambda text: print("%s %s" % (time.strftime("%H:%M:%S"), text), flush=True)
+    log("walk up: drift %+.3f%%/min vol %.3f%%/tick tick %ds seed %s" % (record["drift"], record["vol"], record["tick"], record.get("seed")))
+    while True:
+        time.sleep(record["tick"])
+        state = load(directory)
+        current = read_mock(directory) or Decimal(state["price_usd"])
+        step = math.exp(drift_per_tick + vol * rng.gauss(0.0, 1.0))
+        value = (current * Decimal(repr(step))).quantize(Decimal("0.000001"))
+        value = max(Decimal("0.000100"), min(Decimal("100000000"), value))
+        try: apply_price(state, value)
+        except Exception as error: log("could not apply $%s: %s" % (value, error)); continue
+        log("$%s -> $%s" % (current, value))
+
+# ---------------------------------------------------------------------------------- the simulator (R3)
+
+def sim_start(state, profile):
+    record = state.get("sim") or {}
+    if agent_alive(record.get("pid")): print("the simulator is already running (pid %d)" % record["pid"]); return
+    if state.get("population") is None: sys.exit("this devnet has no population node; the simulator needs `up --role`")
+    argv = [sys.executable, SIM, "run", "--dir", state["dir"], "--seed", str(state.get("seed", 1)), "--profile", profile]
+    state["sim"] = {"pid": None, "profile": profile, "started": time.time(), "stopped": False}
+    save(state["dir"], state)
+    pid = _spawn(state["dir"], "sim", argv)
+    state["sim"]["pid"] = pid
+    save(state["dir"], state)
+    print("simulator started (pid %d): six personas on node%d (population) and node%d (liquidator), profile %s, seed %s"
+          % (pid, state["population"], state["liquidator"], profile, state.get("seed")))
+
+def sim(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    record = state.get("sim") or {}
+    if args.action == "start": sim_start(state, args.profile or record.get("profile") or "demo"); return
+    if args.action == "stop":
+        if not agent_alive(record.get("pid")): print("the simulator is not running"); return
+        _kill(record["pid"], "simulator"); record["stopped"] = True; state["sim"] = record; save(directory, state); return
+    return subprocess.call([sys.executable, SIM, "stats", "--dir", directory])
+
+# ---------------------------------------------------------------------------------- pool (the `pool` preset)
+
+def pool(args):
+    """`pool N configure|signal on|off|quote start|stop`: the pool operator's moves (scenario 3).
+
+    configure  -- restart pool N with its payout address and -yellowbacksignal=1 (step 2)
+    signal off -- restart it with -yellowbacksignal=0: it keeps mining and quoting, but its tags
+                  carry no signal bit; two of three silent pools cross the 60 % pause (step 4)
+    quote start|stop -- run or kill the real yellowback-quote agent beside it (step 3); a stopped
+                  agent shows as quoteKind "signal" once the quote is older than -yellowbackquotemaxage"""
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    node = args.node
+    if node not in all_pools(state): sys.exit("pool must be one of %s" % ", ".join(str(p) for p in all_pools(state)))
+    address = pool_address(state, node)
+    extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agent_pids(state) else []
+    if args.action == "configure":
+        restart_node(state, node, pool_args(address, extra), "with payout address %s and -yellowbacksignal=1" % address)
+        state["pool_signal"][str(node)] = True; save(directory, state)
+        print("node%d is now a signalling pool; `pool %d quote start` runs its quote agent, `mine N %d` mines its blocks" % (node, node, node))
+        return
+    if args.action == "signal":
+        if args.value not in ("on", "off"): sys.exit("pool N signal on|off")
+        on = args.value == "on"
+        restart_node(state, node, pool_args(address, extra + ["-yellowbacksignal=%d" % (1 if on else 0)]),
+                     "with -yellowbacksignal=%d" % (1 if on else 0))
+        state["pool_signal"][str(node)] = on; save(directory, state)
+        silent = [p for p, s in state["pool_signal"].items() if not s]
+        print("node%d %s signalling; silent pools: %s. Share of signalling tags over the last 64 blocks decides: below 60 %% minting pauses, below 50 %% rejection pauses, 75 %%/60 %% recover"
+              % (node, "resumed" if on else "stopped", ", ".join("node%s" % p for p in silent) or "none"))
+        return
+    if args.action == "quote":
+        if args.value not in ("start", "stop"): sys.exit("pool N quote start|stop")
+        pid = agent_pids(state).get(node)
+        if args.value == "start":
+            if agent_alive(pid): print("the quote agent of node%d is already running (pid %d)" % (node, pid)); return
+            if not agent_pids(state) and role_of(state) == "none": sys.exit("this devnet quotes with yed_setquote (`up --agents` runs the agents)")
+            state["agents"][str(node)] = start_agent(directory, node); mark_stopped(state, "quote-%d" % node, False); save(directory, state)
+            print("quote agent of node%d started (pid %d), reading %s" % (node, state["agents"][str(node)], mock_path(directory)))
+            return
+        if not agent_alive(pid): print("the quote agent of node%d is not running" % node); return
+        stop_agents(state, only=node); mark_stopped(state, "quote-%d" % node, True); save(directory, state)
+        print("stopped; node%d keeps its last quote for %d s, then its tags fall back to signal-only (quoteKind \"signal\")" % (node, QUOTE_MAX_AGE))
+        return
+    if args.action == "stratum":
+        if args.value not in ("start", "stop", "status"): sys.exit("pool N stratum start [--stratum-text TEXT]|stop|status")
+        if args.value == "start":
+            text = args.stratum_text if args.stratum_text is not None else (stratum_of(state, node) or {}).get("text")
+            stratum_start(state, node, text); save(directory, state); return
+        if args.value == "stop": stratum_stop(state, node); save(directory, state); return
+        print(stratum_line(state, node)); return
+
+# ---------------------------------------------------------------------------------- the stratum seat (role-pool-regtest-plan.md 3.4)
+
+def stratum_of(state, node): return (state.get("stratum") or {}).get(str(node))
+def stratum_ports(node):
+    """The stratum and /status ports of a seat: the seat's rpc port shifted above every framework
+    port, so two devnets (two portseeds) never share them."""
+    port = STRATUM_PORT_BASE + (rpc_port(node) - _util.PORT_MIN - _util.PORT_RANGE)
+    return port, port + STRATUM_STATUS_OFFSET
+
+def zmq_port(node): return ZMQ_PORT_BASE + _util.MAX_NODES * (PortSeed.n % ZMQ_SEED_PERIOD) + node
+def zmq_url(node): return "tcp://127.0.0.1:%d" % zmq_port(node)
+def zmq_args(node):
+    """The node's -zmqpub* options: one endpoint, both topics (chain-viz-plan.md N-4)."""
+    return ["-zmqpubhashblock=%s" % zmq_url(node), "-zmqpubhashtx=%s" % zmq_url(node)]
+def zmq_record(node): return {"hashblock": zmq_url(node), "hashtx": zmq_url(node)}
+
+def stratum_status(record, timeout=3):
+    """yolo's GET /status document, or None."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/status" % record["status_port"], timeout=timeout) as reply:
+            return json.load(reply)
+    except Exception:
+        return None
+
+def stratum_start(state, node, text=None):
+    """`yolo --payout <the seat's payout address> [--text TEXT]` beside pool `node`, on the node's
+    RPC credentials from devnet.json; the seat's blocks then come from `stratum-miner`
+    (`mine N <node>`), never from `generate`.
+
+    yolo has no modes (P-6): `--payout` set means every block pays that address whatever the
+    miner's username (so the reward lands in the seat's wallet and the username is a free worker
+    name, STRATUM_WORKER); `--text` set means the scriptSig is rebuilt as height push ||
+    coinbaseaux.flags || text (carrier 3), unset leaves the node's scriptSig alone (carrier 2).
+    The tag's payout key comes from -yellowbackpayoutaddress (MINER-2), not from the output, so
+    yed_listminers sees the seat whichever address the coinbase pays."""
+    if text is not None and len(text.encode()) > 100: sys.exit("--stratum-text is at most 100 bytes (yolo's scriptSig limit)")
+    if node not in all_pools(state): sys.exit("stratum runs beside a pool node (%s)" % ", ".join(str(p) for p in all_pools(state)))
+    record = stratum_of(state, node) or {}
+    if agent_alive(record.get("pid")): print("yolo beside node%d is already running (pid %d, payout %s, text %s)" % (node, record["pid"], record.get("payout"), json.dumps(record.get("text")))); return record
+    if not os.access(YOLO, os.X_OK):
+        sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
+    if not alive(state, node): sys.exit("node%d is down; yolo needs its RPC" % node)
+    creds = state["rpc"][str(node)]
+    port, status_port = stratum_ports(node)
+    # A bare URL, not devnet.json's rpc.url: the framework's credentials carry emoji, which are fine
+    # in a Basic auth header and an invalid URI character in a userinfo (F-40).
+    payout = pool_address(state, node)
+    argv = [YOLO, "--payout", payout, "--bind", "127.0.0.1", "--port", str(port), "--status-port", str(status_port),
+            "--rpc", "http://127.0.0.1:%d" % creds["port"], "--rpc-user", creds["user"], "--rpc-password", creds["password"], "--equihash", "auto", "--log", "info"]
+    if text is not None: argv += ["--text", text]
+    pid = _spawn(state["dir"], "stratum-%d" % node, argv)
+    record = {"pid": pid, "payout": payout, "text": text, "port": port, "status_port": status_port, "binary": YOLO, "user": STRATUM_WORKER,
+              "miner": STRATUM_MINER, "started": time.time(), "stopped": False}
+    state.setdefault("stratum", {})[str(node)] = record
+    mark_stopped(state, "stratum-%d" % node, False)
+    for _ in range(30):                        # yolo serves work once its first template poll answered
+        time.sleep(0.5)
+        if not agent_alive(pid): sys.exit("yolo exited at start; see %s/stratum-%d.log" % (state["dir"], node))
+        doc = stratum_status(record)
+        if doc and doc.get("height") is not None: break
+    else:
+        print("yolo started (pid %d) but /status has no template after 15 s; see %s/stratum-%d.log" % (pid, state["dir"], node), file=sys.stderr)
+    print("yolo started beside node%d (pid %d): payout %s, text %s, stratum 127.0.0.1:%d, status http://127.0.0.1:%d/status, log %s/stratum-%d.log"
+          % (node, pid, payout, json.dumps(text), port, status_port, state["dir"], node))
+    print("  `mine N %d` now runs stratum-miner --user %s against it; `check-coinbase <height> -regtest -datadir=%s` verifies the tag"
+          % (node, record["user"], node_dir(state["dir"], node)))
+    return record
+
+def stratum_stop(state, node):
+    record = stratum_of(state, node)
+    if not record: print("no yolo was started beside node%d" % node); return
+    if not agent_alive(record.get("pid")): print("yolo beside node%d is not running" % node)
+    else: _kill(record["pid"], "yolo beside node%d" % node)
+    record["stopped"] = True
+    mark_stopped(state, "stratum-%d" % node, True)
+    print("node%d mines with `generate` again until `pool %d stratum start`" % (node, node))
+
+def stratum_line(state, node):
+    """One line for `status`: yolo's payout and text, connected miners, last tag kind and last submit verdict."""
+    record = stratum_of(state, node)
+    if not record: return "stratum: none (`pool %d stratum start` runs yolo beside node%d)" % (node, node)
+    if not agent_alive(record.get("pid")):
+        return "stratum node%d: yolo (pid %s) %s" % (node, record.get("pid"), "stopped" if record.get("stopped") else "DEAD (see %s/stratum-%d.log)" % (state["dir"], node))
+    doc = stratum_status(record)
+    if not doc: return "stratum node%d: yolo (pid %d) on :%d, /status on :%d not answering" % (node, record["pid"], record["port"], record["status_port"])
+    return ("stratum node%d: yolo (pid %d) on :%d; payout %s; text %s; template height %s (%s s old); miners %s; tag %s; last submit %s; accepted %s rejected %s"
+            % (node, record["pid"], record["port"], doc.get("payout"), json.dumps(record.get("text")) if doc.get("text") else "none", doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
+               json.dumps(doc.get("tag")), json.dumps(doc.get("lastSubmitVerdict")), doc.get("accepted"), doc.get("rejected")))
+
+def stratum_mine(state, node, blocks):
+    """`mine N <node>` for a stratum seat: node -> yolo -> stratum-miner -> submitblock, N times."""
+    record = stratum_of(state, node)
+    if not agent_alive(record.get("pid")): sys.exit("yolo beside node%d is not running (`pool %d stratum start`)" % (node, node))
+    argv = [sys.executable, record.get("miner") or STRATUM_MINER, "--pool", "127.0.0.1:%d" % record["port"], "--user", record["user"], "--blocks", str(blocks)]
+    log = open(os.path.join(state["dir"], "stratum-miner-%d.log" % node), "a")
+    log.write("%s %s\n" % (time.strftime("%H:%M:%S"), " ".join(argv))); log.flush()
+    rc = subprocess.call(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    log.close()
+    if rc != 0: sys.exit("stratum-miner exited %d; see %s/stratum-miner-%d.log and stratum-%d.log" % (rc, state["dir"], node, node))
+
+# ---------------------------------------------------------------------------------- status
+
+# ---------------------------------------------------------------------------------- chain-viz (chain-viz-plan.md C-11)
+
+def chainviz_port(): return CHAINVIZ_PORT_BASE + PortSeed.n % CHAINVIZ_SEED_PERIOD
+def chainviz_binary():
+    """CHAINVIZ_BIN, then chain-viz on PATH, then the workspace's release and debug builds."""
+    override = os.environ.get("CHAINVIZ_BIN")
+    if override: return override
+    found = shutil.which("chain-viz")
+    if found: return found
+    for build in ("release", "debug"):
+        candidate = os.path.join(WORKSPACE, "chain-viz", "target", build, "chain-viz")
+        if os.access(candidate, os.X_OK): return candidate
+    return None
+def chainviz_of(state): return state.get("chainviz") or {}
+def chainviz_pid_file(directory): return os.path.join(directory, "chain-viz.pid")
+def chainviz_pid(state):
+    """The recorded pid, or the pid file's (chain-viz writes it; a record survives a crash)."""
+    pid = chainviz_of(state).get("pid")
+    if pid: return pid
+    try:
+        with open(chainviz_pid_file(state["dir"])) as file: return int(file.read().strip() or 0) or None
+    except (OSError, ValueError): return None
+def _dim(text): return "\033[2m%s\033[0m" % text if sys.stdout.isatty() else text
+
+def chainviz_start(state):
+    """Spawn chain-viz on devnet.json and wait for its `listening on http://…` line; a missing
+    binary is one dim line, never an error (C-11: the devnet does not depend on the visualizer)."""
+    binary = chainviz_binary()
+    if not binary:
+        print(_dim("chain-viz: no binary (CHAINVIZ_BIN, PATH, %s/chain-viz/target/{release,debug}); not started" % WORKSPACE)); return
+    if not os.access(binary, os.X_OK):
+        print(_dim("chain-viz: %s is not executable; not started" % binary)); return
+    directory, port = state["dir"], chainviz_port()
+    log, pid_file = os.path.join(directory, "chain-viz.log"), chainviz_pid_file(directory)
+    argv = [binary, "--devnet", directory, "--listen", "127.0.0.1:%d" % port,
+            "--record", os.path.join(directory, "chain-viz"), "--pid-file", pid_file]
+    pid = _spawn(directory, "chain-viz", argv)
+    url, deadline = None, time.time() + CHAINVIZ_START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            with open(log) as file: match = re.search(r"listening on (http://\S+)", file.read())
+        except OSError: match = None
+        if match: url = match.group(1); break
+        if not agent_alive(pid): break
+        time.sleep(0.25)
+    state["chainviz"] = {"pid": pid, "url": url or "http://127.0.0.1:%d" % port, "port": port, "log": log,
+                         "binary": binary, "pid_file": pid_file, "record": os.path.join(directory, "chain-viz")}
+    if url: print("chain-viz: %s (pid %d, log %s)" % (url, pid, log))
+    elif not agent_alive(pid): print("chain-viz exited at start; see %s" % log, file=sys.stderr)
+    else: print("chain-viz started (pid %d) but printed no `listening on` line in %d s; expected http://127.0.0.1:%d, see %s" % (pid, CHAINVIZ_START_TIMEOUT, port, log), file=sys.stderr)
+
+def chainviz_stop(state, grace=5):
+    """SIGTERM, then SIGKILL after `grace` seconds; by the record or the pid file."""
+    pid = chainviz_pid(state)
+    if not pid or not agent_alive(pid): return
+    _kill(pid, "chain-viz")
+    deadline = time.time() + grace
+    while agent_alive(pid) and time.time() < deadline: time.sleep(0.2)
+    if agent_alive(pid):
+        try: os.kill(pid, 9); print("chain-viz (pid %d) did not stop in %d s; killed" % (pid, grace))
+        except OSError: pass
+    try: os.remove(chainviz_pid_file(state["dir"]))
+    except OSError: pass
+
+def chainviz_line(state):
+    record = chainviz_of(state)
+    if not record: return "chain-viz: not started (`up` starts it when a binary is found; CHAINVIZ_BIN)"
+    pid = chainviz_pid(state)
+    return "chain-viz: %s (pid %s) %s; log %s" % (record.get("url"), pid, "up" if pid and agent_alive(pid) else "DEAD", record.get("log"))
+
+def banner(state):
+    role = role_of(state)
+    if role == "none": return "seat: none (the fully automated demo); every node is the devnet's"
+    seat = seat_of(state)
+    port = state["rpc"][str(seat)]["port"]
+    return ("=" * 78 + "\n"
+            "  YOUR SEAT: %s -- node%d (rpc port %d): %s\n"
+            "  the other nodes are automated; driving them is the single most likely mistake here\n" % (role.upper(), seat, port, ROLES[role]["what"])
+            + "=" * 78)
+
+def status(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    print(banner(state))
+    roles = {USER: "user" if role_of(state) in ("none", "user") else "funder", STOCK: "stock"}
+    for pool_node in all_pools(state): roles[pool_node] = "pool" if pool_node in auto_pools(state) else "POOL*"
+    for attestor in attestors_of(state): roles[attestor] = "attest"
+    if role_of(state) == "attestor": roles[ATTESTOR4] = "ATTEST*"
+    if state.get("population") is not None: roles[state["population"]] = "sim"
+    if state.get("liquidator") is not None: roles[state["liquidator"]] = "liquid"
+    for index in range(state["num_nodes"]):
+        print("node%-2d %-7s rpc %d %s%s" % (index, roles.get(index, "?"), state.get("rpc", {}).get(str(index), {}).get("port", rpc_port(index)),
+                                            "up" if alive(state, index) else "DOWN", "   <- you" if role_of(state) != "none" and index == seat_of(state) else ""))
+    if not alive(state, USER):
+        print("node0 is down: no chain state to report (`up --force` rebuilds, `down --wipe` removes the directory)"); return 1
+    node = rpc(state, USER); activation, stats = node.yed_getactivation(), node.yed_getstats()
+    mintable = stats.get("mintableClasses")
+    minting = ("allowed" if stats["mintingAllowed"] else
+               "limited to class %s (%s; W16)" % (", ".join(mintable), ",".join(stats.get("haltMask") or [])) if mintable else
+               "halted (%s)" % ",".join(stats.get("haltMask") or []))
+    print("height %d; activation %s; minting %s; global ratio %s; supply %s YED in %d active vault(s)"
+          % (node.getblockcount(), activation["status"], minting,
+             "undefined" if stats.get("globalRatioBps") is None else "%.1f %%" % (stats["globalRatioBps"] / 100),
+             Decimal(stats["supplyCents"]) / 100, stats["activeVaults"]))
+    if role_of(state) != "none": print(heartbeat_line(state))
+    walk = state.get("walk") or {}
+    print("price: $%s%s" % (read_mock(directory), (" walking (pid %d, drift %+.2f %%/min, vol %.2f %%/tick)" % (walk["pid"], walk["drift"], walk["vol"]))
+                                                  if agent_alive(walk.get("pid")) else " (fixed; `price --walk` starts the walk)"))
+    for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s share %s" % (row["payoutAddress"], json.dumps(row["registered"]), json.dumps(row["eligible"]), row.get("share")))
+    for pool_node in all_pools(state):
+        miner = rpc(state, pool_node).yed_getinfo()["miner"] if alive(state, pool_node) else {}
+        print("node%d next tag: %s (quote age %s s, signal %s)%s" % (pool_node, miner.get("quoteKind", "?"), miner.get("quoteAgeSeconds"), json.dumps(miner.get("signal")),
+                                                                     "   <- you" if role_of(state) == "pool" and pool_node == seat_of(state) else ""))
+    for pool_node in sorted(int(k) for k in (state.get("stratum") or {})): print(stratum_line(state, pool_node))
+    agents = agent_pids(state)
+    if agents:
+        for pool_node, pid in sorted(agents.items()): print("quote agent node%d pid %d %s" % (pool_node, pid, "up" if agent_alive(pid) else "DOWN"))
+        print("mock price file: %s" % mock_path(directory))
+    else: print("quotes: set directly (`up --agents` runs the real quote agents)")
+    if attestors_of(state):
+        attest = node.yed_getinfo()["attest"]
+        print("attestation %s (trigger %s, arm %s); seated %d; pool %d, fresh %d; carrier %s; required %s"
+              % (attest["status"], attest["triggerHeight"], attest["armHeight"], attest["seatedCount"],
+                 attest["poolSize"], attest["poolFresh"], attest["carrierMode"], attest["required"]))
+        for rec in node.yed_listattestors():
+            print("  seq %-3s %-9s bond %s zat, registered %s, seated %s, fresh %s, pinned %s"
+                  % (rec["seq"], rec["status"], rec["bondZat"], rec["registerHeight"], json.dumps(rec.get("seated")),
+                     json.dumps(rec.get("poolFresh")), json.dumps(rec.get("pinned"))))
+        # The seq a node was given is assigned on chain, in the order the registrations landed in
+        # their block -- not in node order. Print it here: reading `node7` as `seq 7` is the
+        # mistake this line exists to prevent.
+        for attestor in attestors_of(state):
+            pid = attest_pids(state).get("attest-%d" % attestor)
+            price_file = attest_mock_path(directory, attestor)
+            quoted = open(price_file).read().strip() if os.path.exists(price_file) else "?"
+            print("  node%d (seq %s) agent pid %s %s, mock price $%s"
+                  % (attestor, state.get("attest_seqs", {}).get(str(attestor), "?"),
+                     pid, "up" if pid and agent_alive(pid) else "DOWN", quoted))
+        if role_of(state) == "attestor":
+            print("  node%d (YOU): your seat; %d YEC funded, unregistered at `up`; agent conf template %s"
+                  % (ATTESTOR4, SEAT_ATTESTOR_FUND_YEC, os.path.join(directory, "attest-%d.toml" % ATTESTOR4)))
+        for sub in minting_nodes(state):
+            pid = attest_pids(state).get("subscribe-%d" % sub)
+            print("  subscriber beside node%d pid %s %s" % (sub, pid, "up" if pid and agent_alive(pid) else "DOWN"))
+    simrec = state.get("sim") or {}
+    if state.get("population") is not None:
+        print("simulator: %s (`sim stats` for the per-persona tally)" % ("running (pid %d), profile %s, seed %s" % (simrec["pid"], simrec.get("profile"), state.get("seed"))
+                                                                          if agent_alive(simrec.get("pid")) else "not running (`sim start`)"))
+    if state.get("session"): print("session: %s" % state["session"])
+    print(chainviz_line(state))
+    print("wallet: " + " ".join(wallet_command(directory, seat_of(state))))
+
+# ---------------------------------------------------------------------------------- the small commands
+
+def command_check(args):
+    state = load(os.path.abspath(args.dir))
+    try: check(state)
+    except Exception as error: print(error, file=sys.stderr); return 1
+    if (state.get("lightwalletd") or {}).get("pid"):
+        problem = lightwalletd_check(state)
+        if problem: print(problem, file=sys.stderr); return 1
+    print("devnet check passed")
+
+def mine(args):
+    """`mine N` mines round-robin on the automated pools, as the heartbeat does, so every block
+    carries a quote tag. `mine N <node>` mines on one node, and refuses a node whose blocks would
+    carry no tag (the user seat, the stock node, a pool with no payout key) unless `--untagged` says
+    that is the point: 50 tagless blocks in a 64-block window empty the price windows (NO_PRICE),
+    halt minting (PARTICIPATION) and suspend block rejection (ENFORCEMENT, ACT-6) — a majority
+    walking away, impersonated by one careless command (chain-viz plan C-F34)."""
+    state = load(os.path.abspath(args.dir))
+    nodes = [rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)]
+    start = rpc(state, USER).getblockcount()
+    if args.node is None:
+        pools = auto_pools(state)
+        if not pools: sys.exit("no automated pool to mine on; name a node: `mine N <node>`")
+        for i in range(args.blocks):                        # one block, then every node on it, before the next pool mines: no stale tips
+            rpc(state, pools[i % len(pools)], timeout=60).generate(1)
+            sync_blocks(nodes)
+        print("mined %d blocks round-robin on node %s: height %d -> %d" % (args.blocks, ", ".join(str(p) for p in pools), start, rpc(state, USER).getblockcount()))
+        return
+    if not 0 <= args.node < state["num_nodes"]: sys.exit("node must be between 0 and %d" % (state["num_nodes"] - 1))
+    node = rpc(state, args.node)
+    record = stratum_of(state, args.node)
+    stratum = bool(record and not record.get("stopped"))
+    if not stratum and not args.untagged:
+        try: kind = node.yed_getinfo().get("miner", {}).get("quoteKind", "none")
+        except Exception: kind = "none"                     # a stock node: no yed_getinfo
+        if kind == "none":
+            sys.exit("node%d's blocks would carry no Yellowback tag (no payout key or no -yellowback): %d of them drain the price windows,\n"
+                     "halt minting and suspend enforcement. `mine %d` mines on the pools; `mine %d %d --untagged` does this on purpose."
+                     % (args.node, args.blocks, args.blocks, args.blocks, args.node))
+        if kind == "signal":
+            print("note: node%d's quote is stale (quoteKind \"signal\"): its blocks signal but carry no price" % args.node)
+    if stratum:
+        stratum_mine(state, args.node, args.blocks)        # a stratum seat: node -> yolo -> stratum-miner -> submitblock
+    else:
+        node.generate(args.blocks)
+    sync_blocks(nodes)
+    print("mined %d%s blocks on node%d%s: height %d -> %d" % (args.blocks, " untagged" if args.untagged else "", args.node,
+          " through yolo and stratum-miner" if stratum else "", start, node.getblockcount()))
+
+def attestor(args):
+    """`attestor N stop|start|price USD`: the outage and divergence demos of v3 section 5.
+
+    stop  -- kill that attestor's agent; with K_SLACK the others still cover a mint, and stopping
+             two leaves minting refusing with `missing`.
+    start -- bring it back (the node keeps its seat; only the pool goes stale).
+    price -- give that one attestor a different mock price, so the GUI shows a diverging source
+             and, far enough out, DIVERGE_BPS_ATTEST drops it from the selection."""
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    attestors = attestors_of(state)
+    if not attestors: sys.exit("this devnet was brought up with --no-attest; there are no attestors")
+    if role_of(state) == "attestor" and args.node == ATTESTOR4:
+        sys.exit("node%d is YOUR seat: register with `cli --node %d -- yed_registerattestor %d %d 0`, then run\n"
+                 "  %s --conf %s attest --mock-price %s\n"
+                 "yourself (doc/yellowback-attestor.md; the scenario 2b checklist is in your session's NOTES.md)"
+                 % (ATTESTOR4, ATTESTOR4, ATTEST_BOND_YEC, ATTEST_LOCK_BLOCKS, ATTEST_AGENT,
+                    os.path.join(directory, "attest-%d.toml" % ATTESTOR4), attest_mock_path(directory, ATTESTOR4)))
+    if args.node not in attestors: sys.exit("attestor must be one of %s" % ", ".join(str(a) for a in attestors))
+    name = "attest-%d" % args.node
+    pid = attest_pids(state).get(name)
+    if args.action == "stop":
+        if not (pid and agent_alive(pid)): print("%s is already down" % name); return
+        stop_attest_agents(state, only=name)
+        state["attest_agents"][name] = pid          # remembered so `start` can report the swap
+        mark_stopped(state, name, True)
+        save(directory, state)
+        print("stopped %s (seq %s); its attestations stop at the next tick, and the pool keeps the last "
+              "until it ages past attestMaxAge" % (name, state["attest_seqs"].get(str(args.node), "?")))
+        return
+    if args.action == "start":
+        if pid and agent_alive(pid): print("%s is already up (pid %d)" % (name, pid)); return
+        seq = state["attest_seqs"][str(args.node)]
+        state["attest_agents"][name] = start_attest_agent(directory, args.node, seq)
+        mark_stopped(state, name, False)
+        save(directory, state)
+        print("started %s (pid %d, seq %d); mine %d blocks for its next tick"
+              % (name, state["attest_agents"][name], seq, ATTEST_INTERVAL))
+        return
+    value = Decimal(args.usd)
+    if value <= 0: sys.exit("price must be positive")
+    write_attest_mock(directory, args.node, value)
+    if agent_alive((state.get("walk") or {}).get("pid")):
+        print("note: the walk rewrites every automated attestor's price each tick; `price --walk stop` first to hold a divergence")
+    print("node%d (seq %s) now attests $%s (the others are at $%s); mine %d blocks for its next tick"
+          % (args.node, state["attest_seqs"].get(str(args.node), "?"), value, read_mock(directory), ATTEST_INTERVAL))
+
+def notice(args):
+    """`notice VAULTTXID`: post the emergency claim notice for a vault from node 0 (NOT-1,
+    `yed_claimnotice`), the entry point of the emergency flow the GUI demonstrates. Anyone may
+    post a notice and it needs YEC, not YED, so node 0 can post one for a vault it does not own.
+
+    Like every bundle-carrying command this is two-step: with `wait` (the default) the call blocks
+    until its carrier confirms, so mine a block from another terminal -- `yellowback-devnet mine
+    1 2` -- while it waits (the heartbeat does it for you in a role preset)."""
+    state = load(os.path.abspath(args.dir))
+    node = rpc(state, USER, timeout=700)
+    if not attestors_of(state): sys.exit("this devnet was brought up with --no-attest; there is no notice path")
+    try:
+        result = node.yed_claimnotice(args.vaulttxid)
+    except Exception as error:
+        sys.exit("yed_claimnotice: %s" % error)
+    if result.get("pending"):
+        print("carrier %s is in flight; mine a block and run `notice %s` again"
+              % (result["carrierTxid"][:16], args.vaulttxid))
+        return
+    print("notice posted: txid %s, refHeight %s, emergency claim opens at %s"
+          % (result.get("txid", "?"), result.get("refHeight"), result.get("emergencyOpenAt")))
+
+def wallet(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    node = seat_of(state) if args.node is None else args.node
+    if not 0 <= node < state["num_nodes"]: sys.exit("node must be between 0 and %d" % (state["num_nodes"] - 1))
+    if node == STOCK: sys.exit("node1 is the stock node: it has no Yellowback tab to show")
+    command = wallet_command(directory, node, args.app)
+    if args.print: print(" ".join(command)); return
+    if not os.access(command[0], os.X_OK): sys.exit("wallet not found at %s; pass --app, set YELLOWBACK_WALLET_BIN, or use --print" % command[0])
+    subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
+    print("launched on node%d%s: %s" % (node, " (your seat)" if node == seat_of(state) and role_of(state) != "none" else "", " ".join(command)))
+
+def cli(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    if args.datadir is not None:
+        if not 0 <= args.datadir < state["num_nodes"]: sys.exit("node must be between 0 and %d" % (state["num_nodes"] - 1))
+        print(node_dir(directory, args.datadir)); return 0
+    return subprocess.call([os.path.join(os.path.dirname(state["bitcoind"]), "ycash-cli"), "-datadir=" + node_dir(directory, args.node)] + args.args)
+
+def down(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    chainviz_stop(state)
+    for name in ("sim", "walk", "heartbeat", "lightwalletd"):
+        _kill((state.get(name) or {}).get("pid"), name)
+    for node, record in sorted((state.get("stratum") or {}).items()):
+        _kill(record.get("pid"), "yolo beside node%s" % node)
+        subprocess.run(["pkill", "-f", "stratum-miner --pool 127.0.0.1:%d " % record["port"]], capture_output=True)    # a `mine` still solving against it
+    stop_agents(state); stop_attest_agents(state)
+    for node in range(state["num_nodes"]):
+        if alive(state, node):
+            try: rpc(state, node).stop(); print("stopping node%d" % node)
+            except Exception as error: print("node%d: %s" % (node, error))
+    # By process too: a node whose RPC is broken looks down to alive() and would survive, holding
+    # its ports for the next `up` (F-14). Wait for the clean stops, then terminate what is left.
+    left = kill_nodes(directory)
+    if left: print("%d node process(es) did not stop over RPC and were terminated" % len(left))
+    if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
+
+# ---------------------------------------------------------------------------------- sessions, scenarios, reports (R5)
+
+def scenario_files(role):
+    names = {"user": ["1-user"], "attestor": ["2a-attestor-gui", "2b-attestor-headless"], "pool": ["3-pool"]}.get(role, [])
+    return [os.path.join(SCENARIOS, name + ".md") for name in names]
+
+def fork_commit(repo):
+    try: return subprocess.check_output(["git", "-C", repo, "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception: return "unknown"
+
+def params_summary(state):
+    try:
+        params = rpc(state, USER).yed_getinfo()["params"]
+        return json.dumps(params, sort_keys=True)
+    except Exception as error:
+        return "unavailable (%s)" % error
+
+def make_session(state):
+    """<dir>/session-<role>-<date>/ with NOTES.md seeded with the walk-through checklist(s) of
+    the role, so an observation can be typed against the step that prompted it. The seed is in
+    the header: a scenario that produced an interesting liquidation can be replayed exactly."""
+    role = role_of(state)
+    session = os.path.join(state["dir"], "session-%s-%s" % (role, time.strftime("%Y%m%d-%H%M")))
+    os.makedirs(session, exist_ok=True)
+    header = ["# Session notes: the `%s` seat" % role, "",
+              "- started: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+              "- seed: %s (`up --role %s --seed %s` replays the personas and the walk)" % (state.get("seed"), role, state.get("seed")),
+              "- your node: node%d (rpc port %s)" % (seat_of(state), state["rpc"][str(seat_of(state))]["port"]),
+              "- ycash-dd: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
+              "- price at start: $%s" % state["price_usd"], "",
+              "Type observations under the step that prompted them. `yellowback-devnet report` bundles this",
+              "directory with every log and the simulator's tally.", ""]
+    body = []
+    for file in scenario_files(role):
+        try: body += ["", "---", "", open(file).read()]
+        except OSError: body += ["", "(missing scenario file %s)" % file]
+    with open(os.path.join(session, "NOTES.md"), "w") as notes: notes.write("\n".join(header + body) + "\n")
+    return session
+
+def scenario(args):
+    files = sorted(glob.glob(os.path.join(SCENARIOS, "*.md")))
+    if not args.name:
+        print("scenarios (`scenario NAME` prints one):")
+        for file in files: print("  %s" % os.path.basename(file)[:-3])
+        return
+    matches = [f for f in files if os.path.basename(f)[:-3] == args.name or os.path.basename(f).startswith(args.name)]
+    if not matches: sys.exit("no scenario named %s" % args.name)
+    print(open(matches[0]).read())
+
+def report(args):
+    """Bundle the session directory, devnet.json, every agent and process log, the simulator's
+    tally and a REPORT.md header (parameters, both fork commits, seed) into one tarball."""
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    session = state.get("session") or make_session(state)
+    if not os.path.isdir(session): session = make_session(state)
+    role = role_of(state)
+    lines = ["# Yellowback devnet report: the `%s` seat" % role, "",
+             "- generated: %s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+             "- devnet created: %s in %s" % (state.get("created"), directory),
+             "- seed: %s; heartbeat rate: %s s; walk: %s" % (state.get("seed"), (state.get("heartbeat") or {}).get("rate"), json.dumps({k: v for k, v in (state.get("walk") or {}).items() if k in ("drift", "vol", "tick")})),
+             "- ycash-dd: %s; yecwallet-dd: %s" % (fork_commit(REPO), fork_commit(os.path.join(WORKSPACE, "yecwallet-dd"))),
+             "- price now: $%s" % read_mock(directory), ""]
+    if alive(state, USER):
+        node = rpc(state, USER)
+        try:
+            lines += ["## Chain", "", "```json", json.dumps({"height": node.getblockcount(), "stats": node.yed_getstats(), "attest": node.yed_getinfo()["attest"],
+                                                             "attestors": node.yed_listattestors(), "miners": node.yed_listminers()}, indent=1, default=str), "```", ""]
+        except Exception as error: lines += ["chain state unavailable: %s" % error, ""]
+    lines += ["## Parameters (yed_getinfo.params)", "", "```json", params_summary(state), "```", ""]
+    stats_file = os.path.join(directory, "sim-stats.json")
+    if os.path.exists(stats_file):
+        lines += ["## Simulator tally", "", "```json", open(stats_file).read(), "```", ""]
+    with open(os.path.join(session, "REPORT.md"), "w") as file: file.write("\n".join(lines))
+    bundle = os.path.join(directory, "report-%s-%s.tar.gz" % (role, time.strftime("%Y%m%d-%H%M")))
+    with tarfile.open(bundle, "w:gz") as tar:
+        tar.add(session, arcname=os.path.basename(session))
+        for name in ["devnet.json", "sim-stats.json", "heartbeat.json", "mock-price"] + [os.path.basename(f) for f in glob.glob(os.path.join(directory, "*.log"))] + [os.path.basename(f) for f in glob.glob(os.path.join(directory, "*.toml"))]:
+            full = os.path.join(directory, name)
+            if os.path.exists(full): tar.add(full, arcname=os.path.join("devnet", name))
+        session_events = os.path.join(directory, "chain-viz", "session.jsonl")
+        if os.path.exists(session_events): tar.add(session_events, arcname=os.path.join("devnet", "chain-viz", "session.jsonl"))
+        for index in range(state["num_nodes"]):
+            debug = os.path.join(node_dir(directory, index), "regtest", "debug.log")
+            if os.path.exists(debug): tar.add(debug, arcname=os.path.join("devnet", "node%d-debug.log" % index))
+    print("report written: %s (REPORT.md and NOTES.md are in %s)" % (bundle, session))
+
+# ---------------------------------------------------------------------------------- main
+
+# ---------------------------------------------------------------------------------- vectors for the YEW core (wallet plan W0c)
+
+# Base58Check version bytes, from ref/ycash/src/chainparams.cpp:149-153 (mainnet), 409-413
+# (testnet), 613-615 (regtest) and src/yellowback/params.cpp:142/156/189 (the D10 form).
+ADDRESS_VERSIONS = {
+    "mainnet": {"pubkey": "1c28", "script": "1c2c", "secret": "80", "yellowback": "1fe4", "yellowbackPrefix": "ye", "transparentPrefix": "s1"},
+    "testnet": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2007", "yellowbackPrefix": "yt", "transparentPrefix": "sm"},
+    "regtest": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2002", "yellowbackPrefix": "yr", "transparentPrefix": "sm"},
+}
+VECTORS_FEE_ZAT = 10_000       # the miner fee each transparent vector pays (any value; it is what the node signed)
+
+def _der(r, s):
+    """DER-encode an ECDSA (r, s) the way libsecp256k1 does (minimal, sign-padded integers)."""
+    def integer(n):
+        b = n.to_bytes((n.bit_length() + 7) // 8, "big") or b"\x00"
+        return (b"\x00" + b) if b[0] & 0x80 else b
+    rb, sb = integer(r), integer(s)
+    body = b"\x02" + bytes([len(rb)]) + rb + b"\x02" + bytes([len(sb)]) + sb
+    return b"\x30" + bytes([len(body)]) + body
+
+def _tx_of(hex_):
+    from io import BytesIO
+    from test_framework.mininode import CTransaction
+    tx = CTransaction(); tx.deserialize(BytesIO(hex_str_to_bytes(hex_))); return tx
+
+def _payload_of(decoded):
+    """The "YB…" data push of the transaction's OP_RETURN output (hex), or None."""
+    for out in decoded["vout"]:
+        data = ym.script_single_push(hex_str_to_bytes(out["scriptPubKey"]["hex"]))
+        if data is not None: return data.hex()
+    return None
+
+def _key_record(node, address, versions):
+    """WIF, compressed pubkey, HASH160 and both renderings of one node-wallet P2PKH address."""
+    info = node.validateaddress(address)
+    assert info.get("ismine") and info.get("iscompressed"), "%s is not an own compressed-key address" % address
+    pubkey = hex_str_to_bytes(info["pubkey"]); key_hash = ym.hash160(pubkey)
+    address_ye = ym.base58check_encode(hex_str_to_bytes(versions["yellowback"]) + key_hash)
+    yed = node.yed_validateaddress(address_ye)
+    # yed_validateaddress.keyid is uint160::GetHex(): the HASH160 byte-reversed, the txid convention.
+    assert yed["isvalid"] and yed["transparentAddress"] == address and yed["keyid"] == key_hash[::-1].hex(), yed
+    return {"address": address, "address_ye": address_ye, "wif": node.dumpprivkey(address), "pubkeyHex": info["pubkey"],
+            "hash160Hex": key_hash.hex(), "keyidReversedHex": yed["keyid"], "scriptPubKeyHex": info["scriptPubKey"]}
+
+def _template(node, txid, result, mine):
+    """{hex, txid, decoded, txinfo, payloadHex, payloadDecoded, result} for a wallet transaction of
+    `node`, confirmed (mined here if needed) so the index has its record."""
+    hex_ = node.gettransaction(txid)["hex"]                      # the wallet's copy: getrawtransaction needs -txindex or an unspent output
+    decoded = node.decoderawtransaction(hex_)
+    assert decoded["txid"] == txid
+    for _ in range(6):
+        try: txinfo = node.yed_gettxinfo(txid); break
+        except Exception: mine(1)
+    else: txinfo = node.yed_gettxinfo(txid)
+    payload = _payload_of(decoded)
+    return {"hex": hex_, "txid": txid, "decoded": decoded, "txinfo": txinfo, "payloadHex": payload,
+            "payloadDecoded": node.yed_decodepayload(payload) if payload else None, "result": result}
+
+def _pool_miner(state):
+    """`mine(n)`: n blocks round-robin on the automated pools, as the heartbeat does, then let node 0
+    settle. Blocks node 0 mines carry no quote tag; 64 of them empty the price windows (PRICE-1) and
+    every mint after that fails mintpol-no-price."""
+    pools, turn = auto_pools(state), [0]
+    nodes = [rpc(state, index, timeout=60) for index in range(state["num_nodes"]) if alive(state, index)]
+    def mine(n=1):
+        for _ in range(n):                       # one block, then every node on it, before the next pool mines: no stale tips
+            rpc(state, pools[turn[0] % len(pools)], timeout=60).generate(1); turn[0] += 1
+            sync_blocks(nodes)
+        _settle(rpc(state, USER))
+    return mine
+
+def _mine_to(node, height, mine):
+    while node.getblockcount() < height: mine(min(25, height - node.getblockcount()))
+
+def _settle(node, seconds=1.5):
+    """generate returns before the wallet has digested the block it mined (SyncTransaction runs after
+    UpdateTip): a yed_send issued within ~200 ms picks inputs the wallet still thinks unspent or
+    misses the token the block just confirmed, and the mempool refuses it. A human never races this."""
+    time.sleep(seconds); node.getbalance()
+
+def _with_retry(call, attempts=5, seconds=2.0):
+    """`(result, attempts_used)` for a wallet RPC that can lose the post-block race above."""
+    for n in range(1, attempts + 1):
+        try: return call(), n
+        except Exception as error:
+            if n == attempts or "rejected by the mempool" not in str(error): raise
+            print("  attempt %d: %s; retrying" % (n, error)); time.sleep(seconds)
+
+def _two_step(call, mine):
+    """Run a wait=true two-step RPC (the carrier, then the main transaction once it confirms) while
+    mining the blocks it waits for: a plain devnet has no heartbeat."""
+    import threading
+    box = {}
+    def run():
+        try: box["result"] = call()
+        except Exception as error: box["error"] = error
+    thread = threading.Thread(target=run); thread.start()
+    while thread.is_alive():
+        thread.join(1.0)
+        if thread.is_alive(): mine(1)
+    if "error" in box: raise box["error"]
+    return box["result"]
+
+def vectors(args):
+    """`vectors DIR [--out DIR] [--seed N] [--count N]`: JSON vectors for the YEW core's tests
+    (docs/plans/yellowback-wallet-plan.md, Phase W0c, D-W-3, D-W-7, D-W-11), from a running devnet.
+
+    Everything is what node 0 (the funded wallet) produced or reported; Python only re-derives and
+    checks. Four files in --out (default DIR/vectors):
+
+    transparent.json  N transparent-only v4 transactions (1-3 P2PKH inputs, 1-3 outputs; nLockTime
+        0 or a past height; nExpiryHeight 0 or tip+20). Per entry: unsignedHex (createrawtransaction),
+        prevouts [{txid, vout, scriptPubKeyHex, valueZat}], keys [{address, address_ye, wif,
+        pubkeyHex, hash160Hex}] one per input (getnewaddress + dumpprivkey, funded from node 0),
+        branchId (the consensus branch id the node signs under, = getblockchaininfo.consensus.nextblock),
+        sighashPerInput [hex] (ZIP-243, test_framework.script.SignatureHash), signedHex
+        (signrawtransaction: the node's libsecp256k1 signatures), txid, nLockTime, nExpiryHeight, and
+        pythonMatches: whether pure-Python RFC 6979 signing with the same keys reproduces signedHex
+        byte for byte. Nothing is broadcast; the node re-verifies every signedHex (complete = true).
+    addresses.json    ~5 keys: {wif, pubkeyHex, hash160Hex, address_s (the node's P2PKH rendering;
+        s1… on mainnet, sm… here), address_ye (the Yellowback rendering, yr… on regtest, checked
+        against yed_validateaddress)}, with the network and its version bytes.
+    templates.json    one node-built MINT (yed_mint; with its carrier when the devnet is ARMED, the
+        v3 shape), TRANSFER (yed_send) and REDEEM (yed_redeem after the lock): {hex, txid, decoded,
+        txinfo (yed_gettxinfo), payloadHex, payloadDecoded (yed_decodepayload), result (the RPC's
+        own result)}, and "armed".
+    params.json       yed_getinfo, the upgrades and branch ids, relayfee/paytxfee, the framework's
+        protocol constants (TOKEN_VALUE, CARRIER_VALUE, REF_WINDOW, MIN_OUTPUT, …), the address
+        version bytes of all three networks and the v4 header constants.
+
+    --seed fixes every random choice (input/output counts, lock/expiry pattern, amounts, splits);
+    the keys themselves come from the node's keypool, so two runs differ in keys and txids but not
+    in structure. Node 0 must hold enough mature YEC for the mint (~ 5x the minimum mint at the
+    current price plus fees); --fund-from N tops it up from node N's wallet when it is short.
+    """
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    node = rpc(state, USER, timeout=300)
+    rng = random.Random(args.seed)
+    out = os.path.abspath(args.out or os.path.join(directory, "vectors")); os.makedirs(out, exist_ok=True)
+    info = node.yed_getinfo(); network = info["network"]; versions = ADDRESS_VERSIONS[network]
+    chain = node.getblockchaininfo(); branch_id = chain["consensus"]["nextblock"]
+    assert int(branch_id, 16) == SIGNING_BRANCH_ID, "node signs under %s, the framework expects %08x" % (branch_id, SIGNING_BRANCH_ID)
+    from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
+    from test_framework.yellowback_util import (CLASS_RANGES, FEE_BPS, FEE_MIN, GRACE, MAX_LOCK, MAX_MINT, MAX_OUTPUT, MIN_MINT,
+                                                MIN_OUTPUT, REF_WINDOW, TOKEN_VALUE, YELLOWBACK_FEE, wif_to_secret)
+    from test_framework.yellowback_attest import ecdsa_sign
+    COIN = Decimal(10 ** 8)
+    def as_yec(zat): return Decimal(zat) / COIN
+
+    # 0. Funds: the mint wants ~ 5x MIN_MINT at the price plus fees; the vectors want a few YEC.
+    price = Decimal(node.yed_getprice().get("pMint") or 0) / Decimal(1_000_000)          # micro-USD per YEC, the mint price
+    need = Decimal(12) if price <= 0 else (Decimal(MIN_MINT) / 100 / price * 5 + 2).quantize(Decimal("0.01"))
+    if node.getbalance() < need and args.fund_from is not None:
+        funder = rpc(state, args.fund_from)
+        print("node0 holds %s YEC, the run needs ~%s: node%d sends the difference" % (node.getbalance(), need, args.fund_from))
+        funder.sendtoaddress(node.getnewaddress(), need - node.getbalance() + 1); _pool_miner(state)(1)
+
+    # 1. Transparent signing vectors (D-W-3): one fresh, funded key per input.
+    plan = [(rng.randint(1, 3), rng.randint(1, 3), rng.random() < 0.5, rng.random() < 0.5) for _ in range(args.count)]
+    keys = [_key_record(node, node.getnewaddress(), versions) for _ in range(sum(p[0] for p in plan))]
+    funding = {k["address"]: as_yec(rng.randint(60_000, 3_000_000)) for k in keys}
+    mine = _pool_miner(state)
+    fund_txid = node.sendmany("", funding); mine(1)
+    fund = node.decoderawtransaction(node.gettransaction(fund_txid)["hex"])
+    utxo = {}
+    for out_ in fund["vout"]:
+        for address in out_["scriptPubKey"].get("addresses", []):
+            if address in funding: utxo[address] = {"txid": fund_txid, "vout": out_["n"], "scriptPubKeyHex": out_["scriptPubKey"]["hex"], "valueZat": int((Decimal(str(out_["value"])) * COIN).to_integral_value())}
+    assert len(utxo) == len(keys), "funding transaction lacks an output per key"
+    tip = node.getblockcount(); transparent = []; next_key = 0; matches = 0
+    for n_in, n_out, with_lock, with_expiry in plan:
+        ins = keys[next_key:next_key + n_in]; next_key += n_in
+        prevouts = [utxo[k["address"]] for k in ins]
+        total = sum(p["valueZat"] for p in prevouts) - VECTORS_FEE_ZAT
+        cuts = sorted(rng.randint(1_000, total - 1_000) for _ in range(n_out - 1)); bounds = [0] + cuts + [total]
+        amounts = [bounds[i + 1] - bounds[i] for i in range(n_out)]
+        outputs = {node.getnewaddress(): as_yec(a) for a in amounts}
+        lock_time = tip - rng.randint(1, 100) if with_lock else 0
+        expiry = tip + 20 if with_expiry else 0
+        unsigned = node.createrawtransaction([{"txid": p["txid"], "vout": p["vout"]} for p in prevouts], outputs, lock_time, expiry)
+        tx = _tx_of(unsigned)
+        assert (tx.nLockTime, tx.nExpiryHeight) == (lock_time, expiry)
+        sighashes = [SignatureHash(CScript(hex_str_to_bytes(p["scriptPubKeyHex"])), tx, i, SIGHASH_ALL, p["valueZat"], SIGNING_BRANCH_ID)[0] for i, p in enumerate(prevouts)]
+        signed = node.signrawtransaction(unsigned)
+        assert signed["complete"], signed
+        assert node.signrawtransaction(signed["hex"])["complete"]              # the node re-verifies its own signatures
+        for i, (k, digest) in enumerate(zip(ins, sighashes)):                  # pure Python, RFC 6979: must agree with libsecp256k1
+            r, s = ecdsa_sign(wif_to_secret(k["wif"]), digest)
+            tx.vin[i].scriptSig = ym.push(_der(r, s) + bytes([SIGHASH_ALL])) + ym.push(hex_str_to_bytes(k["pubkeyHex"]))
+        python_matches = tx.serialize().hex() == signed["hex"]; matches += python_matches
+        transparent.append({"unsignedHex": unsigned, "prevouts": prevouts, "keys": ins, "branchId": branch_id, "nLockTime": lock_time,
+                            "nExpiryHeight": expiry, "outputs": [{"address": a, "valueZat": z} for a, z in zip(outputs, amounts)],
+                            "feeZat": VECTORS_FEE_ZAT, "sighashPerInput": [d.hex() for d in sighashes], "signedHex": signed["hex"],
+                            "txid": node.decoderawtransaction(signed["hex"])["txid"], "pythonMatches": python_matches})
+    with open(os.path.join(out, "transparent.json"), "w") as f: json.dump({"network": network, "branchId": branch_id, "sighashType": SIGHASH_ALL, "transactions": transparent}, f, indent=1, default=str)
+    print("transparent.json: %d transactions, pythonMatches %d/%d" % (len(transparent), matches, len(transparent)))
+
+    # 2. Addresses (D-W-7 encoding, D-W-11 WIF): five more keys, both renderings.
+    addresses = [_key_record(node, node.getnewaddress(), versions) for _ in range(5)]
+    with open(os.path.join(out, "addresses.json"), "w") as f:
+        json.dump({"network": network, "versions": versions, "keys": [{"wif": k["wif"], "pubkeyHex": k["pubkeyHex"], "hash160Hex": k["hash160Hex"],
+                                                                        "address_s": k["address"], "address_ye": k["address_ye"]} for k in addresses]}, f, indent=1, default=str)
+    print("addresses.json: %d keys (%s… / %s…)" % (len(addresses), addresses[0]["address"][:2], addresses[0]["address_ye"][:2]))
+
+    # 3. Templates: MINT (with carrier when ARMED), TRANSFER, REDEEM, all built by node 0's wallet.
+    armed = bool((info.get("attest") or {}).get("armed"))
+    lock_blocks = CLASS_RANGES["A"][0]
+    for _ in range(80):                                                         # refill the price windows if a previous run drained them
+        if int(node.yed_getprice(node.getblockcount() - REF_LAG).get("pMint") or 0) > 0: break   # the mint's reference height
+        mine(1)
+    if armed: wait_pool_fresh(state)
+    mint = _two_step(lambda: node.yed_mint(MIN_MINT, lock_blocks, "", "", True), mine)
+    templates = {"network": network, "armed": armed, "mint": _template(node, mint["txid"], mint, mine)}
+    if mint.get("carrierTxid"):
+        carrier_hex = node.gettransaction(mint["carrierTxid"])["hex"]
+        templates["carrier"] = {"hex": carrier_hex, "txid": mint["carrierTxid"], "decoded": node.decoderawtransaction(carrier_hex)}
+    print("mint %s (carrier %s, lockHeight %s)" % (mint["txid"], mint.get("carrierTxid"), mint.get("lockHeight")))
+    to = node.yed_getnewaddress()
+    transfer, attempts = _with_retry(lambda: node.yed_send(to, 500)); mine(1)
+    templates["transfer"] = _template(node, transfer if isinstance(transfer, str) else transfer["txid"], transfer, mine); templates["transfer"]["sendAttempts"] = attempts
+    print("transfer %s (%d attempt(s))" % (templates["transfer"]["txid"], attempts))
+    _mine_to(node, int(mint["lockHeight"]), mine)
+    redeem, attempts = _with_retry(lambda: node.yed_redeem(mint["txid"])); mine(1)
+    templates["redeem"] = _template(node, redeem["txid"], redeem, mine); templates["redeem"]["redeemAttempts"] = attempts
+    print("redeem %s (burned %s cents)" % (redeem["txid"], redeem.get("burnedCents")))
+    with open(os.path.join(out, "templates.json"), "w") as f: json.dump(templates, f, indent=1, default=str)
+
+    # 4. Parameters as the node reports them, plus the framework's constants and the version bytes.
+    params = {"network": network, "generated": {"command": " ".join(sys.argv[1:]), "seed": args.seed, "height": node.getblockcount(), "forkCommit": fork_commit(REPO)},
+              "yed_getinfo": node.yed_getinfo(), "consensus": chain["consensus"], "upgrades": chain["upgrades"], "signingBranchId": branch_id,
+              "relayFee": "%.8f" % node.getnetworkinfo()["relayfee"], "payTxFee": "%.8f" % node.getinfo()["paytxfee"],
+              "txVersion": {"header": "80000004", "versionGroupId": "892f2085", "nVersion": 4},
+              "constants": {"TOKEN_VALUE": TOKEN_VALUE, "CARRIER_VALUE": info["params"]["attest"]["carrierValueZat"], "REF_WINDOW": REF_WINDOW, "REF_LAG": REF_LAG,
+                            "MIN_OUTPUT": MIN_OUTPUT, "MAX_OUTPUT": MAX_OUTPUT, "MIN_MINT": MIN_MINT, "MAX_MINT": MAX_MINT, "YELLOWBACK_FEE": YELLOWBACK_FEE,
+                            "FEE_MIN": FEE_MIN, "FEE_BPS": FEE_BPS, "GRACE": GRACE, "MAX_LOCK": MAX_LOCK, "CLASS_RANGES": CLASS_RANGES},
+              "addressVersions": ADDRESS_VERSIONS}
+    with open(os.path.join(out, "params.json"), "w") as f: json.dump(params, f, indent=1, default=str)
+    print("params.json; vectors in %s" % out)
+    return 0 if matches == len(transparent) else 1
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    def add(name, fn, **kw):
+        command = sub.add_parser(name, **kw); command.add_argument("--dir", default=DEFAULT_DIR); command.set_defaults(fn=fn); return command
+    command = add("up", up); command.add_argument("--portseed", type=int, default=_default_portseed()); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
+    command.add_argument("--agents", action="store_true", help="run one real yellowback-quote --mock-price per pool instead of yed_setquote from this script (always on under --role)")
+    command.add_argument("--no-attest", action="store_true", help="the five-node v2 devnet: no attestor nodes, no attest agents, never ARMED")
+    command.add_argument("--role", choices=sorted(ROLES), default="none", help="leave one seat empty for you: user (node 0), attestor (node 8) or pool (node 4); default none = the fully automated demo")
+    command.add_argument("--seed", type=int, help="the personas' and the walk's random seed (printed; replay with the same value)")
+    command.add_argument("--lean", action="store_true", help="a constrained machine: no price walk, heartbeat at half rate")
+    command.add_argument("--no-heartbeat", action="store_true"); command.add_argument("--no-walk", action="store_true"); command.add_argument("--no-sim", action="store_true")
+    command.add_argument("--heartbeat-rate", type=int, help="seconds per block (default %d)" % HEARTBEAT_RATE)
+    command.add_argument("--walk-drift", type=float, default=WALK_DRIFT, help="%%%% per minute (default %s)" % WALK_DRIFT)
+    command.add_argument("--walk-vol", type=float, default=WALK_VOL, help="%%%% per tick (default %s)" % WALK_VOL)
+    command.add_argument("--walk-tick", type=int, default=WALK_TICK, help="seconds (default %d)" % WALK_TICK)
+    command.add_argument("--sim-profile", choices=("demo", "fast"), default="demo", help="persona cadences: demo (a half-hour walk-through) or fast (the regression suite)")
+    command.add_argument("--stratum", action="store_true", help="pool seat only: run yolo (the real stratum pool) beside node 4 and mine its blocks through stratum-miner (YOLO_BIN names the binary)")
+    command.add_argument("--stratum-text", metavar="TEXT", help="with --stratum: yolo rebuilds the coinbase scriptSig as height push + coinbaseaux.flags + TEXT (unset: the node's scriptSig as is)")
+    command.add_argument("--no-viz", action="store_true", help="do not start chain-viz (by default `up` starts it on devnet.json when CHAINVIZ_BIN, PATH or <workspace>/chain-viz/target holds a binary)")
+    add("check", command_check); add("status", status)
+    command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=None, help="one node; default: round-robin on the automated pools"); command.add_argument("--untagged", action="store_true", help="allow a node whose blocks carry no tag (drains the price windows)")
+    command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
+    command = add("price", price); command.add_argument("usd", nargs="?")
+    command.add_argument("--walk", nargs="?", const="start", choices=("start", "stop"), help="start (default) or stop the random walk")
+    command.add_argument("--drift", type=float, default=WALK_DRIFT, help="walk: %% per minute"); command.add_argument("--vol", type=float, default=WALK_VOL, help="walk: %% per tick"); command.add_argument("--tick", type=int, default=WALK_TICK, help="walk: seconds per tick")
+    command.add_argument("--shock", metavar="PCT", help="a step change, written --shock=-35%% (the = keeps the minus from reading as a flag)")
+    command = add("attestor", attestor); command.add_argument("node", type=int); command.add_argument("action", choices=("stop", "start", "price")); command.add_argument("usd", nargs="?")
+    command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "signal", "quote", "stratum")); command.add_argument("value", nargs="?")
+    command.add_argument("--stratum-text", metavar="TEXT", help="stratum start: yolo's coinbase text (default: the last one, else none)")
+    command = add("sim", sim); command.add_argument("action", choices=("start", "stop", "stats"), nargs="?", default="stats"); command.add_argument("--profile", choices=("demo", "fast"))
+    command = add("notice", notice); command.add_argument("vaulttxid")
+    command = add("scenario", scenario); command.add_argument("name", nargs="?")
+    add("report", report)
+    command = add("lightwalletd", lightwalletd, help="run lightwalletd-dd (or the baseline) against node0: start | stop | status")
+    command.add_argument("action", choices=("start", "stop", "status"), nargs="?", default="start")
+    command.add_argument("--port", type=int, default=LWD_PORT); command.add_argument("--bin", help="server binary (default: build lightwalletd-dd into wt/lightwalletd-dd-bin)")
+    command.add_argument("--baseline", action="store_true", help="run the lightwalletd-legacy build from wt/lightwalletd-legacy-bin instead")
+    command.add_argument("--print", action="store_true"); command.add_argument("--extra", default="", help="extra server flags, one quoted string")
+    command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--node", type=int, help="the node to open on (default: your seat)"); command.add_argument("--print", action="store_true")
+    command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("--datadir", type=int, metavar="N", help="print node N's datadir and exit"); command.add_argument("args", nargs=argparse.REMAINDER)
+    command = add("down", down); command.add_argument("--wipe", action="store_true")
+    command = add("vectors", vectors, help="write JSON signing/address/template vectors for the YEW core (wallet plan W0c)")
+    command.add_argument("--out", help="output directory (default DIR/vectors)"); command.add_argument("--seed", type=int, default=1)
+    command.add_argument("--count", type=int, default=12, help="transparent transactions (default 12)")
+    command.add_argument("--fund-from", type=int, default=2, metavar="N", help="top node 0 up from node N when it is short of YEC for the mint (default 2)")
+    add("_heartbeat", _heartbeat_run, help=argparse.SUPPRESS); add("_walk", _walk_run, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
+    if args.command == "attestor" and args.action == "price" and args.usd is None:
+        parser.error("attestor N price needs a USD amount")
+    if args.command in ("pool",) and args.action in ("signal", "quote", "stratum") and args.value is None:
+        parser.error("pool N %s needs a value" % args.action)
+    return args.fn(args) or 0
+
+if __name__ == "__main__": sys.exit(main())

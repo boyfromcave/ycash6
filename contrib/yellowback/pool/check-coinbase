@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""
+check-coinbase: does this block carry a Yellowback coinbase tag? (plan §5 step 4)
+
+  check-coinbase <height|blockhash> [-- <ycash-cli options>]     # e.g. -- -regtest -datadir=/x
+  check-coinbase <height|blockhash> -regtest -datadir=/x         # the same: unknown -options go to ycash-cli
+  check-coinbase --scriptsig <hex>                               # decode a raw coinbase scriptSig offline
+
+Reads the block's coinbase scriptSig through `ycash-cli getblock` and
+`getrawtransaction` and decodes it with the same TAG-1..5 rules the node
+uses (yellowback_price.decode_coinbase_tag). Prints one `key: value` line per
+field, always starting with `kind: quote|signal|none`, and `payoutAddress`
+rendered for the node's network (`getblockchaininfo.chain`) so it can be
+compared with `ycash-cli yed_gettag <height>` line for line. Exit 0 when a tag
+was found, 1 when none, 2 on an error. `--json` prints a JSON object instead.
+
+Everything after `--` is passed to ycash-cli verbatim (network, datadir, rpc
+options); `--cli PATH` names the binary (default: ycash-cli on PATH).
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import yellowback_price as yp  # noqa: E402
+
+
+def cli(binary, extra, *args):
+    cmd = [binary] + list(extra) + list(args)
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("%s: %s" % (" ".join(cmd[:1] + list(args)), (p.stderr or p.stdout).strip()))
+    return p.stdout
+
+
+def coinbase_scriptsig(binary, extra, block):
+    blk = json.loads(cli(binary, extra, "getblock", str(block)))
+    if not blk.get("tx"):
+        raise RuntimeError("block has no transactions")
+    tx = json.loads(cli(binary, extra, "getrawtransaction", blk["tx"][0], "1"))
+    vin = tx.get("vin") or []
+    if not vin or "coinbase" not in vin[0]:
+        raise RuntimeError("first transaction is not a coinbase")
+    return blk.get("height"), blk.get("hash"), bytes.fromhex(vin[0]["coinbase"])
+
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+PUBKEY_PREFIX = {"main": b"\x1c\x28", "test": b"\x1c\x95", "regtest": b"\x1c\x95"}   # chainparams.cpp PUBKEY_ADDRESS
+
+
+def p2pkh_address(key_hash_hex, chain):
+    """Base58Check P2PKH address of a Hash160 for `chain` (s1... on mainnet, sm... elsewhere)."""
+    payload = PUBKEY_PREFIX[chain] + bytes.fromhex(key_hash_hex)
+    check = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    n, out = int.from_bytes(payload + check, "big"), ""
+    while n:
+        n, r = divmod(n, 58)
+        out = _B58[r] + out
+    return "1" * (len(payload + check) - len((payload + check).lstrip(b"\0"))) + out
+
+
+def describe(script_sig, height=None, blockhash=None, chain=None):
+    tag = yp.decode_coinbase_tag(script_sig)
+    out = {"kind": tag["kind"] if tag else "none", "found": tag is not None}
+    if height is not None:
+        out["height"] = height
+    if blockhash is not None:
+        out["blockhash"] = blockhash
+    out["scriptSigBytes"] = len(script_sig)
+    if tag:
+        out.update({"version": tag["version"], "signal": tag["signal"], "priceMicroUsd": tag["priceMicroUsd"],
+                    "priceUsd": tag["priceMicroUsd"] / yp.MICRO, "sourceMask": tag["sourceMask"],
+                    "payoutKeyHash160": tag["payoutKeyHex"], "offset": tag["offset"]})
+        if chain in PUBKEY_PREFIX:
+            out["payoutAddress"] = p2pkh_address(tag["payoutKeyHex"], chain)
+    return out
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    extra = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, extra = argv[:i], argv[i + 1:]
+    ap = argparse.ArgumentParser(prog="check-coinbase", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("block", nargs="?", help="height or block hash")
+    ap.add_argument("--scriptsig", help="hex of a coinbase scriptSig to decode offline")
+    ap.add_argument("--cli", default="ycash-cli")
+    ap.add_argument("--json", action="store_true")
+    args, unknown = ap.parse_known_args(argv)
+    if any(not a.startswith("-") for a in unknown):
+        ap.error("unexpected argument(s): %s" % " ".join(a for a in unknown if not a.startswith("-")))
+    extra = unknown + extra                      # -regtest, -datadir=..., -rpc*: passed to ycash-cli
+    try:
+        if args.scriptsig:
+            out = describe(bytes.fromhex(args.scriptsig))
+        elif args.block:
+            height, blockhash, ss = coinbase_scriptsig(args.cli, extra, args.block)
+            chain = json.loads(cli(args.cli, extra, "getblockchaininfo")).get("chain")
+            out = describe(ss, height, blockhash, chain)
+        else:
+            ap.error("give a height/blockhash or --scriptsig")
+    except (RuntimeError, ValueError, OSError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out))
+    else:
+        for k, v in out.items():
+            print("%s: %s" % (k, json.dumps(v) if isinstance(v, bool) else v))
+    return 0 if out["found"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
