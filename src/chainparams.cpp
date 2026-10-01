@@ -981,6 +981,8 @@ const NUInfo* GetEquihashOverride(int nHeight, const Consensus::Params& params) 
 } // namespace
 
 unsigned int CChainParams::EquihashN(int nHeight) const {
+    if (NetworkIDString() == CBaseChainParams::REGTEST)  // regtest keeps (48,5) under every upgrade, as in v4.5.0
+        return consensus.nEquihashN;
     if (auto info = GetEquihashOverride(nHeight, consensus)) {
         return info->nEquihashN;
     }
@@ -988,6 +990,8 @@ unsigned int CChainParams::EquihashN(int nHeight) const {
 }
 
 unsigned int CChainParams::EquihashK(int nHeight) const {
+    if (NetworkIDString() == CBaseChainParams::REGTEST)  // regtest keeps (48,5) under every upgrade, as in v4.5.0
+        return consensus.nEquihashK;
     if (auto info = GetEquihashOverride(nHeight, consensus)) {
         return info->nEquihashK;
     }
