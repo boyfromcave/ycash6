@@ -37,9 +37,9 @@ from test_framework.yellowback_util import yellowback_node_args
 
 # getblocktemplate fields that legitimately differ between two calls a moment apart, or between
 # two nodes with different mempools: the clock, the long-poll token and the transaction list.
-GBT_VOLATILE = {'curtime', 'longpollid', 'mintime', 'transactions', 'coinbasetxn', 'target', 'bits'}
+GBT_VOLATILE = {'curtime', 'longpollid', 'mintime', 'transactions', 'coinbasetxn', 'target', 'bits', 'defaultroots'}   # 6.20.0: defaultroots compared below without its coinbase-dependent merkleroot
 # getinfo fields that are per-node by definition.
-GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'balance', 'walletversion',
+GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'errorstimestamp', 'balance', 'walletversion',
                     'keypoololdest', 'keypoolsize', 'paytxfee', 'relayfee', 'unlocked_until',
                     # the git describe string of the build itself: v4.5.0-<commit> either way
                     'build', 'subversion'}
@@ -99,10 +99,13 @@ class YellowbackStockParityTest(BitcoinTestFramework):
             assert_equal((label, ta['mutable']), (label, tb['mutable']))
             for k in sorted(set(ta) - GBT_VOLATILE):
                 assert_equal((label, k, ta[k]), (label, k, tb[k]))
+            da = {k: v for k, v in ta['defaultroots'].items() if k != 'merkleroot'}   # the merkle root commits to
+            db = {k: v for k, v in tb['defaultroots'].items() if k != 'merkleroot'}   # each node's own coinbase
+            assert_equal((label, 'defaultroots', da), (label, 'defaultroots', db))
             # the coinbase the two would mine must be byte-identical apart from the payout key
             ca, cb = ta['coinbasetxn'], tb['coinbasetxn']
             assert_equal((label, sorted(ca.keys())), (label, sorted(cb.keys())))
-            assert_equal((label, ca['foundersreward']), (label, cb['foundersreward']))
+            assert_equal((label, ca.get('foundersreward')), (label, cb.get('foundersreward')))   # 6.20.0 emits it only during the YDF mandate
         # one block, read back in full, field for field
         h = a.getbestblockhash()
         ba, bb = a.getblock(h), b.getblock(h)
