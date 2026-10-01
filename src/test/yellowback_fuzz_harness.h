@@ -204,7 +204,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
 inline int RunEvaluate(const std::vector<unsigned char>& data)
 {
     using namespace yellowback;
-    const Params P = RegtestParams(1, 0, 0, 0);
+    const yellowback::Params P = RegtestParams(1, 0, 0, 0);
     MemoryStateView base;
     int height = 0;
     CBlock block;
@@ -242,7 +242,7 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
 inline int RunPayee(const std::vector<unsigned char>& data)
 {
     using namespace yellowback;
-    const Params P = RegtestParams(1, 0, 0, 0);
+    const yellowback::Params P = RegtestParams(1, 0, 0, 0);
     MemoryStateView view;
     State st(view);
     Reader r(data);
