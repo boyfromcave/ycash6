@@ -204,6 +204,8 @@ EXTENDED_SCRIPTS = [
     'yellowback_devnet_roles.py',
     'yellowback_sapling.py',
     'yellowback_stockparity.py',
+    # The plan section 4 demonstration of the 6.20.0 port (~25 minutes; nightly, not a merge gate).
+    'yellowback_demo_v6.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',

@@ -311,7 +311,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6 " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -655,6 +655,17 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+      - name: The plan section 4 demonstration (extended)
+        # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
+        # line per item (yellowback_demo_v6.py, ~25 minutes). This job builds no stock binary, so node 1
+        # is the fork binary without -yellowback and the item 9 spot check is fork-vs-fork; the
+        # transcript says so. The demonstration of record runs with REF_YCASHD = the ycash6-stock build.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_demo_v6
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet,
         # lightwalletd-dd (its feature branch) and the lightwalletd-legacy baseline both served
