@@ -79,7 +79,9 @@ env:
   # and p2p-acceptblock (mininode protocol 170006 < 270013) stay out. The other inherited scripts
   # fail at the pin on upstream-Zcash assumptions in the harness (branch ids, fees, mininode,
   # addresses, caches, branding) or on the three pin defects recorded there; none is the
-  # overlay's to fix.
+  # overlay's to fix. getblocktemplate_longpoll passes but is left out: its random_transaction(...,
+  # min_fee=0.0, ...) draws a zero fee 1 time in 21 and 6.20.0's relay policy refuses it, on the
+  # stock and the fork binary alike (a test flake, not the overlay's; 41 entries).
   #
   # zmq_test is named, so rpc-tests.py runs it whatever --nozmq says (--nozmq only trims the
   # default, unnamed list). The runs of this list therefore drop --nozmq, so rpc-tests.py's own
@@ -89,7 +91,7 @@ env:
   # `txn_doublespend.py --mineblock` is one ALL_SCRIPTS entry with an argument: an unquoted
   # space-separated variable would split it and hand `--mineblock` to every script as a pass-on
   # flag, so it is its own variable, always passed quoted.
-  STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock getblocktemplate_longpoll zmq_test
+  STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock zmq_test
   STOCK_BASELINE_MINEBLOCK: txn_doublespend.py --mineblock
 
 jobs:
