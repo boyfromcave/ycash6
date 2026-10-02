@@ -302,7 +302,9 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
 {
     const Params& m = MainParams();
     BOOST_CHECK_EQUAL(m.network, "main");
-    BOOST_CHECK(!m.IsConfigured());   // startHeight is set per release
+    BOOST_CHECK(m.IsConfigured());    // set per release: 6.21.0-rc1
+    BOOST_CHECK_EQUAL(m.startHeight, 3075000);
+    BOOST_CHECK_EQUAL(m.enforceUntilHeight, m.startHeight + 420480);   // L8: one year of blocks
     BOOST_CHECK_EQUAL(m.pFastWindow, 96);   BOOST_CHECK_EQUAL(m.pFastMinFill, 48);
     BOOST_CHECK_EQUAL(m.pMidWindow, 576);   BOOST_CHECK_EQUAL(m.pMidMinFill, 384);
     BOOST_CHECK_EQUAL(m.pSlowWindow, 2016); BOOST_CHECK_EQUAL(m.pSlowMinFill, 1344);
@@ -341,7 +343,6 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.maxOutput, 10000000);
     BOOST_CHECK_EQUAL(m.tokenValue, TOKEN_VALUE);
     BOOST_CHECK_EQUAL(m.refWindow, REF_WINDOW);
-    BOOST_CHECK_EQUAL(m.enforceUntilHeight, 0);
     BOOST_CHECK_EQUAL(m.volWindow / m.volStep, 42);   // 43 samples, 42 returns
     BOOST_CHECK_EQUAL(TestParams().network, "test");
     BOOST_CHECK_EQUAL(TestParams().grace, 34560);

@@ -621,8 +621,11 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     }
     BOOST_CHECK(index4.IsHealthy());
 
-    // An unconfigured network refuses to start (mainnet placeholders until the ceremony).
-    YellowbackIndex index5(MainParams(), pathTemp / "yellowback-test5", 1 << 20, true);
+    // An unconfigured network (startHeight 0, as testnet until its release sets it) refuses to start.
+    yellowback::Params unconfigured = MainParams();
+    unconfigured.startHeight = 0;
+    unconfigured.enforceUntilHeight = 0;
+    YellowbackIndex index5(unconfigured, pathTemp / "yellowback-test5", 1 << 20, true);
     BOOST_CHECK(!index5.SyncToChain());
     BOOST_CHECK(!index5.IsHealthy());
 }

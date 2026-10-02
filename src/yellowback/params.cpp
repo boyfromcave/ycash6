@@ -141,7 +141,13 @@ const Params& MainParams()
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
         // startHeight and enforceUntilHeight are set per release (§3.1, K10, L8; Phase 10).
-        m.startHeight = 0;
+        // Release 6.21.0-rc1 (2026-10-02, mainnet tip 3,052,055): START at least two weeks of
+        // blocks past the release (M14; 1,152 blocks a day at 75 s), here about 20 days, so an
+        // rc1 tagged within the week still clears it. ENFORCE_UNTIL = START + BLOCKS_PER_YEAR
+        // (420,480, L8); Ycash mainnet schedules no network upgrade (NU5 and later unset in
+        // chainparams.cpp), so nothing caps it earlier. A later set starts at or after the sunset.
+        m.startHeight = 3075000;
+        m.enforceUntilHeight = 3495480;
         return m;
     }();
     return p;

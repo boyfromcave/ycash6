@@ -5,14 +5,30 @@ This is a **release candidate** for testing. It is ycashd 6.20.0 (the Ycash reba
 Zcash 6.x line) with the Ycash Yellowback (YED) overlay: a decentralized dollar on Ycash, where
 YED is minted against locked YEC and enforced by miners.
 
-Yellowback cannot be turned on for mainnet or testnet in this release
-------------------------------------------------------------------------
+Yellowback on mainnet: start height 3,075,000
+---------------------------------------------
 
-`-yellowback` needs a start height for the network, and this release sets one only for regtest:
-on mainnet or testnet the node refuses to start with `-yellowback` ("Yellowback has no start
-height for this network yet"). Without the flag, this node follows the network as the 6.20.0
-line does. Yellowback is for regtest and devnet testing here. Every Yellowback option also needs
-`-experimentalfeatures -yellowback`.
+Yellowback is off unless a node is started with `-experimentalfeatures -yellowback`. Without
+those flags, this node follows the network as the 6.20.0 line does.
+
+This release sets the mainnet parameters:
+
+| | Height | About |
+|---|---|---|
+| `START_HEIGHT`: the Yellowback index starts reading the chain | 3,075,000 | 2026-10-22 |
+| `ENFORCE_UNTIL_HEIGHT`: enforcement sunset, one year of blocks later | 3,495,480 | 2027-10 |
+
+A mainnet node started with `-yellowback` indexes from the start height and waits there. Nothing
+is enforced until miners signal and the soft fork activates, and minting arms only once at least
+five attestors are bonded (plus a 1,152-block delay). Before the start height, `yed_getinfo`
+reports an empty, healthy index.
+
+These heights are consensus parameters, not options. Every node running Yellowback on mainnet must
+use the same values, so they ship only in releases. A later release can change them only to a set
+that starts at or after this set's sunset.
+
+**Testnet is not configured yet.** With `-testnet`, `-yellowback` still refuses to start ("no
+start height for this network yet").
 
 The 6.20.0 baseline's own notes (`doc/release-notes/release-notes-6.20.0.md`) apply unchanged.
 
@@ -54,5 +70,9 @@ Known limitations
 
 - Under `-deletetx` (with the default `-deletetxconflict`), a purged *expired* Yellowback
   transaction disappears from `yed_listtransactions` instead of being listed as `"expired"`.
+- Under `-consolidation`, a consolidation transaction may take every note of an address while it
+  is unconfirmed. A Yellowback operation funded from that address is then refused with
+  `insufficient-yec` until the next block. To avoid this, keep consolidation off the address that
+  funds Yellowback: list only the addresses to consolidate with `-consolidatesaplingaddress`.
 - The macOS Intel and Ubuntu 18.04 packages are best-effort. They are absent from the release if
   their build failed.

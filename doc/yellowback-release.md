@@ -104,8 +104,36 @@ positions, a restart, and redeeming afterwards. One accepted difference: under
 by `yed_listtransactions` / `yed_gettxinfo`. It never confirmed, so it left nothing in the index;
 the operation is simply re-run.
 
+A second accepted difference: a consolidation batch takes a random 10–44 notes, so it can hold
+every note of an address. While it is unconfirmed, a Yellowback operation funded from that address
+is refused with `insufficient-yec` (never built on a note the mempool already spends) and goes
+through one block later. A pool that funds Yellowback from a Sapling address should list only its
+other addresses with `-consolidatesaplingaddress`.
+
 Pools reach the node only through the stock mining RPCs (`getblocktemplate`, `submitblock`), which
 none of these options affect.
+
+## Network parameters (START_HEIGHT, ENFORCE_UNTIL_HEIGHT)
+
+`src/yellowback/params.cpp` carries one start height and one sunset per public network. They are
+consensus parameters (K10): hashed into the state hash, and they decide which tags, registrations
+and vault references exist. So they ship only in a release, never as an operator flag. A network
+whose `startHeight` is 0 refuses `-yellowback` at init.
+
+When setting them in a release:
+- `startHeight` at least two weeks of blocks (16,128 at 75 s) past the release date (M14). Take the
+  tip from a live node or <https://explorer.ycash.xyz/api/v1/network/info>, and leave slack for the
+  time between the commit and the tag.
+- `enforceUntilHeight` = `startHeight` + 420,480 (one year, L8), and never past the next scheduled
+  Ycash network upgrade (`chainparams.cpp`).
+- A set that replaces a released one starts at or after that set's `enforceUntilHeight` (L8), and
+  above every height a released node has validated (M12).
+- Make the same change on the other node line (`ycash-dd`): both lines must agree.
+
+| Network | startHeight | enforceUntilHeight | Set in |
+|---|---|---|---|
+| main | 3,075,000 | 3,495,480 | 6.21.0-rc1 (tip 3,052,055 on 2026-10-02) |
+| test | 0 (unset) | 0 | not yet: testnet had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering) |
 
 ## Wallet (YecWallet) releases
 
