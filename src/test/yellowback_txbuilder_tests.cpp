@@ -48,7 +48,7 @@ using namespace yellowback;
 
 namespace {
 
-const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;   // main.cpp:2931
+const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;   // main.cpp:3412 (v4.5.0 :2931)
 
 CKey NewKey()
 {
