@@ -1994,7 +1994,7 @@ L4; effective only with `-yellowbackenforce=1`, L3); `-yellowbackquotemaxage=<se
 (clamped to `≥ DEFAULT_FEE`); `-yellowbackmintlag` (`REF_LAG`, 0..36); `-debug=yellowback`;
 regtest only: `-yellowbackstartheight`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps`,
 `-yellowbackenforceuntil` (all four in `yed_getinfo.params` and the state hash); test only:
-`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|template|novalve`. `-prune` is refused
+`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|crash:<height>|template|novalve|schema`. `-prune` is refused
 with `-yellowback`.
 
 **v3:** `-yellowbackpreferredattestor=<seq>` (AFEE-W override when that `seq ∈ A`; reported in

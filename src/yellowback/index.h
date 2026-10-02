@@ -110,6 +110,7 @@ struct TestFault
     bool templateFault;               //!< FilterTemplate disagrees with EvaluateBlock once (TPL-3)
     bool noValve;                     //!< ACT-7 disabled (yellowback_runbook.py)
     bool schemaMismatch;              //!< SyncToChain treats the stored tip as a foreign SCHEMA_VERSION once (the v3 rebuild path, yellowback_index.py)
+    std::optional<int> crashHeight;   //!< CheckConnect flushes, then SIGKILLs the node, before judging this height (yellowback_index.py)
 
     TestFault() : storageHook(NONE), armed(false), templateFault(false), noValve(false), schemaMismatch(false) {}
 };

@@ -20,10 +20,12 @@ build_vault_spend_raw.
 
 import os
 import shutil
+import signal
 import time
 
 from test_framework.util import (
     assert_equal,
+    bitcoind_processes,
     assert_greater_than,
     assert_start_raises_init_error,
     connect_nodes_bi,
@@ -78,6 +80,13 @@ def rpc_error_message(fn, *args):
 # Rule: TAG-1 TAG-2 TAG-3 PRICE-1 PRICE-2 ACT-1 ACT-2 ACT-3 SNAP UNDO REG-4 BLK-2 BLK-3 RED-1 RED-2 RED-3 MP-1
 # Rule: REG-A1 ARM-1 ARM-2
 class YellowbackIndexTest(YellowbackTestFramework):
+
+    def wait_crashed(self, i, timeout=60):
+        """Reap node ``i`` after it SIGKILLed itself (-yellowbacktestfault=crash); its proxy becomes None."""
+        p = bitcoind_processes.pop(i)
+        p.wait(timeout=timeout)
+        assert_equal(p.returncode, -signal.SIGKILL)
+        self.nodes[i] = None
 
     def statehash(self, i):
         return self.nodes[i].yed_getstatehash()['statehash']
@@ -297,7 +306,23 @@ class YellowbackIndexTest(YellowbackTestFramework):
         self.checkpoint('after the redemption')
 
         print('rejected_survives_kill9: node 1 mines a malformed spend; kill -9 right after the rejection')
+        # import_clause_after_kill9 (6.20.0, N2): node 3 dies by SIGKILL inside ConnectBlock with the
+        # rule-breaking block stored, flushed and not yet judged. 6.20.0's ThreadImport holds
+        # fImporting across its final ActivateBestChain on every start, so before the fix the restart
+        # connected the block unjudged ("accepted (initial sync / reindex / import, N2)").
+        self.restart(3, ['-yellowbacktestfault=crash:%d' % (nodes[STOCK].getblockcount() + 1)])
+        wait_yed_healthy(nodes[3])
         rejected, bad_txid = mine_rejected_block(self, user, vault_b)
+        self.wait_crashed(3)
+        wait_for_rejection([nodes[i] for i in ENFORCING if i != 3], rejected)
+        assert debug_log_contains(tmpdir, 3, 'crash before judging block %s' % rejected), 'node 3 did not crash at the block'
+        self.restart(3)
+        wait_yed_healthy(nodes[3], timeout=120)
+        wait_for_rejection([nodes[3]], rejected)
+        assert debug_log_contains(tmpdir, 3, 'rejecting block %s' % rejected), 'node 3 did not judge the stored block at restart'
+        with open(os.path.join(tmpdir, 'node3', 'regtest', 'debug.log'), errors='replace') as f:
+            n2 = [l for l in f if rejected in l and 'N2)' in l]
+        assert not n2, 'node 3 accepted the stored block under N2: %s' % n2
         wait_for_rejection(self.enforcing_nodes(), rejected)
         assert_banscore_zero(nodes)
         verdict = nodes[2].yed_getblockverdict(rejected)
