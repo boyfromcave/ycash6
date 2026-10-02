@@ -205,6 +205,7 @@ EXTENDED_SCRIPTS = [
     # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
     'yellowback_devnet_roles.py',
     'yellowback_sapling.py',
+    'yellowback_wr_flags.py',
     'yellowback_stockparity.py',
     # The plan section 4 demonstration of the 6.20.0 port (~25 minutes; nightly, not a merge gate).
     'yellowback_demo_v6.py',
