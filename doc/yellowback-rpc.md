@@ -1222,6 +1222,15 @@ an offline copy of `wallet.dat`.
 Arguments: none. A fresh keypool key as a Yellowback address string (`ye…` mainnet, `yt…`
 testnet, `yr…` regtest). The result is a bare string.
 
+**ycashd 6.20.0:** the transparent keypool is gone (keys are HD, drawn by `GenerateNewKey` as
+stock `getnewaddress` does), so this command — and every builder that draws a fresh owner, token,
+collateral or change key (`yed_mint`, `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim`,
+`yed_sweep`, `yed_registerattestor`, `yed_withdrawbond`) — **requires an unlocked wallet** and
+refuses a locked one with `wallet-locked` (the stock `EnsureWalletIsUnlocked` text may precede it,
+`RPC_WALLET_UNLOCK_NEEDED`). `keypool-empty` can no longer be raised by a fresh-key draw on
+6.20.0; it survives only on the `CReserveKey` change paths. On v4.5.0 the command draws from the
+keypool and works on a locked wallet. The contract JSON is unchanged (audit B-6).
+
 Result of `yed_getnewaddress`:
 
 ```json
@@ -1943,8 +1952,8 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
 | `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
 | `insufficient-yec` | `yed_mint` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes: `yed_mint … <an empty s1… address>` |
-| `wallet-locked` | every signing command | the wallet is encrypted and locked (`walletpassphrase` first); the stock `EnsureWalletIsUnlocked` message may precede it |
-| `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`) |
+| `wallet-locked` | every signing command; on 6.20.0 also `yed_getnewaddress` and every fresh-key draw | the wallet is encrypted and locked (`walletpassphrase` first); the stock `EnsureWalletIsUnlocked` message may precede it |
+| `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`); on 6.20.0 only the `CReserveKey` change paths can raise it (see `yed_getnewaddress`) |
 | `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
 | `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
 | `vault-value-too-small` | `yed_redeem`, `yed_claim`, `yed_sweep` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
