@@ -7,7 +7,9 @@
 //! (refreshed every `listattestors_seconds`); then, since the topic is public and anyone can
 //! broadcast on it (audit D-5), before the RPC: frames already handed to the node are dropped
 //! (an LRU keyed by SHA-256 of the 74 bytes), `citedHeight` must lie in a window around the
-//! node's tip (cached from `yed_getinfo` at every refresh), each `seq` has a token bucket, and
+//! node's tip (cached from `yed_getinfo` at every refresh, and re-read at most once per
+//! `TIP_REFRESH_MIN` when a frame cites above the window: under burst mining the cache lags
+//! the chain by more than the slack), each `seq` has a token bucket, and
 //! an RPC transport failure backs the loop off (bounded, 1..60 s). Everything else goes to
 //! `yed_addattestation`, which verifies the signature. Acceptances are counted. Optional
 //! `[subscribe] endpoints` are HTTPS URLs polled as a second path (plan §5, proposal §13).
@@ -30,6 +32,9 @@ pub const DEDUP_CAPACITY: usize = 4096;
 pub const CITED_BEHIND_MAX: u32 = 64;
 /// ... and lead it by this much (a block found since the cache was taken).
 pub const CITED_AHEAD_MAX: u32 = 8;
+/// A frame citing above `tip + CITED_AHEAD_MAX` re-reads the tip first, but not more often than
+/// this (a flood of far-future frames must not become a flood of `yed_getinfo` calls).
+pub const TIP_REFRESH_MIN: Duration = Duration::from_secs(1);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +71,8 @@ pub struct Subscriber {
     /// The node's height at the last refresh; None until `yed_getinfo` has answered (no window
     /// filter until then).
     pub tip: Option<u32>,
+    /// When `yed_getinfo` was last asked for the tip (periodic or on an ahead-of-window frame).
+    tip_refreshed_at: Option<Instant>,
     seen_set: HashSet<[u8; 32]>,
     seen_order: VecDeque<[u8; 32]>,
     buckets: HashMap<u16, Bucket>,
@@ -85,6 +92,7 @@ impl Subscriber {
             node,
             known_seqs: HashSet::new(),
             tip: None,
+            tip_refreshed_at: None,
             seen_set: HashSet::new(),
             seen_order: VecDeque::new(),
             buckets: HashMap::new(),
@@ -114,6 +122,12 @@ impl Subscriber {
 
     /// `yed_getinfo.height` → the cached tip for the window filter. On failure the previous stays.
     pub async fn refresh_tip(&mut self) -> Result<Option<u32>, RpcError> {
+        self.refresh_tip_at(Instant::now()).await
+    }
+
+    pub async fn refresh_tip_at(&mut self, now: Instant) -> Result<Option<u32>, RpcError> {
+        // Recorded before the call: a failing node is not asked again for TIP_REFRESH_MIN either.
+        self.tip_refreshed_at = Some(now);
         let v = self.node.call("yed_getinfo", vec![]).await?;
         if let Some(h) = v
             .get("height")
@@ -125,11 +139,20 @@ impl Subscriber {
         Ok(self.tip)
     }
 
+    fn ahead_of_window(&self, cited: u32) -> bool {
+        self.tip.is_some_and(|tip| cited > tip.saturating_add(CITED_AHEAD_MAX))
+    }
+
     fn in_window(&self, cited: u32) -> bool {
         match self.tip {
             None => true,
             Some(tip) => cited <= tip.saturating_add(CITED_AHEAD_MAX) && cited.saturating_add(CITED_BEHIND_MAX) >= tip,
         }
+    }
+
+    fn may_refresh_tip(&self, now: Instant) -> bool {
+        self.tip_refreshed_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= TIP_REFRESH_MIN)
     }
 
     fn take_token(&mut self, seq: u16, now: Instant) -> bool {
@@ -189,13 +212,29 @@ impl Subscriber {
             );
             return Outcome::Duplicate(att.seq);
         }
+        // The cache may lag the chain by more than CITED_AHEAD_MAX under burst mining (regtest
+        // devnets mine ~10 blocks/s): a frame the node would accept must not be dropped on a stale
+        // tip, so an ahead-of-window frame re-reads the tip (rate-limited) before the decision.
+        if self.ahead_of_window(att.cited_height) && self.may_refresh_tip(now) {
+            match self.refresh_tip_at(now).await {
+                Ok(tip) => tracing::debug!(
+                    "seq {} cites height {} ahead of the cached tip; refreshed to {:?}",
+                    att.seq,
+                    att.cited_height,
+                    tip
+                ),
+                Err(e) => tracing::debug!("yed_getinfo failed: {e}; keeping the previous tip"),
+            }
+        }
         if !self.in_window(att.cited_height) {
             self.filtered += 1;
-            tracing::debug!(
-                "dropped: seq {} cites height {} but the node is at {:?}",
+            tracing::info!(
+                "dropped: seq {} cites height {} but the node is at {} (window -{}/+{})",
                 att.seq,
                 att.cited_height,
-                self.tip
+                self.tip.map_or("unknown".to_string(), |t| t.to_string()),
+                CITED_BEHIND_MAX,
+                CITED_AHEAD_MAX
             );
             return Outcome::OutOfWindow(att.seq, att.cited_height);
         }
@@ -261,6 +300,7 @@ impl Subscriber {
         loop {
             match self.node.call("yed_getinfo", vec![]).await {
                 Ok(v) => {
+                    self.tip_refreshed_at = Some(Instant::now());
                     self.tip = v
                         .get("height")
                         .and_then(Value::as_i64)
@@ -547,6 +587,91 @@ mod tests {
         );
         assert_eq!(s.handle(&att(1, 1000).encode()).await, Outcome::Accepted(1, false));
         assert_eq!(addattestation_calls(&m), 4);
+    }
+
+    fn getinfo_calls(m: &MockNode) -> usize {
+        m.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == "yed_getinfo")
+            .count()
+    }
+
+    /// Audit D-5 follow-up: a frame ahead of a stale cached tip is judged against a refreshed tip
+    /// (one `yed_getinfo`, at most one per TIP_REFRESH_MIN); a far-future frame is still dropped
+    /// after the refresh; a frame behind the window never triggers one (the tip only grows).
+    #[tokio::test]
+    async fn ahead_of_window_frame_refreshes_the_tip_first() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let chain = Arc::new(AtomicU32::new(1000));
+        let chain_m = chain.clone();
+        let m = MockNode::start(None, move |method, _| match method {
+            "yed_listattestors" => Ok(json!([{"seq": 1}])),
+            "yed_getinfo" => Ok(json!({"network": "regtest", "height": chain_m.load(Ordering::SeqCst)})),
+            "yed_addattestation" => Ok(json!({"accepted": true})),
+            _ => Err((-32601, "Method not found".into())),
+        });
+        let mut s = Subscriber::new(cfg_for(&m, "seq_burst = 100\n")).unwrap();
+        s.refresh_attestors().await.unwrap();
+        let t0 = Instant::now();
+        assert_eq!(s.refresh_tip_at(t0).await.unwrap(), Some(1000));
+        assert_eq!(getinfo_calls(&m), 1);
+        // a burst: the chain is at 1030 while the cache still says 1000; a frame citing 1025 is
+        // in the node's own window, so the subscriber refreshes and passes it
+        chain.store(1030, Ordering::SeqCst);
+        let t1 = t0 + TIP_REFRESH_MIN;
+        assert_eq!(
+            s.handle_at(&att(1, 1025).encode(), t1).await,
+            Outcome::Accepted(1, false)
+        );
+        assert_eq!((s.tip, getinfo_calls(&m)), (Some(1030), 2));
+        // 1000 ahead: one refresh (none here, it was just refreshed), still dropped; a second
+        // later it is refreshed once more and still dropped
+        assert_eq!(
+            s.handle_at(&att(1, 2030).encode(), t1).await,
+            Outcome::OutOfWindow(1, 2030)
+        );
+        assert_eq!(getinfo_calls(&m), 2);
+        let t2 = t1 + TIP_REFRESH_MIN;
+        assert_eq!(
+            s.handle_at(&att(1, 2030).encode(), t2).await,
+            Outcome::OutOfWindow(1, 2030)
+        );
+        assert_eq!((s.tip, getinfo_calls(&m)), (Some(1030), 3));
+        // rate limit: within TIP_REFRESH_MIN of that refresh a frame ahead of the cache is judged
+        // against the cache (dropped) even though the chain has moved on; once the interval has
+        // lapsed it refreshes and passes
+        chain.store(1050, Ordering::SeqCst);
+        assert_eq!(
+            s.handle_at(&att(1, 1045).encode(), t2 + Duration::from_millis(500))
+                .await,
+            Outcome::OutOfWindow(1, 1045)
+        );
+        assert_eq!((s.tip, getinfo_calls(&m)), (Some(1030), 3));
+        assert_eq!(
+            s.handle_at(&att(1, 1045).encode(), t2 + TIP_REFRESH_MIN).await,
+            Outcome::Accepted(1, false)
+        );
+        assert_eq!((s.tip, getinfo_calls(&m)), (Some(1050), 4));
+        // a frame behind the window is dropped without asking the node
+        assert_eq!(
+            s.handle_at(
+                &att(1, 1050 - CITED_BEHIND_MAX - 1).encode(),
+                t2 + Duration::from_secs(10)
+            )
+            .await,
+            Outcome::OutOfWindow(1, 985)
+        );
+        assert_eq!(getinfo_calls(&m), 4);
+        // a frame within the window never refreshes either
+        assert_eq!(
+            s.handle_at(&att(1, 1055).encode(), t2 + Duration::from_secs(10)).await,
+            Outcome::Accepted(1, false)
+        );
+        assert_eq!(getinfo_calls(&m), 4);
+        assert_eq!(s.filtered, 4);
     }
 
     /// Audit D-5: an RPC transport failure backs the loop off, doubling to BACKOFF_MAX, reset on success.
