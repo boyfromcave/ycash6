@@ -17,4 +17,6 @@ src/wallet/wallet.cpp
 src/rust/
 Cargo.toml
 Cargo.lock
+# configure.ac: frozen except the _CLIENT_VERSION_{MAJOR,MINOR,REVISION,BUILD} defines a release
+# bumps (doc/yellowback-release.md); qa/yellowback-audit.sh checks the rest line by line.
 configure.ac

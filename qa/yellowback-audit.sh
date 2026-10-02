@@ -10,11 +10,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 base="${1:-ycash6-baseline}"
 git rev-parse --verify -q "$base^{commit}" >/dev/null || { echo "missing $base (git fetch --tags)"; exit 2; }
-frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$')
+frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$' | grep -vx 'configure.ac')
 if ! git diff --quiet "$base" -- $frozen; then
   echo "FROZEN SET CHANGED vs $base:"; git --no-pager diff --stat "$base" -- $frozen; exit 1
 fi
-echo "frozen set: zero delta vs $base"
+# configure.ac is frozen except its version defines: a release (doc/yellowback-release.md) must
+# bump _CLIENT_VERSION_* there and in src/clientversion.h; any other configure.ac line fails.
+if git diff -U0 "$base" -- configure.ac | grep -E '^[-+]' | grep -Ev '^(\+\+\+|---) (a\/|b\/|\/dev\/null)' | grep -Eqv '^[-+]define\(_CLIENT_VERSION_(MAJOR|MINOR|REVISION|BUILD), [0-9]+\)$'; then
+  echo "FROZEN SET CHANGED vs $base: configure.ac beyond the _CLIENT_VERSION_* defines"; git --no-pager diff "$base" -- configure.ac; exit 1
+fi
+echo "frozen set: zero delta vs $base (configure.ac: version defines only)"
 rc=0
 for f in src/main.cpp:40 src/miner.cpp:35 src/miner.h:10 src/rpc/mining.cpp:35 src/chainparams.cpp:4; do
   p=${f%%:*}; b=${f##*:}

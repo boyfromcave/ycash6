@@ -1,4 +1,4 @@
-Ycash 6.20.0
+Ycash 6.21.0-rc1
 <img align="right" width="100" height="100" src="doc/imgs/logo.png">
 ===========
 
