@@ -46,10 +46,7 @@ pub struct Node {
 
 impl Node {
     pub fn new(cfg: &NodeConfig) -> Result<Self, RpcError> {
-        crate::tls::install();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(cfg.timeout_seconds))
-            .build()
+        let client = crate::http::client(Duration::from_secs(cfg.timeout_seconds))
             .map_err(|e| RpcError::Transport(e.to_string()))?;
         // `http://user:pass@host:port` is accepted as the Python client does.
         let mut url = cfg.rpc_url.clone();
@@ -98,7 +95,9 @@ impl Node {
         }
         let resp = req.send().await.map_err(|e| RpcError::Transport(e.to_string()))?;
         let status = resp.status();
-        let raw = resp.bytes().await.map_err(|e| RpcError::Transport(e.to_string()))?;
+        let raw = crate::http::read_capped(resp, crate::http::RPC_BODY_CAP)
+            .await
+            .map_err(RpcError::Transport)?;
         let reply: Value = match serde_json::from_slice(&raw) {
             Ok(v) => v,
             Err(_) => {

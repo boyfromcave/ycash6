@@ -395,6 +395,10 @@ pub fn normalize_source(s: &SourceToml) -> Result<Source, String> {
         Some(b) if (0..=MASK_BIT_MAX as i64).contains(&b) => Some(b as u32),
         Some(_) => return Err(format!("source {name}: mask_bit must be an integer 0..{MASK_BIT_MAX}")),
     };
+    let scale = s.scale.unwrap_or(1.0);
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(format!("source {name}: scale must be finite and positive"));
+    }
     Ok(Source {
         name: name.clone(),
         kind,
@@ -402,7 +406,7 @@ pub fn normalize_source(s: &SourceToml) -> Result<Source, String> {
         url,
         path,
         quote,
-        scale: s.scale.unwrap_or(1.0),
+        scale,
         timestamp_path,
         timestamp_unit,
         max_age: s.max_age,
@@ -587,7 +591,26 @@ fn to_f64(v: &Value) -> Option<f64> {
 
 pub fn extract_number(obj: &Value, path: &str) -> Result<f64, ShapeError> {
     let v = extract(obj, path)?;
-    to_f64(v).ok_or_else(|| ShapeError(format!("value at {path} is not a number: {v}")))
+    let f = to_f64(v).ok_or_else(|| ShapeError(format!("value at {path} is not a number: {v}")))?;
+    // "inf"/"nan" strings parse as f64 (audit D-1); never a price, a volume or a spread.
+    if !f.is_finite() {
+        return Err(ShapeError(format!("value at {path} is not finite: {v}")));
+    }
+    Ok(f)
+}
+
+/// The venue's cumulative volume figure, or None (time-weighted sample) when the source has no
+/// volume_path or the path does not resolve to a number. A value that resolves but is not finite
+/// refuses the whole sample: the venue is broken, not merely volume-less (`yellowback_price.py`
+/// `extract_volume` applies the same rule).
+pub fn extract_volume(obj: &Value, src: &Source) -> Result<Option<f64>, ShapeError> {
+    let Some(vp) = &src.volume_path else { return Ok(None) };
+    let Ok(v) = extract(obj, vp) else { return Ok(None) };
+    let Some(f) = to_f64(v) else { return Ok(None) };
+    if !f.is_finite() {
+        return Err(ShapeError(format!("volume at {vp} is not finite: {v}")));
+    }
+    Ok(Some(f))
 }
 
 /// Python truthiness of a JSON value (`bool(extract(obj, p))`).
@@ -674,8 +697,8 @@ pub fn extract_timestamp(obj: &Value, path: &str, unit: TimestampUnit) -> Result
             };
             parse_iso8601(&s).ok_or_else(bad)
         }
-        TimestampUnit::Millis => Ok(to_f64(v).ok_or_else(bad)? / 1000.0),
-        TimestampUnit::Seconds => to_f64(v).ok_or_else(bad),
+        TimestampUnit::Millis => Ok(to_f64(v).filter(|f| f.is_finite()).ok_or_else(bad)? / 1000.0),
+        TimestampUnit::Seconds => to_f64(v).filter(|f| f.is_finite()).ok_or_else(bad),
     }
 }
 
@@ -818,10 +841,11 @@ fn fresh_health(sources: &[Source]) -> BTreeMap<String, Health> {
         .collect()
 }
 
-/// Python's `statistics.median` over floats.
+/// Python's `statistics.median` over floats. Total order (audit D-1): no input can reach here
+/// non-finite any more, and a NaN would sort rather than panic if one did.
 pub fn median(values: &[f64]) -> f64 {
     let mut v = values.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in prices"));
+    v.sort_by(f64::total_cmp);
     let n = v.len();
     if n % 2 == 1 {
         v[n / 2]
@@ -892,7 +916,7 @@ impl PriceFeed {
             }
         }
         let mut price = extract_number(&obj, &src.path)? * src.scale;
-        if price <= 0.0 {
+        if !(price > 0.0 && price.is_finite()) {
             return Err(ShapeError(format!("price not positive: {price}")).into());
         }
         let mut age = None;
@@ -915,7 +939,7 @@ impl PriceFeed {
             let m = btc_median.ok_or(Refusal::BtcRef(btc_live, min_btc))?;
             price *= m;
         }
-        let volume = src.volume_path.as_ref().and_then(|vp| extract_number(&obj, vp).ok());
+        let volume = extract_volume(&obj, src)?;
         Ok(Sampled {
             micro: py_round(price * MICRO),
             age,
@@ -1239,6 +1263,48 @@ mod tests {
         );
         r.insert("gen".into(), Ok(json!({"p": gen.to_string()}).to_string().into_bytes()));
         r
+    }
+
+    /// Audit D-1: "inf"/"nan" strings are numbers to `str::parse::<f64>` and must never become a
+    /// sample (a NaN price rounded to 0 µUSD; an inf volume made a NaN TWAP that panicked `median`).
+    #[test]
+    fn non_finite_numbers_are_refused() {
+        for bad in ["inf", "-inf", "nan", "Infinity", "NaN", "+inf"] {
+            let obj = json!({"last": bad, "volume": bad, "ts": bad});
+            assert!(
+                extract_number(&obj, "last").unwrap_err().0.contains("not finite"),
+                "{bad}"
+            );
+            assert!(extract_timestamp(&obj, "ts", TimestampUnit::Seconds).is_err(), "{bad}");
+            assert!(extract_timestamp(&obj, "ts", TimestampUnit::Millis).is_err(), "{bad}");
+            let mut g = row("g", "generic");
+            g.url = Some("http://g/".into());
+            g.path = Some("last".into());
+            g.volume_path = Some("volume".into());
+            let src = &normalize_sources(&[g], "sources").unwrap()[0];
+            assert!(extract_volume(&obj, src).unwrap_err().0.contains("not finite"), "{bad}");
+        }
+        // a missing or non-numeric volume still time-weights; a finite one is the weight
+        let mut g = row("g", "generic");
+        g.url = Some("http://g/".into());
+        g.path = Some("last".into());
+        g.volume_path = Some("volume".into());
+        let src = &normalize_sources(&[g.clone()], "sources").unwrap()[0];
+        assert_eq!(extract_volume(&json!({"last": 1}), src).unwrap(), None);
+        assert_eq!(extract_volume(&json!({"last": 1, "volume": "n/a"}), src).unwrap(), None);
+        assert_eq!(
+            extract_volume(&json!({"last": 1, "volume": "10"}), src).unwrap(),
+            Some(10.0)
+        );
+        // scale is validated at configuration time
+        for bad in [f64::INFINITY, f64::NAN, 0.0, -1.0] {
+            let mut b = g.clone();
+            b.scale = Some(bad);
+            assert!(normalize_sources(&[b], "sources").is_err(), "{bad}");
+        }
+        // median is total-order: a NaN sorts instead of panicking, should one ever get in
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+        assert!(median(&[1.0, f64::NAN, 2.0]).is_finite());
     }
 
     #[test]

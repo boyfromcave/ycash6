@@ -26,31 +26,15 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(timeout_seconds: u64) -> anyhow::Result<Self> {
-        crate::tls::install();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .user_agent("yellowback-attest/3")
-            .build()?;
+        let client = crate::http::client(Duration::from_secs(timeout_seconds))?;
         Ok(Fetcher { client })
     }
 
+    /// Every source concurrently; each under the client's deadline, no redirects, the body
+    /// capped at `VENUE_BODY_CAP` (audit D-3, D-4).
     pub async fn fetch_all(&self, requests: &[Request]) -> Replies {
         let futs = requests.iter().map(|r| async move {
-            let mut req = self.client.get(&r.url).header("Accept", "application/json");
-            for (k, v) in &r.headers {
-                req = req.header(k, v);
-            }
-            let result = match req.send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    match resp.bytes().await {
-                        Ok(b) if status.is_success() => Ok(b.to_vec()),
-                        Ok(_) => Err(format!("HTTP {}", status.as_u16())),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-                Err(e) => Err(e.to_string()),
-            };
+            let result = crate::http::get_capped(&self.client, &r.url, &r.headers, crate::http::VENUE_BODY_CAP).await;
             (r.name.clone(), result)
         });
         n0_future::join_all(futs).await.into_iter().collect()
@@ -69,7 +53,13 @@ pub fn read_mock(path: &Path) -> Option<f64> {
     match std::fs::read_to_string(path)
         .map_err(|e| e.to_string())
         .and_then(|s| s.trim().parse::<f64>().map_err(|e| e.to_string()))
-    {
+        .and_then(|v| {
+            if v.is_finite() {
+                Ok(v)
+            } else {
+                Err(format!("not finite: {v}"))
+            }
+        }) {
         Ok(v) => Some(v),
         Err(e) => {
             tracing::warn!("mock price unreadable: {e}");

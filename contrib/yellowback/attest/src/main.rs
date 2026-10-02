@@ -12,6 +12,7 @@ mod attest;
 mod config;
 mod fixtures;
 mod framing;
+mod http;
 mod price;
 mod rpc;
 mod subscribe;
