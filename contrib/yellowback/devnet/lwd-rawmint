@@ -25,12 +25,14 @@ import argparse
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
 import test_framework.util as _util                                                      # noqa: E402
 _util.MAX_NODES = 12
+from test_framework.authproxy import JSONRPCException                                    # noqa: E402
 from test_framework.util import PortSeed, get_rpc_proxy, hex_str_to_bytes                # noqa: E402
 from test_framework.yellowback_util import build_mint_tx                                 # noqa: E402
 from test_framework.yellowback_attest import build_carrier_tx, build_mint_tx_v3          # noqa: E402
@@ -54,6 +56,18 @@ def main():
         carrier = build_carrier_tx(node, hex_str_to_bytes(args.bundle_hex))
         node.generate(1)                                              # the carrier must be confirmed (v3 section 3.5)
         carrier_txid = carrier["txid"]
+        # The wallet learns of the carrier and its block on the notifier thread, after generate
+        # returns; until it has, listunspent(1) still offers the coin the carrier spent and the
+        # mint below is built on a spent input (audit E-10, gap c).
+        for _ in range(300):
+            try:
+                if node.gettransaction(carrier_txid)["confirmations"] >= 1:
+                    break
+            except JSONRPCException:
+                pass
+            time.sleep(0.1)
+        else:
+            sys.exit("lwd-rawmint: the wallet did not record the carrier %s as confirmed within 30 s" % carrier_txid)
         attest_fee = (args.attest_fee_addr, args.attest_fee_zat) if args.attest_fee_addr else None
         hex_, owner = build_mint_tx_v3(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat,
                                        fee_addr=args.fee_addr, carrier=carrier, attest_fee=attest_fee)
