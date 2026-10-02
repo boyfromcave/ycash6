@@ -43,6 +43,7 @@ from test_framework.yellowback_util import (
     TOKEN_VALUE,
     USER,
     VALVE_BLOCKS,
+    VALVE_NOTE_CAP,
     YELLOWBACK_FEE,
     YellowbackTestFramework,
     _select_funding,
@@ -338,6 +339,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             self.case6_fail_open_on_storage_only,
             self.case5_kill_switch,
             self.case15_valve_catchup_offline_node,
+            self.case16_long_minority_fork_no_ban,
             self.case9_work_valve,
         ]
         if self.options.only:
@@ -1225,6 +1227,66 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.catchup_recover(pool, blockhash)
         self.restart(pool)                          # out of IBD again for the cases that follow
         self.cp('node %d back out of IBD' % pool, ENFORCING)
+
+    # ------------------------------------------------------------------ case 16
+
+    def case16_long_minority_fork_no_ban(self):
+        """Audit B-1: a stock peer relaying a rejected branch longer than ``VALVE_NOTE_CAP`` that
+        stays *behind* the enforcing chain is never banned.  Node 1 mines the rejected root while
+        connected (so every enforcing node judges it), the halves split, node 1 extends its branch
+        by ``VALVE_NOTE_CAP + 3`` while the pools out-work it, and the join replays the whole
+        branch in one ``headers`` message: the root is a ``duplicate`` the loop skips, 64 headers
+        are noted, the 65th is refused past the cap and the rest descend from a refusal -- all DoS
+        0 (``bad-prevblk-yellowback``), never the stock ``prev block not found`` DoS 10.  The valve
+        does not trip (the branch is behind), banscores stay 0 and node 1 stays a peer."""
+# Rule: ACT-7
+# Rule: BLK-2
+        stock = self.nodes[STOCK]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn')
+        blockhash, _ = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        enforcing_tip = self.cp('rejected root judged', ENFORCING)
+
+        print('  split; node %d extends the rejected branch by VALVE_NOTE_CAP + 3 = %d' % (STOCK, VALVE_NOTE_CAP + 3))
+        self.split_network()
+        stock.generate(VALVE_NOTE_CAP + 3)
+        sync_blocks([stock, self.nodes[OBSERVER]])
+        stock_height = stock.getblockcount()
+
+        print('  the pools out-work it while split')
+        # One pool mines, in chunks: alternating pools without a sync in between ties them at the
+        # same height, and a tie never resolves.
+        k = 0
+        while self.nodes[POOLS[0]].getblockcount() < stock_height + 2:
+            self.nodes[POOLS[0]].generate(10)
+            k += 10
+            self.cp('out-work+%d' % k, ENFORCING)
+        enforcing_tip = self.cp('out-worked', ENFORCING)
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].getbestblockhash(), enforcing_tip)
+
+        print('  join: the whole branch arrives in one headers message; no ban, no trip, no reorg')
+        self.join_network()                       # syncs blocks: node 1 and 5 reorg onto the pools' chain
+        time.sleep(2)
+        for i in ENFORCING:
+            info = self.nodes[i].yed_getinfo()
+            assert_equal(info['valveTripped'], False)
+            assert_equal(info['enforcing'], True)
+            assert_equal(self.nodes[i].getbestblockhash(), enforcing_tip)
+        assert_equal(stock.getbestblockhash(), enforcing_tip)
+        assert_banscore_zero([self.nodes[i] for i in ENFORCING])
+        for i in ENFORCING:
+            self.assert_peers_with_stock(i)
+        # Every enforcing node is a direct peer of node 1 and read the branch from it: the cap must
+        # have been reached (the refusal past VALVE_NOTE_CAP is what B-1 is about); node 0 is checked.
+        assert debug_log_contains(self.options.tmpdir, USER, 'holds %d notes' % VALVE_NOTE_CAP), \
+            'node %d never refused a header past VALVE_NOTE_CAP: the branch was not replayed' % USER
+        assert not debug_log_contains(self.options.tmpdir, USER, 'non-continuous headers sequence'), \
+            'node %d scored the replay as non-continuous (B-4)' % USER
+        self.clear_stock_mempool()
+        self.cp('after the long minority fork', ENFORCING)
 
     # ------------------------------------------------------------------ case 9
 

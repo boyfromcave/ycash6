@@ -574,6 +574,10 @@ bool YellowbackIndex::NoteHeaderOnRejectedChain(const CBlockHeader& header)
         root = note->second.root;
         parentWork = note->second.work;
         parentBits = note->second.nBits;
+    } else if (refusedNotes.count(header.hashPrevBlock)) {
+        // B-1: a descendant of a header refused past the P2 bounds. Nothing to learn from it, but it
+        // is still a block on a rejected chain: remembered and answered DoS 0, never the stock DoS 10.
+        return RefuseNote(hash);
     } else {
         BlockMap::const_iterator mi = mapBlockIndex.find(header.hashPrevBlock);
         if (mi == mapBlockIndex.end()) return false;
@@ -595,11 +599,11 @@ bool YellowbackIndex::NoteHeaderOnRejectedChain(const CBlockHeader& header)
     if (neg || over || parentTarget == 0) return true;
     if (target > parentTarget / 100 * 132) {
         LogPrint("yellowback", "valve: header %s not noted (target outside the difficulty loosening of its parent)\n", hash.ToString());
-        return true;
+        return RefuseNote(hash);
     }
     if (notesPerRoot[root] >= VALVE_NOTE_CAP) {
         LogPrint("yellowback", "valve: header %s not noted (root %s holds %d notes)\n", hash.ToString(), root.ToString(), VALVE_NOTE_CAP);
-        return true;
+        return RefuseNote(hash);
     }
     CBlockIndex tmp;
     tmp.nBits = header.nBits;
@@ -615,6 +619,16 @@ bool YellowbackIndex::NoteHeaderOnRejectedChain(const CBlockHeader& header)
         LogPrint("yellowback", "valve: noted header %s on rejected root %s (work %s; trip at %s)\n", hash.ToString(), root.ToString(), n.work.GetHex(), bound.GetHex());
         if (!testFault.noValve && n.work >= bound) TripValve(root);
     }
+    return true;
+}
+
+bool YellowbackIndex::RefuseNote(const uint256& hash)
+{
+    AssertLockHeld(cs_yellowback);
+    // Bounded: a full set is dropped whole. Headers arrive in chain order, so the one that matters
+    // (the parent of the next header) is re-inserted before it is looked up.
+    if (refusedNotes.size() >= VALVE_REFUSED_CAP) refusedNotes.clear();
+    refusedNotes.insert(hash);
     return true;
 }
 
@@ -649,6 +663,7 @@ void YellowbackIndex::TripValve(const uint256& root)
     rejected.clear();
     notes.clear();
     notesPerRoot.clear();
+    refusedNotes.clear();
     // P1: the stock fork warning never fires for refused headers, so the valve raises its own
     // through the same two calls (the timestamp is the tip's block time: no clock in this file).
     SetMiscWarning(text, tip ? tip->GetBlockTime() : 0);
@@ -681,6 +696,7 @@ void YellowbackIndex::ClearRejected()
     rejected.clear();
     notes.clear();
     notesPerRoot.clear();
+    refusedNotes.clear();
 }
 
 size_t YellowbackIndex::ValveNoteCount() const

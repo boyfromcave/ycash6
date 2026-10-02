@@ -63,6 +63,8 @@ namespace yellowback {
 static const int UNDO_KEEP = 4096;
 /** ACT-7 / P2: the most headers the valve notes per rejected root. */
 static const int VALVE_NOTE_CAP = 64;
+/** Audit B-1: the most headers remembered as refused-but-unnoted (past the P2 bounds), so that their descendants stay at DoS 0. */
+static const size_t VALVE_REFUSED_CAP = 4096;
 
 /** The miner-side configuration read only on the miner path and in the hook's "what to do" branch (§3.10). */
 struct MinerConfig
@@ -317,7 +319,10 @@ public:
      * trips the valve in place when the noted work reaches tip.nChainWork + valveBlocks *
      * GetBlockProof(*tip) (ReconsiderBlock loop, Rejected cleared, SetMiscWarning +
      * CAlert::Notify, P1); returns false once tripped so the stock chain is accepted from the
-     * next announcement on (P3).
+     * next announcement on (P3). A header refused outside the P2 bounds, and every descendant
+     * of one, is remembered in `refusedNotes` (bounded by VALVE_REFUSED_CAP, cleared when full)
+     * and answered true as well, so the stock `prev block not found` DoS 10 never reaches a peer
+     * relaying a long rejected chain (audit B-1).
      */
     bool NoteHeaderOnRejectedChain(const CBlockHeader& header);
     /** Walks pprev through BLOCK_FAILED_CHILD marks to the first BLOCK_FAILED_VALID ancestor; its hash in Rejected? */
@@ -466,6 +471,8 @@ private:
     void MaybeFault(TestFault::Hook hook, int height);
     std::optional<uint256> RejectedRootOf(const CBlockIndex* pindex) const;
     void TripValve(const uint256& root);
+    /** B-1: remember `hash` as refused past the P2 bounds (bounded set) and answer true (DoS 0). cs_yellowback held. */
+    bool RefuseNote(const uint256& hash);
     bool IsAbandonedLocked() const;
     bool IsSunsetLocked() const;
     std::optional<std::string> MempoolCheckLocked(const CTransaction& tx);
@@ -496,6 +503,7 @@ private:
     std::set<uint256> rejected;                 //!< the Rejected table, mirrored in memory (loaded at open)
     std::map<uint256, HeaderNote> notes;        //!< ACT-7 odometer: refused headers -> root, accumulated work
     std::map<uint256, int> notesPerRoot;
+    std::set<uint256> refusedNotes;             //!< ACT-7 / B-1: refused past the P2 bounds (and their descendants): terminal at DoS 0
     bool valveTripped;
     int suppressedBlocks;
     bool sunsetLogged;
