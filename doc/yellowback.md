@@ -77,6 +77,13 @@ coinbases. v3 keeps those and adds a second, independent population.
 - **If attestations are unavailable**, minting refuses with `bundle-insufficient` and nothing else
   changes: YED still moves, redemptions still work, and existing vaults are untouched.
 
+Attestor `seq`s are a 16-bit counter that never reuses a number (audit A-8): after 65,536
+registrations REG-A1 can register nobody (the transaction is simply not applied, by totality), so
+the attestation layer is exhausted permanently. With `BOND_MIN` at 20,000 YEC and a one-year lock
+the concurrent set is bounded near supply / 20,000 (about 1,000), so exhaustion takes decades;
+the bound is a parameter-review item if `BOND_MIN` ever drops, not a run-time concern. The
+per-block scan of every attestor record (REG-A1, dormancy) is linear in that same count.
+
 ## Enabling
 
 ```
@@ -142,6 +149,19 @@ and `yed_getstats.halts` show it:
   blocks on regtest, 4,032 on mainnet). This is also where a sunset with no successor release ends
   up. From then on every vault's claim path is spendable by anyone at its claim height and nobody
   refuses the spend: whoever mines first takes the collateral.
+- **Every enforcement gap is such a window, not only abandonment** (audit A-5). The claim branch
+  of a vault script is `<claimHeight> CLTV DROP OP_TRUE`: the only thing that stops a claim
+  without its burn is an enforcing miner refusing the block. Whenever this node's enforcement
+  stands down — initial block download (more than 24 h behind), `-reindex` / `-loadblock`, the
+  work valve tripped, catch-up suppression (six blocks of work ahead on a rejected chain), the
+  `ENFORCEMENT` halt, the sunset — a stock-mined claim-path spend of any ACTIVE vault past its
+  claim height takes the collateral with no burn and the vault closes `unbacked`. At the sunset
+  with no successor release the gap lasts until abandonment is declared: the signal bits decay
+  below the floor over a window (2,016 blocks) and `ABANDON_BLOCKS` (4,032) follow, roughly five
+  days on mainnet during which `yed_sweep` is still refused on an owner's own node (MP-1 stands
+  down only under abandonment). **Owners: redeem, or let no vault sit past its claim height
+  across a sunset**; a wallet should warn at `ENFORCE_UNTIL_HEIGHT - grace` (the GUI's job, not
+  the node's).
 
 What an owner does under abandonment: **sweep before the claim height.** `yed_listpositions` shows
 `canSweep: true` and `sweepBefore` (the claim height) on every ACTIVE vault you own; `yed_sweep
