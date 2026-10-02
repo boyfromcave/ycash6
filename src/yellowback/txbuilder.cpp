@@ -8,6 +8,7 @@
 #include "consensus/upgrades.h"
 #include "key_io.h"
 #include "main.h"
+#include "txmempool.h"
 #include "policy/policy.h"
 #include "script/interpreter.h"
 #include "script/script_error.h"
@@ -886,6 +887,18 @@ struct MintGateFacts
     MintGateFacts() : termClass(0), lockHeight(0), claimHeight(0) {}
 };
 
+/** The cents of every MINT payload in the mempool (mempool.cs is held by the RPC layer, N25: before cs_yellowback). */
+Cents MempoolMintCents()
+{
+    AssertLockHeld(mempool.cs);
+    Cents total = 0;
+    for (CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.begin(); it != mempool.mapTx.end(); ++it) {
+        std::optional<FoundPayload> fp = FindPayload(it->GetTx());
+        if (fp.has_value() && fp->payload.type == PayloadType::MINT) total += (Cents)fp->payload.cents;
+    }
+    return total;
+}
+
 MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
 {
     const Params& p = ctx.params;
@@ -919,6 +932,14 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, g.xMint, p.supplyCapBps);
     if (cap.has_value() && totals.supplyCents + cents > cap.value()) {
         throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents", std::max<Cents>(0, cap.value() - totals.supplyCents)));
+    }
+    // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
+    // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
+    // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
+    const Cents pending = MempoolMintCents();
+    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value()) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool",
+                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending));
     }
     return g;
 }
