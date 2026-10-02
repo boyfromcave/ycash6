@@ -224,7 +224,7 @@ UniValue UnderwaterAt(const VaultRecord& v, const yellowback::Params& p)
     return UniValue((int64_t)q.GetLow64());
 }
 
-UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, const YellowbackIndex& index, const std::optional<Snapshot>& tipSnap, bool abandoned)
+UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex& index, const std::optional<Snapshot>& tipSnap, bool abandoned)
 {
     const yellowback::Params& p = index.GetParams();
     const int tip = index.TipHeight();
@@ -249,10 +249,9 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, const Yellowbac
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
-    bool claimable = false;
-    if (v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value()) {
-        claimable = IsUnderwater(v.collateralZat, tipSnap->PClaim(), v.mintedCents, p.claimThresholdBps);
-    }
+    // RED-4 by either clause, exactly yed_listclaimable's test (unarmed: v2's tip-snapshot clause (a)).
+    const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value() &&
+                           yellowback::rpc::EstimateClaim(index, out, v, tip).claimable;
     o.pushKV("claimable", claimable);
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOID ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
@@ -635,7 +634,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         int fresh = 0;
         if (snap.has_value()) {
             for (uint16_t seq : snap->seated) {
-                if (index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge)) fresh++;
+                if (index.PoolFreshAt(seq, h - g_yellowbackMintLag)) fresh++;       // a mint built now cites R = tip - REF_LAG
             }
         }
         at.pushKV("poolFresh", fresh);
@@ -1704,7 +1703,7 @@ UniValue yed_listattestors(const UniValue& params, bool fHelp)
         o.pushKV("pinned", pinned);
         std::map<uint16_t, uint32_t>::const_iterator lb = lastBundle.find(seq);
         o.pushKV("lastBundleHeight", lb != lastBundle.end() ? UniValue((int64_t)lb->second) : NullUniValue);
-        o.pushKV("poolFresh", index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge));
+        o.pushKV("poolFresh", index.PoolFreshAt(seq, h - g_yellowbackMintLag));
         out.push_back(o);
     }
     return out;

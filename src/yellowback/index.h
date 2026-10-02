@@ -149,8 +149,6 @@ public:
     std::vector<PooledAttestation> All() const;
     /** The newest attestation of `seq` with citedHeight in (R - maxAge, R] and >= startHeight. */
     std::optional<Attestation> Freshest(uint16_t seq, int refHeight, int maxAge, int startHeight) const;
-    /** Some attestation of `seq` cites a height above `minExclusive` (the contract's poolFresh predicates). */
-    bool HasNewerThan(uint16_t seq, int64_t minExclusive) const;
     size_t Size() const;
     void Clear() { bySeq.clear(); }
 
@@ -400,8 +398,12 @@ public:
     bool AddAttestation(const Attestation& att, std::string& reason, bool* replaced = nullptr);
     std::vector<PooledAttestation> PoolAttestations() const;
     size_t PoolSize() const;
-    /** The pool holds an attestation of `seq` with citedHeight > minExclusive (the contract's poolFresh). */
-    bool PoolHasNewerThan(uint16_t seq, int64_t minExclusive) const;
+    /**
+     * The contract's poolFresh: the pool holds an attestation of `seq` a bundle for R could cite,
+     * citedHeight in (R - ATTEST_MAX_AGE, R] and >= startHeight (Freshest's window, the parameter
+     * set at R). A citation above R does not count: it is not usable until R reaches it.
+     */
+    bool PoolFreshAt(uint16_t seq, int refHeight) const;
     /**
      * The bundle this node would build for (R, selector) (W6, W9): Selected(R, selector), the
      * freshest pooled attestation per selected seq with citedHeight in (R - ATTEST_MAX_AGE, R]

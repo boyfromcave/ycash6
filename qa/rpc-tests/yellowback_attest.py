@@ -558,6 +558,12 @@ class YellowbackAttestTest(YellowbackTestFramework):
         print('the emergency claim by node 0: clause (b), the residual to the owner (node 6)')
         rows = user.yed_listclaimable()
         assert_equal([(r['vault'], r['claimPath']) for r in rows], [(v3['txid'] + ':0', 'b')])
+        # yed_getvault / yed_listvaults / yed_listpositions.claimable read RED-4 by either clause, as
+        # yed_listclaimable does (they read clause (a) under the tip snapshot alone before the fix).
+        assert_equal(user.yed_getvault(v3['txid'])['claimable'], True)
+        assert_equal([v['claimable'] for v in user.yed_listvaults('ACTIVE') if v['txid'] == v3['txid']], [True])
+        feed_all(nodes[ATTESTOR_A], emerg)                                             # the owner's node builds its own bundle
+        assert_equal([v['claimable'] for v in nodes[ATTESTOR_A].yed_listpositions() if v['txid'] == v3['txid']], [True])
         assert_greater_than(rows[0]['residualZat'], 100_000)
         before = nodes[ATTESTOR_A].getbalance()
         claimed = self.claim_raw(USER, v3['txid'], a1['token'], emerg, POOLS[1])
@@ -601,6 +607,16 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.set_prices(PRICE)
         self.pools_step(36 + 16, 'restore')
         dormant = live_seqs[-1]
+        print('poolFresh counts a citation in (R - ATTEST_MAX_AGE, R], R = tip - REF_LAG: one above R is not usable yet')
+        assert_equal(user.yed_getinfo()['attest']['poolFresh'], 0)
+        tip = user.getblockcount()
+        ahead = [seq for seq in live_seqs if seq != dormant]
+        feed_all(user, {seq: PRICE for seq in ahead}, cited=tip)                      # an attestor ahead of this node's R
+        assert_equal(user.yed_getinfo()['attest']['poolFresh'], 0)
+        assert_equal([r['seq'] for r in user.yed_listattestors() if r['poolFresh']], [])
+        sel = user.yed_getselection(tip - REF_LAG, '')
+        assert_equal((sel['reachable'], [e['seq'] for e in sel['selected'] if e['poolFresh']]), (0, []))
+        rpc_error('bundle-insufficient', user.yed_estimatecollateral, CENTS, LOCK)
         print('dormancy: seq %d seated, selected in %d rows, absent from every bundle => DORMANT at the next check' % (dormant, DORMANCY_MIN_BUNDLES))
         active = {seq: PRICE for seq in live_seqs if seq != dormant}
         start = user.getblockcount()

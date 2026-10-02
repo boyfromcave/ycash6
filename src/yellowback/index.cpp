@@ -973,16 +973,6 @@ std::optional<Attestation> AttestationPool::Freshest(uint16_t seq, int refHeight
     return best;
 }
 
-bool AttestationPool::HasNewerThan(uint16_t seq, int64_t minExclusive) const
-{
-    std::map<uint16_t, std::vector<PooledAttestation>>::const_iterator it = bySeq.find(seq);
-    if (it == bySeq.end()) return false;
-    for (const PooledAttestation& p : it->second) {
-        if ((int64_t)p.att.citedHeight > minExclusive) return true;
-    }
-    return false;
-}
-
 size_t AttestationPool::Size() const
 {
     size_t n = 0;
@@ -1105,10 +1095,11 @@ size_t YellowbackIndex::PoolSize() const
     return pool.Size();
 }
 
-bool YellowbackIndex::PoolHasNewerThan(uint16_t seq, int64_t minExclusive) const
+bool YellowbackIndex::PoolFreshAt(uint16_t seq, int refHeight) const
 {
     LOCK(cs_yellowback);
-    return pool.HasNewerThan(seq, minExclusive);
+    const Params& p = ParamsAt(std::max(refHeight, 0));
+    return pool.Freshest(seq, refHeight, p.attestMaxAge, p.startHeight).has_value();
 }
 
 BuiltBundle YellowbackIndex::BuildBundleInfo(int refHeight, const std::vector<unsigned char>& selector)
