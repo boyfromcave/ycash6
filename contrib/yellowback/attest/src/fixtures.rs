@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! The Rust/Python aggregator cross-check (plan §5): `fixtures/scenarios.json` describes the
 //! sources and the recorded exchange replies, `fixtures/expected.json` holds what the Python
 //! aggregator (the reference) computed for them. This test must agree exactly; when it does

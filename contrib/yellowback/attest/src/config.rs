@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `attest.toml` (plan §4.7). Bad configuration is the one thing that exits non-zero (code 2).
 
 use std::fmt;

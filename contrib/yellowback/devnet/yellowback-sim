@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """Synthetic users for the Yellowback devnet: six personas, not a random walk.
 
 `yellowback-devnet up --role ...` starts one of these beside the devnet (`sim start|stop|stats`

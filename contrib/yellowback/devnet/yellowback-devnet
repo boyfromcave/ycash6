@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """A one-laptop Yellowback v3 regtest network, ARMED when `up` returns, with a seat left empty.
 
 The plain devnet (`up`, today's behaviour) is eight nodes: node 0 the funded wallet, node 1

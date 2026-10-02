@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `attest`: poll the node for the tip every `poll_seconds`; every `every_blocks` new blocks
 //! aggregate the sources, ask the node to sign (`yed_signattestation`, the key never leaves the
 //! node) and publish the 74 bytes. After `fail_polls` consecutive failed aggregates publish

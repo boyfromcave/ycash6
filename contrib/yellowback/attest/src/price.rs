@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! Price-source layer: a port of `contrib/yellowback/yellowback_price.py` (plan §5).
 //!
 //! The Python module is the behavioural reference; the two are cross-checked on the recorded

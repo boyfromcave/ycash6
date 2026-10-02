@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """A headless stratum miner for the regtest pool seat (docs/plans/role-pool-regtest-plan.md 3.3).
 
 Speaks the client half of the Ycash stratum dialect the yolo pools serve (`ref/yolo/stratumsolo`):

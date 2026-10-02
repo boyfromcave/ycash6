@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `subscribe`: join the topic and feed the node's attestation pool. Each message is dropped
 //! unless it is 74 bytes (or that as hex) and its `seq` is in the last `yed_listattestors`
 //! (refreshed every `listattestors_seconds`); everything else goes to `yed_addattestation`,

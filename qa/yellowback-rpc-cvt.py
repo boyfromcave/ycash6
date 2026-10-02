@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """Generate (or --check) the yed_* rows of rpc/common.h's rpcCvtTable (ycashd 6.20.0 port, seam S1).
 
 6.20.0 replaced v4.5.0's client-side vRPCConvertParams with rpcCvtTable, which the server also

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `dir` transport: a directory both sides can reach. A publish writes
 //! `<path>/<seq>-<citedHeight>.att` (74 raw bytes) through a temporary name and one rename, so a
 //! reader never sees a partial file; a subscriber lists the directory every 2 s and delivers each

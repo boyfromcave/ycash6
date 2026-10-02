@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `iroh` transport: one `iroh-gossip` topic per network. The topic id is SHA-256 of the topic
 //! name of plan §5. Relays come from `[transport] relays` (empty: iroh's default relay set;
 //! `["none"]`: no relay, direct only). `iroh-gossip` has no topic discovery of its own, so the

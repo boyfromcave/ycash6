@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 # Local mirror of the CI `audit` gates for the ycashd 6.20.0 port (plan §2):
 # zero delta in the frozen set and the line budgets, both against the tag ycash6-baseline.
 # Usage: qa/yellowback-audit.sh [base]   (base defaults to ycash6-baseline)

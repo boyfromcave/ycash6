@@ -1,4 +1,8 @@
 #!/bin/sh
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 # Monitoring snippet (plan §5 step 4): is this pool's node emitting quote tags?
 #
 #   monitor-quote.sh [max-age-seconds] [-- <ycash-cli options>]

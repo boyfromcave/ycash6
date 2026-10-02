@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! `yellowback-attest`: the Ycash Yellowback attestor agent (plan §5, W13).
 //!
 //! Two modes, one binary: `attest` (beside an attestor's node) and `subscribe` (beside any

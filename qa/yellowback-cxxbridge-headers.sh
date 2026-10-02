@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 # Generate the cxx bridge headers (src/Makefile.am CXXBRIDGE_H) in a configured tree, so a
 # target-only `make -C src ycashd test/test_bitcoin` works on a fresh checkout.
 #

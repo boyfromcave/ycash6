@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! The 74-byte attestation (proposal §4; plan §3.3):
 //! `seq u16 ‖ priceMicroUsd u32 ‖ citedHeight u32 ‖ sig 64`, fixed-width little-endian.
 //!

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 # Patch src/sync.cpp IN THE BUILD CHECKOUT ONLY (never committed; sync.cpp stays at zero delta vs
 # ycash6-baseline, mapping §19 S3) so a --enable-debug (DEBUG_LOCKORDER) ycashd can run the
 # functional suite. Two stock-6.20.0 behaviours otherwise stop it before any Yellowback code runs:

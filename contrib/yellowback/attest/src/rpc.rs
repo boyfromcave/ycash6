@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! Minimal JSON-RPC 1.0 client over HTTP, a port of `Node` in `yellowback_price.py`: basic auth
 //! from `rpc_user`/`rpc_password` or the node's `.cookie` file (re-read on every call, so a node
 //! restart with a fresh cookie needs no agent restart).

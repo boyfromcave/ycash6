@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """Read every debug.log under the given directories, group the DEBUG_LOCKORDER reports, and fail on any
 whose inverted pair involves Yellowback -- except the one pair that is provably not a deadlock:
 the miner holds cs_yellowback (the TemplateView created right after LOCK2(cs_main, mempool.cs) in

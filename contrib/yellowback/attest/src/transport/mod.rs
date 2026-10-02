@@ -1,3 +1,7 @@
+// Copyright (c) 2026 The Ycash developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 //! Transports (plan §5): the gossip layer carries no trust, so a transport is only "publish
 //! bytes" and "receive bytes". `dir` is a shared directory (tests, devnet); `iroh` is
 //! `iroh-gossip` (production).
