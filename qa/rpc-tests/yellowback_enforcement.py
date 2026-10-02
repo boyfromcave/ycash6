@@ -17,6 +17,7 @@ makes it a real v4.5.0 binary, P9), 2-4 pools (enforcing, signalling), 5 observe
 (``-yellowbackenforce=0``, records ``unbacked``).
 """
 
+import os
 import random
 import time
 
@@ -1331,11 +1332,21 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         # with its mark across a restart (Ycash 1770fce16), so unless the trip flushes the index
         # before it erases Rejected, a kill -9 leaves the mark on disk with no record to undo it
         # and the node refuses the stock chain for good (the kill switch's 83e6c1cb2, the same race).
-        print('  kill -9 of node %d after the trip: it restarts re-armed and still follows node %d' % (POOLS[1], STOCK))
+        # The kill -9 also leaves the rejected root stored and not connected on disk: the trip's flush
+        # wrote the chainstate at its parent and the root's entry with its data, and nothing flushed
+        # since. So the restarted node, re-armed (the trip is not persisted), judges the root at start
+        # (init's ActivateBestChain; 6.20.0's ThreadImport would accept it unjudged under N2's
+        # fImporting), rejects it again, and the peers' headers trip the valve again -- v4.5.0's
+        # behaviour, where AppInit2's ActivateBestChain or the re-download judged it.
+        print('  kill -9 of node %d after the trip: it restarts re-armed, re-judges the root, re-trips and follows node %d' % (POOLS[1], STOCK))
+        log = os.path.join(self.options.tmpdir, 'node%d' % POOLS[1], 'regtest', 'debug.log')
+        def count(needle):
+            with open(log, errors='replace') as f:
+                return f.read().count(needle)
+        rejections, trips = count('rejecting block %s' % blockhash), count('Yellowback: work valve tripped at height')
         self.kill9(POOLS[1])
         self.restart(POOLS[1])
         node = self.nodes[POOLS[1]]
-        assert_equal(node.yed_getinfo()['enforcing'], True)
         deadline = time.time() + 180
         while node.getbestblockhash() != stock.getbestblockhash():
             assert time.time() < deadline, \
@@ -1343,6 +1354,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             stock.generate(1)
             time.sleep(1.0)
         assert_equal(node.getblock(blockhash)['confirmations'] >= 1, True)
+        assert_equal(count('rejecting block %s' % blockhash), rejections + 1)
+        assert_equal(count('Yellowback: work valve tripped at height'), trips + 1)
+        assert_equal(node.yed_getinfo()['valveTripped'], True)
 
     # ------------------------------------------------------------------ case 8 (--extended)
 
