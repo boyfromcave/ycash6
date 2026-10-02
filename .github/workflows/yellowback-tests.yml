@@ -90,7 +90,7 @@ env:
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
   CARGO_AUDIT_VERSION: 0.22.2
-  CARGO_DENY_VERSION: 0.18.3
+  CARGO_DENY_VERSION: 0.20.2   # 0.18.3 cannot parse the CVSS 4.0 advisories in the RustSec DB (2026-10-02)
   # The inherited scripts green twice against the stock 6.20.0 pin (branch ycash6-stock, recorded
   # 2026-09-30; table and failure classes in doc/yellowback-baseline.md "Inherited functional suite
   # at the pin"). 42 entries: 39 BASE_SCRIPTS, zmq_test and two EXTENDED. v4.5.0 ran 7 and
