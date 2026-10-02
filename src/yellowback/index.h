@@ -89,6 +89,9 @@ struct QuoteHolder
     QuoteHolder() : priceMicroUsd(0), sourceMask(0), receivedAt(0) {}
 };
 
+/** The coinbase scriptSig bytes after its two leading pushes: what COINBASE_FLAGS contributed (getblocktemplate.coinbaseaux.flags, audit A-7). */
+CScript CoinbaseFlagsOf(const CScript& coinbaseScriptSig);
+
 /** What the next template's tag would be (yed_getinfo.miner, yed_setquote.nextTag, TemplateInfo). */
 struct MinerStatus
 {
@@ -383,6 +386,9 @@ public:
      * standing and the node's state. Caller holds cs_main; `now` is the RPC's clock (M11).
      */
     UniValue TemplateInfo(int64_t now) const;
+    /** The same, decoded from the coinbase scriptSig of the template actually being served (getblocktemplate
+     *  caches a template across calls, so COINBASE_FLAGS may already be newer than it; audit A-7). */
+    UniValue TemplateInfo(int64_t now, const CScript& coinbaseScriptSig) const;
 
     /** Parse -yellowbacktestfault (regtest only); an error string on a bad spec. */
     std::optional<std::string> SetTestFault(const std::string& spec);

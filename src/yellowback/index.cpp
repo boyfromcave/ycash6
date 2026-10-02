@@ -886,16 +886,35 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
 UniValue YellowbackIndex::TemplateInfo(int64_t now) const
 {
     AssertLockHeld(cs_main);
+    return TemplateInfo(now, (CScript() << (chainActive.Height() + 1) << OP_0) + COINBASE_FLAGS);
+}
+
+CScript CoinbaseFlagsOf(const CScript& coinbaseScriptSig)
+{
+    // Everything after the two leading pushes (`<height> OP_0` as CreateCoinbaseTransaction builds it,
+    // `<height> <extranonce>` after IncrementExtraNonce): the bytes COINBASE_FLAGS contributed.
+    CScript::const_iterator pc = coinbaseScriptSig.begin();
+    opcodetype op;
+    for (int i = 0; i < 2; i++) {
+        if (!coinbaseScriptSig.GetOp(pc, op)) return CScript();
+    }
+    return CScript(pc, coinbaseScriptSig.end());
+}
+
+UniValue YellowbackIndex::TemplateInfo(int64_t now, const CScript& coinbaseScriptSig) const
+{
+    AssertLockHeld(cs_main);
     const MinerStatus ms = GetMinerStatus(now);
     LOCK(cs_yellowback);
-    // The tag the template carries: COINBASE_FLAGS as CreateNewBlock set it (V5, one source of truth),
-    // decoded through the same scan a node applies to the mined block (TAG-1..5).
+    // The tag the template carries, decoded from its coinbase through the same scan a node applies to the
+    // mined block (TAG-1..5). Not COINBASE_FLAGS: yed_setquote between two getblocktemplate calls changes
+    // the global before the cached template is rebuilt (audit A-7).
     const int nextHeight = chainActive.Height() + 1;
-    const std::optional<CoinbaseTag> tag = COINBASE_FLAGS.empty() ? std::nullopt
-                                          : FindTag((CScript() << nextHeight << OP_0) + COINBASE_FLAGS, nextHeight);
+    const CScript flags = CoinbaseFlagsOf(coinbaseScriptSig);
+    const std::optional<CoinbaseTag> tag = flags.empty() ? std::nullopt : FindTag(coinbaseScriptSig, nextHeight);
     KeyIO keyIO(::Params());
     UniValue o(UniValue::VOBJ);
-    o.pushKV("tag", HexStr(COINBASE_FLAGS.begin(), COINBASE_FLAGS.end()));
+    o.pushKV("tag", HexStr(flags.begin(), flags.end()));
     o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
     o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
     o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);

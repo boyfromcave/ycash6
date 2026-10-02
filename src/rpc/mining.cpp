@@ -782,7 +782,8 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     }
 
     UniValue aux(UniValue::VOBJ);
-    aux.pushKV("flags", HexStr(COINBASE_FLAGS.begin(), COINBASE_FLAGS.end()));
+    const CScript auxFlags = yellowback::g_yellowback ? yellowback::CoinbaseFlagsOf(pblock->vtx[0].vin[0].scriptSig) : COINBASE_FLAGS;
+    aux.pushKV("flags", HexStr(auxFlags.begin(), auxFlags.end()));
 
     arith_uint256 hashTarget = arith_uint256().SetCompact(pblock->nBits);
 
@@ -837,7 +838,7 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     result.pushKV("curtime", pblock->GetBlockTime());
     result.pushKV("bits", strprintf("%08x", pblock->nBits));
     result.pushKV("height", (int64_t)(pindexPrev->nHeight+1));
-    if (yellowback::g_yellowback) result.pushKV("yellowback", yellowback::g_yellowback->TemplateInfo(GetTime()));
+    if (yellowback::g_yellowback) result.pushKV("yellowback", yellowback::g_yellowback->TemplateInfo(GetTime(), pblock->vtx[0].vin[0].scriptSig));
 
     return result;
 }
