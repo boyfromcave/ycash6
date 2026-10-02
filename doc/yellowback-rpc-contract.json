@@ -253,37 +253,37 @@
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "mintpol-divergence": {
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "mintpol-global-ratio": {
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "mintpol-no-price": {
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "mintpol-not-active": {
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "mintpol-participation": {
       "raisedBy": [
         "yed_mint"
       ],
-      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap"
+      "when": "MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than PARTICIPATION_FLOOR signals in a window; with the global ratio below GLOBAL_RATIO_HALT_BPS and the class's minimum ratio below RECAP_RATIO_BPS (W16: class A mints through a global-ratio halt, the message names the classes that can); with P_fast/P_slow diverging by more than DIVERGENCE_BPS; with -yellowbacksupplycapbps low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says \"after N cents of mints in the mempool\"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by yed_redeem at lockHeight, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached."
     },
     "no-payout-address": {
       "raisedBy": [
@@ -441,7 +441,7 @@
       "raisedBy": [
         "every gated command"
       ],
-      "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command"
+      "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command. Also the storage boundary of yed_addattestation and yed_buildbundle (audit A-3): a storage exception under either marks the index unhealthy and the call fails with yellowback-unhealthy: storage failure in AddAttestation: … / … in BuildBundle: …"
     }
   },
   "rpcversion": 3,
