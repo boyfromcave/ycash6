@@ -36,6 +36,6 @@ ENV LEGACY_GLIBC=1
 CMD set -e; \
     LEGACY_GLIBC=1 ./zcutil/build.sh -j"$(nproc)"; \
     mkdir -p /out; \
-    cp -v src/ycashd src/ycash-cli src/ycash-tx /out/ 2>/dev/null || true; \
+    cp -v src/ycashd src/ycash-cli src/ycash-tx src/ycashd-wallet-tool /out/; \
     echo "=== glibc floor of produced binaries (must be <= 2.27 for 18.04) ==="; \
     objdump -T /out/ycashd 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -3

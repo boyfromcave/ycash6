@@ -1,0 +1,280 @@
+# Release builds for Ycash with Yellowback (YED): one tarball per platform, a SHA256SUMS file and
+# a DRAFT GitHub release, in the layout of upstream Ycash's releases
+# (github.com/ycashfoundation/ycash/releases, v4.5.0): ycashd_v<version>_<platform>.tar.gz holding
+# ycashd, ycash-cli and ycash-tx (plus 6.20.0's ycashd-wallet-tool) in a directory of the same name,
+# Windows as a .zip.
+# The procedure around it (version bump, tag, review, publish) is doc/yellowback-release.md.
+#
+# No separate _MINING_POOLS_ "wr" (witness rework) package: 6.20.0 carries the pool features of
+# upstream's wr build as runtime options of the one binary, default off (-deletetx, -bdbcache,
+# -consolidation; commits ae23774b3, 9aa430aa3), and its witness-cache half is obsolete there.
+# yellowback_wr_flags covers them with Yellowback on.
+#
+# Triggers:
+#   push of a tag v*            build, smoke-test, and create a draft release (a prerelease when
+#                               the version has -rc/-beta); the tag must equal configure.ac's version
+#   workflow_dispatch           the same builds and smoke tests, artifacts only, no release
+#                               (a proving run before tagging)
+#
+# Platforms (tier 1 must pass for a release; tier 2 is continue-on-error and its asset is simply
+# absent when it fails, so a release is never blocked on it):
+#   linux_x86_64          tier 1  ubuntu-22.04 native (glibc 2.35 floor), the same build as CI
+#   linux_aarch64         tier 1  ubuntu-22.04-arm native (depends pins clang + rust for arm64 Linux)
+#   macos_aarch64         tier 1  macos-14 native
+#   windows               tier 1  ubuntu-22.04 cross build, HOST=x86_64-w64-mingw32 (depends ships
+#                                 llvm-mingw), smoke-tested on windows-latest
+#   ubuntu_18.04_x86_64   tier 2  contrib/legacy-glibc-build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
+#   macos_x86_64          tier 2  macos-15-intel native; native_clang.mk notes x86_64-apple-darwin
+#                                 "is being abandoned" upstream
+#
+# Binaries are unsigned, as upstream's are: macOS needs `xattr -d com.apple.quarantine`, Windows
+# shows a SmartScreen prompt. Builds are not reproducible (the gitian descriptors are dead).
+name: yellowback release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yellowback-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version from configure.ac
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Render the version and check the tag
+        id: v
+        # The same rendering as configure.ac's _CLIENT_VERSION_SUFFIX: BUILD < 25 is -beta<BUILD+1>,
+        # 25..49 is -rc<BUILD-24>, 50 is the release, above 50 is -<BUILD-50>.
+        run: |
+          get() { sed -n "s/^define(_CLIENT_VERSION_$1, \([0-9]*\))$/\1/p" configure.ac; }
+          maj=$(get MAJOR); min=$(get MINOR); rev=$(get REVISION); build=$(get BUILD)
+          if   [ "$build" -lt 25 ]; then sfx="-beta$((build + 1))"
+          elif [ "$build" -lt 50 ]; then sfx="-rc$((build - 24))"
+          elif [ "$build" -eq 50 ]; then sfx=""
+          else sfx="-$((build - 50))"; fi
+          version="$maj.$min.$rev$sfx"
+          grep -q "^#define CLIENT_VERSION_MINOR $min$" src/clientversion.h && \
+          grep -q "^#define CLIENT_VERSION_BUILD $build$" src/clientversion.h || \
+            { echo "src/clientversion.h disagrees with configure.ac ($version)"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} != configure.ac version v$version"; exit 1
+          fi
+          case "$sfx" in -rc*|-beta*) pre=true ;; *) pre=false ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "version $version (prerelease: $pre)"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.tier == 2 }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_x86_64
+            tier: 1
+            os: ubuntu-22.04
+            kind: native
+            smoke: full
+          - platform: linux_aarch64
+            tier: 1
+            os: ubuntu-22.04-arm
+            kind: native
+            smoke: full
+          - platform: macos_aarch64
+            tier: 1
+            os: macos-14
+            kind: native
+            smoke: full
+          - platform: windows
+            tier: 1
+            os: ubuntu-22.04
+            kind: cross
+            host: x86_64-w64-mingw32
+            smoke: none          # an .exe: smoke-windows runs it on windows-latest
+          - platform: ubuntu_18.04_x86_64
+            tier: 2
+            os: ubuntu-22.04
+            kind: legacy
+            smoke: full          # runs inside an 18.04 container, which proves the glibc floor
+          - platform: macos_x86_64
+            tier: 2
+            os: macos-15-intel
+            kind: native
+            smoke: full
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PKG: ycashd_v${{ needs.version.outputs.version }}_${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0       # share/genbuild.sh names the build from git describe (the tag)
+
+      - name: Install build prerequisites (Linux)
+        if: runner.os == 'Linux' && matrix.kind != 'legacy'
+        # g++-multilib does not exist on arm64; nothing in the build needs it there.
+        run: |
+          sudo apt-get update
+          multilib=; [ "$(uname -m)" = x86_64 ] && multilib=g++-multilib
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 $multilib \
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake
+
+      - name: Install build prerequisites (macOS)
+        if: runner.os == 'macOS'
+        # GNU libtool and coreutils first on PATH, as the local macOS recipe needs (zcutil/build.sh
+        # and depends call GNU tools by their plain names).
+        run: |
+          brew install autoconf automake coreutils libtool pkgconf
+          for p in libtool coreutils; do echo "$(brew --prefix $p)/libexec/gnubin" >> "$GITHUB_PATH"; done
+          echo "LIBTOOLIZE=glibtoolize" >> "$GITHUB_ENV"
+          # Without it the cc/cxx crates build the Rust side's C++ for the runner's own macOS, and
+          # the binary refuses older systems (the link itself targets 11.0).
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
+      - name: Cache depends
+        if: matrix.kind != 'legacy'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            depends/built
+            depends/sources
+          key: release-depends-${{ matrix.platform }}-${{ hashFiles('depends/packages/**', 'depends/patches/**', 'depends/Makefile', 'depends/funcs.mk', 'depends/hosts/**', 'depends/builders/**') }}
+
+      - name: Number of cores
+        id: nproc
+        run: echo "count=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)" >> "$GITHUB_OUTPUT"
+
+      - name: Build (native or cross)
+        if: matrix.kind != 'legacy'
+        env:
+          HOST: ${{ matrix.host }}
+        run: |
+          [ -n "$HOST" ] || unset HOST
+          ./zcutil/build.sh -j${{ steps.nproc.outputs.count }}
+
+      - name: Build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
+        if: matrix.kind == 'legacy'
+        run: |
+          docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy .
+          mkdir -p legacy-out
+          docker run --rm -v "$PWD/legacy-out:/out" ycash-legacy
+          floor=$(objdump -T legacy-out/ycashd | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+          echo "glibc floor: $floor"
+          [ "$(printf '%s\n' "$floor" GLIBC_2.27 | sort -V | tail -1)" = GLIBC_2.27 ] || \
+            { echo "glibc floor $floor is above 2.27"; exit 1; }
+
+      - name: Stage stripped binaries
+        # src/ install-strip uses the configured host STRIP (x86_64-w64-mingw32-strip for Windows).
+        run: |
+          mkdir -p "dist/$PKG"
+          if [ "${{ matrix.kind }}" = legacy ]; then
+            cp legacy-out/ycashd legacy-out/ycash-cli legacy-out/ycash-tx legacy-out/ycashd-wallet-tool "dist/$PKG/"
+            strip "dist/$PKG"/ycash*
+          else
+            make -C src install-strip DESTDIR="$PWD/stage" bindir=/bin
+            ext=; [ "${{ matrix.platform }}" = windows ] && ext=.exe
+            for b in ycashd ycash-cli ycash-tx ycashd-wallet-tool; do cp "stage/bin/$b$ext" "dist/$PKG/"; done
+          fi
+          cp COPYING "dist/$PKG/"
+          ls -l "dist/$PKG"
+
+      - name: Smoke test
+        if: matrix.smoke == 'full'
+        # No zk parameters to fetch: 6.20.0 bundles the Sapling parameters and the Sprout verifying
+        # key in the binary (src/init.cpp ZC_LoadParams, src/rust/src/init.rs).
+        run: |
+          if [ "${{ matrix.kind }}" = legacy ]; then
+            docker run --rm -v "$PWD:/w" -w /w ubuntu:18.04 \
+              qa/yellowback-release-smoke.sh "dist/$PKG" "$VERSION"
+          else
+            qa/yellowback-release-smoke.sh "dist/$PKG" "$VERSION"
+          fi
+
+      - name: Package
+        run: |
+          cd dist
+          if [ "${{ matrix.platform }}" = windows ]; then
+            zip -r "$PKG.zip" "$PKG"
+          else
+            tar czf "$PKG.tar.gz" "$PKG"
+          fi
+          rm -rf "$PKG"
+          ls -l
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  smoke-windows:
+    name: Smoke windows (version only)
+    needs: [version, build]
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-windows
+          path: dist
+      - name: Extract
+        shell: pwsh
+        run: Get-ChildItem dist/*.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath dist }
+      - name: Run the .exe files
+        shell: bash
+        run: |
+          qa/yellowback-release-smoke.sh "dist/ycashd_v${{ needs.version.outputs.version }}_windows" \
+            "${{ needs.version.outputs.version }}" --version-only
+
+  release:
+    name: Draft release
+    needs: [version, build, smoke-windows]
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.build.result == 'success' && needs.smoke-windows.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Every tier-1 asset is present
+        run: |
+          cd dist
+          for p in linux_x86_64 linux_aarch64 macos_aarch64; do
+            [ -f "ycashd_v${VERSION}_$p.tar.gz" ] || { echo "missing tier-1 asset $p"; exit 1; }
+          done
+          [ -f "ycashd_v${VERSION}_windows.zip" ] || { echo "missing tier-1 asset windows"; exit 1; }
+          ls -l
+      - name: SHA256SUMS
+        run: cd dist && sha256sum ycashd_v* > SHA256SUMS && cat SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          notes=doc/release-notes/release-notes-$VERSION.md
+          [ -f "$notes" ] || { echo "missing $notes (doc/yellowback-release.md step 2)"; exit 1; }
+          pre=; [ "$PRERELEASE" = true ] && pre=--prerelease
+          gh release create "$GITHUB_REF_NAME" dist/* --draft $pre --verify-tag \
+            --title "ycashd v$VERSION (Yellowback)" --notes-file "$notes"
