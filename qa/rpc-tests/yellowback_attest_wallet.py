@@ -153,6 +153,31 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(52), cited)
         assert_equal(wa.yed_signattestation(0, usd_to_micro(50), cited)['reused'], True)
 
+# Rule: S16 EQV-1
+        # Audit C-5: the guard is keyed on the cited block's hash. After a reorg across `cited` the earlier line is
+        # for another block (its signature verifies nowhere now), so signing the new block at that height -- at any
+        # price -- is not equivocation; the same hash with a different price still is. Node 6 alone forks: it
+        # invalidates its block at `cited`, mines one replacement (shorter than the network's chain, so nobody
+        # follows it), signs, then reconsiders and returns to the network's chain, where the original line applies.
+        print('  a reorg across citedHeight: the guard applies per block hash, not per height')
+        hash_main = wa.getblockhash(cited)
+        wa.invalidateblock(hash_main)
+        wa.generate(1)
+        hash_fork = wa.getblockhash(cited)
+        assert hash_fork != hash_main
+        forked = wa.yed_signattestation(0, usd_to_micro(51), cited)
+        assert_equal((forked['reused'], forked['priceMicroUsd']), (False, usd_to_micro(51)))
+        assert forked['hex'] != signed['hex']
+        assert verify_attestation(hex_str_to_bytes(reg[0]['attestorPubKey']), hex_str_to_bytes(forked['hex']), hash_fork)
+        assert_equal(wa.yed_signattestation(0, usd_to_micro(51), cited)['reused'], True)
+        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(50), cited)   # same hash, other price
+        wa.reconsiderblock(hash_main)
+        assert_equal(wa.getblockhash(cited), hash_main)
+        back = wa.yed_signattestation(0, usd_to_micro(50), cited)
+        assert_equal((back['reused'], back['hex']), (True, signed['hex']))
+        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(51), cited)
+        self.sync_all(blocks_only=True)
+
 # Rule: MINT-1 W7
         print('an unarmed two-step mint: the carrier is still created and spent as vin[last]')
         assert_equal(arming_state(user)['status'], 'UNARMED')

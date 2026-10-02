@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -79,13 +80,20 @@ struct CarrierRecord
     }
 };
 
-/** One line of the signing guard <datadir>/yellowback/attest-signed.dat (S16): what this node signed for (seq, citedHeight). */
+/**
+ * One line of the signing guard <datadir>/yellowback/attest-signed.dat (S16): what this node signed for
+ * (seq, citedHeight, blockHash). The hash is part of the key since the message commits to it: after a
+ * reorg across citedHeight the old signature verifies nowhere, and signing the new chain's block at that
+ * height is not equivocation under EQV-1 (audit C-5). A line loaded from the v1 file carries a null hash
+ * and is honoured for every hash (fail-safe).
+ */
 struct SignedAttestation
 {
     uint16_t seq;
     uint32_t citedHeight;
     uint32_t priceMicroUsd;
     std::array<unsigned char, 64> sig;
+    uint256 blockHash;
 
     SignedAttestation() : seq(0), citedHeight(0), priceMicroUsd(0) { sig.fill(0); }
 
@@ -96,6 +104,7 @@ struct SignedAttestation
         READWRITE(citedHeight);
         READWRITE(priceMicroUsd);
         READWRITE(FLATDATA(sig));
+        READWRITE(blockHash);
     }
 };
 
@@ -176,7 +185,8 @@ public:
     std::vector<std::pair<uint16_t, AttestorRecord>> HotKeys() const;
 
     // ---- v3: the signing guard (S16). In memory and in <datadir>/yellowback/attest-signed.dat (append, fsync before returning).
-    std::optional<SignedAttestation> LookupSigned(uint16_t seq, uint32_t citedHeight) const;
+    /** The line for (seq, citedHeight, blockHash), else a v1 line for (seq, citedHeight) (null hash), else nullopt. */
+    std::optional<SignedAttestation> LookupSigned(uint16_t seq, uint32_t citedHeight, const uint256& blockHash) const;
     /** Append and fsync; false when the write failed (the caller then returns nothing). */
     bool RecordSigned(const SignedAttestation& rec);
     static fs::path SignedFile();
@@ -203,7 +213,7 @@ private:
     YellowbackIndex* index;
     std::set<COutPoint> ourLocks; //!< cs_wallet
     std::vector<CarrierRecord> carriers;                                           //!< cs_wallet
-    std::map<std::pair<uint16_t, uint32_t>, SignedAttestation> signedGuard;         //!< cs_wallet
+    std::map<std::tuple<uint16_t, uint32_t, uint256>, SignedAttestation> signedGuard;   //!< cs_wallet
     std::map<COutPoint, std::function<bool()>> pending;                            //!< pendingMutex
     mutable std::mutex pendingMutex;
     std::condition_variable pendingCv;

@@ -136,7 +136,8 @@ bool ReadWholeFile(const fs::path& path, std::vector<unsigned char>& out)
 }
 
 const unsigned char CARRIERS_MAGIC[4] = { 'Y', 'B', 'C', 1 };
-const unsigned char SIGNED_MAGIC[4] = { 'Y', 'B', 'S', 1 };
+const unsigned char SIGNED_MAGIC[4] = { 'Y', 'B', 'S', 2 };      // 2: lines carry blockHash (audit C-5)
+const unsigned char SIGNED_MAGIC_V1[4] = { 'Y', 'B', 'S', 1 };   // seq, citedHeight, price, sig
 
 } // namespace
 
@@ -239,28 +240,51 @@ void YellowbackWallet::LoadSigned()
 {
     std::vector<unsigned char> raw;
     if (!ReadWholeFile(SignedFile(), raw)) return;
+    bool legacy = false;
     try {
         CDataStream ss(raw, SER_DISK, CLIENT_VERSION);
         unsigned char magic[4];
         ss.read((char*)magic, 4);
-        if (memcmp(magic, SIGNED_MAGIC, 4) != 0) throw std::runtime_error("bad magic");
+        legacy = memcmp(magic, SIGNED_MAGIC_V1, 4) == 0;
+        if (!legacy && memcmp(magic, SIGNED_MAGIC, 4) != 0) throw std::runtime_error("bad magic");
         LOCK(wallet->cs_wallet);
         while (!ss.empty()) {
             SignedAttestation r;
-            ss >> r;
-            signedGuard[std::make_pair(r.seq, r.citedHeight)] = r;
+            if (legacy) {
+                ss >> r.seq >> r.citedHeight >> r.priceMicroUsd >> FLATDATA(r.sig);   // the v1 line: no hash, honoured for every hash
+            } else {
+                ss >> r;
+            }
+            signedGuard[std::make_tuple(r.seq, r.citedHeight, r.blockHash)] = r;
         }
-        LogPrintf("yellowback: %u signed attestation(s) loaded from %s (S16)\n", signedGuard.size(), SignedFile().string());
+        LogPrintf("yellowback: %u signed attestation(s) loaded from %s (S16%s)\n", signedGuard.size(), SignedFile().string(), legacy ? ", v1 file" : "");
     } catch (const std::exception& e) {
         // A torn tail keeps what was read before it: the guard never loses an earlier line.
         LogPrintf("yellowback: %s is damaged (%s); the signing guard keeps %u line(s)\n", SignedFile().string(), e.what(), signedGuard.size());
     }
+    if (legacy) {
+        // Rewrite as v2 so that RecordSigned's appends and this loader agree on one layout; the v1 lines keep
+        // their null hash. A failed rewrite leaves the v1 file and RecordSigned then refuses to append to it.
+        LOCK(wallet->cs_wallet);
+        const fs::path path = SignedFile();
+        const fs::path tmp = path.string() + ".v2";
+        FILE* f = fopen(tmp.string().c_str(), "wb");
+        if (!f) return;
+        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        ss.write((const char*)SIGNED_MAGIC, 4);
+        for (const auto& kv : signedGuard) ss << kv.second;
+        const bool ok = fwrite(&ss[0], 1, ss.size(), f) == ss.size();
+        FileCommit(f);
+        fclose(f);
+        if (ok && RenameOver(tmp, path)) LogPrintf("yellowback: %s rewritten in the v2 layout (%u line(s))\n", path.string(), signedGuard.size());
+    }
 }
 
-std::optional<SignedAttestation> YellowbackWallet::LookupSigned(uint16_t seq, uint32_t citedHeight) const
+std::optional<SignedAttestation> YellowbackWallet::LookupSigned(uint16_t seq, uint32_t citedHeight, const uint256& blockHash) const
 {
     LOCK(wallet->cs_wallet);
-    auto it = signedGuard.find(std::make_pair(seq, citedHeight));
+    auto it = signedGuard.find(std::make_tuple(seq, citedHeight, blockHash));
+    if (it == signedGuard.end()) it = signedGuard.find(std::make_tuple(seq, citedHeight, uint256()));   // a v1 line
     if (it == signedGuard.end()) return std::nullopt;
     return it->second;
 }
@@ -271,6 +295,11 @@ bool YellowbackWallet::RecordSigned(const SignedAttestation& rec)
     const fs::path path = SignedFile();
     TryCreateDirectory(path.parent_path());
     const bool fresh = !fs::exists(path);
+    if (!fresh) {
+        // Never append a v2 line to a v1 file (LoadSigned rewrites it; if that failed, refuse: nothing is returned).
+        std::vector<unsigned char> head;
+        if (!ReadWholeFile(path, head) || head.size() < 4 || memcmp(&head[0], SIGNED_MAGIC, 4) != 0) return false;
+    }
     FILE* f = fopen(path.string().c_str(), "ab");
     if (!f) return false;
     CDataStream ss(SER_DISK, CLIENT_VERSION);
@@ -280,7 +309,7 @@ bool YellowbackWallet::RecordSigned(const SignedAttestation& rec)
     FileCommit(f);   // fsync before the RPC returns (S16)
     fclose(f);
     if (!ok) return false;
-    signedGuard[std::make_pair(rec.seq, rec.citedHeight)] = rec;
+    signedGuard[std::make_tuple(rec.seq, rec.citedHeight, rec.blockHash)] = rec;
     return true;
 }
 
