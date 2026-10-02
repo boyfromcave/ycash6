@@ -43,7 +43,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "abe131e0cd68cd438449ce22969c7b331930ca3b9e4324ed9d841e90a340a4fe";
+const std::string GOLDEN_HASH = "ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6";
 
 uint160 KeyOf(int i)
 {
@@ -3033,10 +3033,16 @@ BOOST_AUTO_TEST_CASE(pin2_excludes_seq)
     // seq 2 appears in two rows of W at one price; seq 1 in two rows at two prices; seq 3 in one row.
     BundleLogRecord r1, r2;
     r1.aMint = r1.aClaim = r2.aMint = r2.aClaim = 40000;
-    r1.selectedSeqs = { 1, 2, 3 }; r1.seqs = { 1, 2, 3 }; r1.prices = { 40000, 40000, 40000 };
-    r2.selectedSeqs = { 1, 2 };    r2.seqs = { 1, 2 };    r2.prices = { 40100, 40000 };
+    r1.selectedSeqs = { 1, 2, 3 }; r1.seqs = { 1, 2, 3 }; r1.prices = { 40000, 40000, 40000 }; r1.citedHeights = { 10, 10, 10 };
+    r2.selectedSeqs = { 1, 2 };    r2.seqs = { 1, 2 };    r2.prices = { 40100, 40000 };        r2.citedHeights = { 11, 10 };
     State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 2), r1);
     State(f.view).Put(keys::BundleLog((uint32_t)f.tip), r2);
+    f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    // Audit A-2: seq 2's two rows carry one attestation (cited height 10) reused by two bundles: one cited height
+    // is not a frozen quote, nothing is pinned. Rewriting the rows with distinct cited heights pins it.
+    BOOST_CHECK(f.Snap(f.tip).pinnedSeqs.empty());
+    r2.citedHeights = { 11, 11 };
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 1), r2);
     f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
     const Snapshot s = f.Snap(f.tip);
     BOOST_CHECK((s.pinnedSeqs == std::vector<uint16_t>{ 2 }));
@@ -3069,10 +3075,30 @@ BOOST_AUTO_TEST_CASE(pin_not_armed_without_bundles)
     r.aMint = r.aClaim = 40000;
     r.selectedSeqs = r.seqs = { 0, 1, 2 };
     r.prices = { 40000, 40000, 40000 };
+    r.citedHeights = { 9, 9, 9 };
     State(f.view).Put(keys::BundleLog((uint32_t)f.tip), r);
     f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
     BOOST_CHECK(f.Snap(f.tip).pinnedSeqs.empty());
     BOOST_CHECK(f.Snap(f.tip).pinnedKeys.empty());
+}
+
+// Rule: PIN-1
+BOOST_AUTO_TEST_CASE(pin1_ignores_undefined_amint)
+{
+    // Audit A-4: a row whose aMint is stored as 0 (every bundle's statistic undefined) is not the window
+    // minimum; two rows at one price plus the 0 row leave PIN-1 unarmed.
+    Fixture f;
+    f.Activate();
+    BundleLogRecord undef, a, b;
+    undef.aMint = undef.aClaim = 0;
+    a.aMint = a.aClaim = 50000;
+    b.aMint = b.aClaim = 50000;
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 3), undef);
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 2), a);
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 1), b);
+    f.Mine(Fixture::Quote(50000, 0));
+    BOOST_CHECK(f.Snap(f.tip).pinnedKeys.empty());
+    BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_NO_PRICE));
 }
 
 // Rule: AFEE-1

@@ -40,7 +40,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig}).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'abe131e0cd68cd438449ce22969c7b331930ca3b9e4324ed9d841e90a340a4fe'
+GOLDEN_STATE_HASH = 'ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1431,11 +1431,11 @@ class StateHashTests(unittest.TestCase):
     def test_preimage_layout(self):
         m = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3))
         pre = m.state_hash_preimage()
-        # T + i32 0 + zero hash + u32 3 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
+        # T + i32 0 + zero hash + u32 4 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x03\x00\x00\x00')
+        self.assertEqual(pre[37:41], b'\x04\x00\x00\x00')
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:59], b'C' + b'\x00' + bytes(8))
         self.assertEqual(pre[59:60], b'G')

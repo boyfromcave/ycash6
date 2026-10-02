@@ -13,6 +13,7 @@
 #include "yellowback/script.h"
 
 #include <algorithm>
+#include <tuple>
 #include <map>
 #include <set>
 
@@ -126,7 +127,7 @@ struct BundleFacts
     std::optional<MicroUsd> aMint, aClaim;
     std::vector<uint16_t> seqs;          //!< A, bundle order
     std::vector<uint16_t> selected;
-    std::vector<std::pair<uint16_t, int64_t>> pairs;   //!< (seq, price) of every attestation
+    std::vector<std::tuple<uint16_t, int64_t, uint32_t>> pairs;   //!< (seq, price, citedHeight) of every attestation
     std::string reason;                  //!< BUNDLE-1's first failure when !verified
 
     BundleFacts() : verified(false), carrierPresent(false) {}
@@ -145,7 +146,7 @@ struct EvalContext
     bool anyBundle;
     std::vector<MicroUsd> aMints, aClaims;
     std::set<uint16_t> selectedUnion;
-    std::set<std::pair<uint16_t, int64_t>> pairUnion;
+    std::set<std::tuple<uint16_t, int64_t, uint32_t>> pairUnion;
 
     EvalContext(State& st, const Params& p, int h, SigCache* cache = nullptr) : st(st), params(p), height(h), cache(cache), anyBundle(false) {}
 
@@ -170,7 +171,7 @@ struct EvalContext
         f.aClaim = v.aClaim;
         for (const Attestation& a : v.C) {
             f.seqs.push_back(a.seq);
-            f.pairs.push_back(std::make_pair(a.seq, (int64_t)a.priceMicroUsd));
+            f.pairs.push_back(std::make_tuple(a.seq, (int64_t)a.priceMicroUsd, a.citedHeight));
         }
         anyBundle = true;
         if (f.aMint.has_value()) aMints.push_back(f.aMint.value());
@@ -189,8 +190,9 @@ struct EvalContext
         row.aClaim = LowerMedian(aClaims).value_or(0);
         row.selectedSeqs.assign(selectedUnion.begin(), selectedUnion.end());
         for (const auto& sp : pairUnion) {
-            row.seqs.push_back(sp.first);
-            row.prices.push_back(sp.second);
+            row.seqs.push_back(std::get<0>(sp));
+            row.prices.push_back(std::get<1>(sp));
+            row.citedHeights.push_back(std::get<2>(sp));
         }
         return row;
     }
@@ -1125,6 +1127,7 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     if ((int64_t)window.size() >= (int64_t)std::max(1, P.pinMinBundles)) {                              // PIN-1
         int64_t aLo = -1, aHi = -1;
         for (const BundleLogRecord& row : window) {
+            if (row.aMint <= 0) continue;                          // an undefined statistic is never a value (audit A-4)
             if (aLo < 0 || row.aMint < aLo) aLo = row.aMint;
             if (row.aMint > aHi) aHi = row.aMint;
         }
@@ -1150,16 +1153,21 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
         if (x1.has_value() && x0.has_value()) {
             const int64_t lo = std::min(x1.value(), x0.value()), diff = std::max(x1.value(), x0.value()) - lo;
             if (diff * BPS > (int64_t)std::max(0, P.pinDeltaBps) * lo) {
-                std::map<uint16_t, std::pair<int, std::set<int64_t>>> perSeq;   // seq -> (rows, prices)
+                // seq -> (rows, prices, cited heights): a seq is pinned only when it signed one price at
+                // PIN_MIN_TAGS distinct cited heights across PIN_MIN_TAGS rows. One attestation reused by
+                // several bundles is one cited height and cannot pin (audit A-2).
+                std::map<uint16_t, std::tuple<int, std::set<int64_t>, std::set<uint32_t>>> perSeq;
                 for (const BundleLogRecord& row : window) {
                     std::set<uint16_t> seen;
                     for (size_t i = 0; i < row.seqs.size() && i < row.prices.size(); i++) {
-                        if (seen.insert(row.seqs[i]).second) perSeq[row.seqs[i]].first++;
-                        perSeq[row.seqs[i]].second.insert(row.prices[i]);
+                        if (seen.insert(row.seqs[i]).second) std::get<0>(perSeq[row.seqs[i]])++;
+                        std::get<1>(perSeq[row.seqs[i]]).insert(row.prices[i]);
+                        if (i < row.citedHeights.size()) std::get<2>(perSeq[row.seqs[i]]).insert(row.citedHeights[i]);
                     }
                 }
                 for (const auto& kv : perSeq) {
-                    if (kv.second.first >= std::max(1, P.pinMinTags) && kv.second.second.size() == 1) s.pinnedSeqs.push_back(kv.first);
+                    if (std::get<0>(kv.second) >= std::max(1, P.pinMinTags) && std::get<1>(kv.second).size() == 1
+                        && (int64_t)std::get<2>(kv.second).size() >= (int64_t)std::max(1, P.pinMinTags)) s.pinnedSeqs.push_back(kv.first);
                 }
             }
         }

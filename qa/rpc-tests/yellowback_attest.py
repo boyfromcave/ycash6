@@ -70,6 +70,7 @@ from test_framework.yellowback_util import (
     DORMANCY_MIN_BUNDLES,
     EMERGENCY_PERSIST,
     OBSERVER,
+    P_SLOW_WINDOW,
     POOLS,
     REF_LAG,
     STOCK,
@@ -520,6 +521,50 @@ class YellowbackAttestTest(YellowbackTestFramework):
         p = user.yed_getprice()
         assert_equal((p['pinnedKeys'], p['pinnedSeqs']), ([], []))
         assert_equal(len(user.yed_getfeepayee(user.getblockcount(), 25 * COIN)['eligible']), 3)
+
+        # ---------------------------------------------------------------- pinning (PIN-2, audit A-2)
+# Rule: PIN-2
+        # xMint drops 10 % inside PIN_WINDOW (the pools move; the fast window follows in 8 blocks), which arms
+        # PIN-2. Two VOID mints then carry one and the same bundle (one attestation per seq, cited at c1): two
+        # BundleLog rows, one price, one cited height -- not a frozen quote, so nothing is pinned. A third VOID
+        # mint with fresh attestations at c3 (same price) gives two distinct cited heights: the seqs are pinned.
+        print('PIN-2: a bundle reused across two VOID mints cannot pin its seqs; two cited heights can')
+        low = PRICE * Decimal('0.90')
+        self.set_prices(low)
+        self.pools_step(8, 'pools down 10 %')
+        p = user.yed_getprice()
+        assert p['xMint'] in (usd_to_micro(low), usd_to_micro(low + Decimal('0.01'))), p   # the fast window moved (jitter)
+        ref = user.getblockcount() - REF_LAG
+        c1 = ref - 1
+        feed_all(user, {seq: low for seq in seqs}, cited=c1)
+        built = user.yed_buildbundle(ref, '')
+        reused = hex_str_to_bytes(built['hex'])
+        pinnable = sorted(built['seqs'])
+        assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(reused))), [c1])
+        est = user.yed_estimatecollateral(CENTS, LOCK)
+        short = int(est['requiredZat']) // 2                  # MINT-5 fails after MINT-9 recorded the bundle (ARMED order)
+        self.mint_raw(USER, reused, ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
+        self.mint_raw(USER, reused, ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
+        p = user.yed_getprice()
+        assert_equal(p['pinnedSeqs'], [])
+        assert all(r['pinned'] is False for r in self.attestors().values())
+        c3 = user.getblockcount() - REF_LAG
+        feed_all(user, {seq: low for seq in seqs}, cited=c3)
+        fresh = user.yed_buildbundle(ref, '')
+        assert_equal(sorted(fresh['seqs']), pinnable)
+        assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(hex_str_to_bytes(fresh['hex'])))), [c3])
+        self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
+        p = user.yed_getprice()
+        assert_equal(p['pinnedSeqs'], pinnable)
+        recs = self.attestors()
+        assert all(recs[seq]['pinned'] is (seq in pinnable) for seq in seqs)
+        assert_same_statehash(self.enforcing_nodes() + [nodes[OBSERVER]], 'PIN-2 everywhere')
+        print('  the pins clear once the rows leave the window; a slow window at $%s restores the price state' % PRICE)
+        self.set_prices(PRICE)
+        self.pools_step(P_SLOW_WINDOW, 'unpin PIN-2')     # the 14 low blocks leave every window before RED-5 reads them
+        p = user.yed_getprice()
+        assert_equal((p['pinnedKeys'], p['pinnedSeqs']), ([], []))
+        assert_equal(p['xMint'], usd_to_micro(PRICE))
 
         # ---------------------------------------------------------------- RED-5 through a notice
         print('RED-5: pools to $%s (the vault is 300 %%-covered), attestors at $%s (pEmerg under EMERGENCY_RATIO)' % (EMERG_X, EMERG_A))

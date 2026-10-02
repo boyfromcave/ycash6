@@ -1328,8 +1328,8 @@ class AttestState(object):
 class BundleLogRecord(object):
     """BundleLog[height] (R12): the lowerMedian statistics over the height's verified MINT / REDEEM /
     CLAIM_NOTICE bundles, the sorted union of their selected sets and the sorted, deduplicated union of
-    their (seq, price) pairs as two parallel arrays."""
-    __slots__ = ('a_mint', 'a_claim', 'selected_seqs', 'seqs', 'prices')
+    their (seq, price, citedHeight) triples as three parallel arrays (citedHeights since SCHEMA_VERSION 4, audit A-2)."""
+    __slots__ = ('a_mint', 'a_claim', 'selected_seqs', 'seqs', 'prices', 'cited_heights')
 
     def __init__(self):
         self.a_mint = None
@@ -1337,6 +1337,7 @@ class BundleLogRecord(object):
         self.selected_seqs = []
         self.seqs = []
         self.prices = []
+        self.cited_heights = []
 
 
 class NoticeRecord(object):
@@ -1511,7 +1512,8 @@ def _ser_attestor(a):
 
 
 def _ser_bundle_log(b):
-    return _price(b.a_mint) + _price(b.a_claim) + _u16_vec(b.selected_seqs) + _u16_vec(b.seqs) + _i64_vec(b.prices)
+    return (_price(b.a_mint) + _price(b.a_claim) + _u16_vec(b.selected_seqs) + _u16_vec(b.seqs) + _i64_vec(b.prices)
+            + _compact(len(b.cited_heights)) + b''.join(_u32(x) for x in b.cited_heights))
 
 
 def _ser_notice(n):
@@ -1544,7 +1546,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -1801,7 +1803,7 @@ class YellowbackModel(object):
             if b['a_claim'] is not None:
                 acc['a_claims'].append(b['a_claim'])
             acc['selected'].update(b['selected'])
-            acc['pairs'].update((seq, price) for seq, price, _c in b['atts'])
+            acc['pairs'].update((seq, price, cited) for seq, price, cited in b['atts'])
             acc['any'] = True
         return b
 
@@ -1923,8 +1925,9 @@ class YellowbackModel(object):
             row.a_claim = lower_median(acc['a_claims']) if acc['a_claims'] else None
             row.selected_seqs = sorted(acc['selected'])
             pairs = sorted(acc['pairs'])
-            row.seqs = [sq for sq, _pr in pairs]
-            row.prices = [pr for _sq, pr in pairs]
+            row.seqs = [sq for sq, _pr, _c in pairs]
+            row.prices = [pr for _sq, pr, _c in pairs]
+            row.cited_heights = [c for _sq, _pr, c in pairs]
             self.bundle_log[height] = row
 
         # SNAP
@@ -1970,9 +1973,10 @@ class YellowbackModel(object):
         window = [self.bundle_log[h] for h in range(max(height - p.pin_window, p.start_height), height)
                   if h in self.bundle_log]                                    # W = (H - 1 - PIN_WINDOW, H - 1]
         if len(window) >= max(1, p.pin_min_bundles):                          # PIN-1
-            a_lo = min(r.a_mint for r in window)
-            a_hi = max(r.a_mint for r in window)
-            if (a_hi - a_lo) * BPS > p.pin_delta_bps * a_lo:
+            defined = [r.a_mint for r in window if r.a_mint is not None and r.a_mint > 0]   # an undefined statistic is never a value (A-4)
+            a_lo = min(defined) if defined else -1
+            a_hi = max(defined) if defined else -1
+            if a_lo >= 0 and (a_hi - a_lo) * BPS > p.pin_delta_bps * a_lo:
                 per_key = {}
                 for h in range(max(height - p.pin_window, p.start_height), height):
                     t = self.tags.get(h)
@@ -1985,13 +1989,16 @@ class YellowbackModel(object):
         x1 = None if (s1 is None or s1.virtual) else s1.p_mint
         x0 = None if (s0 is None or s0.virtual) else s0.p_mint
         if x1 is not None and x0 is not None and abs(x1 - x0) * BPS > p.pin_delta_bps * min(x1, x0):
-            rows_of, prices_of = {}, {}
+            rows_of, prices_of, cited_of = {}, {}, {}
             for row in window:
-                for seq, price in set(zip(row.seqs, row.prices)):
+                for seq, price, cited in set(zip(row.seqs, row.prices, row.cited_heights)):
                     prices_of.setdefault(seq, set()).add(price)
+                    cited_of.setdefault(seq, set()).add(cited)
                 for seq in set(row.seqs):
                     rows_of[seq] = rows_of.get(seq, 0) + 1
-            s.pinned_seqs = sorted(seq for seq, n in rows_of.items() if n >= max(1, p.pin_min_tags) and len(prices_of[seq]) == 1)
+            # one price at PIN_MIN_TAGS distinct cited heights across PIN_MIN_TAGS rows (A-2): a reused attestation cannot pin
+            s.pinned_seqs = sorted(seq for seq, n in rows_of.items() if n >= max(1, p.pin_min_tags) and len(prices_of[seq]) == 1
+                                   and len(cited_of[seq]) >= max(1, p.pin_min_tags))
         s.seated = self.seated(height, m)                                      # seating
         for seq, r in self.attestors.items():
             if seq in s.seated and r.seated_since == 0:

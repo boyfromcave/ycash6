@@ -68,7 +68,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 3;
+static const uint32_t SCHEMA_VERSION = 4;   //!< 4: BundleLog rows carry citedHeights (audit A-2); a v3 directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -524,6 +524,7 @@ struct BundleLogRecord
     std::vector<uint16_t> selectedSeqs;
     std::vector<uint16_t> seqs;
     std::vector<int64_t> prices;
+    std::vector<uint32_t> citedHeights;   //!< parallel to seqs/prices: the attestation's citedHeight (PIN-2 counts distinct cited heights, audit A-2)
 
     BundleLogRecord() : aMint(0), aClaim(0) {}
 
@@ -538,6 +539,7 @@ struct BundleLogRecord
         READWRITE(selectedSeqs);
         READWRITE(seqs);
         READWRITE(prices);
+        READWRITE(citedHeights);
     }
 };
 
