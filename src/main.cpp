@@ -8612,9 +8612,11 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
         }
 
         CBlockIndex *pindexLast = NULL;
+        uint256 hashSkipped;   // Yellowback ACT-7: the last header the loop skipped, so the continuity check survives a skip (audit B-4)
         for (const CBlockHeader& header : headers) {
             CValidationState state;
-            if (pindexLast != NULL && header.hashPrevBlock != pindexLast->GetBlockHash()) {
+            if ((pindexLast != NULL && header.hashPrevBlock != pindexLast->GetBlockHash()) ||
+                (pindexLast == NULL && !hashSkipped.IsNull() && header.hashPrevBlock != hashSkipped)) {
                 Misbehaving(pfrom->GetId(), 20);
                 return error("non-continuous headers sequence");
             }
@@ -8626,6 +8628,7 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
                     (state.GetRejectReason() == "bad-prevblk-yellowback" ||
                      (state.GetRejectReason() == "duplicate" && yellowback::g_yellowback->IsRejectedAncestor(pindexLast)))) {
                     pindexLast = NULL;
+                    hashSkipped = header.GetHash();
                     continue;
                 }
                 if (state.IsInvalid(nDoS)) {
