@@ -14,6 +14,8 @@ that signs, an unlocked one mints.
 Nodes: 0 user (the original wallet), 1 stock, 2-4 pools, 5 observer (the restored wallet).
 """
 
+from decimal import Decimal
+
 from test_framework.util import assert_equal, assert_greater_than, bitcoind_processes, start_node
 from test_framework.yellowback_util import (
     REF_WINDOW,
@@ -149,7 +151,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         pend = user.yed_mint(10000, 48, '', bundle, False)                 # wait=false: the carrier is broadcast, the mint pending
         assert_equal(pend['pending'], True)
         self.sync_all()
-        self.restart(0, ['-developerencryptwallet'])                       # the pending completion lived in memory
+        self.restart(0, ['-developerencryptwallet', '-exportdir=' + self.options.tmpdir])   # the pending completion lived in memory
         user = nodes[0]
         self.sync_all()
         self.mine(POOLS[0])                                                # the carrier confirms; nobody completes the mint
@@ -164,6 +166,30 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[1])
         assert_equal(user.gettxout(pend['carrierTxid'], 0), None)
         assert_equal(restored.yed_sweepcarriers()['outstanding'], 0)      # the restored wallet never knew the carrier (W7)
+
+        print('importwallet (the bulk restore, audit C-1 / H8) locks the imported YED before anything can spend it as YEC')
+        pool = nodes[POOLS[2]]
+        dump = user.dumpwallet('restoredump')                            # node 0 is unlocked from the sweep above
+        tokens0 = sorted((c['txid'], c['vout']) for c in user.yed_listunspent())
+        assert_greater_than(len(tokens0), 0)
+        assert_equal(pool.yed_listunspent(), [])
+        pool.importwallet(dump)                                           # imports every taddr key and rescans
+        got = pool.yed_listunspent()
+        assert_equal(sorted((c['txid'], c['vout']) for c in got), tokens0)
+        assert_equal([c['locked'] for c in got], [True] * len(got))     # locked on the way out, before the RPC returned
+        # A plain spend of nearly the whole balance right after the import: the knapsack would reach
+        # for the 10 000-zat token outputs if they were unlocked (XFER-1 would burn the YED).
+        cents_before = pool.yed_getbalance()['confirmedCents']
+        amount = pool.getbalance() - Decimal(len(got)) * Decimal('0.0001') - Decimal('0.01')
+        txid = pool.sendtoaddress(restored.getnewaddress(), amount)
+        spent = {(v['txid'], v['vout']) for v in pool.getrawtransaction(txid, 1)['vin']}
+        assert_equal(sorted(spent & set(tokens0)), [])
+        self.sync_all()
+        self.mine(POOLS[1])
+        for t, v in tokens0:
+            assert pool.gettxout(t, v) is not None, 'token output %s:%d was spent' % (t, v)
+        assert_equal(pool.yed_getbalance()['confirmedCents'], cents_before)
+        assert_equal(user.yed_getbalance()['confirmedCents'], cents_before)
 
 
 if __name__ == '__main__':

@@ -88,8 +88,9 @@ std::string DecodeDumpString(const std::string &str) {
 /**
  * H8 (Phase 8): after an import and its rescan, YED that has just become mine must be locked
  * before anything can spend it as plain YEC. Declared *before* the LOCK2 of each import RPC so
- * that its destructor runs after cs_wallet is released — Reconcile() takes cs_yellowback and then
- * cs_wallet, exactly as yed_lockcoins calls it, and must not be entered holding cs_wallet.
+ * that its destructor runs after cs_wallet is released — Reconcile() takes cs_yellowback and
+ * cs_wallet one after the other, never nested (N25, the comment inside Reconcile), exactly as
+ * yed_lockcoins calls it, and must not be entered holding cs_wallet.
  */
 struct YellowbackReconcileOnExit
 {
