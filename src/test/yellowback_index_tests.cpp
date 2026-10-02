@@ -1220,9 +1220,15 @@ BOOST_AUTO_TEST_CASE(valve_ignores_lowdiff_headers)
         // answered DoS 0 too, and still not noted.
         BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(HeaderOn(bad.hash, 1, tooEasy).GetHash(), 3, tip->nBits)));
         BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        // Chained on the noted one, the loosening is measured against the note's own target.
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 4, arith_uint256(parentTarget / 100 * 125 / 100 * 140).GetCompact())));
+        // Chained on the noted one, the loosening is still measured against the rejected root's target
+        // (audit A-6): 125 % of 125 % compounds past 132 % and is not noted, nor is 140 % of 125 %.
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 4, arith_uint256(parentTarget / 100 * 125 / 100 * 125).GetCompact())));
         BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 5, arith_uint256(parentTarget / 100 * 125 / 100 * 140).GetCompact())));
+        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
+        // Within the root's bound, a second-generation note is still noted.
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 6, withinBound)));
+        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 2u);
     }
     BOOST_CHECK(!live.index->ValveTripped());
 }

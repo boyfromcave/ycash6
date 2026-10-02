@@ -589,16 +589,19 @@ bool YellowbackIndex::NoteHeaderOnRejectedChain(const CBlockHeader& header)
     }
     // A descendant of a block this node rejected: answered DoS 0 whatever follows (N1).
     if (notes.count(hash)) return true;
-    // P2 bounds: the target within the consensus per-block loosening of its parent's (nPowMaxAdjustDown
-    // = 32 %, chainparams.cpp:104) and fewer than VALVE_NOTE_CAP notes on this root.
+    // P2 bounds: the target within the consensus per-block loosening (nPowMaxAdjustDown = 32 %,
+    // chainparams.cpp:104) of the *rejected root's* nBits -- not the previous note's, so the loosening
+    // cannot compound note by note (audit A-6) -- and fewer than VALVE_NOTE_CAP notes on this root. A
+    // noted header passed CheckBlockHeader only; its nBits was never checked against consensus.
     bool neg = false, over = false;
-    arith_uint256 target, parentTarget;
+    arith_uint256 target, rootTarget;
     target.SetCompact(header.nBits, &neg, &over);
     if (neg || over || target == 0) return true;
-    parentTarget.SetCompact(parentBits, &neg, &over);
-    if (neg || over || parentTarget == 0) return true;
-    if (target > parentTarget / 100 * 132) {
-        LogPrint("yellowback", "valve: header %s not noted (target outside the difficulty loosening of its parent)\n", hash.ToString());
+    BlockMap::const_iterator rootIt = mapBlockIndex.find(root);
+    rootTarget.SetCompact(rootIt != mapBlockIndex.end() ? rootIt->second->nBits : parentBits, &neg, &over);
+    if (neg || over || rootTarget == 0) return true;
+    if (target > rootTarget / 100 * 132) {
+        LogPrint("yellowback", "valve: header %s not noted (target outside the difficulty loosening of its rejected root)\n", hash.ToString());
         return RefuseNote(hash);
     }
     if (notesPerRoot[root] >= VALVE_NOTE_CAP) {
