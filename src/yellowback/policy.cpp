@@ -63,6 +63,8 @@ bool IsWalletSpendShape(const CScript& scriptSig)
 
 } // namespace
 
+static bool FilterTemplateInner(TemplateView& view, const CTransaction& tx, int nHeight, YellowbackIndex& index, const Params& p);
+
 bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
 {
     YellowbackIndex& index = view.Index();
@@ -71,6 +73,20 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
     const Params& p = index.ParamsAt(nHeight);
     if (nHeight < p.startHeight) return true;
 
+    // BLK-3's storage boundary on the template path (audit A-3): a storage failure keeps the candidate
+    // (fail-open) and marks the index unhealthy instead of unwinding CreateNewBlock.
+    try {
+        return FilterTemplateInner(view, tx, nHeight, index, p);
+    } catch (const std::exception& e) {
+        index.SetUnhealthy(std::string("storage failure in FilterTemplate: ") + e.what());
+    } catch (...) {
+        index.SetUnhealthy("storage failure in FilterTemplate");
+    }
+    return true;
+}
+
+static bool FilterTemplateInner(TemplateView& view, const CTransaction& tx, int nHeight, YellowbackIndex& index, const Params& p)
+{
     // Relevance in O(inputs) lookups (N6): only a Tokens/Vaults input or a payload can touch the state.
     State base(view.Overlay());
     bool relevant = false, spendsVoid = false;

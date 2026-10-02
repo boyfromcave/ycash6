@@ -1289,6 +1289,21 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
     BOOST_CHECK(live.index->MempoolCheck(CTransaction(plain[0])));
     BOOST_CHECK(!live.index->IsAbandoned());
 
+    // Audit A-1: a peer streaming distinct garbage vault spends costs this node RED-1..5 per candidate, never a
+    // ComputeSnapshot (the 2,016-height windows, the attestor scan). 1,000 distinct malformed spends of the
+    // ACTIVE vault in well under the time 1,000 snapshots would take (about 10x the plain-transaction bound).
+    std::vector<CTransaction> garbage;
+    for (int i = 0; i < 1000; i++) {
+        CMutableTransaction g = malformed;
+        g.vout[0].nValue = 1000 + i;                       // a distinct txid each (recentRejects filters only identical ones)
+        garbage.push_back(CTransaction(g));
+    }
+    const int64_t g0 = GetTimeMicros();
+    for (const CTransaction& tx : garbage) BOOST_CHECK(!live.index->MempoolCheck(tx));
+    const int64_t gElapsed = GetTimeMicros() - g0;
+    BOOST_TEST_MESSAGE(strprintf("MempoolCheck over 1000 distinct malformed vault spends: %d us", (int)gElapsed));
+    BOOST_CHECK(gElapsed < 2000000);
+
     // The sweep (N5): a pool holding the malformed spend, a plain transaction and the good spend.
     CTxMemPool pool(CFeeRate(0));
     TestMemPoolEntryHelper entry;

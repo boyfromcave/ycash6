@@ -476,6 +476,9 @@ private:
     bool IsAbandonedLocked() const;
     bool IsSunsetLocked() const;
     std::optional<std::string> MempoolCheckLocked(const CTransaction& tx);
+    std::optional<std::string> MempoolCheckInner(const CTransaction& tx);
+    bool AddAttestationLocked(const Attestation& att, std::string& reason, bool* replacedOut);
+    BuiltBundle BuildBundleInfoLocked(int refHeight, const std::vector<unsigned char>& selector);
     /** Snapshots[h].blockHash, nullopt below startHeight or when the row is missing (cs_yellowback). */
     std::optional<uint256> BlockHashAtLocked(int64_t height) const;
     /** One signature through the cache (cs_yellowback). */

@@ -751,6 +751,21 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     AssertLockHeld(cs_yellowback);
     if (stopped || !healthy) return std::nullopt;       // unhealthy: the node enforces nothing (BLK-3)
     if (tx.IsCoinBase()) return std::nullopt;
+    // BLK-3's storage boundary on the mempool path (audit A-3): a storage failure admits the transaction
+    // (fail-open, like CheckConnect) and marks the index unhealthy instead of unwinding AcceptToMemoryPool.
+    try {
+        return MempoolCheckInner(tx);
+    } catch (const std::exception& e) {
+        SetUnhealthy(std::string("storage failure in MempoolCheck: ") + e.what());
+    } catch (...) {
+        SetUnhealthy("storage failure in MempoolCheck");
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction& tx)
+{
+    AssertLockHeld(cs_yellowback);
     State st(*db);
     bool spendsActive = false;
     for (const CTxIn& in : tx.vin) {                    // O(inputs) lookups, no SNAP (N6)
@@ -761,22 +776,15 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     if (IsAbandonedLocked()) return std::nullopt;       // L13: a sweep is an ordinary transaction under abandonment
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
-    // RED-1..4 at the next height over the two-transaction pseudo-block (§4.3): EvaluateBlock reads
-    // vtx[0] as the coinbase (TAG-1, TX-0). The RED verdict comes first so that a malformed spend is
+    // RED-1..5 at the next height by ProcessTx on a discarded overlay, exactly as FilterTemplate dry-runs a
+    // candidate (policy.cpp): RED-1..5 read Snapshots[ref <= H - 1] only, so no SNAP is computed here (N6) and
+    // a peer streaming garbage vault spends costs this node O(inputs) lookups plus the RED checks, not a
+    // ComputeSnapshot per candidate (audit A-1). The RED verdict comes first so that a malformed spend is
     // named by its rule (K7: mempool-check-failed:<verdict>), the expiry bound second.
-    CMutableTransaction cb;
-    cb.vin.resize(1);
-    cb.vin[0].prevout.SetNull();
-    cb.vin[0].scriptSig = CScript() << next;
-    CBlock pseudo;
-    pseudo.vtx.push_back(CTransaction(cb));
-    pseudo.vtx.push_back(tx);
     OverlayStateView overlay(*db);
-    BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0, &sigCache);   // RED-1's bundle fills the W8 cache
-    if (ev.blockInvalid) {
-        const std::string::size_type colon = ev.reason.find(':');
-        return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
-    }
+    State dry(overlay);
+    const TxOutcome out = ProcessTx(dry, p, tx, next, &sigCache);   // RED-1's bundle fills the W8 cache
+    if (out.redFailed) return out.log.verdict;
     // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW, so the spend
     // expires from every mempool (stock nodes enforce expiry) before RED-1's window closes.
     std::optional<FoundPayload> fp = FindPayload(tx);
@@ -809,7 +817,8 @@ void YellowbackIndex::RemoveInvalidVaultSpends(CTxMemPool& pool)
     std::vector<CTransaction> failing;
     for (CTxMemPool::indexed_transaction_set::const_iterator it = pool.mapTx.begin(); it != pool.mapTx.end(); ++it) {
         const CTransaction& tx = it->GetTx();
-        std::optional<std::string> why = MempoolCheckLocked(tx);
+        std::optional<std::string> why = MempoolCheckLocked(tx);   // its storage boundary (A-3): a failure admits and sets unhealthy
+        if (!healthy) return;                                      // keep every transaction, as BLK-3 keeps every block
         if (why.has_value()) {
             LogPrintf("yellowback: dropping vault spend %s from the mempool at the new tip: %s\n", tx.GetHash().ToString(), why.value());
             failing.push_back(tx);
@@ -1065,6 +1074,17 @@ bool YellowbackIndex::AttestationValidLocked(const Attestation& att, const CPubK
 bool YellowbackIndex::AddAttestation(const Attestation& att, std::string& reason, bool* replacedOut)
 {
     LOCK(cs_yellowback);
+    try {
+        return AddAttestationLocked(att, reason, replacedOut);
+    } catch (const std::exception& e) {                 // the RPC-facing storage boundary (audit A-3)
+        SetUnhealthy(std::string("storage failure in AddAttestation: ") + e.what());
+        throw std::runtime_error(std::string("yellowback-unhealthy: ") + unhealthyReason);
+    }
+}
+
+bool YellowbackIndex::AddAttestationLocked(const Attestation& att, std::string& reason, bool* replacedOut)
+{
+    AssertLockHeld(cs_yellowback);
     State st(*db);
     const int tip = TipHeight();
     const Params& p = ParamsAt(std::max(tip, 0));
@@ -1121,6 +1141,17 @@ bool YellowbackIndex::PoolFreshAt(uint16_t seq, int refHeight) const
 BuiltBundle YellowbackIndex::BuildBundleInfo(int refHeight, const std::vector<unsigned char>& selector)
 {
     LOCK(cs_yellowback);
+    try {
+        return BuildBundleInfoLocked(refHeight, selector);
+    } catch (const std::exception& e) {                 // the RPC-facing storage boundary (audit A-3)
+        SetUnhealthy(std::string("storage failure in BuildBundle: ") + e.what());
+        throw std::runtime_error(std::string("yellowback-unhealthy: ") + unhealthyReason);
+    }
+}
+
+BuiltBundle YellowbackIndex::BuildBundleInfoLocked(int refHeight, const std::vector<unsigned char>& selector)
+{
+    AssertLockHeld(cs_yellowback);
     BuiltBundle b;
     b.refHeight = refHeight;
     b.selector = selector;
