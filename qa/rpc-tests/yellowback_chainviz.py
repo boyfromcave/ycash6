@@ -260,19 +260,41 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         # a block with no Yellowback transaction is orphaned so the ledger of (e) is not disturbed
         self.mine(0, 2)
         old_tip = self.nodes[2].getbestblockhash()
+        old_height = self.nodes[2].getblockcount()
+        parent = self.nodes[2].getblockheader(old_tip)['previousblockhash']
+        # quiesce: every node's head in the model is old_tip before the fork, so each node's move
+        # off it is a reorg event `from` old_tip (not a stale head, nor an extension the model missed)
+        assert_equal(self.check_health()['tip']['hash'], old_tip)
         seq = self.api('/api/health')['seq']
         self.nodes[2].invalidateblock(old_tip)
         new_hashes = self.nodes[2].generate(3)
         sync_blocks(self.nodes)
         assert_equal(self.nodes[0].getbestblockhash(), new_hashes[-1])
-        reorgs = wait_for(lambda: [e for e in self.events('reorg', seq) if e['from'] == old_tip], MODEL_TIMEOUT, 'a reorg event from %s' % old_tip[:12])
-        # a poll can land between the three blocks, so `to` is whichever of them the node had
-        assert reorgs[0]['to'] in new_hashes, (reorgs[0], new_hashes)
-        assert reorgs[0]['depth'] >= 1, reorgs[0]
+
+        def onto_new_branch():
+            """Per node, the reorg event off old_tip that puts it on the new branch; None until all
+            three nodes have one. A poll can land between the three blocks, so `to` is whichever of
+            them the node had; on node 2 a poll can also land between invalidateblock and generate,
+            so its reorg is old_tip -> parent (depth 1, at old_tip's height - 1) and the move onto
+            the new branch is the later `tip` on that node (parent -> new_hashes[k] is an extension)."""
+            events = self.api('/api/events?since=%d' % seq)
+            found = {}
+            for e in events:
+                if e.get('kind') != 'reorg' or e['from'] != old_tip or e.get('node') in found:
+                    continue
+                if e['to'] in new_hashes or (e['to'] == parent and any(
+                        f.get('kind') == 'tip' and f['seq'] > e['seq'] and f.get('node') == e.get('node') and f['hash'] in new_hashes for f in events)):
+                    found[e.get('node')] = e
+            return found if len(found) == NODES else None
+        found = wait_for(onto_new_branch, MODEL_TIMEOUT, 'a reorg event from %s onto %s on each of %d nodes' % (old_tip[:12], [h[:12] for h in new_hashes], NODES))
+        reorgs = [found[n] for n in sorted(found)]
+        for e in reorgs:
+            assert e['depth'] >= 1, e
         side = wait_for(lambda: [b for b in self.api('/api/snapshot')['chain']['side'] if b['hash'] == old_tip], MODEL_TIMEOUT, '%s in chain.side' % old_tip[:12])
         assert side[0]['status'] in ('orphaned', 'side'), side[0]
-        print('(d) reorg: %s orphaned (%s), %d reorg event(s) on nodes %s, tip now %s' % (old_tip[:12], side[0]['status'], len(reorgs), sorted(e.get('node') for e in reorgs), new_hashes[-1][:12]))
-        self.check_health()
+        print('(d) reorg: %s (height %d) orphaned (%s), reorg events on nodes %s to %s, tip now %s'
+              % (old_tip[:12], old_height, side[0]['status'], sorted(found), ['parent' if e['to'] == parent else e['to'][:12] for e in reorgs], new_hashes[-1][:12]))
+        assert_equal(self.check_health()['tip']['hash'], new_hashes[-1])
 
     def check_revenue(self):
         """C4: the ledger rolled up over the whole chain; the enforcement fees it attributes are
