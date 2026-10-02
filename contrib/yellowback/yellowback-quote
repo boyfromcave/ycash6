@@ -26,11 +26,13 @@ Usage:
   yellowback-quote --conf yellowback-quote.toml                   # the daemon
   yellowback-quote --conf ... --once                              # one poll; exit 0 iff a quote was published (cron)
   yellowback-quote --conf ... --dry-run [--once]                  # aggregate and print, no RPC; exit 0 iff an aggregate exists
-  yellowback-quote --conf ... --mock-price /path/to/file          # tests and devnet: the file holds one USD price, re-read every poll
+  yellowback-quote --conf ... --mock-price /path/to/file          # regtest only (--i-know-this-is-not-regtest to insist): one USD price, re-read every poll
   yellowback-quote sources --conf ...                             # fetch every source once and show what resolved
 
 Configuration (TOML, Python >= 3.11):
   [node]   rpc_url = "http://127.0.0.1:8832"; rpc_cookie = "~/.ycash/.cookie" | rpc_user, rpc_password
+           (a file holding rpc_password must be mode 0600, or pass --insecure-config-permissions; plain http://
+           with credentials to a host other than loopback needs allow_insecure_rpc = true)
   [quote]  poll_seconds (30), fail_polls (2), twap_seconds (900), min_sources (3), min_venues (2),
            min_btc_sources (2), outlier_bps (1000), silence_seconds (120), fetch_timeout (15)
   [[sources]]          preset rows: name, kind, url, path, max_age, max_spread_bps, reject_paths, mask_bit, ...
@@ -54,7 +56,7 @@ LOG = logging.getLogger("yellowback-quote")
 EXIT_OK, EXIT_NOT_PUBLISHED, EXIT_BAD_CONFIG = 0, 1, 2
 QUOTE_DEFAULTS = {"fail_polls": 2}
 QUOTE_KEYS = ("fail_polls",) + yp.FEED_KEYS
-NODE_KEYS = {"rpc_url", "rpc_cookie", "rpc_user", "rpc_password", "rpc_timeout"}
+NODE_KEYS = {"rpc_url", "rpc_cookie", "rpc_user", "rpc_password", "rpc_timeout", "allow_insecure_rpc"}
 
 
 class ConfigError(Exception):
@@ -64,17 +66,23 @@ class ConfigError(Exception):
 # ---------------------------------------------------------------------------
 # configuration
 
-def load_config(path):
+def load_config(path, insecure_permissions=False):
     """Parse the TOML file into {node: {...}, quote: {...settings}, sources: [...], btc_usd_sources: [...]}.
-    Raises ConfigError on anything the daemon could not run with."""
+    Raises ConfigError on anything the daemon could not run with, including (audit D-7) a file that
+    holds rpc_password and is readable by group or others, unless `insecure_permissions`."""
     try:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
+            mode = os.fstat(f.fileno()).st_mode
     except OSError as e:
         raise ConfigError("cannot read %s: %s" % (path, e))
     except tomllib.TOMLDecodeError as e:
         raise ConfigError("%s: %s" % (path, e))
-    return validate_config(raw)
+    cfg = validate_config(raw)
+    if cfg["node"].get("rpc_password") and not insecure_permissions and os.name == "posix" and mode & 0o077:
+        raise ConfigError("%s holds rpc_password but is readable by group or others (mode %04o): chmod 600 it, "
+                          "or pass --insecure-config-permissions to run anyway" % (path, mode & 0o7777))
+    return cfg
 
 
 def validate_config(raw):
@@ -93,6 +101,16 @@ def validate_config(raw):
         raise ConfigError("[node]: rpc_password needs rpc_user")
     if node.get("rpc_cookie"):
         node["rpc_cookie"] = os.path.expanduser(node["rpc_cookie"])
+    url = node.get("rpc_url")
+    if url is not None and not isinstance(url, str):
+        raise ConfigError("[node] rpc_url must be a string")
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        raise ConfigError("[node] rpc_url must start with http:// or https:// (got %r)" % url)
+    has_credentials = bool(node.get("rpc_user") or node.get("rpc_cookie") or (url and "@" in url))
+    if (url and url.startswith("http://") and has_credentials and not yp.is_loopback_url(url)
+            and not node.get("allow_insecure_rpc")):
+        raise ConfigError("[node] rpc_url %r would send the node's credentials as cleartext Basic auth to a host "
+                          "that is not loopback: use https://, an SSH tunnel to 127.0.0.1, or set allow_insecure_rpc = true" % url)
     quote = dict(raw.get("quote") or {})
     bad = set(quote) - set(QUOTE_KEYS)
     if bad:
@@ -116,6 +134,17 @@ def make_node(node_cfg):
         raise ConfigError("[node] rpc_url is required (not for --dry-run)")
     return yp.Node(url, timeout=int(node_cfg.get("rpc_timeout", 30)), user=node_cfg.get("rpc_user"),
                    password=node_cfg.get("rpc_password"), cookie=node_cfg.get("rpc_cookie"))
+
+
+def mock_network_check(node):
+    """Audit D-11: `--mock-price` is for regtest; anywhere else the file's number would be pushed as
+    the pool's quote. Returns (ok, network); ok is None when the node did not answer."""
+    try:
+        network = node.call("yed_getinfo").get("network")
+    except Exception as e:                       # connection refused, auth, not a Yellowback node ...
+        LOG.error("yed_getinfo failed: %s: %s", e.__class__.__name__, e)
+        return None, None
+    return network == "regtest", network
 
 
 def make_feed(cfg, mock_price=None):
@@ -268,7 +297,11 @@ def parse_args(argv):
     ap.add_argument("command", nargs="?", default="run", choices=["run", "sources"])
     ap.add_argument("--conf", required=True, help="TOML configuration file")
     ap.add_argument("--mock-price", dest="mock_price", metavar="FILE",
-                    help="TEST/DEVNET: read one USD price from FILE every poll instead of the sources (/dev/stdin allowed)")
+                    help="TEST/DEVNET: read one USD price from FILE every poll instead of the sources (/dev/stdin allowed); regtest only")
+    ap.add_argument("--i-know-this-is-not-regtest", dest="allow_mock_off_regtest", action="store_true",
+                    help="push --mock-price although the node is not on regtest")
+    ap.add_argument("--insecure-config-permissions", dest="insecure_permissions", action="store_true",
+                    help="run although the configuration file holds rpc_password and is group/world-readable")
     ap.add_argument("--once", action="store_true", help="one poll; exit 0 iff a quote was published (1 otherwise)")
     ap.add_argument("--dry-run", dest="dry_run", action="store_true", help="one poll: aggregate and print as JSON, no RPC; exit 0 iff an aggregate exists")
     ap.add_argument("--log-level", dest="log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -281,7 +314,7 @@ def main(argv=None, node_factory=make_node, feed_factory=make_feed, sleep=time.s
     logging.basicConfig(level=logging.DEBUG if args.verbose else getattr(logging, args.log_level),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
-        cfg = load_config(args.conf)
+        cfg = load_config(args.conf, insecure_permissions=args.insecure_permissions)
         feed = feed_factory(cfg, args.mock_price)
         if args.command == "sources":
             return sources_command(feed)
@@ -289,6 +322,19 @@ def main(argv=None, node_factory=make_node, feed_factory=make_feed, sleep=time.s
     except ConfigError as e:
         LOG.error("bad configuration: %s", e)
         return EXIT_BAD_CONFIG
+    if args.mock_price and not args.dry_run and not args.allow_mock_off_regtest:
+        while True:
+            ok, network = mock_network_check(node)
+            if ok:
+                break
+            if ok is False:
+                LOG.error("bad configuration: --mock-price on network %r would push the file's number as this pool's "
+                          "quote; --mock-price is for regtest (pass --i-know-this-is-not-regtest to insist)", network)
+                return EXIT_BAD_CONFIG
+            if args.once:
+                return EXIT_NOT_PUBLISHED
+            LOG.error("cannot tell the node's network; retrying in %d s", cfg["quote"]["poll_seconds"])
+            sleep(cfg["quote"]["poll_seconds"])
     agent = QuoteAgent(feed, node, fail_polls=cfg["quote"]["fail_polls"], dry_run=args.dry_run)
     if args.dry_run:
         agent.poll()

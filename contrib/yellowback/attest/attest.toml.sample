@@ -9,6 +9,9 @@
 # only) and publishes the returned 74 bytes; `subscribe` pushes what it hears into its own
 # node's pool. Nothing inbound: no listening socket, no TLS server, no domain.
 
+# This file is read by the agent only. If it holds rpc_password, keep it mode 0600
+# (`chmod 600 attest.toml`): the agent refuses a group/world-readable one
+# (--insecure-config-permissions overrides). The cookie file needs no copy of the secret here.
 [node]
 rpc_url = "http://127.0.0.1:8832"
 # Either the node's cookie file (re-read on every call) ...
@@ -17,6 +20,9 @@ rpc_cookie = "~/.ycash/.cookie"
 # rpc_user = "ycashrpc"
 # rpc_password = "change-me"
 # rpc_timeout = 30
+# Plain http:// carries the credentials as cleartext Basic auth. The agent refuses that to any host
+# other than loopback; run beside the node, tunnel to 127.0.0.1, or use https://. To insist:
+# allow_insecure_rpc = true
 
 [attest]
 seq = 0                  # REQUIRED for `attest`: your registration sequence number (yed_listattestors after yed_registerattestor)
@@ -90,6 +96,9 @@ kind = "iroh"                    # "iroh" (production) or "dir" (tests and the d
 # path = "/var/lib/yellowback/attest-bus"   # dir transport: <seq>-<citedHeight>.att files
 
 [subscribe]
-listattestors_seconds = 60       # refresh the registered set (messages with an unknown seq are dropped before the RPC)
+listattestors_seconds = 60       # refresh the registered set and the node's tip (unknown seq / far-off citedHeight: dropped before the RPC)
 # endpoints = ["https://attestor.example/yellowback/attestation"]   # optional HTTPS second path: raw 74 bytes or hex
 # endpoints_seconds = 30
+# allow_insecure_endpoints = false   # http:// endpoints are refused except on loopback; true to insist
+# seq_burst = 8                  # per-seq token bucket: frames a seq may send at once ...
+# seq_refill_seconds = 15        # ... and the seconds per further frame (one legitimate frame per every_blocks blocks)

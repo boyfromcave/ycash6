@@ -250,11 +250,18 @@ def minting_nodes(state):
 def pool_address(state, node):
     return state["pool_addresses"][all_pools(state).index(node)]
 
+def write_private(path, text):
+    """Write an agent configuration 0600: it holds the node's RPC password and the agents refuse a
+    group/world-readable one (audit D-7)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as file: file.write(text)
+    os.chmod(path, 0o600)
+
 def start_agent(directory, node):
     """One yellowback-quote per pool, detached, reading the shared mock price file; returns its pid."""
     user, password = rpc_auth_pair(node)
     conf = os.path.join(directory, "quote-%d.toml" % node)
-    with open(conf, "w") as file: file.write(AGENT_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password})
+    write_private(conf, AGENT_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password})
     return _spawn(directory, "quote-%d" % node, [sys.executable, AGENT, "--conf", conf, "--mock-price", mock_path(directory)])
 def stop_agents(state, only=None):
     for node, pid in agent_pids(state).items():
@@ -338,7 +345,7 @@ def start_attest_agent(directory, node, seq):
     """`yellowback-attest attest` beside attestor `node`, reading that attestor's own mock price
     file so `attestor N price USD` can diverge one of them."""
     conf = os.path.join(directory, "attest-%d.toml" % node)
-    with open(conf, "w") as file: file.write(attest_conf_text(directory, node, seq))
+    write_private(conf, attest_conf_text(directory, node, seq))
     return _spawn(directory, "attest-%d" % node,
                   [ATTEST_AGENT, "--conf", conf, "attest", "--mock-price", attest_mock_path(directory, node)])
 
@@ -346,9 +353,8 @@ def start_subscriber(directory, node=USER):
     """`yellowback-attest subscribe` beside a minting node: the dir bus into yed_addattestation."""
     user, password = rpc_auth_pair(node)
     conf = os.path.join(directory, "subscribe-%d.toml" % node)
-    with open(conf, "w") as file:
-        file.write(SUBSCRIBE_CONF % {"node": node, "port": rpc_port(node), "user": user,
-                                     "password": password, "bus": bus_path(directory)})
+    write_private(conf, SUBSCRIBE_CONF % {"node": node, "port": rpc_port(node), "user": user,
+                                          "password": password, "bus": bus_path(directory)})
     return _spawn(directory, "subscribe-%d" % node, [ATTEST_AGENT, "--conf", conf, "subscribe"])
 
 def stop_attest_agents(state, only=None):
@@ -784,8 +790,8 @@ def up(args):
                 nodes[USER].sendtoaddress(nodes[LIQUIDATOR].getnewaddress(), LIQUIDATOR_FUND_YEC // FUND_COINS)
             if role == "attestor":
                 nodes[USER].sendtoaddress(nodes[ATTESTOR4].getnewaddress(), SEAT_ATTESTOR_FUND_YEC)
-                with open(os.path.join(directory, "attest-%d.toml" % ATTESTOR4), "w") as file:
-                    file.write(attest_conf_text(directory, ATTESTOR4, "0   # <- REPLACE with your seq from yed_listattestors once your registration confirms"))
+                write_private(os.path.join(directory, "attest-%d.toml" % ATTESTOR4),
+                              attest_conf_text(directory, ATTESTOR4, "0   # <- REPLACE with your seq from yed_listattestors once your registration confirms"))
                 write_attest_mock(directory, ATTESTOR4, args.price)
             sync_mempools(nodes)
             nodes[auto[0]].generate(1); sync_blocks(nodes); wait(nodes, state)

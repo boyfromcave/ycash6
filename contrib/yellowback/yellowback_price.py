@@ -79,6 +79,22 @@ def http_read_capped(resp, cap):
             raise ValueError("reply body exceeds the %d byte cap" % cap)
 
 
+def is_loopback_url(url):
+    """The host of an http(s) URL is loopback (localhost, 127.0.0.0/8, ::1)."""
+    import ipaddress
+    import urllib.parse
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def reject_json_constant(name):
     """`json.loads(parse_constant=...)`: bare NaN / Infinity / -Infinity are not JSON and never a price."""
     raise ValueError("non-finite JSON literal %s" % name)

@@ -50,23 +50,26 @@ path = "price"
 
 
 class FakeNode:
-    """Records yed_setquote calls; `fail` makes the next call(s) raise."""
+    """Records yed_setquote calls; `fail` makes the next call(s) raise; `network` is yed_getinfo's."""
 
-    def __init__(self):
+    def __init__(self, network="regtest"):
         self.calls = []
         self.fail = None          # an exception instance to raise, or None
+        self.network = network
 
     def call(self, method, *params):
         self.calls.append((method,) + params)
         if self.fail is not None:
             e, self.fail = self.fail, None
             raise e
+        if method == "yed_getinfo":
+            return {"network": self.network, "height": 100}
         micro, mask = params
         return {"priceMicroUsd": micro, "sourceMask": mask, "receivedAt": 1_788_673_100,
                 "nextTag": {"kind": "quote" if micro else "signal", "signal": True, "payoutAddress": "s1test"}}
 
     def setquotes(self):
-        return [(m, k) for name, m, k in self.calls if name == "yed_setquote"]
+        return [c[1:] for c in self.calls if c[0] == "yed_setquote"]
 
 
 class StubFeed:
@@ -88,9 +91,10 @@ class StubFeed:
         return {"live_sources": 0 if self.current is None else 3, "live_venues": 0 if self.current is None else 2}
 
 
-def write(path, text):
+def write(path, text, mode=0o600):
     with open(path, "w") as f:
         f.write(text)
+    os.chmod(path, mode)            # the configs here hold rpc_password; the agent refuses 0644 (D-7)
 
 
 class AgentTests(unittest.TestCase):
@@ -208,7 +212,11 @@ class MainTests(unittest.TestCase):
         self.node.fail = ConnectionRefusedError("refused")
         write(self.mock, "0.05")
         code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock)
-        self.assertEqual(code, 1)                                 # RPC failure: not published
+        self.assertEqual(code, 1)                                 # RPC failure (at the network check): not published
+        self.assertEqual(self.node.setquotes(), [])
+        self.node.fail = ConnectionRefusedError("refused")
+        code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock, "--i-know-this-is-not-regtest")
+        self.assertEqual(code, 1)                                 # RPC failure at yed_setquote: not published
 
     def test_once_real_sources_unreachable(self):
         # the MINIMAL config's only source points at nothing: no aggregate, exit 1, no RPC
@@ -290,6 +298,83 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.node.setquotes(), [(50000, 0), (50000, 0)])
         self.assertTrue(all(0 < d <= 1 for d in polls))
+
+    def test_mock_price_is_regtest_only(self):
+        # Rule: audit D-11 -- the mock file is never pushed on a network other than regtest
+        for network in ("main", "test"):
+            node = FakeNode(network)
+            code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock, node=node)
+            self.assertEqual(code, 2, network)
+            self.assertEqual(node.setquotes(), [])
+            self.assertEqual([c[0] for c in node.calls], ["yed_getinfo"])
+            code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock,
+                                    "--i-know-this-is-not-regtest", node=node)
+            self.assertEqual(code, 0, network)
+            self.assertEqual(node.setquotes(), [(50000, 0)])
+        # a node that cannot be asked: --once gives up (1); the daemon keeps asking until it answers
+        node = FakeNode()
+        node.fail = ConnectionRefusedError("refused")
+        code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock, node=node)
+        self.assertEqual((code, node.setquotes()), (1, []))
+        node = FakeNode()
+        node.fail = ConnectionRefusedError("refused")
+        polls = []
+
+        def sleep(delay):
+            polls.append(delay)
+            if len(polls) == 3:
+                raise yq._Stop()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = yq.main(["--conf", self.conf, "--mock-price", self.mock], node_factory=lambda cfg: node, sleep=sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(node.setquotes(), [(50000, 0), (50000, 0)])   # one retry of yed_getinfo, then two polls
+        # --dry-run never asks the node; the sources path does not involve the mock
+        code, _ = self.run_main("--conf", self.conf, "--dry-run", "--mock-price", self.mock, node=FakeNode("main"))
+        self.assertEqual(code, 0)
+
+    def test_config_file_permissions(self):
+        # Rule: audit D-7 -- a TOML holding rpc_password must not be group/world-readable
+        write(self.conf, MINIMAL, mode=0o644)
+        code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock)
+        self.assertEqual(code, 2)
+        with self.assertRaises(yq.ConfigError) as cm:
+            yq.load_config(self.conf)
+        self.assertIn("chmod 600", str(cm.exception))
+        self.assertTrue(yq.load_config(self.conf, insecure_permissions=True))
+        code, _ = self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock, "--insecure-config-permissions")
+        self.assertEqual(code, 0)
+        write(self.conf, MINIMAL, mode=0o640)
+        self.assertEqual(self.run_main("--conf", self.conf, "--once", "--mock-price", self.mock)[0], 2)
+        # a cookie-based file carries no secret of its own: any mode
+        cookie = os.path.join(self.tmp.name, ".cookie")
+        write(cookie, "__cookie__:secret\n")
+        write(self.conf, MINIMAL.replace('rpc_user = "u"\nrpc_password = "p"\n', 'rpc_cookie = "%s"\n' % cookie), mode=0o644)
+        self.assertTrue(yq.load_config(self.conf))
+        # the shipped sample is cookie-based and loads as it is checked in
+        self.assertTrue(yq.load_config(SAMPLE))
+
+    def test_insecure_rpc_needs_an_explicit_opt_in(self):
+        # Rule: audit D-7 -- Basic auth over plain http:// to a host that is not loopback
+        for url in ("http://10.0.0.5:8832", "http://node.example:8832"):
+            text = MINIMAL.replace("http://127.0.0.1:18232", url)
+            write(self.conf, text)
+            with self.assertRaises(yq.ConfigError) as cm:
+                yq.load_config(self.conf)
+            self.assertIn("cleartext", str(cm.exception))
+            write(self.conf, text.replace('rpc_password = "p"\n', 'rpc_password = "p"\nallow_insecure_rpc = true\n'))
+            self.assertTrue(yq.load_config(self.conf))
+            write(self.conf, text.replace("http://", "https://"))
+            self.assertTrue(yq.load_config(self.conf))
+        write(self.conf, MINIMAL.replace("http://127.0.0.1:18232", "http://u:p@10.0.0.5:8832").replace('rpc_user = "u"\nrpc_password = "p"\n', ""))
+        self.assertRaises(yq.ConfigError, yq.load_config, self.conf)
+        for ok in ("http://127.0.0.1:18232", "http://localhost:18232", "http://[::1]:18232", "http://10.0.0.5:8832"):
+            text = MINIMAL.replace("http://127.0.0.1:18232", ok)
+            if ok.startswith("http://10."):
+                text = text.replace('rpc_user = "u"\nrpc_password = "p"\n', "")   # no credentials: nothing to leak
+            write(self.conf, text)
+            self.assertTrue(yq.load_config(self.conf), ok)
+        write(self.conf, MINIMAL.replace("http://127.0.0.1:18232", "ftp://127.0.0.1:18232"))
+        self.assertRaises(yq.ConfigError, yq.load_config, self.conf)
 
     def test_sources_subcommand_without_network(self):
         code, out = self.run_main("sources", "--conf", self.conf)

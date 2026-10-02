@@ -5,15 +5,22 @@
 #
 # The agent pushes `yed_setquote <priceMicroUsd> <sourceMask>` into the pool's ycashd.
 # It needs the node's RPC and nothing else: no listening socket, nothing inbound.
+#
+# This file is read by the agent only. If it holds rpc_password, keep it mode 0600
+# (`chmod 600 yellowback-quote.toml`): the agent refuses a group/world-readable one
+# (--insecure-config-permissions overrides). The cookie file needs no copy of the secret here.
 
 [node]
 rpc_url = "http://127.0.0.1:8832"
-# Either the node's cookie file (default location shown) ...
-# rpc_cookie = "~/.ycash/.cookie"
-# ... or rpcuser / rpcpassword from ycash.conf:
-rpc_user = "ycashrpc"
-rpc_password = "change-me"
+# Either the node's cookie file (default location shown; re-read on every call) ...
+rpc_cookie = "~/.ycash/.cookie"
+# ... or rpcuser / rpcpassword from ycash.conf (then chmod 600 this file):
+# rpc_user = "ycashrpc"
+# rpc_password = "change-me"
 # rpc_timeout = 30
+# Plain http:// carries the credentials as cleartext Basic auth. The agent refuses that to any host
+# other than loopback; run beside the node, tunnel to 127.0.0.1, or use https://. To insist:
+# allow_insecure_rpc = true
 
 [quote]
 poll_seconds = 30        # aggregate and push every 30 s
