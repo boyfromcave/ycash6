@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-const EXIT_BAD_CONFIG: i32 = 2;
+pub const EXIT_BAD_CONFIG: i32 = 2;
 
 #[derive(Parser)]
 #[command(name = "yellowback-attest", version, about = "Ycash Yellowback attestor agent")]
@@ -34,6 +34,9 @@ struct Cli {
     /// Log filter (RUST_LOG syntax), e.g. info, debug, yellowback_attest=debug
     #[arg(long, global = true, default_value = "info")]
     log_level: String,
+    /// Run although the configuration file holds rpc_password and is group/world-readable
+    #[arg(long, global = true)]
+    insecure_config_permissions: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -45,6 +48,9 @@ enum Command {
         /// TEST/DEVNET: read one USD price from FILE every poll instead of the sources
         #[arg(long, value_name = "FILE")]
         mock_price: Option<PathBuf>,
+        /// Allow --mock-price although the node is not on regtest (you will attest that number)
+        #[arg(long, requires = "mock_price")]
+        i_know_this_is_not_regtest: bool,
     },
     /// Join the topic and push every plausible attestation into the node's pool (forever)
     Subscribe,
@@ -73,7 +79,7 @@ async fn main() {
         tracing::error!("bad configuration: --conf FILE is required");
         std::process::exit(EXIT_BAD_CONFIG);
     };
-    let cfg = match config::load(&conf) {
+    let cfg = match config::load(&conf, cli.insecure_config_permissions) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("bad configuration: {e}");
@@ -81,8 +87,11 @@ async fn main() {
         }
     };
     let result: anyhow::Result<i32> = match cli.command {
-        Command::Attest { mock_price } => match attest::Attestor::new(cfg, mock_price) {
-            Ok(a) => a.run().await.map(|_| 0),
+        Command::Attest {
+            mock_price,
+            i_know_this_is_not_regtest,
+        } => match attest::Attestor::new(cfg, mock_price, i_know_this_is_not_regtest) {
+            Ok(a) => a.run().await,
             Err(e) => {
                 tracing::error!("bad configuration: {e}");
                 std::process::exit(EXIT_BAD_CONFIG);

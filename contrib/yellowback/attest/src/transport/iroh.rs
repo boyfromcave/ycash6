@@ -52,16 +52,24 @@ fn load_or_create_secret(path: Option<&Path>) -> anyhow::Result<SecretKey> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("secret_key_file: creating {}", parent.display()))?;
             }
-            std::fs::write(path, hex::encode(key.to_bytes()))
-                .with_context(|| format!("secret_key_file {}", path.display()))?;
+            // Created 0600 from the first instant and never over an existing file (audit D-8).
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
             }
+            let mut f = opts
+                .open(path)
+                .with_context(|| format!("secret_key_file {}", path.display()))?;
+            std::io::Write::write_all(&mut f, hex::encode(key.to_bytes()).as_bytes())
+                .and_then(|_| f.sync_all())
+                .with_context(|| format!("secret_key_file {}", path.display()))?;
             tracing::info!("iroh: new secret key written to {}", path.display());
             Ok(key)
         }
@@ -222,10 +230,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("keys/iroh.key");
         let a = load_or_create_secret(Some(&p)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         let b = load_or_create_secret(Some(&p)).unwrap();
         assert_eq!(a.public(), b.public());
         std::fs::write(&p, "zz").unwrap();
         assert!(load_or_create_secret(Some(&p)).is_err());
+        // an unwritable parent is an error, not a silently ephemeral identity
+        let file_as_dir = dir.path().join("keys/iroh.key/under.key");
+        assert!(load_or_create_secret(Some(&file_as_dir)).is_err());
     }
 
     /// Two endpoints on one machine, no relay: publish on one, receive on the other.

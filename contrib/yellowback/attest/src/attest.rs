@@ -130,12 +130,14 @@ pub struct Attestor {
     pub fetcher: Fetcher,
     pub cadence: Cadence,
     pub mock: Option<PathBuf>,
+    /// `--i-know-this-is-not-regtest`: attest the mock file on a network other than regtest.
+    pub allow_mock_off_regtest: bool,
     pub seq: u16,
     pub published: u64,
 }
 
 impl Attestor {
-    pub fn new(cfg: Config, mock: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn new(cfg: Config, mock: Option<PathBuf>, allow_mock_off_regtest: bool) -> anyhow::Result<Self> {
         let seq = cfg
             .attest
             .seq
@@ -158,9 +160,16 @@ impl Attestor {
             fetcher,
             cadence,
             mock,
+            allow_mock_off_regtest,
             seq,
             published: 0,
         })
+    }
+
+    /// Audit D-11: `--mock-price` exists for regtest and demos; on any other network the number
+    /// in the file would be signed and published as this attestor's price.
+    pub fn mock_allowed_on(&self, network: &str) -> bool {
+        self.mock.is_none() || network == "regtest" || self.allow_mock_off_regtest
     }
 
     /// `yed_getinfo` until the node answers; returns `(network, height)`.
@@ -270,8 +279,17 @@ impl Attestor {
         Tick::Published(att)
     }
 
-    pub async fn run(mut self) -> anyhow::Result<()> {
+    /// The exit code: the loop runs until a signal (0); 2 is a bad configuration found at runtime.
+    pub async fn run(mut self) -> anyhow::Result<i32> {
         let network = self.wait_network().await;
+        if !self.mock_allowed_on(&network) {
+            tracing::error!(
+                "bad configuration: --mock-price on network {network:?} would sign and publish the file's number as \
+                 seq {}'s price; --mock-price is for regtest (pass --i-know-this-is-not-regtest to insist)",
+                self.seq
+            );
+            return Ok(crate::EXIT_BAD_CONFIG);
+        }
         let mut transport = transport::open(&self.cfg.transport, &network).await?;
         tracing::info!(
             "yellowback-attest attest: seq {}, network {network}, every {} blocks, ref_lag {}, poll {} s, transport {}{}",
@@ -293,7 +311,7 @@ impl Attestor {
             }
             tokio::select! {
                 _ = tokio::time::sleep(poll) => {}
-                _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(()); }
+                _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
             }
         }
     }
@@ -469,7 +487,7 @@ mod tests {
             dir.path().join("bus").display()
         );
         let cfg = config::parse(&text).unwrap();
-        let mut a = Attestor::new(cfg.clone(), Some(mock.clone())).unwrap();
+        let mut a = Attestor::new(cfg.clone(), Some(mock.clone()), false).unwrap();
         assert_eq!(a.wait_network().await, "regtest");
         let mut t = DirTransport::open(&dir.path().join("bus")).unwrap();
         let mut sub = DirTransport::open(&dir.path().join("bus"))
@@ -514,7 +532,7 @@ mod tests {
             dir.path().display()
         ))
         .unwrap();
-        let mut a = Attestor::new(cfg, Some(mock)).unwrap();
+        let mut a = Attestor::new(cfg, Some(mock), false).unwrap();
         let mut t = DirTransport::open(dir.path()).unwrap();
         assert_eq!(a.tick(10, &mut t).await, Tick::RpcError);
         // the tick was not consumed: the next poll at the same height tries again
@@ -526,12 +544,35 @@ mod tests {
     fn attest_needs_seq_and_sources() {
         let cfg = config::parse("[node]\nrpc_url = \"http://h:1\"\n[transport]\nkind = \"dir\"\npath = \"/tmp/x\"\n")
             .unwrap();
-        assert!(Attestor::new(cfg.clone(), None).is_err());
+        assert!(Attestor::new(cfg.clone(), None, false).is_err());
         let cfg = config::parse(
             "[node]\nrpc_url = \"http://h:1\"\n[attest]\nseq = 1\n[transport]\nkind = \"dir\"\npath = \"/tmp/x\"\n",
         )
         .unwrap();
-        assert!(Attestor::new(cfg.clone(), None).is_err());
-        assert!(Attestor::new(cfg, Some(PathBuf::from("/dev/null"))).is_ok());
+        assert!(Attestor::new(cfg.clone(), None, false).is_err());
+        assert!(Attestor::new(cfg, Some(PathBuf::from("/dev/null")), false).is_ok());
+    }
+
+    /// Audit D-11: the mock price is refused off regtest unless the operator insists.
+    #[tokio::test]
+    async fn mock_price_is_regtest_only() {
+        let m = MockNode::start(None, |_, _| Ok(json!({"network": "main", "height": 10})));
+        let dir = tempfile::tempdir().unwrap();
+        let mock = dir.path().join("price");
+        std::fs::write(&mock, "1.0").unwrap();
+        let text = format!(
+            "[node]\nrpc_url = \"{}\"\n[attest]\nseq = 1\n[transport]\nkind = \"dir\"\npath = \"{}\"\n",
+            m.url,
+            dir.path().display()
+        );
+        let a = Attestor::new(config::parse(&text).unwrap(), Some(mock.clone()), false).unwrap();
+        assert!(!a.mock_allowed_on("main"));
+        assert!(!a.mock_allowed_on("test"));
+        assert!(a.mock_allowed_on("regtest"));
+        assert_eq!(a.run().await.unwrap(), crate::EXIT_BAD_CONFIG);
+        let a = Attestor::new(config::parse(&text).unwrap(), Some(mock), true).unwrap();
+        assert!(a.mock_allowed_on("main"));
+        let a = Attestor::new(config::parse(&text).unwrap(), None, false);
+        assert!(a.is_err()); // no sources and no mock: still a configuration error
     }
 }
