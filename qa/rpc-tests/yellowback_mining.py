@@ -71,10 +71,11 @@ def gbt_hashes(gbt):
     return [t['hash'] for t in gbt['transactions']]
 
 
-def send_locked(node, hex_):
+def send_locked(node, hex_, allow_yed_burn=False):
     """``sendrawtransaction`` then lock the inputs: the wallet's ``listunspent`` does not see a raw
-    transaction's inputs as spent, so the next hand-built one would pick the same coin."""
-    txid = node.sendrawtransaction(hex_)
+    transaction's inputs as spent, so the next hand-built one would pick the same coin.
+    ``allow_yed_burn``: the H7 guard refuses a payload reassigning fewer cents than it spends (audit C-7)."""
+    txid = node.sendrawtransaction(hex_, False, allow_yed_burn)
     node.lockunspent(False, [{'txid': i.prev_txid, 'vout': i.prev_n} for i in ym.tx_from_hex(hex_).vin])
     return txid
 
@@ -439,7 +440,8 @@ class YellowbackMiningTest(YellowbackTestFramework):
         prev = [{'txid': a_txid, 'vout': 1, 'scriptPubKey': bytes_to_hex_str(ym.p2pkh_script(ym.hash160(hex_str_to_bytes(a_owner)))),
                  'amount': TOKEN_VALUE / 1e8}]
         burn_hex = self.build_transfer(user, [token_a], [4_000], prev)
-        burn_txid = send_locked(user, burn_hex)
+        rpc_error('yed-burn-refused', user.sendrawtransaction, burn_hex)        # H7 (audit C-7): 6,000 of 10,000 would burn
+        burn_txid = send_locked(user, burn_hex, allow_yed_burn=True)
         self.sync_all()
         in_tpl = gbt_hashes(self.nodes[2].getblocktemplate())
         assert burn_txid not in in_tpl and void_txid not in in_tpl

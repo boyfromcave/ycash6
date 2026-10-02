@@ -538,16 +538,17 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
     YellowbackIndex* index = yw.Index();
     if (!index) return false;
 
-    // A payload that assigns cents to an output reassigns the YED; a REDEEM's burn is its own
-    // rule (RED-2) and its change assignment is an assignment like any other. No payload at all,
-    // or a payload with no assignments, means the YED simply disappears.
-    // A REDEEM payload (a vault spend: a redemption, a claim) is overlay business and is judged
-    // by MP-1, never here — its burn is the rule, not an accident. A TRANSFER payload reassigns
-    // the YED unless it assigns nothing at all. Everything else (no payload, an unreadable one, a
-    // MINT payload) leaves the spent cents with nowhere to go: the state machine burns them.
+    // What the payload reassigns: the sum of a TRANSFER's (or a vault-less REDEEM's) assignments. A REDEEM
+    // payload that spends a vault is a redemption or a claim: its burn is the rule (RED-2) and MP-1 judges it,
+    // never this guard. Everything else (no payload, an unreadable one, a MINT payload, a REDEEM payload with
+    // no vault input, a TRANSFER assigning less than it spends) leaves cents with nowhere to go: the state
+    // machine burns them (XFER-2), so the guard compares the assigned sum with this wallet's spent sum
+    // (audit C-7) rather than asking whether any assignment exists.
     std::optional<FoundPayload> fp = FindPayload(tx);
-    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) return false;
-    if (fp.has_value() && fp->payload.type == PayloadType::TRANSFER && !fp->payload.assignments.empty()) return false;
+    int64_t assigned = 0;
+    if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
+        for (const Assignment& a : fp->payload.assignments) assigned += a.cents;
+    }
 
     int64_t cents = 0;
     std::string outpoints;
@@ -557,6 +558,7 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
         if (!index->IsHealthy()) return false;
         State st(index->View());
         for (const CTxIn& in : tx.vin) {
+            if (fp.has_value() && fp->payload.type == PayloadType::REDEEM && st.GetVault(in.prevout).has_value()) return false;   // a vault spend: MP-1's
             std::optional<TokenRecord> t = st.GetToken(in.prevout);
             if (!t.has_value()) continue;
             if (!yw.IsMineScript(t->scriptPubKey)) continue;
@@ -565,9 +567,9 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
             outpoints += in.prevout.ToString();
         }
     }
-    if (cents <= 0) return false;
-    reason = strprintf("this transaction spends %d cents of this wallet's YED (%s) and its payload reassigns none of it,"
-                       " so that YED would be destroyed.", cents, outpoints);
+    if (cents <= 0 || assigned >= cents) return false;
+    reason = strprintf("this transaction spends %d cents of this wallet's YED (%s) and its payload reassigns %d of them,"
+                       " so %d cents of YED would be destroyed.", cents, outpoints, assigned, cents - assigned);
     return true;
 }
 

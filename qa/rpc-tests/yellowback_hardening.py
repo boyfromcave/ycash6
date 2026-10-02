@@ -13,14 +13,16 @@ Written before the code it exercises (H12)."""
 import os
 from decimal import Decimal
 
-from test_framework.util import (assert_equal, assert_start_raises_init_error, start_node,
+from test_framework.util import (assert_equal, assert_start_raises_init_error, bytes_to_hex_str, start_node,
                                  stop_node, bitcoind_processes)
+from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import wallet_mint
 from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_util import (
     MIN_OUTPUT,
     POOLS,
     REF_LAG,
+    REF_WINDOW,
     TOKEN_VALUE,
     YELLOWBACK_FEE,
     YellowbackTestFramework,
@@ -210,6 +212,29 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         assert_rpc_error('yed-burn-refused', user.sendrawtransaction, signed)
         assert_rpc_error('yed-burn-refused', user.sendrawtransaction, signed, False)
         assert_equal(user.getrawmempool(), [])
+
+# Rule: H7
+        # Audit C-7: the guard compares the payload's assigned cents with the wallet's spent cents. A hand-built
+        # TRANSFER that reassigns 9,900 of 10,000 cents, and a REDEEM payload with no vault input (a TRANSFER in
+        # all but name), are both refused; the under-assignment is named in the message.
+        print('h7_under_assigned_transfer_and_vaultless_redeem_are_refused')
+        dest = user.yed_getnewaddress()
+        yec = [u for u in user.listunspent(1) if int(Decimal(str(u['amount'])) * COIN) > 10 * TOKEN_VALUE][0]
+        yec_zat = int(Decimal(str(yec['amount'])) * COIN)
+        expiry = user.getblockcount() + REF_WINDOW
+        for payload in (ym.encode_transfer([(0, 9900)]), ym.encode_redeem(user.getblockcount() - REF_LAG, 0xFF, [(0, 9900)])):
+            vin = [(coin['txid'], coin['vout'], b'', 0xFFFFFFFF), (yec['txid'], yec['vout'], b'', 0xFFFFFFFF)]
+            vout = [(TOKEN_VALUE, ym.p2pkh_script(ym.address_key_hash(dest))),
+                    (0, bytes([ym.OP_RETURN]) + ym.push(payload)),
+                    (yec_zat - YELLOWBACK_FEE, ym.p2pkh_script(ym.address_key_hash(user.getnewaddress())))]
+            under = user.signrawtransaction(bytes_to_hex_str(ym.serialize_tx_v4(vin, vout, 0, expiry)))['hex']
+            msg = assert_rpc_error('yed-burn-refused', user.sendrawtransaction, under)
+            assert 'reassigns 9900 of them, so 100 cents' in msg, msg
+        assert_equal(user.getrawmempool(), [])
+        full = ym.encode_transfer([(0, 10000)])
+        vout[1] = (0, bytes([ym.OP_RETURN]) + ym.push(full))
+        ok_hex = user.signrawtransaction(bytes_to_hex_str(ym.serialize_tx_v4(vin, vout, 0, expiry)))['hex']
+        assert_equal(user.yed_validaterawtransaction(ok_hex)['verdict'], 'ok')   # a full reassignment is not a burn (not sent: the coin is spent below)
 
 # Rule: H7
         print('h7_allowyedburn_sends_it_anyway')
