@@ -634,7 +634,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         int fresh = 0;
         if (snap.has_value()) {
             for (uint16_t seq : snap->seated) {
-                if (index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge)) fresh++;
+                if (index.PoolFreshAt(seq, h - g_yellowbackMintLag)) fresh++;       // a mint built now cites R = tip - REF_LAG
             }
         }
         at.pushKV("poolFresh", fresh);
@@ -1703,7 +1703,7 @@ UniValue yed_listattestors(const UniValue& params, bool fHelp)
         o.pushKV("pinned", pinned);
         std::map<uint16_t, uint32_t>::const_iterator lb = lastBundle.find(seq);
         o.pushKV("lastBundleHeight", lb != lastBundle.end() ? UniValue((int64_t)lb->second) : NullUniValue);
-        o.pushKV("poolFresh", index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge));
+        o.pushKV("poolFresh", index.PoolFreshAt(seq, h - g_yellowbackMintLag));
         out.push_back(o);
     }
     return out;

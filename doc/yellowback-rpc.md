@@ -136,10 +136,11 @@ length of `yed_listunspent` as the trigger for `yed_lockcoins`.
 `triggerHeight`/`armHeight` (`0` while UNARMED; `armHeight = triggerHeight + ATTEST_ARM_DELAY`
 once TRIGGERED), `seatedCount` = `|Snapshots[tip].seated|`, `poolSize` = attestations in this
 node's attestation pool (all `seq`s, up to three each, W5), `poolFresh` = the number of
-**seated** `seq`s for which the pool holds an attestation with `citedHeight > tip − REF_LAG −
-ATTEST_MAX_AGE`, `carrierMode` = the `BUNDLE_CARRIER` in force, `required` = `ATTEST_REQUIRED`
-of the set in force (W15; `false` means every bundle-reading rule is vacuous whatever `status`
-says), `armed` = `status == "ARMED" && required`. `params` gains `attest` (every v3 §3.1 value
+**seated** `seq`s for which the pool holds an attestation a mint built now could cite: `R = tip −
+REF_LAG` and `R − ATTEST_MAX_AGE < citedHeight ≤ R` (and `≥` the start height; the window
+`yed_buildbundle` uses — a citation above `R` is not counted until `R` reaches it),
+`carrierMode` = the `BUNDLE_CARRIER` in force, `required` = `ATTEST_REQUIRED` of the set in
+force (W15; `false` means every bundle-reading rule is vacuous whatever `status` says), `armed` = `status == "ARMED" && required`. `params` gains `attest` (every v3 §3.1 value
 the Mint page and the Attestors view derive from; on regtest `armMin` and `carrierMode` are the
 two additional hashed values, M13) and `params.policy.preferredAttestor` (`null` unless
 `-yellowbackpreferredattestor` is set). `rebuilt` (**v3**) is `true` for the rest of the
@@ -923,10 +924,10 @@ the bond outpoint is spent (IN-2); `seatedSince` the height the attestor entered
 `null` while unseated; `weight` the bond weight at `height` as a decimal string (`"0"` before
 its `ageOrigin`); `seated` and `pinned` membership in `Snapshots[height].seated[]` /
 `pinnedSeqs[]`; `lastBundleHeight` the newest `BundleLog` row whose `seqs[]` holds this `seq`
-(`null` when none); `poolFresh` whether this node's pool holds an attestation of this `seq` with
-`citedHeight > height − REF_LAG − ATTEST_MAX_AGE`. `founding` is whether the record's age runs
-from `triggerHeight` (v3 §3.7 founding cohort; `false` while UNARMED). Empty list before the
-first registration.
+(`null` when none); `poolFresh` whether this node's pool holds an attestation of this `seq` that
+a bundle for `R = height − REF_LAG` could cite (`R − ATTEST_MAX_AGE < citedHeight ≤ R`, as
+`yed_getinfo`). `founding` is whether the record's age runs from `triggerHeight` (v3 §3.7
+founding cohort; `false` while UNARMED). Empty list before the first registration.
 
 Result of `yed_listattestors`:
 

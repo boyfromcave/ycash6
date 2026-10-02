@@ -607,6 +607,16 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.set_prices(PRICE)
         self.pools_step(36 + 16, 'restore')
         dormant = live_seqs[-1]
+        print('poolFresh counts a citation in (R - ATTEST_MAX_AGE, R], R = tip - REF_LAG: one above R is not usable yet')
+        assert_equal(user.yed_getinfo()['attest']['poolFresh'], 0)
+        tip = user.getblockcount()
+        ahead = [seq for seq in live_seqs if seq != dormant]
+        feed_all(user, {seq: PRICE for seq in ahead}, cited=tip)                      # an attestor ahead of this node's R
+        assert_equal(user.yed_getinfo()['attest']['poolFresh'], 0)
+        assert_equal([r['seq'] for r in user.yed_listattestors() if r['poolFresh']], [])
+        sel = user.yed_getselection(tip - REF_LAG, '')
+        assert_equal((sel['reachable'], [e['seq'] for e in sel['selected'] if e['poolFresh']]), (0, []))
+        rpc_error('bundle-insufficient', user.yed_estimatecollateral, CENTS, LOCK)
         print('dormancy: seq %d seated, selected in %d rows, absent from every bundle => DORMANT at the next check' % (dormant, DORMANCY_MIN_BUNDLES))
         active = {seq: PRICE for seq in live_seqs if seq != dormant}
         start = user.getblockcount()

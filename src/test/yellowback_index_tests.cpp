@@ -1548,9 +1548,15 @@ BOOST_AUTO_TEST_CASE(pool_add_replace_freshness_three_per_seq)
     for (const PooledAttestation& pa : all) if (pa.att.seq == 1) seq1.push_back((int)pa.att.citedHeight);
     BOOST_CHECK((seq1 == std::vector<int>{ tip - 2, tip - 1, tip }));
     BOOST_CHECK_EQUAL(index.PoolSize(), all.size());
-    BOOST_CHECK(index.PoolHasNewerThan(1, tip - 1));
-    BOOST_CHECK(!index.PoolHasNewerThan(1, tip));
-    BOOST_CHECK(!index.PoolHasNewerThan(5, 0));
+    // poolFresh (yed_getinfo / yed_listattestors): a citation a bundle for R could carry, in (R - maxAge, R].
+    BOOST_CHECK(index.PoolFreshAt(1, tip));
+    BOOST_CHECK(index.PoolFreshAt(1, tip - 2));
+    BOOST_CHECK(index.PoolFreshAt(1, tip - 3 + maxAge));                 // tip - 2 is the oldest still inside
+    BOOST_CHECK(!index.PoolFreshAt(1, tip + maxAge));                    // (tip, tip + maxAge] holds none: all stale
+    // The overstatement: every pooled citation is newer than R - maxAge, yet all lie above R, so a
+    // bundle for R has nothing to cite (the old predicate had no upper bound and said fresh).
+    BOOST_CHECK(!index.PoolFreshAt(1, tip - 3));
+    BOOST_CHECK(!index.PoolFreshAt(5, tip));
     // Freshest: the newest with citedHeight in (R - maxAge, R].
     {
         AttestationPool pool;
