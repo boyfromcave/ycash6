@@ -2003,13 +2003,16 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     e.xClaim = snap.has_value() ? snap->PClaim() : std::nullopt;
     BuiltBundle built = index.BuildBundleInfo(r, OutPointSelector(vault));
     e.bundleOk = built.sufficient && built.aClaim.has_value();
+    // AFEE-1: every claim under ARMED carries a bundle and pays the attestor fee, whether or not the
+    // pool can build one at this instant; reporting it only with a sufficient bundle under-stated the
+    // fee a wallet prices its minOutZat floor from (audit V-5, found by the YecWallet devnet cases).
+    e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
     if (e.bundleOk) {
         e.aClaim = built.aClaim;
         e.bundleSeqs = built.seqs;
         CombinedPrices c = PriceCombine(snap.has_value() ? snap->PMint() : std::nullopt, e.xClaim, built.aMint, built.aClaim);
         e.pClaim = c.pClaim;
         e.pEmerg = c.pEmerg;
-        e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
     } else {
         e.pClaim = e.xClaim;                         // the cross-section alone; claimPath stays ""
         e.pEmerg = e.xClaim;                         // likewise for the emergency clause and canNotice (min(xClaim, aClaim) <= xClaim)

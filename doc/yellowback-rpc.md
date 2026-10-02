@@ -713,8 +713,9 @@ does not know and the wallet does not hold is refused with `tx-not-found`.
 transaction's verified bundle (`null` when it carried none or BUNDLE-1 failed), `xMint`/`xClaim`
 the cross-section at its `refHeight`, `pMint`/`pClaim` the combined PRICE-2 prices it was judged
 under (`null` when undefined; equal to `x…` when not armed), `bundleSeqs` the `seq`s of its
-contributing attestations `C` (ascending; empty when none), `attestFeeZat` and `attestPayee`
-(the `bondKeyAddress` paid, `null` under AFEE-0), `residualZat` (RED-5's amount, `0` when none was
+contributing attestations `C` (ascending; empty when none), `attestFeeZat` (under ARMED always
+the AFEE-1 amount, even while no bundle can be built, so a wallet's `minOutZat` floor never
+under-states it) and `attestPayee` (the `bondKeyAddress` paid, `null` under AFEE-0), `residualZat` (RED-5's amount, `0` when none was
 due), `claimPath` (`"a"`, `"b"` or `""`), `notice` (`true` when this transaction wrote a
 `Notices` record — a CLAIM_NOTICE that NOT-1 accepted), `carrierVin` (the input index of the
 carrier, `-1` when none) and `bundleSource` (`"scriptsig"`, `"opreturn"` or `""`). `type` gains
