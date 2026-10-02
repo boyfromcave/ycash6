@@ -527,7 +527,7 @@ jobs:
         run: |
           cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
           cargo audit --version
-          cargo audit
+          cargo audit --db "$RUNNER_TEMP/advisory-db"   # its own clone: a cached or cargo-deny-populated ~/.cargo/advisory-db is refused as non-empty
       - name: cargo deny (advisories, licences, bans, sources per deny.toml; audit D-12)
         # The crate's deny.toml (cargo-deny 0.18 syntax, as chain-viz's) is the policy; the
         # cargo-deny release is pinned (CARGO_DENY_VERSION) and installed --locked.
