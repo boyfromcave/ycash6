@@ -27,11 +27,11 @@ END = "    // end yellowback\n"
 
 # v4.5.0 src/rpc/client.cpp: positions converted as JSON (numbers, objects, booleans).
 JSON_POSITIONS = {
-    "yed_buildbundle": {0}, "yed_claim": {3}, "yed_claimnotice": {2},
+    "yed_buildbundle": {0}, "yed_claim": {3, 4}, "yed_claimnotice": {2},
     "yed_estimatecollateral": {0, 1, 2}, "yed_estimatefee": {0}, "yed_estimatesend": {0},
     "yed_getfeepayee": {0, 1}, "yed_gethistory": {0, 1}, "yed_getprice": {0}, "yed_getselection": {0},
-    "yed_getstatehash": {0}, "yed_listattestors": {0}, "yed_listminers": {0, 1}, "yed_listtokens": {0, 1},
-    "yed_listtransactions": {0, 1}, "yed_listvaults": {1, 2}, "yed_mint": {0, 1, 4},
+    "yed_getstatehash": {0}, "yed_listattestors": {0}, "yed_listclaimable": {0, 1}, "yed_listminers": {0, 1}, "yed_listtokens": {0, 1, 2, 3},
+    "yed_listtransactions": {0, 1}, "yed_listvaults": {1, 2}, "yed_mint": {0, 1, 4, 5},
     "yed_registerattestor": {0, 1, 2}, "yed_reportequivocation": {2}, "yed_revive": {0, 1}, "yed_send": {1},
     "yed_sendmany": {0}, "yed_setquote": {0, 1}, "yed_signattestation": {0, 1, 2}, "yed_unlockcoin": {1},
     "yed_withdrawbond": {0},

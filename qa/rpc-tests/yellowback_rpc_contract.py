@@ -205,6 +205,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_getactivation', user.yed_getactivation())
         rows = c.check('yed_listminers', user.yed_listminers())
         assert_greater_than(len(rows), 0)
+        assert_rpc_error('window must be at most', user.yed_listminers, user.getblockcount(), 4033)   # audit C-6
         c.check('yed_gettag', user.yed_gettag(str(user.getblockcount())))
         c.check('yed_gettag', user.yed_gettag(user.getblockhash(1)))
         c.check('yed_setquote', nodes[POOLS[0]].yed_setquote(50_000_000, 1))
@@ -234,7 +235,12 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         print('yed_mint (twice: one to keep, one to release as VOID) and a raw VOID mint')
         assert_rpc_error('mint-bad-lock', user.yed_mint, 10000, 10)
         assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
-        mint_a = c.check('yed_mint', wallet_mint(self, user, 10000, 48))    # v3: the carrier step (W7)
+        # audit F-1: maxCollateralZat bounds vout[0]; refused at preflight, so no carrier is ever built
+        assert_rpc_error('collateral-above-max', user.yed_mint, 10000, 48, '', '', False, 1)
+        assert_equal(user.yed_sweepcarriers()['outstanding'], 0)
+        ceiling = 2 * user.yed_estimatecollateral(10000, 48)['requiredZat']
+        mint_a = c.check('yed_mint', wallet_mint(self, user, 10000, 48, max_collateral_zat=ceiling))   # v3: the carrier step (W7)
+        assert_greater_than(ceiling, mint_a['collateralZat'])
         mint_b = c.check('yed_mint', wallet_mint(self, user, 10000, 48))
         c.check('yed_mint', wallet_mint(self, user, 10000, 48))               # its YED funds the redemption of B
         r = user.yed_getinfo()['height'] - REF_LAG
@@ -270,6 +276,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         transparent = [user.yed_validateaddress(a)['transparentAddress'] for a in own]
         assert_equal(user.yed_listtokens(transparent), tokens)                          # the s… form names the same script
         assert_equal(user.yed_listtokens(own, max(t['height'] for t in tokens) + 1), [])  # minHeight past every token
+        assert_equal(user.yed_listtokens(own, 0, 1), tokens[:1])                          # audit C-6: count / skip paging
+        assert_equal(user.yed_listtokens(own, 0, 100, 1), tokens[1:])
+        assert_equal(user.yed_listtokens(own, 0, 0), [])
+        assert_rpc_error('count and skip must be', user.yed_listtokens, own, 0, -1)
         assert_rpc_error('too-many-addresses', user.yed_listtokens, [])
         assert_rpc_error('too-many-addresses', user.yed_listtokens, own * 101)
         assert_rpc_error('invalid-address', user.yed_listtokens, ['ys1notanaddress'])
@@ -307,6 +317,9 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(band['stage'], 'none')
         assert band['alternatives'] is not None
         c.check('yed_estimatesend', user.yed_estimatesend({claimant.yed_getnewaddress(): 10000}))
+        # audit C-10: each amount is range-checked before the sum (two amounts whose sum would wrap int64)
+        assert_rpc_error('bad-xfer-amount', user.yed_estimatesend,
+                         {claimant.yed_getnewaddress(): 2 ** 62, claimant.yed_getnewaddress(): 2 ** 62})
 
 # Rule: H5
         print('yed_unlockcoin (H5) and the lockunspent refusal')
@@ -365,7 +378,15 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, 64)
         claimable = c.check('yed_listclaimable', user.yed_listclaimable())
         assert mint_a['txid'] + ':0' in [x['vault'] for x in claimable]
-        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid']))       # 100 + 10000 in, 1 YED change
+        assert_equal(user.yed_listclaimable(1), claimable[:1])                             # audit C-6: count / skip paging
+        assert_equal(user.yed_listclaimable(0), [])
+        assert_equal(user.yed_listclaimable(100, len(claimable)), [])
+        # audit F-1: minOutZat floors what reaches the claimant; refused at preflight, before any carrier
+        collateral_a = user.yed_getvault(mint_a['txid'])['collateralZat']
+        assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a)
+        assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
+        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2))   # 100 + 10000 in, 1 YED change
+        assert_greater_than(claimed['collateralOut'], collateral_a // 2)
         assert_equal(claimed['burnedCents'], 10000)
         self.sync_all()
         self.mine(POOLS[0])

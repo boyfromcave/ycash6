@@ -61,6 +61,10 @@ static const int YELLOWBACK_RPC_VERSION = 3;
 
 namespace {
 
+/** C-6: paging defaults and the yed_listminers window bound (the launch bar reads 2016; a day of 75 s blocks is 1152). */
+const int DEFAULT_LIST_COUNT = 1000;
+const int MAX_LISTMINERS_WINDOW = 4032;
+
 YellowbackIndex& EnsureIndex()
 {
     if (!fExperimentalYellowback || !g_yellowback) {
@@ -935,6 +939,7 @@ UniValue yed_listminers(const UniValue& params, bool fHelp)
     const int window = HeightArg(params.size() > 1 ? params[1] : NullUniValue, p.payeeWindow);
     if (h < p.startHeight || h > tip) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("height must be between %d and %d", p.startHeight, tip));
     if (window <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "window must be positive");
+    if (window > MAX_LISTMINERS_WINDOW) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("window must be at most %d", MAX_LISTMINERS_WINDOW));   // C-6
 
     struct Row { int lastTagHeight; uint64_t lastQuote; int quoteTags; };
     std::map<uint160, Row> rows;
@@ -1164,13 +1169,14 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
 
 UniValue yed_listtokens(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 2)
+    if (fHelp || params.size() < 1 || params.size() > 4)
         throw std::runtime_error(
-            "yed_listtokens [\"address\",...] ( minHeight )\n"
+            "yed_listtokens [\"address\",...] ( minHeight count skip )\n"
             "\nThe YED outputs (Tokens records) paying the given addresses, whoever holds the keys: the node-context\n"
             "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (ye/yt/yr)\n"
             "or transparent P2PKH (s1/sm) forms of the same key hash; 1..100 of them. minHeight (default 0) keeps\n"
-            "only tokens created at or above that height. Sorted by (height, txid, vout).\n");
+            "only tokens created at or above that height. Sorted by (height, txid, vout); paged by count (default 1000)\n"
+            "and skip (default 0) over that order.\n");
 
     YellowbackIndex& index = EnsureIndex();
     const yellowback::Params& p = index.GetParams();
@@ -1179,6 +1185,9 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
     if (addresses.empty() || addresses.size() > 100) throw JSONRPCError(RPC_INVALID_PARAMETER, "too-many-addresses: 1..100 addresses");
     int minHeight = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 0;
     if (minHeight < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "minHeight must be >= 0");
+    const int count = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : DEFAULT_LIST_COUNT;   // C-6
+    const int skip = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : 0;
+    if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
     // Every accepted address is one P2PKH script; both forms of one key hash are the same script.
     std::map<CScript, CKeyID> wanted;
     for (size_t i = 0; i < addresses.size(); i++) {
@@ -1217,7 +1226,8 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
         return a.out.n < b.out.n;
     });
     UniValue list(UniValue::VARR);
-    for (const Row& r : rows) {
+    for (size_t i = (size_t)skip; i < rows.size() && (int)list.size() < count; i++) {
+        const Row& r = rows[i];
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", r.out.hash.GetHex());
         o.pushKV("vout", (int)r.out.n);
@@ -1233,12 +1243,16 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
 
 UniValue yed_listclaimable(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 0)
+    if (fHelp || params.size() > 2)
         throw std::runtime_error(
-            "yed_listclaimable\n"
-            "\nACTIVE vaults past claimHeight that are underwater at the tip snapshot (RED-4 would pass).\n");
+            "yed_listclaimable ( count skip )\n"
+            "\nACTIVE vaults past claimHeight that are underwater at the tip snapshot (RED-4 would pass), in vault\n"
+            "outpoint order; paged by count (default 1000) and skip (default 0) over the claimable rows.\n");
 
     YellowbackIndex& index = EnsureIndex();
+    const int count = params.size() > 0 && !params[0].isNull() ? params[0].get_int() : DEFAULT_LIST_COUNT;   // C-6
+    const int skip = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 0;
+    if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const yellowback::Params& p = index.GetParams();
@@ -1257,11 +1271,14 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         candidates.push_back(std::make_pair(COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k)), v));
         return true;
     });
+    int seen = 0;
     for (const auto& c : candidates) {
+        if ((int)list.size() >= count) break;                     // C-6: the per-vault estimate stops at the page
         const COutPoint& out = c.first;
         const VaultRecord& v = c.second;
         yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, tip);
         if (!est.claimable || !est.pClaim.has_value()) continue;
+        if (seen++ < skip) continue;
         const CPubKey owner = v.OwnerKey();
         UniValue o(UniValue::VOBJ);
         o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));

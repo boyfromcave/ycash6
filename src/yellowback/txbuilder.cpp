@@ -1083,8 +1083,39 @@ std::array<unsigned char, 64> DerToCompact(const std::vector<unsigned char>& der
 
 // ---------------------------------------------------------------- v3 preflights (before the carrier step)
 
+namespace {
+
+/** vout[0] of a MINT of `cents` in `g`'s class at pMint: max(required, 4 * FEE_MIN) rounded up to 1000 (MINT-5, K14). */
+CAmount MintCollateral(const Context& ctx, Cents cents, const MintGateFacts& g, MicroUsd pMint)
+{
+    const Params& p = ctx.params;
+    std::optional<CAmount> required = RequiredCollateralRounded(cents, MinRatioBps(p.baseRatioBps[g.termClass], g.S.sigmaMultBps), pMint);
+    if (!required.has_value()) throw std::runtime_error("mint-unsatisfiable: the collateral requirement exceeds MAX_MONEY (K14)");
+    CAmount collateral = std::max(required.value(), 4 * p.feeMin);
+    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
+    return collateral;
+}
+
+/** Audit F-1: the caller's bound on vout[0]; 0 = unbounded. */
+void CheckMaxCollateral(CAmount collateral, CAmount maxCollateralZat)
+{
+    if (maxCollateralZat > 0 && collateral > maxCollateralZat) {
+        throw std::runtime_error(strprintf("collateral-above-max: the mint needs %d zat of collateral, above the maxCollateralZat of %d", collateral, maxCollateralZat));
+    }
+}
+
+/** Audit F-1: the claimant's floor on what reaches `to`; 0 = unbounded. */
+void CheckMinOut(CAmount out, CAmount minOutZat)
+{
+    if (minOutZat > 0 && out < minOutZat) {
+        throw std::runtime_error(strprintf("claim-out-below-min: the claim would pay %d zat to the destination, below the minOutZat of %d", out, minOutZat));
+    }
+}
+
+} // namespace
+
 MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle,
-                            const std::string& from)
+                            const std::string& from, CAmount maxCollateralZat)
 {
     Context ctx(yw);
     // The funding address is judged before any price: bad-address precedes bundle-insufficient.
@@ -1102,10 +1133,12 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
     pf.xMint = g.xMint;
     pf.aMint = f.aMint;
     CombineMint(ctx, g, f, pf.pMint, pf.source);
+    CheckMaxCollateral(MintCollateral(ctx, cents, g, pf.pMint.value()), maxCollateralZat);
     return pf;
 }
 
-ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle)
+ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle,
+                              CAmount minOutZat)
 {
     Context ctx(yw);
     const COutPoint vaultOut(vaultTxid, 0);
@@ -1125,6 +1158,11 @@ ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, co
     pf.xClaim = c.xClaim; pf.aClaim = c.aClaim; pf.pClaim = c.pClaim; pf.pEmerg = c.pEmerg; pf.xMint = c.xMint; pf.aMint = c.aMint;
     pf.claimPath = c.claimPath;
     pf.residualZat = c.residualZat;
+    if (minOutZat > 0) {
+        BuiltTx probe;
+        AttestFeeFor(ctx, pf.refHeight, pf.selector, f, vault.collateralZat, probe);
+        CheckMinOut(vault.collateralZat - FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) - probe.attestFeeZat - c.residualZat, minOutZat);
+    }
     return pf;
 }
 
@@ -1221,7 +1259,8 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
     return out;
 }
 
-BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey& reservekey, const std::string& from, const CarrierRecord& carrier)
+BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey& reservekey, const std::string& from, const CarrierRecord& carrier,
+                  CAmount maxCollateralZat)
 {
     Context ctx(yw);
     const Params& p = ctx.params;
@@ -1237,10 +1276,8 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     out.carrier = carrier;
     out.xMint = g.xMint;
     CombineMint(ctx, g, f, out.pMint, out.source);
-    std::optional<CAmount> required = RequiredCollateralRounded(cents, MinRatioBps(p.baseRatioBps[g.termClass], g.S.sigmaMultBps), out.pMint.value());
-    if (!required.has_value()) throw std::runtime_error("mint-unsatisfiable: the collateral requirement exceeds MAX_MONEY (K14)");
-    CAmount collateral = std::max(required.value(), 4 * p.feeMin);   // MINT-5, K14
-    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
+    const CAmount collateral = MintCollateral(ctx, cents, g, out.pMint.value());   // MINT-5, K14
+    CheckMaxCollateral(collateral, maxCollateralZat);                              // before any key is drawn
     AttestFeeFor(ctx, R, std::vector<unsigned char>(), f, collateral, out);
 
     CPubKey owner = ctx.FreshKey("yellowback-vault");
@@ -1457,7 +1494,7 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
     return BuildVaultSpend(ctx, kind, vaultOut, vault, to, ctx.spendRefHeight);
 }
 
-BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier)
+BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat)
 {
     Context ctx(yw);
     const COutPoint vaultOut(vaultTxid, 0);
@@ -1480,6 +1517,7 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
     extras.attestKey = probe.attestPayeeKey;
     extras.attestFeeZat = probe.attestFeeZat;
     BuiltTx out = BuildVaultSpend(ctx, BuiltKind::CLAIM, vaultOut, vault, to, R, &extras);
+    CheckMinOut(out.collateralOut, minOutZat);   // unsigned so far: nothing is committed or locked
     out.armed = f.armed;
     out.bundleSeqs = f.seqs;
     out.attestPayee = probe.attestPayee;

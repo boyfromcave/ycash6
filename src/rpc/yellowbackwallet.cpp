@@ -26,6 +26,7 @@
 #include "coins.h"
 #include "core_io.h"
 #include "experimental_features.h"
+#include "httpserver.h"
 #include "init.h"
 #include "key_io.h"
 #include "main.h"
@@ -105,6 +106,7 @@ bool StartsWith(const std::string& s, const char* prefix)
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
                                          "vault-not-owned", "not-a-yellowback-address", "sweep-acknowledgement-missing", "bad-address",
                                          "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
+    // collateral-above-max and claim-out-below-min (audit F-1) are caller bounds, not rules: RPC_WALLET_ERROR below.
     for (const char* const* p = RULE; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_VERIFY_REJECTED, msg);
     for (const char* const* p = PARAM; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_INVALID_PARAMETER, msg);
     throw JSONRPCError(RPC_WALLET_ERROR, msg);
@@ -315,6 +317,16 @@ bool ParseWaitArg(const UniValue& params, size_t idx)
     return params[idx].get_int() != 0;
 }
 
+/** An optional zatoshi bound (audit F-1): absent / null => 0 (none); else an integer in [0, MAX_MONEY]. */
+CAmount ParseZatBoundArg(const UniValue& params, size_t idx, const char* name)
+{
+    if (params.size() <= idx || params[idx].isNull()) return 0;
+    if (!params[idx].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string(name) + " must be a number (zatoshi)");
+    const int64_t v = params[idx].get_int64();
+    if (v < 0 || v > MAX_MONEY) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be between 0 and %d", name, MAX_MONEY));
+    return v;
+}
+
 Attestation ParseAttestationArg(const UniValue& v, const char* what)
 {
     if (!v.isStr() || !IsHex(v.get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("attest-malformed: ") + what + " is not 74 bytes of hex");
@@ -380,10 +392,40 @@ bool CarrierConfirmed(const COutPoint& out)
     return true;
 }
 
-/** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600). */
+/**
+ * Audit C-2: a wait=true call holds its HTTP worker for up to -yellowbackcarriertimeout seconds,
+ * so at most half of -rpcthreads (at least one) may wait at once; the slot is taken BEFORE the
+ * carrier is built, so a refusal (`carrier-wait-busy`) costs nothing and leaves nothing outstanding.
+ */
+int g_carrierWaiters = 0;
+CCriticalSection cs_carrierWaiters;
+
+struct CarrierWaitSlot
+{
+    bool held;
+    explicit CarrierWaitSlot(bool wait) : held(false)
+    {
+        if (!wait) return;
+        const int cap = std::max<int>(1, (int)GetArg("-rpcthreads", DEFAULT_HTTP_THREADS) / 2);
+        LOCK(cs_carrierWaiters);
+        if (g_carrierWaiters >= cap) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("carrier-wait-busy: %d wait=true calls are already waiting for a carrier (the limit is half of -rpcthreads); retry, or pass wait=false", g_carrierWaiters));
+        }
+        g_carrierWaiters++;
+        held = true;
+    }
+    ~CarrierWaitSlot()
+    {
+        if (!held) return;
+        LOCK(cs_carrierWaiters);
+        g_carrierWaiters--;
+    }
+};
+
+/** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600, at most 3600). */
 void WaitForCarrier(const CarrierRecord& c)
 {
-    const int64_t timeoutMs = std::max<int64_t>(1, GetArg("-yellowbackcarriertimeout", 600)) * 1000;
+    const int64_t timeoutMs = std::min<int64_t>(3600, std::max<int64_t>(1, GetArg("-yellowbackcarriertimeout", 600))) * 1000;
     const int64_t start = GetTimeMillis();
     while (!CarrierConfirmed(c.outpoint)) {
         if (ShutdownRequested()) throw JSONRPCError(RPC_WALLET_ERROR, "carrier-wait-aborted: shutting down; the carrier " + c.outpoint.ToString() + " stays outstanding (yed_sweepcarriers)");
@@ -404,7 +446,7 @@ void PushPendingCommon(UniValue& o, const CarrierRecord& c, bool pending)
 }
 
 /** Complete a MINT on a confirmed carrier: build, sign, dry-run, gate, commit; forget the carrier. */
-UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::string& from, const CarrierRecord& carrier)
+UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::string& from, const CarrierRecord& carrier, CAmount maxCollateralZat)
 {
     YellowbackIndex& index = *yw.Index();
     BuiltTx built;
@@ -418,7 +460,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
-                built = BuildMint(yw, cents, lockBlocks, reservekey, from, carrier);
+                built = BuildMint(yw, cents, lockBlocks, reservekey, from, carrier, maxCollateralZat);
             } catch (const std::runtime_error& e) {
                 ThrowBuildError(e);
             }
@@ -492,10 +534,10 @@ UniValue ClaimResult(const uint256& txid, const BuiltTx& built, const CarrierRec
 
 BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool ownerPath, bool gate, uint256& txid);
 
-UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier)
+UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat)
 {
     uint256 txid;
-    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier); }, false, true, txid);
+    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier, minOutZat); }, false, true, txid);
     yw.SpendCarrier(carrier.outpoint);
     return ClaimResult(txid, built, carrier);
 }
@@ -683,9 +725,9 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
 
 UniValue yed_mint(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 2 || params.size() > 5)
+    if (fHelp || params.size() < 2 || params.size() > 6)
         throw std::runtime_error(
-            "yed_mint cents lockBlocks ( \"from\" \"bundleHex\" wait )\n"
+            "yed_mint cents lockBlocks ( \"from\" \"bundleHex\" wait maxCollateralZat )\n"
             "\nMint YED: locks the required YEC collateral in a vault for lockBlocks blocks (the term class follows) and creates the YED.\n"
             "The collateral requirement, the enforcement fee and its payee are fixed at the reference height (index tip minus the\n"
             "mint lag) and known before signing. Back up wallet.dat afterwards: the vault owner key is a fresh keypool key.\n"
@@ -701,6 +743,14 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             "4. \"bundleHex\" (string, optional) the attestation bundle to commit to (\"\" = the node's pool)\n"
             "5. wait        (boolean, optional, default true) block until the MINT is committed; false returns after the\n"
             "               carrier broadcast with pending = true and the wallet finishes on the next block\n"
+            "6. maxCollateralZat (numeric, optional, default 0 = no bound) refuse (collateral-above-max) before anything is\n"
+            "               signed when the collateral vout[0] would exceed this many zatoshi; judged at preflight and again\n"
+            "               when the MINT is built on the confirmed carrier (then the carrier lapses and is swept)\n"
+            "\nwait=false and restarts: the pending completion lives in memory only. If the node restarts before the\n"
+            "carrier confirms, nobody builds the MINT: the carrier (CARRIER_VALUE plus its fee) stays outstanding in\n"
+            "carriers.dat until its window (REF_WINDOW blocks past refHeight) lapses and yed_sweepcarriers (also run at\n"
+            "startup) reclaims it. Call yed_mint again after the restart; no YED was issued and no collateral was locked.\n"
+            "At most half of -rpcthreads wait=true calls may wait at once (carrier-wait-busy otherwise).\n"
             "\nResult: { \"txid\", \"vault\", \"termClass\", \"lockHeight\", \"claimHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\",\n"
             "          \"warning\", \"carrierTxid\", \"pending\", \"refHeight\", \"xMint\", \"aMint\", \"pMint\", \"source\", \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\" }\n");
     YellowbackWallet& yw = EnsureYW();
@@ -710,8 +760,10 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
     const std::string from = params.size() > 2 && !params[2].isNull() ? params[2].get_str() : "";
     const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 3);
     const bool wait = ParseWaitArg(params, 4);
+    const CAmount maxCollateralZat = ParseZatBoundArg(params, 5, "maxCollateralZat");
+    CarrierWaitSlot slot(wait);    // C-2: refused here, before any transaction, when too many calls already wait
 
-    // Preflight (before any transaction): MINTPOL-1, the bundle verdict at R and MINT-10.
+    // Preflight (before any transaction): MINTPOL-1, the bundle verdict at R, MINT-10 and the collateral bound.
     MintPreflight pf;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -720,14 +772,14 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
-            pf = PreflightMint(yw, cents, lockBlocks, bundleArg, from);
+            pf = PreflightMint(yw, cents, lockBlocks, bundleArg, from, maxCollateralZat);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
     }
     const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, std::vector<unsigned char>(), from);
     if (!wait) {
-        SchedulePending(yw, carrier, [=, &yw]() { return CompleteMint(yw, cents, lockBlocks, from, carrier); }, "mint");
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteMint(yw, cents, lockBlocks, from, carrier, maxCollateralZat); }, "mint");
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", "");
         o.pushKV("vault", "");
@@ -750,7 +802,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
         return o;
     }
     WaitForCarrier(carrier);
-    return CompleteMint(yw, cents, lockBlocks, from, carrier);
+    return CompleteMint(yw, cents, lockBlocks, from, carrier, maxCollateralZat);
 }
 
 static UniValue DoSend(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients)
@@ -826,15 +878,17 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
 
 UniValue yed_claim(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 4)
+    if (fHelp || params.size() < 1 || params.size() > 5)
         throw std::runtime_error(
-            "yed_claim \"vaultTxid\" ( \"to\" \"bundleHex\" wait )\n"
+            "yed_claim \"vaultTxid\" ( \"to\" \"bundleHex\" wait minOutZat )\n"
             "\nClaim somebody's underwater vault (yed_listclaimable): the claim-path spend at or past claimHeight, burning the\n"
             "vault's debt from this wallet's YED, paying the enforcement fee from the collateral and the rest to \"to\".\n"
             "Refused unless an enforcing miner would accept it (mempool-check-failed:<verdict>). v3: the carrier step first\n"
             "(selector = the vault outpoint), the attestor fee when armed, and the RED-5 residual to the vault owner when due;\n"
             "claimPath is the RED-4 clause that opened the claim (\"a\" combined price, \"b\" the emergency notice).\n"
-            "\nArguments: as yed_redeem, then \"bundleHex\" and wait as yed_mint.\n"
+            "\nArguments: as yed_redeem, then \"bundleHex\" and wait as yed_mint, then minOutZat (numeric, optional, default 0 =\n"
+            "no bound): refuse (claim-out-below-min) before anything is signed when the collateral reaching \"to\" (the\n"
+            "collateral less the enforcement fee, the attestor fee and the RED-5 residual) would be below this many zatoshi.\n"
             "Result: yed_redeem's fields plus { \"carrierTxid\", \"pending\", \"refHeight\", \"xClaim\", \"aClaim\", \"pClaim\", \"pEmerg\", \"claimPath\",\n"
             "        \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\", \"residualZat\" }\n");
     YellowbackWallet& yw = EnsureYW();
@@ -843,6 +897,8 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
     const std::string to = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "";
     const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 2);
     const bool wait = ParseWaitArg(params, 3);
+    const CAmount minOutZat = ParseZatBoundArg(params, 4, "minOutZat");
+    CarrierWaitSlot slot(wait);    // C-2
     ClaimPreflight pf;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -851,14 +907,14 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
-            pf = PreflightClaim(yw, vaultTxid, bundleArg);
+            pf = PreflightClaim(yw, vaultTxid, bundleArg, minOutZat);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
     }
     const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, pf.selector, "");
     if (!wait) {
-        SchedulePending(yw, carrier, [=, &yw]() { return CompleteClaim(yw, vaultTxid, to, carrier); }, "claim");
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat); }, "claim");
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", "");
         o.pushKV("burnedCents", 0);
@@ -880,7 +936,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
         return o;
     }
     WaitForCarrier(carrier);
-    return CompleteClaim(yw, vaultTxid, to, carrier);
+    return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat);
 }
 
 UniValue yed_claimnotice(const UniValue& params, bool fHelp)
@@ -897,6 +953,7 @@ UniValue yed_claimnotice(const UniValue& params, bool fHelp)
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
     const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 1);
     const bool wait = ParseWaitArg(params, 2);
+    CarrierWaitSlot slot(wait);    // C-2
     NoticePreflight pf;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -1152,6 +1209,7 @@ UniValue yed_reportequivocation(const UniValue& params, bool fHelp)
     const Attestation a = ParseAttestationArg(params[0], "attestationHexA");
     const Attestation b = ParseAttestationArg(params[1], "attestationHexB");
     const bool wait = ParseWaitArg(params, 2);
+    CarrierWaitSlot slot(wait);    // C-2
     int refHeight = 0;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -1449,9 +1507,14 @@ UniValue yed_estimatesend(const UniValue& params, bool fHelp)
         const std::vector<std::string> keys = obj.getKeys();
         if (keys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "no recipients");
         if (keys.size() > MAX_ASSIGNMENTS - 1) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("at most %u recipients per transaction", (unsigned)(MAX_ASSIGNMENTS - 1)));
+        const yellowback::Params& p0 = index.GetParams();
         for (const std::string& name : keys) {
-            ParseYedAddress(name, index.GetParams());             // the same address check yed_sendmany applies
-            amount += obj[name].get_int64();
+            ParseYedAddress(name, p0);                            // the same address check yed_sendmany applies
+            const int64_t one = obj[name].get_int64();
+            if (one < p0.minOutput || one > p0.maxOutput) {        // C-10: each amount before the sum (BuildTransfer's order)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("bad-xfer-amount: each amount must be between %d and %d cents", p0.minOutput, p0.maxOutput));
+            }
+            amount += one;
         }
         recipients = keys.size();
     } else {

@@ -316,8 +316,13 @@ struct MintPreflight
     std::string source;
     MintPreflight() : refHeight(0), armed(false) {}
 };
+/**
+ * `maxCollateralZat` (audit F-1): 0 = no bound; else the preflight (at the estimate height) and
+ * BuildMint (at the carrier's R) refuse `collateral-above-max` when vout[0] would exceed it, so a
+ * caller that confirmed a figure from yed_estimatecollateral is never bound to a larger one.
+ */
 MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle,
-                            const std::string& from = "");
+                            const std::string& from = "", CAmount maxCollateralZat = 0);
 
 /** v3: the claim's preflight: R = index tip, the bundle verdict at (R, vault outpoint), RED-4 by clause and the residual. */
 struct ClaimPreflight
@@ -332,7 +337,13 @@ struct ClaimPreflight
     CAmount residualZat;
     ClaimPreflight() : refHeight(0), armed(false), residualZat(0) {}
 };
-ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle);
+/**
+ * `minOutZat` (audit F-1): 0 = no bound; else refuse `claim-out-below-min` when what the claimant
+ * receives at `to` would be below it — at preflight the collateral less the enforcement fee, the
+ * attestor fee and the RED-5 residual; in BuildClaim the exact collateralOut.
+ */
+ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle,
+                              CAmount minOutZat = 0);
 
 /** v3: the notice's preflight (NOT-1 at R = index tip): `notice-standing`, `notice-not-underwater`, `bundle-insufficient`. */
 struct NoticePreflight
@@ -367,7 +378,7 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
  * FinishSapling() via SignBuiltCarrier() + DryRunBuilt().
  */
 BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey& reservekey, const std::string& from,
-                  const CarrierRecord& carrier);
+                  const CarrierRecord& carrier, CAmount maxCollateralZat = 0);
 
 /** recipients: P2PKH script -> cents. At most 14 recipients (one assignment slot is kept for change). */
 BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients, CReserveKey& reservekey);
@@ -385,7 +396,8 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
  * confirmed `carrier` (never vin[0]) with the attestor fee and the RED-5 residual when due.
  * Unsigned; SignVaultSpend(…, false) signs the vault, the YED inputs and the carrier.
  */
-BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier);
+BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier,
+                   CAmount minOutZat = 0);
 
 /** v3 CLAIM_NOTICE (§3.5): confirmed YEC inputs plus the carrier; the 0x06 payload and change. Signed. */
 BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserveKey& reservekey, const CarrierRecord& carrier);

@@ -415,6 +415,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-yellowbackpayeeaccuracywindow=<n>", _("Wallet payee policy: accuracy window in blocks (default: the network's ACCURACY_WINDOW)"));
     strUsage += HelpMessageOpt("-yellowbackpayeetiltbps=<bps>", _("Wallet payee policy: accuracy weighting tilt in bps (default: the network's PAYEE_TILT_BPS)"));
     strUsage += HelpMessageOpt("-yellowbackpreferredattestor=<seq>", _("Attestor seq the wallet pays attestation fees to when it is in the bundle (AFEE-W)"));
+    strUsage += HelpMessageOpt("-yellowbackcarriertimeout=<sec>", _("Seconds a wait=true yed_mint/yed_claim/yed_claimnotice/yed_reportequivocation blocks for its carrier to confirm (default: 600, max 3600); at most half of -rpcthreads such calls wait at once"));
     if (showDebug) {
         strUsage += HelpMessageOpt("-yellowbackstartheight=<h>", "Yellowback start height (regtest only; required with -yellowback)");
         strUsage += HelpMessageOpt("-yellowbacksigmaref=<bps>", "Yellowback SIGMA_REF_BPS override, 0 = multiplier fixed at 1 (regtest only)");

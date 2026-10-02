@@ -109,6 +109,24 @@
       ],
       "when": "bundleHex is not \"YA\" ‖ 0x01 ‖ count ‖ count × 74 bytes (RPC_INVALID_PARAMETER)"
     },
+    "carrier-timeout": {
+      "raisedBy": [
+        "yed_mint",
+        "yed_claim",
+        "yed_claimnotice",
+        "yed_reportequivocation"
+      ],
+      "when": "wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses"
+    },
+    "carrier-wait-busy": {
+      "raisedBy": [
+        "yed_mint",
+        "yed_claim",
+        "yed_claimnotice",
+        "yed_reportequivocation"
+      ],
+      "when": "wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false"
+    },
     "change-floor": {
       "raisedBy": [
         "yed_send",
@@ -129,6 +147,18 @@
         "yed_claim"
       ],
       "when": "tip below claimHeight"
+    },
+    "claim-out-below-min": {
+      "raisedBy": [
+        "yed_claim"
+      ],
+      "when": "minOutZat > 0 and what reaches the destination (the collateral less the enforcement fee, the attestor fee and the RED-5 residual; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat"
+    },
+    "collateral-above-max": {
+      "raisedBy": [
+        "yed_mint"
+      ],
+      "when": "maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1"
     },
     "equivocation-guard": {
       "raisedBy": [
@@ -459,7 +489,7 @@
     }
   },
   "yed_claim": {
-    "args": "<vaultTxid> [to] [bundleHex] [wait]",
+    "args": "<vaultTxid> [to] [bundleHex] [wait] [minOutZat]",
     "returns": {
       "aClaim": 395000,
       "attestFeeZat": 15703517,
@@ -1078,7 +1108,7 @@
     ]
   },
   "yed_listclaimable": {
-    "args": "",
+    "args": "[count] [skip]",
     "returns": [
       {
         "attestFeeZat": 15703517,
@@ -1154,7 +1184,7 @@
     ]
   },
   "yed_listtokens": {
-    "args": "<addresses> [minHeight]",
+    "args": "<addresses> [minHeight] [count] [skip]",
     "returns": [
       {
         "address": "yrExampleOwnerAddress111111111111111",
@@ -1247,7 +1277,7 @@
     ]
   },
   "yed_mint": {
-    "args": "<cents> <lockBlocks> [from] [bundleHex] [wait]",
+    "args": "<cents> <lockBlocks> [from] [bundleHex] [wait] [maxCollateralZat]",
     "returns": {
       "aMint": 1985000,
       "attestFeeZat": 15703517,
@@ -1340,7 +1370,7 @@
     }
   },
   "yed_sendmany": {
-    "args": "",
+    "args": "<{yedaddress: cents, …}>",
     "returns": {
       "changeCents": 50000,
       "expiryHeight": 371,

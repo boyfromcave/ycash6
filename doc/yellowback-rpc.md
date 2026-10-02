@@ -416,7 +416,7 @@ Result of `yed_getactivation`:
 ### `yed_listminers [height] [window]`
 
 Arguments: `height` (number, optional; default the tip), `window` (number, optional; default
-`PAYEE_WINDOW`; the launch bar uses `2016`, L4). One row per `payoutKey` that carries a quote tag
+`PAYEE_WINDOW`, at most `4032` — the launch bar uses `2016`, L4). One row per `payoutKey` that carries a quote tag
 in `(height − window, height]`, in descending `lastTagHeight` order. `share` is the row's share
 of the quote-tagged blocks in the window in bps; `registered` is REG-1 at `height`, `eligible`
 membership in `E(height)` (FEE-2); `penalizedUntil` is the height the REG-2 penalty ends, `0`
@@ -623,11 +623,13 @@ Result of `yed_listvaults`:
 ]
 ```
 
-### `yed_listtokens <addresses> [minHeight]`
+### `yed_listtokens <addresses> [minHeight] [count] [skip]`
 
 Arguments: `addresses` (array of strings, 1..100; each a YED address `ye…`/`yt…`/`yr…` or the
 transparent P2PKH form `s1…`/`sm…` of the same key hash — the two name one script), `minHeight`
-(number, default `0`: only tokens created at or above it). **Node context**: the `Tokens` records
+(number, default `0`: only tokens created at or above it), `count` (number, default `1000`) and
+`skip` (number, default `0`): a page of the sorted result — a client that needs every token of
+a busy address pages until a short page comes back. **Node context**: the `Tokens` records
 (§3.6) whose `scriptPubKey` pays one of the addresses, whoever holds the keys — the authoritative
 YED UTXO set of an address, which `yed_listunspent` gives only for the node's own wallet. This is
 the RPC a light-client server proxies for a wallet it has never seen (lightwalletd plan D-L-7,
@@ -652,9 +654,11 @@ Result of `yed_listtokens`:
 ]
 ```
 
-### `yed_listclaimable`
+### `yed_listclaimable [count] [skip]`
 
-Arguments: none. ACTIVE vaults past `claimHeight` that are underwater at the tip snapshot — the
+Arguments: `count` (number, default `1000`) and `skip` (number, default `0`), a page over the
+claimable rows in vault outpoint order (the per-vault estimate stops once the page is full).
+ACTIVE vaults past `claimHeight` that are underwater at the tip snapshot — the
 source of the wallet's Claim page. `mintedCents` is the burn a claim must carry (RED-2), `feeZat`
 the FEE-1 fee it pays from the collateral, `pClaim` the tip's claim price (never `null` here: an
 undefined `pClaim` makes RED-4 false, so nothing is claimable). Empty list when nothing is.
@@ -1311,14 +1315,19 @@ Result of `yed_lockcoins`:
 ]
 ```
 
-### `yed_mint <cents> <lockBlocks> [from] [bundleHex] [wait]`
+### `yed_mint <cents> <lockBlocks> [from] [bundleHex] [wait] [maxCollateralZat]`
 
 Arguments: `cents` (number, `MIN_MINT ≤ cents ≤ MAX_MINT`), `lockBlocks` (number; the class
 follows from it, V19), `from` (string, optional; a `ys1…` Sapling address to fund the collateral
 from that address's confirmed notes, largest-first — blocks for the proving time; default, or
 `""`: transparent YEC via `AvailableCoins`), **v3** `bundleHex` (string, optional; `""` or absent
 = build from the pool; else a `yed_buildbundle`-shaped bundle used verbatim, the manual path),
-**v3** `wait` (boolean, optional, default `true`; see *v3 two-step commands*). Builds the §3.5
+**v3** `wait` (boolean, optional, default `true`; see *v3 two-step commands*), `maxCollateralZat`
+(number, optional, default `0` = no bound: the caller's ceiling on `collateralZat`, the figure it
+confirmed from `yed_estimatecollateral`; the node refuses `collateral-above-max` at preflight,
+before the carrier, and again when the MINT is built on the confirmed carrier — then the carrier
+lapses and `yed_sweepcarriers` reclaims it — so a block or a price move between the estimate and
+the call never locks more than was agreed). Builds the §3.5
 MINT at `R = tip − REF_LAG` after the MINTPOL-1 gate (`Snapshots[R].activation == ACTIVE`,
 `haltMask == 0`, the cap has room), draws one fresh key for the vault owner and the token output,
 locks the token output, commits. `vault` is `"<txid>:0"`; `payee` is the FEE-W choice (or the
@@ -1345,7 +1354,15 @@ unchanged: `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`,
 `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap`, `mint-unsatisfiable`,
 `mint-bad-lock`, `RPC_INVALID_PARAMETER` for `cents` out of range, `RPC_WALLET_ERROR` for
 insufficient YEC (the carrier's `CARRIER_VALUE` plus two network fees are part of the need) or a
-locked wallet.
+locked wallet; `collateral-above-max` (`RPC_WALLET_ERROR`) when `maxCollateralZat` is set and
+too small; `carrier-wait-busy` when `wait = true` and half of `-rpcthreads` such calls are
+already waiting (before any transaction).
+
+**`wait = false` and restarts.** The pending completion lives in memory only. If the node restarts
+before the carrier confirms, nobody builds the MINT: the carrier (`CARRIER_VALUE` plus its fee)
+stays outstanding in `carriers.dat` until its window (`REF_WINDOW` blocks past `refHeight`)
+lapses and `yed_sweepcarriers` — also run at startup — reclaims it. Call `yed_mint` again after
+the restart; no YED was issued and no collateral was locked.
 
 Result of `yed_mint`:
 
@@ -1374,7 +1391,7 @@ Result of `yed_mint`:
 }
 ```
 
-### `yed_send <yedaddress> <cents>` and `yed_sendmany <{yedaddress: cents, …}>`
+### `yed_send <yedaddress> <cents>`
 
 Arguments: `yed_send`: `yedaddress` (string), `cents` (number). `yed_sendmany`: one object of
 at most 14 recipients. Builds the §3.5 TRANSFER from confirmed YED inputs (index) and confirmed
@@ -1399,7 +1416,10 @@ Result of `yed_send`:
 }
 ```
 
-`yed_sendmany` returns the same shape.
+### `yed_sendmany <{yedaddress: cents, …}>`
+
+Arguments: one object of at most 14 recipients, `{"yedaddress": cents, …}`. As `yed_send`, with
+the same selector, locking and refusals; returns the same shape.
 
 Result of `yed_sendmany`:
 
@@ -1513,16 +1533,20 @@ Result of `yed_redeem`:
 }
 ```
 
-### `yed_claim <vaultTxid> [to] [bundleHex] [wait]`
+### `yed_claim <vaultTxid> [to] [bundleHex] [wait] [minOutZat]`
 
 Arguments as `yed_redeem`, plus **v3** `bundleHex` and `wait` as `yed_mint` (`to` may be `""`
-for the default). The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
+for the default), and `minOutZat` (number, optional, default `0` = no bound: the claimant's floor
+on what reaches `to`; refused `claim-out-below-min` at preflight — the collateral less the
+enforcement fee, the attestor fee and the RED-5 residual — and again at build against the exact
+`collateralOut`, nothing signed either time). The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
 claim-path scriptSig, `nLockTime = claimHeight`, burns `mintedCents` of the claimant's own YED,
 pays the fee from the collateral, collateral to `to`. The v2 fields of `yed_redeem` (including
 `extraBurnCents`, H4) plus the **v3** fields below. Refusals: `vault-not-found`,
 `vault-not-active`, `claim-not-yet` (tip below `claimHeight`), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
-`mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`.
+`mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`,
+`claim-out-below-min`, `carrier-wait-busy`.
 
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
@@ -1957,6 +1981,10 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
 | `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
 | `vault-value-too-small` | `yed_redeem`, `yed_claim`, `yed_sweep` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
+| `collateral-above-max` | `yed_mint` | maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1 |
+| `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the collateral less the enforcement fee, the attestor fee and the RED-5 residual; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
+| `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
+| `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
 
 ## `rpc/client.cpp` conversion rows (Phase 3)
 
@@ -1982,8 +2010,10 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
 | `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_sweep`, `yed_listpositions` | none (all strings) |
-| `yed_claim` | 3 (**v3**; `wait`) |
-| `yed_mint` | 0, 1, 4 (**v3**: `wait` joins `cents`, `lockBlocks`) |
+| `yed_claim` | 3, 4 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit) |
+| `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
+| `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |
+| `yed_listclaimable` | 0, 1 (`count`, `skip`; 2026-10-01 audit) |
 | `yed_listattestors` | 0 (**v3**) |
 | `yed_buildbundle`, `yed_getselection` | 0 (**v3**; `selectorHex` is a string) |
 | `yed_claimnotice` | 2 (**v3**; `wait`) |

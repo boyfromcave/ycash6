@@ -935,16 +935,18 @@ class _CarrierMiner(threading.Thread):
             self.error = str(e)
 
 
-def two_step(test, node, method, *args, miner=None, timeout=120):
-    """Call ``node.<method>(*args, True)`` (``wait=True``) while a helper thread mines the
-    carrier's block on ``miner`` (index; default the first pool).  Returns the RPC's full result
-    (``pending`` False).  The main transaction is left in the mempool for the caller to mine, as
-    the v2 flow scripts expect; ``test.sync_all()`` is run before returning."""
+def two_step(test, node, method, *args, miner=None, timeout=120, after_wait=()):
+    """Call ``node.<method>(*args, True, *after_wait)`` (``wait=True``; ``after_wait`` are the
+    arguments that follow ``wait`` -- ``yed_mint``'s ``maxCollateralZat``, ``yed_claim``'s
+    ``minOutZat``) while a helper thread mines the carrier's block on ``miner`` (index; default
+    the first pool).  Returns the RPC's full result (``pending`` False).  The main transaction
+    is left in the mempool for the caller to mine, as the v2 flow scripts expect;
+    ``test.sync_all()`` is run before returning."""
     miner_index = POOLS[0] if miner is None else (miner if isinstance(miner, int) else test.nodes.index(miner))
     t = _CarrierMiner(miner_index, timeout)
     t.start()
     try:
-        result = getattr(node, method)(*args, True)
+        result = getattr(node, method)(*args, True, *after_wait)
     finally:
         t.join(timeout=5)
     if t.error and result.get('pending', False):
@@ -979,22 +981,27 @@ def _bundle_arg(test, node, selector, prices, ref_height):
     return offline_bundle_hex(test, node, ref_height, selector, prices)
 
 
-def wallet_mint(test, node, cents, lock_blocks, from_addr='', prices=None, miner=None, bundle_hex=None):
+def wallet_mint(test, node, cents, lock_blocks, from_addr='', prices=None, miner=None, bundle_hex=None,
+                max_collateral_zat=None):
     """``yed_mint`` through ``two_step``.  ``prices``: ``{seq: usd}`` or one usd for every
     selected attestor (needed while armed; the bundle is built offline for R = tip - REF_LAG).
-    ``bundle_hex`` overrides the bundle (the refusal cases)."""
+    ``bundle_hex`` overrides the bundle (the refusal cases).  ``max_collateral_zat`` is the
+    sixth argument (audit F-1), omitted when None."""
     ref_height = node.yed_getinfo()['height'] - REF_LAG
     if bundle_hex is None:
         bundle_hex = _bundle_arg(test, node, b'', prices, ref_height)
-    return two_step(test, node, 'yed_mint', cents, lock_blocks, from_addr, bundle_hex, miner=miner)
+    after = () if max_collateral_zat is None else (max_collateral_zat,)
+    return two_step(test, node, 'yed_mint', cents, lock_blocks, from_addr, bundle_hex, miner=miner, after_wait=after)
 
 
-def wallet_claim(test, node, vault_txid, to='', prices=None, miner=None, bundle_hex=None):
-    """``yed_claim`` through ``two_step``; the selector is the vault outpoint, R the index tip."""
+def wallet_claim(test, node, vault_txid, to='', prices=None, miner=None, bundle_hex=None, min_out_zat=None):
+    """``yed_claim`` through ``two_step``; the selector is the vault outpoint, R the index tip.
+    ``min_out_zat`` is the fifth argument (audit F-1), omitted when None."""
     ref_height = node.yed_getinfo()['height']
     if bundle_hex is None:
         bundle_hex = _bundle_arg(test, node, outpoint_selector(vault_txid, 0), prices, ref_height)
-    return two_step(test, node, 'yed_claim', vault_txid, to, bundle_hex, miner=miner)
+    after = () if min_out_zat is None else (min_out_zat,)
+    return two_step(test, node, 'yed_claim', vault_txid, to, bundle_hex, miner=miner, after_wait=after)
 
 
 def wallet_notice(test, node, vault_txid, prices=None, miner=None, bundle_hex=None):
@@ -1248,10 +1255,11 @@ class ArmedModeMixin(object):
         assert micro is not None, 'no %s at %d to attest' % (field, ref_height)
         return Decimal(micro) / 1_000_000
 
-    def mint(self, node, cents, lock_blocks, from_addr='', miner=None, prices=None):
+    def mint(self, node, cents, lock_blocks, from_addr='', miner=None, prices=None, max_collateral_zat=None):
         if self.armed and prices is None:
             prices = self.price_at(node, node.yed_getinfo()['height'] - REF_LAG, 'pMint')
-        return wallet_mint(self, node, cents, lock_blocks, from_addr, prices=prices if self.armed else None, miner=miner)
+        return wallet_mint(self, node, cents, lock_blocks, from_addr, prices=prices if self.armed else None, miner=miner,
+                           max_collateral_zat=max_collateral_zat)
 
     def estimate(self, node, cents, lock_blocks):
         """``yed_estimatecollateral``; armed, with the price override at the attested price (the
@@ -1261,10 +1269,11 @@ class ArmedModeMixin(object):
         usd = self.price_at(node, node.yed_getinfo()['height'] - REF_LAG, 'pMint')
         return node.yed_estimatecollateral(cents, lock_blocks, yu.usd_to_micro(usd))
 
-    def claim(self, node, vault_txid, to='', miner=None, prices=None):
+    def claim(self, node, vault_txid, to='', miner=None, prices=None, min_out_zat=None):
         if self.armed and prices is None:
             prices = self.price_at(node, node.yed_getinfo()['height'], 'pClaim')
-        return wallet_claim(self, node, vault_txid, to, prices=prices if self.armed else None, miner=miner)
+        return wallet_claim(self, node, vault_txid, to, prices=prices if self.armed else None, miner=miner,
+                            min_out_zat=min_out_zat)
 
     def model_check(self, node):
         """The Python model over the whole chain, the full comparison (yed_gettxinfo.type renders
@@ -1275,7 +1284,7 @@ class ArmedModeMixin(object):
         """Positional arguments for a direct ``yed_mint`` call that must reach a refusal past the
         bundle check while armed (a bundle for R = tip - REF_LAG is supplied)."""
         if not self.armed:
-            return (cents, lock_blocks, from_addr)
+            return (cents, lock_blocks, from_addr, '')
         r = node.yed_getinfo()['height'] - REF_LAG
         return (cents, lock_blocks, from_addr, offline_bundle_hex(self, node, r, b'', self.price_at(node, r, 'pMint')))
 
@@ -1283,6 +1292,6 @@ class ArmedModeMixin(object):
         """Positional arguments for a direct ``yed_claim`` call that must reach a refusal past
         the bundle check while armed (a bundle for R = the tip is supplied)."""
         if not self.armed:
-            return (vault_txid,) if not to else (vault_txid, to)
+            return (vault_txid, to, '')
         r = node.yed_getinfo()['height']
         return (vault_txid, to, offline_bundle_hex(self, node, r, outpoint_selector(vault_txid, 0), self.price_at(node, r, 'pClaim')))
