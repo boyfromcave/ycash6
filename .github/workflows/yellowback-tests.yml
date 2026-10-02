@@ -31,11 +31,10 @@ name: yellowback tests
 # the fork binary without -yellowback (P5); the 6.20.0 list and why every other inherited script
 # is out are in doc/yellowback-baseline.md "Inherited functional suite at the pin".
 
-# feature/yellowback-sf was dropped from both trigger lists on 2026-09-20. It is the delivered v2
-# fork and is now a *baseline*, not a workspace: nothing is committed to it, and the v3 plan
-# measures its diff budgets and frozen-file checks against it. Building it on every push to the v3
-# branch's ancestor was spending a 300-minute job on a branch that never moves. workflow_dispatch
-# still runs this workflow against any ref if the baseline ever needs re-checking.
+# Only this line's branch of record triggers a push build. ycash-dd's superseded v2 branch
+# (feature/yellowback-sf) has no counterpart here and, since 2026-10-01, is no comparison base for
+# anything (owner): this workflow measures every budget and the frozen set against the tag
+# ycash6-baseline. workflow_dispatch still runs this workflow against any ref when needed.
 on:
   push:
     branches:
@@ -435,7 +434,7 @@ jobs:
       - name: Rule -> test tags, v3 identifiers (blocking since Phase A1, v3 plan §7)
         # The v3 rules of plan §3.8 (ARM-1/2, REG-A1, BUNDLE-1, MINT-9/10, NOT-1, EQV-1, REV-1, PIN-1/2,
         # AFEE-0/1, RED-5) landed with Phase A1 (yellowback_state_tests.cpp); every identifier must be
-        # tagged. Fold the list into the loop above when the v3 series merges into feature/yellowback-sf.
+        # tagged. Fold the list into the loop above.
         if: ${{ !cancelled() }}
         run: |
           set -e
