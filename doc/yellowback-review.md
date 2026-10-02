@@ -718,8 +718,11 @@ armed.
 
 The push-triggered runs are the plan's record (owner-confirmed, 2026-10-01); this host has no `gh`
 and did not re-check them. The `main` job builds yolo at `YOLO_COMMIT` for `yellowback_stratum.py`,
-pinned to `4a28eef` — the yolo commit the plan verified on 6.20.0 (header-root fallback, `-mocktime`
-regtest recipe); it was `dc0cb24` (the toolchain commit, two behind) until audit B-7.
+pinned to `aba726b` since the audit remediation (2026-10-02, built `--features regtest`, the pin
+ycash-dd carries after yolo's own audit fixes); before that `4a28eef` — the yolo commit the plan
+verified on 6.20.0 (header-root fallback, `-mocktime` regtest recipe) — and `dc0cb24` (the toolchain
+commit, two behind) until audit B-7. chain-viz (`c388ed2`) and lightwalletd (`f84ed92`) are pinned
+to commits the same way.
 
 ### 4.5 Component compatibility (Phase 7, **recorded** from the plan's Phase 7 notes)
 
