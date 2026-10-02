@@ -187,9 +187,10 @@ std::optional<int64_t> UnderwaterAt(const VaultRecord& v, const yellowback::Para
 
 /**
  * The yed_getvault row (contract): the Vaults record plus claimable / underwaterAt / sweepBefore.
- * Mirrors VaultToJSON in rpc/yellowback.cpp (Phase 3) field for field.
+ * Mirrors VaultToJSON in rpc/yellowback.cpp (Phase 3) field for field; `claimable` is the
+ * caller's EstimateClaim verdict (RED-4 by either clause), as VaultToJSON reads it.
  */
-UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const State& st, const yellowback::Params& p, int tipHeight, bool abandoned)
+UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::Params& p, bool abandoned, bool claimable)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", out.hash.GetHex());
@@ -212,12 +213,6 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const State& st, c
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
-    bool claimable = false;
-    if (v.Status() == VaultStatus::ACTIVE && tipHeight >= v.claimHeight) {
-        std::optional<Snapshot> S = SnapshotAt(st, p, tipHeight);
-        std::optional<MicroUsd> pClaim = S.has_value() ? S->PClaim() : std::nullopt;
-        claimable = IsUnderwater(v.collateralZat, pClaim, v.mintedCents, p.claimThresholdBps);
-    }
     o.pushKV("claimable", claimable);
     std::optional<int64_t> at = UnderwaterAt(v, p);
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
@@ -1296,14 +1291,14 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         if (!yw.IsMineVault(v)) return true;
         if (!status.empty() && status != VaultStatusName(v.Status())) return true;
         const COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
-        UniValue o = VaultRow(out, v, st, p, h, abandoned);
+        const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
+        UniValue o = VaultRow(out, v, p, abandoned, est.claimable);
         const bool active = v.Status() == VaultStatus::ACTIVE;
         std::optional<NoticeRecord> notice = active ? st.GetNotice(out) : std::nullopt;
         const bool noticed = notice.has_value();
         o.pushKV("noticed", noticed);
         o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
-        const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
         o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
         o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
         o.pushKV("canSweep", active && abandoned && h >= v.lockHeight);

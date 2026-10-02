@@ -558,6 +558,12 @@ class YellowbackAttestTest(YellowbackTestFramework):
         print('the emergency claim by node 0: clause (b), the residual to the owner (node 6)')
         rows = user.yed_listclaimable()
         assert_equal([(r['vault'], r['claimPath']) for r in rows], [(v3['txid'] + ':0', 'b')])
+        # yed_getvault / yed_listvaults / yed_listpositions.claimable read RED-4 by either clause, as
+        # yed_listclaimable does (they read clause (a) under the tip snapshot alone before the fix).
+        assert_equal(user.yed_getvault(v3['txid'])['claimable'], True)
+        assert_equal([v['claimable'] for v in user.yed_listvaults('ACTIVE') if v['txid'] == v3['txid']], [True])
+        feed_all(nodes[ATTESTOR_A], emerg)                                             # the owner's node builds its own bundle
+        assert_equal([v['claimable'] for v in nodes[ATTESTOR_A].yed_listpositions() if v['txid'] == v3['txid']], [True])
         assert_greater_than(rows[0]['residualZat'], 100_000)
         before = nodes[ATTESTOR_A].getbalance()
         claimed = self.claim_raw(USER, v3['txid'], a1['token'], emerg, POOLS[1])

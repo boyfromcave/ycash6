@@ -529,9 +529,11 @@ derived fields. `collateral` is the decimal-YEC twin of `collateralZat`. `voidRe
 verdict of the MINT rule that failed, `""` for a vault that was ever ACTIVE. `closeHeight`,
 `closingTxid`, `burnedCents` are `null`/`""`/`0` until the vault is CLOSED or CLAIMED
 (`closingTxid` `""`, `closeHeight` `null`). `claimable` is true for an ACTIVE vault at or past
-`claimHeight` that is underwater at the tip snapshot (RED-4 would pass); `underwaterAt` is the
-`pClaim` (µUSD) below which `collateralZat · pClaim < mintedCents · CLAIM_THRESHOLD_BPS`, i.e. the
-price at which the vault becomes claimable (`null` for a VOID vault, which has no debt). `unbacked`
+`claimHeight` that is underwater at the tip snapshot (RED-4 would pass; **v3**, while armed: by
+clause (a) or (b), exactly `yed_listclaimable`'s test, so a vault listed there with `claimPath`
+`"b"` reads `claimable: true` here); `underwaterAt` is the `pClaim` (µUSD) below which
+`collateralZat · pClaim < mintedCents · CLAIM_THRESHOLD_BPS`, i.e. the price at which the vault
+becomes claimable (`null` for a VOID vault, which has no debt). `unbacked`
 is true for a vault closed without its burn (a sweep, IN-2). **`sweepBefore`** (**optional**,
 = `claimHeight`) is present on every VOID vault (its claim path is anyone-can-spend after
 `claimHeight`, K3) and on every ACTIVE vault while abandonment holds (L10); absent otherwise.

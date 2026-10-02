@@ -224,7 +224,7 @@ UniValue UnderwaterAt(const VaultRecord& v, const yellowback::Params& p)
     return UniValue((int64_t)q.GetLow64());
 }
 
-UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, const YellowbackIndex& index, const std::optional<Snapshot>& tipSnap, bool abandoned)
+UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex& index, const std::optional<Snapshot>& tipSnap, bool abandoned)
 {
     const yellowback::Params& p = index.GetParams();
     const int tip = index.TipHeight();
@@ -249,10 +249,9 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, const Yellowbac
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
-    bool claimable = false;
-    if (v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value()) {
-        claimable = IsUnderwater(v.collateralZat, tipSnap->PClaim(), v.mintedCents, p.claimThresholdBps);
-    }
+    // RED-4 by either clause, exactly yed_listclaimable's test (unarmed: v2's tip-snapshot clause (a)).
+    const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value() &&
+                           yellowback::rpc::EstimateClaim(index, out, v, tip).claimable;
     o.pushKV("claimable", claimable);
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOID ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
