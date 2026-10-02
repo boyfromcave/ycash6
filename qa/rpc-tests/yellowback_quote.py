@@ -278,7 +278,9 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         self.write_conf(i, password='wrong')
         code, err = self.run_once(i)
         assert_equal(code, 1)                                        # an RPC failure is not a configuration error
-        assert 'yed_setquote' in err, err
+        # With --mock-price the agent asks yed_getinfo for the network first (audit D-11), so the
+        # wrong password fails there, before yed_setquote; either RPC name is the same verdict.
+        assert 'yed_setquote' in err or 'yed_getinfo failed' in err, err
         with open(self.conf_path(i), 'a') as f:
             f.write('\n[quote]\nbogus = 1\n')
         code, err = self.run_once(i)
