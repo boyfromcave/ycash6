@@ -49,14 +49,17 @@ every coinbase the node builds:
 enabled node is the cross-check. `check-coinbase --scriptsig <hex>` decodes a raw scriptSig
 offline (useful on a pool's coinbase before it is mined).
 
-## Per-stack notes (skeleton — survey §12 Q9 pending)
+## Per-stack notes (survey §12 Q9: one stack verified, the rest unverified)
 
 The survey of which stacks Ycash pools actually run **needs the operators** and is the one Phase 7
 item that code cannot close (Phase 7 checkbox 3, §12 Q9): it is done by asking each pool, during
 the outreach of Phase 10, which stack it runs and whether that stack honours `coinbasetxn` or
-`coinbaseaux.flags`, and by recording the answer here. Each note below is the expected shape from
-reading the stack's public source; **every item marked TODO is unverified against a live pool.**
-The one-line patches described are not shipped in this repository until a pool has run them.
+`coinbaseaux.flags`, and by recording the answer here. As of 2026-10-01 exactly one stack is
+verified end to end (yolo, below, plus the Perl `stratumsolo`/`stratumpool`/`cenote` it rewrites);
+every note marked **Unverified** is the expected shape from reading the stack's public source and
+has not been run against a live pool. Treat an unverified note as a hypothesis for the operator
+to confirm, not as an instruction. The one-line patches described are not shipped in this
+repository until a pool has run them.
 
 ### yolo (Rust) — verified on regtest, 2026-09-28
 
@@ -87,32 +90,38 @@ seat (`yellowback-devnet up --role pool --stratum`). Findings Y-F1..Y-F13 are in
 
 - These build the coinbase themselves from `getblocktemplate` (`lib/transactions.js`
   `createGeneration`), so the **`coinbaseaux.flags` path** applies.
-- TODO (survey): confirm the fork in use reads `coinbaseaux.flags` at all — stock
-  node-stratum-pool ignores it and writes `height push | extranonce1 | extranonce2 | text`.
-  Expected patch: after the height serialisation in `createGeneration`, concatenate
-  `Buffer.from(rpcData.coinbaseaux.flags, 'hex')` when it is non-empty. One line; verify the
-  scriptSig stays ≤ 100 bytes with the pool's `coinbase_text` (the stock text is ≈ 10 bytes).
-- TODO (survey): whether the pool refreshes the template every block (it must: the tag's price
-  changes as the agent publishes).
+- **Unverified** (reading of the stock source, 2026-09): the fork in use may not read
+  `coinbaseaux.flags` at all — stock node-stratum-pool ignores it and writes
+  `height push | extranonce1 | extranonce2 | text`. Expected patch: after the height serialisation
+  in `createGeneration`, concatenate `Buffer.from(rpcData.coinbaseaux.flags, 'hex')` when it is
+  non-empty. One line; verify the scriptSig stays ≤ 100 bytes with the pool's `coinbase_text` (the
+  stock text is ≈ 10 bytes). Until an operator confirms, assume the tag is **dropped** on this stack
+  and verify with `check-coinbase` on the first mined block.
+- **Unverified**: whether the pool refreshes the template every block (it must: the tag's price
+  changes as the agent publishes). Stock node-stratum-pool polls `getblocktemplate` on a timer and
+  on `blocknotify`; a pool that caches templates across blocks carries stale prices.
 
 ### miningcore
 
 - Builds its own coinbase per coin family (`Blockchain/Equihash/EquihashJob.cs`); the
   **`coinbaseaux.flags` path** applies.
-- TODO (survey): whether the Equihash job builder honours `coinbaseaux.flags` (the Bitcoin job
+- **Unverified**: whether the Equihash job builder honours `coinbaseaux.flags` (the Bitcoin job
   builder has a `coinbaseaux` field; the Equihash one may not) and where the extranonce is placed.
-  Expected patch: same shape as above, in the scriptSig assembly of the job builder.
+  Expected patch: same shape as above, in the scriptSig assembly of the job builder. Until an
+  operator confirms, assume the tag is dropped and verify with `check-coinbase`.
 
 ### Solo `getblocktemplate` (own miner software, `coinbasetxn`)
 
 - Nothing to do if the miner submits `coinbasetxn.data` unchanged.
-- TODO (survey): which solo miners in use rewrite the coinbase (some replace `vin[0].scriptSig`
-  to add their own extranonce); those fall under the `coinbaseaux.flags` path.
+- **Unverified**: which solo miners in use rewrite the coinbase (some replace `vin[0].scriptSig`
+  to add their own extranonce); those fall under the `coinbaseaux.flags` path. `check-coinbase`
+  on the first block tells.
 
-### Hosted / closed stacks (TODO: survey)
+### Hosted / closed stacks (unverified; no operator answer recorded yet)
 
 - Operators of closed stratum software can only choose between the `coinbasetxn` path and asking
-  their vendor for the one-line `coinbaseaux.flags` append. Record what each says here.
+  their vendor for the one-line `coinbaseaux.flags` append. Record what each says here; until
+  then nothing is known about any hosted stack.
 
 ## Files
 

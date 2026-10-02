@@ -188,6 +188,7 @@ path = "/Users/you/yb-rt/bus"
 
 ```bash
 cd contrib/yellowback/attest
+chmod 600 ~/yb-rt/attest.toml                                   # it holds rpc_password; the agent refuses 0644
 echo 0.50 > ~/yb-rt/mock-price
 cargo run -q -- check-config --conf ~/yb-rt/attest.toml         # validate before running
 cargo run -q -- attest    --conf ~/yb-rt/attest.toml --mock-price ~/yb-rt/mock-price &

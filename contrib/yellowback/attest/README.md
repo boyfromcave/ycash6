@@ -6,7 +6,7 @@ long-running modes, beside a `ycashd -yellowback`.
 | Mode | Runs beside | Loop |
 |---|---|---|
 | `attest` | an attestor's node (registered with `yed_registerattestor`) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic |
-| `subscribe` | any minting node (the devnet's node 0; YecWallet's bundled node) | join the topic; drop anything that is not 74 bytes or whose `seq` is not in `yed_listattestors` (refreshed every 60 s); push the rest with `yed_addattestation`; count acceptances; optionally poll `[subscribe] endpoints` over HTTPS as a second path |
+| `subscribe` | any minting node (the devnet's node 0; YecWallet's bundled node) | join the topic; drop anything that is not 74 bytes, whose `seq` is not in `yed_listattestors` (refreshed every 60 s), that was already handed to the node (LRU of 4,096 frames), whose `citedHeight` is outside `[tip − 64, tip + 8]` of the node, or that exceeds the `seq`'s token bucket (`seq_burst`, `seq_refill_seconds`); push the rest with `yed_addattestation`; count acceptances; back off 1..60 s while the RPC is down; optionally poll `[subscribe] endpoints` over HTTPS as a second path |
 
 Plus two one-shot commands: `sources` (fetch every source once and show what resolved) and
 `check-config`.
@@ -18,7 +18,17 @@ Running two agents against two nodes with one hot key is the operator's error; d
 **Failure behaviour** (the quote agent's, plan L5): an RPC or transport failure is logged at
 `error` and retried on the next tick, never fatal; after `fail_polls` consecutive failed
 aggregates at a due tick nothing is published until a good one — a missing attestation is the
-correct report of a broken feed. The exit code is non-zero only for a bad configuration (2).
+correct report of a broken feed. The exit code is non-zero only for a bad configuration (2):
+unknown keys, a file holding `rpc_password` that is group/world-readable (unless
+`--insecure-config-permissions`), credentials over plain `http://` to a host other than loopback
+(unless `allow_insecure_rpc = true`), an `http://` endpoint off loopback (unless
+`allow_insecure_endpoints = true`), or `--mock-price` on a network other than regtest (unless
+`--i-know-this-is-not-regtest`).
+
+**What the agent refuses from the network.** Venue replies are fetched with no redirects (a 3xx
+would carry an API key to another host), a total deadline per request, and a 1 MiB body cap;
+`"inf"`/`"nan"` strings and bare `Infinity`/`NaN` literals are shape errors, never samples;
+`median` is total-order. The node's replies are capped at 64 MiB.
 
 ## Layout
 
@@ -51,8 +61,10 @@ attest/
   is configurable and never compiled in (empty = iroh's default set, `["none"]` = direct only).
   `iroh-gossip` has no topic discovery: the swarm is bootstrapped from `[transport] peers`
   (endpoint ids other operators publish); the agent prints its own id at startup, and
-  `secret_key_file` keeps it stable. The endpoint's address is published through iroh's default
-  DNS/pkarr lookup so an id alone is dialable.
+  `secret_key_file` keeps it stable (created 0600, never over an existing file). The endpoint's
+  address is published through iroh's default DNS/pkarr lookup so an id alone is dialable. With
+  `relays = []` the public n0 relays see this agent's IP and endpoint id (not its content, which
+  is signed); own relays or `["none"]` avoid that.
 - **`dir`** (tests, devnet, and any two processes on one machine): a shared directory. A publish
   writes `<path>/<seq>-<citedHeight>.att` through a temp file and one rename; a subscriber
   polls every 2 s and delivers each file once. No relay, no network.

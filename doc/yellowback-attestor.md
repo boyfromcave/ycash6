@@ -27,6 +27,13 @@ system; YED is the unit.
   topic (QUIC with hole punching and relay fallback); nothing listens. The optional HTTPS
   endpoint that subscribers can poll (`[subscribe] endpoints` on *their* side) is a second path
   some attestors may offer; it is not required and this guide does not set one up.
+- **But one third party does see you.** With the default `[transport] relays = []` the swarm
+  bootstraps through iroh's public relays (operated by n0). A relay cannot forge, alter or sign
+  anything — attestations are signed and public — but its operator sees your IP address and
+  endpoint id, can delay your messages, and can partition the swarm. If that matters to you, run
+  `relays = ["https://relay.you.example"]` (your own, or one the Ycash project lists for mainnet)
+  or `relays = ["none"]` with direct peers only. Either way, what leaves your machine is 74
+  public bytes per interval and nothing else.
 - **No periodic transactions.** Registration is one transaction; withdrawal, a year or more
   later, is one more. Attestations are 74-byte gossip messages, never on chain unless a minter
   or claimant carries them (or someone proves an equivocation with them).
@@ -38,7 +45,8 @@ system; YED is the unit.
   attestor node is a plain `ycashd -yellowback`.
 - **No price of your own.** The agent aggregates public sources; the node never reads a socket
   for Yellowback. You choose sources, you do not type prices (`--mock-price` exists for regtest
-  and demos only).
+  and demos only, and the agent refuses it when the node reports any other network unless
+  `--i-know-this-is-not-regtest` is given).
 
 ## What an attestor is
 
@@ -147,6 +155,7 @@ keys are refused, exit 2):
 
 ```
 [node]        rpc_url = "http://127.0.0.1:8832"; rpc_cookie = "~/.ycash/.cookie"   (or rpc_user/rpc_password); rpc_timeout
+              allow_insecure_rpc = false       http:// with credentials to a host other than loopback is refused without this
 [attest]      seq = <your seq>                 REQUIRED: from yed_listattestors once the registration confirmed
               every_blocks = 10                k; sign every N new blocks (regtest devnet: 4)
               fail_polls = 2                   after this many failed aggregates at a due tick, publish nothing until a good one
@@ -165,7 +174,18 @@ keys are refused, exit 2):
               topic_override = ""              default "yellowback/attest/<network>/3"; leave it
               kind = "dir"; path = "..."       tests and the regtest devnet: <seq>-<citedHeight>.att files in a shared directory
 [subscribe]   listattestors_seconds = 60; endpoints = [...]; endpoints_seconds = 30      subscriber side only
+              allow_insecure_endpoints = false (endpoints are https://; http:// only on loopback without this)
+              seq_burst = 8; seq_refill_seconds = 15   per-seq token bucket in front of yed_addattestation
 ```
+
+**Keep `attest.toml` private.** Prefer `rpc_cookie` (the node's own file, re-read on every call).
+If you use `rpc_user`/`rpc_password` the file holds the node's RPC secret — which can
+`yed_signattestation` with your hot key — so `chmod 600 attest.toml`: the agent refuses to start
+on a group- or world-readable one (`--insecure-config-permissions` overrides). It also refuses to
+send those credentials as cleartext Basic auth over plain `http://` to any host but loopback: run
+the agent beside the node, tunnel to `127.0.0.1`, or use `https://` (`allow_insecure_rpc = true`
+to insist). The packaged unit reads `/etc/yellowback/attest.toml`; create it `0600 root:yellowback`
+or whichever user the unit runs as.
 
 Set `secret_key_file` and publish the endpoint id the agent prints at startup (the `iroh`
 transport bootstraps from `peers`, so subscribers need the ids of attestors and attestors of one
@@ -185,10 +205,16 @@ observation. Declare your tier honestly (`flags` at registration) and prefer dir
 can.
 
 **Running it.** `contrib/yellowback/attest/packaging/` holds `yellowback-attest.service`
-(systemd; `Restart=always`, `ProtectSystem=strict`, an `/etc/yellowback/attest.toml`), the
-subscriber's unit, and `org.ycash.yellowback-attest.plist` for launchd. Start the node first; the
-agent retries RPC and transport failures forever and exits non-zero only for a bad configuration.
-A regtest walk-through with the `dir` transport is in the crate's README.
+(systemd; `Restart=always`, `ProtectSystem=strict`, an `/etc/yellowback/attest.toml`, mode 0600),
+the subscriber's unit, and `org.ycash.yellowback-attest.plist` for launchd. Start the node first;
+the agent retries RPC and transport failures forever and exits non-zero only for a bad
+configuration. A regtest walk-through with the `dir` transport is in the crate's README.
+
+The subscriber side runs on a public topic anyone can join, so before it spends an RPC on a
+frame it drops what it already handed to the node (the last 4,096 frames), frames citing a
+height outside `[tip − 64, tip + 8]` of its own node, and frames beyond a per-`seq` token
+bucket (`seq_burst` at once, then one per `seq_refill_seconds`; a legitimate attestor emits one
+per `every_blocks` blocks). The signature is still verified only by the node.
 
 **Monitoring.** On your node, `yed_getinfo.attest` — `status` (`UNARMED`/`TRIGGERED`/`ARMED`),
 `triggerHeight`, `armHeight`, `seatedCount`, `poolSize`, `poolFresh`, `required`, `armed` — and

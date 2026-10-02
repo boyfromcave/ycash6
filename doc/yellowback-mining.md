@@ -175,9 +175,18 @@ listening socket, no TLS server).
 
 ```
 cp contrib/yellowback/pool/yellowback-quote.toml.sample /etc/yellowback-quote.toml   # edit [node] and [[sources]]
+chmod 600 /etc/yellowback-quote.toml                                                 # it may hold the node's RPC password
 yellowback-quote sources --conf /etc/yellowback-quote.toml                           # what every source resolves to right now
 yellowback-quote --conf /etc/yellowback-quote.toml                                   # the daemon (systemd / launchd units in contrib/yellowback/pool/)
 ```
+
+The sample authenticates with the node's cookie file (`rpc_cookie`, re-read on every call), which
+keeps the secret out of this file. With `rpc_user`/`rpc_password` instead, the file must be mode
+0600 — the agent refuses a group- or world-readable one (`--insecure-config-permissions`
+overrides) — and the agent refuses to send those credentials as cleartext Basic auth over plain
+`http://` to any host but loopback (run it beside the node, tunnel to `127.0.0.1`, or use
+`https://`; `allow_insecure_rpc = true` insists). `--mock-price` is for regtest: on any other
+network the agent exits 2 unless `--i-know-this-is-not-regtest` is given.
 
 Every `poll_seconds` (30) it fetches the configured sources, takes each source's 15-minute
 volume-weighted (or time-weighted) average, drops outliers, requires `min_sources` live sources

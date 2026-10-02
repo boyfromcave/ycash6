@@ -19,7 +19,8 @@ pushes one number into the pool's node with `yed_setquote`; the node puts it in 
 ## Quote agent contract
 
 ```
-yellowback-quote [run|sources] --conf FILE [--mock-price FILE] [--once] [--dry-run] [--log-level L | -v]
+yellowback-quote [run|sources] --conf FILE [--mock-price FILE [--i-know-this-is-not-regtest]] [--once] [--dry-run]
+                 [--insecure-config-permissions] [--log-level L | -v]
 ```
 
 - Exit codes: `0` a quote was published (`--once`) or an aggregate exists (`--dry-run`) or the
@@ -27,17 +28,22 @@ yellowback-quote [run|sources] --conf FILE [--mock-price FILE] [--once] [--dry-r
   `sources`); `2` bad configuration. The daemon never exits on an RPC or source failure.
 - `--mock-price FILE`: the file holds one USD price (e.g. `0.05`), re-read every poll; `/dev/stdin`
   works for a single `--dry-run`/`--once`. In mock mode the sources are not fetched and the
-  published `sourceMask` is `0`. An unreadable file is a failed aggregate.
+  published `sourceMask` is `0`. An unreadable (or non-finite) file is a failed aggregate. Regtest
+  only: on any other network the agent exits 2 unless `--i-know-this-is-not-regtest` is given.
 - `--dry-run` does one poll and prints `{"priceMicroUsd", "priceUsd", "sourceMask", "sources"}` (or
   `{"aggregate": null, ...}`) as JSON; no RPC, so `[node] rpc_url` may be absent.
 - Configuration (TOML): `[node] rpc_url` and either `rpc_cookie` or `rpc_user`/`rpc_password`
-  (`rpc_timeout` optional); `[quote] poll_seconds (30), fail_polls (2), twap_seconds (900),
+  (`rpc_timeout` optional; a file holding `rpc_password` must be mode 0600 or the agent exits 2,
+  `--insecure-config-permissions` overrides; credentials over plain `http://` to a host other than
+  loopback need `allow_insecure_rpc = true`); `[quote] poll_seconds (30), fail_polls (2), twap_seconds (900),
   min_sources (3), min_venues (2), min_btc_sources (2), outlier_bps (1000), silence_seconds (120),
   fetch_timeout (15)`; `[[sources]]` and `[[btc_usd_sources]]` rows with `name, kind, url, path,
   quote, scale, timestamp_path, timestamp_unit, max_age, spread_path, spread_unit, bid_path, ask_path,
   max_spread_bps, reject_paths, headers, volume_path, mask_bit` plus the preset parameters
   (`coin, vs, market, target, symbol, base_url, api_key, pair, key, product`). Unknown keys are
-  refused. See `pool/yellowback-quote.toml.sample`.
+  refused. See `pool/yellowback-quote.toml.sample`. Sources are fetched concurrently under one
+  `fetch_timeout` deadline, never through a redirect, with a 1 MiB body cap; `inf`/`nan` values are
+  shape errors, never samples.
 - Source-mask bits: 0 SafeTrade, 1 CoinGecko, 2 CoinMarketCap, 3 Nonkyc; 4–15 unassigned. A
   preset's venue picks its bit; `mask_bit` overrides; a venue without a bit contributes none.
 
