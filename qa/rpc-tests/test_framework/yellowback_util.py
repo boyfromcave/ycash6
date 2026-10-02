@@ -1246,6 +1246,15 @@ def wait_for_rejection(nodes, blockhash, timeout=30):
         assert_rejected(node, blockhash)
 
 
+def write_private(path, text):
+    """Write an agent configuration file 0600: it holds the node's RPC password and the agents
+    (yellowback-quote, yellowback-attest) exit 2 on a group/world-readable one (audit D-7)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+    os.chmod(path, 0o600)
+
+
 def debug_log_contains(tmpdir, i, needle):
     """True iff node ``i``'s regtest debug.log contains ``needle``."""
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')

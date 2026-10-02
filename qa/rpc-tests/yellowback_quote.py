@@ -26,6 +26,7 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     pool_args,
     wait_yed_healthy,
+    write_private,
     yellowback_node_args,
 )
 
@@ -86,9 +87,8 @@ class YellowbackQuoteTest(YellowbackTestFramework):
 
     def write_conf(self, i, fail_polls=FAIL_POLLS, password=None):
         user, pw = rpc_auth_pair(i)
-        with open(self.conf_path(i), 'w') as f:
-            f.write(CONF.format(i=i, port=rpc_port(i), user=user, password=password or pw,
-                                poll=POLL_SECONDS, fail_polls=fail_polls))
+        write_private(self.conf_path(i), CONF.format(i=i, port=rpc_port(i), user=user, password=password or pw,
+                                                     poll=POLL_SECONDS, fail_polls=fail_polls))
 
     def write_mock(self, i, usd):
         tmp = self.mock_path(i) + '.tmp'

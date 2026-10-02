@@ -44,7 +44,7 @@ from decimal import Decimal
 from test_framework.util import assert_equal, rpc_auth_pair, rpc_port
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, ATTEST_ARM_MIN, K_SLACK, M_SELECT, POOLS, REF_LAG,
-    USER, YellowbackTestFramework, wait_yed_healthy,
+    USER, YellowbackTestFramework, wait_yed_healthy, write_private,
 )
 from test_framework.yellowback_attest import register_and_arm, two_step
 
@@ -148,19 +148,17 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
         """One `attest` process signing as `seq` against node `node`."""
         user, password = rpc_auth_pair(node)
         conf = os.path.join(self.workdir, 'attest-%d.toml' % seq)
-        with open(conf, 'w') as f:
-            f.write(ATTEST_CONF % {'port': rpc_port(node), 'user': user, 'password': password,
-                                   'seq': seq, 'every': ATTEST_INTERVAL, 'ref_lag': REF_LAG,
-                                   'poll': POLL_SECONDS, 'bus': self.bus})
+        write_private(conf, ATTEST_CONF % {'port': rpc_port(node), 'user': user, 'password': password,
+                                           'seq': seq, 'every': ATTEST_INTERVAL, 'ref_lag': REF_LAG,
+                                           'poll': POLL_SECONDS, 'bus': self.bus})
         return self.spawn('attest-%d' % seq, [self.agent, '--conf', conf, '--log-level', 'debug',
                                               'attest', '--mock-price', self.mock[seq]])
 
     def start_subscriber(self, node=USER):
         user, password = rpc_auth_pair(node)
         conf = os.path.join(self.workdir, 'subscribe.toml')
-        with open(conf, 'w') as f:
-            f.write(SUBSCRIBE_CONF % {'port': rpc_port(node), 'user': user,
-                                      'password': password, 'bus': self.bus})
+        write_private(conf, SUBSCRIBE_CONF % {'port': rpc_port(node), 'user': user,
+                                              'password': password, 'bus': self.bus})
         return self.spawn('subscribe', [self.agent, '--conf', conf, '--log-level', 'debug', 'subscribe'])
 
     def stop_agent(self, name, timeout=15):
