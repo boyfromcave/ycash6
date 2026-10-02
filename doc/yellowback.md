@@ -332,6 +332,19 @@ Regtest runs all six Ycash upgrades at height 1, as on the v4.5.0 line: baseline
 Equihash at (48,5) under every upgrade (6.20.0 had dropped v4.5.0's regtest exemption). The stock node
 for parity tests is built from branch `ycash6-stock` (all three baseline fixes, no Yellowback).
 
+**A test fault this line has and v4.5.0 does not: `-yellowbacktestfault=crash:<height>`** (regtest
+only, as every `-yellowbacktestfault` spec; `init.cpp` refuses the flag on any other network). When
+`CheckConnect` is about to judge the block at `<height>` for real (never under `fJustCheck`), the
+node flushes the block index and chainstate and then `raise(SIGKILL)`s itself
+(`src/yellowback/index.cpp`, `TestFault::crashHeight`). That reproduces a state only 6.20.0 can
+reach: a rule-breaking block stored on disk, flushed, and not yet judged. 6.20.0's `ThreadImport`
+holds `fImporting` across its final `ActivateBestChain` on every start, so without the port's
+pre-`ThreadImport` `ActivateBestChain` (plan F-37) the restarted node connected that block unjudged
+under N2 ("initial sync / reindex / import"). On v4.5.0 `RewindBlockIndex` erased the never-connected
+entry at start and the block was fetched and judged again, so the fault has no counterpart there.
+`yellowback_index.py` (`rejected_survives_kill9`) drives it; the debug log line is
+`yellowback: -yellowbacktestfault: crash before judging block <hash> at <height>`.
+
 The inherited functional suite at the pin is classified script by script in
 [`yellowback-baseline.md`, "Inherited functional suite at the pin"](yellowback-baseline.md#inherited-functional-suite-at-the-pin).
 Of the 119 `BASE_SCRIPTS`, 39 pass against the stock node. 77 of the failures come from

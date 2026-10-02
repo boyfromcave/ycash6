@@ -76,7 +76,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: dc0cb249605bb9a9f57ce823d6e775b1478447d5
+  YOLO_COMMIT: 4a28eef789bfa9d72778330830f3ae84522d9d64
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), `main` checked
   # out and built the same way, exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
   CHAINVIZ_REPO: boyfromcave/chain-viz

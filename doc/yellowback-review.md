@@ -24,9 +24,11 @@ Commands are in §9.
 
 **Status of the port at `df409ade8`** (plan `docs/plans/yellowback-ycash6-plan.md`, revision 3):
 Phases 0–5 are complete. Phase 6's gates are green **locally** (lockorder, ASan/UBSan, TSan,
-coverage floors, fuzz), but their CI jobs are still disabled. The §4 demonstration has a
-transcript-producing script (`yellowback_demo_v6.py`) and is being run by the coordinator; its
-transcript goes in §8. Phase 7 compatibility has been verified for lightwalletd-dd, yolo, chain-viz
+coverage floors, fuzz). *Refreshed 2026-10-01 (audit B-7/I-11):* every CI job is switched on
+(`8185cba3a`), the repository default branch is `feature/yellowback` so the scheduled jobs fire
+from the branch that carries them, and the plan records the last seven `yellowback-tests.yml`
+runs on `boyfromcave/ycash6` green (push-triggered jobs; §4.4). The §4 demonstration has a
+transcript-producing script (`yellowback_demo_v6.py`); its run of record is in §8. Phase 7 compatibility has been verified for lightwalletd-dd, yolo, chain-viz
 and YEW against 6.20.0 on their own branches (§4.5); none of those branches is merged. §7 lists what
 this document does **not** claim.
 
@@ -79,6 +81,7 @@ baseline (**measured**):
 | `src/miner.h` | +4 / −0 | node, hook | forward declaration + `ybview` member (§2.2) |
 | `src/rpc/mining.cpp` | +7 / −0 | node, RPC | four `getblocktemplate` insertions + include (§2.3) |
 | `src/chainparams.cpp` | +4 / −0 | **baseline fix 3** | regtest Equihash guard (§1.5, §2.4) |
+| `src/util/system.cpp` | +4 / −3 | branding | `PrivacyInfo()` prints no z.cash link, as Ycash v4.5.0 (`67068368d`); not Yellowback, outside every budget |
 | `src/init.cpp` | +193 / −2 | node, startup | help, step-3 checks, index construction, kill switch (with its flush), shutdown, registration (§2.5) |
 | `src/rpc/rawtransaction.cpp` | +23 / −3 | wallet tier | H7 `allowyedburn` (§2.6) |
 | `src/wallet/rpcwallet.cpp` | +20 / −1 | wallet tier | H5 `lockunspent` (§2.6) |
@@ -696,7 +699,7 @@ this revision.
 | `demo_v6` | green on the integration tree (plan Phase 4 note); the run of record is §8 |
 | `attest_agent`, `devnet_roles` (all three presets, ~39 min) | green (Phase 5, `d1d1ac9e5`) |
 | `chainviz` | green on ycash6 with `CHAINVIZ_BIN` from chain-viz `feature/ycash6` (seeds 480, 481) |
-| `stratum` | **pending:** a run with `YOLO_BIN` from yolo `feature/ycash6`. The yolo regtest grid is green on ycash6 (§4.5), but this script's run is not recorded |
+| `stratum` | green with the real yolo `4a28eef` (plan §4, 2026-10-01, **recorded**); CI's `main` job runs it with `YOLO_BIN` built at that commit |
 
 The plan counts these as "all 19 scripts + `yellowback_fee`". The suite rows above name 20 scripts
 including `framework_smoke` (V-11).
@@ -711,10 +714,12 @@ armed.
 |---|---|
 | `audit` | live; every step green locally (**measured**, §1.1) |
 | `python` | live (`5576005b0`) |
-| `main`, `agent`, `nightly`, `lockorder`, `sanitizers`, `coverage`, `weekly-fuzz` | defined and adapted for 6.20.0, still prefixed `if: false &&` (**measured**). **pending:** switch-on and first green runs. Their local equivalents are green (§4.2), but the plan's §8.4 items 23–24 ask for CI runs |
+| `main`, `agent`, `nightly`, `lockorder`, `sanitizers`, `coverage`, `weekly-fuzz` | switched on (`8185cba3a`; **measured**: no `if: false` remains in the workflow). `main`, `audit`, `agent` and `python` run on push/PR; `nightly`, `lockorder`, `sanitizers` and `coverage` on the `0 3 * * *` schedule, `weekly-fuzz` on `0 4 * * 0`, all from the default branch, which the owner set to `feature/yellowback` (plan, 2026-10-01). **recorded:** the last seven `yellowback-tests.yml` runs on `boyfromcave/ycash6` green (plan §4.10, after the chain-viz fix `feb029022`). **pending:** the first scheduled runs of the four nightly jobs and of `weekly-fuzz` (nothing had fired by this refresh) |
 
-Whether the live jobs have run green on GitHub for `origin/feature/yellowback` was not checked (no
-`gh` on this host).
+The push-triggered runs are the plan's record (owner-confirmed, 2026-10-01); this host has no `gh`
+and did not re-check them. The `main` job builds yolo at `YOLO_COMMIT` for `yellowback_stratum.py`,
+pinned to `4a28eef` — the yolo commit the plan verified on 6.20.0 (header-root fallback, `-mocktime`
+regtest recipe); it was `dc0cb24` (the toolchain commit, two behind) until audit B-7.
 
 ### 4.5 Component compatibility (Phase 7, **recorded** from the plan's Phase 7 notes)
 
@@ -905,39 +910,42 @@ These are the 25 items of the v2 plan's §8.4 (scored for v4.5.0 in
 | 12 | Determinism grep empty; `GetTime` only where allowed | determinism grep empty (**measured**); the audit's "Determinism, no clock, no sockets, no bans" step exits 0 (**measured**) | **PASS** |
 | 13 | Coin locking: every owned YED output locked before commit, across reorgs and restarts; `lockunspent` cannot unlock | H5 refusal and `yed_unlockcoin` exist (**measured**); `yellowback_hardening.py`, `yellowback_wallet_restore.py`, `yellowback_wallet_lifecycle.py` green (**recorded**). v4.5.0 scored NOT YET | **PASS** |
 | 14 | The wallet refuses a mint before activation and under each halt (`mintpol-*`); refuses a redeem/claim that `MempoolCheck` rejects | `yellowback_claim.py`, `yellowback_pricefeed.py`, `yellowback_void_mint.py` green (**recorded**) | **PASS** |
-| 15 | `getblocktemplate` carries the tag in all three carriers; a pool-rebuilt coinbase yields a readable tag | `yellowback_mining.py` incl. `gbt_shape_without_flag` green (**recorded**); tag byte-budget unit cases; yolo's grid on ycash6 (§4.5). `yellowback_stratum.py` with `YOLO_BIN` **pending** | **PASS** (stratum script pending, §4.3) |
+| 15 | `getblocktemplate` carries the tag in all three carriers; a pool-rebuilt coinbase yields a readable tag | `yellowback_mining.py` incl. `gbt_shape_without_flag` green (**recorded**); tag byte-budget unit cases; yolo's grid on ycash6 (§4.5); `yellowback_stratum.py` green with yolo `4a28eef` (**recorded**, §4.3) | **PASS** |
 | 16 | The index survives `kill -9` with the chainstate unflushed; refuses `-prune` | `yellowback_index.py` `crash_unflushed_chainstate`, the `-prune` refusal (`:235-236`) green (**recorded**) | **PASS** |
 | 17 | For every `Rejected` hash, `yed_getblockverdict` gives `blockInvalid == true`; refuses when the parent is not the tip | `yellowback_index.py` `verdict_parent_not_tip`, `yellowback_enforcement.py` green (**recorded**) | **PASS** |
 | 18 | Docs: no "no consensus change"; trust statement byte-identical; runbook covers the seven topics | `grep 'no consensus change' doc/yellowback.md` → nothing; the audit "Documents" step exits 0; all seven runbook topics present in `doc/yellowback-mining.md` (**measured**) | **PASS** |
 | 19 | No new build dependency; `configure.ac` untouched; no sockets in node Yellowback code | `configure.ac`, `Cargo.*`, `src/rust/` frozen at zero; socket grep empty (**measured**) | **PASS** |
 | 20 | The shutdown sequence holds for the synchronous hooks | `init.cpp:211-216` after `StopHTTPServer()` (**measured**); mechanical companions `crash_unflushed_chainstate`, `rejected_survives_kill9` green (**recorded**). A reviewer-signed claim | **awaiting a human reviewer** |
 | 21 | Stock parity: fork binary without `-yellowback` indistinguishable from stock | `yellowback_stockparity.py` (300 blocks), `yellowback_stock_node.py`, inherited suite 42/42 (**recorded**); tolerated differences §3.2. v4.5.0 scored NOT YET | **PASS** |
-| 22 | Shielded pool: builder tests unchanged and green; the new methods called only from `src/yellowback/` | builder grep empty, `src/gtest` zero (**measured**); `yellowback_sapling.py` green unarmed and armed (**recorded**). **pending:** `ycash-gtest --gtest_filter='TransactionBuilder*'` | **PARTIAL** |
-| 23 | Concurrency: `lockorder` and `sanitizers` jobs green on the last seven nightly runs | green locally (debug-build lockorder, ASan+UBSan, TSan; **recorded**). **pending:** both CI jobs are `if: false`; no nightly run exists | **PARTIAL** |
-| 24 | Coverage: `qa/yellowback-coverage-floor.sh` exits 0 on the last run's `lcov.info` | floors met locally with the functional suite (**recorded**, plan revision 3). **pending:** the CI `coverage` job | **PARTIAL** |
+| 22 | Shielded pool: builder tests unchanged and green; the new methods called only from `src/yellowback/` | builder grep empty, `src/gtest` zero (**measured**); `yellowback_sapling.py` green unarmed and armed (**recorded**); `ycash-gtest --gtest_filter='TransactionBuilder*'` 18 pass, 1 upstream skip (plan §4, 2026-10-01, **recorded**) | **PASS** |
+| 23 | Concurrency: `lockorder` and `sanitizers` jobs green on the last seven nightly runs | green locally (debug-build lockorder, ASan+UBSan, TSan; **recorded**). Both CI jobs are switched on (`8185cba3a`) and the default branch is `feature/yellowback`, so they fire nightly (§4.4). **pending:** the seven nightly runs themselves (none had fired by this refresh) | **PARTIAL** |
+| 24 | Coverage: `qa/yellowback-coverage-floor.sh` exits 0 on the last run's `lcov.info` | floors met locally with the functional suite (**recorded**, plan revision 3). The CI `coverage` job is switched on and scheduled (§4.4). **pending:** its first run's `lcov.info` | **PARTIAL** |
 | 25 | RPC contract: `yellowback_rpc_contract.py` green; the contract unchanged | script green (**recorded**); contract JSON byte-identical to `ycash-dd`'s (**measured**); `python` job live | **PASS** |
 
-**Summary: 21 PASS, 3 PARTIAL, 1 awaiting a human reviewer, 0 FAIL, 0 NOT YET.** For comparison,
-v4.5.0 at `5ea56c577` scored 11 PASS, 7 PARTIAL, 4 NOT YET, 2 FAIL and 1 awaiting a reviewer.
-All three PARTIALs close with things this host did not do: build and run `ycash-gtest`, and switch
-on and run the CI `lockorder`, `sanitizers` and `coverage` jobs.
+**Summary: 22 PASS, 2 PARTIAL, 1 awaiting a human reviewer, 0 FAIL, 0 NOT YET** (refreshed
+2026-10-01, audit B-7/I-11; item 22 moved to PASS on the recorded `ycash-gtest` run). For
+comparison, v4.5.0 at `5ea56c577` scored 11 PASS, 7 PARTIAL, 4 NOT YET, 2 FAIL and 1 awaiting a
+reviewer. Both PARTIALs close with evidence only GitHub can produce: the first scheduled runs of
+the `lockorder`, `sanitizers` and `coverage` jobs, now enabled and firing from the default branch.
 
 ---
 
 ## 7. What this document does **not** claim
 
-- **That the §4 demonstration of record has passed.** `yellowback_demo_v6.py` exists (`3f312f28a`),
-  and the plan records it green on the integration tree. The run of record and its transcript belong
-  in §8, which is empty until the coordinator attaches them.
-- **That any CI job beyond `audit` and `python` has run.** `main`, `agent`, `nightly`, `lockorder`,
-  `sanitizers`, `coverage` and `weekly-fuzz` are disabled (`if: false && …`). Their gates are green
-  locally only (§4.2, §4.4).
+- **That the §4 demonstration was re-run for this revision.** Its run of record (2026-10-01,
+  portseed 161, 1229 s, items 1–7 and 9 PASS) and transcript are in §8; nothing here re-ran it.
+- **That any scheduled CI job has run.** Every job is switched on and the default branch is set
+  (§4.4), and the push-triggered jobs (`main`, `audit`, `agent`, `python`) are recorded green on
+  the last seven runs; the `nightly`, `lockorder`, `sanitizers`, `coverage` and `weekly-fuzz` jobs
+  had not fired on GitHub when this document was refreshed. Their gates are green locally (§4.2).
 - **Re-runs at `df409ade8`.** No test was built or run for this revision. Everything marked
   *recorded* comes from the integration tree and the agents' runs on 2026-09-30 and 2026-10-01, at
   commits that are ancestors of this one or merged into it.
 - **The `-mempooltxcostlimit` sweep interaction, tested.** It is argued structurally (V-8), not run.
-- **`yellowback_stratum.py`, the `--armed` runs beyond six scripts, `ycash-gtest`.** All pending
-  (§4.3, §6 item 22).
+- **Re-runs of `yellowback_stratum.py`, the `--armed` suite or `ycash-gtest` for this revision.**
+  All three are **recorded** from the plan (2026-10-01: stratum green with yolo `4a28eef`, every
+  armed-capable script green `--armed`, `ycash-gtest --gtest_filter='TransactionBuilder*'` 18 pass
+  and 1 upstream skip), not measured here (§4.3, §6 item 22).
 - **Component compatibility as merged.** §4.5 is the component branches' own evidence. No branch is
   merged, and yecwallet-dd has known breaks awaiting a decision.
 - **Anything about mainnet**: hashpower, pool adoption, the launch bar, or the economics. Those
@@ -967,7 +975,8 @@ The plan §4 checkboxes that the script covers by pointer rather than in its own
 
 - item 8, the 30-minute economy, is `yellowback_devnet_roles.py`: all three presets green, ~39 min
   (Phase 5);
-- item 10 is the CI gates (§4.4), still partly pending.
+- item 10 is the CI gates (§4.4): push-triggered jobs recorded green, scheduled jobs enabled and
+  awaiting their first runs.
 
 ---
 
