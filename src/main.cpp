@@ -1888,8 +1888,6 @@ bool AcceptToMemoryPool(
 
         // we have all inputs cached now, so switch back to dummy
         view.SetBackend(dummy);
-        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
-            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
 
         // Check for non-standard pay-to-script-hash in inputs
         try {
@@ -2031,6 +2029,9 @@ bool AcceptToMemoryPool(
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
+
+        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
+            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
 
         // This will be a single-transaction batch, which will be more efficient
         // than unbatched if the transaction contains at least one Sapling Spend
