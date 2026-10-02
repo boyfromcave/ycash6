@@ -169,7 +169,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
 
         print('importwallet (the bulk restore, audit C-1 / H8) locks the imported YED before anything can spend it as YEC')
         pool = nodes[POOLS[2]]
-        dump = user.dumpwallet('restoredump')                            # node 0 is unlocked from the sweep above
+        dump = user.z_exportwallet('restoredump')                        # node 0 is unlocked from the sweep above; 6.20.0 removed dumpwallet (same format)
         tokens0 = sorted((c['txid'], c['vout']) for c in user.yed_listunspent())
         assert_greater_than(len(tokens0), 0)
         assert_equal(pool.yed_listunspent(), [])
