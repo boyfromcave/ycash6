@@ -550,12 +550,13 @@ class YellowbackAttestTest(YellowbackTestFramework):
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], [])
         assert all(r['pinned'] is False for r in self.attestors().values())
-        c3 = user.getblockcount() - REF_LAG
+        c3 = ref                                              # a second cited height the bundle for R can carry (c1 < c3 <= R)
         feed_all(user, {seq: low for seq in seqs}, cited=c3)
         fresh = user.yed_buildbundle(ref, '')
         assert_equal(sorted(fresh['seqs']), pinnable)
         assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(hex_str_to_bytes(fresh['hex'])))), [c3])
         self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
+        self.step(POOLS[2], 1, 'the row of the third mint enters W')   # W = (H - 1 - PIN_WINDOW, H - 1]: the tip's own row counts from the next SNAP
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], pinnable)
         recs = self.attestors()
