@@ -1,0 +1,72 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# cargo-deny policy for the attestor agent (audit D-12): known advisories, a licence allow-list,
+# and crates.io as the only source. Run from this directory:
+#
+#   cargo deny --locked check
+#
+# (cargo install --locked cargo-deny). CI runs it beside `cargo build --locked`.
+
+[graph]
+all-features = false
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+version = 2
+yanked = "deny"
+# An advisory that cannot be fixed by a pin bump is recorded here with its id and the reason,
+# never silenced globally.
+ignore = [
+    # `paste` (proc-macro, build-time only) is unmaintained; pulled in transitively by iroh 1.2.0.
+    # No runtime code; revisit at the next iroh bump.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro via iroh; no runtime exposure" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# The agent holds no key and signs nothing: a crate that would let it must not appear silently.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
