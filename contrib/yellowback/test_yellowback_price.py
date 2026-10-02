@@ -87,6 +87,7 @@ TABLE = {
     "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT": NONKYC,
 }
 NONKYC_URL = "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"
+PEATIO_URL = "https://safe.trade/api/v2/trade/public/tickers/yecusdt"
 
 
 class FakeHTTP:
@@ -568,6 +569,209 @@ class TagTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(body[14:16], "little"), 0x8001)
         self.assertEqual(body[16:], KEY)
         self.assertEqual(yp.decode_tag_body(body[4:])["sourceMask"], 0x8001)
+
+
+class NonFiniteTests(unittest.TestCase):
+    """Audit D-2 (and D-1 for the Rust twin): "inf"/"nan" strings and bare JSON literals are refused
+    at the source, never averaged, never a 0 µUSD sample, and never reach statistics.median."""
+
+    def setUp(self):
+        self._time = yp.time.time
+        yp.time.time = lambda: NOW
+
+    def tearDown(self):
+        yp.time.time = self._time
+
+    def _state(self, table, source_name="safetrade-direct", srcs=None):
+        srcs = srcs or [THREE[0], THREE[2], {"name": "safetrade-direct", "kind": "peatio_ticker", "market": "yecusdt"}]
+        feed = make_feed(srcs, table, min_sources=2)
+        feed.poll(force=True)
+        return feed, feed.report()["sources"][source_name]
+
+    def test_non_finite_volume_refuses_the_sample(self):
+        for bad in ("inf", "-inf", "nan", "Infinity", "NaN", "+inf"):
+            table = dict(TABLE)
+            table[PEATIO_URL] = dict(PEATIO, volume=bad)
+            feed, h = self._state(table)
+            self.assertEqual(h["state"], "shape", bad)
+            self.assertIn("not finite", h["last_error"])
+            self.assertNotIn("safetrade-direct", feed.samples)
+            self.assertNotIn("safetrade-direct", feed.last_volume)
+            self.assertEqual(feed.aggregate()[2], ["coingecko", "nonkyc"])
+
+    def test_missing_or_non_numeric_volume_still_time_weights(self):
+        for lenient in (None, "", "n/a"):
+            table = dict(TABLE)
+            table[PEATIO_URL] = dict(PEATIO, volume=lenient)
+            feed, h = self._state(table)
+            self.assertEqual(h["state"], "ok", repr(lenient))
+            self.assertEqual(feed.samples["safetrade-direct"][0][2], None)
+
+    def test_non_finite_price_is_a_shape_error_not_a_zero_sample(self):
+        for bad in ("nan", "inf", "-inf", "Infinity"):
+            table = dict(TABLE)
+            table[PEATIO_URL] = dict(PEATIO, last=bad)
+            feed, h = self._state(table)
+            self.assertEqual(h["state"], "shape", bad)
+            self.assertNotIn("safetrade-direct", feed.samples)
+
+    def test_bare_json_literals_are_not_json(self):
+        for body in (b'{"last": Infinity}', b'{"last": -Infinity}', b'{"last": NaN}'):
+            table = dict(TABLE)
+            table[PEATIO_URL] = body
+            feed, h = self._state(table)
+            self.assertEqual(h["state"], "shape", body)
+            self.assertIn("not JSON", h["last_error"])
+        self.assertEqual(yp.json.loads('{"a": 1.5}', parse_constant=yp.reject_json_constant), {"a": 1.5})
+
+    def test_non_finite_timestamp_is_a_shape_error(self):
+        table = dict(TABLE)
+        table[NONKYC_URL] = dict(NONKYC, lastTradeAt="inf")
+        feed, h = self._state(table, "nonkyc")
+        self.assertEqual(h["state"], "shape")
+
+    def test_scale_must_be_finite_and_positive(self):
+        for bad in ("inf", "nan", 0, -1, "x"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                yp.normalize_sources([{"name": "g", "url": "u", "path": "p", "scale": bad}])
+        self.assertEqual(yp.normalize_sources([{"name": "g", "url": "u", "path": "p", "scale": "0.5"}])[0]["scale"], "0.5")
+
+    def test_mock_file_must_be_finite(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix="price", delete=False) as f:
+            f.write("inf\n")
+        feed = yp.PriceFeed([], f.name)
+        self.assertIsNone(feed.read_mock())
+        feed.poll()
+        self.assertIsNone(feed.aggregate())
+        os.unlink(f.name)
+
+    def test_aggregate_never_sees_nan(self):
+        # belt and braces: a NaN in a window (impossible via poll now) must not leak into the median
+        feed = make_feed(THREE, TABLE)
+        feed.poll(force=True)
+        self.assertTrue(all(yp.math.isfinite(t) for _, _, t in feed._live_twaps(NOW)))
+
+
+class HttpGuardTests(unittest.TestCase):
+    """Audit D-3 / D-4 against a local HTTP server: no redirects, the 1 MiB body cap, and one
+    wall-clock deadline over every source of a poll (a slow-drip venue stalls only itself)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        import time as _time
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            hits = []
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, body, status=200, extra=()):
+                self.send_response(status)
+                for k, v in extra:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except OSError:                   # the client hung up on the capped reply
+                    pass
+
+            def do_GET(self):
+                Handler.hits.append((self.path, dict(self.headers)))
+                if self.path.startswith("/redirect"):
+                    self._send(b"", 302, [("Location", "http://%s:%d/leaked" % self.server.server_address)])
+                elif self.path.startswith("/leaked"):
+                    self._send(b'{"price": 1}')
+                elif self.path.startswith("/big"):
+                    self._send(b"[" + b"1," * (yp.MAX_BODY_BYTES // 2) + b"1]")
+                elif self.path.startswith("/chunked-big"):
+                    self.send_response(200)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    piece = b"x" * 65536
+                    for _ in range(yp.MAX_BODY_BYTES // len(piece) + 2):
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+                    self.wfile.write(b"0\r\n\r\n")
+                elif self.path.startswith("/drip"):
+                    # a trickle: the per-operation socket timeout never fires, only the deadline can
+                    self.send_response(200)
+                    self.send_header("Content-Length", "200")
+                    self.end_headers()
+                    for _ in range(200):
+                        try:
+                            self.wfile.write(b" ")
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        _time.sleep(0.1)
+                else:
+                    self._send(b'{"price": "0.5", "volume": "10"}')
+
+            do_POST = do_GET
+
+        cls.Handler = Handler
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server.daemon_threads = True
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        self.Handler.hits[:] = []
+
+    def _feed(self, path, **settings):
+        src = [{"name": "local", "url": self.base + path, "path": "price", "headers": {"x-cg-demo-api-key": "k"}}]
+        feed = yp.PriceFeed(src, None, dict(yp.FEED_DEFAULTS, min_sources=1, min_venues=1, fetch_timeout=2, **settings))
+        feed.poll(force=True)
+        return feed, feed.report()["sources"]["local"]
+
+    def test_plain_fetch_works(self):
+        feed, h = self._feed("/ok")
+        self.assertEqual(h["state"], "ok")
+        self.assertEqual(h["last_price_micro_usd"], 500000)
+
+    def test_redirects_are_refused_and_the_key_stays_home(self):
+        feed, h = self._feed("/redirect")
+        self.assertEqual(h["state"], "fetch")
+        self.assertIn("302", h["last_error"])
+        self.assertEqual([p for p, _ in self.Handler.hits], ["/redirect"])      # /leaked never requested
+
+    def test_rpc_client_refuses_redirects_too(self):
+        node = yp.Node(self.base + "/redirect", user="u", password="p")
+        with self.assertRaises(yp.RpcError) as cm:
+            node.call("yed_getinfo")
+        self.assertEqual(cm.exception.code, 302)
+        self.assertEqual([p for p, _ in self.Handler.hits], ["/redirect"])
+
+    def test_body_cap(self):
+        for path in ("/big", "/chunked-big"):
+            self.Handler.hits[:] = []
+            feed, h = self._feed(path)
+            self.assertEqual(h["state"], "fetch", path)
+            self.assertIn("byte cap", h["last_error"])
+
+    def test_deadline_covers_a_slow_drip_venue_and_the_others_still_resolve(self):
+        import time as _time
+        src = [{"name": "ok", "url": self.base + "/ok", "path": "price"},
+               {"name": "drip", "venue": "d", "url": self.base + "/drip", "path": "price"}]
+        feed = yp.PriceFeed(src, None, dict(yp.FEED_DEFAULTS, min_sources=1, min_venues=1, fetch_timeout=1))
+        started = _time.time()
+        feed.poll(force=True)
+        self.assertLess(_time.time() - started, 5)
+        r = feed.report()["sources"]
+        self.assertEqual(r["ok"]["state"], "ok")
+        self.assertEqual(r["drip"]["state"], "fetch")
+        self.assertIn("deadline", r["drip"]["last_error"])
+        self.assertEqual(feed.aggregate()[2], ["ok"])
 
 
 class FixtureCrossCheck(unittest.TestCase):

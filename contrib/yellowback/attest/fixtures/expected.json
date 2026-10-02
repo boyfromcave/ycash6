@@ -132,6 +132,42 @@
           "micro_usd": 76697790000
         }
       }
+    },
+    {
+      "name": "non_finite_values_are_refused",
+      "median_micro_usd": 567582,
+      "source_mask": 10,
+      "contributing": [
+        "coingecko",
+        "nonkyc"
+      ],
+      "live_sources": 2,
+      "live_venues": 2,
+      "btc_reference_usd": null,
+      "btc_live": 0,
+      "sources": {
+        "coingecko": {
+          "state": "ok",
+          "micro_usd": 567585
+        },
+        "nonkyc": {
+          "state": "ok",
+          "micro_usd": 567580
+        },
+        "safetrade-direct": {
+          "state": "shape",
+          "micro_usd": null
+        },
+        "nan-price": {
+          "state": "shape",
+          "micro_usd": null
+        },
+        "bare-infinity": {
+          "state": "shape",
+          "micro_usd": null
+        }
+      },
+      "btc_usd_sources": {}
     }
   ]
 }

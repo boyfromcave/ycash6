@@ -73,6 +73,26 @@
         "kraken": "kraken.json",
         "coinbase": "coinbase.json"
       }
+    },
+    {
+      "name": "non_finite_values_are_refused",
+      "about": "Audit D-1/D-2: a venue answering \"inf\" as its volume string, \"nan\" as its price string, or the bare JSON literal Infinity (not JSON; Python's json.loads accepted it by default, serde_json never did) is refused as a shape error by both aggregators, so no 0 or NaN sample enters a window and the median never sees a non-finite value. The two sound sources still aggregate.",
+      "settings": {"min_sources": 2, "min_venues": 2},
+      "sources": [
+        {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
+        {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 500},
+        {"name": "safetrade-direct", "kind": "peatio_ticker", "market": "yecusdt"},
+        {"name": "nan-price", "kind": "generic", "venue": "nanvenue", "url": "https://nan.example/ticker", "path": "data.last", "timestamp_path": "data.ts", "max_age": 900, "mask_bit": 4},
+        {"name": "bare-infinity", "kind": "generic", "venue": "infvenue", "url": "https://inf.example/ticker", "path": "data.last", "timestamp_path": "data.ts", "max_age": 900, "mask_bit": 5}
+      ],
+      "btc_usd_sources": [],
+      "replies": {
+        "coingecko": "cg_simple.json",
+        "nonkyc": "nonkyc_yec_usdt.json",
+        "safetrade-direct": "peatio_inf_volume.json",
+        "nan-price": "generic_nan_price.json",
+        "bare-infinity": "generic_bare_infinity.nonjson"
+      }
     }
   ]
 }

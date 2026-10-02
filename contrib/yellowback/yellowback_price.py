@@ -26,9 +26,11 @@ Contents:
 """
 
 import base64
+import concurrent.futures
 import datetime
 import json
 import logging
+import math
 import re
 import statistics
 import struct
@@ -46,6 +48,40 @@ OUTLIER_BPS = 1000              # sources more than 10 % from the median are dro
 TWAP_SECONDS = 900              # the proposal's 15-minute window (§5, §10.1)
 SOURCE_SILENCE_SECONDS = 120
 MIN_SOURCES = 3
+MAX_BODY_BYTES = 1 << 20        # a venue (or the node) reply larger than this is refused, not buffered
+RPC_MAX_BODY_BYTES = 64 << 20   # the node is trusted; this only bounds a runaway reply
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """3xx is an error, never followed: venue APIs do not redirect, and following one would carry
+    the request headers (an API key, the node's Basic auth) to whatever host the venue names."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def http_read_capped(resp, cap):
+    """Read at most `cap` bytes from an HTTP response in chunks; raises ValueError past the cap."""
+    length = resp.headers.get("Content-Length")
+    if length is not None and length.isdigit() and int(length) > cap:
+        raise ValueError("reply body %s bytes exceeds the %d byte cap" % (length, cap))
+    chunks, total = [], 0
+    while True:
+        chunk = resp.read(min(65536, cap + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > cap:
+            raise ValueError("reply body exceeds the %d byte cap" % cap)
+
+
+def reject_json_constant(name):
+    """`json.loads(parse_constant=...)`: bare NaN / Infinity / -Infinity are not JSON and never a price."""
+    raise ValueError("non-finite JSON literal %s" % name)
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +126,10 @@ class Node:
         if self.auth:
             req.add_header("Authorization", "Basic " + self.auth)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                reply = json.loads(resp.read().decode())
+            with _OPENER.open(req, timeout=self.timeout) as resp:
+                reply = json.loads(http_read_capped(resp, RPC_MAX_BODY_BYTES).decode())
         except urllib.error.HTTPError as e:
-            raw = e.read().decode(errors="replace")
+            raw = http_read_capped(e, RPC_MAX_BODY_BYTES).decode(errors="replace")
             try:
                 reply = json.loads(raw)
             except ValueError:
@@ -330,6 +366,12 @@ def normalize_source(src):
     out.setdefault("venue", name)
     out.setdefault("quote", "USD")
     out.setdefault("scale", 1)
+    try:
+        scale = float(out["scale"])
+    except (TypeError, ValueError):
+        raise ValueError("source %s: scale is not a number" % name)
+    if not (math.isfinite(scale) and scale > 0):
+        raise ValueError("source %s: scale must be finite and positive" % name)
     out.setdefault("timestamp_unit", "s")
     out.setdefault("spread_unit", "percent")
     out.setdefault("headers", {})
@@ -460,9 +502,12 @@ def extract(obj, path):
 def extract_number(obj, path):
     v = extract(obj, path)
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         raise ShapeError("value at %s is not a number: %r" % (path, v))
+    if not math.isfinite(f):                 # "inf"/"nan" strings parse as floats; never a price or a volume
+        raise ShapeError("value at %s is not finite: %r" % (path, v))
+    return f
 
 
 def extract_timestamp(obj, path, unit):
@@ -478,9 +523,33 @@ def extract_timestamp(obj, path, unit):
                 dt = dt.replace(tzinfo=datetime.timezone.utc)
             return dt.timestamp()
         f = float(v)
+        if not math.isfinite(f):
+            raise ValueError("not finite")
         return f / 1000.0 if unit == "ms" else f
     except (TypeError, ValueError) as e:
         raise ShapeError("timestamp at %s unreadable (%s): %r" % (path, e, v))
+
+
+def extract_volume(obj, src):
+    """The venue's cumulative volume figure, or None (time-weighted sample) when the source has no
+    volume_path or the path does not resolve. A value that resolves but is not finite refuses the
+    whole sample: the venue is broken, not merely volume-less (the Rust port applies the same rule)."""
+    vp = src.get("volume_path")
+    if not vp:
+        return None
+    try:
+        v = extract(obj, vp)
+    except ShapeError as e:
+        LOG.debug("source %s: volume unreadable, time-weighting this sample (%s)", src["name"], e)
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        LOG.debug("source %s: volume at %s is not a number, time-weighting this sample (%r)", src["name"], vp, v)
+        return None
+    if not math.isfinite(f):
+        raise ShapeError("volume at %s is not finite: %r" % (vp, v))
+    return f
 
 
 def spread_bps(obj, src):
@@ -525,29 +594,50 @@ class PriceFeed:
     # ---- fetching
     @staticmethod
     def _http_get(url, headers, timeout):
+        """GET `url`: no redirects, the socket timeout per operation, the body capped at MAX_BODY_BYTES."""
         req = urllib.request.Request(url, headers=dict({"User-Agent": "yellowback-quote/2", "Accept": "application/json"}, **headers))
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+        with _OPENER.open(req, timeout=timeout) as resp:
+            return http_read_capped(resp, MAX_BODY_BYTES)
 
-    def _fetch_json(self, url, headers):
+    def _fetch_all(self, sources):
+        """key -> reply bytes or the exception for `[(key, source), ...]`, every source fetched concurrently
+        under one wall-clock deadline of `fetch_timeout` seconds (the socket timeout alone lets a
+        slow-drip venue stall a poll)."""
+        timeout = float(self.settings["fetch_timeout"])
+        replies = {}
+        if not sources:
+            return replies
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(sources), thread_name_prefix="fetch")
+        futures = {pool.submit(self._http_get, s["url"], s["headers"], timeout): key for key, s in sources}
+        done, pending = concurrent.futures.wait(futures, timeout=timeout)
+        for f in done:
+            try:
+                replies[futures[f]] = f.result()
+            except Exception as e:
+                replies[futures[f]] = e
+        for f in pending:
+            replies[futures[f]] = TimeoutError("no complete reply within the %.0f s deadline" % timeout)
+        pool.shutdown(wait=False, cancel_futures=True)      # a stalled thread ends on its own socket timeout or the body cap
+        return replies
+
+    @staticmethod
+    def _parse_json(raw):
+        if isinstance(raw, Exception):
+            raise RuntimeError("fetch: %s" % raw)
         try:
-            raw = self._http_get(url, headers, self.settings["fetch_timeout"])
-        except Exception as e:
-            raise RuntimeError("fetch: %s" % e)
-        try:
-            return json.loads(raw.decode())
+            return json.loads(raw.decode(), parse_constant=reject_json_constant)
         except (UnicodeDecodeError, ValueError):
             head = raw[:60].decode("utf-8", "replace").strip()
             raise ShapeError("reply is not JSON (starts %r)" % head)
 
-    def _sample(self, src, now, btc_median):
-        """One fetch of a source. Returns (micro_usd, age_seconds, spread_bps, volume); raises on any refusal."""
-        obj = self._fetch_json(src["url"], src["headers"])
+    def _sample(self, src, now, btc_median, raw):
+        """One reply of a source. Returns (micro_usd, age_seconds, spread_bps, volume); raises on any refusal."""
+        obj = self._parse_json(raw)
         for p in src["reject_paths"]:
             if bool(extract(obj, p)):
                 raise RuntimeError("flagged: %s is true" % p)
         price = extract_number(obj, src["path"]) * float(src["scale"])
-        if price <= 0:
+        if not (price > 0 and math.isfinite(price)):
             raise ShapeError("price not positive: %r" % price)
         age = None
         if src.get("timestamp_path"):
@@ -561,12 +651,7 @@ class PriceFeed:
             if btc_median is None:
                 raise RuntimeError("btcref: no BTC/USD reference (%d live, need %d)" % (self.btc_reference["live"], self.settings["min_btc_sources"]))
             price *= btc_median
-        volume = None
-        if src.get("volume_path"):
-            try:
-                volume = extract_number(obj, src["volume_path"])
-            except ShapeError as e:
-                LOG.debug("source %s: volume unreadable, time-weighting this sample (%s)", src["name"], e)
+        volume = extract_volume(obj, src)
         return int(round(price * MICRO)), age, spread, volume
 
     def _weight(self, name, volume):
@@ -595,12 +680,12 @@ class PriceFeed:
                 msg += " -- reply parsed but the configured path did not resolve: did the API change shape? Check with `yellowback-quote sources`"
             (LOG.warning if prev != state else LOG.debug)(msg)
 
-    def _btc_reference_usd(self, now):
+    def _btc_reference_usd(self, now, replies):
         """Median of the live BTC/USD references, or None below min_btc_sources. Records their health."""
         values = []
         for s in self.btc_sources:
             try:
-                micro, age, spread, _ = self._sample(s, now, None)
+                micro, age, spread, _ = self._sample(s, now, None, replies.get(("btc", s["name"])))
             except Exception as e:
                 self._record(s["name"], False, error=e, health=self.btc_health)
                 continue
@@ -615,6 +700,8 @@ class PriceFeed:
         try:
             with open(self.mock_file) as f:
                 usd = float(f.read().strip())
+            if not math.isfinite(usd):
+                raise ValueError("not finite: %r" % usd)
         except (OSError, ValueError) as e:
             LOG.warning("mock price unreadable: %s", e)
             return None
@@ -633,10 +720,15 @@ class PriceFeed:
         if not force and now - self.last_poll < self.settings["poll_seconds"]:
             return
         self.last_poll = now
-        btc_median = self._btc_reference_usd(now) if any(s["quote"] == "BTC" for s in self.sources) else None
+        needs_btc = any(s["quote"] == "BTC" for s in self.sources)
+        wanted = [(s["name"], s) for s in self.sources]
+        if needs_btc:
+            wanted += [(("btc", s["name"]), s) for s in self.btc_sources]
+        replies = self._fetch_all(wanted)
+        btc_median = self._btc_reference_usd(now, replies) if needs_btc else None
         for s in self.sources:
             try:
-                micro, age, spread, volume = self._sample(s, now, btc_median)
+                micro, age, spread, volume = self._sample(s, now, btc_median, replies.get(s["name"]))
             except Exception as e:
                 self._record(s["name"], False, error=e)
                 continue
