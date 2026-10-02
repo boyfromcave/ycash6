@@ -17,6 +17,7 @@
 #include "yellowback/wallet.h"
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -70,8 +71,10 @@ struct BuiltTx
     std::set<COutPoint> yedInputs;          //!< YED outpoints consumed
     CPubKey freshKey;                       //!< the key drawn for this transaction (owner / token / collateral / change)
     std::string warning;                    //!< MINT: the keypool-low nag ("" if none)
-    // Sapling shape: set by BuildMint/BuildRedeem/BuildClaim/BuildSweep, consumed by FinishSapling
-    std::optional<TransactionBuilder> builder;
+    // Sapling shape: set by BuildMint/BuildRedeem/BuildClaim/BuildSweep, consumed by FinishSapling.
+    // Held by pointer (audit B-5): the 6.20.0 builder is move-only and its move constructor drops
+    // firstSaplingSpendAddr (F-2), so the object itself is never moved -- a BuiltTx moves the pointer.
+    std::unique_ptr<TransactionBuilder> builder;
     std::string fundedFrom;                 //!< MINT: "transparent" | "sapling"
     std::string collateralTo;               //!< vault spends: the destination address as given or drawn
 
@@ -132,7 +135,7 @@ struct BuiltTx
                 collateralZat(0), collateralOut(0), burnCents(0), changeCents(0), extraBurnCents(0), changeVout(-1), vaultValue(0),
                 carrierVin(-1), armed(false), attestFeeZat(0), attestFeeVout(-1), residualZat(0), residualVout(-1), emergencyOpenAt(0),
                 seq(0), bondVin(-1), bondZat(0), bondLocktime(0), flags(0), sweptCarriers(0) {}
-    bool NeedsProving() const { return builder.has_value(); }
+    bool NeedsProving() const { return builder != nullptr; }
     bool IsVaultSpend() const { return kind == BuiltKind::REDEEM || kind == BuiltKind::RELEASE || kind == BuiltKind::CLAIM || kind == BuiltKind::SWEEP; }
 };
 

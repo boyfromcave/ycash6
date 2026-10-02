@@ -153,7 +153,7 @@ PrecomputedTransactionData V4TxData(const CTransaction& tx)
 
 void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, bool ownerPath)
 {
-    if (out.builder.has_value()) throw std::runtime_error("FinishSapling must run before SignVaultSpend");
+    if (out.builder) throw std::runtime_error("FinishSapling must run before SignVaultSpend");
     const size_t extra = out.carrierVin >= 0 ? 2 : 1;
     if (out.tx.vin.size() != out.yedPrevs.size() + extra) throw std::runtime_error("vault spend input count mismatch");
     if (ownerPath) {
@@ -405,14 +405,16 @@ struct Context
      * NewTx, no keystore, no Orchard anchor (so a v4 transaction while NU5 is inactive). 6.20.0 takes
      * the Sapling anchor in the constructor: the spend shapes pass the one their witnesses were taken
      * at, the output-only shapes the tip's (as the stock wallet does). Never moved afterwards: the
-     * 6.20.0 builder is move-only and its move constructor does not carry firstSaplingSpendAddr.
+     * 6.20.0 builder is move-only and its move constructor does not carry firstSaplingSpendAddr
+     * (F-2), which is why BuiltTx holds it through a unique_ptr (audit B-5).
      */
-    TransactionBuilder& NewBuilder(std::optional<TransactionBuilder>& slot, uint32_t expiry,
+    TransactionBuilder& NewBuilder(std::unique_ptr<TransactionBuilder>& slot, uint32_t expiry,
                                    std::optional<uint256> saplingAnchor = std::nullopt) const
     {
         CheckExpiry(expiry);
         const uint256 anchor = saplingAnchor.has_value() ? saplingAnchor.value() : pcoinsTip->GetBestAnchor(SAPLING);
-        TransactionBuilder& b = slot.emplace(::Params(), chainHeight + 1, std::nullopt, anchor);
+        slot = std::make_unique<TransactionBuilder>(::Params(), chainHeight + 1, std::nullopt, anchor);
+        TransactionBuilder& b = *slot;
         b.SetExpiryHeight(expiry);
         b.SetFee(fee);
         return b;
@@ -1795,7 +1797,7 @@ BuiltTx BuildSweepCarriers(YellowbackWallet& yw, const std::vector<CarrierRecord
 
 void SignBuiltInputs(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId)
 {
-    if (out.builder.has_value()) throw std::runtime_error("FinishSapling must run before SignBuiltInputs");
+    if (out.builder) throw std::runtime_error("FinishSapling must run before SignBuiltInputs");
     if (out.carrierVin >= 0 && out.carrier.has_value() && out.tx.vin[out.carrierVin].scriptSig.empty()) {
         SignCarrierInput(out.tx, (unsigned int)out.carrierVin, out.carrier.value(), keystore, branchId);
     }
@@ -1829,7 +1831,7 @@ BuiltTx BuildSweep(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
 
 void FinishSapling(BuiltTx& out)
 {
-    if (!out.builder.has_value()) return;
+    if (!out.builder) return;
     TransactionBuilderResult r = out.builder->Build();
     if (r.IsError()) throw std::runtime_error("Sapling build failed: " + r.GetError());
     out.tx = CMutableTransaction(r.GetTxOrThrow());
