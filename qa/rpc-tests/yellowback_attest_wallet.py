@@ -160,22 +160,27 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         # invalidates its block at `cited`, mines one replacement (shorter than the network's chain, so nobody
         # follows it), signs, then reconsiders and returns to the network's chain, where the original line applies.
         print('  a reorg across citedHeight: the guard applies per block hash, not per height')
-        hash_main = wa.getblockhash(cited)
+        for _ in range(4):
+            self.mine(POOLS[0])          # a cited height above the registrations, so the fork keeps seq 0
+        cited2 = wa.getblockcount() - REF_LAG
+        first = wa.yed_signattestation(0, usd_to_micro(50), cited2)
+        assert_equal(first['reused'], False)
+        hash_main = wa.getblockhash(cited2)
         wa.invalidateblock(hash_main)
         wa.generate(1)
-        hash_fork = wa.getblockhash(cited)
+        hash_fork = wa.getblockhash(cited2)
         assert hash_fork != hash_main
-        forked = wa.yed_signattestation(0, usd_to_micro(51), cited)
+        forked = wa.yed_signattestation(0, usd_to_micro(51), cited2)
         assert_equal((forked['reused'], forked['priceMicroUsd']), (False, usd_to_micro(51)))
-        assert forked['hex'] != signed['hex']
+        assert forked['hex'] != first['hex']
         assert verify_attestation(hex_str_to_bytes(reg[0]['attestorPubKey']), hex_str_to_bytes(forked['hex']), hash_fork)
-        assert_equal(wa.yed_signattestation(0, usd_to_micro(51), cited)['reused'], True)
-        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(50), cited)   # same hash, other price
+        assert_equal(wa.yed_signattestation(0, usd_to_micro(51), cited2)['reused'], True)
+        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(50), cited2)   # same hash, other price
         wa.reconsiderblock(hash_main)
-        assert_equal(wa.getblockhash(cited), hash_main)
-        back = wa.yed_signattestation(0, usd_to_micro(50), cited)
-        assert_equal((back['reused'], back['hex']), (True, signed['hex']))
-        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(51), cited)
+        assert_equal(wa.getblockhash(cited2), hash_main)
+        back = wa.yed_signattestation(0, usd_to_micro(50), cited2)
+        assert_equal((back['reused'], back['hex']), (True, first['hex']))
+        assert_rpc_error('equivocation-guard', wa.yed_signattestation, 0, usd_to_micro(51), cited2)
         self.sync_all(blocks_only=True)
 
 # Rule: MINT-1 W7

@@ -191,15 +191,16 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.step(POOLS[0] if miner is None else miner, 1, 'carrier')
         return carrier
 
-    def mint_raw(self, owner, bundle, ref, required, miner, expect='ACTIVE', void_reason=None, seqs=None):
-        """Carrier step, then the MINT of ``CENTS`` at ``ref`` with ``bundle`` in the carrier, the
-        pool fee to FEE-W's payee and the attestor fee to the bundle's first seq, mined by ``miner``.
-        Returns ``{txid, ref, owner, token, required, seqs, payee}``."""
+    def mint_raw(self, owner, bundle, ref, required, miner, expect='ACTIVE', void_reason=None, seqs=None, carrier_miner=None):
+        """Carrier step (mined by ``carrier_miner``, default ``miner``), then the MINT of ``CENTS`` at
+        ``ref`` with ``bundle`` in the carrier, the pool fee to FEE-W's payee and the attestor fee to the
+        bundle's first seq, mined by ``miner`` (a VOID mint needs the stock node: TPL-2 keeps it out of a
+        pool's template). Returns ``{txid, ref, owner, token, required, seqs, payee}``."""
         user = self.nodes[USER]
         owner_node = self.nodes[owner]
         atts = decode_bundle(bundle)
         seqs = sorted(parse_attestation(a)[0] for a in atts) if seqs is None else seqs
-        carrier = self.carrier_step(owner, bundle, miner)
+        carrier = self.carrier_step(owner, bundle, miner if carrier_miner is None else carrier_miner)
         payee = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
         attest_payee = self.bond_key_address(seqs[0])
         hex_, owner_pub = build_mint_tx_v3(owner_node, CENTS, LOCK, ref, required, fee_addr=payee, carrier=carrier,
@@ -543,8 +544,9 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(reused))), [c1])
         est = user.yed_estimatecollateral(CENTS, LOCK)
         short = int(est['requiredZat']) // 2                  # MINT-5 fails after MINT-9 recorded the bundle (ARMED order)
-        self.mint_raw(USER, reused, ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
-        self.mint_raw(USER, reused, ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
+        # the carriers by pool 4 (quote tags keep the fast window filled), the VOID mints by the stock node (TPL-2)
+        self.mint_raw(USER, reused, ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
+        self.mint_raw(USER, reused, ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], [])
         assert all(r['pinned'] is False for r in self.attestors().values())
@@ -553,7 +555,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         fresh = user.yed_buildbundle(ref, '')
         assert_equal(sorted(fresh['seqs']), pinnable)
         assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(hex_str_to_bytes(fresh['hex'])))), [c3])
-        self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, short, POOLS[2], expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable)
+        self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], pinnable)
         recs = self.attestors()
