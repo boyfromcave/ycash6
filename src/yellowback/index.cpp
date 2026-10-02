@@ -24,6 +24,8 @@
 
 #include <univalue.h>
 
+#include <csignal>
+
 #include <boost/algorithm/string.hpp>
 
 namespace yellowback {
@@ -119,7 +121,7 @@ void YellowbackIndex::Wipe(const std::string& why)
     // 6.20.0 keeps them (Ycash 1770fce16), and a mark with no record has no valve root and no kill
     // switch. Reconsidered, the block is re-judged at the next ActivateBestChain as on v4.5.0: an
     // enforcing node re-rejects it (and records it again), -yellowbackenforce=0 connects it. Init
-    // runs that ActivateBestChain itself (ReconsideredOnWipe): ThreadImport's runs under fImporting.
+    // runs that ActivateBestChain itself, before ThreadImport (whose own runs under fImporting).
     if (!rejected.empty()) {
         CValidationState state;
         for (const uint256& hash : rejected) {
@@ -170,6 +172,10 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         f.noValve = true;
     } else if (spec == "schema") {
         f.schemaMismatch = true;
+    } else if (boost::algorithm::starts_with(spec, "crash:")) {
+        int64_t h = atoi64(spec.substr(6));
+        if (h <= 0 || h > 0x7FFFFFFF) return std::string("-yellowbacktestfault: bad height");
+        f.crashHeight = (int)h;
     } else if (boost::algorithm::starts_with(spec, "storage:")) {
         std::vector<std::string> parts;
         boost::split(parts, spec, boost::is_any_of(":"));
@@ -185,7 +191,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         }
         f.armed = true;
     } else {
-        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], template, novalve or schema");
+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template, novalve or schema");
     }
     testFault = f;
     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
@@ -375,6 +381,13 @@ std::optional<std::string> YellowbackIndex::CheckConnect(const CBlock& block, co
     const int h = pindex->nHeight;
     if (h < params.startHeight) return std::nullopt;
     if (chainActive.Contains(pindex)) return std::nullopt;   // K6: a re-verification (VerifyDB, verifychain)
+    if (!fJustCheck && testFault.crashHeight == h) {
+        // A crash holding a stored, unjudged block: make its index entry durable (as a periodic flush
+        // would have), then die the way kill -9 does.
+        LogPrintf("yellowback: -yellowbacktestfault: crash before judging block %s at %d\n", block.GetHash().ToString(), h);
+        FlushStateToDisk();
+        raise(SIGKILL);
+    }
     try {
         MaybeFault(TestFault::CHECK, h);
         std::optional<TipRecord> tip;

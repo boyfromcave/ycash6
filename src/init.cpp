@@ -422,7 +422,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbackenforceuntil=<h>", "Yellowback enforcement sunset height, 0 = none (regtest only)");
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
-        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], template, novalve or schema (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], crash:<height>, template, novalve or schema (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -2231,10 +2231,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!yellowback::g_yellowback->SyncToChain()) {
             LogPrintf("yellowback: index is unhealthy at startup: %s\n", yellowback::g_yellowback->UnhealthyReason());
         }
-        // A wipe reconsidered the blocks Rejected named (YellowbackIndex::Wipe): re-judge them here,
-        // as v4.5.0 did when it fetched them again. ThreadImport's ActivateBestChain would connect
-        // them under fImporting (6.20.0 holds CImportingNow across it), which N2 accepts unjudged.
-        if (yellowback::g_yellowback->ReconsideredOnWipe() > 0) {
+        // Activate the best chain here, before ThreadImport, as v4.5.0's AppInit2 did. 6.20.0 moved that
+        // call into ThreadImport and holds CImportingNow across it on every start (v4.5.0: around
+        // -reindex / -loadblock only), so every block it connects is accepted unjudged by N2
+        // (fImporting, and IsInitialBlockDownload() is true under fImporting until it latches). Here
+        // fImporting is false: a stored block a crash left unconnected, and any block a wipe
+        // reconsidered (YellowbackIndex::Wipe), is judged. -reindex / -reindex-chainstate rebuild in
+        // ThreadImport under N2 as before.
+        if (!fReindex && !fReindexChainState && chainActive.Tip() != nullptr) {
             CValidationState ybState;
             ActivateBestChain(ybState, chainparams);
         }
