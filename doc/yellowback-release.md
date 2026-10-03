@@ -141,6 +141,72 @@ tests hold `abandonBlocks >= grace` on every network. It is the floor on how lon
 for its developers after any halt before pools stop filtering vault spends and wallets offer
 `yed_sweep` — the time budget of the "Freeze, then fix" runbook below.
 
+## Renewal releases (W18)
+
+`ENFORCE_UNTIL_HEIGHT` is a sunset, not a deadline for new values. A release that carries **the
+same parameter set with only a later `enforceUntilHeight`** is a *renewal*: it cannot make two
+enforcing releases disagree at one height (a node left on the old release stops rejecting at the
+old sunset and becomes permissive, and a permissive node follows whatever the stricter majority
+builds), so it is exempt from the "start at or after the previous sunset" rule above and may ship
+at any time before the sunset. `ParamsHash` sees it as a different set only in `enforceUntilHeight`.
+
+**Obligation:** the renewal for each year ships **no later than six months before the sunset**
+(for the 6.21.0-rc1 set, before height ≈ 3,285,000, 2027-04), so a missed date costs a warning,
+not an enforcement gap. Put the next renewal's due height in the release notes of every release
+that sets or renews a sunset. A release that changes any other value is a *parameter change* and
+follows the rule above or the runbook below.
+
+## Freeze, then fix (W19)
+
+Roughly seventy consensus-shaped values go to mainnet for the first time with 6.21.0. If one is
+wrong, the rule "a replacement set starts at or after the previous sunset" would leave it in force
+for up to a year. The sanctioned shortcut is to make the chain itself show that no node is
+enforcing the old set: a replacement set may start at height `X` when either `X ≥` the previous
+set's `enforceUntilHeight`, **or** `Snapshots[h].haltMask` has had `ENFORCEMENT` set for every
+`h` in `[X − SIGNAL_WINDOW, X − 1]` — enforcement has been off for a full window (2,016 blocks,
+≈ 1.75 days), so no node validated a vault spend under the old set in that stretch. The predicate
+is `yellowback::ParamSetStartAdmissible` (`src/yellowback/params.cpp`, `// Rule: ACT-5`), a
+release-time check with a unit case over a synthetic halt; `SelectParams` itself does not change,
+sets are chosen by height as before.
+
+The runbook:
+
+1. **Freeze.** Ask the pools to restart with `-yellowbackenforce=0` (the existing kill switch;
+   signalling stops with it). Within one signal window the share of signalling blocks falls under
+   `ENFORCEMENT_FLOOR` (50 %) and `Snapshots[h].haltMask` gains `ENFORCEMENT`; `PARTICIPATION`
+   sets first, at 60 %, and minting stops (`yed_getstats.mintableClasses` empty,
+   `yed_getactivation.mintHalted`). Confirm the bit on a node of record with
+   `yed_gethistory <h> <h>` for the first halted height; call it `F`.
+2. **Wait one signal window** after `F` so the earliest admissible start is `F + SIGNAL_WINDOW`.
+   Meanwhile ship the corrected set with `startHeight = X ≥ F + SIGNAL_WINDOW` and a new sunset
+   (`X + 420,480`), on both node lines, with the `ACT-5` unit case extended for the real `F` and
+   the usual release procedure above. Lead time M14 still applies to `X` from the release date.
+3. **Upgrade and re-signal.** Pools install the release and restart with enforcement on. The signal
+   count climbs over a window, enforcement resumes at `ENFORCEMENT_RESUME` (60 %); from `X` the
+   index applies the corrected set. Activation (ACT-1..3) does not run again: the module stays
+   ACTIVE throughout, only its halts move.
+
+What is and is not at risk during the freeze:
+
+- **No YED can be created.** Evaluation never stops; every MINT in the stretch is VOID
+  (`mint-halted-participation`) and its collateral comes back by `yed_redeem` at its lock height.
+- **Existing vaults stay script-locked** until their own `lockHeight` (owner) and `claimHeight`
+  (anyone). The claim branch is open to anyone past `claimHeight`, and with enforcement off nobody
+  refuses a claim without its burn — but the pools on the release still *filter* rule-breaking
+  vault spends from their own templates and mempools (TPL-1, MP-1) until abandonment, so leakage
+  is bounded by stock hashpower and by the vaults whose `claimHeight` falls inside the freeze.
+  Owners redeem before the freeze if they can; a wallet should warn on any vault within `GRACE`
+  of its claim height.
+- **YED transfers and redemptions continue** as ordinary transactions; the index records them.
+- **Abandonment is the clock.** `ABANDON_BLOCKS` = `GRACE` = 34,560 blocks (≈ 30 days, W21) of
+  the `ENFORCEMENT` halt is where the pools' filtering stands down and wallets offer `yed_sweep`.
+  Thirty days is the floor on how long the module waits for its developers; a freeze that takes
+  longer than that has become abandonment, and what leaks meanwhile is the cost. Abandonment is a
+  rolling predicate: enforcement resuming ends it.
+
+Rejected for now: set-version signalling in the coinbase tag (a live switch with no freeze, a real
+design addition) and miner-voted parameters (a different design).
+
 ## Wallet (YecWallet) releases
 
 YecWallet bundles `ycashd`. Its release should take these packages as inputs rather than rebuild

@@ -255,6 +255,18 @@ const Params& SelectParams(const std::vector<Params>& sets, int height)
     return best ? *best : sets.front();
 }
 
+// Rule: ACT-5
+bool ParamSetStartAdmissible(int startHeight, int previousEnforceUntilHeight, int signalWindow,
+                             const std::function<bool(int)>& enforcementHaltedAt)
+{
+    if (previousEnforceUntilHeight > 0 && startHeight >= previousEnforceUntilHeight) return true;   // L8
+    if (signalWindow <= 0) return false;
+    for (int h = startHeight - signalWindow; h <= startHeight - 1; h++) {                              // W19: a full window of ENFORCEMENT
+        if (h < 0 || !enforcementHaltedAt(h)) return false;
+    }
+    return true;
+}
+
 const Params& ParamsForNetwork(const std::string& networkId)
 {
     if (networkId == "main") return MainParams();

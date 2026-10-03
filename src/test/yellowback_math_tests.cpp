@@ -297,6 +297,36 @@ BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
 }
 
 // Rule: ACT-5
+// Rule: ACT-5
+// W19 ("freeze, then fix"): over a synthetic run of snapshots whose ENFORCEMENT halt holds on
+// [200, 300), a parameter-change set may start at X iff X >= the previous sunset or every snapshot
+// in [X - SIGNAL_WINDOW, X - 1] shows the halt.
+BOOST_AUTO_TEST_CASE(act5_param_set_start_admissible)
+{
+    const int window = RegtestParams(1, 0, 0, 0).signalWindow;   // 64
+    const int sunset = 1000;
+    auto halted = [](int h) { return h >= 200 && h < 300; };
+    // L8: at or past the previous sunset, whatever the chain shows
+    BOOST_CHECK(ParamSetStartAdmissible(sunset, sunset, window, halted));
+    BOOST_CHECK(ParamSetStartAdmissible(sunset + 1, sunset, window, halted));
+    BOOST_CHECK(!ParamSetStartAdmissible(sunset - 1, sunset, window, halted));
+    // W19: the first admissible X is the one whose window is exactly the first 64 halted snapshots
+    BOOST_CHECK(ParamSetStartAdmissible(200 + window, sunset, window, halted));
+    BOOST_CHECK(!ParamSetStartAdmissible(200 + window - 1, sunset, window, halted));      // [199, 262]: 199 enforcing
+    BOOST_CHECK(ParamSetStartAdmissible(300, sunset, window, halted));                    // [236, 299]
+    BOOST_CHECK(!ParamSetStartAdmissible(301, sunset, window, halted));                   // [237, 300]: enforcement resumed at 300
+    BOOST_CHECK(!ParamSetStartAdmissible(250, sunset, window, halted));                   // a partial window is not a freeze
+    // a previous set with no sunset (regtest 0) admits a successor only through the freeze
+    BOOST_CHECK(!ParamSetStartAdmissible(5000, 0, window, halted));
+    BOOST_CHECK(ParamSetStartAdmissible(300, 0, window, halted));
+    // the window never reaches below height 0
+    auto always = [](int) { return true; };
+    BOOST_CHECK(ParamSetStartAdmissible(window, 0, window, always));
+    BOOST_CHECK(!ParamSetStartAdmissible(window - 1, 0, window, always));
+    // a renewal (W18) never asks; the mainnet set's own window is a day and three quarters of blocks
+    BOOST_CHECK_EQUAL(MainParams().signalWindow, 2016);
+}
+
 // The §3.1 table, both columns; the four regtest flags land where the plan says.
 BOOST_AUTO_TEST_CASE(act5_params_tables)
 {

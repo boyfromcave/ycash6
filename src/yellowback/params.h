@@ -10,6 +10,7 @@
 #include "script/script.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -251,6 +252,19 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
  * sets and EvaluateBlock receives the one selected for H.
  */
 const Params& SelectParams(const std::vector<Params>& sets, int height);
+
+/**
+ * Rule: ACT-5 (W19; v2 L8 amended). A parameter-change set -- one differing from the set before it
+ * in any value other than enforceUntilHeight -- may start at `startHeight` iff `startHeight` is at
+ * or past the previous set's `enforceUntilHeight` (L8), or the ENFORCEMENT halt was set on every
+ * snapshot in [startHeight - signalWindow, startHeight - 1]: enforcement has been off for a full
+ * window, so no released node validated a vault spend under the old set in that stretch ("freeze,
+ * then fix"). `enforcementHaltedAt(h)` reads Snapshots[h].haltMask & ENFORCEMENT; the predicate has
+ * no index dependency. A renewal (W18: same values, later sunset) is exempt and never asks. This is
+ * a release-time check (doc/yellowback-release.md), not a rule SelectParams applies.
+ */
+bool ParamSetStartAdmissible(int startHeight, int previousEnforceUntilHeight, int signalWindow,
+                             const std::function<bool(int)>& enforcementHaltedAt);
 
 /** Parameters for a network id as returned by CChainParams::NetworkIDString(); regtest returns unconfigured defaults. */
 const Params& ParamsForNetwork(const std::string& networkId);
