@@ -673,6 +673,10 @@ jobs:
           stock="$RUNNER_TEMP/ycash6-stock"
           git worktree add --detach "$stock" FETCH_HEAD
           ln -s "$PWD/depends/x86_64-pc-linux-gnu" "$stock/depends/x86_64-pc-linux-gnu"
+          # src/Makefile.am links librustzcash.a from $(top_builddir)/target, whatever CARGO_TARGET_DIR
+          # says, so the stock tree needs the shared target linked in as well (the local wt/ recipe
+          # does both; the first nightly, 7702d2260, failed at CXXLD ycashd without it).
+          ln -s "$PWD/target" "$stock/target"
           export CARGO_TARGET_DIR="$PWD/target"
           (cd "$stock" && ./autogen.sh && CONFIG_SITE="$stock/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --quiet)
           qa/yellowback-cxxbridge-headers.sh "$stock" -j$(nproc)
