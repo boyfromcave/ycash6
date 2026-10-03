@@ -22,9 +22,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf automake bsdmainutils build-essential ca-certificates \
         curl git g++-multilib libc6-dev libtool m4 ncurses-dev \
-        pkg-config python3 unzip wget zlib1g-dev xz-utils \
+        pkg-config python3 unzip wget zlib1g-dev xz-utils g++-8 \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# depends compiles its native host tools with the plain gcc/g++. 18.04's GCC 7.5
+# has no std::filesystem, which native_ccache 4.12 requires, so make GCC 8 (from
+# the 18.04 archive) the default. Host tools only: the shipped binaries are built
+# with depends' clang + libc++, and the glibc floor is still the image's 2.27.
+RUN ln -sf gcc-8 /usr/bin/gcc && ln -sf g++-8 /usr/bin/g++ && g++ --version | head -1
 
 WORKDIR /ycash
 COPY . /ycash
