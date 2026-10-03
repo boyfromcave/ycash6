@@ -1284,10 +1284,33 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     Fixture f(1, 0, 1, 0);                                  // cap = 0.01% of market cap: below $100 on a young regtest chain
     f.Activate();
     BOOST_CHECK(SupplyCapCents(f.Snap(f.tip).issuedZat, 50000, 1).value() < 10000);
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "mint-supply-cap");
+    // W20: supply sits at the cap (zero headroom). Class C (300 %) and class B (400 %) are below
+    // RECAP_RATIO_BPS and are refused; class A (500 %) mints through and takes supply above the cap.
+    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, o)), "mint-supply-cap"); }
+    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1, o)), "mint-supply-cap"); }
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
+    BOOST_CHECK(f.GetTotals().supplyCents > SupplyCapCents(f.Snap(f.tip).issuedZat, f.Snap(f.tip).PMint(), 1).value());
+    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, o)), "mint-supply-cap"); }   // still refused above it
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");                                                   // class A always
     Fixture g(1, 0, 10000, 0);                              // cap = 100% of market cap: ~$818 at 131 blocks and $1/YEC
     g.Activate(1000000);
     BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
+    // W20 with the volatility multiplier at or above 1.25x: class B's minimum (400 % x mult) reaches the
+    // floor and passes the cap while class C's (300 % x mult) does not. SIGMA_REF 1 and the price
+    // alternating between $0.05 and $0.05075 every VOL_STEP (8) blocks: every sample step is a
+    // +-1.49 % return, sigma ~ 1.39 x SIGMA_REF.
+    Fixture h(1, 10000, 1, 0);
+    while (h.tip < h.P.startHeight + 2 * h.P.signalWindow + 2) h.Mine(Fixture::Quote(((h.tip + 1) / 8) % 2 ? 50750 : 50000, (h.tip + 1) % 3));
+    BOOST_REQUIRE(h.Snap(h.tip).activation.IsActive());
+    BOOST_REQUIRE_EQUAL(h.Snap(h.tip).haltMask, 0u);
+    const int mult = h.Snap(h.tip - 1).sigmaMultBps;
+    BOOST_CHECK(mult >= 12500 && mult < 16667);
+    BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[1], mult) >= h.P.recapRatioBps);
+    BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[2], mult) < h.P.recapRatioBps);
+    // class B first, at the ref just measured; the block that carries it quotes $0.05 and can only
+    // lower the next ref's multiplier (one sample return drops to zero), which keeps class C refused
+    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 97, h.tip - 1, o)), ""); }
+    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 145, h.tip - 1, o)), "mint-supply-cap"); }
 }
 
 // Rule: MINT-7
@@ -1992,7 +2015,8 @@ BOOST_AUTO_TEST_CASE(params_selected_by_height)
     Fixture f;
     f.Activate();
     // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap.
-    CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1);
+    MintOpts capped; capped.termClass = 2;                         // W20: above the cap class A still mints; class C shows the cap
+    CMutableTransaction m = f.MintTx(10000, 145, f.tip - 1, capped);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
     block.vtx.push_back(CTransaction(m));

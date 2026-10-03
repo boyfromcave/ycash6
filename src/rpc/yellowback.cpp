@@ -568,7 +568,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_getinfo\n"
             "\nYellowback index status, activation, miner state and parameters (doc/yellowback-rpc.md).\n"
-            "Never refuses while the index is unhealthy.\n"
+            "Never refuses while the index is unhealthy. supplyCapReached (W20): at the tip the smallest mint\n"
+            "would exceed the supply cap, so only the classes at or over RECAP_RATIO_BPS mint (false with no cap).\n"
             "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
     YellowbackIndex& index = EnsureIndex();
@@ -606,6 +607,12 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("suppressedBlocks", index.SuppressedCount());
     o.pushKV("templatePolicy", cfg.templatePolicy);
     o.pushKV("abandoned", index.IsAbandoned());
+    // W20: at the tip the smallest mint of any class would exceed the supply cap; false when the cap
+    // is undefined. Above it only the classes at or over RECAP_RATIO_BPS mint (yed_getstats.mintableClasses).
+    {
+        std::optional<Cents> cap = snap.has_value() ? SupplyCapCents(snap->issuedZat, snap->PMint(), p.supplyCapBps) : std::nullopt;
+        o.pushKV("supplyCapReached", cap.has_value() && st.GetTotals().supplyCents + p.minMint > cap.value());
+    }
 #ifdef ENABLE_WALLET
     // H10: what the Yellowback wallet layer holds locked, and that it is there at all. The GUI
     // reads a mismatch between lockedOutputs and yed_listunspent as the trigger for yed_lockcoins.
@@ -800,13 +807,15 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     o.pushKV("supplyCapCents", PriceOrNull(cap));
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
     o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && (!cap.has_value() || t.supplyCents < cap.value()));
-    // W16: the classes a mint can use now. Every class when nothing halts; under a global-ratio
-    // halt alone, those whose minimum ratio reaches the recapitalisation floor; none otherwise.
+    // W16 / W20: the classes a mint can use now. Every class when nothing halts and the cap has room
+    // for the smallest mint; under a global-ratio halt alone or at the cap, those whose minimum ratio
+    // reaches the recapitalisation floor; none under any other halt.
     UniValue mintable(UniValue::VARR);
     const auto& P = index.GetParams();
-    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && (!cap.has_value() || t.supplyCents < cap.value())) {
+    const bool capReached = cap.has_value() && t.supplyCents + P.minMint > cap.value();
+    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0) {
         for (int i = 0; i < NUM_CLASSES; i++) {
-            if (!(s.haltMask & HALT_GLOBAL_RATIO) || MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps) mintable.push_back(ClassLetter((uint8_t)i));
+            if ((!(s.haltMask & HALT_GLOBAL_RATIO) && !capReached) || MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps) mintable.push_back(ClassLetter((uint8_t)i));
         }
     }
     o.pushKV("mintableClasses", mintable);

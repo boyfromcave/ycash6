@@ -8,7 +8,8 @@ VOID mints (plan §3.8 MINT-1..8, V3, K3, L14): every failing MINT rule register
 whose collateral is locked until lockHeight and released by yed_redeem with no burn and no fee
 (void_release_via_yed_redeem); a mint before activation is VOID; a mint under each halt is VOID
 and the wallet refuses it with the matching mintpol-* identifier (MINTPOL-1); the supply-cap race
-across a reorg voids the loser (mint6_cap_race_after_reorg).
+across a reorg voids the loser (mint6_cap_race_after_reorg); above the cap only a class at or over
+RECAP_RATIO_BPS mints (W20: class A passes, supplyCapReached and mintableClasses show it).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer; every overlay node runs with the same
 -yellowbacksupplycapbps so the cap verdict is one every node records.
@@ -53,7 +54,7 @@ def assert_rpc_error(substr, fn, *args):
         fn(*args)
     except Exception as e:
         assert substr in str(e), 'expected %r in %r' % (substr, str(e))
-        return
+        return str(e)
     raise AssertionError('expected an error containing %r' % substr)
 
 
@@ -278,17 +279,20 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: MINT-6 UNDO
         print('mint6_cap_race_after_reorg: two mints that together exceed the cap on different branches')
+        # W20: the cap is soft above RECAP_RATIO_BPS, so class A (500 %) mints through it; the race
+        # is run with class C (300 %, lock 145), the class the cap still refuses
         stats = user.yed_getstats()
         headroom = stats['supplyCapCents'] - stats['supplyCents']
         m = (headroom * 6 // 10) // 100 * 100
         assert_greater_than(m, 10000)
         void_before = stats['voidVaults']
+        assert_equal((user.yed_getinfo()['supplyCapReached'], sorted(stats['mintableClasses'])), (False, ['A', 'B', 'C']))
         self.split_network()
-        mint_x = self.mint(user, m, 48)                    # the carrier's block, then the mint's
+        mint_x = self.mint(user, m, 145)                   # the carrier's block, then the mint's
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_x['txid'])['status'], 'ACTIVE')
-        mint_y = self.mint(observer, m, 48, miner=STOCK)   # the observer sits on the stock half
+        mint_y = self.mint(observer, m, 145, miner=STOCK)  # the observer sits on the stock half
         sync_mempools([nodes[1], nodes[5]])
         stock.generate(2)                                  # three stock blocks against the enforcing half's two
         self.join_network()
@@ -313,7 +317,12 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 1)
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000 + m)
         stats = user.yed_getstats()      # v3: the carrier blocks added issuance, so the cap moved; provoke it from the current numbers
-        assert_rpc_error('mintpol-cap', user.yed_mint, stats['supplyCapCents'] - stats['supplyCents'] + 100, 48)
+        over = stats['supplyCapCents'] - stats['supplyCents'] + 100
+        # W20 / MINTPOL-1: a class C mint over the cap is refused and the message names the class that
+        # can mint (A, at a sigma multiplier of 1); the same amount as class A passes the gate
+        msg = assert_rpc_error('mintpol-cap', user.yed_mint, over, 145)
+        assert 'class A' in msg, msg
+        assert_equal(user.yed_getinfo()["supplyCapReached"], over < 10100)     # headroom below the smallest mint
         self.checkpoint('cap race')
 
 # Rule: MINT-4 HALT-2 MINTPOL-1
@@ -331,19 +340,29 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         void_gr = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[2])
         self.expect_void(void_gr, 'mint-halted-global-ratio')
 
-# Rule: HALT-2 MINTPOL-1
-        print('W16 under this script\'s supply cap: the windows agree at $20, the halt persists, and the cap -- proportional to the price -- binds first')
+# Rule: HALT-2 MINT-6 MINTPOL-1
+        print('W16 and W20 under this script\'s supply cap: the windows agree at $20, the halt persists, the cap -- proportional to the price -- is reached, and class A mints through both')
         self.mine_round_robin(POOLS, 64)
         stats = user.yed_getstats()
         assert_equal(stats['haltMask'], ['GLOBAL_RATIO'])
         # SUPPLY_CAP_BPS is tiny here (the cap-race case above): the price drop shrank the cap under the
-        # supply, so no class can mint and mintableClasses is empty for the cap's reason, not the halt's
+        # supply. W20: the cap is soft above RECAP_RATIO_BPS, so the class at the floor (A) is the one
+        # class that can mint -- through the halt (W16) and above the cap (W20) alike
         assert_greater_than(stats['supplyCents'] + 10000, stats['supplyCapCents'])
-        assert_equal((stats['mintingAllowed'], stats['mintableClasses']), (False, []))
+        assert_equal((stats['mintingAllowed'], stats['mintableClasses']), (False, ['A']))
+        assert_equal(user.yed_getinfo()['supplyCapReached'], True)
         assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C: the halt, before the cap
-        assert_rpc_error('mintpol-cap', user.yed_mint, 10000, 48)              # class A: through the halt, into the cap
         void_c = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[1])
         self.expect_void(void_c, 'mint-halted-global-ratio')
+        supply_before = stats['supplyCents']
+        mint_a = self.mint(user, 10000, 48)                                     # class A: through the halt, above the cap
+        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
+        self.mine(POOLS[0])                                                     # a pool template carries it (TPL-2: the verdict is OK)
+        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
+        stats = user.yed_getstats()
+        assert_equal(stats['supplyCents'], supply_before + 10000)
+        assert_greater_than(stats['supplyCents'], stats['supplyCapCents'])
+        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintableClasses']), (True, ['A']))
         self.model_check(nodes[2])
 
 # Rule: RED-1 IN-2 K3

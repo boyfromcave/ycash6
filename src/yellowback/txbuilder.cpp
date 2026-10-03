@@ -916,12 +916,15 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     if (!S.has_value() || !S->activation.IsActive() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
     if (S->haltMask & HALT_NO_PRICE) throw std::runtime_error("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
     if (S->haltMask & (HALT_PARTICIPATION | HALT_ENFORCEMENT)) throw std::runtime_error("mintpol-participation: minting is halted while miner participation is low (ACT-4)");
-    if ((S->haltMask & HALT_GLOBAL_RATIO) && MinRatioBps(ctx.params.baseRatioBps[g.termClass], S->sigmaMultBps) < ctx.params.recapRatioBps) {
-        // W16: only a class whose minimum ratio reaches the recapitalisation floor mints through a global-ratio halt
-        std::string open;
-        for (int c = 0; c < NUM_CLASSES; c++) if (MinRatioBps(ctx.params.baseRatioBps[c], S->sigmaMultBps) >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+    // W16 / W20: the classes whose minimum ratio reaches the recapitalisation floor -- they mint through a
+    // global-ratio halt and above the supply cap; the refusals below name them.
+    const bool recap = MinRatioBps(ctx.params.baseRatioBps[g.termClass], S->sigmaMultBps) >= ctx.params.recapRatioBps;
+    std::string open;
+    for (int c = 0; c < NUM_CLASSES; c++) if (MinRatioBps(ctx.params.baseRatioBps[c], S->sigmaMultBps) >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+    const std::string openClasses = open.empty() ? "" : " (class " + open + ")";
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && !recap) {
         throw std::runtime_error(strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose minimum ratio is at least %d %% can mint until it recovers%s",
-                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")"));
+                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, openClasses));
     }
     if (S->haltMask & HALT_DIVERGENCE) throw std::runtime_error("mintpol-divergence: minting is halted while the price windows diverge (HALT-3)");
     if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) throw std::runtime_error("mintpol-not-active: an unknown halt bit is set at the reference height");
@@ -929,17 +932,20 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     g.xMint = S->PMint();
     if (!g.xMint.has_value()) throw std::runtime_error("mintpol-no-price: pMint is undefined at the reference height");
     const Totals totals = ctx.st.GetTotals();
+    // MINT-6 (W20): above the cap only a class at or over the recapitalisation floor mints; the message
+    // names the classes that would go through.
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, g.xMint, p.supplyCapBps);
-    if (cap.has_value() && totals.supplyCents + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents", std::max<Cents>(0, cap.value() - totals.supplyCents)));
+    if (cap.has_value() && !recap && totals.supplyCents + cents > cap.value()) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents; above the cap only a term class whose minimum ratio is at least %d %% can mint%s",
+                                           std::max<Cents>(0, cap.value() - totals.supplyCents), p.recapRatioBps / 100, openClasses));
     }
     // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
     // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
     // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
     const Cents pending = MempoolMintCents();
-    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool",
-                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending));
+    if (cap.has_value() && !recap && pending > 0 && totals.supplyCents + pending + cents > cap.value()) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool; above the cap only a term class whose minimum ratio is at least %d %% can mint%s",
+                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending, p.recapRatioBps / 100, openClasses));
     }
     return g;
 }

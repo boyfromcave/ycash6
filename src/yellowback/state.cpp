@@ -332,9 +332,12 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (!armed) {
         if (const char* v = mint5()) return v;
     }
-    // MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9, R15)
+    // MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9, R15). W20: the cap is soft
+    // above RECAP_RATIO_BPS -- a mint that would exceed it is refused only when its class minimum,
+    // after the volatility multiplier, is below the recapitalisation floor (the W16 gate).
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
-    if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()) return verdict::MINT_SUPPLY_CAP;
+    if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()
+        && MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
     // MINT-8 (FEE-0 when E(R) is empty, K11)

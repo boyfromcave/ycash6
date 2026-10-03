@@ -2395,9 +2395,11 @@ class YellowbackModel(object):
             v = mint5(x_mint)
             if v is not None:
                 return v
-        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9)
+        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9). W20: above the cap a
+        # mint is accepted iff its class minimum reaches the recapitalisation floor (the W16 gate)
         cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
-        if cap is not None and self.totals.supply_cents + pl.cents > cap:
+        if (cap is not None and self.totals.supply_cents + pl.cents > cap
+                and min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps):
             return 'mint-supply-cap'
         # MINT-7
         if opret == 1:
