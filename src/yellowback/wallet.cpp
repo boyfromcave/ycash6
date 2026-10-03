@@ -210,32 +210,6 @@ std::vector<CarrierRecord> YellowbackWallet::LapsedCarriers(int tipHeight) const
     return out;
 }
 
-std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::Bonds() const
-{
-    // Lock order (N25): the caller holds cs_wallet before cs_yellowback; neither is taken here.
-    AssertLockHeld(wallet->cs_wallet);
-    AssertLockHeld(index->cs_yellowback);
-    std::vector<std::pair<uint16_t, AttestorRecord>> out;
-    for (const auto& kv : State(index->View()).Attestors()) {
-        const CPubKey k = kv.second.BondKey();
-        if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
-    }
-    return out;
-}
-
-std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::HotKeys() const
-{
-    // Lock order (N25): the caller holds cs_wallet before cs_yellowback; neither is taken here.
-    AssertLockHeld(wallet->cs_wallet);
-    AssertLockHeld(index->cs_yellowback);
-    std::vector<std::pair<uint16_t, AttestorRecord>> out;
-    for (const auto& kv : State(index->View()).Attestors()) {
-        const CPubKey k = kv.second.AttestorKey();
-        if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
-    }
-    return out;
-}
-
 void YellowbackWallet::LoadSigned()
 {
     std::vector<unsigned char> raw;

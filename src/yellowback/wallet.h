@@ -179,11 +179,6 @@ public:
     /** <datadir>/yellowback/carriers.dat */
     static fs::path CarriersFile();
 
-    // ---- v3: bonds (R6). Attestors records whose bondPubKey this wallet holds; cs_yellowback held by the caller.
-    std::vector<std::pair<uint16_t, AttestorRecord>> Bonds() const;
-    /** The attestor hot keys this wallet holds: every Attestors record whose attestorPubKey it has (cs_yellowback held by the caller). */
-    std::vector<std::pair<uint16_t, AttestorRecord>> HotKeys() const;
-
     // ---- v3: the signing guard (S16). In memory and in <datadir>/yellowback/attest-signed.dat (append, fsync before returning).
     /** The line for (seq, citedHeight, blockHash), else a v1 line for (seq, citedHeight) (null hash), else nullopt. */
     std::optional<SignedAttestation> LookupSigned(uint16_t seq, uint32_t citedHeight, const uint256& blockHash) const;
