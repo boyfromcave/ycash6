@@ -21,7 +21,16 @@
 //   snapshot for H - 1:        u8 status, u32 haltMask, i64 pFast, i64 pMid, i64 pSlow, i32 sigma, i64 issued
 //   activation record:         u8 status, i32 lockIn, i32 activate
 //   u8  hsel                   H = START - 2 + (hsel mod (VOL_WINDOW + 11))   (START - 2 .. START + VOL_WINDOW + 8)
-//   rest                       a serialised CBlock; a deserialisation failure discards the input (M10)
+//   rest                       a serialised CBlock; a deserialisation failure discards the input (M10),
+//                              and so does a block that carries one txid twice (below)
+//
+// The evaluator's domain is a block ConnectBlock has already accepted up to CheckConnect. CheckBlock
+// refuses a repeated txid outright (bad-txns-duplicate), and even past it every input exists and is
+// unspent, so two transactions with one txid cannot both connect (the second
+// double-spends the first's inputs or nullifiers, and CheckTransaction refuses a transaction that
+// spends nothing; BIP30 refuses an overwrite). State is keyed by outpoint, so a repeated txid would
+// overwrite its own Vaults/Tokens rows while Totals counted it twice -- property (iv) would fail on
+// an input no node can deliver. The harness keeps the rest of the block arbitrary.
 //
 // Totals are seeded consistently (supply = sum of the tokens, collateral =
 // sum of the ACTIVE vaults), regtest params are fixed at {1, 0, 0, 0} and
@@ -46,6 +55,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -117,7 +127,8 @@ inline int64_t SumTokens(const yellowback::StateView& view)
 
 /**
  * Seed the view per the grammar and return the height and block. Returns
- * false when the CBlock does not deserialise (the input is discarded).
+ * false when the CBlock does not deserialise or repeats a txid (the input
+ * is discarded).
  */
 inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowback::Params& P, yellowback::MemoryStateView& view, int& height, CBlock& block)
 {
@@ -191,12 +202,16 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
     } catch (const std::exception&) {
         return false;
     }
+    std::set<uint256> txids;
+    for (const CTransaction& tx : block.vtx) {
+        if (!txids.insert(tx.GetHash()).second) return false;   // outside the domain: see the grammar note
+    }
     return true;
 }
 
 /**
  * The YellowbackEvaluate body. Returns 0 (ok), 1 (input discarded: the
- * block did not deserialise), or a negative code naming the violated
+ * block did not deserialise or repeats a txid), or a negative code naming the violated
  * property: -1 apply/undo identity, -2 overlay equivalence, -3 the
  * enforcement flag, -4 supply == sum of tokens. An exception is the
  * caller's failure (the target is total).
