@@ -1,0 +1,11 @@
+# ThreadSanitizer suppressions for the `sanitizers` job's `thread` step (ycashd 6.20.0 only).
+#
+# The Rust side (librustzcash, orchard, sapling) is not compiled with -fsanitize=thread, so TSan
+# cannot see the atomics rayon's thread pool synchronises with and reports the pool's stack
+# hand-offs (StackJob::execute reading what Registry::in_worker_cold wrote on the caller's stack)
+# as races. 6.20.0's TestingSetup starts that pool for every case (Orchard batch validation), so
+# each test case reports them; v4.5.0 has no rayon and ycash-dd's thread step needs no file.
+# Only rayon's own crates are listed: a race in Yellowback or node C++ code is still reported.
+race:rayon_core
+race:crossbeam_deque
+race:crossbeam_epoch

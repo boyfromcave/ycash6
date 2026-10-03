@@ -1064,7 +1064,10 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread --disable-werror \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) test/test_bitcoin
-          src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
+          # Rust's rayon pool is uninstrumented; qa/yellowback-tsan-suppressions.txt says why and
+          # lists only its crates (first scheduled run on 7702d2260: 2 reports, both in rayon).
+          TSAN_OPTIONS="suppressions=$PWD/qa/yellowback-tsan-suppressions.txt" \
+            src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
