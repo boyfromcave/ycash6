@@ -150,7 +150,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         st.Put(keys::Vault(COutPoint(Fill((uint8_t)(i + 1)), 0)), v);
         switch (v.Status()) {
         case VaultStatus::ACTIVE: totals.activeVaults++; totals.collateralZat += v.collateralZat; break;
-        case VaultStatus::VOID: totals.voidVaults++; break;
+        case VaultStatus::VOIDED: totals.voidVaults++; break;
         case VaultStatus::CLOSED: totals.closedVaults++; break;
         case VaultStatus::CLAIMED: totals.claimedVaults++; break;
         }

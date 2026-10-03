@@ -713,7 +713,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
     // VOID release: the same shape on a VOID vault is an ordinary spend (K3): closed, not unbacked, nothing burned.
     {
         MemoryStateView view;
-        seed(view, VaultStatus::VOID, 100000000);
+        seed(view, VaultStatus::VOIDED, 100000000);
         State st(view);
         VaultSpendShape s = f.Shape(true, false, true, false, {});
         BuiltTx b = f.Built(s, PlanVaultSpend(s));

@@ -224,7 +224,7 @@ const char* VaultStatusName(VaultStatus s)
 {
     switch (s) {
     case VaultStatus::ACTIVE: return "ACTIVE";
-    case VaultStatus::VOID: return "VOID";
+    case VaultStatus::VOIDED: return "VOID";
     case VaultStatus::CLOSED: return "CLOSED";
     case VaultStatus::CLAIMED: return "CLAIMED";
     }

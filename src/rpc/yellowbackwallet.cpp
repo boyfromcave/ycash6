@@ -180,7 +180,7 @@ std::string ClassName(uint8_t termClass)
 /** The pClaim below which the vault is underwater: ceil(mintedCents * thresholdBps * COIN / collateralZat); nullopt for a VOID vault. */
 std::optional<int64_t> UnderwaterAt(const VaultRecord& v, const yellowback::Params& p)
 {
-    if (v.mintedCents <= 0 || v.collateralZat <= 0 || v.Status() == VaultStatus::VOID) return std::nullopt;
+    if (v.mintedCents <= 0 || v.collateralZat <= 0 || v.Status() == VaultStatus::VOIDED) return std::nullopt;
     arith_uint256 rhs = arith_uint256(v.mintedCents) * arith_uint256(p.claimThresholdBps) * arith_uint256(COIN);
     arith_uint256 at = CeilDiv(rhs, arith_uint256(v.collateralZat));
     if (!FitsInt64(at)) return std::nullopt;
@@ -220,7 +220,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
     o.pushKV("voidReason", v.voidReason);
     // K3 / L10: a VOID vault's claim path is unpoliced after claimHeight; an ACTIVE vault's is, under abandonment.
-    if (v.Status() == VaultStatus::VOID || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
+    if (v.Status() == VaultStatus::VOIDED || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
     return o;
 }
 

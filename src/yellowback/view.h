@@ -223,7 +223,7 @@ struct Activation
 };
 
 /** Vaults.status, declaration order (§3.6). */
-enum class VaultStatus : uint8_t { ACTIVE = 0, VOID = 1, CLOSED = 2, CLAIMED = 3 };
+enum class VaultStatus : uint8_t { ACTIVE = 0, VOIDED = 1, CLOSED = 2, CLAIMED = 3 };   // VOIDED, not VOID: <windows.h> #defines VOID
 const char* VaultStatusName(VaultStatus s);
 
 struct VaultRecord
@@ -245,10 +245,10 @@ struct VaultRecord
     bool unbacked;                            //!< closed by a spend that failed RED-1..4 with burned < mintedCents
 
     VaultRecord() : termClass(0), lockHeight(0), claimHeight(0), collateralZat(0), mintedCents(0), mintHeight(0), refHeight(0),
-                    status((uint8_t)VaultStatus::VOID), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false) {}
+                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false) {}
 
     VaultStatus Status() const { return (VaultStatus)status; }
-    bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOID; }
+    bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
     /** The owner key as a CPubKey (invalid when the bytes are not a key). */
     CPubKey OwnerKey() const { return CPubKey(ownerPubKey.begin(), ownerPubKey.end()); }
 

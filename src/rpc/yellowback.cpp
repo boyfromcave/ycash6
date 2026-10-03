@@ -257,10 +257,10 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value() &&
                            yellowback::rpc::EstimateClaim(index, out, v, tip).claimable;
     o.pushKV("claimable", claimable);
-    o.pushKV("underwaterAt", v.Status() == VaultStatus::VOID ? NullUniValue : UnderwaterAt(v, p));
+    o.pushKV("underwaterAt", v.Status() == VaultStatus::VOIDED ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
     // K3 / L10: a VOID vault's claim path is unpoliced after claimHeight; an ACTIVE vault's under abandonment.
-    if (v.Status() == VaultStatus::VOID || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
+    if (v.Status() == VaultStatus::VOIDED || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
     yellowback::rpc::PushNoticeFields(o, State(index.View()), p, out, v);
     return o;
 }

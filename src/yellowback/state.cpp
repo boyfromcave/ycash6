@@ -425,7 +425,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     log.verdict = v;
     log.yedOut = 0;
     if (!tx.vout.empty() && tx.vout[0].scriptPubKey.IsPayToScriptHash()) {
-        vault.status = (uint8_t)VaultStatus::VOID;
+        vault.status = (uint8_t)VaultStatus::VOIDED;
         vault.voidReason = v;
         ctx.st.Put(keys::Vault(vaultOut), vault);
         totals.voidVaults++;
@@ -807,7 +807,7 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         }
         if (std::optional<VaultRecord> v = ctx.st.GetVault(prev)) {
             if (v->Status() == VaultStatus::ACTIVE && !Contains(active, prev)) active.push_back({ prev, v.value() });
-            else if (v->Status() == VaultStatus::VOID && !Contains(voids, prev)) voids.push_back({ prev, v.value() });
+            else if (v->Status() == VaultStatus::VOIDED && !Contains(voids, prev)) voids.push_back({ prev, v.value() });
         }
         // IN-2 (amended): a bond spend withdraws the attestor unless it is EJECTED; the record stays
         if (std::optional<uint16_t> seq = ctx.st.GetBondIndex(prev)) {

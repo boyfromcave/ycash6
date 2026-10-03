@@ -94,7 +94,7 @@ static bool FilterTemplateInner(TemplateView& view, const CTransaction& tx, int 
         if (base.GetToken(in.prevout).has_value()) relevant = true;
         if (std::optional<VaultRecord> v = base.GetVault(in.prevout)) {
             relevant = true;
-            if (v->Status() == VaultStatus::VOID) spendsVoid = true;
+            if (v->Status() == VaultStatus::VOIDED) spendsVoid = true;
         }
     }
     const std::optional<FoundPayload> fp = FindPayload(tx);
