@@ -776,7 +776,10 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
             "yed_getstats\n"
-            "\nTotals plus the tip snapshot: supply, collateral, vault counts, prices, sigma, global ratio, cap, halts.\n");
+            "\nTotals plus the tip snapshot: supply, collateral, vault counts, prices, sigma, global ratio, cap, halts.\n"
+            "mintableClasses: the term classes a mint can use now -- every class when nothing halts and the cap has room;\n"
+            "under a GLOBAL_RATIO halt alone (W16) or once the cap is reached (W20), those whose minimum ratio reaches\n"
+            "params.recapRatioBps; none under any other halt.\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
@@ -806,13 +809,13 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), index.GetParams().supplyCapBps);
     o.pushKV("supplyCapCents", PriceOrNull(cap));
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
-    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && (!cap.has_value() || t.supplyCents < cap.value()));
     // W16 / W20: the classes a mint can use now. Every class when nothing halts and the cap has room
     // for the smallest mint; under a global-ratio halt alone or at the cap, those whose minimum ratio
     // reaches the recapitalisation floor; none under any other halt.
     UniValue mintable(UniValue::VARR);
     const auto& P = index.GetParams();
     const bool capReached = cap.has_value() && t.supplyCents + P.minMint > cap.value();
+    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && !capReached);   // one cap predicate with supplyCapReached (W20)
     if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0) {
         for (int i = 0; i < NUM_CLASSES; i++) {
             if ((!(s.haltMask & HALT_GLOBAL_RATIO) && !capReached) || MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps) mintable.push_back(ClassLetter((uint8_t)i));

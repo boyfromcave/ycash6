@@ -296,7 +296,7 @@ Arguments: none. `Totals` plus the tip snapshot. `pClaim` is `null` when undefin
 the minimum fill on the mid or slow window); `globalRatioBps` is `null` when there is no supply or
 no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
 `haltMask` is the decoded tip `haltMask` as an array of names (empty when minting is open);
-`mintingAllowed` is `activation == active && haltMask == [] && cap has room` — every class can
+`mintingAllowed` is `activation == active && haltMask == [] && !supplyCapReached` — every class can
 mint. **v3 (W16)** `mintableClasses` is the list of term classes a mint can use *now*: every
 class when `mintingAllowed`; under a `GLOBAL_RATIO` halt alone **or at the supply cap** (W20:
 `yed_getinfo.supplyCapReached` — the smallest mint would exceed it), the classes whose minimum

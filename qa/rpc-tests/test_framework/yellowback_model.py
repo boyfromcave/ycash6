@@ -1608,11 +1608,14 @@ class YellowbackModel(object):
         d.update(self.totals.as_dict())
         if s is None:
             s = Snapshot.virtual_snapshot()
+        cap = supply_cap_cents(s.issued_zat, s.p_mint, self.params.supply_cap_bps)
+        # W20: the cap is reached when the next mint of any class would exceed it (yed_getinfo.supplyCapReached)
+        cap_reached = cap is not None and self.totals.supply_cents + self.params.min_mint > cap
         d.update({'issuedZat': s.issued_zat, 'pFast': s.p_fast, 'pMid': s.p_mid, 'pSlow': s.p_slow,
                   'pMint': s.p_mint, 'pClaim': s.p_claim, 'sigmaMultBps': s.sigma_mult_bps,
                   'globalRatioBps': s.global_ratio_bps,
-                  'supplyCapCents': supply_cap_cents(s.issued_zat, s.p_mint, self.params.supply_cap_bps),
-                  'haltMask': s.halt_names(), 'mintingAllowed': s.activation.status == ACTIVE and s.halt_mask == 0})
+                  'supplyCapCents': cap,
+                  'haltMask': s.halt_names(), 'mintingAllowed': s.activation.status == ACTIVE and s.halt_mask == 0 and not cap_reached})
         return d
 
     def block_verdict(self, height):
