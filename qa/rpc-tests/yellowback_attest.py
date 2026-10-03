@@ -407,36 +407,50 @@ class YellowbackAttestTest(YellowbackTestFramework):
         # HALT_NO_PRICE and the vault voids as mint-halted-no-price instead of mint9-bundle-sig
         # (main CI on 06607d94c failed; the same job passed on another run). Four tagged blocks on
         # the common prefix are exactly the fast window's fill at the deepest candidate.
-        self.set_prices(PRICE)
-        self.pools_step(4, 'tagged cushion before the split', jitter=False)
-        # The deepest candidate's fast window is these four blocks plus four tagless stock
-        # blocks, and the fill is exactly four. A signal tag here would bring the flake back.
-        tip = user.getblockcount()
-        for h in range(tip - 3, tip + 1):
-            assert_equal(user.yed_gettag(str(h))['kind'], 'quote')
-
         # ---------------------------------------------------------------- VOID: a reorged citation (R9)
         print('a bundle citing a reorged block: split, mine both branches, pick an R whose selections intersect, join')
-        self.split_network()
-        enforcing_tip = user.getblockcount()
-        for k in range(4):
-            self.toggle_quote(POOLS[k % 3])
-            nodes[POOLS[k % 3]].generate(1)
-            self.sync_all(blocks_only=True)
-        nodes[STOCK].generate(7)
-        self.sync_all(blocks_only=True)
+        # Whether some R in tip+1..tip+4 selects two attestors on both branches follows the block
+        # hashes; four candidates miss now and then (coverage job on ycash-dd 25ceee68b). Later R
+        # cannot help: the winning branch is tagless and its fast window empties. So when no
+        # candidate qualifies, rejoin (the longer stock branch wins; it holds nothing the enforcing
+        # nodes reject), lay a fresh tagged cushion and split again. The cushion of a retry is one
+        # whole slow window (64 on regtest): after a rejoin the mid (24, fill 16) and slow (64, fill
+        # 43) windows also hold the losing split's 7 tagless stock blocks, and four tagged blocks
+        # refill only the fast window, so pMint would stay undefined at every candidate.
         chosen = None
-        for r in range(enforcing_tip + 1, enforcing_tip + 5):
-            sel_a = select_attestors(user.getblockhash(r), b'', selection_pool(user, r))
-            sel_b = select_attestors(nodes[OBSERVER].getblockhash(r), b'', selection_pool(nodes[OBSERVER], r))
-            assert user.getblockhash(r) != nodes[OBSERVER].getblockhash(r)
-            both = sorted(set(sel_a) & set(sel_b))
-            # Snapshots[R] on the winning chain. A missing pMint becomes mint-halted-no-price
-            # and hides the bundle-signature verdict this step is here to show.
-            if len(both) >= 2 and nodes[OBSERVER].yed_getprice(r)['pMint'] is not None:
-                chosen = (r, both)
+        for attempt in range(6):
+            if attempt:
+                print('  no qualifying R on split %d; rejoin and split again' % attempt)
+                self.join_network()
+                self.checkpoint('rejoined after split %d' % attempt)
+            self.set_prices(PRICE)
+            self.pools_step(P_SLOW_WINDOW if attempt else 4, 'tagged cushion before the split', jitter=False)
+            # The deepest candidate's fast window is these four blocks plus four tagless stock
+            # blocks, and the fill is exactly four. A signal tag here would bring the flake back.
+            tip = user.getblockcount()
+            for h in range(tip - 3, tip + 1):
+                assert_equal(user.yed_gettag(str(h))['kind'], 'quote')
+            self.split_network()
+            enforcing_tip = user.getblockcount()
+            for k in range(4):
+                self.toggle_quote(POOLS[k % 3])
+                nodes[POOLS[k % 3]].generate(1)
+                self.sync_all(blocks_only=True)
+            nodes[STOCK].generate(7)
+            self.sync_all(blocks_only=True)
+            for r in range(enforcing_tip + 1, enforcing_tip + 5):
+                sel_a = select_attestors(user.getblockhash(r), b'', selection_pool(user, r))
+                sel_b = select_attestors(nodes[OBSERVER].getblockhash(r), b'', selection_pool(nodes[OBSERVER], r))
+                assert user.getblockhash(r) != nodes[OBSERVER].getblockhash(r)
+                both = sorted(set(sel_a) & set(sel_b))
+                # Snapshots[R] on the winning chain. A missing pMint becomes mint-halted-no-price
+                # and hides the bundle-signature verdict this step is here to show.
+                if len(both) >= 2 and nodes[OBSERVER].yed_getprice(r)['pMint'] is not None:
+                    chosen = (r, both)
+                    break
+            if chosen is not None:
                 break
-        assert chosen is not None, 'no reference height with two attestors selected on both branches and a defined price'
+        assert chosen is not None, 'no reference height with two attestors selected on both branches and a defined price in six splits'
         r_reorg, both = chosen
         # pooled on the enforcing branch (accepted against hash A), signed over hash A
         fed = feed_all(user, {seq: PRICE for seq in both}, cited=r_reorg)
