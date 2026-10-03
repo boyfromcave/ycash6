@@ -1187,8 +1187,8 @@ tagged blocks with no further code (V25).
 ### The abandonment predicate (shared by every wallet command that reads it)
 
 The chain shows **abandonment** when `Snapshots[tip].haltMask.ENFORCEMENT` has been set
-continuously for at least `ABANDON_BLOCKS` (= 2 · `SIGNAL_WINDOW`: 4,032 on mainnet, 128 on
-regtest) — two full windows in which fewer than half of blocks signalled. That is the whole
+continuously for at least `ABANDON_BLOCKS` (= `GRACE`: 34,560 on mainnet, 128 on regtest; W21)
+— thirty days in which fewer than half of blocks signalled. That is the whole
 predicate (`YellowbackIndex::IsAbandoned()`, computed from `Snapshots` alone, so every node of
 every release answers alike, L12). It is **never** gated on the node's own `-yellowbackenforce`,
 its valve state, its health or a passed sunset. While it holds: `yed_getinfo.abandoned` is true;

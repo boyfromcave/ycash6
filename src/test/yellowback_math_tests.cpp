@@ -315,7 +315,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.enforcementFloor, 1008);
     BOOST_CHECK_EQUAL(m.enforcementResume, 1210);
     BOOST_CHECK_EQUAL(m.valveBlocks, 6);
-    BOOST_CHECK_EQUAL(m.abandonBlocks, 2 * m.signalWindow);
+    BOOST_CHECK_EQUAL(m.abandonBlocks, m.grace);              // W21
     BOOST_CHECK_EQUAL(m.nReg, 576);
     BOOST_CHECK_EQUAL(m.nPenalty, 288);
     BOOST_CHECK_EQUAL(m.peerLag, 10);
@@ -365,6 +365,10 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(r.enforcementResume, 39);
     BOOST_CHECK_EQUAL(r.valveBlocks, 6);
     BOOST_CHECK_EQUAL(r.abandonBlocks, 128);
+    // W21: the module waits at least GRACE for its developers on every network (ABANDON_BLOCKS >= GRACE)
+    BOOST_CHECK(m.abandonBlocks >= m.grace);
+    BOOST_CHECK(TestParams().abandonBlocks >= TestParams().grace);
+    BOOST_CHECK(r.abandonBlocks >= r.grace);
     BOOST_CHECK_EQUAL(r.nReg, 24);
     BOOST_CHECK_EQUAL(r.nPenalty, 12);
     BOOST_CHECK_EQUAL(r.peerLag, 4);

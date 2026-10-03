@@ -130,10 +130,16 @@ When setting them in a release:
   above every height a released node has validated (M12).
 - Make the same change on the other node line (`ycash-dd`): both lines must agree.
 
-| Network | startHeight | enforceUntilHeight | Set in |
-|---|---|---|---|
-| main | 3,075,000 | 3,495,480 | 6.21.0-rc1 (tip 3,052,055 on 2026-10-02) |
-| test | 0 (unset) | 0 | not yet: testnet had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering) |
+| Network | startHeight | enforceUntilHeight | abandonBlocks | Set in |
+|---|---|---|---|---|
+| main | 3,075,000 | 3,495,480 | 34,560 (= `grace`, W21) | 6.21.0-rc1 (tip 3,052,055 on 2026-10-02) |
+| test | 0 (unset) | 0 | 34,560 (= `grace`, W21) | not yet: testnet had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering) |
+
+`abandonBlocks` (`ABANDON_BLOCKS`, W21) is compiled in with the other §3.1 values and is not set
+per release: it equals `grace` (thirty days) on mainnet and testnet, 128 on regtest, and the unit
+tests hold `abandonBlocks >= grace` on every network. It is the floor on how long the module waits
+for its developers after any halt before pools stop filtering vault spends and wallets offer
+`yed_sweep` — the time budget of the "Freeze, then fix" runbook below.
 
 ## Wallet (YecWallet) releases
 

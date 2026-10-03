@@ -145,9 +145,11 @@ and `yed_getstats.halts` show it:
   owner path nor the claim path is policed — collateral can leave a vault without its burn, and
   YED so left unbacked stays in circulation. Vaults untouched during the pause are protected again
   when rejection resumes at 60 %.
-- **Two full windows of the `ENFORCEMENT` halt is abandonment** (`yed_getinfo.abandoned`; 128
-  blocks on regtest, 4,032 on mainnet). This is also where a sunset with no successor release ends
-  up. From then on every vault's claim path is spendable by anyone at its claim height and nobody
+- **`ABANDON_BLOCKS` of the `ENFORCEMENT` halt is abandonment** (`yed_getinfo.abandoned`; 128
+  blocks on regtest, 34,560 — thirty days, the same length as `GRACE` — on mainnet; W21). It is
+  the minimum time the module waits for its developers after any halt, including a deliberate
+  freeze (`doc/yellowback-release.md`, "Freeze, then fix"). This is also where a sunset with no
+  successor release ends up. From then on every vault's claim path is spendable by anyone at its claim height and nobody
   refuses the spend: whoever mines first takes the collateral.
 - **Every enforcement gap is such a window, not only abandonment** (audit A-5). The claim branch
   of a vault script is `<claimHeight> CLTV DROP OP_TRUE`: the only thing that stops a claim
@@ -157,8 +159,8 @@ and `yed_getstats.halts` show it:
   `ENFORCEMENT` halt, the sunset — a stock-mined claim-path spend of any ACTIVE vault past its
   claim height takes the collateral with no burn and the vault closes `unbacked`. At the sunset
   with no successor release the gap lasts until abandonment is declared: the signal bits decay
-  below the floor over a window (2,016 blocks) and `ABANDON_BLOCKS` (4,032) follow, roughly five
-  days on mainnet during which `yed_sweep` is still refused on an owner's own node (MP-1 stands
+  below the floor over a window (2,016 blocks) and `ABANDON_BLOCKS` (34,560) follow, roughly a
+  month on mainnet during which `yed_sweep` is still refused on an owner's own node (MP-1 stands
   down only under abandonment). **Owners: redeem, or let no vault sit past its claim height
   across a sunset**; a wallet should warn at `ENFORCE_UNTIL_HEIGHT - grace` (the GUI's job, not
   the node's).

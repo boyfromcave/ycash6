@@ -126,7 +126,7 @@ struct Params
     int enforcementFloor;                //!< 1,008 (50 %): below it block rejection suspends
     int enforcementResume;               //!< 1,210 (60 %)
     int valveBlocks;                     //!< 6 (node-local, never a state input)
-    int abandonBlocks;                   //!< 4,032 (L10, L12)
+    int abandonBlocks;                   //!< 34,560 = GRACE (W21; L10, L12); invariant abandonBlocks >= grace
 
     // Miners (REG-1..4, FEE-2)
     int nReg;                            //!< 576 (informational)
