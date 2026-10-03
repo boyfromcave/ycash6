@@ -931,9 +931,16 @@ class MintTests(unittest.TestCase):
         self.assertIsNotNone(cap)
         # issued ~ 135 blocks * 6.25 YEC ~ 843 YEC * $0.05 = $42 -> cap = 15 % of that ~ 632 cents < MIN_MINT
         self.assertLess(cap, 10_000)
-        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
+        # W20: over the cap only a mint whose ratio reaches RECAP_RATIO_BPS (500 %) is accepted.
+        # Class C (300 %, lock 145) is refused; class A (500 %, lock 48) goes through and supply
+        # ends above the cap.
+        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 12, fee_key=KEY1, term_class=2)
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-supply-cap')
+        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
+        c.mine((1, 50_000, 0, KEY1), [raw])
+        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, '')
+        self.assertGreater(c.model.totals.supply_cents, cap)
 
     # Rule: MINT-7
     def test_mint7_token_output_is_opreturn(self):
