@@ -1320,3 +1320,14 @@ jobs:
               "The fuzz targets ran to their time cap in the workflow; the replay table is regenerated from the corpus. **Any file under src/fuzzing/*/crashes/ in this diff is a finding: replay it and fix before merging.** No crashes/ files = merge." '' \
               '## 3. What this PR touches in src/' '' \
               'n/a — no src/ change (src/test/yellowback_fuzz_tests.cpp is generated test data, not code under review)')" || true
+      - name: Fail on a crash (the input is already in the artifact, crashes/ and the corpus PR)
+        # Each target runs with || true so one crash does not cost the others their 30 minutes; this
+        # step turns the run red afterwards instead of reporting a crash as a green run.
+        if: always()
+        run: |
+          if ls src/fuzzing/Yellowback*/output/crash-* >/dev/null 2>&1; then
+            ls -l src/fuzzing/Yellowback*/output/crash-*
+            echo "::error::a fuzz target crashed: replay the input from the artifact (or crashes/ in the corpus PR) and fix"
+            exit 1
+          fi
+          echo "no crashes"

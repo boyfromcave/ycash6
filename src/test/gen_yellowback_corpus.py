@@ -18,7 +18,8 @@ every file under src/fuzzing/<Target>/crashes/, a found-and-fixed crash)
 without a fuzzing build or a path.
 
     gen_yellowback_corpus.py            print the C++ tables
-    gen_yellowback_corpus.py --write    write input/*.bin and update the C++ file
+    gen_yellowback_corpus.py --write    write input/*.bin and update the C++ file (files named fuzz-*.bin,
+                                        the weekly job's merged finds, are kept and never checked)
     gen_yellowback_corpus.py --check    exit 1 unless input/ and the C++ file match (CI); also checks that
                                         src/test/data/yellowback_golden.json equals the qa/ copy the model pins
 
@@ -670,6 +671,13 @@ def splice(text, block):
     return text[:a] + block + text[b:]
 
 
+# The weekly fuzz job merges what each run found into input/ as fuzz-<date>-<n>.bin. Those files are
+# the fuzzer's, not this generator's: --write keeps them (it used to delete every unexpected .bin, so
+# five targets' weekly finds were thrown away each week and only YellowbackBundle, which is not in
+# TARGETS, ever grew) and --check ignores them. The C++ replay tables never read input/.
+FOUND_PREFIX = "fuzz-"
+
+
 def expected_files(target):
     return {name + ".bin": data for name, data in CORPORA[target]()}
 
@@ -680,7 +688,7 @@ def write_all():
         os.makedirs(d, exist_ok=True)
         want = expected_files(target)
         for name in os.listdir(d):
-            if name.endswith(".bin") and name not in want:
+            if name.endswith(".bin") and name not in want and not name.startswith(FOUND_PREFIX):
                 os.remove(os.path.join(d, name))
         for name, data in want.items():
             with open(os.path.join(d, name), "wb") as f:
@@ -696,7 +704,7 @@ def check_all():
     for target in TARGETS:
         d = os.path.join(FUZZ_DIR, target, "input")
         want = expected_files(target)
-        have = {n for n in os.listdir(d) if n.endswith(".bin")} if os.path.isdir(d) else set()
+        have = {n for n in os.listdir(d) if n.endswith(".bin") and not n.startswith(FOUND_PREFIX)} if os.path.isdir(d) else set()
         for name in sorted(set(want) | have):
             p = os.path.join(d, name)
             if name not in want:
