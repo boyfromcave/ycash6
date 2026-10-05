@@ -213,7 +213,7 @@
         "yed_redeem",
         "yed_claim"
       ],
-      "when": "no fresh key could be drawn (keypoolrefill)"
+      "when": "no fresh key could be drawn (keypoolrefill); on 6.20.0 only the CReserveKey change paths can raise it (see yed_getnewaddress)"
     },
     "lock-below-min": {
       "raisedBy": [
@@ -421,7 +421,7 @@
     },
     "wallet-locked": {
       "raisedBy": [
-        "every signing command"
+        "every signing command; on 6.20.0 also `yed_getnewaddress` and every fresh-key draw"
       ],
       "when": "the wallet is encrypted and locked (walletpassphrase first); the stock EnsureWalletIsUnlocked message may precede it"
     },
@@ -450,7 +450,7 @@
     "planV3": "docs/plans/yellowback-v3-development-plan.md",
     "revision": 6,
     "revisionV3": 4,
-    "rpcdoc": "ycash-dd/doc/yellowback-rpc.md",
+    "rpcdoc": "ycash6/doc/yellowback-rpc.md",
     "section": "4.5"
   },
   "yed_addattestation": {
