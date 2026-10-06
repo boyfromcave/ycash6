@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "c863b2b1e09d4b019f63f96b183ce3f1777c51a5a6a70d29f3558e3d4abe3359"
+    "sha256": "744c041915b05f6d850904fbfd44734aea13373f27b9c0aa1bcfe63c32f48819"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2096,6 +2096,15 @@
         "set_signunlock"
       ],
       "provokedBy": "a cancel spend"
+    },
+    {
+      "code": -4,
+      "message": "set-sign-once",
+      "raisedBy": [
+        "set_signunlock",
+        "set_signcancel"
+      ],
+      "provokedBy": "a second, different unlock of a vault this wallet already signed"
     },
     {
       "code": -8,

@@ -244,6 +244,16 @@ class VaultRpcTest(BitcoinTestFramework):
         bu = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 2}])
         signed = n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])
         assert_equal(signed['complete'], True)
+        # sign once (SET_EQUIVOCATION): a different unlock of the same vault is refused by both signers,
+        # also after a restart; re-signing the identical transaction is idempotent
+        bu_other = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 3}])
+        assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
+        assert_raises_rpc('set-sign-once', n0.set_signunlock, bu_other['hex'])
+        assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
+        self.restart(1)
+        n1 = self.nodes[1]
+        assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
+        assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
         assert_raises_rpc('', n1.vault_send, signed['hex'])   # node 1 cannot sign node 0's fee inputs
         txid = n0.vault_send(signed['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
@@ -262,6 +272,14 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(bc['deadline'], pre['deadline'])
         assert_equal(bc['cancelsetid'], pre['cancelsetid'])
         assert_equal(bc['required'], 1)
+        # The rebuild after confirmation is byte-identical to the mempool build (one sighash to sign);
+        # sign once: another cancel of the same intent is refused, re-signing the same one is idempotent.
+        assert_equal(bc['hex'], pre['hex'])
+        assert_equal(n2.vault_buildcancel(intent_op)['hex'], bc['hex'])
+        other = bc['hex'][:-38] + '01000000' + bc['hex'][-30:]               # the same cancel with nLockTime 1: another sighash
+        assert other != bc['hex']
+        assert_raises_rpc('set-sign-once', n2.set_signcancel, other)
+        assert_equal(n2.set_signcancel(bc['hex'])['hex'], pre_signed['hex'])
         # The cancel signed before the intent was mined is still valid after it.
         cancel_txid = n2.vault_send(pre_signed['hex'])
         self.mine(1)

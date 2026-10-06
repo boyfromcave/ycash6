@@ -24,7 +24,9 @@ from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import VAULT_BRANCH_ID, assert_equal, nuparams, start_nodes
+from test_framework import vault
 from test_framework.vault import bond_script
+from test_framework.yellowback_util import pubkey_to_address, wif_to_secret
 from test_framework.vault_contract import Contract
 from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
 
@@ -155,10 +157,23 @@ class VaultRpcContractTest(BitcoinTestFramework):
         # ---- equivocation, then the owner spend its dormancy opens ----
         c.error('owner branch opens at height', n, 'vault_ownerspend', relock, addr)
         a = c.call(n, 'set_signunlock', c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 1}])['hex'])
-        b = c.call(n, 'set_signunlock', c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 2}])['hex'])
-        assert a['sighash'] != b['sighash']
+        bu_b = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 2}])
+        c.error('set-sign-once', n, 'set_signunlock', bu_b['hex'])         # the wallet never equivocates (sign once)
+        # The second signature, made outside the wallet with the member's key (as a faulty or malicious signer would).
+        tx_b = vault.tx_from_hex(bu_b['hex'])
+        coin = n.gettxout(relock.split(':')[0], int(relock.split(':')[1]))
+        sh_b = vault.template_sighash(tx_b, 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
+        secret = wif_to_secret(n.dumpprivkey(pubkey_to_address(bytes.fromhex(key))))
+        msg_b = vault.set_sig_msg(bytes.fromhex(setid)[::-1], 1, relock.split(':')[0], int(relock.split(':')[1]), sh_b)
+        sig_b = vault.sign_recoverable(secret, msg_b)
+        sh_a = vault.template_sighash(vault.tx_from_hex(a['hex']), 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
+        assert_equal(sh_a.hex(), a['sighash'])                              # the framework's sighash is the node's
+        assert_equal(vault.recover_compact(bytes.fromhex(a['setsigs'][0]['sig']),
+                                           vault.set_sig_msg(bytes.fromhex(setid)[::-1], 1, relock.split(':')[0], int(relock.split(':')[1]), sh_a)).hex(), key)
+        sighash_b = sh_b.hex()
+        assert a['sighash'] != sighash_b
         proof = {'setid': setid, 'prevout': relock, 'rolea': 1, 'sighasha': a['sighash'], 'siga': a['setsigs'][0]['sig'],
-                 'roleb': 1, 'sighashb': b['sighash'], 'sigb': b['setsigs'][0]['sig']}
+                 'roleb': 1, 'sighashb': sighash_b, 'sigb': sig_b.hex()}
         c.call(n, 'set_equivocation', proof)
         mine(1)
         info = c.call(n, 'set_getinfo', setid)

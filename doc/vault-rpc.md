@@ -230,6 +230,10 @@ Result: `SetSigResult`
 Adds this wallet's current-member signatures over the set-signature message (plan §15.2 step 4)
 for the vault's `setid`, up to `unlockthreshold`. Signing two different spends of one outpoint
 is provable equivocation: sign only the transaction you mean.
+**Sign once:** before handing out a signature the wallet records, in its wallet database, the
+role and sighash its members signed for `(setid, prevout)`, and refuses a different role or
+sighash for that pair with `set-sign-once` (`RPC_WALLET_ERROR`), across restarts; re-signing the
+identical transaction is idempotent. There is no override.
 
 ### `vault_buildcancel "intentoutpoint"`
 Params: `["intentoutpoint": outpoint]`
@@ -243,14 +247,17 @@ transaction spends, `intentconfirmed` is false and `deadline` assumes the intent
 next block. The mempool accepts the cancel as the intent's child (a mempool parent counts as
 confirming in the next block, so I-2 holds), and both may confirm in one block; a cancel signed
 before the intent confirms stays valid after it. So a watcher can build and sign a cancel the
-moment an intent appears.
+moment an intent appears. Called again for the same intent it returns the same transaction
+(mempool or confirmed) while its fee inputs are unspent (remembered in memory until restart), so
+every member signs one sighash.
 
 ### `set_signcancel "hex"`
 Params: `["hex": hex]`
 
 Result: `SetSigResult`
 
-As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`.
+As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`, under the same
+sign-once record.
 
 ### `vault_send "hex"`
 Params: `["hex": hex]`
@@ -308,6 +315,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
 | -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
+| -4 | `set-sign-once` | `set_signunlock`, `set_signcancel` | a second, different unlock of a vault this wallet already signed |
 | -8 | `not an unspent intent output` | `vault_buildcancel`, `vault_release` | a released intent |
 | -1 | `can no longer be cancelled` | `vault_buildcancel` | an intent past its delay |
 | -1 | `matures at height` | `vault_release` | an intent before its delay |

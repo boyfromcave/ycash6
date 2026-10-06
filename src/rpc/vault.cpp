@@ -602,6 +602,9 @@ UniValue vault_decodescript(const UniValue& params, bool fHelp)
 /** Recipient scripts this process built intents for (vault_buildunlock / vault_app), so that
  *  vault_release can find a recipient the wallet does not own. In memory only. */
 std::map<uint256, CScript> g_recipients;
+/** The last CANCEL built per intent (vault_buildcancel): rebuilt byte-identical while its fee inputs are unspent,
+ *  so members asked twice sign one sighash (sign once, SET_EQUIVOCATION). In memory only. */
+std::map<COutPoint, CMutableTransaction> g_cancelBuilds;
 
 void EnsureWallet(bool fHelp)
 {
@@ -1298,12 +1301,36 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
         if (!RecoverSig(msg, sig, key)) throw JSONRPCError(RPC_INVALID_PARAMETER, "an existing set signature does not verify (the transaction changed?)");
         have.push_back(key);
     }
+    // Sign once (SET_EQUIVOCATION, plan §15.3): two signatures by one member over the same (setId, prevout)
+    // with a different role or sighash eject it and freeze its bond. The wallet records what its members
+    // signed before handing any signature out, and refuses a different one; the identical sighash is idempotent.
+    const COutPoint& prevout = mtx.vin[idx].prevout;
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    bool recorded = false;
+    {
+        uint8_t prevRole = 0;
+        uint256 prevSighash;
+        if (walletdb.ReadVaultSetSig(setId, prevout, prevRole, prevSighash)) {
+            if (prevRole != role || prevSighash != sighash)
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("set-sign-once: this wallet already signed a different %s (role %d, sighash %s) of %s for set %s; "
+                                                               "a second signature is a provable equivocation (SET_EQUIVOCATION ejects the member and freezes its bond). "
+                                                               "Collect signatures on the transaction already signed",
+                                                               prevRole == ROLE_UNLOCK ? "unlock" : "cancel", (int)prevRole, prevSighash.GetHex(), prevout.ToString(), setId.GetHex()));
+            recorded = true;
+        }
+    }
     for (const auto& m : snap->GetMembers(setId)) {
         if ((int)sigs.size() >= *k) break;
         if (!IsCurrent(*s, m.second, h) || std::find(have.begin(), have.end(), m.first) != have.end()) continue;
         if (!pwalletMain->HaveKey(m.first.GetID())) continue;
+        const CKey priv = WalletPrivKey(m.first);      // throws (nothing recorded) when the key is unavailable
+        if (!recorded) {
+            if (!walletdb.WriteVaultSetSig(setId, prevout, role, sighash))
+                throw JSONRPCError(RPC_WALLET_ERROR, "set-sign-once: cannot record the signature in the wallet; nothing was signed");
+            recorded = true;
+        }
         std::vector<unsigned char> sig;
-        if (!SignRecoverable(WalletPrivKey(m.first), msg, sig)) throw JSONRPCError(RPC_WALLET_ERROR, "signing failed");
+        if (!SignRecoverable(priv, msg, sig)) throw JSONRPCError(RPC_WALLET_ERROR, "signing failed");
         sigs.push_back(sig);
         have.push_back(m.first);
     }
@@ -1388,7 +1415,9 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
             "vault_buildcancel \"intentoutpoint\"\n"
             "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
             "(I-2), fee from this wallet (unsigned). Collect the cancel set's signatures with set_signcancel, then vault_send.\n"
-            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child.\n"
+            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
+            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once: a second,\n"
+            "different cancel signature is an equivocation).\n"
             "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
             "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\"}\n"
             + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
@@ -1429,10 +1458,31 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
         coinHeight = NextHeight();
     }
     if (NextHeight() - coinHeight >= ip.delay) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the intent matured at height %d; it can no longer be cancelled", coinHeight + ip.delay));
-    CMutableTransaction mtx = NewTx();
-    mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
-    mtx.vout.push_back(CTxOut(coin.nValue, origin));
-    Fund(mtx, coin.nValue);
+    // Rebuilt byte-identical while the remembered build's fee inputs are unspent (sign once): the same
+    // transaction whether the intent was in the mempool or has confirmed since.
+    CMutableTransaction mtx;
+    bool reused = false;
+    auto cached = g_cancelBuilds.find(op);
+    if (cached != g_cancelBuilds.end() && cached->second.vout.size() > 0 && cached->second.vout[0].scriptPubKey == origin) {
+        reused = true;
+        const CMutableTransaction& c = cached->second;
+        for (size_t i = 1; i < c.vin.size() && reused; i++) {
+            CTxOut fee;
+            int fh;
+            const COutPoint& f = c.vin[i].prevout;
+            if (!GetCoin(f, fee, fh) || pwalletMain->IsSpent(f.hash, f.n, std::nullopt)) { reused = false; break; }   // 6.20.0: asOfHeight (nullopt = now)
+            LOCK(mempool.cs);
+            if (mempool.mapNextTx.count(f)) reused = false;
+        }
+        if (reused) mtx = c;
+    }
+    if (!reused) {
+        mtx = NewTx();
+        mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
+        mtx.vout.push_back(CTxOut(coin.nValue, origin));
+        Fund(mtx, coin.nValue);
+        g_cancelBuilds[op] = mtx;
+    }
     auto k = Snapshot()->Threshold(ip.cancelSetId, ROLE_CANCEL);
     UniValue o(UniValue::VOBJ);
     o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
