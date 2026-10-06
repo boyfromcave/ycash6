@@ -13,6 +13,8 @@
 # Triggers:
 #   push of a tag v*            build, smoke-test, and create a draft release (a prerelease when
 #                               the version has -rc/-beta); the tag must equal configure.ac's version
+#                               and the mainnet Yellowback heights must be set
+#                               (qa/yellowback-release-heights.sh, hardening F-5)
 #   workflow_dispatch           the same builds and smoke tests, artifacts only, no release
 #                               (a proving run before tagging)
 #
@@ -75,6 +77,12 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
           echo "version $version (prerelease: $pre)"
+      - name: Mainnet Yellowback heights are set (hardening F-5)
+        # A tag never releases a build whose mainnet START_HEIGHT is unset; a workflow_dispatch
+        # proving run only warns.
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then qa/yellowback-release-heights.sh
+          else qa/yellowback-release-heights.sh --warn; fi
 
   build:
     name: Build ${{ matrix.platform }}

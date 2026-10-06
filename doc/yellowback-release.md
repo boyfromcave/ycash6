@@ -129,10 +129,12 @@ When setting them in a release:
 - A set that replaces a released one starts at or after that set's `enforceUntilHeight` (L8), and
   above every height a released node has validated (M12).
 - Make the same change on the other node line (`ycash-dd`): both lines must agree.
+- The release workflow refuses a tag while the mainnet `startHeight` is 0 or `enforceUntilHeight`
+  is not above it (`qa/yellowback-release-heights.sh`; a `workflow_dispatch` run only warns).
 
 | Network | startHeight | enforceUntilHeight | abandonBlocks | Set in |
 |---|---|---|---|---|
-| main | 3,075,000 | 3,495,480 | 34,560 (= `grace`, W21) | 6.21.0-rc1 (tip 3,052,055 on 2026-10-02) |
+| main | 0 (unset) | 0 | 34,560 (= `grace`, W21) | not yet: the 6.21.0-rc1 set (3,075,000 / 3,495,480) was withdrawn on 2026-10-05 (hardening plan F-5, H-8); the release that passes the launch gates sets it |
 | test | 0 (unset) | 0 | 34,560 (= `grace`, W21) | not yet: testnet had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering) |
 
 `abandonBlocks` (`ABANDON_BLOCKS`, W21) is compiled in with the other §3.1 values and is not set
