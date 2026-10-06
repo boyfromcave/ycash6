@@ -63,14 +63,19 @@ coinbases. v3 keeps those and adds a second, independent population.
   prices with an off-chain agent (`contrib/yellowback/attest/`). Attestors send no transactions
   after registering and need no domain, no open port and no funded hot wallet. The highest-weighted
   bonds are *seated*; weight is bond size times age, so influence is slow, visible and costly to buy.
-- **Arming.** The layer switches on by itself: once five attestors have matured bonds, a one-day
-  countdown starts (`yed_getinfo.attest` shows `UNARMED` / `TRIGGERED` / `ARMED`). Until it arms,
-  the node behaves exactly as v2.
+- **Arming.** The layer switches on by itself: once seven attestors have matured bonds on mainnet
+  (`ATTEST_ARM_MIN`, hardening H-2; three on regtest), a one-day countdown starts
+  (`yed_getinfo.attest` shows `UNARMED` / `TRIGGERED` / `ARMED`). **Minting requires an armed
+  layer** on mainnet and testnet (`MINT_REQUIRES_ARMED`, H-1; `yed_getinfo.mintRequiresArmed`): until
+  it arms every mint is refused (`mintpol-unarmed`) and a hand-built one is VOID
+  (`mint-halted-unarmed`); redemptions, transfers and claims behave exactly as v2. Regtest keeps
+  the v2 behaviour unless `-yellowbackmintrequiresarmed` is set.
 - **What you see as a minter.** `yed_mint` and `yed_claim` become **two transactions**: the wallet
   first publishes a small *carrier* output that commits to the attestations it will use, waits one
   block, then sends the mint or claim that spends it. The wallet does this for you; the GUI shows
-  "preparing price proof (1 block)". You pay one extra small output and a 25 % addition to the
-  enforcement fee, which goes to an attestor whose signature you used.
+  "preparing price proof (1 block)". You pay one extra small output and a 50 % addition to the
+  enforcement fee on mainnet (`ATTEST_FEE_BPS` 5,000 on a 15 bps pool fee, hardening H-4; 25 % on
+  regtest), which goes to an attestor whose signature you used.
 - **The combination.** Mints size at the **lower** of the two sources and claims open at the
   **higher**, so each operation is priced against whichever population the transacting party
   controls least. If the two disagree by more than 15 %, minting pauses rather than guessing.
@@ -129,6 +134,17 @@ there (it is what `yed_mint` reports). A mint whose reference snapshot is not AC
 collateral is short at that snapshot is **VOID**: the YED it would have issued never exists and the
 collateral is released by its owner with `yed_redeem` at the lock height (no burn, no fee). The
 wallet refuses to build a mint that would be VOID (`mintpol-*` identifiers in `doc/yellowback-rpc.md`).
+
+**Launch parameters (hardening plan H-2, H-4, H-5, H-10, H-11, H-12).** On mainnet and testnet only
+class A (30–90 days) is enabled: classes B and C carry an empty term range (`minBlocks >
+maxBlocks` in `yed_getinfo.params.classes`) and every lock length in them is refused
+(`mint-bad-lock`; VOID `bad-mint-lock-height` if hand-built). The largest single mint is $2,500
+(`MAX_MINT`), the pool fee 15 bps of the collateral (`FEE_BPS`, minimum 0.5 YEC) with half of it
+again to the attestor (`ATTEST_FEE_BPS` 5,000), the global-ratio halt 300 % and the
+recapitalisation floor 600 %. Above the supply cap only class A mints, and only when the ratio it
+locks reaches that floor (H-10; `yed_getstats.mintableClasses`). Regtest keeps the v3 values
+(25 bps, 2,500 bps, $10,000, 250 % / 500 %) and all three classes, so its scripts' arithmetic is
+unchanged.
 
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
