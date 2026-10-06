@@ -87,7 +87,6 @@ from .test_framework import BitcoinTestFramework
 from .util import (
     VAULT_BRANCH_ID,
     assert_equal,
-    assert_greater_than,
     assert_start_raises_init_error,
     bitcoind_processes,
     bytes_to_hex_str,
@@ -1076,7 +1075,6 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
         assert term_class is not None, 'lock_blocks %d is outside every class (pass term_class= to build it anyway)' % lock_blocks
     class_index = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
     lock_height = ref_height + lock_blocks
-    claim_height = lock_height + GRACE
     vault = ym.yed_vault_script(yed_params(), owner, lock_height)
     fee_vout = 3 if fee_addr else FEE_VOUT_NONE
     payload = ym.encode_mint(class_index, cents, lock_height, ref_height, owner, fee_vout)

@@ -113,7 +113,7 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual(len(tx.vin), 1)
         self.assertEqual(tx.vin[0].prev_txid, node.utxos[0]['txid'])
         self.assertEqual(len(tx.vout), 5)
-        lock_height, claim_height = 190 + 48, 190 + 48 + yu.GRACE
+        lock_height = 190 + 48
         self.assertEqual(tx.vout[0].value, collateral)
         self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), node.pubkey, lock_height))   # U-23: the V
         self.assertTrue(ym.is_yed_vault(tx.vout[0].script))
