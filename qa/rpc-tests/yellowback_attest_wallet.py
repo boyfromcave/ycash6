@@ -26,6 +26,7 @@ REGISTRY) by registering one attestor per block and counting; the wallet's own b
 node.
 """
 
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -607,8 +608,18 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         self.mine(pool)
         to = claimant.yed_getnewaddress()
         failures, txids = [], []
+
+        def mine_tight(miner):
+            # The block reaches the user's chain, then the call follows at once: the wallet notifier
+            # runs on whole seconds (validationinterface.cpp ThreadNotifyWallets), so the transaction
+            # just mined is still at wallet depth -1. sync_all's polling would hide the window.
+            best = self.nodes[miner].generate(1)[0]
+            deadline = time.time() + 60
+            while user.getbestblockhash() != best:
+                assert time.time() < deadline, 'block %s never reached the user' % best
+                time.sleep(0.02)
         for i in range(rounds):
-            miner = POOLS[i % len(POOLS)]
+            miner = pool                     # one miner: tight mining never races another pool into a fork
             try:
                 if i % 2 == 0:
                     m = wallet_mint(self, user, 10000, 48, prices=90, miner=miner)
@@ -617,10 +628,10 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
                     ref = user.yed_getinfo()['height'] - REF_LAG
                     res, txid = two_step_pending(self, user, 'yed_mint', 10000, 48, '', offline_bundle_hex(self, user, ref, b'', 90), miner=miner)
                     txids += [res['carrierTxid'], txid]
-                self.mine(miner)
+                mine_tight(miner)
                 txids.append(user.yed_send(to, 100)['txid'])      # selects YEC right after the block
                 self.sync_all()
-                self.mine(miner)
+                mine_tight(miner)                                  # and the next carrier right after this one
             except JSONRPCException as e:
                 failures.append((i, e.error['message']))
                 self.sync_all()
