@@ -596,6 +596,19 @@ jobs:
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
           cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest test_framework.test_yellowback_model test_framework.test_yellowback_util -v
+      - name: vault framework unit tests and the vault_vectors.json check (upgrade plan §15.9)
+        # test_framework/vault.py is the second implementation of the vault primitive; its unit
+        # tests include gen_vault_vectors.py --check, so a stale golden vector fails here.
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -m pyflakes qa/rpc-tests/test_framework/vault.py qa/rpc-tests/test_framework/test_vault.py qa/rpc-tests/test_framework/gen_vault_vectors.py
+          python3 qa/rpc-tests/test_framework/gen_vault_vectors.py --check
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_vault -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
