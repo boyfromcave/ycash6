@@ -8,6 +8,7 @@
 #include "amount.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
+#include "uint256.h"
 
 #include <cstdint>
 #include <functional>
@@ -16,14 +17,16 @@
 #include <vector>
 
 /**
- * Yellowback: a miner-enforced, over-collateralised USD stablecoin overlay on
- * Ycash (Ycash Yellowback, YED).
+ * Yellowback: an over-collateralised USD stablecoin on Ycash (Ycash
+ * Yellowback, YED), the rule module of the vault primitive.
  *
- * No opcode and no network upgrade: the overlay reads coinbase tags and vault
- * spends, and enforcing miners reject blocks whose vault spends break RED-1..4
- * (a soft fork among the enforcing subset). The protocol is
- * docs/plans/yellowback-v2-development-plan.md §3; the constants below are
- * §3.1. Rule identifiers in comments (TAG-1, MINT-2, RED-3, …) refer to it.
+ * Since the vault upgrade (docs/plans/yellowback-upgrade-plan.md §5, §15.10)
+ * its rules are consensus at every height where UPGRADE_VAULT is active: a
+ * failing mint or vault spend makes the block invalid (DoS 100), with no
+ * activation signalling, enforcement flag, valve or sunset. The rule text is
+ * docs/plans/yellowback-v2-development-plan.md §3 and the v3 plan as amended
+ * by the upgrade plan §6; the constants below are §3.1. Rule identifiers in
+ * comments (TAG-1, MINT-2, RED-3, …) refer to them.
  *
  * DigiByte's DigiDollar (ref/digibyte/src/consensus/digidollar.h) is the
  * behavioural reference for the ratios and the oracle bundle; the v2 tag,
@@ -102,32 +105,27 @@ const char* BundleCarrierName(BundleCarrier carrier);
 
 /**
  * Per-network parameters (§3.1, field list §4.2a). Built once per network.
- * Regtest takes startHeight, sigmaRefBps, supplyCapBps and enforceUntilHeight
- * from the four regtest-only flags (parsed in index.cpp, never here: this file
- * is libbitcoin_common and §3.10 forbids GetArg); every other regtest value is
- * compiled in.
+ * startHeight is the UPGRADE_VAULT activation height and attestorSetId the
+ * network's YED attestor set (U-22; regtest -yellowbackattestorset); regtest
+ * takes sigmaRefBps, supplyCapBps and the v3/H-1 overrides from regtest-only
+ * flags (parsed in index.cpp, never here: this file is libbitcoin_common and
+ * §3.10 forbids GetArg); every other regtest value is compiled in.
  */
 struct Params
 {
     std::string network;                 //!< "main", "test" or "regtest" (CChainParams::NetworkIDString)
 
-    int startHeight;                     //!< first height whose tags count; 0 = not configured; >= 1 (M2)
-    int enforceUntilHeight;              //!< ACT-5 sunset; 0 = none (regtest); past it the node rejects nothing
+    int startHeight;                     //!< first height whose tags count = the UPGRADE_VAULT activation height (U-22); 0 = YED off
     std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of Yellowback addresses (D10)
+    uint256 attestorSetId;               //!< the vault primitive set whose members cancel claims (U-22, U-23); null = YED off
+    int claimDelay;                      //!< CLAIM_DELAY: the YED vault's (and its claim intents') delay, blocks (U-23); 1,152 (1 d), regtest 10
 
     // Prices (PRICE-1..2, V16, L9)
     int pFastWindow, pMidWindow, pSlowWindow;          //!< 96 / 576 / 2,016
     int pFastMinFill, pMidMinFill, pSlowMinFill;       //!< ceil(W/2), ceil(2W/3), ceil(2W/3)
 
-    // Activation (ACT-1..7)
-    int signalWindow;                    //!< 2,016
-    int activationThreshold;             //!< 1,512 (75 %)
-    int participationFloor;              //!< 1,210 (60 %): below it minting halts
-    int activationDelay;                 //!< 2,016 blocks from lock-in to ACTIVE
-    int enforcementFloor;                //!< 1,008 (50 %): below it block rejection suspends
-    int enforcementResume;               //!< 1,210 (60 %)
-    int valveBlocks;                     //!< 6 (node-local, never a state input)
-    int abandonBlocks;                   //!< 34,560 = GRACE (W21; L10, L12); invariant abandonBlocks >= grace
+    // (Activation ACT-1..7, the valve and abandonment are gone: the module is consensus at the
+    // UPGRADE_VAULT height, docs/plans/yellowback-upgrade-plan.md §6, U-21.)
 
     // Miners (REG-1..4, FEE-2)
     int nReg;                            //!< 576 (informational)
@@ -213,8 +211,8 @@ struct Params
 
     Params();
 
-    /** v2: configured iff the start height is known (§4.2). */
-    bool IsConfigured() const { return startHeight > 0; }
+    /** Configured iff the start height (the UPGRADE_VAULT activation) and the attestor set are both known (U-22). */
+    bool IsConfigured() const { return startHeight > 0 && !attestorSetId.IsNull(); }
     /** Class index (0..2) for a lock length in blocks; -1 if in no class (V19). */
     int ClassForLockBlocks(int64_t lockBlocks) const;
     bool IsValidClass(int termClass) const { return termClass >= 0 && termClass < NUM_CLASSES; }
@@ -240,14 +238,13 @@ const Params& MainParams();
 const Params& TestParams();
 
 /**
- * Regtest parameters (§3.1 regtest column). The first four arguments are the
- * v2 regtest-only flags -yellowbackstartheight, -yellowbacksigmaref (0 = multiplier
- * fixed at 1), -yellowbacksupplycapbps (0 = no cap) and -yellowbackenforceuntil
- * (0 = no sunset); v3 adds -yellowbackattestarmmin (0 = never arms) and
- * -yellowbackbundlecarrier; the hardening plan (H-1) adds -yellowbackmintrequiresarmed. All seven
- * are hashed into the state hash (M13).
+ * Regtest parameters (§3.1 regtest column). startHeight is the UPGRADE_VAULT activation height
+ * (-nuparams=6d5b7a31:<h>, U-22); attestorSetId is -yellowbackattestorset; the regtest-only flags
+ * -yellowbacksigmaref (0 = multiplier fixed at 1), -yellowbacksupplycapbps (0 = no cap),
+ * -yellowbackattestarmmin (0 = never arms), -yellowbackbundlecarrier and
+ * -yellowbackmintrequiresarmed (H-1) give the rest. All seven are hashed into the state hash (M13).
  */
-Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
+Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const uint256& attestorSetId,
                      int attestArmMin = 3, BundleCarrier bundleCarrier = BundleCarrier::SCRIPTSIG,
                      bool mintRequiresArmed = false);
 
@@ -260,21 +257,9 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
  */
 const Params& SelectParams(const std::vector<Params>& sets, int height);
 
-/**
- * Rule: ACT-5 (W19; v2 L8 amended). A parameter-change set -- one differing from the set before it
- * in any value other than enforceUntilHeight -- may start at `startHeight` iff `startHeight` is at
- * or past the previous set's `enforceUntilHeight` (L8), or the ENFORCEMENT halt was set on every
- * snapshot in [startHeight - signalWindow, startHeight - 1]: enforcement has been off for a full
- * window, so no released node validated a vault spend under the old set in that stretch ("freeze,
- * then fix"). `enforcementHaltedAt(h)` reads Snapshots[h].haltMask & ENFORCEMENT; the predicate has
- * no index dependency. A renewal (W18: same values, later sunset) is exempt and never asks. This is
- * a release-time check (doc/yellowback-release.md), not a rule SelectParams applies.
- */
-bool ParamSetStartAdmissible(int startHeight, int previousEnforceUntilHeight, int signalWindow,
-                             const std::function<bool(int)>& enforcementHaltedAt);
-
 /** Parameters for a network id as returned by CChainParams::NetworkIDString(); regtest returns unconfigured defaults. */
 const Params& ParamsForNetwork(const std::string& networkId);
+
 
 } // namespace yellowback
 

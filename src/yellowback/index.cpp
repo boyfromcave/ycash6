@@ -21,6 +21,8 @@
 #include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
+#include "vault/template.h"
+#include "consensus/params.h"
 
 #include <univalue.h>
 
@@ -31,6 +33,7 @@
 namespace yellowback {
 
 YellowbackIndex* g_yellowback = nullptr;
+bool g_yellowbackLive = false;
 CAmount g_yellowbackFee = DEFAULT_YELLOWBACK_FEE;
 int g_yellowbackMintLag = DEFAULT_REF_LAG;
 
@@ -51,20 +54,18 @@ TemplateView::~TemplateView() {}
 // Construction, health, storage
 
 YellowbackIndex::YellowbackIndex(const Params& paramsIn, const fs::path& dir, size_t cacheSize, bool fWipe)
-    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, false)), healthy(true), stopped(false), rebuilt(false),
-      pendingWipe(fWipe), reconsideredOnWipe(0), payeePolicy(PayeePolicy::Defaults(paramsIn)), valveTripped(false), suppressedBlocks(0), sunsetLogged(false)
+    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false), rebuilt(false),
+      payeePolicy(PayeePolicy::Defaults(paramsIn))
 {
     paramSets.push_back(paramsIn);
-    // -reindex-yellowback opens the directory as is and wipes it in SyncToChain, under cs_main:
-    // Wipe() must read Rejected first, to reconsider the blocks it names (6.20.0, see Wipe).
-    LoadRejected();
+    if (fWipe) LogPrintf("yellowback: index wiped (-reindex-yellowback)\n");
 }
 
 YellowbackIndex::~YellowbackIndex() {}
 
 void YellowbackIndex::SetUnhealthy(const std::string& reason)
 {
-    if (healthy) LogPrintf("yellowback: index unhealthy: %s; enforcement off; restart with -reindex-yellowback\n", reason);
+    if (healthy) LogPrintf("yellowback: index unhealthy: %s; restart with -reindex-yellowback\n", reason);
     healthy = false;
     unhealthyReason = reason;
     cache.valid = false;
@@ -113,39 +114,9 @@ uint256 YellowbackIndex::GetStateHash() const
 
 void YellowbackIndex::Wipe(const std::string& why)
 {
-    AssertLockHeld(cs_main);
-    LogPrintf("yellowback: wiping index (%s; Rejected cleared)\n", why);
-    // A wipe erases Rejected, so first clear the FAILED marks it accounts for, durably (the valve's
-    // order, eda580983). v4.5.0's RewindBlockIndex erased those never-connected entries at every
-    // start, so after any wipe the block was fetched again and re-judged by the rebuilt index;
-    // 6.20.0 keeps them (Ycash 1770fce16), and a mark with no record has no valve root and no kill
-    // switch. Reconsidered, the block is re-judged at the next ActivateBestChain as on v4.5.0: an
-    // enforcing node re-rejects it (and records it again), -yellowbackenforce=0 connects it. Init
-    // runs that ActivateBestChain itself, before ThreadImport (whose own runs under fImporting).
-    if (!rejected.empty()) {
-        CValidationState state;
-        for (const uint256& hash : rejected) {
-            BlockMap::iterator mi = mapBlockIndex.find(hash);
-            if (mi == mapBlockIndex.end()) continue;
-            ReconsiderBlock(state, mi->second);
-            reconsideredOnWipe++;
-            LogPrintf("yellowback: wipe: reconsidered %s\n", hash.ToString());
-        }
-        FlushStateToDisk();
-    }
+    LogPrintf("yellowback: wiping index (%s)\n", why);
     db->Wipe();
-    rejected.clear();
     cache.valid = false;
-}
-
-void YellowbackIndex::LoadRejected()
-{
-    rejected.clear();
-    db->Iterate(std::string(1, keys::PREFIX_REJECTED), [&](const std::string& k, const std::string&) {
-        if (k.size() == 1 + 32) rejected.insert(uint256(std::vector<unsigned char>(k.begin() + 1, k.end())));
-        return true;
-    });
-    if (!rejected.empty()) LogPrintf("yellowback: %u rejected block(s) on record\n", (unsigned)rejected.size());
 }
 
 uint256 YellowbackIndex::ParamsHash(const Params& p) const
@@ -168,8 +139,6 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
     TestFault f;
     if (spec == "template") {
         f.templateFault = true;
-    } else if (spec == "novalve") {
-        f.noValve = true;
     } else if (spec == "schema") {
         f.schemaMismatch = true;
     } else if (boost::algorithm::starts_with(spec, "crash:")) {
@@ -191,7 +160,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         }
         f.armed = true;
     } else {
-        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template, novalve or schema");
+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template or schema");
     }
     testFault = f;
     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
@@ -258,12 +227,8 @@ bool YellowbackIndex::SyncToChain()
 {
     LOCK(cs_main);
     LOCK(cs_yellowback);
-    if (pendingWipe) {
-        pendingWipe = false;
-        Wipe("-reindex-yellowback");
-    }
     if (!params.IsConfigured()) {
-        SetUnhealthy("yellowback parameters are not configured for this network (no start height)");
+        SetUnhealthy("yellowback parameters are not configured for this network (no UPGRADE_VAULT height or no attestor set)");
         return false;
     }
 
@@ -282,7 +247,7 @@ bool YellowbackIndex::SyncToChain()
         tip = std::nullopt;
     }
     if (tip.has_value()) {
-        // The four hashed regtest values (M13) are part of every state; a node restarted with a
+        // The hashed regtest values (M13) are part of every state; a node restarted with a
         // different set rebuilds rather than carrying rows computed under the old one.
         std::optional<ParamsRecord> stored = State(*db).GetParamsRecord();
         if (stored.has_value() && SerializeRecord(stored.value()) != SerializeRecord(ParamsRecord(params))) {
@@ -373,14 +338,19 @@ bool YellowbackIndex::TipMatches(const CBlockIndex* pindex, std::optional<TipRec
     return false;
 }
 
-std::optional<std::string> YellowbackIndex::CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck)
+YellowbackIndex::ConnectCheck YellowbackIndex::CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck)
 {
     AssertLockHeld(cs_main);
     LOCK(cs_yellowback);
-    if (stopped || !healthy) return std::nullopt;
+    ConnectCheck out;
+    if (stopped) return out;
+    if (!healthy) {
+        out.failure = "the Yellowback index is unhealthy (" + unhealthyReason + "); restart with -reindex-yellowback";
+        return out;
+    }
     const int h = pindex->nHeight;
-    if (h < params.startHeight) return std::nullopt;
-    if (chainActive.Contains(pindex)) return std::nullopt;   // K6: a re-verification (VerifyDB, verifychain)
+    if (h < params.startHeight) return out;
+    if (chainActive.Contains(pindex)) return out;   // K6: a re-verification (VerifyDB, verifychain)
     if (!fJustCheck && testFault.crashHeight == h) {
         // A crash holding a stored, unjudged block: make its index entry durable (as a periodic flush
         // would have), then die the way kill -9 does.
@@ -391,57 +361,28 @@ std::optional<std::string> YellowbackIndex::CheckConnect(const CBlock& block, co
     try {
         MaybeFault(TestFault::CHECK, h);
         std::optional<TipRecord> tip;
-        if (!TipMatches(pindex, tip, "check")) return std::nullopt;
+        if (!TipMatches(pindex, tip, "check")) {
+            out.failure = unhealthyReason;
+            return out;
+        }
         const uint256 tipHash = tip.has_value() ? tip->blockHash : uint256();
         const Evaluation& e = Evaluate(block, h, tipHash);
-        if (!e.ev.blockInvalid) return std::nullopt;
-        const uint256 blockHash = block.GetHash();
-        const std::string reason = e.ev.reason;
-        // BLK-2: what to do with an invalid verdict (the only place -yellowbackenforce is read outside the miner path, §3.10).
-        if (!e.ev.enforcementOn) {
-            LogPrint("yellowback", "block %s at %d fails BLK-1 (%s) but enforcement is off at this height (ACT-5)\n", blockHash.ToString(), h, reason);
-            return std::nullopt;
-        }
-        if (!miner.enforce) {
-            LogPrintf("yellowback: block %s at %d fails BLK-1 (%s); accepted (-yellowbackenforce=0)\n", blockHash.ToString(), h, reason);
-            return std::nullopt;
-        }
-        if (valveTripped) {
-            LogPrintf("yellowback: block %s at %d fails BLK-1 (%s); accepted (work valve tripped)\n", blockHash.ToString(), h, reason);
-            return std::nullopt;
-        }
-        if (fReindex || fImporting || IsInitialBlockDownload(::Params().GetConsensus())) {
-            LogPrintf("yellowback: block %s at %d fails BLK-1 (%s); accepted (initial sync / reindex / import, N2)\n", blockHash.ToString(), h, reason);
-            return std::nullopt;
-        }
-        if (NetworkAlreadyBuiltOn(pindex)) {
-            const int ahead = pindexBestHeader ? pindexBestHeader->nHeight - h : 0;
-            LogPrintf("yellowback: catch-up: accepted rule-breaking block %s at %d (network %d blocks ahead)\n", blockHash.ToString(), h, ahead);
-            suppressedBlocks++;
-            return std::nullopt;
-        }
-        if (!fJustCheck) {
-            RejectedRecord r;
-            r.height = h;
-            r.reason = reason;
-            db->Write(keys::Rejected(blockHash), SerializeRecord(r));
-            if (!db->Commit(true)) {
-                SetUnhealthy("failed to record the rejected block");
-                return std::nullopt;
-            }
-            rejected.insert(blockHash);
-            LogPrintf("yellowback: rejecting block %s at %d: %s\n", blockHash.ToString(), h, reason);
-        }
-        return reason;
+        if (!e.ev.blockInvalid) return out;
+        // U-21: a consensus rejection, with no node-local conjunct (no enforcement flag, valve,
+        // IBD / reindex / import or catch-up suppression, sunset or abandonment).
+        out.invalid = std::string("bad-yellowback-") + e.ev.verdict;
+        out.reason = e.ev.reason;
+        if (!fJustCheck) LogPrintf("yellowback: block %s at %d is invalid: %s\n", block.GetHash().ToString(), h, e.ev.reason);
+        return out;
     } catch (const std::exception& e) {
         db->Discard();
         SetUnhealthy(std::string("storage failure in CheckConnect: ") + e.what());
-        return std::nullopt;
     } catch (...) {
         db->Discard();
         SetUnhealthy("storage failure in CheckConnect");
-        return std::nullopt;
     }
+    out.failure = unhealthyReason;
+    return out;
 }
 
 bool YellowbackIndex::CommitConnect(const CBlock& block, const CBlockIndex* pindex)
@@ -476,10 +417,6 @@ bool YellowbackIndex::CommitConnect(const CBlock& block, const CBlockIndex* pind
         }
         cache.valid = false;
         LogPrint("yellowback", "applied block %d %s\n", h, blockHash.ToString());
-        if (!sunsetLogged && IsSunsetLocked()) {
-            sunsetLogged = true;
-            LogPrintf("yellowback: enforcement sunset reached at height %d (ENFORCE_UNTIL_HEIGHT %d): upgrade required; this node tags and evaluates but rejects nothing\n", h, params.enforceUntilHeight);
-        }
         return true;
     } catch (const std::exception& e) {
         db->Discard();
@@ -527,235 +464,16 @@ bool YellowbackIndex::UndoDisconnect(const CBlockIndex* pindex)
 }
 
 // ---------------------------------------------------------------------------
-// BLK-2 descendants, BLK-2 clause 3 and the work valve (ACT-7)
-
-std::optional<uint256> YellowbackIndex::RejectedRootOf(const CBlockIndex* pindex) const
-{
-    const CBlockIndex* p = pindex;
-    while (p) {
-        if (p->nStatus & BLOCK_FAILED_VALID) {
-            const uint256 h = p->GetBlockHash();
-            if (rejected.count(h)) return h;
-            return std::nullopt;
-        }
-        if (!(p->nStatus & BLOCK_FAILED_CHILD)) return std::nullopt;
-        p = p->pprev;
-    }
-    return std::nullopt;
-}
-
-bool YellowbackIndex::IsRejectedAncestor(const CBlockIndex* pindexPrev) const
-{
-    AssertLockHeld(cs_main);
-    LOCK(cs_yellowback);
-    return RejectedRootOf(pindexPrev).has_value();
-}
-
-bool YellowbackIndex::NetworkAlreadyBuiltOn(const CBlockIndex* pindex) const
-{
-    AssertLockHeld(cs_main);
-    const CBlockIndex* tip = chainActive.Tip();
-    if (!pindexBestHeader || !tip || !pindex) return false;
-    if (pindexBestHeader->GetAncestor(pindex->nHeight) != pindex) return false;
-    return pindexBestHeader->nChainWork >= tip->nChainWork + GetBlockProof(*tip) * params.valveBlocks;
-}
-
-bool YellowbackIndex::NoteHeaderOnRejectedChain(const CBlockHeader& header)
-{
-    AssertLockHeld(cs_main);
-    LOCK(cs_yellowback);
-    if (valveTripped || rejected.empty()) return false;
-    const uint256 hash = header.GetHash();
-    uint256 root;
-    arith_uint256 parentWork;
-    uint32_t parentBits;
-    std::map<uint256, HeaderNote>::const_iterator note = notes.find(header.hashPrevBlock);
-    if (note != notes.end()) {
-        root = note->second.root;
-        parentWork = note->second.work;
-        parentBits = note->second.nBits;
-    } else if (refusedNotes.count(header.hashPrevBlock)) {
-        // B-1: a descendant of a header refused past the P2 bounds. Nothing to learn from it, but it
-        // is still a block on a rejected chain: remembered and answered DoS 0, never the stock DoS 10.
-        return RefuseNote(hash);
-    } else {
-        BlockMap::const_iterator mi = mapBlockIndex.find(header.hashPrevBlock);
-        if (mi == mapBlockIndex.end()) return false;
-        std::optional<uint256> r = RejectedRootOf(mi->second);
-        if (!r.has_value()) return false;
-        root = r.value();
-        parentWork = mi->second->nChainWork;
-        parentBits = mi->second->nBits;
-    }
-    // A descendant of a block this node rejected: answered DoS 0 whatever follows (N1).
-    if (notes.count(hash)) return true;
-    // P2 bounds: the target within the consensus per-block loosening (nPowMaxAdjustDown = 32 %,
-    // chainparams.cpp:104) of the *rejected root's* nBits -- not the previous note's, so the loosening
-    // cannot compound note by note (audit A-6) -- and fewer than VALVE_NOTE_CAP notes on this root. A
-    // noted header passed CheckBlockHeader only; its nBits was never checked against consensus.
-    bool neg = false, over = false;
-    arith_uint256 target, rootTarget;
-    target.SetCompact(header.nBits, &neg, &over);
-    if (neg || over || target == 0) return true;
-    BlockMap::const_iterator rootIt = mapBlockIndex.find(root);
-    rootTarget.SetCompact(rootIt != mapBlockIndex.end() ? rootIt->second->nBits : parentBits, &neg, &over);
-    if (neg || over || rootTarget == 0) return true;
-    if (target > rootTarget / 100 * 132) {
-        LogPrint("yellowback", "valve: header %s not noted (target outside the difficulty loosening of its rejected root)\n", hash.ToString());
-        return RefuseNote(hash);
-    }
-    if (notesPerRoot[root] >= VALVE_NOTE_CAP) {
-        LogPrint("yellowback", "valve: header %s not noted (root %s holds %d notes)\n", hash.ToString(), root.ToString(), VALVE_NOTE_CAP);
-        return RefuseNote(hash);
-    }
-    CBlockIndex tmp;
-    tmp.nBits = header.nBits;
-    HeaderNote n;
-    n.root = root;
-    n.nBits = header.nBits;
-    n.work = parentWork + GetBlockProof(tmp);
-    notes[hash] = n;
-    notesPerRoot[root]++;
-    const CBlockIndex* tip = chainActive.Tip();
-    if (tip) {
-        const arith_uint256 bound = tip->nChainWork + GetBlockProof(*tip) * params.valveBlocks;
-        LogPrint("yellowback", "valve: noted header %s on rejected root %s (work %s; trip at %s)\n", hash.ToString(), root.ToString(), n.work.GetHex(), bound.GetHex());
-        if (!testFault.noValve && n.work >= bound) TripValve(root);
-    }
-    return true;
-}
-
-bool YellowbackIndex::RefuseNote(const uint256& hash)
-{
-    AssertLockHeld(cs_yellowback);
-    // Bounded: a full set is dropped whole. Headers arrive in chain order, so the one that matters
-    // (the parent of the next header) is re-inserted before it is looked up.
-    if (refusedNotes.size() >= VALVE_REFUSED_CAP) refusedNotes.clear();
-    refusedNotes.insert(hash);
-    return true;
-}
-
-void YellowbackIndex::TripValve(const uint256& root)
-{
-    AssertLockHeld(cs_main);
-    AssertLockHeld(cs_yellowback);
-    const CBlockIndex* tip = chainActive.Tip();
-    const int h = tip ? tip->nHeight : 0;
-    valveTripped = true;
-    const std::string text = strprintf("Yellowback: work valve tripped at height %d (rejected root %s); enforcement off until restart", h, root.ToString());
-    LogPrintf("yellowback: %s\n", text);
-    // The V13 ReconsiderBlock loop, right here under the cs_main AcceptBlockHeader holds (ACT-7).
-    CValidationState state;
-    for (const uint256& hash : rejected) {
-        BlockMap::iterator mi = mapBlockIndex.find(hash);
-        if (mi == mapBlockIndex.end()) {
-            LogPrintf("yellowback: valve: rejected block %s is not in the block index; skipped\n", hash.ToString());
-            continue;
-        }
-        ReconsiderBlock(state, mi->second);
-        LogPrintf("yellowback: valve: reconsidered %s\n", hash.ToString());
-    }
-    // Make the cleared failure flags durable before erasing the records that drive them: 6.20.0
-    // keeps never-connected index entries with their FAILED marks across restarts (Ycash
-    // 1770fce16), so a crash in between would reload BLOCK_FAILED_VALID with no record left to
-    // reconsider it (the startup kill switch's 83e6c1cb2). cs_main is recursive and held;
-    // FlushStateToDisk adds only cs_LastBlockFile, whose holders never call into the overlay.
-    FlushStateToDisk();
-    for (const uint256& hash : rejected) db->Erase(keys::Rejected(hash));
-    db->Commit(true);
-    rejected.clear();
-    notes.clear();
-    notesPerRoot.clear();
-    refusedNotes.clear();
-    // P1: the stock fork warning never fires for refused headers, so the valve raises its own
-    // through the same two calls (the timestamp is the tip's block time: no clock in this file).
-    SetMiscWarning(text, tip ? tip->GetBlockTime() : 0);
-    AlertNotify(text, true);   // 6.20.0: CAlert::Notify became the free function AlertNotify
-}
-
-int YellowbackIndex::RejectedCount() const
-{
-    LOCK(cs_yellowback);
-    return (int)rejected.size();
-}
-
-std::vector<uint256> YellowbackIndex::RejectedHashes() const
-{
-    LOCK(cs_yellowback);
-    return std::vector<uint256>(rejected.begin(), rejected.end());
-}
-
-std::optional<RejectedRecord> YellowbackIndex::GetRejected(const uint256& blockHash) const
-{
-    LOCK(cs_yellowback);
-    return State(*db).GetRejected(blockHash);
-}
-
-void YellowbackIndex::ClearRejected()
-{
-    LOCK(cs_yellowback);
-    for (const uint256& hash : rejected) db->Erase(keys::Rejected(hash));
-    db->Commit(true);
-    rejected.clear();
-    notes.clear();
-    notesPerRoot.clear();
-    refusedNotes.clear();
-}
-
-size_t YellowbackIndex::ValveNoteCount() const
-{
-    LOCK(cs_yellowback);
-    return notes.size();
-}
-
-bool YellowbackIndex::IsSunsetLocked() const
-{
-    if (params.enforceUntilHeight <= 0) return false;
-    return TipHeight() >= params.enforceUntilHeight;
-}
-
-bool YellowbackIndex::IsSunset() const
-{
-    LOCK(cs_yellowback);
-    return IsSunsetLocked();
-}
-
-bool YellowbackIndex::IsEnforcing() const
-{
-    LOCK(cs_yellowback);
-    return miner.enforce && healthy && !valveTripped && !IsSunsetLocked();
-}
-
-// ---------------------------------------------------------------------------
-// Abandonment (L10, L12), MP-1 and the mempool sweep (N5)
-
-bool YellowbackIndex::IsAbandonedLocked() const
-{
-    State st(*db);
-    const int tip = TipHeight();
-    if (tip < params.startHeight) return false;
-    const int first = tip - params.abandonBlocks + 1;
-    if (first < params.startHeight) return false;
-    for (int h = tip; h >= first; h--) {
-        std::optional<Snapshot> s = st.GetSnapshot((uint32_t)h);
-        if (!s.has_value() || !(s->haltMask & HALT_ENFORCEMENT)) return false;
-    }
-    return true;
-}
-
-bool YellowbackIndex::IsAbandoned() const
-{
-    LOCK(cs_yellowback);
-    return IsAbandonedLocked();
-}
+// The mempool check and the mempool sweep (N5)
 
 std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransaction& tx)
 {
     AssertLockHeld(cs_yellowback);
-    if (stopped || !healthy) return std::nullopt;       // unhealthy: the node enforces nothing (BLK-3)
+    if (stopped) return std::nullopt;
+    if (!healthy) return std::string("yellowback-unhealthy");   // the module cannot be evaluated: admit nothing that touches it
     if (tx.IsCoinBase()) return std::nullopt;
-    // BLK-3's storage boundary on the mempool path (audit A-3): a storage failure admits the transaction
-    // (fail-open, like CheckConnect) and marks the index unhealthy instead of unwinding AcceptToMemoryPool.
+    // The storage boundary on the mempool path (audit A-3): a storage failure refuses the transaction and
+    // marks the index unhealthy (the next block then aborts the node) instead of unwinding AcceptToMemoryPool.
     try {
         return MempoolCheckInner(tx);
     } catch (const std::exception& e) {
@@ -763,31 +481,40 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     } catch (...) {
         SetUnhealthy("storage failure in MempoolCheck");
     }
-    return std::nullopt;
+    return std::string("yellowback-unhealthy");
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction& tx)
 {
     AssertLockHeld(cs_yellowback);
     State st(*db);
-    bool spendsActive = false;
-    for (const CTxIn& in : tx.vin) {                    // O(inputs) lookups, no SNAP (N6)
-        std::optional<VaultRecord> v = st.GetVault(in.prevout);
-        if (v.has_value() && v->Status() == VaultStatus::ACTIVE) { spendsActive = true; break; }
-    }
-    if (!spendsActive) return std::nullopt;
-    if (IsAbandonedLocked()) return std::nullopt;       // L13: a sweep is an ordinary transaction under abandonment
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
-    // RED-1..5 at the next height by ProcessTx on a discarded overlay, exactly as FilterTemplate dry-runs a
-    // candidate (policy.cpp): RED-1..5 read Snapshots[ref <= H - 1] only, so no SNAP is computed here (N6) and
-    // a peer streaming garbage vault spends costs this node O(inputs) lookups plus the RED checks, not a
-    // ComputeSnapshot per candidate (audit A-1). The RED verdict comes first so that a malformed spend is
+    if (next < p.startHeight) return std::nullopt;
+    // Relevance in O(inputs + outputs) (N6): a payload, a token / vault / intent input, or a YED-tagged
+    // template output is what the module reads; anything else cannot be invalid under it.
+    bool spendsActive = false, relevant = FindPayload(tx).has_value();
+    for (const CTxIn& in : tx.vin) {
+        std::optional<VaultRecord> v = st.GetVault(in.prevout);
+        if (v.has_value() && v->Status() == VaultStatus::ACTIVE) spendsActive = true;
+        if (v.has_value() || st.GetToken(in.prevout).has_value() || st.GetIntent(in.prevout).has_value()) relevant = true;
+    }
+    for (const CTxOut& o : tx.vout) {
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        if ((vault::ParseVault(o.scriptPubKey, vp) && vp.tag == YED_TAG) || (vault::ParseIntent(o.scriptPubKey, ip) && ip.tag == YED_TAG)) relevant = true;
+    }
+    if (!relevant) return std::nullopt;
+    // The module's validity at the next height by ProcessTx on a discarded overlay, exactly as FilterTemplate
+    // dry-runs a candidate (policy.cpp): the rules read Snapshots[ref <= H - 1] only, so no SNAP is computed
+    // here (N6) and a peer streaming garbage costs this node O(inputs) lookups plus the rule checks, not a
+    // ComputeSnapshot per candidate (audit A-1). The verdict comes first so that a malformed transaction is
     // named by its rule (K7: mempool-check-failed:<verdict>), the expiry bound second.
     OverlayStateView overlay(*db);
     State dry(overlay);
     const TxOutcome out = ProcessTx(dry, p, tx, next, &sigCache);   // RED-1's bundle fills the W8 cache
-    if (out.redFailed) return out.log.verdict;
+    if (out.invalid) return out.log.verdict;
+    if (!spendsActive) return std::nullopt;
     // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW, so the spend
     // expires from every mempool (stock nodes enforce expiry) before RED-1's window closes.
     std::optional<FoundPayload> fp = FindPayload(tx);
@@ -820,10 +547,10 @@ void YellowbackIndex::RemoveInvalidVaultSpends(CTxMemPool& pool)
     std::vector<CTransaction> failing;
     for (CTxMemPool::indexed_transaction_set::const_iterator it = pool.mapTx.begin(); it != pool.mapTx.end(); ++it) {
         const CTransaction& tx = it->GetTx();
-        std::optional<std::string> why = MempoolCheckLocked(tx);   // its storage boundary (A-3): a failure admits and sets unhealthy
-        if (!healthy) return;                                      // keep every transaction, as BLK-3 keeps every block
+        std::optional<std::string> why = MempoolCheckLocked(tx);   // its storage boundary (A-3): a failure sets unhealthy
+        if (!healthy) return;                                      // the next block aborts the node; nothing to sweep
         if (why.has_value()) {
-            LogPrintf("yellowback: dropping vault spend %s from the mempool at the new tip: %s\n", tx.GetHash().ToString(), why.value());
+            LogPrintf("yellowback: dropping %s from the mempool at the new tip: %s\n", tx.GetHash().ToString(), why.value());
             failing.push_back(tx);
         }
     }
@@ -861,18 +588,13 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
     LOCK(cs_yellowback);
     MinerStatus s;
     s.payoutKey = miner.payoutKey;
-    // MINER-1: the signal bit iff -yellowbacksignal and -yellowbackenforce and the valve has not
-    // tripped and the tip is not past ENFORCE_UNTIL_HEIGHT (L3, L7, L8).
-    s.signal = miner.signal && miner.enforce && !valveTripped && !IsSunsetLocked();
     if (quote.priceMicroUsd != 0) s.quoteAgeSeconds = now - quote.receivedAt;
     if (!healthy || !miner.payoutKey.has_value()) {          // MINER-3, MINER-2
         s.kind = "none";
-        s.signal = false;
         return s;
     }
-    if (quote.priceMicroUsd != 0 && now - quote.receivedAt <= miner.quoteMaxAge) s.kind = "quote";
-    else if (miner.signal) s.kind = "signal";
-    else s.kind = "none";
+    // MINER-1: a quote tag iff a fresh quote is held (the signal-only tag left with ACT-1, §6)
+    s.kind = quote.priceMicroUsd != 0 && now - quote.receivedAt <= miner.quoteMaxAge ? "quote" : "none";
     const int tip = TipHeight();
     if (tip >= params.startHeight) {
         s.registered = Registered(*db, params, miner.payoutKey.value(), tip);
@@ -918,22 +640,11 @@ UniValue YellowbackIndex::TemplateInfo(int64_t now, const CScript& coinbaseScrip
     o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
     o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
     o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
-    o.pushKV("signal", tag.has_value() && tag->Signal());
     std::optional<CKeyID> payout = tag.has_value() ? std::optional<CKeyID>(CKeyID(tag->payoutKey)) : ms.payoutKey;
     o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(CTxDestination(payout.value()))) : NullUniValue);
     o.pushKV("registered", ms.registered);
     o.pushKV("eligible", ms.eligible);
-    State st(*db);
-    const int tip = TipHeight();
-    const std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
-    o.pushKV("activation", a.Status() == ActivationStatus::ACTIVE ? "active" : a.Status() == ActivationStatus::LOCKED_IN ? "locked_in" : "signaling");
-    o.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
-    o.pushKV("enforcing", miner.enforce && healthy && !valveTripped && !IsSunsetLocked());
-    o.pushKV("valveTripped", valveTripped);
-    o.pushKV("sunset", IsSunsetLocked());
     o.pushKV("healthy", healthy);
-    o.pushKV("templatePolicy", miner.templatePolicy);
     return o;
 }
 
@@ -1226,37 +937,46 @@ std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vec
 
 // ---------------------------------------------------------------------------
 
-std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)
+std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out)
 {
-    // The seven regtest-only flags of §3.1 (M13): -yellowbackstartheight (required), the three v2
-    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil, v3's
-    // -yellowbackattestarmmin, -yellowbackbundlecarrier, and the hardening plan's
-    // -yellowbackmintrequiresarmed (H-1). Every value is hashed into the state hash so mismatched
+    // U-22: START_HEIGHT is the UPGRADE_VAULT activation height and the attestor set is per network
+    // (regtest -yellowbackattestorset). The regtest-only overrides of §3.1 (M13) are -yellowbacksigmaref,
+    // -yellowbacksupplycapbps, v3's -yellowbackattestarmmin and -yellowbackbundlecarrier, and the hardening
+    // plan's -yellowbackmintrequiresarmed (H-1); every value is hashed into the state hash so mismatched
     // test nodes fail loudly.
-    static const char* const REGTEST_FLAGS[] = { "-yellowbackstartheight", "-yellowbacksigmaref", "-yellowbacksupplycapbps", "-yellowbackenforceuntil",
+    static const char* const REGTEST_FLAGS[] = { "-yellowbackattestorset", "-yellowbacksigmaref", "-yellowbacksupplycapbps",
                                                  "-yellowbackattestarmmin", "-yellowbackbundlecarrier", "-yellowbackmintrequiresarmed" };
+    // Retired with the vault upgrade (§6): the start is the activation height, and there is no sunset.
+    for (const char* f : { "-yellowbackstartheight", "-yellowbackenforceuntil" }) {
+        if (mapArgs.count(f)) return std::string(f) + " is retired: YED starts at the UPGRADE_VAULT activation height (-nuparams=6d5b7a31:<h> on regtest)";
+    }
+    const int startHeight = consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT
+                                ? 0 : consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
     if (networkId != "regtest") {
         for (const char* f : REGTEST_FLAGS) {
             if (mapArgs.count(f)) return std::string(f) + " is regtest-only";
         }
         out = ParamsForNetwork(networkId);
+        out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         return std::nullopt;
     }
-    if (!mapArgs.count("-yellowbackstartheight")) return std::string("regtest -yellowback requires -yellowbackstartheight");
-    int64_t startHeight = GetArg("-yellowbackstartheight", 0);
-    if (startHeight <= 0 || startHeight > 0x7FFFFFFF) return std::string("-yellowbackstartheight must be a positive height");
+    uint256 setId;
+    if (mapArgs.count("-yellowbackattestorset")) {
+        const std::string hex = GetArg("-yellowbackattestorset", "");
+        if (hex.size() != 64 || !IsHex(hex)) return std::string("-yellowbackattestorset must be a set id (64 hex characters)");
+        setId = uint256S(hex);
+        if (setId.IsNull()) return std::string("-yellowbackattestorset must not be zero");
+    }
     int64_t sigmaRef = GetArg("-yellowbacksigmaref", 0);
     if (sigmaRef < 0 || sigmaRef > 0x7FFFFFFF) return std::string("-yellowbacksigmaref must be >= 0");
     int64_t capBps = GetArg("-yellowbacksupplycapbps", 0);
     if (capBps < 0 || capBps > 10000) return std::string("-yellowbacksupplycapbps must be between 0 and 10000");
-    int64_t until = GetArg("-yellowbackenforceuntil", 0);
-    if (until < 0 || until > 0x7FFFFFFF) return std::string("-yellowbackenforceuntil must be >= 0");
     int64_t armMin = GetArg("-yellowbackattestarmmin", 3);
     if (armMin < 0 || armMin > 0x7FFFFFFF) return std::string("-yellowbackattestarmmin must be >= 0");
     std::optional<BundleCarrier> carrier = ParseBundleCarrier(GetArg("-yellowbackbundlecarrier", "scriptsig"));
     if (!carrier.has_value()) return std::string("-yellowbackbundlecarrier must be scriptsig, opreturn or either");
     const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
-    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until, (int)armMin, carrier.value(), requireArmed);
+    out = RegtestParams(setId.IsNull() ? 0 : startHeight, (int)sigmaRef, (int)capBps, setId, (int)armMin, carrier.value(), requireArmed);
     return std::nullopt;
 }
 

@@ -35,17 +35,19 @@
  * Totality (K1, M1): EvaluateBlock never throws, never asserts on input and
  * never divides by an unchecked zero. A rule whose input is undefined — a
  * missing or virtual snapshot, an undefined price, a lookup that misses — is
- * false: a MINT rule that is false gives a VOID verdict, a RED rule that is
- * false gives the block-invalid verdict. Only BLK-1 (a failing spend of an
- * ACTIVE vault) can make a block invalid, and only ACT-5 decides whether an
- * enforcing node acts on it.
+ * false. Since the vault upgrade (docs/plans/yellowback-upgrade-plan.md §5.3,
+ * §6, U-21, U-23) these are consensus rules at every height where
+ * UPGRADE_VAULT is active: a failing MINT, a failing spend of an ACTIVE vault
+ * (RED-1..5, at the claim intent's creation for a claim), a malformed intent
+ * spend and a YED-tagged vault or intent output no rule created make the
+ * transaction invalid and the block invalid (BLK-1); there is no VOID vault,
+ * no activation state machine and no enforcement switch. A failing TRANSFER
+ * still burns (the Runes "cenotaph" rule) and a failing v3 act is still
+ * non-Yellowback: neither is invalid.
  *
  * DigiByte enforces the equivalent rules in consensus
  * (ref/digibyte/src/digidollar/validation.cpp) and rejects a failing
- * transaction outright; an overlay cannot reject a mint or transfer, so a
- * failing MINT registers a VOID vault and a failing TRANSFER burns (the
- * Runes "cenotaph" rule), while a failing ACTIVE-vault spend is the one
- * class of transaction enforcing miners refuse (V3).
+ * transaction outright; so does the module now.
  *
  * qa/rpc-tests/test_framework/yellowback_model.py is the second
  * implementation of this file; SERIALISATION.md next to it records every
@@ -71,7 +73,6 @@ extern const char* const BAD_MINT_VAULT_SCRIPT;
 // MINT-4
 extern const char* const MINT_NOT_ACTIVE;
 extern const char* const MINT_HALTED_NO_PRICE;
-extern const char* const MINT_HALTED_PARTICIPATION;
 extern const char* const MINT_HALTED_GLOBAL_RATIO;
 extern const char* const MINT_HALTED_DIVERGENCE;
 extern const char* const MINT_HALTED_UNARMED;
@@ -105,20 +106,26 @@ extern const char* const MINT10_DIVERGED;
 extern const char* const RED1_BUNDLE_PREFIX;     //!< "red1-bundle-"
 extern const char* const RED5_RESIDUAL;
 extern const char* const AFEE1_FEE;
+// The vault upgrade (U-23)
+extern const char* const VAULT_CLAIM_INTENTS;    //!< a claim's outputs are not one claimant intent (+ at most one owner residual intent), or re-lock
+extern const char* const INTENT_SPEND_MALFORMED; //!< a claim intent spent by a selector other than release/cancel, or with a MINT/REDEEM payload
+extern const char* const INTENT_CANCEL_RESIDUAL; //!< an attestor cancel of the owner's residual intent
+extern const char* const INTENT_CANCEL_NO_VAULT; //!< a cancel that does not re-create exactly one byte-identical vault
+extern const char* const YED_TEMPLATE_OUTPUT;    //!< a YED-tagged V or I output no mint, claim or cancel created
 extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUNDLE-1 held but the statistic is undefined
 } // namespace verdict
 
 /** The result of EvaluateBlock (§4.2a). */
 struct BlockEvaluation
 {
-    bool blockInvalid;                 //!< BLK-1 condition, independent of ACT-5
-    bool enforcementOn;                //!< ACT-5 at H (from Snapshots[H-1], incl. the sunset); blockInvalid && enforcementOn => reject
-    std::string reason;                //!< "<verdict>:<txid>" of the first failing vault spend, else ""
+    bool blockInvalid;                 //!< BLK-1: some transaction is invalid under the module (a consensus rejection, U-21)
+    std::string verdict;               //!< the first invalid transaction's verdict (the reject reason is "bad-yellowback-<verdict>")
+    std::string reason;                //!< "<verdict>:<txid>" of the first invalid transaction, else ""
     std::vector<std::pair<uint256, TxLogRecord>> txlogs;
     Snapshot snapshot;
     UndoRecord undo;
 
-    BlockEvaluation() : blockInvalid(false), enforcementOn(false) {}
+    BlockEvaluation() : blockInvalid(false) {}
 };
 
 /** The result of ProcessTx. */
@@ -126,10 +133,10 @@ struct TxOutcome
 {
     TxLogRecord log;
     bool relevant;      //!< a TxLog entry was written (the tx created or spent a Tokens/Vaults entry, N7)
-    bool vaultSpend;    //!< the tx spent an ACTIVE vault (RED-1..4 applied, M3)
-    bool redFailed;     //!< vaultSpend and RED-1..4 failed (the BLK-1 condition for this tx)
+    bool vaultSpend;    //!< the tx spent an ACTIVE vault (RED-1..5 applied, M3)
+    bool invalid;       //!< the tx is invalid under the module (log.verdict says why; the BLK-1 condition, U-21)
 
-    TxOutcome() : relevant(false), vaultSpend(false), redFailed(false) {}
+    TxOutcome() : relevant(false), vaultSpend(false), invalid(false) {}
 };
 
 /**
@@ -143,8 +150,9 @@ TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int
 /**
  * Evaluate a whole block into `overlay` without committing it (§3.8, §3.9
  * BLK-1): the coinbase tag first (TAG-1..5), then every transaction in
- * block order, then SNAP (REG-4, ACT-1..6, PRICE-1..2, SIGMA-1, HALT-1..4)
- * and the tip. Every write goes through the overlay and is recorded in the
+ * block order (stopping at the first invalid one: the block is invalid and
+ * the overlay is to be discarded), then SNAP (REG-4, PRICE-1..2, SIGMA-1,
+ * HALT-1..3) and the tip. Every write goes through the overlay and is recorded in the
  * returned undo record; the caller commits or discards. Below START_HEIGHT
  * nothing is written and the evaluation is empty. Total: no input can make
  * it throw (K1). Used by ConnectBlock, CreateNewBlock, MempoolCheck and
@@ -168,7 +176,7 @@ void UndoBlock(StateView& view, const UndoRecord& undo);
 /**
  * SNAP for height H after the block's transactions (§3.7, §3.8; v3 §3.8
  * order): the REG-4 judgement for the tag at H - PEER_LAG (writes
- * Judgements), Activation (ACT-2/3; writes it), then the v3 passes —
+ * Judgements), then the v3 passes —
  * maturity, ARM-1/2 (writes Attest), PIN-1/2, seating (writes seatedSince) —
  * the medians over the quote tags of keys not pinned at H, σ, issuance
  * (prev.issuedZat + subsidyZat), totals, halts, dormancy (writes Attestors
@@ -185,12 +193,6 @@ Snapshot ComputeSnapshot(State& st, const Params& params, int height, const uint
  * (a rule reading it is then false).
  */
 std::optional<Snapshot> SnapshotAt(const State& st, const Params& params, int64_t height);
-
-/** ACT-5: enforcement at H from Snapshots[H - 1] (ACTIVE, ENFORCEMENT clear, H <= ENFORCE_UNTIL_HEIGHT). */
-bool EnforcementOn(const State& st, const Params& params, int height);
-
-/** ACT-1: valid tags with the signal bit in (H - SIGNAL_WINDOW, H]. */
-uint32_t SignalCount(const State& st, const Params& params, int height);
 
 /** E(R) (FEE-2): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated, minus Snapshots[R].pinnedKeys (PIN-1); empty => FEE-0. */
 std::vector<CKeyID> EligiblePayees(const StateView& view, const Params& params, int refHeight);

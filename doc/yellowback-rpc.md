@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 4
+# Yellowback RPC contract (`yed_*`), rpcversion 5
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `4`. Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `5` (the vault upgrade, above; it was `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -26,13 +26,41 @@ first commit; until then a v3 node and a v2 wallet refuse each other (N27), whic
 Everything marked **v3** in this file is Phase A0's contract for Phases A2 (node context) and A3
 (wallet context); the v2 text is unchanged except where a field's meaning changed and is marked.
 
-**`rpcversion` 4 (hardening plan H-9.3, 2026-10-05), by decision as `3` was.** The change is again
+**`rpcversion` 4 (hardening plan H-9.3, 2026-10-05), by decision as `3` was; superseded by `5` below.** The change is again
 an addition: optional client bounds (`yed_mint`'s `maxCollateralZat` and `yed_claim`'s
 `minOutZat`, both since the 2026-10-01 audit, and `yed_claim`'s new `maxBurnCents`). The bump
 makes a client that does not know the bounds (and so cannot cap what a malicious or mistaken
 server builds for it) refuse the node rather than run unprotected. Clients go to `4` with the
 hardening plan's H5 chunks (YecWallet, YEW through lightwalletd); until then they refuse each other,
 which is intended.
+
+**The vault upgrade (`rpcversion` 5; docs/plans/yellowback-upgrade-plan.md §15.10, U-21..U-24).**
+Ycash Yellowback (YED) is the rule module of the vault primitive: its rules are consensus at every
+height where `UPGRADE_VAULT` is active and the network's YED attestor set is known (regtest:
+`-nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>`; mainnet and testnet unset, so the yed_*
+commands do not exist there). `-yellowback` and `-experimentalfeatures` no longer gate anything.
+What changed for a client, every item a removal or a shape change (hence the bump; the hardening
+plan's H3-c had taken 4 on its own branch, and the two merge to 5):
+- `yed_getactivation` reports the upgrade (`status`, `activationHeight`, `branchId`,
+  `attestorSetId`, `claimDelay`, `height`); `yed_getinfo` drops `activation`, `enforcing`,
+  `valveTripped`, `sunset`, `rejectedBlocks`, `suppressedBlocks`, `templatePolicy`, `abandoned`,
+  `miner.signal`, `params.enforceUntilHeight`/`valveBlocks`/`abandonBlocks`/`windows.signal` and
+  gains `upgrade` (the `yed_getactivation` object), `params.attestorSetId` and `params.claimDelay`.
+- `yed_gethistory` rows drop `signalCount` and `activation`; `yed_gettag` drops `signal`;
+  `yed_getblockverdict` drops `enforcementOn` and gains `verdict`; `yed_sweep` is gone (and the
+  abandonment predicate with it); `yed_listpositions` drops `canSweep`.
+- The vault is the primitive's V template (tag `YED\0`, the attestor set as both sets, delay
+  `CLAIM_DELAY`, ownerHeight `lockHeight`, appHeight `lockHeight + GRACE`): `yed_getvault` and
+  every vault row gain `scriptPubKey` (its hex) and lose `sweepBefore`. A claim moves the vault
+  into a claimant intent (and, when RED-5's residual is due, an owner residual intent): the vault is
+  `CLAIMING` (a new status) with **optional** `intents` until the claimant intent is released
+  (`vault_release`, after `CLAIM_DELAY`: `CLAIMED`) or cancelled by the attestor set
+  (`vault_buildcancel` + `set_signcancel` + `vault_send`: the vault is re-created at the cancel's
+  output 0 and is the same position, `ACTIVE`; the claim's burn is not refunded, U-24).
+  `yed_gettxinfo` gains `reopenedVaults` and the types `claim_release` and `claim_cancel`.
+- A failing mint or vault spend is an invalid transaction: no VOID vault is produced
+  (`voidReason` stays `""`), the mempool refuses it with `bad-yellowback-<verdict>` and a block
+  carrying it is rejected (DoS 100). `mempool-check-failed:<verdict>` keeps its meaning.
 
 ## Conventions
 
@@ -112,7 +140,8 @@ carried by `TOKEN_VALUE` (10,000 zat) P2PKH outputs assigned cents by a payload;
 is the only technical guard against sending YED to software that does not run the overlay (H9).
 `yed_send`/`yed_sendmany`/`yed_validateaddress` refuse anything else with
 `not-a-yellowback-address`. Sapling `ys1…` addresses are accepted as the *funding* of `yed_mint`
-and the *destination* of `yed_redeem`/`yed_claim`/`yed_sweep` (§4.6), never as YED recipients.
+and the *destination* of `yed_redeem` (§4.6), never as YED recipients (a claim pays an intent,
+whose recipient is transparent).
 
 ---
 
@@ -121,24 +150,21 @@ and the *destination* of `yed_redeem`/`yed_claim`/`yed_sweep` (§4.6), never as 
 ### `yed_getinfo`
 
 Arguments: none. Never refuses while unhealthy. `height`/`blockhash` are always the tip the index
-holds (V2; `height` is `-1` and `blockhash` `""` while the index is empty). `enforcing` is `false`
-under the kill switch (`-yellowbackenforce=0`), the valve (`valveTripped`, ACT-7, L7), the sunset
-(`sunset`, ACT-5, L8) or an unhealthy index. `rejectedBlocks` counts blocks this node refused
-(`Rejected`); `suppressedBlocks` counts rule-breaking blocks accepted by BLK-2 clause 3 because the
-network had already built `VALVE_BLOCKS` on them (L11) — an information line, not an alarm.
-`abandoned` is the abandonment predicate below (L10). `supplyCapReached` (W20) is `true` when, at
-the tip snapshot, the smallest mint (`MIN_MINT`) of any class would take `supplyCents` over the
-supply cap (`false` when the cap is undefined: `supplyCapBps == 0` or no price); above the cap only
-class A, when its minimum ratio reaches `params.recapRatioBps`, mints (H-10) —
-`yed_getstats.mintableClasses` says whether it can. `mintRequiresArmed` (**hardening, H-1**) is
+holds (V2; `height` is `-1` and `blockhash` `""` while the index is empty). `upgrade` is the
+`yed_getactivation` object (the vault upgrade; `startHeight` is its activation height, U-22).
+`supplyCapReached` (**v3, W20**) is `true`
+when the next mint of any class would exceed the supply cap at the tip snapshot (`supplyCents +
+MIN_MINT > supplyCapCents`) and `false` when the cap is undefined (no cap, no price, empty index);
+above the cap only class A, when its minimum ratio reaches `params.recapRatioBps`, mints
+(H-10; `yed_getstats.mintableClasses`). `mintRequiresArmed` (**hardening, H-1**) is
 `MINT_REQUIRES_ARMED` of the set in force: when `true` a mint whose reference height is not
 ARMED (`attest.armed`) is VOID with `mint-halted-unarmed` (MINT-4) and `yed_mint` refuses it with
 `mintpol-unarmed`; `true` on mainnet and testnet, `false` on regtest unless
-`-yellowbackmintrequiresarmed` is set (a hashed value there, M13). `templatePolicy` is `"strict"` or `"consensus"`. `miner.quoteKind` is what the next template's tag would be (`"quote"`, `"signal"`,
-`"none"`); `miner.quoteAgeSeconds` is `null` when no quote is held; `miner.payoutAddress` is `null`
+`-yellowbackmintrequiresarmed` is set (a hashed value there, M13). `miner.quoteKind` is what the
+next template's tag would be (`"quote"` or `"none"`; the signal-only tag left with ACT-1); `miner.quoteAgeSeconds` is `null` when no quote is held; `miner.payoutAddress` is `null`
 when the node has no payout key (then `quoteKind` is `"none"`). `params` reports every value the
 Mint page derives from; on regtest `startHeight`, `sigmaRefBps`, `supplyCapBps` and
-`enforceUntilHeight` are the four hashed values (§3.1, M13; `enforceUntilHeight` `0` = none).
+`attestorSetId` are the four hashed values (§3.1, M13); `claimDelay` is `CLAIM_DELAY` (U-23).
 `params.feeZat` is the network fee floor `YELLOWBACK_FEE` (`-yellowbackfee`), distinct from the enforcement fee
 (`feeMinZat`/`feeBps`); every transaction the wallet builds pays max(`feeZat`, its ZIP-317 conventional fee),
 so it has no unpaid actions under `-txunpaidactionlimit`/`-blockunpaidactionlimit` (ycash6 plan P-2). `params.policy.preferredPayee` is `null` unless `-yellowbackpreferredpayee`
@@ -165,33 +191,28 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 4,
+  "rpcversion": 5,
   "enabled": true,
   "network": "regtest",
   "height": 331,
   "blockhash": "0f3a9c1e5b7d2a4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f",
   "chainHeight": 331,
-  "startHeight": 1,
+  "startHeight": 103,
   "healthy": true,
   "unhealthyReason": "",
-  "enforcing": true,
-  "valveTripped": false,
-  "sunset": false,
-  "rejectedBlocks": 0,
-  "suppressedBlocks": 0,
-  "templatePolicy": "strict",
-  "abandoned": false,
   "supplyCapReached": false,
   "mintRequiresArmed": false,
   "lockedOutputs": 2,
   "protectedByIndex": true,
   "rebuilt": false,
-  "activation": {
+  "upgrade": {
+    "name": "Vault",
+    "branchId": "6d5b7a31",
     "status": "active",
-    "lockInHeight": 129,
-    "activateHeight": 193,
-    "signalCount": 64,
-    "window": 64
+    "activationHeight": 103,
+    "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
+    "claimDelay": 10,
+    "height": 331
   },
   "attest": {
     "status": "ARMED",
@@ -206,15 +227,15 @@ Result of `yed_getinfo`:
   },
   "miner": {
     "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111",
-    "signal": true,
     "quoteKind": "quote",
     "quoteAgeSeconds": 12,
     "registered": true,
     "eligible": true
   },
   "params": {
-    "startHeight": 1,
-    "enforceUntilHeight": 0,
+    "startHeight": 103,
+    "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
+    "claimDelay": 10,
     "sigmaRefBps": 0,
     "supplyCapBps": 0,
     "refLag": 2,
@@ -225,9 +246,7 @@ Result of `yed_getinfo`:
     "feeBps": 25,
     "tokenValueZat": 10000,
     "feeZat": 1000,
-    "valveBlocks": 6,
-    "abandonBlocks": 128,
-    "windows": { "fast": 8, "mid": 24, "slow": 64, "signal": 64 },
+    "windows": { "fast": 8, "mid": 24, "slow": 64 },
     "minFill": { "fast": 4, "mid": 16, "slow": 43 },
     "classes": [
       { "class": "A", "minBlocks": 48, "maxBlocks": 96, "baseRatioBps": 50000 }
@@ -392,7 +411,6 @@ Result of `yed_getprice`:
     "found": true,
     "kind": "quote",
     "version": 1,
-    "signal": true,
     "priceMicroUsd": 2000000,
     "sourceMask": 3,
     "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
@@ -402,37 +420,23 @@ Result of `yed_getprice`:
 
 ### `yed_getactivation`
 
-Arguments: none. The ACT-1..7 state at the tip. `window`, `threshold`, `participationFloor`,
-`enforcementFloor`, `enforcementResume` are the network constants (`SIGNAL_WINDOW`,
-`ACTIVATION_THRESHOLD`, `PARTICIPATION_FLOOR`, `ENFORCEMENT_FLOOR`, `ENFORCEMENT_RESUME`);
-`signalCount` is the tip's; `lockInHeight`/`activateHeight` are `0` until reached. `mintHalted`
-is the tip's `PARTICIPATION` bit (ACT-4), `enforcementSuspended` its `ENFORCEMENT` bit (ACT-6).
-`enforcing`, `valveTripped`, `sunset` are as `yed_getinfo`; `enforceUntilHeight` is
-`ENFORCE_UNTIL_HEIGHT` (`0` = none). `history` samples `signalCount` every `SIGNAL_WINDOW / 8`
-blocks ending at the tip (8 rows, oldest first; fewer when the chain is shorter than a window).
+Arguments: none. The vault upgrade's status (U-22; ACT-1..7 — signalling, lock-in, the valve, the
+sunset — are retired, upgrade plan §6). `status` is `"active"` once the index tip has reached
+`activationHeight` (the `UPGRADE_VAULT` height = `startHeight`), else `"pending"`; `branchId` is
+the upgrade's (`6d5b7a31`); `attestorSetId` is the network's YED attestor set (the vault
+primitive set whose members cancel claims); `claimDelay` is `CLAIM_DELAY`; `height` the index tip.
 
 Result of `yed_getactivation`:
 
 ```json
 {
+  "name": "Vault",
+  "branchId": "6d5b7a31",
   "status": "active",
-  "lockInHeight": 129,
-  "activateHeight": 193,
-  "signalCount": 64,
-  "window": 64,
-  "threshold": 48,
-  "participationFloor": 39,
-  "enforcementFloor": 32,
-  "enforcementResume": 39,
-  "mintHalted": false,
-  "enforcementSuspended": false,
-  "enforcing": true,
-  "valveTripped": false,
-  "sunset": false,
-  "enforceUntilHeight": 0,
-  "history": [
-    { "height": 331, "signalCount": 64 }
-  ]
+  "activationHeight": 103,
+  "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
+  "claimDelay": 10,
+  "height": 331
 }
 ```
 
@@ -472,8 +476,9 @@ Result of `yed_listminers`:
 Arguments: one **string** (no `client.cpp` conversion): all digits ⇒ a height on the active
 chain, otherwise a block hash of a stored block. Decodes the coinbase tag (TAG-1..5) of that
 block. When `found` is `false` (no tag, or a height below `startHeight`) `kind` is `"none"` and
-the other fields are absent (**optional**). `kind` is `"quote"` or `"signal"`; a signal-only tag
-has `priceMicroUsd: 0`. Allowed while unhealthy.
+the other fields are absent (**optional**). `kind` is `"quote"`, or `"signal"` for a tag carrying a
+payout key but no quote (`priceMicroUsd: 0`; the name is kept, though the ACT-1 signal bit it once
+carried is retired with the upgrade, plan §6). Allowed while unhealthy.
 
 Result of `yed_gettag`:
 
@@ -482,7 +487,6 @@ Result of `yed_gettag`:
   "found": true,
   "kind": "quote",
   "version": 1,
-  "signal": true,
   "priceMicroUsd": 2000000,
   "sourceMask": 3,
   "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
@@ -491,13 +495,11 @@ Result of `yed_gettag`:
 
 ### `yed_setquote <priceMicroUsd> <sourceMask>`
 
-Arguments: `priceMicroUsd` (number; `0` clears the quote so the next tag is signal-only or
-none), `sourceMask` (number, 16-bit; the §5 source-bit registry). Miner control (MINER-1): stores
+Arguments: `priceMicroUsd` (number; `0` clears the quote so the next tag is none), `sourceMask` (number, 16-bit; the §5 source-bit registry). Miner control (MINER-1): stores
 `{quote, sourceMask, receivedAt = GetTime()}`; requires RPC auth like every command. Allowed
 while unhealthy (the tag is not emitted then, MINER-3, but the quote is kept). `nextTag` is what
 the next template would carry given the stored quote, `-yellowbackquotemaxage`,
-`-yellowbacksignal`, `-yellowbackenforce`, the valve and the sunset (`kind` `"quote"`,
-`"signal"` or `"none"`; `payoutAddress` `null` when there is no payout key — but then the command
+(`kind` `"quote"` or `"none"`; `payoutAddress` `null` when there is no payout key — but then the command
 has already refused with `no-payout-address`). `receivedAt` is Unix seconds on the node's clock.
 The quote agent (`contrib/yellowback/yellowback-quote`) calls this every `poll_seconds` and
 `yed_setquote 0 0` after `fail_polls` failed aggregates (L5).
@@ -511,7 +513,6 @@ Result of `yed_setquote`:
   "receivedAt": 1789000000,
   "nextTag": {
     "kind": "quote",
-    "signal": true,
     "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
   }
 }
@@ -558,10 +559,18 @@ clause (a) or (b), exactly `yed_listclaimable`'s test, so a vault listed there w
 `"b"` reads `claimable: true` here); `underwaterAt` is the `pClaim` (µUSD) below which
 `collateralZat · pClaim < mintedCents · CLAIM_THRESHOLD_BPS`, i.e. the price at which the vault
 becomes claimable (`null` for a VOID vault, which has no debt). `unbacked`
-is true for a vault closed without its burn (a sweep, IN-2). **`sweepBefore`** (**optional**,
-= `claimHeight`) is present on every VOID vault (its claim path is anyone-can-spend after
-`claimHeight`, K3) and on every ACTIVE vault while abandonment holds (L10); absent otherwise.
-The prototype's `tier`, `rosterIndex`, `errBpsAtClose`, `requiredBurnCents`, `indexHeight` are
+is true for a vault closed without its burn (IN-2; no rule produces one since the sweep was
+retired, upgrade plan §6). `scriptPubKey` is the vault's V template in hex (tag `YED\0`, both
+sets the YED attestor set, delay `CLAIM_DELAY`, ownerHeight `lockHeight`, appHeight `lockHeight +
+GRACE`; U-23) — what an external builder needs to spend it. A vault that is **`CLAIMING`** (a
+claim moved its collateral into a claimant intent, and the RED-5 residual into an owner residual
+intent) carries **`intents`** (**optional**, absent otherwise): `[{txid, vout, role, height,
+releaseHeight}]`, `role` `"claimant"` or `"residual"`, `releaseHeight` = `height + CLAIM_DELAY`,
+the first height `vault_release` can spend it. Releasing the claimant intent makes the vault
+`CLAIMED`; an attestor-set cancel re-creates it as an `ACTIVE` vault at the cancel's output 0
+(the same position under that outpoint; the claim's burn is not refunded, U-24). A VOID vault is
+no longer produced (a failing mint is an invalid transaction); `VOID` stays a valid status
+filter for a chain indexed before the upgrade. The prototype's `tier`, `rosterIndex`, `errBpsAtClose`, `requiredBurnCents`, `indexHeight` are
 gone. Refuses with `vault-not-found`.
 
 **v3.** `noticed` is whether a `Notices` record stands for this vault (NOT-1; always `false` for
@@ -581,22 +590,22 @@ Result of `yed_getvault`:
   "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
   "ownerAddress": "yrExampleOwnerAddress111111111111111",
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
-  "collateralZat": 25125628141,
-  "collateral": 251.25628141,
+  "lockHeight": 377,
+  "claimHeight": 401,
+  "collateralZat": 251889169000,
+  "collateral": 2518.89169,
   "mintedCents": 100000,
   "mintHeight": 332,
   "refHeight": 329,
-  "feePaidZat": 62814071,
+  "feePaidZat": 629722922,
   "closeHeight": null,
   "closingTxid": "",
   "burnedCents": 0,
   "unbacked": false,
   "claimable": false,
-  "underwaterAt": 437800,
+  "underwaterAt": 436700,
   "voidReason": "",
-  "sweepBefore": 404,
+  "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
   "noticed": false,
   "noticeHeight": null,
   "emergencyOpenAt": null
@@ -606,7 +615,7 @@ Result of `yed_getvault`:
 ### `yed_listvaults [status] [count] [skip]`
 
 Arguments: `status` (string, optional; `""` or absent = every status, else one of `ACTIVE`,
-`VOID`, `CLOSED`, `CLAIMED`), `count` (number, default `100`), `skip` (number, default `0`).
+`VOID`, `CLOSED`, `CLAIMED`, `CLAIMING`), `count` (number, default `100`), `skip` (number, default `0`).
 Paged, in ascending outpoint order; the result is a **list** of `yed_getvault` rows (an empty
 list past the end). The prototype's `rosterIndex` argument and its `{height, total, vaults}`
 envelope are gone (the `client.cpp` row is now `1,2`).
@@ -623,22 +632,22 @@ Result of `yed_listvaults`:
     "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
-    "lockHeight": 380,
-    "claimHeight": 404,
-    "collateralZat": 25125628141,
-    "collateral": 251.25628141,
+    "lockHeight": 377,
+    "claimHeight": 401,
+    "collateralZat": 251889169000,
+    "collateral": 2518.89169,
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 62814071,
+    "feePaidZat": 629722922,
     "closeHeight": null,
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
     "claimable": false,
-    "underwaterAt": 437800,
+    "underwaterAt": 436700,
     "voidReason": "",
-    "sweepBefore": 404,
+    "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null
@@ -706,18 +715,18 @@ Result of `yed_listclaimable`:
   {
     "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
-    "collateralZat": 25125628141,
+    "collateralZat": 251889169000,
     "mintedCents": 100000,
-    "feeZat": 62814071,
-    "claimHeight": 404,
-    "underwaterAt": 437800,
+    "feeZat": 629722922,
+    "claimHeight": 401,
+    "underwaterAt": 436700,
     "pClaim": 400000,
     "claimPath": "a",
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null,
     "residualZat": 0,
-    "attestFeeZat": 15703517
+    "attestFeeZat": 157430730
   }
 ]
 ```
@@ -745,6 +754,11 @@ carrier, `-1` when none) and `bundleSource` (`"scriptsig"`, `"opreturn"` or `""`
 `"notice"`, `"register"`, `"equivocation"`, `"revive"`; for `"register"` `seq` (**optional**)
 is the assigned sequence number.
 
+**Vault upgrade** (`rpcversion` 5): `reopenedVaults` lists the vaults an attestor-set cancel
+re-created as `ACTIVE` (U-24; the cancel's output 0, empty otherwise); `type` gains
+`"claim_release"` (the claimant or residual intent released after `CLAIM_DELAY`) and
+`"claim_cancel"`. A failing transaction has no `TxLog` row: it is invalid, never confirmed.
+
 Result of `yed_gettxinfo`:
 
 ```json
@@ -757,7 +771,7 @@ Result of `yed_gettxinfo`:
   "yedIn": 0,
   "yedOut": 100000,
   "burned": 0,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "assigned": [
     { "vout": 1, "cents": 100000 }
@@ -768,6 +782,7 @@ Result of `yed_gettxinfo`:
   "closedVaults": [
     { "txid": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b", "vout": 0 }
   ],
+  "reopenedVaults": [],
   "expired": false,
   "xMint": 1990000,
   "xClaim": 2000000,
@@ -776,7 +791,7 @@ Result of `yed_gettxinfo`:
   "pMint": 1985000,
   "pClaim": 2000000,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0,
   "claimPath": "",
@@ -814,7 +829,7 @@ Result of `yed_decodepayload`:
   "reason": "",
   "termClass": "A",
   "cents": 100000,
-  "lockHeight": 380,
+  "lockHeight": 377,
   "refHeight": 329,
   "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
   "feeVout": 3,
@@ -826,11 +841,10 @@ Result of `yed_decodepayload`:
 
 Arguments: `hex` (string; a complete, normally signed transaction). Dry run of §3.8 at the tip
 (`EvaluateBlock` over a one-transaction pseudo-block at `tip + 1`, exactly `MempoolCheck`'s
-predicate) plus `VerifyAllInputs` for the scripts (`valid`). For a vault spend `blockValid` is
-RED-1..4 (BLK-1's condition, independent of activation) and `wouldBeRejected` says whether an
-enforcing miner refuses it — `!blockValid`, or the MP-1 expiry bound (`mempoolExpiryOk` false:
-`nExpiryHeight == 0` or `> refHeight + REF_WINDOW`) — *unless* abandonment holds (L13), when it
-is false. `unconfirmedInputs` lists inputs the index does not know (unconfirmed parents; the
+predicate) plus `VerifyAllInputs` for the scripts (`valid`): every input verified as the mempool would at `tip + 1` — `STANDARD_SCRIPT_VERIFY_FLAGS` plus the UPGRADE_VAULT flags (CSV, the set opcodes) once active, `OP_CHECKSETSIG`/`OP_CHECKSETDORMANT` against the set state at the tip, and the BIP68 sequence locks (an intent RELEASE whose input has not aged is `valid: false`, `invalidReason` `non-BIP68-final`). **Optional:** `invalidReason` (string) is present only when `valid` is false: `input <n> fails script verification: <script error>`, `input <n> is unknown or spent`, `non-BIP68-final` or `bad-txns-vault-timelock`. For a vault spend `blockValid` is
+RED-1..5 (the rule a block carrying it must pass) and `wouldBeRejected` says whether the mempool
+refuses it — `!blockValid`, or the MP-1 expiry bound (`mempoolExpiryOk` false:
+`nExpiryHeight == 0` or `> refHeight + REF_WINDOW`). `unconfirmedInputs` lists inputs the index does not know (unconfirmed parents; the
 verdict cannot see them, M13). Never commits anything.
 
 Result of `yed_validaterawtransaction`:
@@ -844,7 +858,7 @@ Result of `yed_validaterawtransaction`:
   "yedIn": 100000,
   "yedOut": 0,
   "burned": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "blockValid": true,
   "wouldBeRejected": false,
@@ -858,14 +872,15 @@ Result of `yed_validaterawtransaction`:
 ### `yed_getblockverdict <blockhash>`
 
 Arguments: `blockhash` (string; a block the node has on disk). Runs `EvaluateBlock` on the
-stored block and explains a rejection: `blockInvalid` is BLK-1's condition, `enforcementOn` ACT-5
-at that height (from `Snapshots[H − 1]`, incl. the sunset), `reason` is `"<verdict>:<txid>"` of
-the first failing vault spend or `""`. `transactions` lists every Yellowback-relevant
+stored block and explains a rejection: `blockInvalid` is whether a transaction in it is invalid
+under the Yellowback rules (the block is then refused, DoS 100, `bad-yellowback-<verdict>`),
+`verdict` the first invalid transaction's verdict (`"ok"` when none), `reason`
+`"<verdict>:<txid>"` of it or `""`; evaluation stops at that transaction. `enforcementOn` (ACT-5)
+is gone: the rules hold at every height where the upgrade is active. `transactions` lists every Yellowback-relevant
 transaction in block order with its verdict; `closedVaults` as `yed_gettxinfo`. Allowed while
 unhealthy. **Precondition (N12):** refuses with `verdict-parent-not-tip` unless the block's
-parent is the index tip (a candidate child, or the block the node just rejected) or the block is
-in `Rejected` with the current tip as its parent — the state at any other parent would need an
-undo replay.
+parent is the index tip (a candidate child, or a block the node refused on top of it) — the state
+at any other parent would need an undo replay.
 
 Result of `yed_getblockverdict`:
 
@@ -873,7 +888,7 @@ Result of `yed_getblockverdict`:
 {
   "blockInvalid": true,
   "reason": "vault-spend-short-burn:6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
-  "enforcementOn": true,
+  "verdict": "vault-spend-short-burn",
   "transactions": [
     {
       "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
@@ -882,7 +897,7 @@ Result of `yed_getblockverdict`:
       "verdict": "vault-spend-short-burn",
       "yedIn": 50000,
       "yedOut": 0,
-      "feeZat": 62814071,
+      "feeZat": 629722922,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
       "closedVaults": [
         { "txid": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b", "vout": 0 }
@@ -920,10 +935,10 @@ Result of `yed_estimatecollateral`:
 
 ```json
 {
-  "requiredZat": 25125628141,
+  "requiredZat": 251889169000,
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
+  "lockHeight": 377,
+  "claimHeight": 401,
   "minRatioBps": 50000,
   "baseRatioBps": 50000,
   "sigmaMultBps": 10000,
@@ -934,7 +949,7 @@ Result of `yed_estimatecollateral`:
   "source": "a",
   "armed": true,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "divergenceBps": 25
 }
 ```
@@ -1144,7 +1159,7 @@ Result of `yed_estimatefee`:
 
 ```json
 {
-  "feeZat": 62814071
+  "feeZat": 629722922
 }
 ```
 
@@ -1152,7 +1167,8 @@ Result of `yed_estimatefee`:
 
 Arguments: `from`, `to` (numbers; `startHeight ≤ from ≤ to ≤ tip`, at most 2,016 rows per call,
 else `RPC_INVALID_PARAMETER`). The `Snapshots` records (§3.6) for `from ≤ h ≤ to`, ascending,
-`haltMask` decoded to names, `activation` as an object, undefined prices and ratio `null`.
+`haltMask` decoded to names, undefined prices and ratio `null` (`signalCount` and `activation`
+left with ACT-1..7, upgrade plan §6).
 `tagged` is whether the block carried a valid tag, `quote` whether that tag carried a quote
 (`priceMicroUsd ≠ 0`). `yellowback_model.py` compares every field of every row.
 
@@ -1165,8 +1181,6 @@ Result of `yed_gethistory`:
     "blockHash": "0f3a9c1e5b7d2a4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f",
     "tagged": true,
     "quote": true,
-    "signalCount": 64,
-    "activation": { "status": "active", "lockInHeight": 129, "activateHeight": 193 },
     "pFast": 2000000,
     "pMid": 2000000,
     "pSlow": 1990000,
@@ -1184,41 +1198,27 @@ Result of `yed_gethistory`:
 
 ### `getblocktemplate` (stock command; the `yellowback` object)
 
-On a node with `-yellowback` — and only then; otherwise the response is v4.5.0's key for key
-(N10, `yellowback_stockparity.py`) — `getblocktemplate` returns `coinbasetxn` with the tag in its
+On a node where Yellowback is live (the vault upgrade configured with a YED attestor set, U-22)
+— and only then; otherwise the response is v4.5.0's key for key (N10, `yellowback_stockparity.py`) — `getblocktemplate` returns `coinbasetxn` with the tag in its
 scriptSig, `coinbaseaux.flags` = the tag push in hex (it begins with the `0x24` push opcode; a
 pool that assembles its own coinbase appends these bytes verbatim after the BIP34 height push,
 §5), `"coinbase/append"` in `mutable`, and `TemplateInfo()`:
 
 ```
-"yellowback": { "tag": "<hex>", "kind": "quote"|"signal"|"none", "priceMicroUsd": n,
-                "quoteAgeSeconds": n, "signal": bool, "payoutAddress": "s1…",
-                "registered": bool, "eligible": bool, "activation": "signaling"|"locked_in"|"active",
-                "signalCount": n, "enforcing": bool, "valveTripped": bool, "sunset": bool,
-                "healthy": bool, "templatePolicy": "strict" }
+"yellowback": { "tag": "<hex>", "kind": "quote"|"none", "priceMicroUsd": n,
+                "quoteAgeSeconds": n, "payoutAddress": "s1…",
+                "registered": bool, "eligible": bool, "healthy": bool }
 ```
 
-With `-yellowbackrequirehealthy` the command refuses outright while the index is unhealthy
-(K24); without it the template is unpoliced and untagged (MINER-3). Regtest `generate` goes
+The command refuses outright while the index is unhealthy (K24; `-yellowbackrequirehealthy` is
+retired and this is always on — an unhealthy node cannot tell a valid template from an invalid
+one). The template carries only transactions valid under the Yellowback rules (TPL-1). Regtest `generate` goes
 through the same `CreateNewBlock`, so a regtest node with a payout address and a quote mines
 tagged blocks with no further code (V25).
 
 ---
 
 ## Wallet context (`src/rpc/yellowbackwallet.cpp`)
-
-### The abandonment predicate (shared by every wallet command that reads it)
-
-The chain shows **abandonment** when `Snapshots[tip].haltMask.ENFORCEMENT` has been set
-continuously for at least `ABANDON_BLOCKS` (= `GRACE`: 34,560 on mainnet, 128 on regtest; W21)
-— thirty days in which fewer than half of blocks signalled. That is the whole
-predicate (`YellowbackIndex::IsAbandoned()`, computed from `Snapshots` alone, so every node of
-every release answers alike, L12). It is **never** gated on the node's own `-yellowbackenforce`,
-its valve state, its health or a passed sunset. While it holds: `yed_getinfo.abandoned` is true;
-`yed_getvault` and `yed_listpositions` show `sweepBefore` on every ACTIVE vault and
-`yed_listpositions.canSweep`; `yed_sweep` builds; MP-1 and TPL-1/2 stand down for vault spends
-(L13), so `yed_validaterawtransaction.wouldBeRejected` is false for a sweep. Otherwise
-`yed_sweep` refuses with `sweep-not-abandoned`.
 
 ### Coin locking (three stages; carried over from the prototype)
 
@@ -1375,7 +1375,7 @@ above. Refusals (**v3**): `bundle-insufficient` (armed and fewer than `M_SELECT`
 attestors are in the pool — the message names the missing `seq`s; also for a `bundleHex` whose
 attestations do not satisfy BUNDLE-1 at `R`, with the reason), `mint10-diverged` (refused
 **before** the carrier is built), `bundle-malformed` (`bundleHex` is not a bundle). v2 refusals
-unchanged: `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`,
+unchanged: `mintpol-not-active`, `mintpol-no-price`,
 `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap`, `mint-unsatisfiable`; hardening:
 `mintpol-unarmed` (H-1, `mintRequiresArmed` and `R` not ARMED);
 `mint-bad-lock`, `RPC_INVALID_PARAMETER` for `cents` out of range, `RPC_WALLET_ERROR` for
@@ -1397,10 +1397,10 @@ Result of `yed_mint`:
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
-  "collateralZat": 25125628141,
-  "feeZat": 62814071,
+  "lockHeight": 377,
+  "claimHeight": 401,
+  "collateralZat": 251889169000,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "fundedFrom": "transparent",
   "warning": "",
@@ -1412,7 +1412,7 @@ Result of `yed_mint`:
   "pMint": 1985000,
   "source": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111"
 }
 ```
@@ -1527,14 +1527,16 @@ Result of `yed_unlockcoin`:
 Arguments: `vaultTxid` (string), `to` (string, optional; a transparent or `ys1…` destination for
 the collateral; default a fresh own transparent address). One step (V24):
 
-- On an **ACTIVE** vault at or past `lockHeight`: the §3.5 owner-path REDEEM — burns
+- On an **ACTIVE** vault at or past `lockHeight`: the §3.5 owner-path REDEEM (the V template's
+  owner path, selector 2: scriptSig `<sig> OP_2`, `nLockTime ≥ lockHeight`, U-23) — burns
   `mintedCents` of the wallet's YED, pays the FEE-1 fee to `payee(R, vaultOutpoint)`, sends the
   rest of the collateral to `to`. Runs `MempoolCheck` first and refuses (`mempool-check-failed:
   <verdict>`) rather than commit anything MP-1 would refuse (K7); on success `CommitTransaction`
   puts it in the node's own mempool.
 - On a **VOID** vault at or past `lockHeight` (L14): the §3.5 VOID RELEASE — owner path, no
-  burn, no fee, no payload; an ordinary spend no rule polices (K3). Returns `burnedCents: 0`,
-  `feeZat: 0`, `payee: null`. The GUI calls this **Release**.
+  burn, no fee, no payload. Returns `burnedCents: 0`, `feeZat: 0`, `payee: null`. The GUI calls
+  this **Release**. Since the vault upgrade no VOID vault is produced (a failing mint is invalid),
+  so this branch only serves a chain indexed before it.
 
 `collateralOut` is the zat paid to `to`. `extraBurnCents` (H4) is a sub-dollar YED remainder the
 selector burned rather than refuse: it is `0` whenever a selection with change of `0` or
@@ -1551,9 +1553,9 @@ Result of `yed_redeem`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 25062804070,
+  "collateralOut": 251259436078,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0
 }
@@ -1564,14 +1566,23 @@ Result of `yed_redeem`:
 Arguments as `yed_redeem`, plus **v3** `bundleHex` and `wait` as `yed_mint` (`to` may be `""`
 for the default), and `minOutZat` (number, optional, default `0` = no bound: the claimant's floor
 on what reaches `to`; refused `claim-out-below-min` at preflight — the collateral less the
-enforcement fee, the attestor fee and the RED-5 residual — and again at build against the exact
+RED-5 residual, the claimant intent's value (U-23: the fees come from the claimant's YEC) — and again at build against the exact
 `collateralOut`, nothing signed either time), and `maxBurnCents` (number, optional, default `0` =
 no bound, hardening H-9.3: the claimant's cap on the YED the claim burns; refused
 `claim-burn-above-max` at preflight when the vault's `mintedCents` exceeds it and again at build
 against the exact burn — the debt plus any H4 sub-dollar remainder — nothing signed either time).
 The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
-claim-path scriptSig, `nLockTime = claimHeight`, burns `mintedCents` of the claimant's own YED,
-pays the fee from the collateral, collateral to `to`. The v2 fields of `yed_redeem` (including
+the V template's claim path (selector 4: scriptSig `OP_4`, U-23), `nLockTime = claimHeight`,
+burns `mintedCents` of the claimant's own YED and moves the collateral into a **claimant intent**
+(the primitive's I template, output 0, paying `to`, delay `CLAIM_DELAY`) of the
+collateral less the RED-5 residual; the fees are paid from YEC the wallet selects (a claim
+input carries no collateral to pay them from: `yed_claim` funds them), with its own change. `to`
+must be transparent (an intent pays a key; `bad-address` otherwise). The vault becomes
+`CLAIMING`; after `CLAIM_DELAY` blocks the primitive's **`vault_release <intentTxid> 0`** pays the
+intent to `to` and the vault becomes `CLAIMED`. Until then any `cancelThreshold` members of the
+YED attestor set may cancel it (`vault_buildcancel` + `set_signcancel` + `vault_send`), which
+re-creates the vault as `ACTIVE` at the cancel's output 0 and does not refund the burn (U-24).
+`collateralOut` is the claimant intent's value. The v2 fields of `yed_redeem` (including
 `extraBurnCents`, H4) plus the **v3** fields below. Refusals: `vault-not-found`,
 `vault-not-active`, `claim-not-yet` (tip below `claimHeight`), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
@@ -1580,8 +1591,9 @@ would fail at the reference snapshot by both clauses), `insufficient-yed`, `chan
 
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
-`residualZat ≥ RESIDUAL_MIN_ZAT` — the residual output `P2PKH(ownerPubKey)` of `residualZat`
-(RED-5); with a `ys1…` `to` the residual stays transparent (S11). The wallet dry-runs RED-1..5
+`residualZat ≥ RESIDUAL_MIN_ZAT` — the **residual intent** (an I template paying
+`P2PKH(ownerPubKey)` at least `residualZat`, RED-5; anyone may `vault_release` it to the owner
+after `CLAIM_DELAY`, and a cancel never touches it). The wallet dry-runs RED-1..5
 before commit. `claimPath` is the clause that opened the claim (`"a"` underwater under the
 combined `pClaim`; `"b"` the emergency clause: a notice `EMERGENCY_PERSIST..EMERGENCY_NOTICE_TTL`
 blocks old and `collateralZat · pEmerg < mintedCents · EMERGENCY_RATIO_BPS · COIN`); under `"b"`
@@ -1595,9 +1607,9 @@ Result of `yed_claim`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 25062804070,
+  "collateralOut": 251889169000,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0,
   "carrierTxid": "5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c",
@@ -1609,7 +1621,7 @@ Result of `yed_claim`:
   "pEmerg": null,
   "claimPath": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0
 }
@@ -1818,42 +1830,14 @@ Result of `yed_signattestation`:
 }
 ```
 
-### `yed_sweep <vaultTxid> <acknowledgement> [to]`
-
-Arguments: `vaultTxid` (string), `acknowledgement` (string; must be exactly
-`I understand this leaves YED unbacked`), `to` (string, optional, as `yed_redeem`). L10: builds
-the §3.5 SWEEP of an own ACTIVE vault — an owner-path spend with no burn and no fee — **only
-while the abandonment predicate holds**; signs it and commits it through the node's own mempool,
-which admits it under abandonment (L13), and returns the raw `hex` so the owner can submit it to
-any other node as well. The transaction is a rule-breaking vault spend by design (it fails RED-1):
-an enforcing node — one on a chain that does not show abandonment — never mines it; on the
-abandoned chain every node admits, relays and mines it like any other transaction. The vault is
-then `CLOSED, unbacked = true`, `Totals.unbackedCents` grows by the debt (`unbackedCents` here),
-and `yed_listtransactions` shows `type: "sweep"`. What the owner is told (§4.6): after
-`claimHeight` the claim path is anyone-can-spend and, with nobody enforcing RED-4, whoever mines
-first takes the collateral — sweep before `claimHeight` (`sweepBefore`) or lose it. Refusals:
-`sweep-not-abandoned`, `sweep-acknowledgement-missing`, `vault-not-found`, `vault-not-owned`,
-`vault-not-active`, `vault-locked`.
-
-Result of `yed_sweep`:
-
-```json
-{
-  "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
-  "hex": "0400008085202f8901…",
-  "collateralOut": 25125627141,
-  "to": "smExampleTransparentTwin111111111111",
-  "unbackedCents": 100000
-}
-```
-
 ### `yed_listpositions [status]`
 
 Arguments: `status` (string, optional; as `yed_listvaults`). The wallet's own vaults (a vault is
 mine iff `HaveKey(ownerPubKey)`): every `yed_getvault` field plus `canRedeem` (true for an
 ACTIVE or VOID vault at or past `lockHeight` — for VOID it is the Release, L14), `canClaim`
-(true when `claimable` and the wallet holds `≥ mintedCents`) and `canSweep` (true for an ACTIVE
-vault while abandonment holds). `sweepBefore` as `yed_getvault` (**optional**).
+(true when `claimable` and the wallet holds `≥ mintedCents`). `scriptPubKey` and, while
+`CLAIMING`, `intents` as `yed_getvault` (`canSweep` and `sweepBefore` left with the sweep, upgrade
+plan §6).
 
 **v3.** `noticed`, `noticeHeight`, `emergencyOpenAt` as `yed_getvault` (the Positions page's
 "notice posted; emergency claim opens at …" badge); `canNotice` (true when the vault is ACTIVE,
@@ -1873,28 +1857,27 @@ Result of `yed_listpositions`:
     "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
-    "lockHeight": 380,
-    "claimHeight": 404,
-    "collateralZat": 25125628141,
-    "collateral": 251.25628141,
+    "lockHeight": 377,
+    "claimHeight": 401,
+    "collateralZat": 251889169000,
+    "collateral": 2518.89169,
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 62814071,
+    "feePaidZat": 629722922,
     "closeHeight": null,
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
     "claimable": false,
-    "underwaterAt": 437800,
+    "underwaterAt": 436700,
     "voidReason": "",
-    "sweepBefore": 404,
+    "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null,
     "canRedeem": false,
     "canClaim": false,
-    "canSweep": false,
     "canNotice": false
   }
 ]
@@ -1907,8 +1890,8 @@ wallet transaction that is in `TxLog` with an own token or vault involved (N21: 
 `spentTokens`/`assigned`/`closedVaults` that are mine), plus own unconfirmed and expired
 Yellowback transactions. `type` is the wallet's view: `mint`, `send`, `receive`, `burn` (a
 transfer that burned), `redeem` (own owner-path redemption), `claim` (this wallet claimed),
-`claimed` (an own vault was claimed by someone else), `sweep` (an own vault swept under
-abandonment), **v3** `notice` (a CLAIM_NOTICE this wallet posted), `noticed` (a notice was
+`claimed` (an own vault was claimed by someone else), `sweep` (an own vault swept under the
+retired abandonment rule; only on a chain indexed before the upgrade), **v3** `notice` (a CLAIM_NOTICE this wallet posted), `noticed` (a notice was
 posted on an own vault), `register`, `withdraw` (an own bond withdrawn), `revive`,
 `equivocation` (a report this wallet posted), `carrier` (an own carrier funding or sweep
 transaction). `amountCents` is the signed effect on this wallet. `unbacked` is true on a row that
@@ -1930,7 +1913,7 @@ Result of `yed_listtransactions`:
     "yedOut": 100000,
     "burned": 0,
     "amountCents": 100000,
-    "feeZat": 62814071,
+    "feeZat": 629722922,
     "payee": "smQvTmAz2ExamplePayoutAddress1111111",
     "unbacked": false,
     "expired": false
@@ -1948,18 +1931,16 @@ what `yellowback_rpc_contract.py` uses.
 | Identifier | Raised by | When (provocation) |
 |---|---|---|
 | `yellowback-unhealthy` | every gated command | the index is unhealthy (`unhealthyReason` follows); provoke with `-yellowbacktestfault=storage:commit` then any non-allow-listed command. Also the storage boundary of `yed_addattestation` and `yed_buildbundle` (audit A-3): a storage exception under either marks the index unhealthy and the call fails with `yellowback-unhealthy: storage failure in AddAttestation: …` / `… in BuildBundle: …` |
-| `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says "after N cents of mints in the mempool"). W20 (H-10): above the cap only class A at or over `RECAP_RATIO_BPS` mints; the message says whether it can. **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by `yed_redeem` at `lockHeight`, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached. |
+| `mintpol-not-active`, `mintpol-no-price`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says "after N cents of mints in the mempool"). W20 (H-10): above the cap only class A at or over `RECAP_RATIO_BPS` mints; the message says whether it can. **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by `yed_redeem` at `lockHeight`, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached. |
 | `mintpol-unarmed` | `yed_mint` | MINTPOL-1 for H-1: `yed_getinfo.mintRequiresArmed` is `true` and the reference height `R` is not ARMED, so the mint would confirm VOID with `mint-halted-unarmed` (MINT-4); provoke on regtest with `-yellowbackmintrequiresarmed` before arming |
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |
 | `invalid-address` | `yed_listtokens` | a string that is neither a YED nor a transparent P2PKH address of this network |
-| `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_sweep`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
-| `vault-locked` | `yed_redeem`, `yed_sweep` | tip below `lockHeight` (ACTIVE and VOID alike) |
+| `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
+| `vault-locked` | `yed_redeem` | tip below `lockHeight` (ACTIVE and VOID alike) |
 | `claim-not-yet` | `yed_claim` | tip below `claimHeight` |
 | `claim-not-underwater` | `yed_claim` | RED-4 would fail at the reference snapshot (the price did not fall) |
-| `sweep-not-abandoned` | `yed_sweep` | the abandonment predicate is false: enforcement on, or suspended for less than `ABANDON_BLOCKS` (L10, L12 — a passed sunset alone is not abandonment) |
-| `sweep-acknowledgement-missing` | `yed_sweep` | the second argument is not the exact acknowledgement string |
 | `change-floor` | `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim` | no selection leaves YED change of `0` or `≥ MIN_OUTPUT` (H2; a REDEEM or CLAIM burns a sub-dollar remainder instead, H4, so it reaches this only when even that is impossible): send `cents − 50` from a single `cents` output. The message is structured and always has this shape: `change-floor: <requested> cents cannot be sent from these coins without change below the $1.00 minimum output; nearest workable amounts: below <n\|none>, above <n\|none>` — the GUI reads the two numbers with that grammar and `yed_estimatesend.alternatives` returns them as fields |
 | `unlock-acknowledgement-missing` | `yed_unlockcoin` | the third argument is not exactly `I understand this burns YED` |
 | `yed-locked-outpoint` | `lockunspent` (the stock RPC) | `lockunspent false\|true [{txid,vout}]` naming an outpoint the Yellowback wallet layer holds: use `yed_unlockcoin` |
@@ -2003,7 +1984,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 
 | Identifier | Raised by | When (provocation) |
 |---|---|---|
-| `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim`, `yed_sweep` (`to`) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `ye…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
+| `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim` (`to`; a claim's must be transparent) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `ye…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
 | `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
 | `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
 | `insufficient-yec` | `yed_mint` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes: `yed_mint … <an empty s1… address>` |
@@ -2011,9 +1992,9 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`); on 6.20.0 only the `CReserveKey` change paths can raise it (see `yed_getnewaddress`) |
 | `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
 | `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
-| `vault-value-too-small` | `yed_redeem`, `yed_claim`, `yed_sweep` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
+| `vault-value-too-small` | `yed_redeem`, `yed_claim` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
 | `collateral-above-max` | `yed_mint` | maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1 |
-| `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the collateral less the enforcement fee, the attestor fee and the RED-5 residual; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
+| `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the claimant intent: the collateral less the RED-5 residual, U-23; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
 | `claim-burn-above-max` | `yed_claim` | maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1 |
 | `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
 | `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
@@ -2041,7 +2022,7 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_sendmany` | 0 (unchanged; the object) |
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
-| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_sweep`, `yed_listpositions` | none (all strings) |
+| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions` | none (all strings) |
 | `yed_claim` | 3, 4, 5 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit; `maxBurnCents` since rpcversion 4) |
 | `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
 | `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |
@@ -2058,18 +2039,23 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 
 ## Configuration the contract depends on
 
-`-yellowback`; `-yellowbackenforce` (default 1); `-yellowbackpayoutaddress=<s1…>` (P2PKH; defaults
-to a P2PKH `-mineraddress`); `-yellowbacksignal` (default 0 on mainnet, 1 on testnet and regtest,
-L4; effective only with `-yellowbackenforce=1`, L3); `-yellowbackquotemaxage=<sec>` (default
-1800); `-yellowbacktemplatepolicy=strict|consensus`; `-yellowbackrequirehealthy` (default 0);
-`-yellowbackpreferredpayee=<s1…>`; `-yellowbackpayeepenaltyblocks`, `-yellowbackpayeeaccuracywindow`,
+Yellowback is live where the vault upgrade (`UPGRADE_VAULT`, branch `6d5b7a31`) has an activation
+height and the network has a YED attestor set (U-22): on regtest `-nuparams=6d5b7a31:<h>` and
+`-yellowbackattestorset=<setid>` (a `set_create` result; hashed); mainnet and testnet have none
+yet. `-yellowback` and `-experimentalfeatures` no longer gate anything (`-yellowback=0` is still
+accepted, as the H6 acknowledgement); `-yellowbackenforce`, `-yellowbacksignal`,
+`-yellowbacktemplatepolicy` and `-yellowbackrequirehealthy` are retired (logged and ignored),
+and `-yellowbackstartheight` and `-yellowbackenforceuntil` are refused at init (the start height
+is the activation height). `-yellowbackpayoutaddress=<s1…>` (P2PKH; defaults
+to a P2PKH `-mineraddress`); `-yellowbackquotemaxage=<sec>` (default
+1800); `-yellowbackpreferredpayee=<s1…>`; `-yellowbackpayeepenaltyblocks`, `-yellowbackpayeeaccuracywindow`,
 `-yellowbackpayeetiltbps` (FEE-W overrides, L6; reported in `yed_getinfo.params.policy` and
-`yed_getfeepayee.policy`); `-reindex-yellowback` (also clears `Rejected`); `-yellowbackfee`
+`yed_getfeepayee.policy`); `-reindex-yellowback`; `-yellowbackfee`
 (clamped to `≥ DEFAULT_FEE`); `-yellowbackmintlag` (`REF_LAG`, 0..36); `-debug=yellowback`;
-regtest only: `-yellowbackstartheight`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps`,
-`-yellowbackenforceuntil` (all four in `yed_getinfo.params` and the state hash); test only:
-`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|crash:<height>|template|novalve|schema`. `-prune` is refused
-with `-yellowback`.
+regtest only: `-yellowbackattestorset`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps` (with
+the activation height, all four in `yed_getinfo.params` and the state hash); test only:
+`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|crash:<height>|template|schema`. `-prune` is refused
+where Yellowback is live.
 
 **v3:** `-yellowbackpreferredattestor=<seq>` (AFEE-W override when that `seq ∈ A`; reported in
 `yed_getinfo.params.policy.preferredAttestor`); regtest only: `-yellowbackattestarmmin=<n>`

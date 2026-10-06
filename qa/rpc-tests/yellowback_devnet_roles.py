@@ -59,6 +59,7 @@ HEARTBEAT_RATE = 2          # seconds per block: the budget below is measured in
 WALK_TICK = 3
 SHOCK = '-70%'              # class C (300 %) goes under CLAIM_THRESHOLD (110 %) at -63 %; class A (500 %) does not
 EMERGENCY_PERSIST = 4
+CLAIM_DELAY = 10              # regtest CLAIM_DELAY (U-23): the liquidator releases its claim after it
 STOCK, POOLS, ATTESTOR4, POPULATION, LIQUIDATOR = 1, (2, 3, 4), 8, 9, 10
 EXPECT = {
     # what each preset promises (plan section 3.1 / 3.2 as built: revision 3, I-1)
@@ -289,7 +290,7 @@ class Preset:
                 if r['txid'] in population_vaults():
                     return r
             return None
-        row = self.wait_until(claimed, 60 + EMERGENCY_PERSIST + 30, 'the liquidator claiming a persona\'s vault')
+        row = self.wait_until(claimed, 60 + EMERGENCY_PERSIST + 30 + 2 * CLAIM_DELAY, 'the liquidator claiming a persona\'s vault (and releasing it, U-23)')
         closing = self.node(0).yed_gettxinfo(row['closingTxid'])
         check(closing['path'] == 'claim', 'the closing transaction is a %s, not a claim' % closing['path'])
         check(closing['claimPath'] in ('a', 'b'), 'claimPath %r' % closing['claimPath'])

@@ -66,7 +66,7 @@ V: `ownerheight`, `appheight`; I: `recipienthash`, `vaulthash`, `matureheight`, 
 
 ### `vault_decodescript "hex"`
 Decodes a V or I scriptPubKey (`type` `vault` / `intent` with its fields), a `YV` act OP_RETURN
-(`type` `act`, the decoded body, `payload`, `signatures`; or `error` with the decode reason), a
+(`type` `act`, the act's own type as `acttype`, the decoded body, `payload`, `signatures`; or `error` with the decode reason), a
 bond redeem script (`type` `bond`, `locktime`, `memberkey`, its P2SH `scriptpubkey` and
 `address`), `malformed` (a template skeleton with a non-minimal push or out-of-range field), or
 `none`.

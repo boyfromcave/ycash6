@@ -89,7 +89,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
             assert_equal(set(p) >= {'txid', 'vout', 'status', 'ownerPubKey', 'ownerKeyId', 'ownerAddress', 'termClass',
                                     'lockHeight', 'claimHeight', 'collateralZat', 'collateral', 'mintedCents', 'mintHeight',
                                     'refHeight', 'feePaidZat', 'closeHeight', 'closingTxid', 'burnedCents', 'unbacked',
-                                    'claimable', 'underwaterAt', 'voidReason', 'canRedeem', 'canClaim', 'canSweep'}, True)
+                                    'claimable', 'underwaterAt', 'voidReason', 'scriptPubKey', 'canRedeem', 'canClaim'}, True)
         locked = restored.yed_lockcoins()
         assert_equal(len(locked), len(coins0))
         assert_equal(sorted((l['txid'], l['vout']) for l in locked), sorted((c[0], c[1]) for c in coins0))
@@ -120,13 +120,13 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal([c['locked'] for c in user.yed_listunspent()], [True] * len(user.yed_listunspent()))
 
         print('encrypted wallet (experimental, -developerencryptwallet): locked refuses to sign, unlocked mints')
-        self.restart(0, ['-developerencryptwallet'])
+        self.restart(0, ['-experimentalfeatures', '-developerencryptwallet'])
         user = nodes[0]
         user.encryptwallet('pass')
         # encryptwallet shuts the node down by itself; wait for the process, then restart it.
         bitcoind_processes[0].wait()
         del bitcoind_processes[0]
-        nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, ['-developerencryptwallet']))
+        nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, ['-experimentalfeatures', '-developerencryptwallet']))
         user = nodes[0]
         self.reconnect(0)
         self.sync_all(blocks_only=True)
@@ -151,7 +151,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         pend = user.yed_mint(10000, 48, '', bundle, False)                 # wait=false: the carrier is broadcast, the mint pending
         assert_equal(pend['pending'], True)
         self.sync_all()
-        self.restart(0, ['-developerencryptwallet', '-exportdir=' + self.options.tmpdir])   # the pending completion lived in memory
+        self.restart(0, ['-experimentalfeatures', '-developerencryptwallet', '-exportdir=' + self.options.tmpdir])   # the pending completion lived in memory
         user = nodes[0]
         self.sync_all()
         self.mine(POOLS[0])                                                # the carrier confirms; nobody completes the mint

@@ -390,7 +390,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(p['pSlow'], 50 * USD)
         assert_equal(user.yed_listclaimable(), [])
         assert_equal(user.yed_gettag(str(user.getblockcount()))['found'], True)
-        assert_equal(user.yed_getactivation()['enforcementSuspended'], False)
+        assert_equal(user.yed_getactivation()['status'], 'active')
         print('  34 % forged, pools at 33 %: a quote-tag majority moves pSlow and pClaim, and the mint gate reflects it')
         self.mixed_window(21, 22, 21, 100 * USD, key20)
         p = self.price()

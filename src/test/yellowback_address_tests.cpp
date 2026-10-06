@@ -12,6 +12,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+/** The YED attestor set the regtest parameters of these cases name (U-22). */
+static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
 using namespace yellowback;
 
 BOOST_FIXTURE_TEST_SUITE(yellowback_address_tests, BasicTestingSetup)
@@ -20,7 +23,7 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
 {
     const Params& main = MainParams();
     const Params& test = TestParams();
-    Params regtest = RegtestParams(1, 0, 0, 0);
+    Params regtest = RegtestParams(1, 0, 0, TestSet());
 
     std::vector<CKeyID> ids;
     ids.push_back(CKeyID(uint160()));

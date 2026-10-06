@@ -311,9 +311,32 @@ class Liquidator(Persona):
     def setup(self):
         self.sim.liquidator_address = self.address
         self.noticed = {}         # vault txid -> height of the last notice attempt
+        self.claims = {}          # vault txid -> the claim's txid, until its claimant intent is released
         self.inventory_tried = False
 
+    def release_matured(self, tip):
+        """The vault upgrade (U-23): a claim leaves the vault CLAIMING; vault_release pays the
+        claimant intent once the next block reaches its releaseHeight (CLAIM_DELAY), and the vault
+        is then CLAIMED."""
+        for vault, claim_txid in list(self.claims.items()):
+            try:
+                row = self.rpc.yed_getvault(vault)
+            except Exception as error:
+                self.tally.refused(self.name, "getvault", error)
+                continue
+            if row.get("status") != "CLAIMING":
+                del self.claims[vault]
+                continue
+            for intent in row.get("intents") or []:
+                if intent.get("role") != "claimant" or intent.get("txid") != claim_txid or tip + 1 < intent["releaseHeight"]:
+                    continue
+                released = self.call("release", "vault_release", "%s:%d" % (intent["txid"], intent["vout"]))
+                if released:
+                    self.log("%-12s RELEASED claim %s of vault %s" % (self.name, claim_txid[:16], vault[:16]))
+                    del self.claims[vault]
+
     def act(self, tip):
+        self.release_matured(tip)
         if not self.inventory_tried:
             self.inventory_tried = True
             result = self.mint(self.inventory_cents, CLASS_C[1])      # the longest lock: inventory, not a bet
@@ -342,6 +365,8 @@ class Liquidator(Persona):
                 continue
             result = self.call("claim", "yed_claim", vault, "", "", True)
             if result:
+                if result.get("txid"):
+                    self.claims[vault] = result["txid"]
                 self.log("%-12s CLAIMED vault %s by clause (%s): burned %s YED, collateral out %s zat"
                          % (self.name, vault[:16], result.get("claimPath"), Decimal(result.get("burnedCents", 0)) / 100, result.get("collateralOut")))
         # the emergency path: a notice on any foreign vault under the emergency ratio
