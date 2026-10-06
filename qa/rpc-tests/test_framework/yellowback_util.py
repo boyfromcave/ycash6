@@ -286,8 +286,12 @@ def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=
     return args
 
 
+# P4-b: the set is the attestor registry: its livenessWindow is the attestors' member dormancy (an attestor that
+# sends no SET_HEARTBEAT for that many blocks is DORMANT), so the suites, whose attestors never heartbeat unless a
+# case says so, use a window far beyond any run; a suite that tests the set's dormancy creates its own.
+ATTESTOR_SET_LIVENESS = 100000
 ATTESTOR_SET_SPEC = {'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                     'open': True, 'maturity': 1}
+                     'open': True, 'maturity': 1, 'livenesswindow': ATTESTOR_SET_LIVENESS}
 
 
 def start_nodes_with_attestor_set(num, tmpdir, args_fn, edges):

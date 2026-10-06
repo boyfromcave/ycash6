@@ -16,9 +16,14 @@ attestors move 6 % across two bundles: pinnedKeys fills, E(R) shrinks, xMint fol
 unpinned pool), pin_test_not_armed_without_bundles, the RED-5 residual through a notice,
 EMERGENCY_PERSIST blocks and an emergency claim whose residual lands in the owner's balance,
 not1_reset_attack_fails, a claim with a bundle by clause (a), equivocation => EJECTED on every
-node, dormancy => DORMANT then revive_raw => ELIGIBLE, the bond spend => WITHDRAWN while the
-ejected one stays EJECTED, and assert_model_matches(full=True) at the end; checkpoint() after
-every block.
+node, dormancy => DORMANT then a SET_HEARTBEAT => ELIGIBLE, the bond spend => WITHDRAWN while the
+ejected one's frozen bond cannot be spent, and assert_model_matches(full=True) at the end;
+checkpoint() after every block.
+
+P4-b: the registrations are SET_JOINs to the attestor set (a v3 ATTESTOR_REGISTER and
+ATTESTOR_REVIVE are refused, bad-yellowback-attestor-*-retired), the member key is the hot key and
+the bond key, the revival is a SET_HEARTBEAT, and EQV-1 freezes the ejected member's bond in the
+set (the primitive refuses its spend: bad-vault-bond-frozen).
 
 Every pool alternates its quote between P and P + $0.01 (``step``): PIN-1 pins a pool that quotes
 one price across the window whenever the attestors' bundles move, which is the design (proposal
@@ -33,23 +38,24 @@ from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import (
     ATTESTOR_WIFS,
-    BOND_WIFS,
     attestor_keys,
     bond_keys,
     bond_secret_for,
     build_bundle,
     build_carrier_tx,
+    build_legacy_register_tx,
     build_mint_tx_v3,
     build_register_tx,
     decode_bundle,
     encode_bundle,
     equivocation_raw,
     feed_all,
+    heartbeat_raw,
     hot_secret_for,
+    legacy_revive_raw,
     outpoint_selector,
     parse_attestation,
     post_notice_raw,
-    revive_raw,
     select_attestors,
     selection_pool,
     send_and_lock,
@@ -359,20 +365,22 @@ class YellowbackAttestTest(YellowbackTestFramework):
         hot, bond = attestor_keys(N_ATTESTORS), bond_keys(N_ATTESTORS)
         for i in range(N_ATTESTORS):
             wallet = nodes[ATTESTOR_A] if i < 3 else nodes[ATTESTOR_B]
-            wallet.importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)
-            wallet.importprivkey(BOND_WIFS[i], 'yellowback-bond', False)
+            wallet.importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)      # the member key: hot key and bond key (P4-b)
+        print('P4-b: a v3 ATTESTOR_REGISTER is refused')
+        rpc_error('attestor-register-retired', user.sendrawtransaction, build_legacy_register_tx(nodes[ATTESTOR_A], hot[0][1]))
         reg_heights = {}
+        join_txids = []
         for block, members in enumerate(([0, 1], [2], [3, 4])):
             for i in members:
                 funder = nodes[ATTESTOR_A] if i < 3 else nodes[ATTESTOR_B]
                 hex_, _lt = build_register_tx(funder, hot[i][1], bond[i][1])
-                txid = send_and_lock(funder, hex_)
-                dec = user.yed_decodepayload(hex_)
-                assert_equal((dec['type'], dec['register']['attestorPubKey']), ('register', hot[i][1]))
+                join_txids.append(send_and_lock(funder, hex_))
             self.sync_all()
             self.step(POOLS[block], 1, 'registration')
             for i in members:
                 reg_heights[i] = user.getblockcount()
+        for txid in join_txids:
+            assert_equal(user.yed_gettxinfo(txid)['type'], 'register')
         recs = self.attestors()
         assert_equal(sorted(recs), [0, 1, 2, 3, 4])
         by_pub = {pk: i for i, (_s, pk) in enumerate(hot)}
@@ -735,33 +743,39 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 1)   # SNAP seats before the dormancy pass (v3 §3.8 order)
         self.pools_step(1, 'after the dormancy check')
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 2)   # it leaves the seats at the next SNAP
-        print('revive_raw => ELIGIBLE')
+        print('P4-b: ATTESTOR_REVIVE is refused; a SET_HEARTBEAT => ELIGIBLE')
         cited = user.getblockcount() - REF_LAG
         att = sign_attestation(hot_secret_for(user, dormant), dormant, usd_to_micro(PRICE), cited, user.getblockhash(cited))
-        rev_txid = user.sendrawtransaction(revive_raw(user, att))
+        rpc_error('attestor-revive-retired', user.sendrawtransaction, legacy_revive_raw(user, att))
+        rev_txid = user.sendrawtransaction(heartbeat_raw(user, hot_secret_for(user, dormant)))
         self.sync_all()
         self.step(POOLS[1], 1, 'revive')
         self.assert_status_everywhere(dormant, 'ELIGIBLE')
-        assert_equal(user.yed_gettxinfo(rev_txid)['type'], 'revive')
+        assert_equal(user.yed_gettxinfo(rev_txid)['type'], 'set_act')
+        assert_equal(self.attestors()[dormant]['lastAct'], user.getblockcount())
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 1)
 
         # ---------------------------------------------------------------- bond withdrawal
-        print('bond spends after the locktime: WITHDRAWN, and the ejected one stays EJECTED')
+        print('bond spends after the locktime: WITHDRAWN; the ejected one\'s bond is frozen (P4-b) and stays EJECTED')
         recs = self.attestors()
         w_seq, e_seq = seq_of[0], eqv_seq
         locktime = max(int(recs[w_seq]['bondLocktime']), int(recs[e_seq]['bondLocktime']))
         while user.getblockcount() < locktime:
             self.pools_step(1, 'to the bond locktime')
         wallet = nodes[ATTESTOR_A]
-        for seq, expect in ((w_seq, 'WITHDRAWN'), (e_seq, 'EJECTED')):
-            rec = recs[seq]
-            hex_ = withdraw_bond_raw(wallet, rec, bond_secret_for(rec))
-            txid = wallet.sendrawtransaction(hex_)
-            self.sync_all()
-            self.step(POOLS[2], 1, 'bond spend')
-            assert_equal(user.getrawtransaction(txid, 1)['confirmations'], 1)
-            self.assert_status_everywhere(seq, expect)
-            assert_equal(self.attestors()[seq]['bondSpentHeight'], user.getblockcount())
+        assert recs[e_seq]['bondFrozen'] and not recs[w_seq]['bondFrozen']
+        members = user.set_getinfo(user.yed_getinfo()['upgrade']['attestorSetId'])['memberlist']
+        frozen = [m for m in members if m['key'] == recs[e_seq]['attestorPubKey']]
+        assert_equal((frozen[0]['status'], frozen[0]['bondfrozen']), ('ejected', True))
+        rpc_error('bad-vault-bond-frozen', wallet.sendrawtransaction, withdraw_bond_raw(wallet, recs[e_seq], bond_secret_for(recs[e_seq])))
+        rec = recs[w_seq]
+        txid = wallet.sendrawtransaction(withdraw_bond_raw(wallet, rec, bond_secret_for(rec)))
+        self.sync_all()
+        self.step(POOLS[2], 1, 'bond spend')
+        assert_equal(user.getrawtransaction(txid, 1)['confirmations'], 1)
+        self.assert_status_everywhere(w_seq, 'WITHDRAWN')
+        self.assert_status_everywhere(e_seq, 'EJECTED')
+        assert_equal(self.attestors()[w_seq]['bondSpentHeight'], user.getblockcount())
         rpc_error('attest-not-eligible', user.yed_addattestation, bytes_to_hex_str(
             sign_attestation(hot_secret_for(user, w_seq), w_seq, usd_to_micro(PRICE), user.getblockcount() - REF_LAG,
                              user.getblockhash(user.getblockcount() - REF_LAG))))

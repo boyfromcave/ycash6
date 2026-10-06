@@ -1472,9 +1472,11 @@ class Totals(object):
 
 
 class AttestorRecord(object):
-    """Attestors[seq] (v3 plan section 3.6, REG-A1)."""
+    """Attestors[seq] (v3 plan section 3.6).  Since P4-b the mirror of one SET_JOIN to the attestor set:
+    attestor_pubkey = bond_pubkey = the member key, last_act / bond_frozen the set's."""
     __slots__ = ('attestor_pubkey', 'bond_pubkey', 'bond_outpoint', 'bond_zat', 'bond_locktime', 'flags',
-                 'register_height', 'status', 'status_height', 'bond_spent_height', 'seated_since')
+                 'register_height', 'status', 'status_height', 'bond_spent_height', 'seated_since',
+                 'last_act', 'bond_frozen')
 
     def __init__(self):
         self.attestor_pubkey = b''
@@ -1488,6 +1490,8 @@ class AttestorRecord(object):
         self.status_height = 0
         self.bond_spent_height = 0
         self.seated_since = 0
+        self.last_act = 0
+        self.bond_frozen = False
 
     def as_dict(self, seq):
         return {'seq': seq, 'attestorPubKey': self.attestor_pubkey.hex(), 'bondPubKey': self.bond_pubkey.hex(),
@@ -1495,7 +1499,19 @@ class AttestorRecord(object):
                 'bondZat': self.bond_zat, 'bondLocktime': self.bond_locktime, 'flags': self.flags,
                 'registerHeight': self.register_height, 'status': ATTESTOR_STATUS_NAMES[self.status],
                 'statusHeight': self.status_height,
-                'bondSpentHeight': self.bond_spent_height or None, 'seatedSince': self.seated_since or None}
+                'bondSpentHeight': self.bond_spent_height or None, 'seatedSince': self.seated_since or None,
+                'lastAct': self.last_act, 'bondFrozen': self.bond_frozen}
+
+
+class AttestorSetRecord(object):
+    """AttestorSet (P4-b): the attestor set's SET_CREATE parameters the module reads."""
+    __slots__ = ('create_height', 'seats', 'maturity', 'liveness_window')
+
+    def __init__(self, create_height, seats, maturity, liveness_window):
+        self.create_height = create_height
+        self.seats = seats
+        self.maturity = maturity
+        self.liveness_window = liveness_window
 
 
 class AttestState(object):
@@ -1690,7 +1706,8 @@ def _ser_snapshot(s):
 def _ser_attestor(a):
     return (_bytes(a.attestor_pubkey) + _bytes(a.bond_pubkey) + _hash(a.bond_outpoint[0]) + _u32(a.bond_outpoint[1])
             + _i64(a.bond_zat) + _u32(a.bond_locktime) + _u8(a.flags) + _i32(a.register_height) + _u8(a.status)
-            + _i32(a.status_height) + _i32(a.bond_spent_height) + _i32(a.seated_since))
+            + _i32(a.status_height) + _i32(a.bond_spent_height) + _i32(a.seated_since)
+            + _i32(a.last_act) + _bool(a.bond_frozen))
 
 
 def _ser_bundle_log(b):
@@ -1732,7 +1749,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 6        # the vault upgrade (view.h)
+    SCHEMA_VERSION = 7        # P4-b: the attestor registry on the primitive set (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -1755,6 +1772,7 @@ class YellowbackModel(object):
         self.attest = AttestState()
         self.bundle_log = {}      # height -> BundleLogRecord
         self.notices = {}         # (txid, n) -> NoticeRecord
+        self.attestor_set_rec = None   # P4-b: AttestorSetRecord once the set's SET_CREATE is seen
         self._bundle_acc = None   # the BundleLog[H] accumulator of the block being fed (R12)
         # issuedZat is carried from the previous snapshot; the virtual snapshot below START_HEIGHT
         # carries ``issued_before_start`` (default 0 = the sum over [START_HEIGHT, H]; see SERIALISATION.md)
@@ -1860,10 +1878,13 @@ class YellowbackModel(object):
         return rec.bond_zat * clamp(height - self.age_origin(rec, attest), 0, self.params.age_cap)
 
     def seated(self, height, attest=None):
-        """The N_SLOTS ELIGIBLE seq of greatest weight(seq, H), ties by seq; ascending."""
+        """The min(N_SLOTS, seats) ELIGIBLE seq of greatest weight(seq, H), ties by seq; ascending (P4-b: the set's
+        seats bound N_SLOTS)."""
         attest = self.attest if attest is None else attest
         ranked = sorted(((-self.weight(r, attest, height), seq) for seq, r in self.attestors.items() if r.status == A_ELIGIBLE))
-        return sorted(seq for _w, seq in ranked[:self.params.n_slots])
+        z = self.attestor_set_rec
+        slots = min(max(0, self.params.n_slots), z.seats if z is not None else 0)
+        return sorted(seq for _w, seq in ranked[:slots])
 
     def selected(self, ref_height, selector):
         """selected(R, selector) (W9) over the stored seated minus pinnedSeqs of Snapshots[R]."""
@@ -2050,7 +2071,7 @@ class YellowbackModel(object):
         return self.feed_block(int(block['height']), block['hash'], cb, subsidy_zat, txs[1:], [o.script for o in txs[0].vout])
 
     _STATE_FIELDS = ('tags', 'judgements', 'vaults', 'intents', 'tokens', 'txlog', 'totals', 'snapshots', 'blocks',
-                     'attestors', 'bond_index', 'attestor_seq', 'attest', 'bundle_log', 'notices')
+                     'attestors', 'bond_index', 'attestor_seq', 'attest', 'bundle_log', 'notices', 'attestor_set_rec')
 
     def feed_block(self, height, block_hash, coinbase_scriptsig_hex, subsidy_zat, txs, coinbase_vout_scripts=()):
         """Apply one block.  ``txs`` are the non-coinbase transactions as getblock-2 dicts or Tx
@@ -2126,8 +2147,26 @@ class YellowbackModel(object):
         s.tagged = tag is not None
         s.quote = tag is not None and tag.is_quote
         # ---- v3 (section 3.8 SNAP): maturity, ARM-1/2, PIN-1/2, seating; dormancy after the halts
-        for r in self.attestors.values():                                      # maturity
-            if r.status == A_PENDING and height >= r.register_height + p.bond_maturity:
+        # maturity and the set's member dormancy (P4-b): PENDING -> ELIGIBLE at registerHeight + max(set maturity,
+        # BOND_MATURITY) over the module's bond floor and for a key never slashed; ELIGIBLE -> DORMANT when lastAct <
+        # H - livenessWindow; DORMANT -> ELIGIBLE after a heartbeat that follows the dormancy
+        z = self.attestor_set_rec
+        slashed = set(r.attestor_pubkey for r in self.attestors.values() if r.bond_frozen)
+        for seq in sorted(self.attestors):
+            r = self.attestors[seq]
+            if z is None:
+                continue
+            mature_at = r.register_height + max(z.maturity, p.bond_maturity)
+            floor_ok = (r.bond_zat >= p.bond_min and r.bond_locktime >= r.register_height + p.bond_min_lock
+                        and r.attestor_pubkey not in slashed)
+            live = r.last_act >= height - z.liveness_window
+            if r.status == A_PENDING and floor_ok and height >= mature_at:
+                r.status = A_ELIGIBLE
+                r.status_height = height
+            if r.status == A_ELIGIBLE and not live:
+                r.status = A_DORMANT
+                r.status_height = height
+            elif r.status == A_DORMANT and live and r.last_act > r.status_height:
                 r.status = A_ELIGIBLE
                 r.status_height = height
         eligible_count = sum(1 for r in self.attestors.values() if r.status == A_ELIGIBLE)
@@ -2240,6 +2279,9 @@ class YellowbackModel(object):
                 a.status_height = height
             a.bond_spent_height = height
             bond_spent = True
+        # P4-b: the attestor set's acts on the Attestors mirror (after the bond spends, as the primitive orders them)
+        set_act = self._apply_set_act(tx, height, rec)
+        set_act_type = rec.type
         active_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_ACTIVE]
         void_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_VOID]
         intent_spent = []
@@ -2250,7 +2292,7 @@ class YellowbackModel(object):
         payload, opret = tx_payload(scripts)
 
         yed_outputs = set()            # the YED-tagged template outputs a rule below created (U-23)
-        touched = bool(rec.spent_tokens) or bool(active_spent) or bool(void_spent) or bond_spent or bool(intent_spent)
+        touched = bool(rec.spent_tokens) or bool(active_spent) or bool(void_spent) or bond_spent or bool(intent_spent) or set_act
         if intent_spent:
             if len(intent_spent) != 1 or active_spent:
                 return self._fail(rec, 'intent-spend-malformed')
@@ -2281,17 +2323,17 @@ class YellowbackModel(object):
             if payload is not None:
                 rec.type = TXLOG_TYPE_NAMES[payload.type]
                 if payload.type == PAYLOAD_ATTESTOR_REGISTER:
-                    held = self._apply_register(tx, height, rec, payload)
+                    return self._fail(rec, 'attestor-register-retired')          # P4-b: join the set (SET_JOIN)
                 elif payload.type == PAYLOAD_CLAIM_NOTICE:
                     held = self._apply_notice(tx, height, rec, payload)
                 elif payload.type == PAYLOAD_EQUIVOCATION:
                     held = self._apply_equivocation(tx, height, rec)
                 elif payload.type == PAYLOAD_ATTESTOR_REVIVE:
-                    held = self._apply_revive(tx, height, rec, payload)
+                    return self._fail(rec, 'attestor-revive-retired')            # P4-b: SET_HEARTBEAT
             if held:
                 touched = True
             else:
-                rec.type = 'NONE'
+                rec.type = set_act_type if set_act else 'NONE'
                 if yed_in > 0:
                     rec.verdict = VERDICT_BURNED
 
@@ -2383,41 +2425,94 @@ class YellowbackModel(object):
         from . import yellowback_attest as ya
         return ya.verify_attestation(pubkey33, att, block_hash)
 
-    def _apply_register(self, tx, height, rec, pl):
-        """REG-A1 (proposal section 5.2; bondOutpoint = txid:0)."""
-        from . import yellowback_attest as ya
+    def _latest_record(self, key33):
+        """(seq, record) of the key's newest Attestors record (the set's current member record), or (None, None)."""
+        found = (None, None)
+        for seq in sorted(self.attestors):
+            if self.attestors[seq].attestor_pubkey == key33:
+                found = (seq, self.attestors[seq])
+        return found
+
+    def _eject_record(self, height, r, freeze):
+        if r.status != A_EJECTED:
+            r.status = A_EJECTED
+            r.status_height = height
+        if freeze:
+            r.bond_frozen = True
+
+    def _apply_set_act(self, tx, height, rec):
+        """P4-b: the attestor set's acts on the mirror (state.h, "the attestor registry is the vault primitive's
+        set").  The primitive has validated the act; an act that does not parse is ignored here."""
+        from . import vault as va
         p = self.params
-        if not (is_valid_compressed_pubkey(pl.attestor_pubkey) and is_valid_compressed_pubkey(pl.bond_pubkey)):
+        if not p.attestor_set:
             return False
-        if not tx.vout:
+        spk = None
+        for o in tx.vout:
+            if va.is_act_script(o.script):
+                spk = o.script
+                break
+        if spk is None:
             return False
-        if not (height + p.bond_min_lock <= pl.bond_locktime < LOCKTIME_THRESHOLD):
+        try:
+            _payload, act, _sigs = va.parse_act_script(spk)
+        except va.VaultError:
             return False
-        if tx.vout[0].script != p2sh_script(ya.bond_script(pl.bond_pubkey, pl.bond_locktime)):
-            return False
-        if tx.vout[0].value < p.bond_min:
-            return False
-        for a in self.attestors.values():
-            if a.attestor_pubkey == pl.attestor_pubkey and a.status != A_WITHDRAWN:
+        t = act['type']
+        if t == va.ACT_SET_CREATE:
+            if tx.txid != p.attestor_set or self.attestor_set_rec is not None:
                 return False
-        seq = self.attestor_seq
-        if seq in self.attestors:
+            self.attestor_set_rec = AttestorSetRecord(height, act['seats'], act['maturity'], act['livenessWindow'])
+            rec.type = 'ATTESTOR_SET_ACT'
+            rec.attestor_seq = 0          # the C++ TxLog's attestorSeq default (yed_gettxinfo shows seq 0)
+            return True
+        if bytes.fromhex(act.get('setId', '')) != p.attestor_set_internal or self.attestor_set_rec is None:
             return False
-        a = AttestorRecord()
-        a.attestor_pubkey = pl.attestor_pubkey
-        a.bond_pubkey = pl.bond_pubkey
-        a.bond_outpoint = (tx.txid, 0)
-        a.bond_zat = tx.vout[0].value
-        a.bond_locktime = pl.bond_locktime
-        a.flags = pl.flags
-        a.register_height = height
-        a.status = A_PENDING
-        a.status_height = height
-        self.attestors[seq] = a
-        self.bond_index[(tx.txid, 0)] = seq
-        self.attestor_seq = (seq + 1) & 0xFFFF
-        rec.attestor_seq = seq
-        return True
+        z = self.attestor_set_rec
+        if t == va.ACT_SET_JOIN:
+            vout = act['bondVout']
+            if vout >= len(tx.vout):
+                return False
+            seq = self.attestor_seq
+            if seq in self.attestors:
+                return False
+            a = AttestorRecord()
+            a.attestor_pubkey = bytes.fromhex(act['memberKey'])
+            a.bond_pubkey = a.attestor_pubkey
+            a.bond_outpoint = (tx.txid, vout)
+            a.bond_zat = tx.vout[vout].value
+            a.bond_locktime = act['bondLocktime']
+            a.flags = 0
+            a.register_height = height
+            a.status = A_PENDING
+            a.status_height = height
+            a.last_act = min(height + z.maturity, 0x7FFFFFFF)
+            self.attestors[seq] = a
+            self.bond_index[a.bond_outpoint] = seq
+            self.attestor_seq = (seq + 1) & 0xFFFF
+            rec.type = 'ATTESTOR_REGISTER'
+            rec.attestor_seq = seq
+            return True
+        if t in (va.ACT_SET_HEARTBEAT, va.ACT_SET_REMOVE, va.ACT_SET_EQUIVOCATION):
+            if t == va.ACT_SET_EQUIVOCATION:
+                key = va.recover_compact(bytes.fromhex(act['sigA']),
+                                         va.set_sig_msg_raw(bytes.fromhex(act['setId']), act['roleA'], bytes.fromhex(act['prevout']),
+                                                            bytes.fromhex(act['sighashA'])))
+                if key is None:
+                    return False
+            else:
+                key = bytes.fromhex(act['memberKey'])
+            seq, r = self._latest_record(key)
+            if r is None:
+                return False
+            if t == va.ACT_SET_HEARTBEAT:
+                r.last_act = height
+            else:
+                self._eject_record(height, r, t == va.ACT_SET_EQUIVOCATION or act['burn'] == 1)
+            rec.type = 'ATTESTOR_SET_ACT'
+            rec.attestor_seq = seq
+            return True
+        return False
 
     def _apply_notice(self, tx, height, rec, pl):
         """NOT-1."""
@@ -2450,57 +2545,54 @@ class YellowbackModel(object):
         rec.notice = True
         return True
 
-    def _apply_equivocation(self, tx, height, rec):
-        """EQV-1."""
+    def equivocation_evidence(self, tx):
+        """EQV-1's evidence (structure only, state.h EquivocationEvidence): the two attestations of the carrier
+        bundle when they share a seq and a citedHeight >= START_HEIGHT with different prices, else None."""
         from . import yellowback_attest as ya
         p = self.params
         if p.bundle_carrier == CARRIER_OP_RETURN:
-            return False
+            return None
         found, _why = self._find_carrier(tx, False)
         if found is None:
-            return False
+            return None
         _i, pushes = found
         _pk, h = ya.parse_carrier_script(pushes[2])
         if sha256(pushes[0]) != h:
-            return False
+            return None
         atts = ya.decode_bundle(pushes[0])
         if atts is None or len(atts) != 2:
-            return False
+            return None
         a, b = ya.parse_attestation(atts[0]), ya.parse_attestation(atts[1])
-        if a[0] != b[0] or a[2] != b[2] or a[1] == b[1]:
-            return False
-        r = self.attestors.get(a[0])
-        if r is None or r.status in (A_WITHDRAWN, A_EJECTED):
-            return False
-        bh = self.block_hash_at(a[2])
-        if bh is None or a[2] < p.start_height:
-            return False
-        if not (self._attestation_valid(atts[0], r.attestor_pubkey, bh) and self._attestation_valid(atts[1], r.attestor_pubkey, bh)):
-            return False
-        r.status = A_EJECTED
-        r.status_height = height
-        rec.attestor_seq = a[0]
-        rec.bundle_seqs = [a[0]]
-        return True
+        if a[0] != b[0] or a[2] != b[2] or a[1] == b[1] or a[2] < p.start_height:
+            return None
+        return atts, a[2]
 
-    def _apply_revive(self, tx, height, rec, pl):
-        """REV-1."""
-        p = self.params
-        r = self.attestors.get(pl.seq)
-        if r is None or r.status != A_DORMANT:
+    def _apply_equivocation(self, tx, height, rec):
+        """EQV-1 (P4-b): the first record in seq order that is its key's newest, with an unspent, unfrozen bond, under
+        which both attestations verify over blockHash(citedHeight) is EJECTED and its bond frozen."""
+        e = self.equivocation_evidence(tx)
+        if e is None:
             return False
-        if not (height - p.attest_max_age < pl.cited_height <= height - 1):
+        atts, cited = e
+        if cited >= height:
             return False
-        bh = self.block_hash_at(pl.cited_height)
+        bh = self.block_hash_at(cited)
         if bh is None:
             return False
-        att = struct.pack('<HII', pl.seq, pl.price_micro_usd, pl.cited_height) + pl.sig
-        if not self._attestation_valid(att, r.attestor_pubkey, bh):
-            return False
-        r.status = A_ELIGIBLE
-        r.status_height = height
-        rec.attestor_seq = pl.seq
-        return True
+        newest = {}
+        for seq in sorted(self.attestors):
+            newest[self.attestors[seq].attestor_pubkey] = seq
+        for seq in sorted(self.attestors):
+            r = self.attestors[seq]
+            if r.bond_spent_height or r.bond_frozen or newest[r.attestor_pubkey] != seq:
+                continue
+            if not (self._attestation_valid(atts[0], r.attestor_pubkey, bh) and self._attestation_valid(atts[1], r.attestor_pubkey, bh)):
+                continue
+            self._eject_record(height, r, True)
+            rec.attestor_seq = seq
+            rec.bundle_seqs = [struct.unpack('<H', atts[0][:2])[0]]
+            return True
+        return False
 
     def _apply_mint(self, tx, height, rec, pl, opret):
         """MINT-1..10.  Returns True when the mint holds (an ACTIVE vault); False makes the transaction invalid."""
@@ -2878,6 +2970,10 @@ class YellowbackModel(object):
         # the vault upgrade: Intents by outpoint (U-23)
         for op in sorted(self.intents, key=_outpoint_sort_key):
             out += _outpoint_key(b'I', op) + _ser_intent(self.intents[op])
+        # P4-b: the AttestorSet record
+        z = self.attestor_set_rec
+        if z is not None:
+            out += b'Z' + _i32(z.create_height) + _u8(z.seats) + _u32(z.maturity) + _u32(z.liveness_window)
         return bytes(out)
 
     def state_hash(self):
@@ -3008,7 +3104,8 @@ def compare_history(model, node):
 
 
 # The contract's type strings for the model's v3 TxLog types (doc/yellowback-rpc.md, Conventions).
-_RPC_TYPE = {'ATTESTOR_REGISTER': 'register', 'CLAIM_NOTICE': 'notice', 'EQUIVOCATION': 'equivocation', 'ATTESTOR_REVIVE': 'revive'}
+_RPC_TYPE = {'ATTESTOR_REGISTER': 'register', 'CLAIM_NOTICE': 'notice', 'EQUIVOCATION': 'equivocation', 'ATTESTOR_REVIVE': 'revive',
+             'ATTESTOR_SET_ACT': 'set_act'}
 
 
 def compare_txinfo(model, node):
@@ -3042,7 +3139,7 @@ def compare_txinfo(model, node):
         _check(int(info.get('residualZat', 0)) == rec.residual_zat, 'yed_gettxinfo.residualZat', rec.height, '%s model=%r rpc=%r' % (txid, rec.residual_zat, info.get('residualZat')))
         _check((info.get('claimPath') or '') == rec.claim_path, 'yed_gettxinfo.claimPath', rec.height, txid)
         _check(bool(info.get('notice', False)) == rec.notice, 'yed_gettxinfo.notice', rec.height, txid)
-        if _RPC_TYPE.get(str(rec.type), str(rec.type)) == 'register':
+        if _RPC_TYPE.get(str(rec.type), str(rec.type)) in ('register', 'set_act'):
             _check(int(info.get('seq', -1)) == rec.attestor_seq, 'yed_gettxinfo.seq', rec.height, txid)
 
 
@@ -3066,6 +3163,8 @@ def compare_attestors(model, node):
         _check(int(flags['tier']) == (rec.flags & 3) and bool(flags['pool']) == bool(rec.flags & 4), 'attestor.flags', extra=str(seq))
         _check((r.get('bondSpentHeight') or 0) == rec.bond_spent_height, 'attestor.bondSpentHeight', extra=str(seq))
         _check((r.get('seatedSince') or 0) == rec.seated_since, 'attestor.seatedSince', extra='%d model=%r rpc=%r' % (seq, rec.seated_since, r.get('seatedSince')))
+        _check(int(r.get('lastAct', -1)) == rec.last_act, 'attestor.lastAct', extra='%d model=%r rpc=%r' % (seq, rec.last_act, r.get('lastAct')))
+        _check(bool(r.get('bondFrozen')) == rec.bond_frozen, 'attestor.bondFrozen', extra=str(seq))
         if snap is not None:
             _check(bool(r['seated']) == (seq in snap.seated), 'attestor.seated', tip, str(seq))
             _check(bool(r['pinned']) == (seq in snap.pinned_seqs), 'attestor.pinned', tip, str(seq))

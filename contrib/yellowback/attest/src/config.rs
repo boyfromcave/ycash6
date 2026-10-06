@@ -48,6 +48,7 @@ pub struct AttestToml {
     pub fail_polls: Option<u32>,
     pub ref_lag: Option<u32>,
     pub poll_seconds: Option<u64>,
+    pub heartbeat_blocks: Option<u32>,
     #[serde(flatten)]
     pub feed: FeedSettingsToml,
 }
@@ -103,6 +104,9 @@ pub struct AttestConfig {
     pub fail_polls: u32,
     pub ref_lag: u32,
     pub poll_seconds: u64,
+    /// P4-b: send a SET_HEARTBEAT of this attestor's member key every this many blocks (the attestor set's
+    /// member dormancy: no act in its livenessWindow makes the record DORMANT); 0 = never.
+    pub heartbeat_blocks: u32,
     pub feed: FeedSettings,
 }
 
@@ -139,6 +143,8 @@ pub struct Config {
 }
 
 pub const DEFAULT_EVERY_BLOCKS: u32 = 10;
+/// P4-b: one SET_HEARTBEAT a day at 75-second blocks; the attestor set's livenessWindow must exceed it.
+pub const DEFAULT_HEARTBEAT_BLOCKS: u32 = 1152;
 pub const DEFAULT_FAIL_POLLS: u32 = 2;
 pub const DEFAULT_REF_LAG: u32 = 2;
 pub const DEFAULT_POLL_SECONDS: u64 = 15;
@@ -254,6 +260,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         fail_polls: a.fail_polls.unwrap_or(DEFAULT_FAIL_POLLS),
         ref_lag: a.ref_lag.unwrap_or(DEFAULT_REF_LAG),
         poll_seconds: a.poll_seconds.unwrap_or(DEFAULT_POLL_SECONDS),
+        heartbeat_blocks: a.heartbeat_blocks.unwrap_or(DEFAULT_HEARTBEAT_BLOCKS),
         feed: a.feed.resolve().map_err(|e| format!("[attest]: {e}"))?,
     };
     if attest.every_blocks < 1 || attest.fail_polls < 1 || attest.poll_seconds < 1 {

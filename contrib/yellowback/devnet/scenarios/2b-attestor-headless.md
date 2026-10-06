@@ -59,7 +59,7 @@ in. (The devnet's `attestor 8 …` command refuses to touch your seat.)
 
 3. **Stop signing** (Ctrl-C the agent). Watch DORMANT arrive after `DORMANCY_BLOCKS` (16
    blocks ≈ 4 min, once `DORMANCY_MIN_BUNDLES` = 2 bundles have selected you and found nothing),
-   then revive with `yed_revive <seq> <priceMicroUsd>`. **Does anything warn you *before*
+   then revive with `yed_revive <seq> <priceMicroUsd>` (since P4-b a `SET_HEARTBEAT`; your agent also sends one every `heartbeat_blocks`). **Does anything warn you *before*
    dormancy, or only after?**
    - notes:
 

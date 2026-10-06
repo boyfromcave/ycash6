@@ -39,6 +39,16 @@ class Module final : public vault::Module
 public:
     std::optional<std::string> ValidateCreate(const CTransaction& tx, size_t vout, const vault::VaultParams& params, const vault::ModuleContext& ctx) const override;
     std::optional<std::string> ValidateSpend(const CTransaction& tx, size_t vin, const vault::TemplateSpend& spend, const vault::ModuleContext& ctx) const override;
+    /** P4-b (U-25): the attestor set. */
+    std::optional<vault::SetId> GovernedSet() const override;
+    /**
+     * P4-b (U-25): EQV-1 on the primitive side. An EQUIVOCATION transaction whose two attestations (one seq, one
+     * citedHeight in [START_HEIGHT, height), two prices) both verify under a member key of the attestor set, over the
+     * block hash at citedHeight, names that member (the first in key order whose bond is unspent and not frozen), so
+     * the primitive ejects it and freezes its bond in the same block. The module's own EQV-1 (state.cpp) ejects the
+     * same member's Attestors record.
+     */
+    std::vector<CPubKey> Ejections(const CTransaction& tx, const vault::ModuleContext& ctx) const override;
 };
 
 /** The registered instance (vault/module.cpp's table entry). */

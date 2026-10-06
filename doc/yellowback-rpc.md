@@ -62,6 +62,22 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
   (`voidReason` stays `""`), the mempool refuses it with `bad-yellowback-<verdict>` and a block
   carrying it is rejected (DoS 100). `mempool-check-failed:<verdict>` keeps its meaning.
 
+**P4-b: the attestor registry is the attestor set** (upgrade plan §15.10; additions only, so
+`rpcversion` stays 5). An attestor is a member of the vault primitive's set `attestorSetId`: it
+joins with a `SET_JOIN` (`set_join`, or `yed_registerattestor`, which is that join with a fresh
+wallet key), stays live with `SET_HEARTBEAT` (`set_heartbeat`, or `yed_revive`), and its one member
+key is its hot key (it signs prices), its bond key (the set's bond B) and its fee key. Every
+`Attestors` record mirrors one join (a new `seq` per join). `ATTESTOR_REGISTER` and
+`ATTESTOR_REVIVE` payloads are invalid (`bad-yellowback-attestor-register-retired`,
+`-attestor-revive-retired`). `yed_listattestors` rows gain `lastAct` (the set's lastAct for the
+member) and `bondFrozen` (the bond is frozen in the set: `SET_REMOVE` with burn, `SET_EQUIVOCATION`,
+or EQV-1, which now freezes the bond through the module ejection hook, U-25); `yed_gettxinfo.type`
+gains `"set_act"` (a heartbeat, removal or set equivocation of an attestor; `seq` names its record)
+and `"register"` now names a `SET_JOIN` to the set. A record is ELIGIBLE from `registerHeight +
+max(set maturity, BOND_MATURITY)` when its bond meets `BOND_MIN` / `BOND_MIN_LOCK` and its key was
+never slashed; DORMANT when its `lastAct` is older than the set's `livenesswindow` (or by S15, as
+before); ELIGIBLE again after a heartbeat that follows. `seated` holds at most `min(N_SLOTS, seats)`.
+
 ## Conventions
 
 - **Units.** YED in integer **cents** (`100` = $1.00); YEC in **zatoshi** fields (`…Zat`) with a
@@ -755,7 +771,9 @@ due), `claimPath` (`"a"`, `"b"` or `""`), `notice` (`true` when this transaction
 `Notices` record — a CLAIM_NOTICE that NOT-1 accepted), `carrierVin` (the input index of the
 carrier, `-1` when none) and `bundleSource` (`"scriptsig"`, `"opreturn"` or `""`). `type` gains
 `"notice"`, `"register"`, `"equivocation"`, `"revive"`; for `"register"` `seq` (**optional**)
-is the assigned sequence number.
+is the assigned sequence number. **P4-b:** `"register"` is a `SET_JOIN` to the attestor set,
+`"set_act"` (with `seq`) a heartbeat, removal or set equivocation of an attestor; `"revive"` is
+no longer written (`ATTESTOR_REVIVE` is invalid).
 
 **Vault upgrade** (`rpcversion` 5): `reopenedVaults` lists the vaults an attestor-set cancel
 re-created as `ACTIVE` (U-24; the cancel's output 0, empty otherwise); `type` gains
@@ -961,7 +979,10 @@ Result of `yed_estimatecollateral`:
 
 Arguments: `height` (number, optional; default the index tip; `seated`/`pinned`/`weight` are
 evaluated at that height's snapshot, the records are always the current table). Every
-`Attestors` record (v3 §3.6), ascending `seq`. `bondOutpoint` is `txid:0` of the registration;
+`Attestors` record (v3 §3.6), ascending `seq`; since P4-b each mirrors one `SET_JOIN` to the attestor
+set (`attestorPubKey` = `bondPubKey` = the member key; `lastAct` the set's lastAct for it, i.e. the
+join height + maturity or its last `SET_HEARTBEAT`; `bondFrozen` whether the set froze its bond).
+`bondOutpoint` is `txid:bondVout` of the join (vout 0 from `set_join` and `yed_registerattestor`);
 `bondAddress` the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself);
 `bondKeyAddress` the P2PKH address of `bondPubKey` (where attestation fees are paid);
 `bondLocktime` the CLTV height; `flags` the decoded registration flags; `status` one of the five
@@ -993,6 +1014,8 @@ Result of `yed_listattestors`:
     "statusHeight": 288,
     "bondSpentHeight": null,
     "seatedSince": 300,
+    "lastAct": 281,
+    "bondFrozen": false,
     "founding": true,
     "weight": "31000000000",
     "seated": true,
@@ -1689,17 +1712,21 @@ Result of `yed_sweepcarriers`:
 
 Arguments: `bondYec` (number, decimal YEC, `≥ BOND_MIN`), `lockBlocks` (number, `≥
 BOND_MIN_LOCK`; `bondLocktime = tip + 1 + lockBlocks`), `flags` (number, optional, default `0`;
-the raw `u8` of proposal §5.2: bits 0–1 source tier, bit 2 pool operator). The §3.5
-ATTESTOR_REGISTER: `vout[0]` = `P2SH(bondScript(bondPubKey, bondLocktime))` of `bondYec`,
-`vout[1]` = the `0x05` payload, change; `attestorPubKey` (hot) and `bondPubKey` are two fresh
-keypool keys of this wallet (draw two — back up `wallet.dat` afterwards, the rule above). The
-bond is **not** `IsMine` (its script is non-standard to `Solver`, R6): the wallet finds it
-through `Attestors` by `bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in
-the result — it is assigned when the transaction confirms (REG-A1); read it from
-`yed_listattestors` by `attestorPubKey`; `warning` is the keypool-low nag as `yed_mint` (`""`
-when there is none). Refusals: `bond-below-min`, `lock-below-min` (also for
-`bondLocktime ≥ LOCKTIME_THRESHOLD`), `RPC_WALLET_ERROR` for insufficient YEC or a locked
-wallet, `keypool-empty`.
+accepted and ignored since P4-b; it was the raw `u8` of proposal §5.2). **P4-b:** this is
+`set_join <attestorSetId> bondYec (tip + 1 + lockBlocks)` with a fresh wallet key as the member
+key: `vout[0]` = `P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG)` of `bondYec` (the set's bond
+B, the same script as v3's bond script), `vout[1]` = the `SET_JOIN` act signed by the member key,
+change. The member key is `attestorPubKey` and the bond key at once (back up `wallet.dat`
+afterwards). The bond is **not** `IsMine` (R6): the wallet finds it through `Attestors` by
+`bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in the result — it is assigned
+when the join confirms; read it from `yed_listattestors` by `attestorPubKey`; `flags` is always
+`{tier 0, pool false}`; `warning` is `""`; `maturesAt` is `tip + 1 + max(set maturity,
+BOND_MATURITY)`. Refusals: `bond-below-min`, `lock-below-min` (the module's floor; also for
+`bondLocktime ≥ LOCKTIME_THRESHOLD`), `yellowback-no-attestor-set` (the network has none),
+`register-needs-admission` (`RPC_WALLET_ERROR`: the set is not open; the message carries the
+partly signed hex for `set_signact` / `set_sendact`), the `set_join` refusals (insufficient
+confirmed transparent YEC, the set's own `bondmin` / `bondlockmin` / seats as
+`bad-vault-act-*`).
 
 Result of `yed_registerattestor`:
 
@@ -1747,12 +1774,14 @@ Result of `yed_withdrawbond`:
 Arguments: `seq` (number; a DORMANT attestor whose hot key this wallet holds), `priceMicroUsd`
 (number; the price the revival attests — the plan writes `yed_revive` with no arguments, but a
 wallet may hold several attestor keys and the node has no price source of its own, so both are
-explicit here). Builds the §3.5 ATTESTOR_REVIVE: one attestation for `citedHeight = tip −
-REF_LAG` signed through the same guard as `yed_signattestation` (so a revival can never
-equivocate against an earlier signature for that height), payload `0x08`, funded from any
-confirmed YEC, change. REV-1 then sets the record ELIGIBLE with its age preserved. Refusals:
+explicit here). **P4-b:** the revival is a `SET_HEARTBEAT` of the member key to the attestor set
+(`set_heartbeat`; `txid` is that transaction's; `ATTESTOR_REVIVE` is invalid); the record is
+ELIGIBLE again at the SNAP of the heartbeat's block, with its age preserved. The command still
+signs one attestation for `citedHeight = tip − REF_LAG` through the same guard as
+`yed_signattestation` and returns it in `hex` (feed it with `yed_addattestation`). Refusals:
 `attest-unknown-seq`, `not-dormant` (any status but DORMANT), `attest-key-not-held`,
-`attest-range`, `equivocation-guard`, `RPC_WALLET_ERROR` for insufficient YEC.
+`attest-range`, `equivocation-guard`, the `set_heartbeat` refusals (`RPC_WALLET_ERROR` for
+insufficient confirmed YEC).
 
 Result of `yed_revive`:
 
@@ -1769,7 +1798,7 @@ Result of `yed_revive`:
 ### `yed_reportequivocation <attestationHexA> <attestationHexB> [wait]` (v3)
 
 Arguments: two 74-byte attestations in hex, `wait` as `yed_mint`. Before build the wallet checks
-EQV-1's conditions itself: same `seq` (any status but WITHDRAWN or EJECTED), same `citedHeight`
+EQV-1's conditions itself: same `seq` (whose bond is unspent and not frozen, P4-b), same `citedHeight`
 `≥ startHeight` with a block hash in the index, different prices, both signatures valid under
 `attestorPubKey(seq)` over **this chain's** `blockHash(citedHeight)` (two honest attestations
 from two sides of a fork are not an equivocation). Then the carrier step with a bundle that is
@@ -1983,7 +2012,7 @@ provokes each.
 | `bond-locked` | `yed_withdrawbond` | tip `< bondLocktime`: withdraw right after registering |
 | `bond-spent` | `yed_withdrawbond` | the bond outpoint is already spent (`bondSpentHeight` set): withdraw twice |
 | `not-dormant` | `yed_revive` | the record's status is not DORMANT: revive an ELIGIBLE attestor |
-| `not-equivocation` | `yed_reportequivocation` | any EQV-1 condition fails — different `seq`s, different `citedHeight`s, equal prices, a bad signature, an EJECTED/WITHDRAWN `seq`, or a `citedHeight` whose hash is not in the index (two sides of a fork): report the same attestation twice |
+| `not-equivocation` | `yed_reportequivocation` | any EQV-1 condition fails — different `seq`s, different `citedHeight`s, equal prices, a bad signature, a `seq` whose bond is spent or already frozen (P4-b), or a `citedHeight` whose hash is not in the index (two sides of a fork): report the same attestation twice |
 | `attest-key-not-held` | `yed_signattestation`, `yed_revive` (the hot key), `yed_withdrawbond` (the bond key) | the wallet does not hold the key the command needs: sign for a `seq` registered by another node |
 | `equivocation-guard` | `yed_signattestation`, `yed_revive` | `attest-signed.dat` holds a signature for `(seq, citedHeight)` at a different price (S16): sign twice for one height at two prices, also across a restart. Message grammar: `equivocation-guard: seq <n> already signed <p₀> for height <h>` |
 

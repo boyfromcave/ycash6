@@ -9,6 +9,7 @@
 // (qa/rpc-tests/test_framework/yellowback_golden.json) and must reproduce
 // its pinned state hash byte for byte (N18, N23).
 
+#include "vault/act.h"
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
 #include "yellowback/math.h"
@@ -43,7 +44,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "4abefe81e3822134b15fada7418d9abe9ab3d3dc3332da96b383ef8a6f97e907";
+const std::string GOLDEN_HASH = "b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc";
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -124,8 +125,11 @@ struct Fixture
     int tip;
     CKey ownerKey, userKey;
     int fakeCounter;
-    std::vector<CKey> hotKeys, bondKeys;    //!< v3: attestor i registers with hotKeys[i] / bondKeys[i] and becomes seq i
+    std::vector<CKey> hotKeys, bondKeys;    //!< attestor i joins with member key hotKeys[i] (= bondKeys[i] since P4-b) and becomes seq i
     SigCache* cache = nullptr;
+    // P4-b: the attestor set is a primitive set; P.attestorSetId is the txid of `setCreate`, mined by the first join
+    CMutableTransaction setCreate;
+    bool setMined = false;
 
     explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int armMin = 3)
         : P(RegtestParams(start, sigmaRef, capBps, TestSet(), armMin)), tip(start - 1), fakeCounter(0)
@@ -134,8 +138,78 @@ struct Fixture
         userKey = CKey::TestOnlyRandomKey(true);
         for (int i = 0; i < 8; i++) {
             hotKeys.push_back(DeterministicKey("yellowback-state-test-hot", i));
-            bondKeys.push_back(DeterministicKey("yellowback-state-test-bond", i));
+            bondKeys.push_back(hotKeys.back());
         }
+        RecreateSet();
+    }
+
+    /** The SET_CREATE of the attestor set (open, 15 seats, 1/1/1 thresholds, maturity, livenessWindow); sets
+     *  P.attestorSetId to its txid. Only before anything is mined (P is hashed into the state from the first block). */
+    void RecreateSet(uint32_t livenessWindow = 1000000, uint32_t maturity = 1, uint8_t seats = 15)
+    {
+        BOOST_REQUIRE(tip < P.startHeight);
+        vault::Act a;
+        a.type = vault::ACT_SET_CREATE;
+        a.create.seats = seats;
+        a.create.unlockThreshold = 1;
+        a.create.cancelThreshold = 1;
+        a.create.slashThreshold = 1;
+        a.create.flags = vault::SET_FLAG_OPEN;
+        a.create.rateWindow = 1000;
+        a.create.livenessWindow = livenessWindow;
+        a.create.bondMin = 1;
+        a.create.maturity = maturity;
+        a.create.admitKey = DeterministicKey("yellowback-state-test-admit", 0).GetPubKey();
+        setCreate = CMutableTransaction();
+        setCreate.vin.push_back(CTxIn(COutPoint(TestSet(), 0)));
+        setCreate.vout.push_back(CTxOut(0, vault::EncodeAct(a)));
+        P.attestorSetId = CTransaction(setCreate).GetHash();
+    }
+
+    /** Mine the SET_CREATE (once, in its own block) before the first join. */
+    void EnsureSet()
+    {
+        if (setMined) return;
+        setMined = true;
+        Mine(Quote(50000, (tip + 1) % 3), { setCreate });
+        BOOST_REQUIRE(State(view).GetAttestorSet().has_value());
+    }
+
+    /** A `YV` act transaction: vin[0] a fake input, the act (signed by `signers` over actMsg), a change output. */
+    CMutableTransaction ActTx(vault::Act act, const std::vector<CKey>& signers, std::vector<CTxOut> before = {})
+    {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(FakeInput()));
+        for (const CTxOut& o : before) m.vout.push_back(o);
+        const uint256 msg = vault::ActMsg(vault::EncodePayload(act), m.vin[0].prevout);
+        for (const CKey& k : signers) {
+            std::vector<unsigned char> sig;
+            BOOST_REQUIRE(vault::SignRecoverable(k, msg, sig));
+            act.sigs.push_back(sig);
+        }
+        m.vout.push_back(CTxOut(0, vault::EncodeAct(act)));
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    CMutableTransaction HeartbeatTx(int i)
+    {
+        vault::Act a;
+        a.type = vault::ACT_SET_HEARTBEAT;
+        a.heartbeat.setId = P.attestorSetId;
+        a.heartbeat.memberKey = hotKeys[i].GetPubKey();
+        return ActTx(a, { hotKeys[i] });
+    }
+
+    /** SET_REMOVE of member i, signed by member `by` (slashThreshold 1). */
+    CMutableTransaction RemoveTx(int i, int by, bool burn)
+    {
+        vault::Act a;
+        a.type = vault::ACT_SET_REMOVE;
+        a.remove.setId = P.attestorSetId;
+        a.remove.memberKey = hotKeys[i].GetPubKey();
+        a.remove.burn = burn ? 1 : 0;
+        return ActTx(a, { hotKeys[by] });
     }
 
     static CKey DeterministicKey(const char* tag, int i)
@@ -389,23 +463,40 @@ struct Fixture
     std::optional<BundleLogRecord> BundleRow(int h) const { return State(const_cast<MemoryStateView&>(view)).GetBundleLog((uint32_t)h); }
     bool Armed() const { return P.IsArmed(Attest().IsArmed()); }
 
-    /** A registration of attestor i: vout[0] the 10 YEC bond (P2SH), vout[1] the payload, vout[2] change. */
-    CMutableTransaction RegisterTx(int i, CAmount bondZat = 10 * COIN, int lockBlocks = -1, uint8_t flags = 0, bool bareBond = false,
-                                   std::optional<CPubKey> hot = std::nullopt)
+    /** P4-b: attestor i joins the attestor set: vout[0] the bond P2SH(BondScript(member, locktime)) of bondZat, vout[1]
+     *  the SET_JOIN act signed by the member, vout[2] change. Mines the SET_CREATE first if needed. `member` overrides
+     *  the member key (signing with the key of `signer`, default i). */
+    CMutableTransaction RegisterTx(int i, CAmount bondZat = 10 * COIN, int lockBlocks = -1, std::optional<int> signer = std::nullopt)
     {
+        EnsureSet();
+        const CKey& key = hotKeys[signer.value_or(i)];
         const uint32_t locktime = (uint32_t)(tip + 1 + (lockBlocks < 0 ? P.bondMinLock : lockBlocks));
+        vault::Act a;
+        a.type = vault::ACT_SET_JOIN;
+        a.join.setId = P.attestorSetId;
+        a.join.memberKey = key.GetPubKey();
+        a.join.bondLocktime = locktime;
+        a.join.bondVout = 0;
+        return ActTx(a, { key }, { CTxOut(bondZat, P2SHScript(BondScript(key.GetPubKey(), locktime))) });
+    }
+
+    /** The pre-P4-b ATTESTOR_REGISTER payload (invalid since P4-b). */
+    CMutableTransaction LegacyRegisterTx(int i)
+    {
+        const uint32_t locktime = (uint32_t)(tip + 1 + P.bondMinLock);
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        const CScript bond = BondScript(bondKeys[i].GetPubKey(), locktime);
-        m.vout.push_back(CTxOut(bondZat, bareBond ? bond : P2SHScript(bond)));
-        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRegister(hot.value_or(hotKeys[i].GetPubKey()), bondKeys[i].GetPubKey(), locktime, flags)))));
+        const CScript bond = BondScript(hotKeys[i].GetPubKey(), locktime);
+        m.vout.push_back(CTxOut(10 * COIN, P2SHScript(bond)));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRegister(hotKeys[i].GetPubKey(), hotKeys[i].GetPubKey(), locktime, 0)))));
         m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
         return m;
     }
 
-    /** Register attestors [from, from + n) one per block. */
+    /** Register attestors [from, from + n) one per block (after the SET_CREATE's own block, the first time). */
     void Register(int n, int from = 0)
     {
+        EnsureSet();
         for (int i = from; i < from + n; i++) {
             Mine(Quote(50000, (tip + 1) % 3), { RegisterTx(i) });
             BOOST_REQUIRE_MESSAGE(Attestor((uint16_t)i).has_value(), strprintf("attestor %d not registered at %d", i, tip));
@@ -604,7 +695,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
             static const std::map<int, std::string> expected = {
-                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 251, "mint9-no-bundle" } };
+                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" }, { 251, "mint9-no-bundle" } };
             invalidBlocks++;
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
             BOOST_REQUIRE(expected.count(height));
@@ -618,7 +709,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 3);
+    BOOST_CHECK_EQUAL(invalidBlocks, 4);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -1986,13 +2077,13 @@ BOOST_AUTO_TEST_CASE(snap_written_for_every_height_ge_start)
 BOOST_AUTO_TEST_CASE(params_selected_by_height)
 {
     // Two regtest sets: the second starts at 100 with a supply cap; EvaluateBlock reads the set SelectParams picks.
-    std::vector<yellowback::Params> sets = { RegtestParams(1, 0, 0, TestSet()), RegtestParams(100, 0, 1, TestSet()) };
+    Fixture f;
+    std::vector<yellowback::Params> sets = { RegtestParams(1, 0, 0, f.P.attestorSetId), RegtestParams(100, 0, 1, f.P.attestorSetId) };
     BOOST_CHECK_EQUAL(SelectParams(sets, 1).startHeight, 1);
     BOOST_CHECK_EQUAL(SelectParams(sets, 99).startHeight, 1);
     BOOST_CHECK_EQUAL(SelectParams(sets, 100).startHeight, 100);
     BOOST_CHECK_EQUAL(SelectParams(sets, 5000).startHeight, 100);
     BOOST_CHECK_EQUAL(SelectParams(sets, 0).startHeight, 1);          // none qualifies: the first set
-    Fixture f;
     f.Activate();
     // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap.
     MintOpts capped; capped.termClass = 2;                         // W20: above the cap class A still mints; class C shows the cap
@@ -2112,69 +2203,184 @@ struct EmergencyFixture
 
 } // namespace
 
-// Rule: REG-A1
-BOOST_AUTO_TEST_CASE(rega1_bare_bond_below_min_short_lock_refused)
+// Rule: P4-b (§15.10): ATTESTOR_REGISTER and ATTESTOR_REVIVE are invalid; the registry is the primitive set
+BOOST_AUTO_TEST_CASE(p4b_register_and_revive_payloads_invalid)
 {
     Fixture f;
     f.MineQuotesTo(20);
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, -1, 0, true)), "none");        // bare bond script: not P2SH
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN - 1)), "none");                 // below BOND_MIN
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, f.P.bondMinLock - 1)), "none"); // bondLocktime < H + BOND_MIN_LOCK
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, (int)LOCKTIME_THRESHOLD)), "none");
+    bool invalid = false;
+    CMutableTransaction reg = f.LegacyRegisterTx(0);
+    BOOST_CHECK_EQUAL(VerdictOf(f, reg, &invalid), verdict::ATTESTOR_REGISTER_RETIRED);
+    BOOST_CHECK_EQUAL(f.Refused(CTransaction(reg).GetHash()), verdict::ATTESTOR_REGISTER_RETIRED);
     BOOST_CHECK(!f.Attestor(0).has_value());
-    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 0);
-    // The exact minimum lock and bond hold; the record, the bond index and the counter follow.
-    CMutableTransaction ok = f.RegisterTx(0, 10 * COIN, f.P.bondMinLock, 5);
+    CMutableTransaction rev = f.ReviveTx(f.Att(0, 50000, f.tip));
+    BOOST_CHECK_EQUAL(VerdictOf(f, rev), verdict::ATTESTOR_REVIVE_RETIRED);
+    BOOST_CHECK_EQUAL(f.Refused(CTransaction(rev).GetHash()), verdict::ATTESTOR_REVIVE_RETIRED);
+    // A block carrying either is invalid (BLK-1, U-21).
+    CBlock block;
+    block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
+    block.vtx.push_back(CTransaction(f.LegacyRegisterTx(1)));
+    OverlayStateView overlay(f.view);
+    BlockEvaluation ev = EvaluateBlock(overlay, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
+    BOOST_CHECK(ev.blockInvalid);
+    BOOST_CHECK_EQUAL(ev.verdict, verdict::ATTESTOR_REGISTER_RETIRED);
+}
+
+// Rule: P4-b: the seat source is the set (SET_CREATE, SET_JOIN mirrored; maturity and the module's bond floor)
+BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
+{
+    Fixture f;
+    f.MineQuotesTo(20);
+    BOOST_CHECK(!State(f.view).GetAttestorSet().has_value());
+    f.EnsureSet();
+    std::optional<AttestorSetRecord> z = State(f.view).GetAttestorSet();
+    BOOST_REQUIRE(z.has_value());
+    BOOST_CHECK_EQUAL(z->createHeight, f.tip);
+    BOOST_CHECK_EQUAL(z->seats, 15);
+    BOOST_CHECK_EQUAL(z->maturity, 1u);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(f.setCreate).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_SET_ACT);
+    // a join to another set is not mirrored
+    {
+        vault::Act a;
+        a.type = vault::ACT_SET_JOIN;
+        a.join.setId = TestSet();
+        a.join.memberKey = f.hotKeys[0].GetPubKey();
+        a.join.bondLocktime = (uint32_t)(f.tip + 1 + f.P.bondMinLock);
+        CMutableTransaction other = f.ActTx(a, { f.hotKeys[0] }, { CTxOut(10 * COIN, P2SHScript(BondScript(f.hotKeys[0].GetPubKey(), a.join.bondLocktime))) });
+        BOOST_CHECK_EQUAL(VerdictOf(f, other), "none");
+        BOOST_CHECK(!f.Attestor(0).has_value());
+    }
+    CMutableTransaction ok = f.RegisterTx(0, 10 * COIN, f.P.bondMinLock);
     BOOST_CHECK_EQUAL(VerdictOf(f, ok), verdict::OK);
     std::optional<AttestorRecord> rec = f.Attestor(0);
     BOOST_REQUIRE(rec.has_value());
+    const CPubKey member = f.hotKeys[0].GetPubKey();
+    BOOST_CHECK(rec->attestorPubKey == std::vector<unsigned char>(member.begin(), member.end()));
+    BOOST_CHECK(rec->bondPubKey == rec->attestorPubKey);
     BOOST_CHECK_EQUAL(rec->status, (uint8_t)AttestorStatus::PENDING);
     BOOST_CHECK_EQUAL(rec->registerHeight, f.tip);
+    BOOST_CHECK_EQUAL(rec->lastAct, f.tip + 1);                       // joinHeight + the set's maturity
     BOOST_CHECK_EQUAL(rec->bondZat, 10 * COIN);
-    BOOST_CHECK_EQUAL(rec->flags, 5);
+    BOOST_CHECK_EQUAL(rec->flags, 0);
+    BOOST_CHECK(!rec->bondFrozen);
     BOOST_CHECK(rec->bondOutpoint == COutPoint(CTransaction(ok).GetHash(), 0));
     BOOST_CHECK_EQUAL(State(f.view).GetBondIndex(rec->bondOutpoint).value(), 0);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 1);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_REGISTER);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
+    // below the module's floor: mirrored (the set admitted them) but never ELIGIBLE
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN - 1)), verdict::OK);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, f.P.bondMinLock - 1)), verdict::OK);
+    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 3);
+    const int joined0 = f.Attestor(0)->registerHeight;
+    while (f.tip < joined0 + f.P.bondMaturity - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::PENDING);
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));                    // registerHeight + max(maturity 1, BOND_MATURITY 8)
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->statusHeight, f.tip);
+    for (int i = 0; i < 20; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::PENDING);
 }
 
-// Rule: REG-A1
+// Rule: P4-b
 // Rule: IN-2
-BOOST_AUTO_TEST_CASE(rega1_duplicate_hot_key_vs_withdrawn)
+BOOST_AUTO_TEST_CASE(p4b_rejoin_after_withdraw_new_seq)
 {
     Fixture f;
     f.MineQuotesTo(20);
     f.Register(1);
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), "none");   // held by seq 0
-    BOOST_CHECK(!f.Attestor(1).has_value());
-    // After the bond is spent the record is WITHDRAWN and the hot key is free again.
     while (f.tip < (int)f.Attestor(0)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(0)), verdict::OK);
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::WITHDRAWN);
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), verdict::OK);
-    BOOST_CHECK_EQUAL(f.Attestor(1)->attestorPubKey.size(), 33u);
+    // the same key joins again (the set allows a key that is not ACTIVE): a new seq, the old record stays WITHDRAWN
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN, -1, 0)), verdict::OK);
+    BOOST_REQUIRE(f.Attestor(1).has_value());
     BOOST_CHECK(f.Attestor(1)->attestorPubKey == f.Attestor(0)->attestorPubKey);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::PENDING);
+    // a heartbeat reaches the key's newest record only
+    const int lastAct0 = f.Attestor(0)->lastAct;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    CMutableTransaction hb = f.HeartbeatTx(0);
+    BOOST_CHECK_EQUAL(VerdictOf(f, hb), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->lastAct, f.tip);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->lastAct, lastAct0);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(hb).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_SET_ACT);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(hb).GetHash())->attestorSeq, 1);
 }
 
-// Rule: REG-A1
+// Rule: P4-b
 // Rule: EQV-1
 // Rule: IN-2
-BOOST_AUTO_TEST_CASE(rega1_ejected_then_spent_stays_barred)
+BOOST_AUTO_TEST_CASE(p4b_slashed_key_barred_removed_key_not)
 {
     Fixture f;
-    f.Arm();
-    // Eject seq 0, then spend its bond: the record stays EJECTED (bondSpentHeight set) and its hot key is barred for good.
+    f.Arm(4);
+    // EQV-1 ejects seq 0 and freezes its bond; SET_REMOVE without burn ejects seq 3 and leaves the bond free.
     const int cited = f.tip;
     f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 50000, cited), f.Att(0, 51000, cited))), verdict::OK);
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::EJECTED);
-    while (f.tip < (int)f.Attestor(0)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(0)), verdict::OK);
-    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::EJECTED);
-    BOOST_CHECK_EQUAL(f.Attestor(0)->bondSpentHeight, f.tip);
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(3, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), "none");
-    BOOST_CHECK(!f.Attestor(3).has_value());
+    BOOST_CHECK(f.Attestor(0)->bondFrozen);
+    CMutableTransaction rm = f.RemoveTx(3, 1, false);
+    BOOST_CHECK_EQUAL(VerdictOf(f, rm), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->statusHeight, f.tip);
+    BOOST_CHECK(!f.Attestor(3)->bondFrozen);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(rm).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_SET_ACT);
+    // SET_REMOVE with burn freezes
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RemoveTx(2, 1, true)), verdict::OK);
+    BOOST_CHECK(f.Attestor(2)->bondFrozen);
+    // both rejoin; only the key that was never slashed can become ELIGIBLE again
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(4, 10 * COIN, -1, 0)), verdict::OK);   // seq 4 = key 0
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(5, 10 * COIN, -1, 3)), verdict::OK);   // seq 5 = key 3
+    for (int i = 0; i < f.P.bondMaturity + 1; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // EJECTED then spent stays EJECTED (IN-2)
+    while (f.tip < (int)f.Attestor(3)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(3)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->bondSpentHeight, f.tip);
+}
+
+// Rule: P4-b: the set's member dormancy (lastAct < H - livenessWindow) and revival by SET_HEARTBEAT
+BOOST_AUTO_TEST_CASE(p4b_set_dormancy_and_heartbeat_revival)
+{
+    Fixture f;
+    f.RecreateSet(20);                                          // livenessWindow 20
+    f.MineQuotesTo(20);
+    f.Register(1);
+    const int joined = f.tip;
+    const int lastAct = f.Attestor(0)->lastAct;
+    BOOST_CHECK_EQUAL(lastAct, joined + 1);
+    while (f.tip < joined + f.P.bondMaturity) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    while (f.tip < lastAct + 20) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);    // lastAct >= H - 20
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::DORMANT);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->statusHeight, f.tip);
+    BOOST_CHECK(f.Snap(f.tip).seated.empty());
+    CMutableTransaction hb = f.HeartbeatTx(0);
+    BOOST_CHECK_EQUAL(VerdictOf(f, hb), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);       // at the heartbeat's own SNAP
+    BOOST_CHECK_EQUAL(f.Attestor(0)->lastAct, f.tip);
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0 }));
+    f.Undo();
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::DORMANT);
+}
+
+// Rule: P4-b: the set's seats bound N_SLOTS
+BOOST_AUTO_TEST_CASE(p4b_seats_bound_nslots)
+{
+    Fixture f;
+    f.RecreateSet(1000000, 1, 2);                               // two seats; N_SLOTS 5 on regtest
+    f.MineQuotesTo(20);
+    f.Register(3);                                              // the third join would be refused by the primitive; the mirror follows blocks
+    for (int i = 0; i < f.P.bondMaturity + 1; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).seated.size(), 2u);
+    BOOST_CHECK_EQUAL(Seated(f.view, f.P, f.tip).size(), 2u);
 }
 
 // Rule: ARM-1
@@ -2813,6 +3019,7 @@ BOOST_AUTO_TEST_CASE(eqv1_two_prices_one_hash_ejects)
     BOOST_CHECK_EQUAL(VerdictOf(f, e), verdict::OK);
     BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::EJECTED);
     BOOST_CHECK_EQUAL(f.Attestor(1)->statusHeight, f.tip);
+    BOOST_CHECK(f.Attestor(1)->bondFrozen);                                     // P4-b: the set's frozen-bond rule
     BOOST_CHECK_EQUAL(f.Log(CTransaction(e).GetHash())->type, (uint8_t)TxLogType::EQUIVOCATION);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(e).GetHash())->attestorSeq, 1);
     // an ejected attestor leaves seated at the next SNAP and cannot be ejected twice
@@ -2837,15 +3044,18 @@ BOOST_AUTO_TEST_CASE(eqv1_fork_hashes_not_equivocation)
     BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(2, 50000, f.tip + 5), f.Att(2, 51000, f.tip + 5))), "none");
 }
 
-// Rule: REV-1
+// Rule: REV-1 (P4-b: revival is a SET_HEARTBEAT)
 // Rule: SNAP
-BOOST_AUTO_TEST_CASE(rev1_only_dormant)
+BOOST_AUTO_TEST_CASE(rev1_heartbeat_revives_s15_dormant)
 {
     Fixture f;
     f.Arm(4);
-    // An ELIGIBLE attestor cannot be "revived".
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(0, 50000, f.tip))), "none");
-    // Make seq L dormant: two mints whose selection includes L, signed by the other two, then a check height.
+    // A heartbeat of an ELIGIBLE attestor only moves lastAct.
+    CMutableTransaction hb0 = f.HeartbeatTx(0);
+    BOOST_CHECK_EQUAL(VerdictOf(f, hb0), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->lastAct, f.tip);
+    // Make seq L dormant (S15): two mints whose selection includes L, signed by the other two, then a check height.
     int L = -1, rows = 0;
     while (rows < f.P.dormancyMinBundles) {
         const int R = f.tip - 1;
@@ -2861,14 +3071,10 @@ BOOST_AUTO_TEST_CASE(rev1_only_dormant)
     while (f.tip % f.P.dormancyCheck != 0 || f.tip - f.P.dormancyBlocks < f.Attestor(L)->seatedSince) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
     BOOST_CHECK_EQUAL(f.Attestor(L)->statusHeight, f.tip);
-    // Revive: stale (citedHeight == H - ATTEST_MAX_AGE), citedHeight == H, a tampered price... then a fresh one. (VerdictOf mines at H = tip + 1.)
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, 50000, f.tip + 1 - f.P.attestMaxAge))), "none");
-    { Attestation a = f.Att(L, 50000, f.tip, Fixture::FakeHash(f.tip + 1)); a.citedHeight = (uint32_t)f.tip + 1;
-      BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(a)), "none"); }                     // citedHeight == H: not <= H - 1
-    { Attestation a = f.Att(L, 50000, f.tip); a.priceMicroUsd++; BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(a)), "none"); }
+    // the retired payload is invalid; a heartbeat revives at its own SNAP
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, 50000, f.tip))), verdict::ATTESTOR_REVIVE_RETIRED);
     BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
-    CMutableTransaction r = f.ReviveTx(f.Att(L, 50000, f.tip));
+    CMutableTransaction r = f.HeartbeatTx(L);
     BOOST_CHECK_EQUAL(VerdictOf(f, r), verdict::OK);
     BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(r).GetHash())->attestorSeq, L);
@@ -3124,7 +3330,7 @@ BOOST_AUTO_TEST_CASE(afee1_fee_to_contributor)
     { MintOpts o; o.attestFeeValue = afee - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }
     { MintOpts o; o.attestFeeVout = 3; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }    // the pool fee's vout
     { MintOpts o; o.attestFeeVout = 9; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }    // out of range
-    { MintOpts o; o.attestFeeScript = GetScriptForDestination(f.hotKeys[sel[0]].GetPubKey().GetID());                              // the hot key, not the bond key
+    { MintOpts o; o.attestFeeScript = GetScriptForDestination(f.ownerKey.GetPubKey().GetID());                                    // not the member key (P4-b: hot key = bond key)
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }
     // a contributor who is not the first signer is fine, and the log names it
     { MintOpts o; o.attestPayee = Selected(f.view, f.P, f.tip - 1, valtype()).back();

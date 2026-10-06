@@ -129,6 +129,7 @@ std::string TypeLower(TxLogType t)
     case TxLogType::ATTESTOR_REVIVE: return "revive";
     case TxLogType::CLAIM_RELEASE: return "claim_release";
     case TxLogType::CLAIM_CANCEL: return "claim_cancel";
+    case TxLogType::ATTESTOR_SET_ACT: return "set_act";
     case TxLogType::NONE: break;
     }
     return "none";
@@ -360,7 +361,7 @@ void PushTxLogV3(UniValue& o, const TxLogRecord& l, const YellowbackIndex& index
     }
     o.pushKV("carrierVin", carrierVin);
     o.pushKV("bundleSource", source);
-    if (l.Type() == TxLogType::ATTESTOR_REGISTER) o.pushKV("seq", (int)l.attestorSeq);
+    if (l.Type() == TxLogType::ATTESTOR_REGISTER || l.Type() == TxLogType::ATTESTOR_SET_ACT) o.pushKV("seq", (int)l.attestorSeq);
 }
 
 UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l, const YellowbackIndex& index, std::optional<int> refHeight, const CTransaction* tx, bool expired = false)
@@ -1658,7 +1659,8 @@ UniValue yed_listattestors(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "yed_listattestors ( height )\n"
-            "\nEvery Attestors record (v3 §3.6) in seq order; seated/pinned/weight at height's snapshot (default the tip).\n");
+            "\nEvery Attestors record (v3 §3.6) in seq order; seated/pinned/weight at height's snapshot (default the tip). Since P4-b\n"
+            "a record mirrors one SET_JOIN to the attestor set (attestorPubKey = the member key; lastAct and bondFrozen are the set's).\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
@@ -1697,6 +1699,8 @@ UniValue yed_listattestors(const UniValue& params, bool fHelp)
         o.pushKV("statusHeight", rec.statusHeight);
         o.pushKV("bondSpentHeight", rec.bondSpentHeight != 0 ? UniValue(rec.bondSpentHeight) : NullUniValue);
         o.pushKV("seatedSince", rec.seatedSince != 0 ? UniValue(rec.seatedSince) : NullUniValue);
+        o.pushKV("lastAct", rec.lastAct);                 // P4-b
+        o.pushKV("bondFrozen", rec.bondFrozen);
         o.pushKV("founding", attest.Status() != AttestStatus::UNARMED && AgeOrigin(rec, attest, p) == (int64_t)attest.triggerHeight);
         o.pushKV("weight", DecimalString(AttestorWeight(rec, attest, p, h)));
         const bool seated = snap.has_value() && std::find(snap->seated.begin(), snap->seated.end(), seq) != snap->seated.end();

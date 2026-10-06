@@ -35,9 +35,10 @@ class KeyTests(unittest.TestCase):
     def test_fixed_wifs_follow_the_pool_convention(self):
         for i, wif in enumerate(ya.ATTESTOR_WIFS):
             self.assertEqual(yu.wif_to_secret(wif), hashlib.sha256(b'yellowback-regtest-attestor-%d' % i).digest())
-        for i, wif in enumerate(ya.BOND_WIFS):
+        for i, wif in enumerate(ya.V3_BOND_WIFS):
             self.assertEqual(yu.wif_to_secret(wif), hashlib.sha256(b'yellowback-regtest-bond-%d' % i).digest())
-        self.assertEqual(len(set(ya.ATTESTOR_WIFS + ya.BOND_WIFS)), 10)
+        self.assertEqual(len(set(ya.ATTESTOR_WIFS + ya.V3_BOND_WIFS)), 10)
+        self.assertEqual(ya.BOND_WIFS, ya.ATTESTOR_WIFS)          # P4-b: the bond key is the member key
 
     def test_attestor_keys(self):
         keys = ya.attestor_keys(5)
@@ -334,18 +335,31 @@ class BuilderTests(unittest.TestCase):
         return FakeNode([utxo(b'a', 0, 30), utxo(b'b', 1, 5)])
 
     def test_register_layout(self):
+        """P4-b: build_register_tx is the SET_JOIN of the member key to the run's attestor set."""
+        from test_framework import vault as va
         node = self.node()
-        hot, bond = ya.attestor_keys(1)[0][1], ya.bond_keys(1)[0][1]
-        hex_, locktime = ya.build_register_tx(node, hot, bond, 10 * yu.COIN, 200, flags=2)
+        secret, hot = ya.attestor_keys(1)[0]
+        saved = yu.ATTESTOR_SET[0]
+        yu.ATTESTOR_SET[0] = ym.TEST_SET
+        try:
+            hex_, locktime = ya.build_register_tx(node, hot, hot, 10 * yu.COIN, 200, flags=2)
+            with self.assertRaises(AssertionError):
+                ya.build_register_tx(node, hot, ya.attestor_keys(2)[1][1])        # a separate bond key is gone
+        finally:
+            yu.ATTESTOR_SET[0] = saved
         self.assertEqual(locktime, 200 + 1 + 200)
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(len(tx.vout), 3)
         self.assertEqual(tx.vout[0].value, 10 * yu.COIN)
-        self.assertEqual(tx.vout[0].script, ym.p2sh_script(ya.bond_script(bytes.fromhex(bond), locktime)))
-        payload = ym.script_single_push(tx.vout[1].script)
-        self.assertEqual(payload, ya.encode_attestor_register(bytes.fromhex(hot), bytes.fromhex(bond), locktime, 2))
+        self.assertEqual(tx.vout[0].script, ym.p2sh_script(ya.bond_script(bytes.fromhex(hot), locktime)))
+        p, act, sigs = va.parse_act_script(tx.vout[1].script)
+        self.assertEqual((act['type'], act['setId'], act['memberKey'], act['bondLocktime'], act['bondVout']),
+                         (va.ACT_SET_JOIN, bytes.fromhex(ym.TEST_SET)[::-1].hex(), hot, locktime, 0))
+        self.assertEqual(va.recover_compact(sigs[0], va.act_msg(p, tx.vin[0].prev_txid, tx.vin[0].prev_n)).hex(), hot)
         self.assertEqual(tx.vout[2].value, 30 * yu.COIN - 10 * yu.COIN - yu.YELLOWBACK_FEE)
         self.assertEqual(tx.expiry_height, 0)
+        legacy = ym.tx_from_hex(ya.build_legacy_register_tx(node, hot))
+        self.assertEqual(ym.script_single_push(legacy.vout[1].script)[:4], b'YB\x03\x05')
 
     def test_carrier_round_trip(self):
         node = self.node()
@@ -386,6 +400,9 @@ class BuilderTests(unittest.TestCase):
         saved, yu.ATTESTOR_SET[0] = yu.ATTESTOR_SET[0], '5e' * 32
         self.addCleanup(lambda: yu.ATTESTOR_SET.__setitem__(0, saved))
         node = self.node()
+        saved = yu.ATTESTOR_SET[0]
+        yu.ATTESTOR_SET[0] = ym.TEST_SET          # the V template names the attestor set (U-23)
+        self.addCleanup(lambda: yu.ATTESTOR_SET.__setitem__(0, saved))
         bundle = ya.encode_bundle([ya.sign_attestation(ya.attestor_keys(1)[0][0], 1, 1_000_000, 2, BH_ONE)])
         carrier = ya.build_carrier_tx(node, bundle, send=False)
         collateral = 20 * yu.COIN
@@ -423,9 +440,18 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(ym.parse_pushes(tx.vin[-1].script_sig)[0], ya.encode_bundle([a, b]))
         with self.assertRaises(AssertionError):
             ya.equivocation_raw(node, ya.build_carrier_tx(node, ya.encode_bundle([a]), send=False))
-        tx = ym.tx_from_hex(ya.revive_raw(node, a))
+        tx = ym.tx_from_hex(ya.legacy_revive_raw(node, a))
         self.assertEqual(len(tx.vin), 1)
         self.assertEqual(ym.script_single_push(tx.vout[0].script), b'YB\x03\x08' + a)
+        from test_framework import vault as va
+        saved = yu.ATTESTOR_SET[0]
+        yu.ATTESTOR_SET[0] = ym.TEST_SET
+        try:
+            tx = ym.tx_from_hex(ya.heartbeat_raw(node, s))                   # P4-b: revival is a SET_HEARTBEAT
+        finally:
+            yu.ATTESTOR_SET[0] = saved
+        _p, act, _sigs = va.parse_act_script(tx.vout[0].script)
+        self.assertEqual((act['type'], act['memberKey']), (va.ACT_SET_HEARTBEAT, ya.attestor_keys(1)[0][1]))
 
 
 class VectorFileTests(unittest.TestCase):

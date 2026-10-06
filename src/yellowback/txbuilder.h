@@ -421,17 +421,15 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
 /** v3 CLAIM_NOTICE (§3.5): confirmed YEC inputs plus the carrier; the 0x06 payload and change. Signed. */
 BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserveKey& reservekey, const CarrierRecord& carrier);
 
-/** v3 ATTESTOR_REGISTER (§3.5): vout[0] the bond P2SH of bondZat, vout[1] the 0x05 payload, change; two fresh keys. Signed. */
-BuiltTx BuildRegisterAttestor(YellowbackWallet& yw, CAmount bondZat, int lockBlocks, uint8_t flags, CReserveKey& reservekey);
-
 /** v3 bond withdrawal: the bond input signed by hand, nLockTime = bondLocktime, to `to` ("" = a fresh own address; s1…; ys1… Sapling shape). */
 BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string& to = "");
 
 /**
- * v3 ATTESTOR_REVIVE (§3.5): one attestation for citedHeight = tip - REF_LAG signed with the hot key
- * through the signing guard (S16), payload 0x08, funded from confirmed YEC, change. Signed.
+ * yed_revive since P4-b: the checks (attest-unknown-seq, not-dormant, attest-key-not-held) and one attestation for
+ * citedHeight = tip - REF_LAG signed with the member key through the signing guard (S16); no transaction (the caller
+ * sends the SET_HEARTBEAT that revives the record, ATTESTOR_REVIVE being invalid). kind REVIVE, attestorPubKey set.
  */
-BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, CReserveKey& reservekey);
+BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd);
 
 /** v3 EQUIVOCATION (§3.5): the carrier (whose bundle is exactly {a, b}) plus YEC; payload 0x07; change. Signed. EQV-1 is checked by CheckEquivocation first. */
 BuiltTx BuildEquivocation(YellowbackWallet& yw, const Attestation& a, const Attestation& b, CReserveKey& reservekey, const CarrierRecord& carrier);

@@ -314,7 +314,7 @@
       "raisedBy": [
         "yed_reportequivocation"
       ],
-      "when": "any EQV-1 condition fails — different seqs, different citedHeights, equal prices, a bad signature, an EJECTED/WITHDRAWN seq, or a citedHeight whose hash is not in the index (two sides of a fork): report the same attestation twice"
+      "when": "any EQV-1 condition fails — different seqs, different citedHeights, equal prices, a bad signature, a seq whose bond is spent or already frozen (P4-b), or a citedHeight whose hash is not in the index (two sides of a fork): report the same attestation twice"
     },
     "notice-not-underwater": {
       "raisedBy": [
@@ -1044,6 +1044,7 @@
       {
         "attestorPubKey": "03b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7d8e9f0",
         "bondAddress": "smExampleBondAddress11111111111111111",
+        "bondFrozen": false,
         "bondKeyAddress": "smExampleBondKeyAddr11111111111111111",
         "bondLocktime": 500,
         "bondOutpoint": {
@@ -1057,6 +1058,7 @@
           "tier": 0
         },
         "founding": true,
+        "lastAct": 281,
         "lastBundleHeight": 330,
         "pinned": false,
         "poolFresh": true,

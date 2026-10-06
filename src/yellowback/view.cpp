@@ -132,6 +132,7 @@ std::string Attest() { return "M"; }
 std::string BundleLog(uint32_t height) { return std::string(1, PREFIX_BUNDLELOG) + U32BE(height); }
 std::string Notice(const COutPoint& out) { return OutPointKey(PREFIX_NOTICE, out); }
 std::string Intent(const COutPoint& out) { return OutPointKey('I', out); }
+std::string AttestorSet() { return "Z"; }
 
 uint16_t SeqOf(const std::string& key)
 {
@@ -205,6 +206,7 @@ YB_RECORD(AttestState)
 YB_RECORD(BundleLogRecord)
 YB_RECORD(NoticeRecord)
 YB_RECORD(IntentRecord)
+YB_RECORD(AttestorSetRecord)
 #undef YB_RECORD
 
 const char* VaultStatusName(VaultStatus s)
@@ -232,6 +234,7 @@ const char* TxLogTypeName(TxLogType t)
     case TxLogType::ATTESTOR_REVIVE: return "ATTESTOR_REVIVE";
     case TxLogType::CLAIM_RELEASE: return "CLAIM_RELEASE";
     case TxLogType::CLAIM_CANCEL: return "CLAIM_CANCEL";
+    case TxLogType::ATTESTOR_SET_ACT: return "ATTESTOR_SET_ACT";
     }
     return "UNKNOWN";
 }
@@ -410,6 +413,13 @@ std::optional<IntentRecord> State::GetIntent(const COutPoint& out) const
     return r;
 }
 
+std::optional<AttestorSetRecord> State::GetAttestorSet() const
+{
+    AttestorSetRecord r;
+    if (!Get(keys::AttestorSet(), r)) return std::nullopt;
+    return r;
+}
+
 std::vector<std::pair<uint16_t, AttestorRecord>> State::Attestors() const
 {
     std::vector<std::pair<uint16_t, AttestorRecord>> out;
@@ -441,8 +451,8 @@ uint256 StateHash(const StateView& view, const std::string& network)
     // Then the tables in the §3.6 order; each Iterate visits its keys in ascending order,
     // which is ascending height (big-endian keys) or ascending outpoint.
     // v3 appends Attestors (A), AttestorSeq (N), Attest (M), BundleLog (W) and Notices (E); BondIndex (B) is derived.
-    // The vault upgrade drops Activation (C) and appends Intents (I).
-    for (const char* prefix : { "Q", "J", "V", "K", "G", "S", "P", "A", "N", "M", "W", "E", "I" }) {
+    // The vault upgrade drops Activation (C) and appends Intents (I); P4-b appends AttestorSet (Z).
+    for (const char* prefix : { "Q", "J", "V", "K", "G", "S", "P", "A", "N", "M", "W", "E", "I", "Z" }) {
         view.Iterate(prefix, [&](const std::string& k, const std::string& v) {
             feed(k, v);
             return true;

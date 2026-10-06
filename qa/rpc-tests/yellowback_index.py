@@ -65,6 +65,7 @@ from test_framework.yellowback_util import (
     wait_yed_healthy,
     yellowback_node_args,
 )
+from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_attest import attestor_keys, bond_keys, build_register_tx, send_and_lock
 from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY
 
@@ -461,18 +462,31 @@ class YellowbackIndexTest(YellowbackTestFramework):
             assert_equal(len(self.attestors_of(i)), 2)
         assert_same_statehash(yellowback_nodes, 'after the join: the unarmed branch won')
         # The undone registration is dead on the winning chain: its bondLocktime was H + BOND_MIN_LOCK for the
-        # height it was built at, and REG-A1 needs L >= H + BOND_MIN_LOCK at the height it is mined, twenty
-        # blocks later. A fresh one (a new locktime) registers, matures and arms from there.
+        # height it was built at. P4-b: it is still a valid SET_JOIN (the test set's bondlockmin is 0), so it may
+        # be mined again (it comes back to the mempools of the losing branch's nodes); the module mirrors it, but
+        # its lock is below BOND_MIN_LOCK from the height it is now mined at, so the record stays PENDING for good
+        # (the module's floor) and its key, an ACTIVE member, cannot join again before withdrawing. Mine it
+        # deterministically, then a fresh join of another key registers, matures and arms from there.
         check = user.yed_validaterawtransaction(hex3)
-        assert_equal((check['type'], check['verdict']), ('none', 'ok'))               # non-Yellowback now
-        hex3b, _lt = build_register_tx(user, hot[2][1], bond[2][1])
-        nodes[POOLS[0]].sendrawtransaction(hex3b)                     # mempools rarely agree across a reorg join: hand it to the miner
+        assert_equal((check['type'], check['verdict']), ('register', 'ok'))
+        try:
+            nodes[POOLS[0]].sendrawtransaction(hex3)                  # mempools rarely agree across a reorg join: hand it to the miner
+        except JSONRPCException:
+            pass                                                      # already in that mempool
+        nodes[POOLS[0]].generate(1)
+        self.sync_all(blocks_only=True)
+        assert_equal(len(self.attestors_of(0)), 3)
+        assert_equal(self.attestors_of(0)[2][2], nodes[0].getblockcount())
+        hot4 = attestor_keys(ATTEST_ARM_MIN + 1)[ATTEST_ARM_MIN]
+        hex3b, _lt = build_register_tx(user, hot4[1], hot4[1])
+        nodes[POOLS[0]].sendrawtransaction(hex3b)
         nodes[POOLS[0]].generate(1)
         self.sync_all(blocks_only=True)
         h3b = nodes[0].getblockcount()
-        assert_equal(len(self.attestors_of(0)), 3)
-        assert_equal(self.attestors_of(0)[2][2], h3b)
+        assert_equal(len(self.attestors_of(0)), 4)
+        assert_equal(self.attestors_of(0)[3][2], h3b)
         self.mine_round_robin(POOLS, BOND_MATURITY)
+        assert_equal(self.attestors_of(0)[2][1], 'PENDING')         # below the module's floor: never ELIGIBLE
         assert_equal(nodes[0].yed_getinfo()['attest']['triggerHeight'], h3b + BOND_MATURITY)
         self.mine_round_robin(POOLS, ATTEST_ARM_DELAY)
         for node in yellowback_nodes:

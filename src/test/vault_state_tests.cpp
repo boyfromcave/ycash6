@@ -13,11 +13,15 @@
 #include "vault/module.h"
 #include "vault/node.h"
 #include "vault/state.h"
+#include "yellowback/attest.h"
+#include "yellowback/bundle.h"
 #include "yellowback/module.h"
+#include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "vault/template.h"
 
 #include "chain.h"
+#include "crypto/sha256.h"
 #include "key.h"
 #include "primitives/block.h"
 #include "script/interpreter.h"
@@ -1290,6 +1294,95 @@ BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1)
     BOOST_CHECK(!anc(4));
     BOOST_CHECK(!anc(-1));
     BOOST_CHECK(!AncestorHashes(nullptr)(0));
+}
+
+BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1_yed)
+{
+    // P4-b (U-25, the YED half; ycash-dd's module_ejection_hook_eqv1): the YED module names the attestor-set member whose key signed two prices for one
+    // (seq, citedHeight, blockHash) in an EQUIVOCATION transaction; the primitive ejects it and freezes its bond.
+    Chain c;
+    const CKey k1 = MakeKey(61), k2 = MakeKey(62), outsider = MakeKey(63);
+    const SetId s = SetWithMembers(c, {k1, k2});
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    const int64_t cited = c.h - 3;
+    auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xab; return x; };
+    BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
+    auto att = [&](const CKey& k, uint32_t price, int64_t at) {
+        yellowback::Attestation a;
+        a.seq = 7;
+        a.priceMicroUsd = price;
+        a.citedHeight = (uint32_t)at;
+        std::vector<unsigned char> rec;
+        BOOST_REQUIRE(k.SignCompact(yellowback::AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, fakeHash(at)), rec));
+        std::copy(rec.begin() + 1, rec.end(), a.sig.begin());
+        return a;
+    };
+    auto eqvTx = [&](const yellowback::Attestation& a, const yellowback::Attestation& b) {
+        yellowback::Bundle bundle;
+        bundle.atts = { a, b };
+        const valtype raw = yellowback::EncodeBundle(bundle);
+        uint256 h;
+        CSHA256().Write(raw.data(), raw.size()).Finalize(h.begin());
+        const CScript redeem = yellowback::CarrierScript(MakeKey(64).GetPubKey(), h);
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(c.Fund(), yellowback::CarrierScriptSig(raw, valtype(71, 0x30), redeem)));
+        m.vout.push_back(CTxOut(0, yellowback::PayloadScript(yellowback::EncodePayload(yellowback::Payload::Equivocation()))));
+        return m;
+    };
+    auto apply = [&](const CMutableTransaction& m, VaultState& st, bool withHashes) {
+        if (withHashes) st.SetBlockHashes(hashes);
+        return Res(st.ApplyTx(CTransaction(m), c.h, c.coins));
+    };
+    const CMutableTransaction e = eqvTx(att(k1, 50000, cited), att(k1, 51000, cited));
+
+    // Unconfigured module: nothing happens (and the transaction is valid).
+    yellowback::ClearModuleParams();
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(e, st, true), "OK"); BOOST_CHECK(st.Changes().empty() || !GetBond(st, bond1)->frozen); }
+    const yellowback::Params p = yellowback::RegtestParams(10, 0, 0, s);
+    yellowback::SetModuleParams(p);
+    BOOST_CHECK(yellowback::RegisteredModule()->GovernedSet() == std::optional<SetId>(s));
+    // No block hashes: the module cannot verify, nothing happens.
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(e, st, false), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    // Not an equivocation (same price; another key; a cited height at or above the block): nothing happens, all valid.
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 50000, cited), att(k1, 50000, cited)), st, true), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(outsider, 50000, cited), att(outsider, 51000, cited)), st, true), "OK");
+      BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_ACTIVE); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 50000, c.h), att(k1, 51000, c.h)), st, true), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    // The equivocation: k1 EJECTED and its bond frozen; k2 untouched; the undo restores the base byte for byte.
+    VaultState st(c.kv);
+    BOOST_CHECK_EQUAL(*apply(e, st, true), "OK");
+    BOOST_CHECK_EQUAL(GetMember(st, s, k1.GetPubKey())->status, MEMBER_EJECTED);
+    BOOST_CHECK(GetMember(st, s, k1.GetPubKey())->bondFrozen);
+    BOOST_CHECK(GetBond(st, bond1)->frozen);
+    BOOST_CHECK_EQUAL(GetMember(st, s, k2.GetPubKey())->status, MEMBER_ACTIVE);
+    // In the same block a later spend of the frozen bond is invalid; a second report changes nothing.
+    {
+        CMutableTransaction spend;
+        spend.vin.push_back(CTxIn(bond1));
+        spend.vout.push_back(CTxOut(500, GetScriptForDestination(k1.GetPubKey().GetID())));
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(spend), c.h, c.coins)), "bad-vault-bond-frozen");
+        const auto before = st.Changes();
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(eqvTx(att(k1, 50000, cited), att(k1, 52000, cited))), c.h, c.coins)), "OK");
+        BOOST_CHECK(st.Changes() == before);
+    }
+    const BlockUndo undo = st.MakeUndo();
+    MemoryKV after = c.kv;
+    after.Apply(st.Changes());
+    VaultState back(after);
+    back.ApplyUndo(undo);
+    after.Apply(back.Changes());
+    BOOST_CHECK(after.data == c.kv.data);
+    // The same through ApplyBlock with the provider (what ConnectBlock does).
+    {
+        CBlock block;
+        block.vtx.push_back(CTransaction(e));
+        VaultState sb(c.kv);
+        sb.SetBlockHashes(hashes);
+        BlockUndo bu;
+        BOOST_CHECK(!sb.ApplyBlock(block, c.h, c.coins, bu));
+        BOOST_CHECK(GetBond(sb, bond1)->frozen);
+    }
+    yellowback::ClearModuleParams();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

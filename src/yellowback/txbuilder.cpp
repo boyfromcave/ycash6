@@ -1171,12 +1171,6 @@ void DryRunOrThrow(Context& ctx, const BuiltTx& out)
     case BuiltKind::EQUIVOCATION:
         if (!log.has_value() || log->Type() != TxLogType::EQUIVOCATION) throw std::runtime_error("not-equivocation: EQV-1 would not eject at height " + std::to_string(H));
         return;
-    case BuiltKind::REVIVE:
-        if (!log.has_value() || log->Type() != TxLogType::ATTESTOR_REVIVE) throw std::runtime_error("not-dormant: REV-1 would not revive at height " + std::to_string(H));
-        return;
-    case BuiltKind::REGISTER:
-        if (!log.has_value() || log->Type() != TxLogType::ATTESTOR_REGISTER) throw std::runtime_error("register-refused: REG-A1 would not admit this registration at height " + std::to_string(H));
-        return;
     default:
         return;
     }
@@ -1702,53 +1696,6 @@ BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserv
     return out;
 }
 
-BuiltTx BuildRegisterAttestor(YellowbackWallet& yw, CAmount bondZat, int lockBlocks, uint8_t flags, CReserveKey& reservekey)
-{
-    Context ctx(yw);
-    const Params& p = ctx.params;
-    if (bondZat < p.bondMin) throw std::runtime_error(strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
-    if (lockBlocks < p.bondMinLock) throw std::runtime_error(strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
-    const int64_t locktime = (int64_t)ctx.chainHeight + 1 + lockBlocks;
-    if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw std::runtime_error("lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
-    const CPubKey hot = ctx.FreshKey("yellowback-attestor");
-    const CPubKey bond = ctx.FreshKey("yellowback-bond");
-    const CScript bondScript = BondScript(bond, (uint32_t)locktime);
-    if (bondScript.empty()) throw std::runtime_error("cannot build the bond script");
-    std::vector<unsigned char> payload = EncodePayload(Payload::AttestorRegister(hot, bond, (uint32_t)locktime, flags));
-    if (payload.empty()) throw std::runtime_error("cannot encode the registration payload");
-
-    BuiltTx out;
-    out.kind = BuiltKind::REGISTER;
-    out.refHeight = ctx.indexHeight;
-    out.attestorPubKey = hot;
-    out.bondPubKey = bond;
-    out.bondScript = bondScript;
-    out.bondZat = bondZat;
-    out.bondLocktime = (uint32_t)locktime;
-    out.flags = flags;
-    out.warning = ctx.KeypoolWarning();
-    CMutableTransaction mtx;
-    std::vector<std::pair<CScript, CAmount>> prevs;
-    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
-        mtx = ctx.NewTx(ctx.Expiry(ctx.chainHeight));
-        mtx.vout.push_back(CTxOut(bondZat, P2SHScript(bondScript)));       // vout[0] the bond
-        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));             // vout[1] the payload
-        prevs.clear();
-        const CAmount needed = bondZat + ctx.fee;
-        const CAmount selected = ctx.SelectYec(needed, mtx, prevs);
-        const CAmount change = selected - needed;
-        if (change > 0) {
-            CPubKey changeKey;
-            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-        }
-    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
-    ctx.SignInputs(mtx, prevs, 0);
-    out.tx = mtx;
-    DryRunOrThrow(ctx, out);   // REG-A1 at the next height
-    return out;
-}
-
 BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string& to)
 {
     Context ctx(yw);
@@ -1858,7 +1805,7 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
     return a;
 }
 
-BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, CReserveKey& reservekey)
+BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd)
 {
     Context ctx(yw);
     std::optional<AttestorRecord> rec = ctx.st.GetAttestor(seq);
@@ -1875,25 +1822,8 @@ BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, 
     out.refHeight = cited;
     out.seq = seq;
     out.attestation = a;
-    std::vector<unsigned char> payload = EncodePayload(Payload::AttestorRevive(a.seq, a.priceMicroUsd, a.citedHeight, a.sig));
-    if (payload.empty()) throw std::runtime_error("cannot encode the revive payload");
-    CMutableTransaction mtx;
-    std::vector<std::pair<CScript, CAmount>> prevs;
-    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
-        mtx = ctx.NewTx(ctx.Expiry(cited));
-        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
-        prevs.clear();
-        const CAmount selected = ctx.SelectYec(ctx.fee, mtx, prevs);
-        const CAmount change = selected - ctx.fee;
-        if (change > 0) {
-            CPubKey changeKey;
-            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-        }
-    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
-    ctx.SignInputs(mtx, prevs, 0);
-    out.tx = mtx;
-    DryRunOrThrow(ctx, out);   // REV-1 at the next height
+    out.attestorPubKey = hot;
+    // P4-b: no transaction here; the caller broadcasts a SET_HEARTBEAT of the member key (set_heartbeat)
     return out;
 }
 
@@ -1905,8 +1835,8 @@ void CheckEquivocation(YellowbackWallet& yw, const Attestation& a, const Attesta
     if (a.priceMicroUsd == b.priceMicroUsd) throw std::runtime_error("not-equivocation: the prices are equal");
     std::optional<AttestorRecord> rec = ctx.st.GetAttestor(a.seq);
     if (!rec.has_value()) throw std::runtime_error(strprintf("not-equivocation: no attestor with seq %u", (unsigned)a.seq));
-    if (rec->Status() == AttestorStatus::WITHDRAWN || rec->Status() == AttestorStatus::EJECTED) {
-        throw std::runtime_error(strprintf("not-equivocation: seq %u is %s", (unsigned)a.seq, AttestorStatusName(rec->Status())));
+    if (rec->bondSpentHeight != 0 || rec->Frozen()) {   // P4-b: EQV-1 freezes an unspent, unfrozen bond
+        throw std::runtime_error(strprintf("not-equivocation: the bond of seq %u is %s", (unsigned)a.seq, rec->Frozen() ? "frozen" : "spent"));
     }
     if ((int64_t)a.citedHeight < ctx.params.startHeight || (int64_t)a.citedHeight > ctx.chainHeight) {
         throw std::runtime_error(strprintf("not-equivocation: cited height %u is not in this chain's index", a.citedHeight));

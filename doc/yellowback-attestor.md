@@ -15,6 +15,36 @@ runs, a second `yellowback-attest` pointed at a second node. Do not run them. If
 attestor to a new machine, stop the old node first, copy `wallet.dat` *and* `attest-signed.dat`
 together, and never start the old one again. Do not delete `attest-signed.dat`.
 
+## Since the vault upgrade (P4-b): the attestor registry is the attestor set
+
+Read this first; where the sections below disagree, this section wins (upgrade plan §15.10).
+
+- **Registration is a `SET_JOIN`** to the vault primitive's YED attestor set (`attestorSetId`,
+  `yed_getinfo.upgrade`). `yed_registerattestor <bondYec> <lockBlocks>` is exactly that join with a
+  fresh wallet key (`flags` is ignored); `set_join <attestorSetId> <bondYec> <bondLocktime>
+  [memberKey]` is the same with a key of your choice. `ATTESTOR_REGISTER` and `ATTESTOR_REVIVE`
+  payloads are invalid transactions now.
+- **One key**: the member key is the hot key (it signs attestations), the bond key (the bond is
+  `P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG)`, the same script as before) and the fee
+  key. **The bond key cannot be kept cold any more** — the "Bond key hygiene" section below no
+  longer applies: whoever holds the attestor node's wallet can spend the bond after
+  `bondLocktime` (given up for a single registry, upgrade plan §15.10 P4-b).
+- **Heartbeats**: the set's member dormancy makes an attestor DORMANT when its `lastAct` is older
+  than the set's `livenesswindow`, and signing prices is not an act. `yellowback-attest attest`
+  sends `set_heartbeat <attestorSetId> <memberKey>` every `heartbeat_blocks` blocks (default
+  1,152 ≈ a day; keep it well below the set's `livenesswindow`, `set_getinfo <attestorSetId>`).
+  The v3 dormancy (selected and absent, below) still applies on top.
+- **Revival is a `SET_HEARTBEAT`** (`yed_revive <seq> <priceMicroUsd>` sends it and still returns a
+  freshly signed attestation): the record is ELIGIBLE again at that block.
+- **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below `BOND_MIN`
+  or locked for less than `BOND_MIN_LOCK` is recorded but never becomes ELIGIBLE.
+- **Ejection freezes the bond.** EQV-1 (two prices, one height) ejects the member *and* freezes
+  its bond in the set: the bond can never be withdrawn, and the key never becomes ELIGIBLE again.
+  `SET_REMOVE` by the set (with or without burn) ejects too; without burn the bond is returned at
+  its locktime and the key may join again.
+- `yed_listattestors` rows carry `lastAct` and `bondFrozen`; `set_getinfo <attestorSetId>` shows
+  the same members from the primitive's side.
+
 This guide is written from the v3 plan (`docs/plans/yellowback-v3-development-plan.md` §4.7, §5)
 and the proposal (`docs/reference/yellowback-price-attestation.md` §4–§6, §12, §13). The RPCs it
 names are specified in `doc/yellowback-rpc.md`; the agent's every setting is documented in

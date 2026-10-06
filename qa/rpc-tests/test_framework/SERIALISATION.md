@@ -11,14 +11,16 @@ Since the vault upgrade (`docs/plans/yellowback-upgrade-plan.md` §15.10, `SCHEM
 rules are consensus at `UPGRADE_VAULT`: the vault is the primitive's V template, a claim moves it
 into intents, a failing mint or vault spend makes the block invalid, and the activation state
 machine, the enforcement halts and the VOID vault are gone. The entries below are updated in place;
-what the upgrade changed is marked **(U-2x)**.
+what the upgrade changed is marked **(U-2x)**. P4-b (`SCHEMA_VERSION` 7: the attestor registry is the
+primitive's set `attestorSetId`) is marked **(P4-b)**.
 
-The golden vector `yellowback_golden.json` (440 synthetic heights, 443 block entries, regtest
-params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId '5e75' × 16, attestArmMin 3,
-bundleCarrier scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state
-hash `4abefe81e3822134b15fada7418d9abe9ab3d3dc3332da96b383ef8a6f97e907`. Three entries are flagged
-`"invalid"` (heights 137, 217, 251): they are rejected and not applied, and the next entry is the
-same height mined again without the offending transaction.
+The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block entries, regtest
+params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
+SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
+scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
+`b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc`. Four entries are flagged
+`"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
+the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
 and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector` together.
 
@@ -28,7 +30,7 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 6`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 7`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
@@ -37,8 +39,9 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |
 | 9 | `Params` | `P` | `i32 startHeight` (the `UPGRADE_VAULT` activation height, U-22), `i32 sigmaRefBps`, `i32 supplyCapBps`, `uint256 attestorSetId` (32 internal bytes; it replaced v3's `i32 enforceUntil`, **U-22**); v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1: `u8 mintRequiresArmed` |
-| 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice` |
+| 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice`. `Attestors`: `bytes attestorPubKey`, `bytes bondPubKey`, `COutPoint bondOutpoint`, `i64 bondZat`, `u32 bondLocktime`, `u8 flags`, `i32 registerHeight`, `u8 status` (`PENDING, ELIGIBLE, DORMANT, EJECTED, WITHDRAWN`), `i32 statusHeight`, `i32 bondSpentHeight`, `i32 seatedSince`, then **(P4-b)** `i32 lastAct`, `bool bondFrozen` |
 | 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height` |
+| 16 | `AttestorSet` **(P4-b)**, once the set's `SET_CREATE` is seen | `Z` | `i32 createHeight`, `u8 seats`, `u32 maturity`, `u32 livenessWindow` |
 
 Each record is its key immediately followed by its value. `TxLog`, `Rejected`, `Undo` are
 excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
@@ -115,8 +118,10 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
 - **C2. Invalid transactions and blocks (U-21).** The verdicts that make a transaction invalid:
   every MINT verdict but `ok`; every RED-1..5 verdict of a spend of an ACTIVE vault;
   `vault-claim-intents`, `intent-spend-malformed`, `intent-cancel-residual`,
-  `intent-cancel-no-vault` and `yed-template-output` (L–N below). A failing TRANSFER still burns
-  (E) and a failing v3 act is still non-Yellowback: neither is invalid. The block's evaluation
+  `intent-cancel-no-vault` and `yed-template-output` (L–N below); **(P4-b)** any `ATTESTOR_REGISTER`
+  payload (`attestor-register-retired`) and any `ATTESTOR_REVIVE` payload (`attestor-revive-retired`),
+  whatever its body. A failing TRANSFER still burns (E) and a failing NOT-1 or EQV-1 is still
+  non-Yellowback: neither is invalid. The block's evaluation
   stops at the first invalid transaction; its reason is `"<verdict>:<txid>"`. A coinbase output
   that is a YED V or I makes the block invalid (`yed-template-output`).
 - **D. MINT verdict precedence.** MINT-2 in the plan's clause order: `bad-mint-class`,
@@ -174,6 +179,40 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   and was not created by the rule that ran (the mint's `vout[0]`, the claim's intents, the
   cancel's `vout[0]`) makes the transaction invalid (`yed-template-output`).
 
+- **O. The attestor set's acts (P4-b).** Per non-coinbase transaction, after IN-1/IN-2 (the bond
+  spends) and before the payload rules: the first output that is a `YV` act (`vault.is_act_script`)
+  is parsed (`vault.parse_act_script`; the C++ uses `vault::DecodeAct` + `ActFieldsValid`); one that
+  does not parse is ignored (the primitive would have refused the block). With `setId` (or, for
+  `SET_CREATE`, the txid) equal to `attestorSetId`:
+  `SET_CREATE` writes `AttestorSet` once (`createHeight = H`, the body's `seats`, `maturity`,
+  `livenessWindow`); the others need `AttestorSet`. `SET_JOIN`: a new `Attestors[next]` with
+  `attestorPubKey = bondPubKey = memberKey`, `bondOutpoint = (txid, bondVout)`, `bondZat =
+  vout[bondVout].value`, `bondLocktime`, `flags 0`, `registerHeight = statusHeight = H`, `PENDING`,
+  `lastAct = min(H + maturity, 2^31 − 1)`, a `BondIndex` row; `AttestorSeq += 1`; `TxLog.type =
+  ATTESTOR_REGISTER`, `attestorSeq` the new seq. `SET_HEARTBEAT` / `SET_REMOVE` / `SET_EQUIVOCATION`
+  act on the key's **newest** record (highest seq with that `attestorPubKey`; the key of a
+  `SET_EQUIVOCATION` is the one `sigA` recovers to): heartbeat `lastAct = H`; remove `EJECTED`
+  (`bondFrozen` when `burn = 1`); set equivocation `EJECTED` and `bondFrozen`; `EJECTED` moves
+  `statusHeight` only when the status changes; `TxLog.type = ATTESTOR_SET_ACT`, `attestorSeq` that
+  seq. `SET_WINDDOWN` changes nothing. The acts are not re-validated (no seat count, no signature):
+  the primitive has done that, which is also why the mirror may hold more records than the set has
+  seats. **reading:** the transaction's `TxLog.type` is the act's unless the payload rules set one.
+- **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
+  START_HEIGHT` and `< H`, two prices, the scriptsig carrier); the key is the **first record in seq
+  order** that is its key's newest, has `bondSpentHeight = 0` and `bondFrozen = false`, under which
+  both attestations verify over `Snapshots[citedHeight].blockHash` (the record named by the
+  attestations' `seq` is not consulted: a key cannot sign under another key). Effect: `EJECTED`
+  (`statusHeight` on change) and `bondFrozen`; `TxLog.attestorSeq` that record's seq,
+  `bundleSeqs = [seq of the attestations]`. The primitive freezes the same member's bond (the module
+  ejection hook, U-25), which the model does not model.
+- **Q. Seats (P4-b, SNAP).** For every record in seq order, before ARM-1/2, with `AttestorSet`
+  present: `PENDING → ELIGIBLE` (`statusHeight = H`) when `H ≥ registerHeight + max(maturity,
+  BOND_MATURITY)`, `bondZat ≥ BOND_MIN`, `bondLocktime ≥ registerHeight + BOND_MIN_LOCK` and no
+  record of the key has `bondFrozen`; then an `ELIGIBLE` record with `lastAct < H − livenessWindow`
+  becomes `DORMANT`, and a `DORMANT` one with `lastAct ≥ H − livenessWindow` and `lastAct >
+  statusHeight` becomes `ELIGIBLE` (`statusHeight = H` either way). S15 runs after the halts as in
+  v3. `seated` takes `min(N_SLOTS, seats)` records (`0` without `AttestorSet`).
+
 ## 4. Codec choices (§3.2–3.4)
 
 - **TAG-1.** The height prefix is skipped by the **length** of `CScript() << nHeight` (1 byte for
@@ -193,7 +232,7 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   = lockHeight + GRACE` (numbers as minimal `CScriptNum` pushes); a YED intent is the I of that V
   (`yed_intent_script`). Both are parsed only in their exact shape with in-range fields
   (`parse_vault_template` / `parse_intent_template`: rebuild and compare); the model implements
-  the two templates itself and does not import `vault.py`.
+  the two templates itself (it imports `vault.py` only for the `YV` act codec, P4-b).
 - Compressed-key validity is `CPubKey::IsFullyValid` for 33 bytes: prefix `02`/`03`, `x < p`,
   `x³ + 7` a quadratic residue.
 
