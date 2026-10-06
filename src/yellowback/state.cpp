@@ -35,6 +35,7 @@ const char* const MINT_HALTED_NO_PRICE = "mint-halted-no-price";
 const char* const MINT_HALTED_PARTICIPATION = "mint-halted-participation";
 const char* const MINT_HALTED_GLOBAL_RATIO = "mint-halted-global-ratio";
 const char* const MINT_HALTED_DIVERGENCE = "mint-halted-divergence";
+const char* const MINT_HALTED_UNARMED = "mint-halted-unarmed";
 const char* const BAD_MINT_COLLATERAL = "bad-mint-collateral";
 const char* const MINT_UNSATISFIABLE = "mint-unsatisfiable";
 const char* const MINT_SUPPLY_CAP = "mint-supply-cap";
@@ -319,6 +320,8 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (S->haltMask & HALT_DIVERGENCE) return verdict::MINT_HALTED_DIVERGENCE;
     if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) return verdict::MINT_NOT_ACTIVE; // an unknown bit: MINT-4 needs every other bit clear
     const bool armed = ctx.Armed(ref);
+    // MINT-4 (H-1): with MINT_REQUIRES_ARMED a mint whose R is not ARMED is halted like any other; a claim is unaffected
+    if (P.mintRequiresArmed && !armed) return verdict::MINT_HALTED_UNARMED;
     std::optional<MicroUsd> xMint = S->PMint();
     std::optional<MicroUsd> pMint = xMint;
     auto mint5 = [&]() -> const char* {
@@ -336,8 +339,9 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     // above RECAP_RATIO_BPS -- a mint that would exceed it is refused only when its class minimum,
     // after the volatility multiplier, is below the recapitalisation floor (the W16 gate).
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
+    // H-10: above the cap only class A (termClass 0) at or over the floor mints, so re-enabling a class cannot re-open the cap.
     if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()
-        && MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
+        && (p.termClass != 0 || MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps)) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
     // MINT-8 (FEE-0 when E(R) is empty, K11)

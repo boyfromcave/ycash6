@@ -239,7 +239,7 @@ walk-through is a way to be selected and then ignored.
 ## Arming, and the day's notice
 
 Nothing reads attestations until the layer **arms** (proposal §6.4, D-4). At the first snapshot
-with `ATTEST_ARM_MIN` (5) `ELIGIBLE` attestors the state becomes `TRIGGERED` with `armHeight =
+with `ATTEST_ARM_MIN` (7 on mainnet and testnet, hardening H-2; 3 on regtest) `ELIGIBLE` attestors the state becomes `TRIGGERED` with `armHeight =
 triggerHeight + ATTEST_ARM_DELAY` (1,152 blocks ≈ one day); at `armHeight` it becomes `ARMED` and
 every mint and claim from then on must carry a valid bundle. The trigger is a public fact for that
 day: wallets show "attestation layer arms at height …", `yed_getinfo.attest` reports

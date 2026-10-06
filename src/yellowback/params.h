@@ -139,17 +139,17 @@ struct Params
 
     // Enforcement fee (FEE-1)
     CAmount feeMin;                      //!< 0.5 YEC
-    int feeBps;                          //!< 25
+    int feeBps;                          //!< 15 (H-4; regtest 25)
 
     // Vaults
     int grace;                           //!< claimHeight = lockHeight + grace
     int claimThresholdBps;               //!< 11,000
     int supplyCapBps;                    //!< 1,500; 0 = no cap
-    int globalRatioHaltBps;              //!< 25,000
-    int recapRatioBps;                   //!< 50,000: under HALT-2 a MINT is accepted iff minRatioBps(class, S) >= this (W16)
+    int globalRatioHaltBps;              //!< 30,000 (H-11; regtest 25,000)
+    int recapRatioBps;                   //!< 60,000 (H-11; regtest 50,000): under HALT-2 a MINT is accepted iff minRatioBps(class, S) >= this (W16)
     int divergenceBps;                   //!< 2,000
-    int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive
-    int classMax[NUM_CLASSES];
+    int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive;
+    int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5: B and C on mainnet/testnet)
     int baseRatioBps[NUM_CLASSES];       //!< 50,000 / 40,000 / 30,000
 
     // Volatility (SIGMA-1, V17)
@@ -161,7 +161,7 @@ struct Params
 
     // Amounts
     Cents minMint;                       //!< MINT-2
-    Cents maxMint;                       //!< MINT-2
+    Cents maxMint;                       //!< MINT-2: $2,500 (H-12; regtest $10,000)
     Cents minOutput;                     //!< XFER-1
     Cents maxOutput;                     //!< XFER-1
     CAmount tokenValue;                  //!< TOKEN_VALUE
@@ -175,7 +175,7 @@ struct Params
     // Price attestation (v3 plan §3.1). Regtest reads attestArmMin and bundleCarrier from
     // -yellowbackattestarmmin / -yellowbackbundlecarrier (ParamsFromArgs, index.cpp); both are
     // in the state-hash preimage's Params record (view.h ParamsRecord, M13).
-    int attestArmMin;                    //!< ATTEST_ARM_MIN 5 (ARM-1); 0 = never arms (regtest)
+    int attestArmMin;                    //!< ATTEST_ARM_MIN 7 (ARM-1, H-2); 0 = never arms (regtest)
     int attestArmDelay;                  //!< ATTEST_ARM_DELAY 1,152 (ARM-2)
     bool attestRequired;                 //!< ATTEST_REQUIRED (W15): false => PRICE-2 reads x only, bundles ignored
     BundleCarrier bundleCarrier;         //!< BUNDLE_CARRIER (W2)
@@ -195,7 +195,7 @@ struct Params
     int emergencyPersist;                //!< EMERGENCY_PERSIST 48
     int emergencyNoticeTtl;              //!< EMERGENCY_NOTICE_TTL 1,152
     CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5)
-    int attestFeeBps;                    //!< ATTEST_FEE_BPS 2,500 (AFEE-1)
+    int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1, H-4; regtest 2,500)
     CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
     int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
     int bondMaturity;                    //!< BOND_MATURITY 16,128
@@ -207,6 +207,9 @@ struct Params
     CAmount carrierValue;                //!< CARRIER_VALUE 10,000 zat (wallet policy, never hashed)
     int attestInterval;                  //!< k 10 (agent policy: signing interval; ATTEST_MAX_AGE = 2 k)
     int walletConfirmations;             //!< WALLET_CONFIRMATIONS 6 (wallet policy)
+    bool mintRequiresArmed;              //!< MINT_REQUIRES_ARMED (H-1): MINT-4 refuses a mint whose R is not ARMED
+                                         //!< (mint-halted-unarmed); mainnet/testnet true, regtest -yellowbackmintrequiresarmed
+                                         //!< (default false), hashed in the Params record (M13)
 
     Params();
 
@@ -215,6 +218,8 @@ struct Params
     /** Class index (0..2) for a lock length in blocks; -1 if in no class (V19). */
     int ClassForLockBlocks(int64_t lockBlocks) const;
     bool IsValidClass(int termClass) const { return termClass >= 0 && termClass < NUM_CLASSES; }
+    /** H-5: a class with an empty term range (classMin > classMax) is disabled; MINT-2 refuses every term in it. */
+    bool IsClassEnabled(int termClass) const { return IsValidClass(termClass) && classMin[termClass] <= classMax[termClass]; }
     /**
      * "ARMED" in every v3 rule means both: the snapshot's Attest.status == ARMED and
      * this set's attestRequired (W15). A1 adds IsArmedAt(const Snapshot&) once the
@@ -239,10 +244,12 @@ const Params& TestParams();
  * v2 regtest-only flags -yellowbackstartheight, -yellowbacksigmaref (0 = multiplier
  * fixed at 1), -yellowbacksupplycapbps (0 = no cap) and -yellowbackenforceuntil
  * (0 = no sunset); v3 adds -yellowbackattestarmmin (0 = never arms) and
- * -yellowbackbundlecarrier. All six are hashed into the state hash (M13).
+ * -yellowbackbundlecarrier; the hardening plan (H-1) adds -yellowbackmintrequiresarmed. All seven
+ * are hashed into the state hash (M13).
  */
 Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
-                     int attestArmMin = 3, BundleCarrier bundleCarrier = BundleCarrier::SCRIPTSIG);
+                     int attestArmMin = 3, BundleCarrier bundleCarrier = BundleCarrier::SCRIPTSIG,
+                     bool mintRequiresArmed = false);
 
 /**
  * Parameter-set selection by height (§3.1 *Parameter versioning*, K10): the

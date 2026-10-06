@@ -43,7 +43,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6";
+const std::string GOLDEN_HASH = "d3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0";
 
 uint160 KeyOf(int i)
 {
@@ -520,7 +520,8 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     BOOST_REQUIRE(doc.isObject());
     const UniValue& pj = doc["params"];
     yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), pj["enforceUntil"].get_int(),
-                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int());
+                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
+                                         pj["mintRequiresArmed"].get_bool());
     MemoryStateView view;
     const MemoryStateView empty = view;
     std::vector<UndoRecord> undos;
@@ -1252,6 +1253,58 @@ BOOST_AUTO_TEST_CASE(mint4_divergence_and_global_ratio)
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
 }
 
+// Rule: MINT-4
+// H-1: with MINT_REQUIRES_ARMED an unarmed R halts the mint (VOID, mint-halted-unarmed) after every
+// halt bit; once ARMED the mint is judged exactly as before (MINT-9 needs its bundle).
+BOOST_AUTO_TEST_CASE(mint4_requires_armed)
+{
+    Fixture f;
+    f.P.mintRequiresArmed = true;
+    f.MineQuotesTo(100);                                    // LOCKED_IN: mint-not-active precedes the new clause
+    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-not-active"); }
+    f.Activate();
+    BOOST_REQUIRE(!f.Armed());
+    bool invalid = true;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1), &invalid), verdict::MINT_HALTED_UNARMED);
+    BOOST_CHECK(!invalid);                                  // VOID like any halted mint, never an invalid block
+    BOOST_CHECK_EQUAL(std::string(verdict::MINT_HALTED_UNARMED), "mint-halted-unarmed");
+    Fixture g;                                              // the same chain without the parameter mints (v2 path)
+    g.Activate();
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
+    // ARMED: the clause is vacuous; MINT-9 judges the bundle as before
+    Fixture a;
+    a.P.mintRequiresArmed = true;
+    a.Arm();
+    BOOST_REQUIRE(a.Armed());
+    BOOST_CHECK_EQUAL(MintVerdictOf(a, a.MintTx(10000, 48, a.tip - 1)), verdict::MINT9_NO_BUNDLE);
+    BOOST_CHECK_EQUAL(MintVerdictOf(a, a.MintV3(10000, 50000)), "");
+    // ATTEST_REQUIRED false means never ARMED (W15): with the parameter nothing mints
+    Fixture off;
+    off.P.mintRequiresArmed = true;
+    off.P.attestRequired = false;
+    off.Arm();
+    BOOST_CHECK(!off.Armed());
+    BOOST_CHECK_EQUAL(MintVerdictOf(off, off.MintTx(10000, 48, off.tip - 1)), verdict::MINT_HALTED_UNARMED);
+}
+
+// Rule: MINT-2
+// H-5: a class disabled by an empty term range refuses every lock length with the existing verdict.
+BOOST_AUTO_TEST_CASE(mint2_disabled_class_refused)
+{
+    Fixture f;
+    f.P.classMin[1] = 97; f.P.classMax[1] = 96;             // B empty
+    f.P.classMin[2] = 97; f.P.classMax[2] = 96;             // C empty (the mainnet shape)
+    f.Activate();
+    MintOpts a; a.collateral = 10000000000000LL;
+    MintOpts b = a; b.termClass = 1;
+    MintOpts c = a; c.termClass = 2;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 100, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 96, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
+}
+
 // Rule: HALT-2
 BOOST_AUTO_TEST_CASE(recap_floor_is_the_class_minimum_with_sigma)
 {
@@ -1284,8 +1337,8 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     Fixture f(1, 0, 1, 0);                                  // cap = 0.01% of market cap: below $100 on a young regtest chain
     f.Activate();
     BOOST_CHECK(SupplyCapCents(f.Snap(f.tip).issuedZat, 50000, 1).value() < 10000);
-    // W20: supply sits at the cap (zero headroom). Class C (300 %) and class B (400 %) are below
-    // RECAP_RATIO_BPS and are refused; class A (500 %) mints through and takes supply above the cap.
+    // W20 / H-10: supply sits at the cap (zero headroom). Class C (300 %) and class B (400 %) are
+    // refused; class A (500 %, at RECAP_RATIO_BPS) mints through and takes supply above the cap.
     { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, o)), "mint-supply-cap"); }
     { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1, o)), "mint-supply-cap"); }
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
@@ -1296,7 +1349,7 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     g.Activate(1000000);
     BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
     // W20 with the volatility multiplier at or above 1.25x: class B's minimum (400 % x mult) reaches the
-    // floor and passes the cap while class C's (300 % x mult) does not. SIGMA_REF 1 and the price
+    // floor, but H-10 admits only class A above the cap, so B and C are both refused. SIGMA_REF 1 and the price
     // alternating between $0.05 and $0.05075 every VOL_STEP (8) blocks: every sample step is a
     // +-1.49 % return, sigma ~ 1.39 x SIGMA_REF.
     Fixture h(1, 10000, 1, 0);
@@ -1307,10 +1360,11 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     BOOST_CHECK(mult >= 12500 && mult < 16667);
     BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[1], mult) >= h.P.recapRatioBps);
     BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[2], mult) < h.P.recapRatioBps);
-    // class B first, at the ref just measured; the block that carries it quotes $0.05 and can only
-    // lower the next ref's multiplier (one sample return drops to zero), which keeps class C refused
-    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 97, h.tip - 1, o)), ""); }
+    // class B first, at the ref just measured (H-10: refused although it reaches the floor); the block
+    // that carries it quotes $0.05 and can only lower the next ref's multiplier, which keeps class C refused
+    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 97, h.tip - 1, o)), "mint-supply-cap"); }
     { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 145, h.tip - 1, o)), "mint-supply-cap"); }
+    BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 48, h.tip - 1)), "");                                                   // class A mints
 }
 
 // Rule: MINT-7

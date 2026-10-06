@@ -38,9 +38,9 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig}).  The C++ unit test
+# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 5).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6'
+GOLDEN_STATE_HASH = 'd3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1417,14 +1417,15 @@ def build_golden():
 def golden_document(c):
     return {
         'description': 'Yellowback v3 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
-                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig)}; payload version 3; '
+                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
+                       'SCHEMA_VERSION 5; payload version 3; '
                        '%d synthetic blocks (see test_yellowback_model.build_golden): the v2 lifecycle to 224, then '
                        'registrations, arming, a mint with a bundle, a VOID mint without one, a notice and an emergency '
                        'claim with a residual, dormancy, an equivocation, a revival and two bond spends. '
                        'txs[0] of every block is the coinbase; the model reads its scriptSig only. '
                        'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.' % GOLDEN_BLOCKS,
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0,
-                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG},
+                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
         'totals': c.model.totals.as_dict(),
@@ -1438,24 +1439,28 @@ class StateHashTests(unittest.TestCase):
     def test_preimage_layout(self):
         m = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3))
         pre = m.state_hash_preimage()
-        # T + i32 0 + zero hash + u32 4 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
+        # T + i32 0 + zero hash + u32 5 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x04\x00\x00\x00')
+        self.assertEqual(pre[37:41], b'\x05\x00\x00\x00')        # SCHEMA_VERSION 5 (H-1)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:59], b'C' + b'\x00' + bytes(8))
         self.assertEqual(pre[59:60], b'G')
         self.assertEqual(pre[60:100], bytes(40))
-        # P: the four v2 i32 fields, then v3's attestArmMin u32 (3) and bundleCarrier u8 (0 = scriptsig) (M13)
-        self.assertEqual(pre[100:122], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
-                         + b'\x03\x00\x00\x00' + b'\x00')
+        # P: the four v2 i32 fields, then v3's attestArmMin u32 (3) and bundleCarrier u8 (0 = scriptsig),
+        # then H-1's mintRequiresArmed u8 (0) (M13)
+        self.assertEqual(pre[100:123], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
+                         + b'\x03\x00\x00\x00' + b'\x00' + b'\x00')
         # v3 (section 3.6): AttestorSeq (N + u16 next) and Attest (M + status u8 + i32 triggerHeight + i32 armHeight) always present
-        self.assertEqual(pre[122:125], b'N\x00\x00')
-        self.assertEqual(pre[125:], b'M' + bytes(9))
+        self.assertEqual(pre[123:126], b'N\x00\x00')
+        self.assertEqual(pre[126:], b'M' + bytes(9))
         m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
-        self.assertEqual(m2.state_hash_preimage()[117:122], b'\x00\x00\x00\x00' + b'\x02')
+        self.assertEqual(m2.state_hash_preimage()[117:123], b'\x00\x00\x00\x00' + b'\x02' + b'\x00')
         self.assertNotEqual(m2.state_hash(), m.state_hash())
+        m3 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, mint_requires_armed=True))
+        self.assertEqual(m3.state_hash_preimage()[122:123], b'\x01')
+        self.assertNotEqual(m3.state_hash(), m.state_hash())
         self.assertEqual(m.state_hash(), ym.sha256(pre).hex())
 
     # Rule: N18
@@ -1554,9 +1559,10 @@ class StateHashTests(unittest.TestCase):
         c1.mine_n(3)
         c2.mine_n(3)
         self.assertNotEqual(c1.model.state_hash(), c2.model.state_hash())
-        # only P.enforceUntil differs: everything before it and the 18 bytes after it (attestArmMin, bundleCarrier, N, M) agree
-        self.assertEqual(c1.model.state_hash_preimage()[:-22], c2.model.state_hash_preimage()[:-22])
-        self.assertEqual(c1.model.state_hash_preimage()[-18:], c2.model.state_hash_preimage()[-18:])
+        # only P.enforceUntil differs: everything before it and the 19 bytes after it (attestArmMin, bundleCarrier,
+        # mintRequiresArmed, N, M) agree
+        self.assertEqual(c1.model.state_hash_preimage()[:-23], c2.model.state_hash_preimage()[:-23])
+        self.assertEqual(c1.model.state_hash_preimage()[-19:], c2.model.state_hash_preimage()[-19:])
 
 
 class JsonFeedTests(unittest.TestCase):

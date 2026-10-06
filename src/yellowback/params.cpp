@@ -14,7 +14,7 @@ namespace {
 void SetCommon(Params& p)
 {
     p.minMint   = 10000;      // $100
-    p.maxMint   = 1000000;    // $10,000 (param; DigiByte $100,000)
+    p.maxMint   = 250000;     // $2,500 (H-12: guarded issuance for the first parameter lifetime; DigiByte $100,000)
     p.minOutput = 100;        // $1.00 (DigiByte minOutputAmount)
     p.maxOutput = 10000000;   // $100,000 (param; DigiByte's maxMintAmount)
     p.tokenValue = TOKEN_VALUE;
@@ -41,17 +41,21 @@ void SetCommon(Params& p)
     p.payeeWindow     = 100;
 
     p.feeMin = 50000000;            // 0.5 YEC (V10)
-    p.feeBps = 25;
+    p.feeBps = 15;                  // H-4 (was 25)
 
     p.grace              = 34560;   // 30 d
     p.claimThresholdBps  = 11000;
     p.supplyCapBps       = 1500;    // 15 % of market cap (V21)
-    p.globalRatioHaltBps = 25000;
-    p.recapRatioBps      = 50000;       // W16: twice the halt floor; on every network only class A (500 %) mints through a halt
+    p.globalRatioHaltBps = 30000;       // H-11 (was 25,000)
+    p.recapRatioBps      = 60000;       // W16: twice the halt floor (H-11, was 50,000)
     p.divergenceBps      = 2000;
     p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 50000;   // A: 30-90 d
-    p.classMin[1] = 103681; p.classMax[1] = 420480;  p.baseRatioBps[1] = 40000;   // B: 90-365 d
-    p.classMin[2] = 420481; p.classMax[2] = 2102400; p.baseRatioBps[2] = 30000;   // C: 1-5 y (MAX_LOCK, V19)
+    // H-5: classes B and C are disabled by an empty term range [classMax[0] + 1, classMax[0]]
+    // (classMin > classMax): MINT-2 refuses every term in them, no code path changes and the ranges
+    // stay contiguous. The enabled bounds were B 103,681-420,480 (90-365 d) and C 420,481-2,102,400
+    // (1-5 y, MAX_LOCK, V19).
+    p.classMin[1] = 103681; p.classMax[1] = 103680;  p.baseRatioBps[1] = 40000;   // B: disabled (H-5)
+    p.classMin[2] = 103681; p.classMax[2] = 103680;  p.baseRatioBps[2] = 30000;   // C: disabled (H-5)
 
     p.volWindow         = 2016;
     p.volStep           = 48;
@@ -66,7 +70,7 @@ void SetCommon(Params& p)
     p.enforceUntilHeight = 0;       // set per release beside startHeight (L8)
 
     // v3 §3.1: price attestation
-    p.attestArmMin        = 5;      // ARM-1 (D-4)
+    p.attestArmMin        = 7;      // ARM-1 (H-2; D-4 had 5)
     p.attestArmDelay      = 1152;   // ARM-2: one day
     p.attestRequired      = true;   // W15
     p.bundleCarrier       = BundleCarrier::SCRIPTSIG;   // W2
@@ -86,7 +90,7 @@ void SetCommon(Params& p)
     p.emergencyPersist    = 48;
     p.emergencyNoticeTtl  = 1152;
     p.residualMinZat      = 100000; // RED-5
-    p.attestFeeBps        = 2500;   // AFEE-1 (D-3)
+    p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
     p.bondMin             = 20000 * COIN;
     p.bondMinLock         = 420480; // one year
     p.bondMaturity        = 16128;  // two weeks
@@ -98,6 +102,7 @@ void SetCommon(Params& p)
     p.carrierValue        = 10000;  // wallet policy
     p.attestInterval      = 10;     // k, agent policy
     p.walletConfirmations = 6;      // wallet policy
+    p.mintRequiresArmed   = true;   // H-1: MINT-4 refuses an unarmed mint (mint-halted-unarmed)
 }
 
 } // namespace
@@ -118,7 +123,8 @@ Params::Params()
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), attestFeeBps(0),
       bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
-      dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0)
+      dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
+      mintRequiresArmed(false)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = 0;
@@ -185,9 +191,9 @@ const char* BundleCarrierName(BundleCarrier carrier)
     return "unknown";
 }
 
-/** The §3.1 regtest column; only the six arguments come from flags (M13). */
+/** The §3.1 regtest column; only the seven arguments come from flags (M13). */
 Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
-                     int attestArmMin, BundleCarrier bundleCarrier)
+                     int attestArmMin, BundleCarrier bundleCarrier, bool mintRequiresArmed)
 {
     Params r;
     r.network = "regtest";
@@ -209,6 +215,13 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.peerMin = 3;
     r.payeeWindow = 10;
     r.grace = 24;
+    // The hardening plan's mainnet values (H-4, H-11, H-12) stay out of the regtest column: its
+    // scripts' fee, cap and recapitalisation arithmetic is written against the v3 values.
+    r.feeBps             = 25;
+    r.attestFeeBps       = 2500;
+    r.maxMint            = 1000000;
+    r.globalRatioHaltBps = 25000;
+    r.recapRatioBps      = 50000;
     r.classMin[0] = 48;  r.classMax[0] = 96;
     r.classMin[1] = 97;  r.classMax[1] = 144;
     r.classMin[2] = 145; r.classMax[2] = 240;
@@ -236,13 +249,14 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.dormancyCheck       = 4;
     r.attestInterval      = 4;
     r.walletConfirmations = 1;
-    // the six flags
+    // the seven flags
     r.startHeight        = startHeight;
     r.sigmaRefBps        = sigmaRefBps;
     r.supplyCapBps       = supplyCapBps;
     r.enforceUntilHeight = enforceUntil;
     r.attestArmMin       = attestArmMin;
     r.bundleCarrier      = bundleCarrier;
+    r.mintRequiresArmed  = mintRequiresArmed;
     return r;
 }
 

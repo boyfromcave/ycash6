@@ -1228,12 +1228,13 @@ std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vec
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)
 {
-    // The six regtest-only flags of §3.1 (M13): -yellowbackstartheight (required), the three v2
-    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil, and v3's
-    // -yellowbackattestarmmin, -yellowbackbundlecarrier. Every value is hashed into the state hash
-    // so mismatched test nodes fail loudly.
+    // The seven regtest-only flags of §3.1 (M13): -yellowbackstartheight (required), the three v2
+    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil, v3's
+    // -yellowbackattestarmmin, -yellowbackbundlecarrier, and the hardening plan's
+    // -yellowbackmintrequiresarmed (H-1). Every value is hashed into the state hash so mismatched
+    // test nodes fail loudly.
     static const char* const REGTEST_FLAGS[] = { "-yellowbackstartheight", "-yellowbacksigmaref", "-yellowbacksupplycapbps", "-yellowbackenforceuntil",
-                                                 "-yellowbackattestarmmin", "-yellowbackbundlecarrier" };
+                                                 "-yellowbackattestarmmin", "-yellowbackbundlecarrier", "-yellowbackmintrequiresarmed" };
     if (networkId != "regtest") {
         for (const char* f : REGTEST_FLAGS) {
             if (mapArgs.count(f)) return std::string(f) + " is regtest-only";
@@ -1254,7 +1255,8 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& 
     if (armMin < 0 || armMin > 0x7FFFFFFF) return std::string("-yellowbackattestarmmin must be >= 0");
     std::optional<BundleCarrier> carrier = ParseBundleCarrier(GetArg("-yellowbackbundlecarrier", "scriptsig"));
     if (!carrier.has_value()) return std::string("-yellowbackbundlecarrier must be scriptsig, opreturn or either");
-    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until, (int)armMin, carrier.value());
+    const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
+    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until, (int)armMin, carrier.value(), requireArmed);
     return std::nullopt;
 }
 
