@@ -139,8 +139,14 @@ outpoint is provable equivocation: sign only the transaction you mean.
 
 ### `vault_buildcancel "intentoutpoint"`
 The CANCEL spend (selector 2) of an unmatured intent: its value back into the vault it was
-unlocked from (I-2). Result: `{"hex", "required", "cancelsetid", "deadline"}` (`deadline` = the
-last height a cancel can confirm at).
+unlocked from (I-2). Result: `{"hex", "required", "cancelsetid", "deadline", "intentconfirmed"}`
+(`deadline` = the last height a cancel can confirm at). An intent still in the mempool can be
+cancelled too: its originating vault script is read from the vault coin its transaction spends,
+`intentconfirmed` is false and `deadline` assumes the intent confirms in the next block. The
+mempool accepts the cancel as the intent's child (a mempool parent counts as confirming in the
+next block, so I-2 holds), and both may confirm in one block; a cancel signed before the intent
+confirms stays valid after it. So a watcher can build and sign a cancel the moment an intent
+appears.
 
 ### `set_signcancel "hex"`
 As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`.
