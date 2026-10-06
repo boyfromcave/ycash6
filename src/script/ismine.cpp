@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2020-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -63,6 +64,8 @@ isminetype IsMineInner(const CKeyStore& keystore, const CScript& scriptPubKey, I
     {
     case TX_NONSTANDARD:
     case TX_NULL_DATA:
+    case TX_VAULT:        // vault templates are spent through the vault_* / set_* RPCs
+    case TX_VAULT_INTENT:
         break;
     case TX_PUBKEY:
         keyID = CPubKey(vSolutions[0]).GetID();

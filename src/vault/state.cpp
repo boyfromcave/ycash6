@@ -46,6 +46,13 @@ std::string KeyBond(const COutPoint& outpoint)
     return k;
 }
 
+std::string KeyTemplateOut(const COutPoint& outpoint)
+{
+    std::string k = KeyBond(outpoint);
+    k[0] = KEY_TEMPLATE_OUT;
+    return k;
+}
+
 namespace {
 
 template <typename T>
@@ -143,6 +150,28 @@ MemberList GetMembers(const KVReader& kv, const SetId& setId)
 std::optional<BondRecord> GetBond(const KVReader& kv, const COutPoint& outpoint)
 {
     return ReadRecord<BondRecord>(kv, KeyBond(outpoint));
+}
+
+std::optional<TemplateOutRecord> GetTemplateOut(const KVReader& kv, const COutPoint& outpoint)
+{
+    return ReadRecord<TemplateOutRecord>(kv, KeyTemplateOut(outpoint));
+}
+
+std::vector<std::pair<COutPoint, TemplateOutRecord>> ListTemplateOuts(const KVReader& kv)
+{
+    std::vector<std::pair<COutPoint, TemplateOutRecord>> out;
+    kv.Iterate(std::string(1, KEY_TEMPLATE_OUT), [&](const std::string& k, const std::string& v) {
+        if (k.size() != 37) return true;
+        TemplateOutRecord rec;
+        if (!DeserializeRecord(v, rec)) return true;
+        COutPoint op;
+        std::copy(k.begin() + 1, k.begin() + 33, op.hash.begin());
+        op.n = 0;
+        for (int i = 0; i < 4; i++) op.n |= (uint32_t)(unsigned char)k[33 + i] << (8 * i);
+        out.emplace_back(op, rec);
+        return true;
+    });
+    return out;
 }
 
 std::vector<SetId> ListSets(const KVReader& kv)
@@ -520,6 +549,19 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
         set->lockedValue += tx.vout[o].nValue;
         if (!MoneyRange(tx.vout[o].nValue) || !MoneyRange(set->lockedValue)) return std::string("bad-txns-vault-amount");
         PutRecord(KeySet(v.setId), *set);
+    }
+
+    // ---- the template-output index (vault_list; an intent's height for replay) ----
+    if (tin) Erase(KeyTemplateOut(tx.vin[tinIndex].prevout));
+    for (size_t o = 0; o < outs.size(); o++) {
+        if (outs[o].kind != OutClass::VAULT && outs[o].kind != OutClass::INTENT) continue;
+        TemplateOutRecord rec;
+        rec.kind = outs[o].kind == OutClass::VAULT ? 0 : 1;
+        rec.height = h;
+        rec.value = tx.vout[o].nValue;
+        rec.scriptPubKey = tx.vout[o].scriptPubKey;
+        if (outs[o].kind == OutClass::INTENT) rec.origin = tcoin.scriptPubKey;
+        PutRecord(KeyTemplateOut(COutPoint(txid, o)), rec);
     }
 
     // ---- module dispatch (after the primitive rules; a module can only reject) ----

@@ -36,7 +36,10 @@ class CBlockIndex;
  * (the state after the parent block, U-17).
  *
  * Keys: 's'||setId(32) → SetRecord; 'm'||setId(32)||memberKey(33) → MemberRecord;
- *       'b'||txid(32)||n(u32 LE) → BondRecord (every member bond not yet spent).
+ *       'b'||txid(32)||n(u32 LE) → BondRecord (every member bond not yet spent);
+ *       'v'||txid(32)||n(u32 LE) → TemplateOutRecord (every unspent V / I output created
+ *       from activation: the vault_list index, and the creation height of an intent, which
+ *       block undo data does not always carry, for replay on start).
  * Deterministic, integer only; amounts are MoneyRange-checked.
  */
 namespace vault {
@@ -125,15 +128,40 @@ struct BondRecord
     }
 };
 
+/** An unspent V or I output created from activation (key 'v'). `origin` is the
+ *  scriptPubKey of the V an intent was unlocked from (its vaultHash preimage, which a
+ *  cancel must recreate); empty for a V. Not consensus input except `height` (I-2). */
+struct TemplateOutRecord
+{
+    uint8_t kind = 0; // 0 = V, 1 = I
+    int64_t height = 0;
+    CAmount value = 0;
+    CScript scriptPubKey;
+    CScript origin;
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(kind);
+        READWRITE(height);
+        READWRITE(value);
+        READWRITE(*(CScriptBase*)(&scriptPubKey));
+        READWRITE(*(CScriptBase*)(&origin));
+    }
+};
+
 typedef std::vector<std::pair<CPubKey, MemberRecord>> MemberList;
 
 std::string KeySet(const SetId& setId);
 std::string KeyMember(const SetId& setId, const CPubKey& key);
 std::string KeyMemberPrefix(const SetId& setId);
 std::string KeyBond(const COutPoint& outpoint);
+std::string KeyTemplateOut(const COutPoint& outpoint);
 static const char KEY_SET = 's';
 static const char KEY_MEMBER = 'm';
 static const char KEY_BOND = 'b';
+static const char KEY_TEMPLATE_OUT = 'v';
 
 /** Read-only, byte-ordered key/value space. Implementations must be safe for concurrent reads. */
 class KVReader
@@ -160,6 +188,9 @@ std::optional<SetRecord> GetSet(const KVReader& kv, const SetId& setId);
 std::optional<MemberRecord> GetMember(const KVReader& kv, const SetId& setId, const CPubKey& key);
 MemberList GetMembers(const KVReader& kv, const SetId& setId);
 std::optional<BondRecord> GetBond(const KVReader& kv, const COutPoint& outpoint);
+std::optional<TemplateOutRecord> GetTemplateOut(const KVReader& kv, const COutPoint& outpoint);
+/** Every unspent template output in the index, in key (outpoint) order. */
+std::vector<std::pair<COutPoint, TemplateOutRecord>> ListTemplateOuts(const KVReader& kv);
 /** Every set id, in key order. */
 std::vector<SetId> ListSets(const KVReader& kv);
 

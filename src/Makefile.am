@@ -328,6 +328,7 @@ BITCOIN_CORE_H = \
   vault/checker.h \
   vault/db.h \
   vault/module.h \
+  vault/node.h \
   vault/state.h \
   vault/template.h \
   spentindex.h \
@@ -435,8 +436,10 @@ libbitcoin_server_a_SOURCES = \
   yellowback/index.cpp \
   yellowback/policy.cpp \
   rpc/yellowback.cpp \
+  rpc/vault.cpp \
   vault/checker.cpp \
   vault/db.cpp \
+  vault/node.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

@@ -38,6 +38,7 @@
 #include "validationinterface.h"
 #include "zip317.h"
 #include "yellowback/policy.h"
+#include "vault/node.h"
 
 #include <librustzcash.h>
 #include <rust/bridge.h>
@@ -370,6 +371,15 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
     CCoinsViewCache view(pcoinsTip);
 
+    // UPGRADE_VAULT (plan §15.6 "Miner"): acts, the rate limit and the template inputs' scripts
+    // apply against a running copy of the set state (vault::TemplateRun: 6.20.0 keeps no
+    // per-template coins view and its template check skips scripts); a transaction that fails is
+    // skipped.
+    std::optional<vault::TemplateRun> vaultRunHolder;
+    vaultRun = nullptr;
+    if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb)
+        vaultRun = &vaultRunHolder.emplace(*vault::g_vaultdb, pcoinsTip, mempool, nHeight, chainparams.GetConsensus());
+
     SaplingMerkleTree sapling_tree;
     assert(view.GetSaplingAnchorAt(view.GetBestAnchor(SAPLING), sapling_tree));
 
@@ -546,6 +556,14 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     // Yellowback TPL-1/2, last refusal before AddToBlock (only a turnstile violation follows, mapping §19)
     if (ybview && !yellowback::policy::FilterTemplate(*ybview, iter->GetTx(), nHeight)) return false;
 
+    // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx
+    if (vaultRun) {
+        if (auto vaultBad = vaultRun->Try(iter->GetTx())) {
+            LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", iter->GetTx().GetHash().ToString(), vaultBad->c_str());
+            return false;
+        }
+    }
+
     if (chainparams.ZIP209Enabled()) {
         // Does this transaction lead to a turnstile violation?
 
@@ -584,6 +602,8 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
         saplingValue = saplingValueDummy;
         orchardValue = orchardValueDummy;
     }
+
+    if (vaultRun) vaultRun->Commit();
 
     return true;
 }

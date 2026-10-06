@@ -71,6 +71,15 @@ BASE_SCRIPTS= [
     'yellowback_chainviz.py',
     # The vault primitive network upgrade (docs/plans/yellowback-upgrade-plan.md §15.9).
     'vault_upgrade.py',
+    # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
+    # release, cancel, owner spend, reorg across an act, restart reconciliation.
+    'vault_rpc.py',
+    # The primitive with raw transactions, cross-checked against VaultModel: set lifecycle, lock /
+    # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
+    # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
+    'vault_primitive.py',
+    'vault_slashing.py',
+    'vault_bridge.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

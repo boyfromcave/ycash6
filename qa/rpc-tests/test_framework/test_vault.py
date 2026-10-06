@@ -634,6 +634,54 @@ class ModelTests(unittest.TestCase):
     def test_unknown_set_is_released(self):
         self.assertTrue(v.VaultModel().is_released(SET_B, 10))
 
+    def test_malformed_shapes_rejected(self):
+        """Reconciliation (8): a V- or I-skeleton output whose fields do not parse is invalid
+        (C++ MatchVault / MatchIntent MALFORMED → bad-txns-vault-malformed); before this the
+        model treated it as an ordinary output and accepted it."""
+        c = Chain()
+        sid = c.setup()
+        vp = vparams(set_id=sid, cancel_set_id=sid, delay=10)
+        good_v = v.vault_script(vp)
+        self.assertEqual(v.template_shape(good_v), 'V')
+        bad_delay = v.vault_script_unchecked(vparams(set_id=sid, cancel_set_id=sid, delay=0))
+        self.assertIsNone(v.parse_vault(bad_delay))
+        self.assertEqual(v.template_shape(bad_delay), 'malformed')
+        # non-minimal push of the delay (OP_5 is minimal, 0x01 0x05 is not)
+        vp5 = vparams(set_id=sid, cancel_set_id=sid, delay=5)
+        s5 = v.vault_script(vp5)
+        nonmin = v.nonminimal_delay_vault(vp5)
+        self.assertNotEqual(nonmin, s5)
+        self.assertEqual(len(nonmin), len(s5) + 1)
+        self.assertEqual(v.template_shape(nonmin), 'malformed')
+        # the two setId copies differ
+        other = bytes(32)
+        two_ids = good_v.replace(v.push(sid) + bytes([v.OP_CHECKSETDORMANT]),
+                                 v.push(other) + bytes([v.OP_CHECKSETDORMANT]), 1)
+        self.assertEqual(v.template_shape(two_ids), 'malformed')
+        ip = v.intent_for(vp, c.dest)
+        self.assertEqual(v.template_shape(v.intent_script(ip)), 'I')
+        bad_i = v.intent_script_unchecked(v.IntentParams(ip.tag, ip.recipient_hash, ip.vault_hash, 0,
+                                                         ip.cancel_set_id, ip.set_id, ip.owner_key))
+        self.assertEqual(v.template_shape(bad_i), 'malformed')
+        self.assertIsNone(v.template_shape(c.dest))
+        self.assertIsNone(v.template_shape(v.bond_spk(MKEYS[0], 500)))
+        for spk in (bad_delay, nonmin, two_ids, bad_i):
+            self.assertEqual(c.reject(v.make_tx(c.coin(), [(v.COIN, spk)])), 'bad-txns-vault-malformed')
+        # the same outputs are ordinary data before activation
+        pre = v.VaultModel(activation_height=1000)
+        pre.tip = 10
+        pre.add_coin('%064x' % 7, 0, 10 * v.COIN, c.dest, 1)
+        self.assertIsNone(pre.check_tx(v.make_tx([('%064x' % 7, 0, v.SEQUENCE_FINAL)], [(v.COIN, bad_i)])))
+
+    def test_coinbase_act_rejected(self):
+        """Reconciliation (9): an act in a coinbase is invalid (bad-vault-act-coinbase)."""
+        c = Chain()
+        cb = v.make_tx([('00' * 32, 0xFFFFFFFF, v.SEQUENCE_FINAL)],
+                       [(v.COIN, c.dest), (0, v.act_script(v.encode_act(v.act_set_create(3, 2, 1, 2, v.pubkey_of(ADMIT)))))])
+        cb.vin[0].scriptSig = b'\x01\x01'
+        self.assertTrue(v.is_coinbase(cb))
+        self.assertEqual(c.reject(cb), 'bad-vault-act-coinbase')
+
 
 class VectorTests(unittest.TestCase):
     def test_vectors_reproducible(self):

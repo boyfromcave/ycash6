@@ -18,8 +18,7 @@
  * snapshot at the spending height. Ordinary signatures still go through the signature cache;
  * set signatures are never cached (their validity depends on set state, not only on bytes).
  *
- * The three methods match the virtuals being added to BaseSignatureChecker in
- * script/interpreter.h; `override` is added when the two land together.
+ * The three methods override the BaseSignatureChecker virtuals in script/interpreter.h.
  */
 namespace vault {
 
@@ -32,12 +31,12 @@ public:
                   PrecomputedTransactionData& txdataIn, std::shared_ptr<const SetSnapshot> snapshotIn, int64_t heightIn);
 
     /** The set's threshold for `role` (1 unlock, 2 cancel); nullopt for an unknown set/role. */
-    std::optional<int> SetThreshold(const uint256& setId, uint8_t role) const;
+    std::optional<int> SetThreshold(const uint256& setId, uint8_t role) const override;
     /** §15.2 steps 3–5 over sighash = SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branch). */
     bool CheckSetSigs(const uint256& setId, uint8_t role, const std::vector<valtype>& sigs,
-                      const CScript& scriptCode, uint32_t consensusBranchId) const;
+                      const CScript& scriptCode, uint32_t consensusBranchId) const override;
     /** Dormant, wound down past its liveness window, or unknown (§15.4). */
-    bool IsSetReleased(const uint256& setId) const;
+    bool IsSetReleased(const uint256& setId) const override;
 
     int64_t Height() const { return height; }
 
