@@ -1889,8 +1889,14 @@ Arguments: `count` (number, default `100`), `skip` (number, default `0`). Newest
 wallet transaction that is in `TxLog` with an own token or vault involved (N21: filtered on
 `spentTokens`/`assigned`/`closedVaults` that are mine), plus own unconfirmed and expired
 Yellowback transactions. `type` is the wallet's view: `mint`, `send`, `receive`, `burn` (a
-transfer that burned), `redeem` (own owner-path redemption), `claim` (this wallet claimed),
-`claimed` (an own vault was claimed by someone else), `sweep` (an own vault swept under the
+transfer that burned), `redeem` (own owner-path redemption), `claim` (this wallet claimed, its
+own vault included; `amountCents` is minus the burned debt), `claimed` (an own vault was claimed by
+someone else; `amountCents` 0), **upgrade (U-23)** `claim_release` / `claim_cancel` (the claimant
+intent of this wallet's claim was released to it, the vault CLAIMED, or cancelled by the attestor
+set, the vault ACTIVE again with the burn kept, U-24) and `claim_released` / `claim_cancelled` (the
+same two, seen by the owner of a vault someone else claimed) — on these four `path` is `"claim"`,
+`amountCents` is 0 and `burned` 0 (the claim row carries the burn); the release of the owner's
+RED-5 residual intent has no row (it moves no Yellowback record), `sweep` (an own vault swept under the
 retired abandonment rule; only on a chain indexed before the upgrade), **v3** `notice` (a CLAIM_NOTICE this wallet posted), `noticed` (a notice was
 posted on an own vault), `register`, `withdraw` (an own bond withdrawn), `revive`,
 `equivocation` (a report this wallet posted), `carrier` (an own carrier funding or sweep

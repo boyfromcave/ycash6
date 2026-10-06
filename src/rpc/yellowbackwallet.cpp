@@ -1367,7 +1367,9 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_listtransactions ( count skip )\n"
             "\nThis wallet's Yellowback history from the index, newest first: type is mint, send, receive, burn, redeem,\n"
-            "claim (this wallet claimed), claimed (an own vault was claimed), sweep (an own vault swept), plus own\n"
+            "claim (this wallet claimed, incl. its own vault), claimed (an own vault was claimed), claim_release / claim_cancel\n"
+            "(the intent of this wallet's claim released / cancelled), claim_released / claim_cancelled (the same, on an own\n"
+            "vault someone else claimed), sweep (an own vault swept), plus own\n"
             "transactions with a payload that expired unmined (\"expired\": true, verdict \"expired\").\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -1380,6 +1382,35 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
     State st(index.View());
     const int h = IndexHeight(index);
 
+    // U-23 pre-pass: the vaults this wallet claimed (a claim's TxLog names the vault in closedVaults and
+    // the burn in spentTokens; its release / cancel names the same vault), and where each cancel
+    // re-created a vault (a cancelled vault's record moves to the re-created outpoint).
+    std::set<COutPoint> claimedByMe;
+    std::map<COutPoint, COutPoint> reopenedAt;
+    index.View().Iterate("L", [&](const std::string& k, const std::string& raw) {
+        TxLogRecord l;
+        if (!DeserializeRecord(raw, l)) return true;
+        if (l.Type() == TxLogType::REDEEM && l.verdict == verdict::OK && l.path == "claim") {
+            bool burnedMine = false;
+            for (const AssignedOutput& a : l.spentTokens) if (yw.IsMineScript(a.scriptPubKey)) burnedMine = true;
+            if (burnedMine) for (const COutPoint& c : l.closedVaults) claimedByMe.insert(c);
+        }
+        if (l.Type() == TxLogType::CLAIM_CANCEL && l.closedVaults.size() == 1 && l.reopenedVaults.size() == 1)
+            reopenedAt[l.closedVaults[0]] = l.reopenedVaults[0];
+        return true;
+    });
+    // The vault record of `c`, following cancels to the re-created vault (the same position, the same owner).
+    auto vaultOf = [&](COutPoint c) -> std::optional<VaultRecord> {
+        for (size_t hops = 0; hops <= reopenedAt.size(); hops++) {
+            std::optional<VaultRecord> v = st.GetVault(c);
+            if (v.has_value()) return v;
+            auto it = reopenedAt.find(c);
+            if (it == reopenedAt.end()) return std::nullopt;
+            c = it->second;
+        }
+        return std::nullopt;
+    };
+
     struct Row { int height; UniValue o; };
     std::vector<Row> rows;
     index.View().Iterate("L", [&](const std::string& k, const std::string& raw) {
@@ -1391,7 +1422,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         for (const AssignedOutput& a : l.assigned) if (yw.IsMineScript(a.scriptPubKey)) received += a.cents;
         for (const AssignedOutput& a : l.spentTokens) if (yw.IsMineScript(a.scriptPubKey)) spent += a.cents;
         for (const COutPoint& c : l.closedVaults) {
-            std::optional<VaultRecord> v = st.GetVault(c);
+            std::optional<VaultRecord> v = vaultOf(c);
             if (v.has_value() && yw.IsMineVault(v.value())) {
                 closedMine = true;
                 if (v->unbacked) unbacked = true;
@@ -1402,16 +1433,28 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
             std::optional<VaultRecord> v = st.GetVault(COutPoint(txid, 0));
             mintMine = v.has_value() && yw.IsMineVault(v.value());
         }
-        if (received == 0 && spent == 0 && !closedMine && !mintMine) return true;
+        const bool intentSpend = l.Type() == TxLogType::CLAIM_RELEASE || l.Type() == TxLogType::CLAIM_CANCEL;
+        bool claimantMine = false;
+        for (const COutPoint& c : l.closedVaults) if (claimedByMe.count(c)) claimantMine = true;
+        if (received == 0 && spent == 0 && !closedMine && !mintMine && !(intentSpend && claimantMine)) return true;
         std::string type;
         int64_t amount = received - spent;
         const bool ok = l.verdict == verdict::OK;
+        std::string path = l.path;
         if (l.Type() == TxLogType::MINT) { type = "mint"; }
+        else if (intentSpend) {
+            // U-23: the claimant's intent released (CLAIMED) or cancelled by the attestor set (the vault
+            // ACTIVE again); the claimant's view wins when this wallet claimed its own vault. No YED moves
+            // (the claim burned it), so amountCents is 0; path is the claim's.
+            const bool release = l.Type() == TxLogType::CLAIM_RELEASE;
+            type = claimantMine ? (release ? "claim_release" : "claim_cancel") : (release ? "claim_released" : "claim_cancelled");
+            path = "claim";
+        }
+        else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }   // incl. a claim of an own vault
         else if (closedMine) {
             if (ok) type = l.path == "claim" ? "claimed" : "redeem";
             else type = l.path == "owner" ? "sweep" : "claimed";
         }
-        else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }
         else if (spent > 0 && l.burned > 0 && l.yedOut == received) { type = "burn"; }   // nothing left this wallet but the burn
         else if (spent > 0) { type = "send"; }        // incl. an own-to-own transfer (amountCents 0)
         else { type = "receive"; }
@@ -1421,7 +1464,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         o.pushKV("confirmations", h - l.height + 1);
         o.pushKV("type", type);
         o.pushKV("verdict", l.verdict);
-        o.pushKV("path", l.path);
+        o.pushKV("path", path);
         o.pushKV("yedIn", l.yedIn);
         o.pushKV("yedOut", l.yedOut);
         o.pushKV("burned", l.burned);

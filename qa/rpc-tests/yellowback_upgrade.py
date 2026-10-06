@@ -214,6 +214,8 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         self.mine()
         _res, mint_c = self.two_step(n0, 'yed_mint', 10_000, 48, '')
         self.mine()
+        _res, mint_d = self.two_step(n0, 'yed_mint', 10_000, 48, '')      # node 0 keeps this one's YED: it claims its own vault
+        self.mine()
         spk_c = n0.getrawtransaction(mint_c, 1)['vout'][0]['scriptPubKey']['hex']
         for claimant in (n1, n2):
             n0.yed_send(claimant.yed_getnewaddress(), 10_000)
@@ -222,12 +224,14 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         self.mine()
         assert_equal(n1.yed_getbalance()['confirmedCents'], 10_000)
         assert_equal(n2.yed_getbalance()['confirmedCents'], 10_000)
+        assert_equal(n0.yed_getbalance()['confirmedCents'], 10_000)
 
         print('the price falls to $5 for a whole slow window; the claim path opens')
         n0.yed_setquote(CRASH, 1)
-        vb = n0.yed_getvault(mint_b)
-        self.mine(max(70, vb['claimHeight'] - n0.getblockcount()))
+        vd = n0.yed_getvault(mint_d)
+        self.mine(max(70, vd['claimHeight'] - n0.getblockcount()))
         assert n0.yed_getvault(mint_b)['claimable']
+        assert n0.yed_getvault(mint_d)['claimable']
 
         print('an underwater claim (selector 4) moves the vault into a claimant intent: CLAIMING')
         to_b = n1.getnewaddress()
@@ -245,8 +249,19 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_equal(idec['type'], 'intent')
         assert_equal(idec["tag"], "59454400")
         assert_equal(craw['vout'][0]['valueZat'], vb['collateralZat'])                   # the whole vault (S-2)
-        assert_equal(n0.yed_getstats()['supplyCents'], 10_000)                          # the claim burned its 10,000
+        assert_equal(n0.yed_getstats()['supplyCents'], 20_000)                          # the claim burned its 10,000
+        # yed_listtransactions: the claimant's row is a claim (minus the burn), the owner's a claimed (0)
+        assert_equal(self.tx_row(n1, claim_b, ('type', 'path', 'amountCents')), ('claim', 'claim', -10_000))
+        assert_equal(self.tx_row(n0, claim_b, ('type', 'path', 'amountCents')), ('claimed', 'claim', 0))
         claiming = self.assert_one_state('claim B')
+
+        print('node 0 claims its own vault: its row is a claim, not claimed')
+        _res, claim_d = self.two_step(n0, 'yed_claim', mint_d, n0.getnewaddress())
+        self.mine()
+        assert_equal(n0.yed_getvault(mint_d)['status'], 'CLAIMING')
+        assert_equal(n0.yed_getstats()['supplyCents'], 10_000)
+        assert_equal(self.tx_row(n0, claim_d, ('type', 'path', 'amountCents')), ('claim', 'claim', -10_000))
+        claiming = self.assert_one_state('claim D')
 
         print('a reorg across the claim: ACTIVE again, then CLAIMING again')
         for n in self.yb():
@@ -267,7 +282,8 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         # state, BIP68; plan §15 finding 56): an unaged RELEASE is invalid, an aged one valid, and
         # sendrawtransaction agrees both times.
         rel_hex = self.release_hex(n1, claim_b, idec['recipienthash'], n1.validateaddress(to_b)['scriptPubKey'])
-        self.mine(CLAIM_DELAY - 2)
+        claim_h = n1.getblock(claim_block)['height']
+        self.mine(claim_h + CLAIM_DELAY - 2 - n1.getblockcount())        # the next block is one short of maturity
         v = n1.yed_validaterawtransaction(rel_hex)
         assert_equal((v['valid'], v.get('invalidReason'), v['verdict'], v['type']), (False, 'non-BIP68-final', 'ok', 'claim_release'))
         assert_raises_rpc('non-BIP68-final', n1.sendrawtransaction, rel_hex)
@@ -280,6 +296,10 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         self.mine()
         assert_equal(n0.yed_getvault(mint_b)['status'], 'CLAIMED')
         assert rel in n1.getblock(n1.getbestblockhash())['tx']
+        assert_equal(self.tx_row(n1, rel, ('type', 'path', 'amountCents', 'burned')), ('claim_release', 'claim', 0, 0))
+        assert_equal(self.tx_row(n0, rel, ('type', 'path', 'amountCents', 'burned')), ('claim_released', 'claim', 0, 0))
+        assert_equal(self.tx_row(n1, claim_b, ('type',)), ('claim',))         # the claim rows are unchanged by the release
+        assert_equal(self.tx_row(n0, claim_b, ('type',)), ('claimed',))
         self.assert_one_state('release B')
 
         print('a wrong-price claim cancelled by the attestor set: the same position ACTIVE, the burn kept (U-24)')
@@ -314,6 +334,10 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_equal(after['activeVaults'], before['activeVaults'] + 1)
         log = n0.yed_gettxinfo(cancel)
         assert_equal(log['type'], 'claim_cancel')
+        assert_equal(self.tx_row(n2, cancel, ('type', 'path', 'amountCents')), ('claim_cancel', 'claim', 0))
+        assert_equal(self.tx_row(n0, cancel, ('type', 'path', 'amountCents')), ('claim_cancelled', 'claim', 0))
+        assert_equal(self.tx_row(n2, claim_c, ('type', 'amountCents')), ('claim', -10_000))   # the burn is kept (U-24)
+        assert_equal(self.tx_row(n0, claim_c, ('type', 'amountCents')), ('claimed', 0))      # the moved vault is still node 0's
         self.assert_one_state('cancel C')
 
         print('an invalid mint: refused by the mempool, and the block carrying it rejected by every Yellowback node')
@@ -336,6 +360,12 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert found, 'node 0 did not score the relayer of the invalid block 100'
         for n in self.yb():
             assert_equal(n.getbestblockhash(), tip)
+
+    def tx_row(self, node, txid, fields):
+        """The one yed_listtransactions row of ``txid`` on ``node``, as a tuple of ``fields``."""
+        rows = [r for r in node.yed_listtransactions(1000) if r['txid'] == txid]
+        assert_equal(len(rows), 1)
+        return tuple(rows[0][f] for f in fields)
 
     def release_hex(self, node, intent_txid, recipient_hash, recipient_spk):
         """The RELEASE of intent ``intent_txid``:0 (selector 1, nSequence = CLAIM_DELAY) to ``recipient_spk``, as
