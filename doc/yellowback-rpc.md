@@ -75,9 +75,10 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
 - **Outpoints** are objects `{"txid": "<hex>", "vout": n}`; a vault is named by its outpoint
   string `"<txid>:0"` where the prototype did (`vault`).
 - **Term classes** are the strings `"A"`, `"B"`, `"C"`; vault statuses `"ACTIVE"`, `"VOID"`,
-  `"CLOSED"`, `"CLAIMED"`; activation statuses `"signaling"`, `"locked_in"`, `"active"`; halt-mask
+  `"CLOSED"`, `"CLAIMED"`, `"CLAIMING"`; upgrade statuses (`yed_getactivation`) `"pending"`,
+  `"active"` (the v2 `"signaling"` / `"locked_in"` left with signalling, upgrade plan §6); halt-mask
   names `"NOT_ACTIVE"`, `"NO_PRICE"`, `"PARTICIPATION"`, `"GLOBAL_RATIO"`, `"DIVERGENCE"`,
-  `"ENFORCEMENT"` (§3.6).
+  `"ENFORCEMENT"` (§3.6; `PARTICIPATION` and `ENFORCEMENT` are no longer set since the upgrade).
 - **Payees** are rendered as the P2PKH address (`s1…` mainnet, `sm…` testnet/regtest) of the key
   hash, `null` when there is none (FEE-0, or a VOID release / sweep).
 - **Verdicts** are the §4.2a strings (`ok`, `bad-mint-collateral`, `vault-spend-malformed`, …).
@@ -121,8 +122,10 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
   not, a v3 wallet always takes the carrier step for these commands: before arming the bundle
   is empty and the carrier is still created, so one code path exists (the carrier costs
   `CARRIER_VALUE` = 10,000 zat plus the network fee).
-- **Gating.** Every command requires `-experimentalfeatures -yellowback`; without them the node
-  answers JSON-RPC `-32601` "Method not found". Every refusal is `RPC_INVALID_PARAMETER` (a bad
+- **Gating.** Every command requires Yellowback to be live: the vault upgrade scheduled and the
+  network's YED attestor set configured (U-22; regtest: `-nuparams=6d5b7a31:<h>` and
+  `-yellowbackattestorset=<setid>`); otherwise the node answers JSON-RPC `-32601` "Method not
+  found (Yellowback is not active: …)". Every refusal is `RPC_INVALID_PARAMETER` (a bad
   argument), `RPC_WALLET_ERROR` (funds, locking) or `RPC_VERIFY_REJECTED` (a rule), with a
   message that **begins with a stable identifier** from the table in *Error identifiers*; the
   wallet matches the identifier, never the text after it.
@@ -1889,8 +1892,14 @@ Arguments: `count` (number, default `100`), `skip` (number, default `0`). Newest
 wallet transaction that is in `TxLog` with an own token or vault involved (N21: filtered on
 `spentTokens`/`assigned`/`closedVaults` that are mine), plus own unconfirmed and expired
 Yellowback transactions. `type` is the wallet's view: `mint`, `send`, `receive`, `burn` (a
-transfer that burned), `redeem` (own owner-path redemption), `claim` (this wallet claimed),
-`claimed` (an own vault was claimed by someone else), `sweep` (an own vault swept under the
+transfer that burned), `redeem` (own owner-path redemption), `claim` (this wallet claimed, its
+own vault included; `amountCents` is minus the burned debt), `claimed` (an own vault was claimed by
+someone else; `amountCents` 0), **upgrade (U-23)** `claim_release` / `claim_cancel` (the claimant
+intent of this wallet's claim was released to it, the vault CLAIMED, or cancelled by the attestor
+set, the vault ACTIVE again with the burn kept, U-24) and `claim_released` / `claim_cancelled` (the
+same two, seen by the owner of a vault someone else claimed) — on these four `path` is `"claim"`,
+`amountCents` is 0 and `burned` 0 (the claim row carries the burn); the release of the owner's
+RED-5 residual intent has no row (it moves no Yellowback record), `sweep` (an own vault swept under the
 retired abandonment rule; only on a chain indexed before the upgrade), **v3** `notice` (a CLAIM_NOTICE this wallet posted), `noticed` (a notice was
 posted on an own vault), `register`, `withdraw` (an own bond withdrawn), `revive`,
 `equivocation` (a report this wallet posted), `carrier` (an own carrier funding or sweep

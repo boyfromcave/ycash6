@@ -1,0 +1,833 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""upgrade-walk: the whole ecosystem on the vault upgrade, walked end to end on a running devnet.
+
+docs/plans/yellowback-upgrade-plan.md §4 (the bridge), §5 (YED on the primitive), §15.8 (the
+set_* / vault_* RPCs) and §15.10 (U-21..U-24), exercised on the one-laptop devnet with every
+client the devnet runs: chain-viz, lightwalletd (the fork, --yellowback) and yolo beside pool 4.
+Every step prints the calls it makes and the evidence (txids, RPC outputs) into a transcript
+(--transcript, default <dir>/upgrade-walk-transcript.txt) and ends PASS or stops at the first
+FAIL. The checklist this script follows is scenarios/upgrade-walk.md.
+
+The devnet it expects (deterministic: nothing mines but this script):
+
+    yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 480
+
+Eleven nodes: 0 the minter, 1 stock (no attestor set: the YED module is inert there, the
+primitive is not), 2-4 pools (real quote agents), 5-7 attestors, 8 the empty attestor seat this
+walk fills (join, mature, agent, heartbeat), 9 a holder, 10 the claimant.
+
+Steps (each can be skipped with --skip NAME[,NAME]):
+  clients    lightwalletd (fork, --yellowback) on --lwd-port, yolo beside pool 4, chain-viz probe
+  members    attestor set membership: node 8 joins, matures, heartbeats; node 6 goes dormant (S15)
+             with its agent stopped and revives with a SET_HEARTBEAT when it comes back
+  mint       arming (ARMED, seated), mints -> the V template (tag YED, the attestor set, CLAIM_DELAY)
+  transfer   yed_send to the holder and the claimant
+  redeem     the owner redeems after lockHeight (selector 2); renew = redeem + mint the same debt
+  claim      $5 crash: an underwater claim -> claimant intent (CLAIMING); a reorg across it; release
+             after CLAIM_DELAY (CLAIMED)
+  cancel     a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
+  invalid    an invalid mint refused by every Yellowback mempool, the block carrying it rejected by
+             every Yellowback node
+  bridge     the WYEC bridge persona (bridge-sim) in both shapes: lock -> mock burn -> intent ->
+             release; a rogue intent cancelled; owner recovery when the guardians fall silent
+  final      one state hash on every node (YED and vault), chain-viz and lightwalletd agree
+
+    ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk [--dir DIR] [--transcript PATH] [--skip ...] [--summary PATH]
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from decimal import Decimal
+from io import BytesIO
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEVNET = os.path.join(HERE, "yellowback-devnet")
+BRIDGE_SIM = os.path.join(HERE, "bridge-sim")
+
+
+def _load_devnet():
+    loader = importlib.machinery.SourceFileLoader("yellowback_devnet", DEVNET)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+dv = _load_devnet()                         # the devnet's own helpers (state, rpc, agents, ports)
+from test_framework.mininode import CBlock, CTransaction           # noqa: E402
+from test_framework.util import bytes_to_hex_str, hex_str_to_bytes, sync_blocks   # noqa: E402
+from test_framework.yellowback_util import CLAIM_DELAY, REF_LAG, VAULT_ACTIVATION, template_coinbase   # noqa: E402
+from test_framework import yellowback_model as ym                  # noqa: E402
+
+STEPS = ("clients", "members", "mint", "transfer", "redeem", "claim", "cancel", "invalid", "bridge", "final")
+USER, STOCK, POOLS, ATTESTORS, SEAT, HOLDER, CLAIMANT = 0, 1, (2, 3, 4), (5, 6, 7), 8, 9, 10
+STRATUM_POOL = 4
+DORMANT_AGENT = 6
+CANCELLER = 5                     # the attestor that cancels the wrong-price claim
+MINT_CENTS, LOCK_BLOCKS = 10_000, 48
+PRICE, CRASH = "50", "5"          # $100 at 500 % locks 10 YEC; at $5 those 10 YEC back $50 < $110: underwater
+
+
+class WalkFailure(Exception):
+    pass
+
+
+def jdump(value, limit=None):
+    text = json.dumps(value, default=str, sort_keys=True)
+    if limit and len(text) > limit:
+        text = text[:limit] + " ... (%d bytes)" % len(text)
+    return text
+
+
+def pick(value, keys):
+    return {k: value.get(k) for k in keys if k in value}
+
+
+class Walk:
+    def __init__(self, args):
+        self.args = args
+        self.dir = os.path.abspath(args.dir)
+        self.state = dv.load(self.dir)
+        self.skip = set(s for s in (args.skip or "").split(",") if s)
+        if args.only: self.skip = set(STEPS) - set(args.only.split(","))
+        unknown = self.skip - set(STEPS)
+        if unknown: sys.exit("unknown step(s) to skip: %s (steps: %s)" % (", ".join(sorted(unknown)), ", ".join(STEPS)))
+        self.transcript = open(args.transcript or os.path.join(self.dir, "upgrade-walk-transcript.txt"), "w")
+        self.t0 = time.time()
+        self.summary = {"steps": {}, "evidence": {}, "findings": []}
+        self.n = self.state["num_nodes"]
+        if self.n < 11 or self.state.get("role") != "attestor":
+            sys.exit("upgrade-walk needs `up --role attestor --no-heartbeat --no-walk --no-sim` (eleven nodes, node 8 empty)")
+        for name in ("heartbeat", "walk", "sim"):
+            if dv.agent_alive((self.state.get(name) or {}).get("pid")):
+                sys.exit("the %s is running; this walk mines every block itself (`up ... --no-heartbeat --no-walk --no-sim`)" % name)
+        self.set_id = self.state["attestor_set"]
+        self.yed_nodes = [i for i in range(self.n) if i != STOCK]
+        self.vaults = {}
+
+    # ------------------------------------------------------------------ transcript
+    def out(self, text=""):
+        print(text, flush=True)
+        self.transcript.write(text + "\n")
+        self.transcript.flush()
+
+    def step(self, name, title):
+        self.current = name
+        self.out("")
+        self.out("=" * 100)
+        self.out("[%s +%ds] %s  (height %d)" % (name, time.time() - self.t0, title, self.tip()))
+        self.out("=" * 100)
+
+    def note(self, text):
+        self.out("  # " + text)
+
+    def ok(self, condition, text):
+        if not condition:
+            self.out("  FAIL: " + text)
+            raise WalkFailure("%s: %s" % (self.current, text))
+        self.out("  PASS: " + text)
+
+    def evidence(self, key, value):
+        self.summary["evidence"][key] = value
+
+    def finding(self, text):
+        self.summary["findings"].append(text)
+        self.out("  FINDING: " + text)
+
+    # ------------------------------------------------------------------ rpc and devnet
+    def node(self, i, timeout=120):
+        return dv.rpc(self.state, i, timeout=timeout)
+
+    def call(self, i, method, *args, show=True, keys=None, limit=600, quiet=False):
+        """One RPC on node i, echoed into the transcript with its (trimmed) result."""
+        if not quiet:
+            self.out("  $ node%d %s %s" % (i, method, " ".join(jdump(a) for a in args)))
+        result = getattr(self.node(i), method)(*args)
+        if show and not quiet:
+            shown = pick(result, keys) if keys and isinstance(result, dict) else result
+            self.out("    = " + jdump(shown, limit))
+        return result
+
+    def fails(self, i, method, *args, expect):
+        """An RPC that must fail with ``expect`` in its message."""
+        self.out("  $ node%d %s %s   (must fail: %s)" % (i, method, " ".join(jdump(a, 80) for a in args), expect))
+        try:
+            result = getattr(self.node(i), method)(*args)
+        except Exception as error:
+            message = getattr(error, "error", {}).get("message") if hasattr(error, "error") else str(error)
+            message = message or str(error)
+            self.out("    ! " + message[:300])
+            self.ok(expect in message, "node%d %s refused: %s" % (i, method, expect))
+            return message
+        self.out("    = " + jdump(result, 300))
+        self.ok(False, "node%d %s should have failed with %s" % (i, method, expect))
+
+    def devnet(self, *argv, check=True):
+        """A yellowback-devnet command, as a person would type it; state is reloaded after."""
+        dv.save(self.dir, self.state)
+        command = [sys.executable, DEVNET] + list(argv) + ["--dir", self.dir]
+        self.out("  $ yellowback-devnet %s" % " ".join(argv))
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        for line in (proc.stdout + proc.stderr).strip().splitlines():
+            if "SyntaxWarning" in line or "re.match(" in line: continue
+            self.out("    | " + line[:240])
+        self.state = dv.load(self.dir)
+        if check and proc.returncode != 0:
+            self.ok(False, "yellowback-devnet %s exited %d" % (" ".join(argv), proc.returncode))
+        return proc
+
+    def tip(self):
+        return self.node(USER).getblockcount()
+
+    def all_nodes(self):
+        return [self.node(i) for i in range(self.n)]
+
+    def wait_mempool(self, txid, nodes=POOLS, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if all(txid in self.node(i).getrawmempool() for i in nodes): return
+            time.sleep(0.2)
+        raise WalkFailure("%s did not reach the mempools of nodes %s" % (txid, nodes))
+
+    def mine(self, blocks, stratum=False, quiet=False):
+        """Round-robin on the automated pools (every block carries a quote tag), or through yolo."""
+        start = self.tip()
+        nodes = self.all_nodes()
+        if stratum:
+            dv.stratum_mine(self.state, STRATUM_POOL, blocks)
+        else:
+            for k in range(blocks):
+                self.node(POOLS[(start + k) % len(POOLS)], timeout=180).generate(1)
+                sync_blocks(nodes)
+        sync_blocks(nodes)
+        if not quiet:
+            self.out("  ~ mined %d block(s)%s: %d -> %d" % (blocks, " through yolo + stratum-miner" if stratum else "", start, self.tip()))
+        return self.tip()
+
+    def mine_to(self, height, quiet=False):
+        if self.tip() < height: self.mine(height - self.tip(), quiet=quiet)
+
+    def wait_spender(self, i, txid, timeout=90):
+        deadline = time.time() + timeout
+        node = self.node(i)
+        while time.time() < deadline:
+            for cand in node.getrawmempool():
+                try: raw = node.getrawtransaction(cand, 1)
+                except Exception: continue
+                if any(vin.get("txid") == txid for vin in raw["vin"]): return cand
+            time.sleep(0.2)
+        raise WalkFailure("node%d: nothing spent the carrier %s within %ds" % (i, txid, timeout))
+
+    def fresh(self, i, tries=20):
+        """Before a bundle-carrying call: every running attest agent has a fresh attestation in node i's pool.
+        A burst of blocks outruns the agents (they sign every ATTEST_INTERVAL blocks, the pool keeps
+        attestMaxAge), so wait, and mine into the next tick when waiting alone does not help."""
+        self.state = dv.load(self.dir)
+        running = len([1 for name, pid in dv.attest_pids(self.state).items() if name.startswith("attest-") and dv.agent_alive(pid)])
+        for k in range(tries):
+            info = self.node(i).yed_getinfo()["attest"]
+            want = min(running, info["seatedCount"])
+            if info["poolFresh"] >= want: return info
+            time.sleep(1.5)
+            if k % 2 == 1: self.mine(1, quiet=True)
+        raise WalkFailure("node%d: poolFresh %d < %d running agents after %d tries" % (i, info["poolFresh"], want, tries))
+
+    def two_step(self, i, method, *args, keys=None):
+        """yed_mint / yed_claim with wait=false: the carrier, one block, then the main transaction."""
+        keys = keys or ["pending", "carrierTxid", "refHeight", "xMint", "aMint", "pMint", "xClaim", "aClaim", "pClaim", "bundleSeqs"]
+        for attempt in range(4):
+            self.fresh(i)
+            try:
+                res = self.call(i, method, *args, False, keys=keys)
+                break
+            except Exception as error:
+                message = str(getattr(error, "error", {}).get("message", error))
+                if "bundle-insufficient" not in message or attempt == 3: raise
+                # the agents sign every ATTEST_INTERVAL blocks; a selection can still miss a tick that lands a moment later
+                self.out("    ! %s -- the agents lag the tip; one more block and retry" % message[:160])
+                time.sleep(2); self.mine(1, quiet=True)
+        self.ok(res["pending"] is True and res.get("carrierTxid"), "%s took the carrier step (carrier %s)" % (method, res.get("carrierTxid")))
+        self.wait_mempool(res["carrierTxid"])
+        self.mine(1, quiet=True)
+        txid = self.wait_spender(i, res["carrierTxid"])
+        self.wait_mempool(txid)
+        self.out("    -> main transaction %s (spends the carrier)" % txid)
+        return res, txid
+
+    def statehashes(self, label):
+        sync_blocks(self.all_nodes())
+        yed = {i: self.node(i).yed_getstatehash()["statehash"] for i in self.yed_nodes}
+        vault = {i: self.node(i).vault_getinfo()["statehash"] for i in range(self.n)}
+        self.out("  $ yed_getstatehash on nodes %s; vault_getinfo.statehash on every node" % ",".join(str(i) for i in self.yed_nodes))
+        self.out("    = yed %s ; vault %s" % (sorted(set(yed.values())), sorted(set(vault.values()))))
+        self.ok(len(set(yed.values())) == 1, "%s: one YED state hash on all %d Yellowback nodes" % (label, len(yed)))
+        self.ok(len(set(vault.values())) == 1, "%s: one vault state hash on all %d nodes, the stock node included" % (label, len(vault)))
+        return yed[USER], vault[USER]
+
+    def attestor_row(self, pubkey, node=USER):
+        for row in self.node(node).yed_listattestors():
+            if row["attestorPubKey"] == pubkey: return row
+        return None
+
+    def member_row(self, pubkey):
+        for m in self.node(USER).set_getinfo(self.set_id)["memberlist"]:
+            if m["key"] == pubkey: return m
+        return None
+
+    def http_json(self, url, timeout=10):
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+
+    # ------------------------------------------------------------------ clients
+    def chainviz(self, label, intent=None, cancelled=None):
+        """chain-viz's vault panel (/api/vaults) once it has caught up with the tip: its sets, vaults and intents
+        must be the node's (vault_list), and an outstanding intent / a cancel must show."""
+        url = (self.state.get("chainviz") or {}).get("url")
+        if not url or "clients" in self.skip:
+            self.note("chain-viz not running: skipped (%s)" % label); return None
+        base = url.rstrip("/")
+        for _ in range(30):
+            try: doc = self.http_json(base + "/api/vaults")
+            except Exception as error: doc = {"error": str(error)}
+            if (doc.get("tip") or {}).get("height") == self.tip(): break
+            time.sleep(1)
+        self.ok((doc.get("tip") or {}).get("height") == self.tip(), "chain-viz follows the tip (%s)" % label)
+        node_out = {r["outpoint"]: r["kind"] for r in self.node(USER).vault_list()}
+        viz_out = {r["outpoint"]: r["kind"] for r in doc.get("vaults", []) + doc.get("intents", [])}
+        sets = [s["setid"][:16] + " (%s current%s)" % (s.get("current"), ", dormant" if s.get("dormant") else "") for s in doc.get("sets", [])]
+        self.out("  $ GET %s/api/vaults   (%s)" % (base, label))
+        self.out("    = sets %s; byTag %s; %d vaults, %d intents; last spends %s" % (
+            sets, jdump(doc.get("byTag")), len(doc.get("vaults", [])), len(doc.get("intents", [])),
+            jdump([pick(x, ["action", "kind", "outpoint", "height"]) for x in (doc.get("spends") or [])[:3]])))
+        self.ok(viz_out == node_out and len(doc.get("sets", [])) == self.node(USER).vault_getinfo()["sets"],
+                "chain-viz shows the node's %d sets and %d vault outputs (%s)" % (len(doc.get("sets", [])), len(viz_out), label))
+        if intent:
+            self.ok(viz_out.get(intent) == "intent", "chain-viz shows the intent %s" % intent[:16])
+        if cancelled:
+            self.ok(any(x.get("action") == "cancel" and x.get("outpoint") == cancelled for x in doc.get("spends") or []),
+                    "chain-viz shows the cancel of %s" % cancelled[:16])
+        return doc
+
+    def lwd_probe(self, label):
+        lwd = self.state.get("lightwalletd") or {}
+        if not dv.agent_alive(lwd.get("pid")):
+            self.note("lightwalletd not running: skipped (%s)" % label); return None
+        info = dv.lightwalletd_probe(lwd["port"], timeout=10, yellowback=True)
+        y = info.get("yellowback", {})
+        shown = {k: v for k, v in y.items() if k.startswith(("GetVaultInfo", "ListSets", "GetSet", "ListVaultOutputs", "GetYellowbackInfo#rpcversion"))}
+        self.out("  $ lwdinfo -server 127.0.0.1:%d -yellowback   (%s)" % (lwd["port"], label))
+        self.out("    = latestHeight %s; %s" % (info.get("latestHeight"), jdump(shown)))
+        bad = {k: v for k, v in shown.items() if "#" not in k and v != "ok"}
+        self.ok(not bad, "lightwalletd serves the vault read calls (GetVaultInfo, ListSets, GetSet, ListVaultOutputs): %s" % (bad or "all ok"))
+        return y
+
+    def lwd_equality(self, label):
+        """The fork's devnet test TestDevnetVaultUpgradeThroughServer: GetVaultInfo / ListSets / GetSet(the
+        attestor set) / ListVaultOutputs equal the node's vault_getinfo / set_list / set_getinfo / vault_list."""
+        lwd = self.state.get("lightwalletd") or {}
+        base = self.state.get("lightwalletd_baseline") or {}
+        if not dv.agent_alive(lwd.get("pid")) or not dv.agent_alive(base.get("pid")):
+            self.note("lightwalletd fork + baseline not both running: equality test skipped (%s)" % label); return
+        env = dict(os.environ, LWD_DEVNET_DIR=self.dir, LWD_FORK_ADDR="127.0.0.1:%d" % lwd["port"],
+                   LWD_BASELINE_ADDR="127.0.0.1:%d" % base["port"], GOFLAGS="-mod=vendor")
+        command = ["go", "test", "-tags", "devnet", "-count=1", "-v", "-run", "TestDevnetVaultUpgradeThroughServer", "./frontend/"]
+        self.out("  $ (cd %s && LWD_DEVNET_DIR=... go test -tags devnet -run TestDevnetVaultUpgradeThroughServer ./frontend/)   (%s)" % (dv.LWD_REPO, label))
+        proc = subprocess.run(command, cwd=dv.LWD_REPO, env=env, capture_output=True, text=True, timeout=600)
+        for line in proc.stdout.splitlines():
+            if line.strip().startswith(("---", "ok", "FAIL", "PASS", "yellowback_devnet_test.go")): self.out("    | " + line.strip()[:300])
+        self.ok(proc.returncode == 0, "lightwalletd's vault read calls equal the node's RPCs, byte for byte where compared (%s)" % label)
+
+    def start_baseline_lwd(self):
+        binary = dv.lightwalletd_binary(baseline=True)
+        if not os.access(binary, os.X_OK):
+            self.note("baseline lightwalletd not found at %s: equality test will skip" % binary); return
+        port = self.args.lwd_port + 1
+        data = os.path.join(self.dir, "lwd-baseline")
+        os.makedirs(data, exist_ok=True)
+        command = dv.lightwalletd_command(self.dir, binary, port)
+        command = [c if not c.endswith(os.path.join("node0", "lightwalletd")) else data for c in command]
+        command = [c if not c.endswith("lightwalletd.log") else os.path.join(data, "lightwalletd.log") for c in command]
+        command[command.index("--http-bind-addr") + 1] = "127.0.0.1:%d" % (port + 2000)
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.state["lightwalletd_baseline"] = {"pid": process.pid, "port": port, "binary": binary}
+        dv.save(self.dir, self.state)
+        self.out("  $ %s ... --grpc-bind-addr 127.0.0.1:%d   (the baseline server: the vault calls must be UNIMPLEMENTED there)" % (binary, port))
+
+    def s_clients(self):
+        self.step("clients", "the clients: lightwalletd (fork + baseline), yolo beside pool 4, chain-viz")
+        info = self.call(USER, "vault_getinfo")
+        self.ok(info["active"] and info["branchid"] == "6d5b7a31" and info["activationheight"] == VAULT_ACTIVATION,
+                "UPGRADE_VAULT (branch 6d5b7a31) active since %d" % VAULT_ACTIVATION)
+        up = self.call(USER, "yed_getinfo", keys=["rpcversion", "upgrade", "attest"])
+        self.ok(up["rpcversion"] == 5 and up["upgrade"]["attestorSetId"] == self.set_id, "Yellowback rpcversion 5 on the attestor set %s" % self.set_id[:16])
+        self.fails(STOCK, "yed_getinfo", expect="Method not found")
+        self.note("node 1 runs without -yellowbackattestorset: no yed_* there, but the primitive (set_*/vault_*) runs on every node")
+        self.call(STOCK, "vault_getinfo", keys=["active", "sets", "statehash"])
+        if "clients" in self.skip: return
+        self.devnet("lightwalletd", "start", "--port", str(self.args.lwd_port), "--extra=--yellowback")
+        self.start_baseline_lwd()
+        self.devnet("pool", str(STRATUM_POOL), "stratum", "start")
+        doc = dv.stratum_status(dv.stratum_of(self.state, STRATUM_POOL)) or {}
+        self.out("    yolo /status: " + jdump(pick(doc, ["height", "payout", "miners", "templateAgeSeconds", "tag"])))
+        self.ok(doc.get("height") is not None, "yolo serves a template at height %s" % doc.get("height"))
+        h = self.mine(2, stratum=True)
+        block = self.node(USER).getblock(self.node(USER).getbestblockhash())
+        tag = self.call(USER, "yed_gettag", str(h), keys=["kind", "payoutAddress", "quote"])
+        self.ok(tag.get("payoutAddress") == dv.pool_address(self.state, STRATUM_POOL), "the block yolo built carries pool 4's tag across the upgrade (yed_gettag)")
+        self.evidence("stratum_block", block["hash"])
+        cv = self.state.get("chainviz") or {}
+        self.ok(dv.agent_alive(cv.get("pid")), "chain-viz is running at %s" % cv.get("url"))
+        health = self.http_json(cv["url"].rstrip("/") + "/api/health")
+        self.out("  $ GET %s/api/health\n    = %s" % (cv["url"].rstrip("/"), jdump(health, 400)))
+        self.lwd_probe("start")
+
+    # ------------------------------------------------------------------ members
+    def s_members(self):
+        self.step("members", "attestor set membership: join, maturity, heartbeat; a member goes dormant and revives")
+        before = self.call(USER, "set_getinfo", self.set_id, keys=["members", "current", "seats", "livenesswindow", "maturity", "bondmin", "open"])
+        self.call(SEAT, "getbalance")
+        lock = 200
+        reg = self.call(SEAT, "yed_registerattestor", 10, lock, keys=["txid", "attestorPubKey", "bondAddress", "seq"])
+        self.note("P4-b: yed_registerattestor sends a SET_JOIN of a fresh wallet key to the attestor set (bond 10 YEC, CLTV +%d)" % lock)
+        pub = reg["attestorPubKey"]
+        self.wait_mempool(reg["txid"])
+        raw = self.node(SEAT).getrawtransaction(reg["txid"], 1)
+        act = [o for o in raw["vout"] if o["scriptPubKey"]["type"] == "nulldata"]
+        dec = self.call(USER, "vault_decodescript", act[0]["scriptPubKey"]["hex"], keys=["type", "acttype", "setid", "memberkey"])
+        self.ok(dec.get("acttype") in ("join", "SET_JOIN") and dec.get("setid") == self.set_id, "the registration is a SET_JOIN act on the attestor set")
+        join_h = self.mine(1)
+        m = self.member_row(pub)
+        self.out("    member: " + jdump(m))
+        self.ok(m and m["status"] == "active" and m["joinheight"] == join_h, "node 8's key is an ACTIVE member of the set from height %d" % join_h)
+        row = self.attestor_row(pub)
+        self.out("    yed_listattestors row: " + jdump(pick(row, ["seq", "status", "registerHeight", "bondZat", "seated"])))
+        self.ok(row["status"] == "PENDING", "the module mirrors the join as a PENDING attestor (seq %d): current in the set after its maturity (%d), "
+                "seated only after the module's stricter BOND_MATURITY (8) (finding 41)" % (row["seq"], before["maturity"]))
+        seq = row["seq"]
+        self.mine_to(join_h + 8)                               # max(set maturity 1, BOND_MATURITY 8)
+        row = self.attestor_row(pub)
+        self.ok(row["status"] == "ELIGIBLE" and self.member_row(pub)["current"], "after BOND_MATURITY node 8 is current in the set and ELIGIBLE (seated %s)" % row.get("seated"))
+        self.state["attest_seqs"][str(SEAT)] = seq
+        for key in ("attestors", "auto_attestors"):
+            if SEAT not in self.state[key]: self.state[key].append(SEAT)
+        dv.write_attest_mock(self.dir, SEAT, dv.read_mock(self.dir) or PRICE)
+        self.state["attest_agents"]["attest-%d" % SEAT] = dv.start_attest_agent(self.dir, SEAT, seq)
+        dv.save(self.dir, self.state)
+        self.out("  $ yellowback-attest --conf %s/attest-8.toml attest --mock-price %s/attest-price-8   (seq %d, pid %d)"
+                 % (self.dir, self.dir, seq, self.state["attest_agents"]["attest-%d" % SEAT]))
+        hb = self.call(SEAT, "set_heartbeat", self.set_id, pub)
+        self.wait_mempool(hb["txid"])
+        hb_h = self.mine(1)
+        self.ok(self.member_row(pub)["lastact"] == hb_h, "SET_HEARTBEAT %s: node 8's lastAct = %d" % (hb["txid"][:16], hb_h))
+        self.evidence("join_txid", reg["txid"]); self.evidence("heartbeat_txid", hb["txid"])
+        self.mine(dv.ATTEST_INTERVAL + REF_LAG, quiet=True)
+        info = self.call(USER, "yed_getinfo", keys=["attest"])
+        self.ok(info["attest"]["seatedCount"] == 4 and info["attest"]["status"] == "ARMED", "four attestors seated, still ARMED")
+        self.vaults["seat_pub"] = pub
+
+        # dormancy (S15): node 6's agent stops; bundles keep selecting it; it goes DORMANT
+        pub6 = None
+        for row in self.node(USER).yed_listattestors():
+            if row["seq"] == self.state["attest_seqs"][str(DORMANT_AGENT)]: pub6 = row["attestorPubKey"]
+        self.devnet("attestor", str(DORMANT_AGENT), "stop")
+        self.note("S15 on regtest: an ELIGIBLE attestor selected in >= DORMANCY_MIN_BUNDLES (2) bundles of the last DORMANCY_BLOCKS (16) "
+                  "without signing any is DORMANT at the next H %% DORMANCY_CHECK (4) == 0")
+        self.fund_user()
+        dormant_at = None
+        for k in range(6):
+            res, txid = self.two_step(USER, "yed_mint", MINT_CENTS, LOCK_BLOCKS, "", "")
+            self.mine(1, quiet=True)
+            v = self.node(USER).yed_getvault(txid)
+            self.vaults.setdefault("mints", []).append(txid)
+            self.out("    mint %d: %s bundleSeqs %s status %s" % (k, txid[:16], res.get("bundleSeqs"), v["status"]))
+            for _ in range(4):
+                if self.attestor_row(pub6)["status"] == "DORMANT": break
+                self.mine(1, quiet=True)
+            row = self.attestor_row(pub6)
+            if row["status"] == "DORMANT":
+                dormant_at = row["statusHeight"]; break
+        self.out("    node 6's record: " + jdump(pick(self.attestor_row(pub6), ["seq", "status", "statusHeight", "lastAct", "seated"])))
+        self.ok(dormant_at is not None, "node 6 (agent stopped) went DORMANT at %s while its bond stayed live" % dormant_at)
+        info = self.call(USER, "yed_getinfo", keys=["attest"])
+        self.ok(info["attest"]["status"] == "ARMED", "the layer stays ARMED with one attestor dormant (seated %d)" % info["attest"]["seatedCount"])
+        self.devnet("attestor", str(DORMANT_AGENT), "start")
+        self.note("the agent sends a SET_HEARTBEAT on its first poll: REV-1's replacement (a heartbeat after dormancy revives)")
+        revived = None
+        for _ in range(30):
+            self.mine(1, quiet=True)
+            row = self.attestor_row(pub6)
+            if row["status"] == "ELIGIBLE": revived = row; break
+            time.sleep(1)
+        self.out("    node 6's record: " + jdump(pick(self.attestor_row(pub6), ["seq", "status", "statusHeight", "lastAct", "seated"])))
+        self.ok(revived is not None and revived["lastAct"] > dormant_at, "node 6 revived (ELIGIBLE again at %s, lastAct %s) after its heartbeat"
+                % (revived and revived["statusHeight"], revived and revived["lastAct"]))
+        self.summary["steps"]["members"] = {"seat_seq": seq, "dormant_at": dormant_at, "revived_at": revived["statusHeight"]}
+
+    def fund_user(self):
+        """Node 0 spent most of its coinbase funding the personas: top it up from the pools."""
+        if self.node(USER).getbalance() >= 120: return
+        txids = [self.call(p, "sendtoaddress", self.node(USER).getnewaddress(), 60) for p in POOLS]
+        for t in txids: self.wait_mempool(t)
+        self.mine(1)
+
+    # ------------------------------------------------------------------ mint
+    def s_mint(self):
+        self.step("mint", "arming and mint -> the V template")
+        info = self.call(USER, "yed_getinfo", keys=["attest", "mintRequiresArmed"])
+        self.ok(info["attest"]["status"] == "ARMED", "ARMED since %s (triggered %s)" % (info["attest"]["armHeight"], info["attest"]["triggerHeight"]))
+        self.fund_user()
+        made = list(self.vaults.get("mints", []))         # the members step's mints carried the dormancy bundles
+        while len(made) < 5:
+            res, txid = self.two_step(USER, "yed_mint", MINT_CENTS, LOCK_BLOCKS, "", "")
+            made.append(txid)
+        self.mine(1)
+        mints = dict(zip(("A", "B", "C", "D", "E"), made))
+        self.note("vaults A..E: %s" % ", ".join("%s %s" % (k, v[:16]) for k, v in mints.items()))
+        self.vaults.update(mints)
+        va = self.call(USER, "yed_getvault", mints["A"], keys=["status", "mintedCents", "collateralZat", "lockHeight", "claimHeight", "scriptPubKey", "termClass"])
+        dec = self.call(USER, "vault_decodescript", va["scriptPubKey"])
+        self.ok(dec["type"] == "vault" and dec["tag"] == "59454400" and dec["setid"] == self.set_id and dec["cancelsetid"] == self.set_id,
+                "vault A's output is the primitive's V: tag YED\\0, set = cancel set = the attestor set")
+        self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["claimHeight"],
+                "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = claimHeight (%d) (U-23)" % (CLAIM_DELAY, va["lockHeight"], va["claimHeight"]))
+        listed = self.call(USER, "vault_list", {"tag": "YED"}, show=False)
+        self.out("    = vault_list {tag: YED}: %d V outputs: %s" % (len(listed), ", ".join(r["outpoint"][:16] + ".." for r in listed)))
+        self.ok(all(m + ":0" in {r["outpoint"] for r in listed} for m in mints.values()), "vault_list sees the YED vaults")
+        stats = self.call(USER, "yed_getstats", keys=["supplyCents", "activeVaults", "mintingAllowed"])
+        for name, txid in mints.items(): self.evidence("mint_" + name, txid)
+        self.chainviz("after the mints")
+
+    # ------------------------------------------------------------------ transfer
+    def s_transfer(self):
+        self.step("transfer", "YED transfers: to the holder (node 9) and the claimant (node 10)")
+        to_claimant = self.call(CLAIMANT, "yed_getnewaddress")
+        to_holder = self.call(HOLDER, "yed_getnewaddress")
+        a = self.call(USER, "yed_send", to_claimant, 2 * MINT_CENTS, keys=["txid", "burnedCents", "outputs"])
+        self.wait_mempool(a["txid"]); self.mine(1, quiet=True)
+        b = self.call(USER, "yed_send", to_holder, 1_000, keys=["txid"])
+        self.wait_mempool(b["txid"]); self.mine(1)
+        info = self.call(USER, "yed_gettxinfo", a["txid"], keys=["type", "verdict", "outputs"])
+        bal_c = self.call(CLAIMANT, "yed_getbalance")
+        bal_h = self.call(HOLDER, "yed_getbalance")
+        self.ok(bal_c["confirmedCents"] == 2 * MINT_CENTS and bal_h["confirmedCents"] == 1_000, "the claimant holds 200 YED, the holder 10 YED")
+        self.evidence("transfer_txids", [a["txid"], b["txid"]])
+
+    # ------------------------------------------------------------------ redeem / renew
+    def s_redeem(self):
+        self.step("redeem", "owner redeem after lockHeight (selector 2), and renew (redeem + mint the same debt)")
+        va = self.node(USER).yed_getvault(self.vaults["A"])
+        self.fails(USER, "yed_redeem", self.vaults["A"], expect="vault-locked")
+        self.mine_to(va["lockHeight"])
+        red = self.call(USER, "yed_redeem", self.vaults["A"], keys=["txid", "burnedCents", "collateralZat"])
+        self.wait_mempool(red["txid"]); self.mine(1)
+        tx = self.node(USER).getrawtransaction(red["txid"], 1)
+        self.ok(tx["vin"][0]["scriptSig"]["hex"].endswith("52"), "the redeem spends V with selector 2 (scriptSig ends OP_2)")
+        self.ok(self.node(USER).yed_getvault(self.vaults["A"])["status"] == "CLOSED", "vault A CLOSED")
+        self.evidence("redeem_txid", red["txid"])
+        # renew: the wallet's renew flow is redeem then a new mint of the same debt (hardening H-8)
+        vb = self.node(USER).yed_getvault(self.vaults["B"])
+        self.mine_to(vb["lockHeight"])
+        red_b = self.call(USER, "yed_redeem", self.vaults["B"], keys=["txid", "burnedCents"])
+        self.wait_mempool(red_b["txid"]); self.mine(1, quiet=True)
+        res, renewed = self.two_step(USER, "yed_mint", vb["mintedCents"], LOCK_BLOCKS, "", "")
+        self.mine(1)
+        nb = self.call(USER, "yed_getvault", renewed, keys=["status", "mintedCents", "lockHeight", "claimHeight"])
+        self.ok(self.node(USER).yed_getvault(self.vaults["B"])["status"] == "CLOSED" and nb["status"] == "ACTIVE" and nb["mintedCents"] == vb["mintedCents"],
+                "renewed: B CLOSED, B' ACTIVE with the same %d cents and a later lockHeight (%d -> %d)" % (vb["mintedCents"], vb["lockHeight"], nb["lockHeight"]))
+        self.vaults["B2"] = renewed
+        self.evidence("renew", {"redeem": red_b["txid"], "mint": renewed})
+
+    # ------------------------------------------------------------------ claim
+    def s_claim(self):
+        self.step("claim", "an underwater claim -> claimant intent -> a reorg across it -> release after CLAIM_DELAY")
+        vc = self.node(USER).yed_getvault(self.vaults["C"])
+        self.devnet("price", CRASH)
+        self.note("the pools' quote agents and every automated attestor now see $%s; P_claim falls once the slow window fills" % CRASH)
+        target = max(vc["claimHeight"], self.tip() + 66)
+        while self.tip() < target:
+            self.mine(min(20, target - self.tip()), quiet=True)
+        self.mine(2, stratum="clients" not in self.skip)
+        price = self.call(USER, "yed_getprice", keys=["pClaim", "pMid", "pSlow", "aClaim", "xClaim"])
+        claimable = self.call(USER, "yed_listclaimable", show=False)
+        self.out("    = yed_listclaimable: %s" % jdump([pick(c, ["vault", "mintedCents", "pClaim", "collateralZat"]) for c in claimable], 600))
+        self.ok(self.vaults["C"] + ":0" in {c["vault"] for c in claimable}, "vault C is claimable at P_claim %s" % price.get("pClaim"))
+        res, claim = self.two_step(CLAIMANT, "yed_claim", self.vaults["C"], "", "")
+        claim_block = self.node(POOLS[self.tip() % 3]).generate(1)[0]
+        sync_blocks(self.all_nodes())
+        self.out("  ~ mined the claim in %s at %d" % (claim_block[:16], self.tip()))
+        v = self.call(USER, "yed_getvault", self.vaults["C"], keys=["status", "intents", "burnedCents"])
+        raw = self.node(USER).getrawtransaction(claim, 1)
+        idec = self.call(USER, "vault_decodescript", raw["vout"][0]["scriptPubKey"]["hex"], keys=["type", "tag", "setid", "cancelsetid", "delay"])
+        self.ok(v["status"] == "CLAIMING" and raw["vin"][0]["scriptSig"]["hex"] == "54" and idec["type"] == "intent",
+                "claim %s: selector 4 (OP_4) moved vault C into a claimant intent (CLAIMING)" % claim[:16])
+        intents = self.call(USER, "vault_list", {"kind": "intent"}, keys=None, limit=800)
+        self.ok(any(r["outpoint"] == claim + ":0" for r in intents), "vault_list shows the intent %s:0 (matures at %s)" % (claim[:16], claim and [r.get("matureheight") for r in intents if r["outpoint"] == claim + ":0"]))
+        claiming = self.statehashes("claim C")
+        self.chainviz("an intent outstanding", intent=claim + ":0")
+        self.lwd_probe("an intent outstanding")
+        self.lwd_equality("an intent outstanding")
+
+        self.note("a reorg across the claim: invalidateblock on every node, then reconsiderblock")
+        for i in range(self.n): self.node(i).invalidateblock(claim_block)
+        self.out("  $ invalidateblock %s on all %d nodes" % (claim_block[:16], self.n))
+        sts = {i: self.node(i).yed_getvault(self.vaults["C"])["status"] for i in self.yed_nodes}
+        self.out("    = vault C status per node: %s" % jdump(sts))
+        self.ok(set(sts.values()) == {"ACTIVE"}, "after the reorg vault C is ACTIVE again on every Yellowback node, no intent")
+        in_mempool = claim in self.node(USER).getrawmempool()
+        self.out("    claim back in node0's mempool: %s" % in_mempool)
+        for i in range(self.n): self.node(i).reconsiderblock(claim_block)
+        sync_blocks(self.all_nodes())
+        self.out("  $ reconsiderblock %s on all %d nodes" % (claim_block[:16], self.n))
+        sts = {i: self.node(i).yed_getvault(self.vaults["C"])["status"] for i in self.yed_nodes}
+        self.ok(set(sts.values()) == {"CLAIMING"}, "reconsidered: CLAIMING again everywhere")
+        self.ok(self.statehashes("reconsidered") == claiming, "the state hashes after the reorg round trip equal those before it")
+
+        self.fails(CLAIMANT, "vault_release", claim + ":0", expect="matures at height")
+        claim_h = self.node(USER).getblock(claim_block)["height"]
+        self.mine_to(claim_h + CLAIM_DELAY - 1)
+        rel = self.call(CLAIMANT, "vault_release", claim + ":0")
+        self.wait_mempool(rel); self.mine(1)
+        v = self.call(USER, "yed_getvault", self.vaults["C"], keys=["status", "burnedCents"])
+        self.ok(v["status"] == "CLAIMED", "release %s after CLAIM_DELAY: vault C CLAIMED" % rel[:16])
+        self.evidence("claim", {"claim": claim, "claim_block": claim_block, "release": rel})
+
+    # ------------------------------------------------------------------ cancel
+    def s_cancel(self):
+        self.step("cancel", "a wrong-price claim cancelled by one attestor: the burn is lost, the vault ACTIVE again")
+        stats0 = self.node(USER).yed_getstats()
+        spk = self.node(USER).yed_getvault(self.vaults["D"])["scriptPubKey"]
+        res, claim = self.two_step(CLAIMANT, "yed_claim", self.vaults["D"], "", "")
+        self.mine(1)
+        v = self.call(USER, "yed_getvault", self.vaults["D"], keys=["status", "intents", "burnedCents"])
+        self.ok(v["status"] == "CLAIMING", "claim %s on vault D: CLAIMING" % claim[:16])
+        mid = self.call(USER, "yed_getstats", keys=["supplyCents"])
+        self.ok(mid["supplyCents"] == stats0["supplyCents"] - MINT_CENTS, "the claim burned its %d cents" % MINT_CENTS)
+        self.devnet("price", PRICE)
+        self.note("the attestors' reference is back at $%s: at their price vault D is %d %% collateralised, so the claim is wrong "
+                  "and one attestor (node %d) cancels it; consensus never learns why (§3.4)" % (int(PRICE), 500, CANCELLER))
+        built = self.call(CANCELLER, "vault_buildcancel", claim + ":0", keys=["required", "cancelsetid", "deadline"])
+        signed = self.call(CANCELLER, "set_signcancel", built["hex"], keys=["complete", "signatures", "required", "sighash"])
+        self.ok(signed["complete"] and signed["signatures"] == 1, "one attestor signature completes the cancel (cancelThreshold 1)")
+        cancel = self.call(CANCELLER, "vault_send", signed["hex"])
+        self.wait_mempool(cancel); self.mine(1)
+        self.fails(USER, "yed_getvault", self.vaults["D"], expect="")
+        vd = self.call(USER, "yed_getvault", cancel, keys=["status", "mintedCents", "scriptPubKey"])
+        self.ok(vd["status"] == "ACTIVE" and vd["scriptPubKey"] == spk, "the position is ACTIVE at the cancel's output 0, byte-identical V")
+        after = self.call(USER, "yed_getstats", keys=["supplyCents", "activeVaults"])
+        self.ok(after["supplyCents"] == mid["supplyCents"], "the burn is not refunded (U-24): supply stays %d" % after["supplyCents"])
+        log = self.call(USER, "yed_gettxinfo", cancel, keys=["type", "reopenedVaults"])
+        self.ok(log["type"] == "claim_cancel", "yed_gettxinfo calls it claim_cancel")
+        self.fails(CLAIMANT, "vault_release", claim + ":0", expect="")
+        self.vaults["D2"] = cancel
+        self.evidence("cancel", {"claim": claim, "cancel": cancel})
+        self.chainviz("after the cancel", cancelled=claim + ":0")
+
+    # ------------------------------------------------------------------ invalid
+    def bad_mint(self, node):
+        """A $50 mint (MINT-2: bad-mint-amount) on the YED V, signed by node's wallet (yellowback_upgrade.py)."""
+        n = self.node(node)
+        params = ym.Params.regtest(VAULT_ACTIVATION, attestor_set=self.set_id)
+        owner = hex_str_to_bytes(n.validateaddress(n.getnewaddress())["pubkey"])
+        ref = n.getblockcount() - REF_LAG
+        lock = ref + 48
+        coin = [u for u in n.listunspent() if u["amount"] > 2][0]
+        vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, lock)),
+                 (10_000, ym.p2pkh_script(ym.hash160(owner))),
+                 (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_mint(0, 5_000, lock, ref, owner, ym.FEE_VOUT_NONE))),
+                 (int(coin["amount"] * ym.COIN) - 1 * ym.COIN - 10_000 - 10_000, ym.p2pkh_script(ym.hash160(owner)))]
+        raw = ym.serialize_tx_v4([(coin["txid"], coin["vout"], b"", 0xFFFFFFFF)], vouts, 0, ref + 40).hex()
+        signed = n.signrawtransaction(raw)
+        assert signed["complete"], signed
+        return signed["hex"]
+
+    def s_invalid(self):
+        self.step("invalid", "an invalid mint: refused by every Yellowback mempool; the block carrying it rejected by every Yellowback node")
+        bad = self.bad_mint(USER)
+        txid = self.node(USER).decoderawtransaction(bad)["txid"]
+        self.out("  built %s: a $50 mint on the YED V (MINT-2 needs >= MIN_MINT)" % txid)
+        for i in self.yed_nodes:
+            self.fails(i, "sendrawtransaction", bad, expect="bad-yellowback-bad-mint-amount")
+        tip = self.node(USER).getbestblockhash()
+        cb, gbt = template_coinbase(self.node(POOLS[0]))
+        block = CBlock()
+        block.nVersion = gbt["version"]; block.hashPrevBlock = int(gbt["previousblockhash"], 16)
+        block.hashBlockCommitments = int(gbt["blockcommitmentshash"], 16);   # 6.20.0: the header field (Heartwood: chain history root)
+        block.nTime = gbt["curtime"]; block.nBits = int(gbt["bits"], 16)
+        tx = CTransaction(); tx.deserialize(BytesIO(hex_str_to_bytes(bad)))
+        block.vtx = [cb, tx]; block.hashMerkleRoot = block.calc_merkle_root(); block.solve()
+        hexblock = bytes_to_hex_str(block.serialize())
+        self.out("  solved block %064x on %s carrying it (Python Equihash 48,5)" % (block.sha256, tip[:16]))
+        verdicts = {}
+        for i in self.yed_nodes:
+            verdicts[i] = self.node(i).submitblock(hexblock)
+        self.out("  $ submitblock <block> on nodes %s\n    = %s" % (",".join(str(i) for i in self.yed_nodes), jdump(verdicts)))
+        self.ok(set(verdicts.values()) == {"bad-yellowback-bad-mint-amount"}, "every Yellowback node rejects the block: bad-yellowback-bad-mint-amount")
+        self.ok(all(self.node(i).getbestblockhash() == tip for i in range(self.n)), "no node moved off %s" % tip[:16])
+        self.note("not submitted to node 1: it runs without -yellowbackattestorset, so the module is inert there and it would "
+                  "accept the block (on mainnet the attestor set is a chain parameter and there is no such node; finding)")
+        self.evidence("invalid", {"tx": txid, "block": "%064x" % block.sha256})
+        self.mine(1)
+
+    # ------------------------------------------------------------------ bridge (bridge-sim)
+    def s_bridge(self):
+        for shape in self.args.bridge_shapes.split(","):
+            self.bridge_shape(shape)
+
+    def bridge(self, *argv, check=True):
+        return self.devnet("bridge", *argv, check=check)
+
+    def bridge_status(self):
+        dv.save(self.dir, self.state)
+        out = subprocess.run([sys.executable, DEVNET, "bridge", "status", "--json", "--dir", self.dir], capture_output=True, text=True, timeout=120)
+        try: return json.loads(out.stdout)
+        except ValueError: raise WalkFailure("bridge status --json: %s %s" % (out.stdout[-400:], out.stderr[-400:]))
+
+    def wait_bridge(self, predicate, what, blocks=40):
+        """Mine one block at a time until the daemon's status satisfies predicate (it acts on each tip)."""
+        for _ in range(blocks):
+            time.sleep(2.5)
+            st = self.bridge_status()
+            if predicate(st): return st
+            self.mine(1, quiet=True)
+        st = self.bridge_status()
+        self.out("    status: " + jdump(st, 1500))
+        self.ok(predicate(st), what)
+        return st
+
+    def bridge_shape(self, shape):
+        self.step("bridge", "the WYEC bridge persona, shape %s (bridge-sim; no Ethereum, a mock burn feed)" % shape)
+        if dv.agent_alive((self.state.get("bridge") or {}).get("pid")): self.bridge("down")
+        self.bridge("up", "--shape", shape)
+        st = self.bridge_status()
+        sid = st["set"]
+        info = self.call(USER, "set_getinfo", sid, keys=["seats", "unlockthreshold", "cancelthreshold", "slashthreshold", "current", "ratelimitbps", "ratewindow", "livenesswindow", "open"])
+        if shape == "guardians":
+            self.ok((info["seats"], info["unlockthreshold"], info["cancelthreshold"], info["slashthreshold"], info["current"]) == (9, 6, 1, 7, 9),
+                    "guardian set %s: 9 seats, 6 to unlock, 1 to cancel, 7 to slash, 9 current members on 9 nodes" % sid[:16])
+        else:
+            ch = self.call(USER, "set_getinfo", st["cancelset"], keys=["seats", "open", "cancelthreshold", "current"])
+            self.ok(info["seats"] == 1 and info["unlockthreshold"] == 1 and ch["open"] and ch["current"] >= 3,
+                    "relayer set %s (1 seat) + OPEN challenger set %s (%d challengers)" % (sid[:16], st["cancelset"][:16], ch["current"]))
+        self.bridge("lock", "20", "--dest", "0x" + "ab" * 20)
+        self.bridge("lock", "6", "--dest", "0x" + "cd" * 20)
+        lock_h = self.mine(1)
+        w = info["ratewindow"]
+        self.note("U-20: the epoch a lock confirms in has no basis for it; the next epoch starts at %d (rate window %d)" % ((lock_h // w + 1) * w, w))
+        self.mine_to((lock_h // w + 1) * w - 1)
+        st = self.wait_bridge(lambda s: len(s.get("locks", [])) >= 2 and s.get("unlockable", 0) > 0, "the locks are under the set and an epoch with a basis has begun", blocks=40)
+        locks = self.call(USER, "vault_list", {"tag": "WYEC", "setid": sid}, show=False)
+        self.out("    = vault_list {tag: WYEC}: %s" % jdump([pick(r, ["outpoint", "value", "ownerheight", "appheight"]) for r in locks]))
+        lts = [self.node(USER).getrawtransaction(lk["txid"], 1) for lk in st["locks"]]
+        self.ok(any(o["scriptPubKey"]["type"] == "nulldata" and ("00" * 12 + "ab" * 20) in o["scriptPubKey"]["hex"] for lt in lts for o in lt["vout"]),
+                "the lock carries the opaque 32-byte destination (ABI bytes32) in an OP_RETURN consensus never reads")
+        recipient = self.node(HOLDER).getnewaddress()
+        self.bridge("burn", "3", recipient, "--id", "burn-%s-1" % shape)
+        st = self.wait_bridge(lambda s: any(b["id"] == "burn-%s-1" % shape and b.get("intent") for b in s["burns"]), "the daemon posted an unlock intent for the burn")
+        burn = [b for b in st["burns"] if b["id"] == "burn-%s-1" % shape][0]
+        self.out("    burn -> intent %s (signatures %s)" % (burn["intent"], burn.get("signers")))
+        if not burn.get("released"):
+            itx = burn["intent"].split(":")[0]
+            if itx in self.node(USER).getrawmempool():
+                self.wait_mempool(itx); self.mine(1)
+            if any(r["outpoint"] == burn["intent"] for r in self.node(USER).vault_list({"kind": "intent", "tag": "WYEC"})):
+                self.chainviz("a WYEC intent outstanding", intent=burn["intent"])
+        st = self.wait_bridge(lambda s: any(b["id"] == "burn-%s-1" % shape and b.get("released") for b in s["burns"]),
+                              "the daemon released the intent after the delay", blocks=30)
+        burn = [b for b in st["burns"] if b["id"] == "burn-%s-1" % shape][0]
+        rel = self.node(USER).getrawtransaction(burn["released"], 1)
+        paid = [o for o in rel["vout"] if recipient in o["scriptPubKey"].get("addresses", [])]
+        self.ok(paid and paid[0]["valueZat"] >= 3 * 100_000_000, "release %s paid 3 YEC to the burn's Ycash recipient" % burn["released"][:16])
+        self.evidence("bridge_%s_release" % shape, {"intent": burn["intent"], "release": burn["released"]})
+
+        # a rogue intent: signed by the unlock quorum without any burn
+        self.bridge("rogue", "2")
+        st = self.wait_bridge(lambda s: any(r.get("cancelled") for r in s.get("rogues", [])), "the watcher cancelled the intent it could not match to a burn", blocks=12)
+        rogue = st["rogues"][-1]
+        self.out("    rogue intent %s cancelled by %s" % (rogue["intent"], rogue["cancelled"]))
+        self.wait_mempool(rogue["cancelled"]); self.mine(1)
+        cancel = self.node(USER).getrawtransaction(rogue["cancelled"], 1)
+        self.ok(cancel["vin"][0]["scriptSig"]["hex"].endswith("52"), "the cancel spends the intent with selector 2 (one canceller's signature)")
+        self.ok(any(r["outpoint"] == rogue["cancelled"] + ":0" for r in self.node(USER).vault_list({"tag": "WYEC", "kind": "vault"})),
+                "the value is back in a WYEC vault (I-2)")
+        self.evidence("bridge_%s_rogue" % shape, rogue)
+
+        # the guardians fall silent: the owner recovers every lock
+        self.bridge("silence")
+        info = self.node(USER).set_getinfo(sid)
+        live_until = max(m["lastact"] for m in info["memberlist"]) + info["livenesswindow"]
+        self.note("the daemon stops heartbeating; the set is DORMANT once no current member acted in livenessWindow (%d) -> height %d"
+                  % (info["livenesswindow"], live_until))
+        self.bridge("recover", check=False)
+        self.mine_to(live_until)
+        st = self.call(USER, "set_getinfo", sid, keys=["dormant", "released", "current"])
+        self.ok(st["dormant"] and st["released"], "the bridge set is DORMANT and released")
+        self.bridge("recover")
+        for txid in self.node(USER).getrawmempool(): self.wait_mempool(txid)
+        self.mine(1)
+        left = [r for r in self.node(USER).vault_list({"tag": "WYEC", "setid": sid})]
+        self.ok(not left, "the owner recovered every vault and intent under the set (OWNER-RELEASED, selector 3)")
+        self.bridge("down")
+
+    # ------------------------------------------------------------------ final
+    def s_final(self):
+        self.step("final", "every node agrees; the clients agree")
+        yed, vault = self.statehashes("end")
+        self.evidence("statehash", {"yed": yed, "vault": vault, "height": self.tip()})
+        self.call(USER, "vault_getinfo", keys=["sets", "vaults", "intents", "lockedvalue", "statehash"])
+        self.call(USER, "yed_getstats", keys=["supplyCents", "activeVaults", "claimedVaults", "closedVaults", "mintingAllowed"])
+        self.chainviz("end")
+        self.lwd_probe("end")
+        self.lwd_equality("end")
+
+    def run(self):
+        self.out("upgrade-walk %s on %s (portseed %s), node %s, %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), self.dir, self.state["portseed"],
+                 self.state["bitcoind"], "skipping " + ",".join(sorted(self.skip)) if self.skip else "all steps"))
+        self.out("ycash6 %s; devnet created %s; attestor set %s" % (dv.fork_commit(dv.REPO), self.state.get("created"), self.set_id))
+        status = 0
+        try:
+            for name in STEPS:
+                if name in self.skip and name != "clients":
+                    self.out("\n[%s] skipped" % name); continue
+                getattr(self, "s_" + name)()
+                self.summary["steps"].setdefault(name, "PASS")
+        except WalkFailure as failure:
+            self.out("\nWALK FAILED: %s" % failure)
+            self.summary["failed"] = str(failure)
+            status = 1
+        except Exception as error:
+            import traceback
+            self.out("\nWALK ERROR: %r\n%s" % (error, traceback.format_exc()))
+            self.summary["failed"] = repr(error)
+            status = 2
+        self.summary["height"] = self.tip()
+        self.summary["seconds"] = int(time.time() - self.t0)
+        self.out("\n%s in %d s at height %d" % ("WALK PASSED" if status == 0 else "WALK DID NOT PASS", self.summary["seconds"], self.summary["height"]))
+        if self.args.summary:
+            with open(self.args.summary, "w") as f: json.dump(self.summary, f, indent=2, default=str)
+        return status
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--dir", default=dv.DEFAULT_DIR)
+    parser.add_argument("--transcript")
+    parser.add_argument("--summary", help="write a JSON summary (steps, evidence, findings) here")
+    parser.add_argument("--skip", help="comma-separated steps to skip: " + ",".join(STEPS))
+    parser.add_argument("--only", help="run only these steps (comma-separated); clients' checks are skipped unless named")
+    parser.add_argument("--bridge-shapes", default="guardians,relayer", help="the bridge shapes to walk (default both)")
+    parser.add_argument("--lwd-port", type=int, default=9480, help="the fork's gRPC port; the baseline takes the next one (default 9480)")
+    return Walk(parser.parse_args()).run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

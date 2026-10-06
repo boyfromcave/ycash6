@@ -13,7 +13,7 @@ into the node with `yed_setquote <priceMicroUsd> <sourceMask>`. The node puts
 the quote into its coinbase tag while it is younger than -yellowbackquotemaxage.
 
   * After `fail_polls` (default 2) consecutive failed aggregates the agent calls
-    `yed_setquote 0`, so the pool goes signal-only at once (L5); the node's
+    `yed_setquote 0`, so the pool's templates carry no tag at once (L5); the node's
     staleness clock remains the backstop for a dead agent. Publishing resumes on
     the next good aggregate.
   * An RPC failure (connection refused, auth, `yellowback-unhealthy`, ...) is
@@ -203,7 +203,7 @@ class QuoteAgent:
                     return "rpc-error"
                 self.pending_clear = False
                 self.published = None
-                LOG.warning("quote cleared: the node is signal-only until the next good aggregate (L5)")
+                LOG.warning("quote cleared: the node's templates carry no tag until the next good aggregate (L5)")
                 return "cleared"
             return "failed"
         micro, mask, names = agg

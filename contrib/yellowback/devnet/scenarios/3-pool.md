@@ -23,7 +23,7 @@ devnet already exists in `~/yb-devnet`, `up` refuses and tells you to pass `--fo
 rebuilds over it.
 
 ```bash
-yellowback-devnet up --role pool        # ~3 min; node 4 is a plain miner: no payout, no signal
+yellowback-devnet up --role pool        # ~3 min; node 4 is a plain miner: no payout, no quote
 yellowback-devnet up --role pool --stratum [--stratum-text TEXT]   # the same, with real pool software beside node 4 (step 0)
 yellowback-devnet cli --node 4 -- yed_getinfo
 ```
@@ -31,7 +31,7 @@ yellowback-devnet cli --node 4 -- yed_getinfo
 No GUI: pools are headless, which is the point (D-2). This is how a pool operator meets
 Yellowback — one more process, one more config file, one more thing that can page them at 3 a.m.
 
-**Automated around you:** 2 other pools (nodes 2 and 3) quoting and signalling, 4 attestors,
+**Automated around you:** 2 other pools (nodes 2 and 3) quoting, 4 attestors,
 the heartbeat on *those two pools only* (your blocks are always yours to mine), the price walk,
 the simulated population and the liquidator.
 
@@ -45,7 +45,7 @@ the simulated population and the liquidator.
    touches your blocks. What to look at:
    - `yellowback-devnet status` prints one line from yolo's `GET /status`: payout address,
      coinbase text, connected miners, template height and age, the **tag kind yolo decoded in the coinbase it built**
-     (`none` now, `signal` after step 2, `quote` after step 3), the last `submitblock` verdict
+     (`none` until step 3, `quote` after it), the last `submitblock` verdict
      and the accepted/rejected counts. `pool 4 stratum status` prints the same line alone.
    - `<dir>/stratum-4.log` (yolo: one `work <height> … tag: …` line per template, one
      `accepted`/`rejected: <verdict>` per submit) and `<dir>/stratum-miner-4.log` (every
@@ -61,8 +61,8 @@ the simulated population and the liquidator.
      pins the fixed behaviour on all four payout × text cells.
    - Cadence: a stratum `mine N 4` is about one block per second, the heartbeat one per 30 s
      under `--lean`, so `mine 25 4` makes node 4 the whole 64-block window (`share 10000`).
-     Steps 4 and 5 assume a *share*; with `--stratum` mine one or two blocks at a time between
-     heartbeat ticks, or the pause and the pin never show.
+     Step 5 assumes a *share*; with `--stratum` mine one or two blocks at a time between
+     heartbeat ticks, or the pin never shows.
    - notes:
 
 1. **A plain miner.** Mine a few blocks (`yellowback-devnet mine 3 4`). Observe that your blocks
@@ -77,37 +77,34 @@ the simulated population and the liquidator.
    - notes:
 
 2. **Become a pool.** `yellowback-devnet pool 4 configure` restarts node 4 with its payout
-   address and `-yellowbacksignal=1` (what an operator does by editing `ycash.conf` — read
-   `doc/yellowback-mining.md` §2 and check the two lines match). Mine again. Watch
+   address (what an operator does by editing `ycash.conf` — read `doc/yellowback-mining.md` §2
+   and check the line matches). Mine again. Watch
    `yed_listminers` move you to registered (`N_REG` = 24 tagged blocks) and then eligible, and
    watch fees start arriving (`getbalance` on node 4; a mint's `payee`).
    - with `--stratum`: yolo logs `node down` / `node back` across the restart and keeps
-     serving. `check-coinbase <height> -regtest -datadir=<dir>/node4` now exits 0 with `kind:
-     signal` and your `payoutAddress`, line for line with `yed_gettag`; yolo's `/status` says
-     `tag "signal"`. Registration counts **quote** tags: you become registered only once step 3's
-     agent runs and 24 more of your blocks carry a price.
+     serving. A payout key alone puts no tag in your coinbase (since the vault upgrade there is no
+     signal-only tag): `check-coinbase` still exits 1 and yolo's `/status` says `tag "none"`
+     until step 3's agent runs. Registration counts **quote** tags: you become registered only
+     once 24 of your blocks carry a price.
    - notes:
 
 3. **The real quote agent.** `yellowback-devnet pool 4 quote start` runs `yellowback-quote
    --mock-price` beside your node — the path an actual pool runs — instead of `yed_setquote`
    by hand. `cli --node 4 -- yed_getinfo` → `miner.quoteKind` "quote", `quoteAgeSeconds`.
    Then `pool 4 quote stop` and watch the quote go stale past `-yellowbackquotemaxage`
-   (120 s here): `quoteKind` falls back to "signal".
+   (120 s here): `quoteKind` falls back to "none" and your templates are untagged.
    - with `--stratum`: the very next `mine 1 4` carries the quote (`check-coinbase` → `kind:
      quote`, `priceMicroUsd` = the mock price; `status` → `tag "quote"`). yolo re-issues work
      when `coinbaseaux.flags` changes (Y-F2), so a template fetched before the agent published
      is not what gets mined.
    - notes:
 
-4. **Stop signalling.** `yellowback-devnet pool 4 signal off` (you keep mining and quoting,
-   your tags carry no signal bit). With 2 of 3 still signalling you stay above the 60 %
-   threshold. Now `pool 3 signal off` and watch: minting pauses below 60 %
-   (`yed_getstats.mintingAllowed`, `haltMask` PARTICIPATION), rejection pauses below 50 %
-   (`yed_getactivation.enforcementSuspended`), then recovery at 75 % / 60 % once you `signal
-   on` again. Mine your share while you watch (`mine 5 4`); the window is 64 blocks.
-   - with `--stratum`: `check-coinbase` on your next block shows `signal: false` with the
-     quote intact. Mine one block per heartbeat tick, not `mine 20 4`: at one block per
-     second you *are* the window and the 60 % line never moves.
+4. **Stop quoting.** `yellowback-devnet pool 4 quote stop` and keep mining (`mine 5 4`). Your
+   blocks are untagged once the quote is stale; you drop out of `yed_listminers`' eligible set
+   after `payeeWindow` blocks and the fees stop. Nothing else changes: since the vault upgrade
+   Yellowback's rules are consensus, so no share of pools has to keep tagging or signalling for
+   them to hold (pool signalling, the 60 % pause and the 50 % enforcement pause are retired,
+   upgrade plan §6). `pool 4 quote start` to come back.
    - notes:
 
 5. **Get pinned.** Stop your agent and quote a constant: `cli --node 4 -- yed_setquote
@@ -132,8 +129,8 @@ the simulated population and the liquidator.
 - Are the failure modes discoverable from `yed_getinfo` alone, without a dashboard, since that
   is what a daemon operator has? If **no**, the fix is more likely better fields and a clearer
   mining runbook than a GUI — the finding R8 is waiting on before anything is built.
-- A pool that finds this annoying simply will not run it, and the whole design rests on pools
-  running it.
+- A pool that finds this annoying simply will not quote. Since the vault upgrade the rules do not
+  rest on pools; the pool price population does, alongside the attestors'.
 
 ```bash
 yellowback-devnet report

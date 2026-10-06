@@ -24,7 +24,7 @@ rpc_cookie = "~/.ycash/.cookie"
 
 [quote]
 poll_seconds = 30        # aggregate and push every 30 s
-fail_polls = 2           # after this many consecutive failed aggregates: `yed_setquote 0` (signal-only, L5)
+fail_polls = 2           # after this many consecutive failed aggregates: `yed_setquote 0` (no tag until the next good aggregate, L5)
 twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
 min_sources = 2          # live sources needed after the outlier filter (fail closed below; see below)
 min_venues = 2           # distinct venues among them

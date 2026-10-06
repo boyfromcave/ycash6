@@ -1,0 +1,393 @@
+upgrade-walk 2026-10-06 07:27:50 on <workspace>/wt/scratch/up6-mirror/dn (portseed 640), node <workspace>/wt/up6-mirror/src/ycashd, skipping cancel,members
+ycash6 870ad694b; devnet created 2026-10-06 07:22:38; attestor set 470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad
+
+====================================================================================================
+[clients +0s] the clients: lightwalletd (fork + baseline), yolo beside pool 4, chain-viz  (height 201)
+====================================================================================================
+  $ node0 vault_getinfo 
+    = {"activationheight": 103, "active": true, "branchid": "6d5b7a31", "dbtip": {"hash": "06f3ece7d94555221ff2a2b496285208992d09afebf09ff6e9d9c5d059e450c5", "height": 201}, "height": 201, "intents": 0, "lockedvalue": "0E-8", "sets": 1, "statehash": "fb0f22bcfaa9d2ee7618198259c83bf64c2770738f982a6e87a0262d6896b1bc", "vaults": 0}
+  PASS: UPGRADE_VAULT (branch 6d5b7a31) active since 103
+  $ node0 yed_getinfo 
+    = {"attest": {"armHeight": 194, "armed": true, "carrierMode": "scriptsig", "poolFresh": 3, "poolSize": 6, "required": true, "seatedCount": 3, "status": "ARMED", "triggerHeight": 186}, "rpcversion": 5, "upgrade": {"activationHeight": 103, "attestorSetId": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "branchId": "6d5b7a31", "claimDelay": 10, "height": 201, "name": "Vault", "status": "active"}}
+  PASS: Yellowback rpcversion 5 on the attestor set 470529ab54b472e9
+  $ node1 yed_getinfo    (must fail: Method not found)
+    ! Method not found
+  PASS: node1 yed_getinfo refused: Method not found
+  # node 1 runs without -yellowbackattestorset: no yed_* there, but the primitive (set_*/vault_*) runs on every node
+  $ node1 vault_getinfo 
+    = {"active": true, "sets": 1, "statehash": "fb0f22bcfaa9d2ee7618198259c83bf64c2770738f982a6e87a0262d6896b1bc"}
+  $ yellowback-devnet lightwalletd start --port 9480 --extra=--yellowback
+    | lightwalletd started on 127.0.0.1:9480 against node0 (pid 32646): <workspace>/wt/scratch/devnet-dd/bin/lightwalletd
+    | GetLightdInfo: ECC LightWalletD v0.0.0.0-dev chain=regtest height=201
+  $ <workspace>/wt/lightwalletd-legacy-bin/lightwalletd-legacy ... --grpc-bind-addr 127.0.0.1:9481   (the baseline server: the vault calls must be UNIMPLEMENTED there)
+  $ yellowback-devnet pool 4 stratum start
+    | yolo started beside node4 (pid 32665): payout smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4, text null, stratum 127.0.0.1:23697, status http://127.0.0.1:28697/status, log <workspace>/wt/scratch/up6-mirror/dn/stratum-4.log
+    |   `mine N 4` now runs stratum-miner --user devnet-worker against it; `check-coinbase <height> -regtest -datadir=<workspace>/wt/scratch/up6-mirror/dn/node4` verifies the tag
+    yolo /status: {"height": 202, "miners": 0, "payout": "smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4", "tag": "quote", "templateAgeSeconds": 0.0}
+  PASS: yolo serves a template at height 202
+  ~ mined 2 block(s) through yolo + stratum-miner: 201 -> 203
+  $ node0 yed_gettag "203"
+    = {"kind": "quote", "payoutAddress": "smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4"}
+  PASS: the block yolo built carries pool 4's tag across the upgrade (yed_gettag)
+  PASS: chain-viz is running at http://127.0.0.1:32704
+  $ GET http://127.0.0.1:32704/api/health
+    = {"agreeing": 11, "chain": "regtest", "disagreeing": [], "nodes": 11, "nodesUp": 11, "ok": true, "public": false, "replay": null, "rpcCalls": {"0": {"getbestblockhash": 7, "getblock": 23, "getblockchaininfo": 1, "getblocksubsidy": 20, "getchaintips": 3, "getrawmempool": 8, "set_getinfo": 3, "set_list": 3, "vault_getinfo": 4, "vault_list": 1, "yed_getactivation": 3, "yed_gethistory": 1, "yed_getinfo ... (2638 bytes)
+  $ lwdinfo -server 127.0.0.1:9480 -yellowback   (start)
+    = latestHeight 203; {"GetVaultInfo": "ok", "GetVaultInfo#active": "true", "GetVaultInfo#sets": "1", "GetYellowbackInfo#rpcversion": "5", "ListSets": "ok", "ListSets#rows": "1", "ListVaultOutputs": "ok", "ListVaultOutputs#rows": "0"}
+  PASS: lightwalletd serves the vault read calls (GetVaultInfo, ListSets, GetSet, ListVaultOutputs): all ok
+
+[members] skipped
+
+====================================================================================================
+[mint +4s] arming and mint -> the V template  (height 203)
+====================================================================================================
+  $ node0 yed_getinfo 
+    = {"attest": {"armHeight": 194, "armed": true, "carrierMode": "scriptsig", "poolFresh": 3, "poolSize": 6, "required": true, "seatedCount": 3, "status": "ARMED", "triggerHeight": 186}, "mintRequiresArmed": false}
+  PASS: ARMED since 194 (triggered 186)
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "a947dfd5fe4cb5f72be234d14e44f0d90cea265cbeb145dddd994abff2cc4f5e", "pMint": 50000000, "pending": true, "refHeight": 201, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier a947dfd5fe4cb5f72be234d14e44f0d90cea265cbeb145dddd994abff2cc4f5e)
+    -> main transaction e8a9336c3b6de6abbf790e867f477432a1f39e382c2887fd6b78be56e549a095 (spends the carrier)
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "713eaee8d5dd3bdfadb3fe52719d45501bd884b03914c5ed4570f42b16421bb1", "pMint": 50000000, "pending": true, "refHeight": 202, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier 713eaee8d5dd3bdfadb3fe52719d45501bd884b03914c5ed4570f42b16421bb1)
+    -> main transaction 43fdd923293e494170597bfc76634e482e3f608e79d479a9b451e51dc4d3f40f (spends the carrier)
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "a303ebb10e005acbe90d8b5387ce922228115444ec1cd669a1f092c405cdf298", "pMint": 50000000, "pending": true, "refHeight": 203, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier a303ebb10e005acbe90d8b5387ce922228115444ec1cd669a1f092c405cdf298)
+    -> main transaction fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d (spends the carrier)
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "3e763bbfcba4239975f5b75c0248d6da6cb9d38f5b7c964d5c67ea5f808943e5", "pMint": 50000000, "pending": true, "refHeight": 204, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier 3e763bbfcba4239975f5b75c0248d6da6cb9d38f5b7c964d5c67ea5f808943e5)
+    -> main transaction 548319fc961df64c578f6f90464931d963df7551d83d1faae2073afca700df8b (spends the carrier)
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "74e83ea85e2644feac9461401bf30abea86ce18df8b671927ec2016f240d5bee", "pMint": 50000000, "pending": true, "refHeight": 205, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier 74e83ea85e2644feac9461401bf30abea86ce18df8b671927ec2016f240d5bee)
+    -> main transaction de5c4fb9053fe89255d8cd4c44b5482299ee4836b7079561b8abd082a128346b (spends the carrier)
+  ~ mined 1 block(s): 208 -> 209
+  # vaults A..E: A e8a9336c3b6de6ab, B 43fdd923293e4941, C fe85eeb06f179985, D 548319fc961df64c, E de5c4fb9053fe892
+  $ node0 yed_getvault "e8a9336c3b6de6abbf790e867f477432a1f39e382c2887fd6b78be56e549a095"
+    = {"claimHeight": 273, "collateralZat": 1000000000, "lockHeight": 249, "mintedCents": 10000, "scriptPubKey": "045945440020adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab2905475a6d75765187637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab29054751c067765287637502f900b17521037f1b52f9a43299fdd5c1e546b164e25bb05ccd796ef8b54b7c2b91ddbbda8b64ac67765387637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab290547c16921037f1b52f9a43299fdd5c1e546b164e25bb05ccd796ef8b54b7c2b91ddbbda8b64ac675488021101b1686868", "status": "ACTIVE", "termClass": "A"}
+  $ node0 vault_decodescript "045945440020adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab2905475a6d75765187637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab29054751c067765287637502f900b17521037f1b52f9a43299fdd5c1e546b164e25bb05ccd796ef8b54b7c2b91ddbbda8b64ac67765387637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab290547c16921037f1b52f9a43299fdd5c1e546b164e25bb05ccd796ef8b54b7c2b91ddbbda8b64ac675488021101b1686868"
+    = {"appheight": 273, "cancelsetid": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "delay": 10, "ownerheight": 249, "ownerkey": "037f1b52f9a43299fdd5c1e546b164e25bb05ccd796ef8b54b7c2b91ddbbda8b64", "setid": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "tag": "59454400", "tagtext": "YED", "type": "vault"}
+  PASS: vault A's output is the primitive's V: tag YED\0, set = cancel set = the attestor set
+  PASS: delay = CLAIM_DELAY (10), ownerHeight = lockHeight (249), appHeight = claimHeight (273) (U-23)
+  $ node0 vault_list {"tag": "YED"}
+    = vault_list {tag: YED}: 5 V outputs: 43fdd923293e4941.., fe85eeb06f179985.., de5c4fb9053fe892.., 548319fc961df64c.., e8a9336c3b6de6ab..
+  PASS: vault_list sees the YED vaults
+  $ node0 yed_getstats 
+    = {"activeVaults": 5, "mintingAllowed": true, "supplyCents": 50000}
+  PASS: chain-viz follows the tip (after the mints)
+  $ GET http://127.0.0.1:32704/api/vaults   (after the mints)
+    = sets ['470529ab54b472e9 (0 current, dormant)']; byTag [{"intents": 0, "tag": "59454400", "tagtext": "YED", "valuezat": 5000000000, "vaults": 5}]; 5 vaults, 0 intents; last spends []
+  PASS: chain-viz shows the node's 1 sets and 5 vault outputs (after the mints)
+
+====================================================================================================
+[transfer +18s] YED transfers: to the holder (node 9) and the claimant (node 10)  (height 209)
+====================================================================================================
+  $ node10 yed_getnewaddress 
+    = "yrVEiACFi3YVoAQJdH2PTpY7m7sCG777Gt1"
+  $ node9 yed_getnewaddress 
+    = "yrMNQFjagjVWV1UyciRjSwRW9hahZHmQXdR"
+  $ node0 yed_send "yrVEiACFi3YVoAQJdH2PTpY7m7sCG777Gt1" 20000
+    = {"txid": "97c6b8306d217768d1867fd80a4c4e4bf45ce7bacbf5833640a4db2ede30c610"}
+  $ node0 yed_send "yrMNQFjagjVWV1UyciRjSwRW9hahZHmQXdR" 1000
+    = {"txid": "b6426cf8ad6dbeeef752311ca430bd5b78864a2b52df11081c1ebb6cfe9c28b7"}
+  ~ mined 1 block(s): 210 -> 211
+  $ node0 yed_gettxinfo "97c6b8306d217768d1867fd80a4c4e4bf45ce7bacbf5833640a4db2ede30c610"
+    = {"type": "transfer", "verdict": "ok"}
+  $ node10 yed_getbalance 
+    = {"confirmedCents": 20000, "height": 211, "unconfirmedCents": 0}
+  $ node9 yed_getbalance 
+    = {"confirmedCents": 1000, "height": 211, "unconfirmedCents": 0}
+  PASS: the claimant holds 200 YED, the holder 10 YED
+
+====================================================================================================
+[redeem +24s] owner redeem after lockHeight (selector 2), and renew (redeem + mint the same debt)  (height 211)
+====================================================================================================
+  $ node0 yed_redeem "e8a9336c3b6de6abbf790e867f477432a1f39e382c2887fd6b78be56e549a095"   (must fail: vault-locked)
+    ! vault-locked: the vault is locked until height 249 (tip 211)
+  PASS: node0 yed_redeem refused: vault-locked
+  ~ mined 38 block(s): 211 -> 249
+  $ node0 yed_redeem "e8a9336c3b6de6abbf790e867f477432a1f39e382c2887fd6b78be56e549a095"
+    = {"burnedCents": 10000, "txid": "99aac6cfaa27d9d82a7a3488d5f288b48970c7f910c3deb70eac06fc35ef808c"}
+  ~ mined 1 block(s): 249 -> 250
+  PASS: the redeem spends V with selector 2 (scriptSig ends OP_2)
+  PASS: vault A CLOSED
+  $ node0 yed_redeem "43fdd923293e494170597bfc76634e482e3f608e79d479a9b451e51dc4d3f40f"
+    = {"burnedCents": 10000, "txid": "6e35b019d2c7ff758dcea86214e8d946376f2c43e4226e9324a34aeeaa7bc3f1"}
+  $ node0 yed_mint 10000 48 "" "" false
+    = {"aMint": 50000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "d7031240e2a4b9f42db4ed21748a1a0b4dfaa655b5706adc264f19e5f2fe7ebc", "pMint": 50000000, "pending": true, "refHeight": 249, "xMint": 50000000}
+  PASS: yed_mint took the carrier step (carrier d7031240e2a4b9f42db4ed21748a1a0b4dfaa655b5706adc264f19e5f2fe7ebc)
+    -> main transaction e377d6ed3863afc1cdca5392e80b134e806924042fd2abdf79b59aa34d46a434 (spends the carrier)
+  ~ mined 1 block(s): 252 -> 253
+  $ node0 yed_getvault "e377d6ed3863afc1cdca5392e80b134e806924042fd2abdf79b59aa34d46a434"
+    = {"claimHeight": 321, "lockHeight": 297, "mintedCents": 10000, "status": "ACTIVE"}
+  PASS: renewed: B CLOSED, B' ACTIVE with the same 10000 cents and a later lockHeight (250 -> 297)
+
+====================================================================================================
+[claim +110s] an underwater claim -> claimant intent -> a reorg across it -> release after CLAIM_DELAY  (height 253)
+====================================================================================================
+  $ yellowback-devnet price 5
+    | set the price to $5 on every pool quote and every automated attestor's mock price; mine a pool block to publish each quote
+  # the pools' quote agents and every automated attestor now see $5; P_claim falls once the slow window fills
+  ~ mined 2 block(s) through yolo + stratum-miner: 319 -> 321
+  $ node0 yed_getprice 
+    = {"pClaim": 5000000, "pMid": 5000000, "pSlow": 5000000, "xClaim": 5000000}
+  $ node0 yed_listclaimable 
+    = yed_listclaimable: [{"collateralZat": 1000000000, "mintedCents": 10000, "pClaim": 5000000, "vault": "e377d6ed3863afc1cdca5392e80b134e806924042fd2abdf79b59aa34d46a434:0"}, {"collateralZat": 1000000000, "mintedCents": 10000, "pClaim": 5000000, "vault": "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d:0"}, {"collateralZat": 1000000000, "mintedCents": 10000, "pClaim": 5000000, "vault": "de5c4fb9053fe89255d8cd4c44b5482299ee4836b7079561b8abd082a128346b:0"}, {"collateralZat": 1000000000, "mintedCents": 10000, "pClaim": 5000000, "vault": "548319fc961df64c578f6f90464931d963df7551d83d1faae2073afca700df8b: ... (604 bytes)
+  PASS: vault C is claimable at P_claim 5000000
+  $ node10 yed_claim "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d" "" "" false
+    = {"aClaim": 5000000, "bundleSeqs": [0, 1, 2], "carrierTxid": "18110384dc55ed29a41864c3c8174441c7d559966d713cc643db9ac619ea3879", "pClaim": 5000000, "pending": true, "refHeight": 321, "xClaim": 5000000}
+  PASS: yed_claim took the carrier step (carrier 18110384dc55ed29a41864c3c8174441c7d559966d713cc643db9ac619ea3879)
+    -> main transaction da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436 (spends the carrier)
+  ~ mined the claim in 0aae3b27a5a20153 at 323
+  $ node0 yed_getvault "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d"
+    = {"burnedCents": 10000, "intents": [{"height": 323, "releaseHeight": 333, "role": "claimant", "txid": "da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436", "vout": 0}], "status": "CLAIMING"}
+  $ node0 vault_decodescript "045945440020ef88b74023a0d7ca2ff347799d6c033d8b9849fb86e2b3dfd0845b331c240b5c20b9dc674b226db2e4d4c3b5c90185edf3fbfd7875032ef274b6d66f6403b118f76d7576518763755ab267765287637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab29054752c067538820adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab290547c1692102b4a51a54e63f49f7fdbf98d10ee7981be4c7df43053457e0a76340250d51236aac6868"
+    = {"cancelsetid": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "delay": 10, "setid": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "tag": "59454400", "type": "intent"}
+  PASS: claim da12ea56c637464a: selector 4 (OP_4) moved vault C into a claimant intent (CLAIMING)
+  $ node0 vault_list {"kind": "intent"}
+    = [{"cancellable": true, "cancelsetid": "470529ab54b472e996e88805f8495bbd1d47999011fbcf4bf9c3fee0755bbfad", "delay": 10, "height": 323, "kind": "intent", "mature": false, "matureheight": 333, "origin": "045945440020adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab2905475a6d75765187637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab29054751c067765287637502fb00b1752102b4a51a54e63f49f7fdbf98d10ee7981be4c7df43053457e0a76340250d51236aac67765387637520adbf5b75e0fec3f94bcffb119099471dbd5b49f80588e896e972b454ab290547c1692102b4a51a54e63f49f7fdbf98d10ee7981be4c7df43053457e0a76340250d51236aac675488021301b1686868", "outpoint": "da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436:0", "ownerkey": "02b4a51a54e63f49f7fdbf98d10ee7981be4c7df43053457e0a76340250d51236a", "recip ... (1631 bytes)
+  PASS: vault_list shows the intent da12ea56c637464a:0 (matures at [333])
+  $ yed_getstatehash on nodes 0,2,3,4,5,6,7,8,9,10; vault_getinfo.statehash on every node
+    = yed ['3d72b487a0b54a19e4722034d7158cff509615c57fe21a5ec4dc85b42294f0c7'] ; vault ['b4a5770fe299bcc6207ad03be7e21db21db9f024c69c649e8d635951f5118976']
+  PASS: claim C: one YED state hash on all 10 Yellowback nodes
+  PASS: claim C: one vault state hash on all 11 nodes, the stock node included
+  PASS: chain-viz follows the tip (an intent outstanding)
+  $ GET http://127.0.0.1:32704/api/vaults   (an intent outstanding)
+    = sets ['470529ab54b472e9 (0 current, dormant)']; byTag [{"intents": 1, "tag": "59454400", "tagtext": "YED", "valuezat": 4000000000, "vaults": 3}]; 3 vaults, 1 intents; last spends [{"action": "app", "height": 323, "kind": "vault", "outpoint": "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d:0"}, {"action": "owner", "height": 251, "kind": "vault", "outpoint": "43fdd923293e494170597bfc76634e482e3f608e79d479a9b451e51dc4d3f40f:0"}, {"action": "owner", "height": 250, "kind": "vault", "outpoint": "e8a9336c3b6de6abbf790e867f477432a1f39e382c2887fd6b78be56e549a095:0"}]
+  PASS: chain-viz shows the node's 1 sets and 4 vault outputs (an intent outstanding)
+  PASS: chain-viz shows the intent da12ea56c637464a
+  $ lwdinfo -server 127.0.0.1:9480 -yellowback   (an intent outstanding)
+    = latestHeight 323; {"GetVaultInfo": "ok", "GetVaultInfo#active": "true", "GetVaultInfo#sets": "1", "GetYellowbackInfo#rpcversion": "5", "ListSets": "ok", "ListSets#rows": "1", "ListVaultOutputs": "ok", "ListVaultOutputs#rows": "4"}
+  PASS: lightwalletd serves the vault read calls (GetVaultInfo, ListSets, GetSet, ListVaultOutputs): all ok
+  $ (cd <workspace>/wt/p6-lightwalletd-dd && LWD_DEVNET_DIR=... go test -tags devnet -run TestDevnetVaultUpgradeThroughServer ./frontend/)   (an intent outstanding)
+    | yellowback_devnet_test.go:979: vault upgrade 6d5b7a31 active from 103; attestor set 470529ab54b472e9: 0 members (0 current); 1 sets, 4 vault outputs; statehash b4a5770fe299bcc6
+    | --- PASS: TestDevnetVaultUpgradeThroughServer (0.02s)
+    | PASS
+    | ok  	github.com/zcash/lightwalletd/frontend	0.473s
+  PASS: lightwalletd's vault read calls equal the node's RPCs, byte for byte where compared (an intent outstanding)
+  # a reorg across the claim: invalidateblock on every node, then reconsiderblock
+  $ invalidateblock 0aae3b27a5a20153 on all 11 nodes
+    = vault C status per node: {"0": "ACTIVE", "2": "ACTIVE", "3": "ACTIVE", "4": "ACTIVE", "5": "ACTIVE", "6": "ACTIVE", "7": "ACTIVE", "8": "ACTIVE", "9": "ACTIVE", "10": "ACTIVE"}
+  PASS: after the reorg vault C is ACTIVE again on every Yellowback node, no intent
+    claim back in node0's mempool: True
+  $ reconsiderblock 0aae3b27a5a20153 on all 11 nodes
+  PASS: reconsidered: CLAIMING again everywhere
+  $ yed_getstatehash on nodes 0,2,3,4,5,6,7,8,9,10; vault_getinfo.statehash on every node
+    = yed ['3d72b487a0b54a19e4722034d7158cff509615c57fe21a5ec4dc85b42294f0c7'] ; vault ['b4a5770fe299bcc6207ad03be7e21db21db9f024c69c649e8d635951f5118976']
+  PASS: reconsidered: one YED state hash on all 10 Yellowback nodes
+  PASS: reconsidered: one vault state hash on all 11 nodes, the stock node included
+  PASS: the state hashes after the reorg round trip equal those before it
+  $ node10 vault_release "da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436:0"   (must fail: matures at height)
+    ! the intent matures at height 333
+  PASS: node10 vault_release refused: matures at height
+  ~ mined 9 block(s): 323 -> 332
+  $ node10 vault_release "da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436:0"
+    = "a419e0bda41da38e3844f05d055e7fa45c6985239d49a92d224cd74ef51baf59"
+  ~ mined 1 block(s): 332 -> 333
+  $ node0 yed_getvault "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d"
+    = {"burnedCents": 10000, "status": "CLAIMED"}
+  PASS: release a419e0bda41da38e after CLAIM_DELAY: vault C CLAIMED
+
+[cancel] skipped
+
+====================================================================================================
+[invalid +275s] an invalid mint: refused by every Yellowback mempool; the block carrying it rejected by every Yellowback node  (height 333)
+====================================================================================================
+  built 1302f5ef408ff6a9f9ee4038904f7c85259093372f381d9ad73092a8791b7d6e: a $50 mint on the YED V (MINT-2 needs >= MIN_MINT)
+  $ node0 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node0 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node2 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node2 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node3 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node3 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node4 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node4 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node5 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node5 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node6 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node6 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node7 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node7 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node8 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node8 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node9 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node9 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  $ node10 sendrawtransaction "0400008085202f89011a49417687cb3b311aa39addf369a518a5e1794929a4f4ea45fd83e54b603 ... (1062 bytes)   (must fail: bad-yellowback-bad-mint-amount)
+    ! 16: bad-yellowback-bad-mint-amount
+  PASS: node10 sendrawtransaction refused: bad-yellowback-bad-mint-amount
+  solved block 016e544dd15b4db7afd4545398088912f5d69a962bf4246ba0e777bf9e30f3c6 on 0da350215fbc1d59 carrying it (Python Equihash 48,5)
+  $ submitblock <block> on nodes 0,2,3,4,5,6,7,8,9,10
+    = {"0": "bad-yellowback-bad-mint-amount", "2": "bad-yellowback-bad-mint-amount", "3": "bad-yellowback-bad-mint-amount", "4": "bad-yellowback-bad-mint-amount", "5": "bad-yellowback-bad-mint-amount", "6": "bad-yellowback-bad-mint-amount", "7": "bad-yellowback-bad-mint-amount", "8": "bad-yellowback-bad-mint-amount", "9": "bad-yellowback-bad-mint-amount", "10": "bad-yellowback-bad-mint-amount"}
+  PASS: every Yellowback node rejects the block: bad-yellowback-bad-mint-amount
+  PASS: no node moved off 0da350215fbc1d59
+  # not submitted to node 1: it runs without -yellowbackattestorset, so the module is inert there and it would accept the block (on mainnet the attestor set is a chain parameter and there is no such node; finding)
+  ~ mined 1 block(s): 333 -> 334
+
+====================================================================================================
+[bridge +277s] the WYEC bridge persona, shape guardians (bridge-sim; no Ethereum, a mock burn feed)  (height 334)
+====================================================================================================
+  $ yellowback-devnet bridge up --shape guardians
+    | bridge up: shape guardians; coordinator node1; signers 1,2,3,4,5,6,7,9,10
+    |   set_create on node1: setid b8f23f516048b32c565ecdb0c16f8d0afe685ef2cad1fc3d228d764473a69128 admitkey 0239fd1cfce2fd17
+    |   node1  joined b8f23f516048b32c: key 03ef13ce6596da85 (txid 57163bf1d25aea0c)
+    |   node2  joined b8f23f516048b32c: key 02064b61ae935987 (txid a2120cd39f15b6e1)
+    |   node3  joined b8f23f516048b32c: key 029a76e8b24cb577 (txid 94fc0541b87ad7d3)
+    |   node4  joined b8f23f516048b32c: key 03beed184a96f94c (txid d08c0d3be19f074f)
+    |   node5  joined b8f23f516048b32c: key 03db277de8087f39 (txid 6b89d291d03841fb)
+    |   node6  joined b8f23f516048b32c: key 02b38bf32fdfbc01 (txid 6d251d6bcf094c82)
+    |   node7  joined b8f23f516048b32c: key 0325b5e130bd99f2 (txid 23d4d54fc61cf4f4)
+    |   node9  joined b8f23f516048b32c: key 03d8f8f2320b0199 (txid 1921e15f835af3eb)
+    |   node10 joined b8f23f516048b32c: key 03fda1904c6e01cf (txid 91134cd68e41c6ae)
+    |   9 members current in b8f23f516048b32c (unlock 6, cancel 1, slash 7, rate 5000 bps / 20 blocks, liveness 30)
+    |   daemon started (pid 35097), log <workspace>/wt/scratch/up6-mirror/dn/bridge-sim.log, feed <workspace>/wt/scratch/up6-mirror/dn/bridge-burns.jsonl
+  $ node0 set_getinfo "b8f23f516048b32c565ecdb0c16f8d0afe685ef2cad1fc3d228d764473a69128"
+    = {"cancelthreshold": 1, "current": 9, "livenesswindow": 30, "open": false, "ratelimitbps": 5000, "ratewindow": 20, "seats": 9, "slashthreshold": 7, "unlockthreshold": 6}
+  PASS: guardian set b8f23f516048b32c: 9 seats, 6 to unlock, 1 to cancel, 7 to slash, 9 current members on 9 nodes
+  $ yellowback-devnet bridge lock 20 --dest 0xabababababababababababababababababababab
+    | locked 20 YEC under b8f23f516048b32c: 0a99ac5775c6eaace290ce7cf1e0650e849fa7ae2561b71150bf1a0fcdb92540:0 (owner key 02bcf9cf35c5cfea, ownerHeight 740, destination 000000000000000000000000abababababababababababababababababababab)
+  $ yellowback-devnet bridge lock 6 --dest 0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+    | locked 6 YEC under b8f23f516048b32c: 79491ab56fc3f9ff5485404ef3888dee76d2ab13db562d3b9c0acb2a692b49c8:0 (owner key 02f2e688ef26708c, ownerHeight 740, destination 000000000000000000000000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd)
+  ~ mined 1 block(s): 339 -> 340
+  # U-20: the epoch a lock confirms in has no basis for it; the next epoch starts at 360 (rate window 20)
+  ~ mined 19 block(s): 340 -> 359
+  $ node0 vault_list {"setid": "b8f23f516048b32c565ecdb0c16f8d0afe685ef2cad1fc3d228d764473a69128", "tag": "WYEC"}
+    = vault_list {tag: WYEC}: [{"appheight": 0, "outpoint": "0a99ac5775c6eaace290ce7cf1e0650e849fa7ae2561b71150bf1a0fcdb92540:0", "ownerheight": 740, "value": "20.00000000"}, {"appheight": 0, "outpoint": "79491ab56fc3f9ff5485404ef3888dee76d2ab13db562d3b9c0acb2a692b49c8:0", "ownerheight": 740, "value": "6.00000000"}]
+  PASS: the lock carries the opaque 32-byte destination (ABI bytes32) in an OP_RETURN consensus never reads
+  $ yellowback-devnet bridge burn 3 smVMHoaG6TEAmHsVTVi4rYf2qGoMVT5aig6 --id burn-guardians-1
+    | burn burn-guardians-1 appended to <workspace>/wt/scratch/up6-mirror/dn/bridge-burns.jsonl: 3 YEC to smVMHoaG6TEAmHsVTVi4rYf2qGoMVT5aig6
+    burn -> intent 0499e59b956aa20bffe53869ff3d017c9f0a9328cb947aa14021444a0f8ee8e7:0 (signatures [1, 2, 3, 4, 5, 6])
+  ~ mined 1 block(s): 360 -> 361
+  PASS: chain-viz follows the tip (a WYEC intent outstanding)
+  $ GET http://127.0.0.1:32704/api/vaults   (a WYEC intent outstanding)
+    = sets ['b8f23f516048b32c (9 current)', '470529ab54b472e9 (0 current, dormant)']; byTag [{"intents": 1, "tag": "57594543", "tagtext": "WYEC", "valuezat": 2600000000, "vaults": 2}, {"intents": 0, "tag": "59454400", "tagtext": "YED", "valuezat": 3000000000, "vaults": 3}]; 5 vaults, 1 intents; last spends [{"action": "unlock", "height": 361, "kind": "vault", "outpoint": "0a99ac5775c6eaace290ce7cf1e0650e849fa7ae2561b71150bf1a0fcdb92540:0"}, {"action": "release", "height": 333, "kind": "intent", "outpoint": "da12ea56c637464ad5ce99d59758244c0ac43829998544eb7a8dc877716b5436:0"}, {"action": "app", "height": 323, "kind": "vault", "outpoint": "fe85eeb06f179985c32ab5d39c6235bffee65b3c87cb4d6d145a4231ef3f185d:0"}]
+  PASS: chain-viz shows the node's 2 sets and 6 vault outputs (a WYEC intent outstanding)
+  PASS: chain-viz shows the intent 0499e59b956aa20b
+  PASS: release ba42b09252db1849 paid 3 YEC to the burn's Ycash recipient
+  $ yellowback-devnet bridge rogue 2
+    | rogue intent 21c7462b3c79e5f358bfb3dbc0f60bdcc3ac01a6c11d9bb73322a10fbd40079e:0: 2 YEC to smWJhKNNPBxEQ82U5GoYCDAczE4mYWRRaPp, signed by nodes [1, 2, 3, 4, 5, 6] with no burn behind it
+    rogue intent 21c7462b3c79e5f358bfb3dbc0f60bdcc3ac01a6c11d9bb73322a10fbd40079e:0 cancelled by 08e5684d47f41224e2f4eaf62c33f2f62a326bb057be44a2e49bfa08de40853c
+  ~ mined 1 block(s): 367 -> 368
+  PASS: the cancel spends the intent with selector 2 (one canceller's signature)
+  PASS: the value is back in a WYEC vault (I-2)
+  $ yellowback-devnet bridge silence
+    | the members stop heartbeating (<workspace>/wt/scratch/up6-mirror/dn/bridge-silence); the set goes DORMANT livenessWindow blocks after the last act
+  # the daemon stops heartbeating; the set is DORMANT once no current member acted in livenessWindow (30) -> height 394
+  $ yellowback-devnet bridge recover
+    | vault 08e5684d47f41224e2f4eaf62c33f2f62a326bb057be44a2e49bfa08de40853c:0: the owner branch opens at height 741 and the set is not released
+    | vault 21c7462b3c79e5f358bfb3dbc0f60bdcc3ac01a6c11d9bb73322a10fbd40079e:1: the owner branch opens at height 741 and the set is not released
+    | vault 79491ab56fc3f9ff5485404ef3888dee76d2ab13db562d3b9c0acb2a692b49c8:0: the owner branch opens at height 741 and the set is not released
+  ~ mined 26 block(s): 368 -> 394
+  $ node0 set_getinfo "b8f23f516048b32c565ecdb0c16f8d0afe685ef2cad1fc3d228d764473a69128"
+    = {"current": 9, "dormant": true, "released": true}
+  PASS: the bridge set is DORMANT and released
+  $ yellowback-devnet bridge recover
+    | recovered vault 08e5684d47f41224e2f4eaf62c33f2f62a326bb057be44a2e49bfa08de40853c:0 (2.00000000 YEC): txid e81b708db4ed4210d69a01fa3ec0faf1b1e4f0a9d9dfa3ebd101e3f34832b6c4, selector 3
+    | recovered vault 21c7462b3c79e5f358bfb3dbc0f60bdcc3ac01a6c11d9bb73322a10fbd40079e:1 (15.00000000 YEC): txid 6b8c3e4eb85033c1dc2e33e03447f18c8bfbe697172849663970a01bfa03ae4f, selector 3
+    | recovered vault 79491ab56fc3f9ff5485404ef3888dee76d2ab13db562d3b9c0acb2a692b49c8:0 (6.00000000 YEC): txid eafb73c4434fbddb389e95b6991804150c93365809715698be95cd3aac4056fe, selector 3
+  ~ mined 1 block(s): 394 -> 395
+  PASS: the owner recovered every vault and intent under the set (OWNER-RELEASED, selector 3)
+  $ yellowback-devnet bridge down
+    | bridge daemon (pid 35097) stopped
+
+====================================================================================================
+[bridge +444s] the WYEC bridge persona, shape relayer (bridge-sim; no Ethereum, a mock burn feed)  (height 395)
+====================================================================================================
+  $ yellowback-devnet bridge up --shape relayer
+    | bridge up: shape relayer; coordinator node2; signers 2; challengers 5,6,7
+    |   set_create on node2: setid c1672859754fd44ac0a79a6a6cde1b4bf84c88ab0eaa0b7e83318452688bea1a admitkey 03229a3cfb23caca
+    |   set_create on node5: challenger set 171741b4207c2fdfd2af677e12f20cec06bf4b220497906b659929415c80931d (OPEN)
+    |   node2  joined c1672859754fd44a: key 028f6d51e0068a12 (txid c32fadf5d9a96a5f)
+    |   node5  joined 171741b4207c2fdf: key 024b2ff5f8faae68 (txid d1ab8dd2b924bb17)
+    |   node6  joined 171741b4207c2fdf: key 02260b5a72919aec (txid 8cf37dfc0a9e1c27)
+    |   node7  joined 171741b4207c2fdf: key 02beebe2cd986c91 (txid 9f4c57319ad36d18)
+    |   1 members current in c1672859754fd44a (unlock 1, cancel 1, slash 1, rate 5000 bps / 20 blocks, liveness 30)
+    |   daemon started (pid 36099), log <workspace>/wt/scratch/up6-mirror/dn/bridge-sim.log, feed <workspace>/wt/scratch/up6-mirror/dn/bridge-burns.jsonl
+  $ node0 set_getinfo "c1672859754fd44ac0a79a6a6cde1b4bf84c88ab0eaa0b7e83318452688bea1a"
+    = {"cancelthreshold": 1, "current": 1, "livenesswindow": 30, "open": false, "ratelimitbps": 5000, "ratewindow": 20, "seats": 1, "slashthreshold": 1, "unlockthreshold": 1}
+  $ node0 set_getinfo "171741b4207c2fdfd2af677e12f20cec06bf4b220497906b659929415c80931d"
+    = {"cancelthreshold": 1, "current": 3, "open": true, "seats": 5}
+  PASS: relayer set c1672859754fd44a (1 seat) + OPEN challenger set 171741b4207c2fdf (3 challengers)
+  $ yellowback-devnet bridge lock 20 --dest 0xabababababababababababababababababababab
+    | locked 20 YEC under c1672859754fd44a: 5ef64d92bcef952b265a1d9f3277f64348dc47b6846c50304e195ae565ac51ac:0 (owner key 02e50933fbf2b2f5, ownerHeight 801, destination 000000000000000000000000abababababababababababababababababababab)
+  $ yellowback-devnet bridge lock 6 --dest 0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+    | locked 6 YEC under c1672859754fd44a: 2d4dbcdbbfb458fe28b68897ef82417c658782f190e6facf7a8bff8bfbaad8ba:0 (owner key 034a551d2e186308, ownerHeight 801, destination 000000000000000000000000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd)
+  ~ mined 1 block(s): 400 -> 401
+  # U-20: the epoch a lock confirms in has no basis for it; the next epoch starts at 420 (rate window 20)
+  ~ mined 18 block(s): 401 -> 419
+  $ node0 vault_list {"setid": "c1672859754fd44ac0a79a6a6cde1b4bf84c88ab0eaa0b7e83318452688bea1a", "tag": "WYEC"}
+    = vault_list {tag: WYEC}: [{"appheight": 0, "outpoint": "5ef64d92bcef952b265a1d9f3277f64348dc47b6846c50304e195ae565ac51ac:0", "ownerheight": 801, "value": "20.00000000"}, {"appheight": 0, "outpoint": "2d4dbcdbbfb458fe28b68897ef82417c658782f190e6facf7a8bff8bfbaad8ba:0", "ownerheight": 801, "value": "6.00000000"}]
+  PASS: the lock carries the opaque 32-byte destination (ABI bytes32) in an OP_RETURN consensus never reads
+  $ yellowback-devnet bridge burn 3 smbSngUZZD578MYwMqeBWgu9RXNGk58QyuF --id burn-relayer-1
+    | burn burn-relayer-1 appended to <workspace>/wt/scratch/up6-mirror/dn/bridge-burns.jsonl: 3 YEC to smbSngUZZD578MYwMqeBWgu9RXNGk58QyuF
+    burn -> intent 1771f5ae99c37a18283c00688c3064bbedb7b89a001391f00572c8868d96984a:0 (signatures [2])
+  ~ mined 1 block(s): 420 -> 421
+  PASS: chain-viz follows the tip (a WYEC intent outstanding)
+  $ GET http://127.0.0.1:32704/api/vaults   (a WYEC intent outstanding)
+    = sets ['c1672859754fd44a (1 current)', '171741b4207c2fdf (3 current)', 'b8f23f516048b32c (9 current, dormant)', '470529ab54b472e9 (0 current, dormant)']; byTag [{"intents": 1, "tag": "57594543", "tagtext": "WYEC", "valuezat": 2600000000, "vaults": 2}, {"intents": 0, "tag": "59454400", "tagtext": "YED", "valuezat": 3000000000, "vaults": 3}]; 5 vaults, 1 intents; last spends [{"action": "unlock", "height": 421, "kind": "vault", "outpoint": "5ef64d92bcef952b265a1d9f3277f64348dc47b6846c50304e195ae565ac51ac:0"}, {"action": "owner-released", "height": 395, "kind": "vault", "outpoint": "21c7462b3c79e5f358bfb3dbc0f60bdcc3ac01a6c11d9bb73322a10fbd40079e:1"}, {"action": "owner-released", "height": 395, "kind": "vault", "outpoint": "08e5684d47f41224e2f4eaf62c33f2f62a326bb057be44a2e49bfa08de40853c:0"}]
+  PASS: chain-viz shows the node's 4 sets and 6 vault outputs (a WYEC intent outstanding)
+  PASS: chain-viz shows the intent 1771f5ae99c37a18
+  PASS: release 65ad2349f719134a paid 3 YEC to the burn's Ycash recipient
+  $ yellowback-devnet bridge rogue 2
+    | rogue intent 294addb8e88d59f423022104668add6d804159efe1bf1a1fa3fbcd0efa36f7dc:0: 2 YEC to smYkbLB2x4czA9Ke1AvF9rHpnMxurBHSsLi, signed by nodes [2] with no burn behind it
+    rogue intent 294addb8e88d59f423022104668add6d804159efe1bf1a1fa3fbcd0efa36f7dc:0 cancelled by bb2beff50424db7c891193cb147b9c6d4e2c20af829292f98ea6f1196dd7cc2f
+  ~ mined 1 block(s): 427 -> 428
+  PASS: the cancel spends the intent with selector 2 (one canceller's signature)
+  PASS: the value is back in a WYEC vault (I-2)
+  $ yellowback-devnet bridge silence
+    | the members stop heartbeating (<workspace>/wt/scratch/up6-mirror/dn/bridge-silence); the set goes DORMANT livenessWindow blocks after the last act
+  # the daemon stops heartbeating; the set is DORMANT once no current member acted in livenessWindow (30) -> height 455
+  $ yellowback-devnet bridge recover
+    | vault bb2beff50424db7c891193cb147b9c6d4e2c20af829292f98ea6f1196dd7cc2f:0: the owner branch opens at height 802 and the set is not released
+    | vault 2d4dbcdbbfb458fe28b68897ef82417c658782f190e6facf7a8bff8bfbaad8ba:0: the owner branch opens at height 802 and the set is not released
+    | vault 294addb8e88d59f423022104668add6d804159efe1bf1a1fa3fbcd0efa36f7dc:1: the owner branch opens at height 802 and the set is not released
+  ~ mined 27 block(s): 428 -> 455
+  $ node0 set_getinfo "c1672859754fd44ac0a79a6a6cde1b4bf84c88ab0eaa0b7e83318452688bea1a"
+    = {"current": 1, "dormant": true, "released": true}
+  PASS: the bridge set is DORMANT and released
+  $ yellowback-devnet bridge recover
+    | recovered vault bb2beff50424db7c891193cb147b9c6d4e2c20af829292f98ea6f1196dd7cc2f:0 (2.00000000 YEC): txid dabf1acea5855f852325dee00d11634e4f989d9d7b9e4417df10972466a7934c, selector 3
+    | recovered vault 2d4dbcdbbfb458fe28b68897ef82417c658782f190e6facf7a8bff8bfbaad8ba:0 (6.00000000 YEC): txid 662584c37ecfcd0c5134c989887b530c29b4d7faedcd3e0a4de7cf2cf6b084a9, selector 3
+    | recovered vault 294addb8e88d59f423022104668add6d804159efe1bf1a1fa3fbcd0efa36f7dc:1 (15.00000000 YEC): txid 6fb516af7ee0656494f5214c2fddca826163db5605abe0342ab083f4c1099150, selector 3
+  ~ mined 1 block(s): 455 -> 456
+  PASS: the owner recovered every vault and intent under the set (OWNER-RELEASED, selector 3)
+  $ yellowback-devnet bridge down
+    | bridge daemon (pid 36099) stopped
+
+====================================================================================================
+[final +600s] every node agrees; the clients agree  (height 456)
+====================================================================================================
+  $ yed_getstatehash on nodes 0,2,3,4,5,6,7,8,9,10; vault_getinfo.statehash on every node
+    = yed ['79faf05c2493b36bff2a7ff38b31eeed8d47b580bbe01eaca67c90ab5d825081'] ; vault ['bc2448dd00bbbdbf9aab8840d51d936feecef2d1fbae650bc015775780c68a05']
+  PASS: end: one YED state hash on all 10 Yellowback nodes
+  PASS: end: one vault state hash on all 11 nodes, the stock node included
+  $ node0 vault_getinfo 
+    = {"intents": 0, "lockedvalue": "30.00000000", "sets": 4, "statehash": "bc2448dd00bbbdbf9aab8840d51d936feecef2d1fbae650bc015775780c68a05", "vaults": 3}
+  $ node0 yed_getstats 
+    = {"activeVaults": 3, "claimedVaults": 1, "closedVaults": 2, "mintingAllowed": false, "supplyCents": 30000}
+  PASS: chain-viz follows the tip (end)
+  $ GET http://127.0.0.1:32704/api/vaults   (end)
+    = sets ['c1672859754fd44a (1 current, dormant)', '171741b4207c2fdf (3 current)', 'b8f23f516048b32c (9 current, dormant)', '470529ab54b472e9 (0 current, dormant)']; byTag [{"intents": 0, "tag": "59454400", "tagtext": "YED", "valuezat": 3000000000, "vaults": 3}]; 3 vaults, 0 intents; last spends [{"action": "owner-released", "height": 456, "kind": "vault", "outpoint": "294addb8e88d59f423022104668add6d804159efe1bf1a1fa3fbcd0efa36f7dc:1"}, {"action": "owner-released", "height": 456, "kind": "vault", "outpoint": "bb2beff50424db7c891193cb147b9c6d4e2c20af829292f98ea6f1196dd7cc2f:0"}, {"action": "owner-released", "height": 456, "kind": "vault", "outpoint": "2d4dbcdbbfb458fe28b68897ef82417c658782f190e6facf7a8bff8bfbaad8ba:0"}]
+  PASS: chain-viz shows the node's 4 sets and 3 vault outputs (end)
+  $ lwdinfo -server 127.0.0.1:9480 -yellowback   (end)
+    = latestHeight 456; {"GetVaultInfo": "ok", "GetVaultInfo#active": "true", "GetVaultInfo#sets": "4", "GetYellowbackInfo#rpcversion": "5", "ListSets": "ok", "ListSets#rows": "4", "ListVaultOutputs": "ok", "ListVaultOutputs#rows": "3"}
+  PASS: lightwalletd serves the vault read calls (GetVaultInfo, ListSets, GetSet, ListVaultOutputs): all ok
+  $ (cd <workspace>/wt/p6-lightwalletd-dd && LWD_DEVNET_DIR=... go test -tags devnet -run TestDevnetVaultUpgradeThroughServer ./frontend/)   (end)
+    | yellowback_devnet_test.go:979: vault upgrade 6d5b7a31 active from 103; attestor set 470529ab54b472e9: 0 members (0 current); 4 sets, 3 vault outputs; statehash bc2448dd00bbbdbf
+    | --- PASS: TestDevnetVaultUpgradeThroughServer (0.01s)
+    | PASS
+    | ok  	github.com/zcash/lightwalletd/frontend	0.497s
+  PASS: lightwalletd's vault read calls equal the node's RPCs, byte for byte where compared (end)
+
+WALK PASSED in 602 s at height 456

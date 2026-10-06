@@ -11,7 +11,7 @@
 # the quote is younger than max-age (default 900 s, half of -yellowbackquotemaxage)
 # and `.miner.eligible` is true; prints one line either way, so it drops into
 # cron, a systemd timer, Nagios/Icinga or a Prometheus textfile collector.
-# Exit 1 = signal-only or stale (the quote agent is down or fails closed),
+# Exit 1 = no quote or a stale one (quoteKind "none": the quote agent is down or fails closed),
 # exit 2 = not eligible / not registered, exit 3 = RPC failure or module off.
 #
 # The quote agent's own log (`journalctl -u yellowback-quote`) says why: look for
