@@ -37,44 +37,45 @@ name: yellowback tests
 # is out are in doc/yellowback-baseline.md "Inherited functional suite at the pin".
 
 # Triggers (CI/CD design of 2026-10-06, wt/BRIEFING-upgrade.md; upgrade plan "CI/CD"):
-#   push / pull_request on the node-line branches (one list, the `node-branches` anchor below):
+#   push / pull_request on the node-line branches (one list, the `node-line-branches` anchor below):
 #     the push tier -- build once, unit tests, the functional suites sharded over one build
 #     artifact, the audit, the agent crate, the Python checks, lint. Target 25 min warm.
-#   schedule: ONLY the `schedule-dispatch` job. GitHub runs a scheduled workflow from the DEFAULT
+#   schedule: ONLY the `schedule-fanout` job. GitHub runs a scheduled workflow from the DEFAULT
 #     branch's copy of this file and checks out the default branch (feature/yellowback here), so
 #     a nightly defined on harden/yellowback or upgrade/vault never ran on those branches. The
 #     dispatcher instead starts this workflow by workflow_dispatch on every branch of the anchor
 #     (tier nightly at 03:00, weekly on Sunday 04:00), so each branch runs ITS OWN nightly. It
 #     takes effect once the default branch carries this file (or the default branch is switched
 #     to harden/yellowback for the duration of the hardening plan).
-#   workflow_dispatch, input `tier`: push (the push tier), nightly (variants, the long suites,
-#     the cross-repo runs), weekly (fuzzing), all (push + nightly). Any ref.
+#   workflow_dispatch, input `tier`: all (push + nightly; the default, as a dispatch ran before),
+#     push, nightly (variants, the long suites, the cross-repo runs), weekly (fuzzing). Any ref.
 # Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
 on:
   push:
-    branches: &node-branches
+    branches: &node-line-branches
       - harden/yellowback
       - upgrade/vault
       - feature/yellowback
   pull_request:
-    branches: *node-branches
+    branches: *node-line-branches
   schedule:
     - cron: '0 3 * * *'
     - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Which tier to run: push, nightly (variants and long suites), weekly (fuzz, about 3.5 hours), all (push + nightly)'
+        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites) or weekly (fuzz, about 3.5 hours)'
         type: choice
-        options: [push, nightly, weekly, all]
-        default: push
+        options: [all, push, nightly, weekly]
+        default: all
 
 permissions:
   contents: read
 
 concurrency:
-  group: yellowback-tests-${{ github.ref }}-${{ github.event_name }}-${{ inputs.tier || 'push' }}
-  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+  # Push and pull_request runs of one ref supersede each other; every dispatched run is its own.
+  group: yellowback-tests-${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   # Plan section 6.0 item 6's list for Phase 6 and after, plus yellowback_hardening (Phase 8,
@@ -100,12 +101,13 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: aba726b4f7d14e9b6949180011d860263deee1c4
+  YOLO_COMMIT: dc9c57a671e37821c21932b4859f9d28800d27e9
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
-  # this commit (its main on 2026-10-01; bump by PR, audit I-5) and built --locked the same way,
-  # exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
+  # this commit (bump by PR, audit I-5) and built --locked the same way, exported as CHAINVIZ_BIN.
+  # Since 2026-10-06 its harden/yellowback build (H5: rpcversion 4 fields), the pin ycash-dd's CI
+  # uses; it must be pushed to boyfromcave/chain-viz before this resolves. yolo: its main.
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: c388ed218a06ea59701ecbda9130d9789cb0a969
+  CHAINVIZ_COMMIT: 4b010df9785a8bc181bd45e10087704cc2b121fd
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
@@ -143,7 +145,7 @@ jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
   # the top). A branch whose copy of this file does not accept `tier` yet (feature/yellowback until
   # this file is merged back there) is skipped with a warning, never a red run.
-  schedule-dispatch:
+  schedule-fanout:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
@@ -152,7 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: *node-branches
+        branch: *node-line-branches
     steps:
       - name: Dispatch this workflow on the branch
         env:
@@ -208,13 +210,13 @@ jobs:
         # output that rpc-tests.py reads (SRCDIR/BUILDDIR are this same workspace path on every
         # runner of this repository, so the shards can use it as is).
         run: |
-          tar czf "$RUNNER_TEMP/ycash-build.tgz" src/ycashd src/ycash-cli src/ycash-tx src/test/test_bitcoin \
+          tar czf "$RUNNER_TEMP/node-bin.tgz" src/ycashd src/ycash-cli src/ycash-tx src/test/test_bitcoin \
             qa/pull-tester/tests_config.ini
-          ls -l "$RUNNER_TEMP/ycash-build.tgz"
+          ls -l "$RUNNER_TEMP/node-bin.tgz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ycash-build
-          path: ${{ runner.temp }}/ycash-build.tgz
+          name: node-bin
+          path: ${{ runner.temp }}/node-bin.tgz
           retention-days: 3
           if-no-files-found: error
 
@@ -229,9 +231,9 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ycash-build
+          name: node-bin
           path: ${{ runner.temp }}
-      - run: tar xzf "$RUNNER_TEMP/ycash-build.tgz"
+      - run: tar xzf "$RUNNER_TEMP/node-bin.tgz"
       - name: Unit tests (the whole test_bitcoin, P5)
         # Not only yellowback_*: the Phase 3 hooks sit in files that miner_tests, main_tests,
         # mempool_tests and rpc_tests cover.
@@ -329,7 +331,7 @@ jobs:
           apt: 'false'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ycash-build
+          name: node-bin
           path: ${{ runner.temp }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: matrix.suite == 'yellowback' && needs.sidecars.result == 'success'
@@ -338,7 +340,7 @@ jobs:
           path: ${{ runner.temp }}
       - name: Unpack
         run: |
-          tar xzf "$RUNNER_TEMP/ycash-build.tgz"
+          tar xzf "$RUNNER_TEMP/node-bin.tgz"
           if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
             mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
             echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
