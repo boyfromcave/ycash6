@@ -23,7 +23,7 @@ pub const MICRO: f64 = 1_000_000.0;
 pub const OUTLIER_BPS: f64 = 1000.0; // sources more than 10 % from the median are dropped
 pub const TWAP_SECONDS: f64 = 900.0; // the proposal's 15-minute window
 pub const SOURCE_SILENCE_SECONDS: f64 = 120.0;
-pub const MIN_SOURCES: usize = 3;
+pub const MIN_SOURCES: usize = 2; // hardening F-2 (D-RD-ATT-2): 3 failed closed on 53 % of blocks; min_venues 2 stays
 pub const MASK_BIT_MAX: u32 = 15;
 
 /// The source-mask bit registry (plan §5; informational). The Rust agent keeps it so the
@@ -1315,18 +1315,21 @@ mod tests {
         let a = f.aggregate(now).unwrap();
         assert_eq!((a.micro_usd, a.source_mask), (510_000, 0b1010));
         assert_eq!(a.contributing, vec!["cg", "nonkyc", "gen"]);
-        // an outlier is dropped and the aggregate falls below min_sources
-        let mut f = feed(FeedSettings::default());
+        // an outlier is dropped and the aggregate falls below min_sources = 3 ...
+        let three = || FeedSettings {
+            min_sources: 3,
+            ..Default::default()
+        };
+        let mut f = feed(three());
         f.ingest(now, &replies(0.50, 0.52, 0.90, now));
         assert!(f.aggregate(now).is_none());
-        let mut f = feed(FeedSettings {
-            min_sources: 2,
-            ..Default::default()
-        });
+        // ... but not below the default 2 (hardening F-2), with two venues left
+        assert_eq!((MIN_SOURCES, FeedSettings::default().min_venues), (2, 2));
+        let mut f = feed(FeedSettings::default());
         f.ingest(now, &replies(0.50, 0.52, 0.90, now));
         assert_eq!(f.aggregate(now).unwrap().micro_usd, 510_000);
         // a fetch failure drops the source; the health table says why
-        let mut f = feed(FeedSettings::default());
+        let mut f = feed(three());
         let mut r = replies(0.50, 0.52, 0.51, now);
         r.insert("gen".into(), Err("connection refused".into()));
         f.ingest(now, &r);

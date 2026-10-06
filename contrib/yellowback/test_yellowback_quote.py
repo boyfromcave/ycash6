@@ -280,7 +280,8 @@ class MainTests(unittest.TestCase):
         node = yq.make_node({"rpc_url": "http://127.0.0.1:18232", "rpc_cookie": cookie})
         self.assertEqual(node.auth, yp.base64.b64encode(b"__cookie__:secret").decode())
         sample = yq.load_config(SAMPLE)
-        self.assertEqual([yp.mask_bit_for(s) for s in sample["sources"]], [1, 0, 3])
+        self.assertEqual([yp.mask_bit_for(s) for s in sample["sources"]], [1, 0, 3, 3])   # nonkyc-btc enabled (F-2)
+        self.assertEqual((sample["quote"]["min_sources"], sample["quote"]["min_venues"]), (2, 2))
         self.assertEqual(len(sample["btc_usd_sources"]), 3)
 
     def test_loop_polls_and_stops(self):
