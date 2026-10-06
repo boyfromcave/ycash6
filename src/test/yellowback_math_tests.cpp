@@ -167,18 +167,21 @@ BOOST_AUTO_TEST_CASE(mint5_min_ratio_and_required_collateral_worked_example)
 }
 
 // Rule: MINT-5
-// K14: class A at the 3x cap is 150,000 bps; MAX_MINT * 150,000 * COIN = 1.5e19
-// exceeds int64 before the division, and at PRICE_MIN the quotient (1.5e17 zat)
-// exceeds MAX_MONEY: "unsatisfiable", never a wrapped number.
+// K14: class A at the 3x cap is 150,000 bps; a $10,000 mint (the regtest MAX_MINT, mainnet's
+// before H-12) * 150,000 * COIN = 1.5e19 exceeds int64 before the division, and at PRICE_MIN the
+// quotient (1.5e17 zat) exceeds MAX_MONEY: "unsatisfiable", never a wrapped number.
 BOOST_AUTO_TEST_CASE(mint5_required_collateral_overflow_at_max_mint_and_price_min)
 {
     const Params& m = MainParams();
+    const Cents bigMint = RegtestParams(1, 0, 0, 0).maxMint;
+    BOOST_CHECK_EQUAL(bigMint, 1000000);
     const int worst = MinRatioBps(m.baseRatioBps[0], m.sigmaMultMaxBps);
     BOOST_CHECK_EQUAL(worst, 150000);
-    BOOST_CHECK(!RequiredCollateral(m.maxMint, worst, PRICE_MIN).has_value());
-    BOOST_CHECK(!RequiredCollateralRounded(m.maxMint, worst, PRICE_MIN).has_value());
+    BOOST_CHECK(!RequiredCollateral(bigMint, worst, PRICE_MIN).has_value());
+    BOOST_CHECK(!RequiredCollateralRounded(bigMint, worst, PRICE_MIN).has_value());
+    BOOST_CHECK(!RequiredCollateral(m.maxMint, worst, PRICE_MIN).has_value());   // H-12's $2,500: 3.75e16 zat, still > MAX_MONEY
     // At $0.05 the same mint needs 3e14 zat = 3,000,000 YEC: satisfiable (< MAX_MONEY).
-    auto r = RequiredCollateral(m.maxMint, worst, 50000);
+    auto r = RequiredCollateral(bigMint, worst, 50000);
     BOOST_REQUIRE(r.has_value());
     BOOST_CHECK_EQUAL(r.value(), 300000000000000LL);
     // Exactly MAX_MONEY is satisfiable; one zat above is not.
@@ -247,46 +250,77 @@ BOOST_AUTO_TEST_CASE(red4_underwater_worked_example)
 BOOST_AUTO_TEST_CASE(fee1_min_dominates_small_vault)
 {
     const Params& m = MainParams();
-    // 25 bps of 200 YEC is exactly FEE_MIN; below 200 YEC the minimum applies.
-    BOOST_CHECK_EQUAL(FeeZat(199 * COIN, m.feeMin, m.feeBps), m.feeMin);
+    // 15 bps (H-4): FEE_MIN applies up to 333 1/3 YEC; at 25 bps (regtest) it was 200 YEC.
+    BOOST_CHECK_EQUAL(FeeZat(333 * COIN, m.feeMin, m.feeBps), m.feeMin);
     BOOST_CHECK_EQUAL(FeeZat(200 * COIN, m.feeMin, m.feeBps), m.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(200 * COIN - 1, m.feeMin, m.feeBps), m.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(201 * COIN, m.feeMin, m.feeBps), 50250000);
+    BOOST_CHECK_EQUAL(FeeZat(334 * COIN, m.feeMin, m.feeBps), 50100000);
     BOOST_CHECK_EQUAL(FeeZat(1, m.feeMin, m.feeBps), m.feeMin);
     BOOST_CHECK_EQUAL(FeeZat(0, m.feeMin, m.feeBps), m.feeMin);
-    // 6,000 YEC (the worked vault) pays 15 YEC.
-    BOOST_CHECK_EQUAL(FeeZat(6000 * COIN, m.feeMin, m.feeBps), 15 * COIN);
+    // 6,000 YEC (the worked vault) pays 9 YEC.
+    BOOST_CHECK_EQUAL(FeeZat(6000 * COIN, m.feeMin, m.feeBps), 9 * COIN);
+    // The regtest column keeps 25 bps: 200 YEC is exactly FEE_MIN, 201 YEC pays 0.5025 YEC.
+    const Params r = RegtestParams(1, 0, 0, 0);
+    BOOST_CHECK_EQUAL(FeeZat(200 * COIN, r.feeMin, r.feeBps), r.feeMin);
+    BOOST_CHECK_EQUAL(FeeZat(201 * COIN, r.feeMin, r.feeBps), 50250000);
 }
 
 // Rule: FEE-1
 BOOST_AUTO_TEST_CASE(fee1_at_max_money)
 {
     const Params& m = MainParams();
-    BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, m.feeMin, m.feeBps), 5250000000000LL);   // 52,500 YEC, no overflow
+    BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, m.feeMin, m.feeBps), 3150000000000LL);   // 31,500 YEC at 15 bps, no overflow
     BOOST_CHECK(MoneyRange(FeeZat(MAX_MONEY, m.feeMin, m.feeBps)));
     BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, m.feeMin, 10000), MAX_MONEY);
 }
 
+namespace {
+/**
+ * The class-range invariant, relaxed by H-5 to "contiguous or empty": an empty class
+ * (classMin > classMax) is disabled and ignored; the enabled classes, in class order, are
+ * non-empty, start at >= 1, and each starts one block after the previous enabled one ends.
+ */
+bool ClassesContiguousOrEmpty(const Params& p)
+{
+    int prevMax = -1;
+    for (int i = 0; i < NUM_CLASSES; i++) {
+        if (!p.IsClassEnabled(i)) continue;
+        if (p.classMin[i] < 1) return false;
+        if (prevMax >= 0 && p.classMin[i] != prevMax + 1) return false;
+        prevMax = p.classMax[i];
+    }
+    return prevMax >= 0;                                   // at least one class is enabled
+}
+} // namespace
+
 // Rule: MINT-2
 BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
 {
-    const Params& m = MainParams();
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34559), -1);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34560), 0);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103680), 0);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103681), 1);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420480), 1);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420481), 2);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102400), 2);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102401), -1);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(0), -1);
-    BOOST_CHECK_EQUAL(m.ClassForLockBlocks(-5), -1);
-    for (int i = 1; i < NUM_CLASSES; i++) BOOST_CHECK_EQUAL(m.classMin[i], m.classMax[i - 1] + 1);
-    BOOST_CHECK_EQUAL(m.baseRatioBps[0], 50000);
-    BOOST_CHECK_EQUAL(m.baseRatioBps[1], 40000);
-    BOOST_CHECK_EQUAL(m.baseRatioBps[2], 30000);
-    BOOST_CHECK_EQUAL(m.classMax[2], 5 * BLOCKS_PER_YEAR);   // MAX_LOCK = 5 y (V19)
+    // H-5: mainnet and testnet enable class A only; B and C carry an empty range at A's upper end.
+    for (const Params* n : { &MainParams(), &TestParams() }) {
+        const Params& m = *n;
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34559), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34560), 0);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103680), 0);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103681), -1);    // was class B
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420480), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420481), -1);    // was class C
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102400), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102401), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(0), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(-5), -1);
+        BOOST_CHECK(m.IsClassEnabled(0));
+        BOOST_CHECK(!m.IsClassEnabled(1));
+        BOOST_CHECK(!m.IsClassEnabled(2));
+        BOOST_CHECK(m.classMin[1] > m.classMax[1] && m.classMin[2] > m.classMax[2]);
+        BOOST_CHECK(ClassesContiguousOrEmpty(m));
+        BOOST_CHECK_EQUAL(m.baseRatioBps[0], 50000);
+        BOOST_CHECK_EQUAL(m.baseRatioBps[1], 40000);
+        BOOST_CHECK_EQUAL(m.baseRatioBps[2], 30000);
+    }
     Params r = RegtestParams(10, 0, 0, 0);
+    BOOST_CHECK(ClassesContiguousOrEmpty(r));
+    for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(r.IsClassEnabled(i));
+    for (int i = 1; i < NUM_CLASSES; i++) BOOST_CHECK_EQUAL(r.classMin[i], r.classMax[i - 1] + 1);
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(48), 0);
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(96), 0);
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(97), 1);
@@ -294,6 +328,58 @@ BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(145), 2);
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(240), 2);
     BOOST_CHECK_EQUAL(r.ClassForLockBlocks(241), -1);
+}
+
+// Rule: MINT-2
+// H-5: the params invariant is "contiguous or empty"; an empty range disables a class without a schema change.
+BOOST_AUTO_TEST_CASE(params_class_ranges_contiguous_or_empty)
+{
+    Params p = RegtestParams(10, 0, 0, 0);                  // A [48, 96], B [97, 144], C [145, 240]
+    BOOST_CHECK(ClassesContiguousOrEmpty(p));
+    Params noB = p;                                         // B empty: C must then follow A directly
+    noB.classMin[1] = 97; noB.classMax[1] = 96;
+    BOOST_CHECK(!noB.IsClassEnabled(1));
+    BOOST_CHECK(!ClassesContiguousOrEmpty(noB));            // a gap [97, 144] between A and C
+    noB.classMin[2] = 97;
+    BOOST_CHECK(ClassesContiguousOrEmpty(noB));
+    BOOST_CHECK_EQUAL(noB.ClassForLockBlocks(100), 2);
+    Params aOnly = p;                                       // the mainnet shape
+    aOnly.classMin[1] = aOnly.classMin[2] = 97; aOnly.classMax[1] = aOnly.classMax[2] = 96;
+    BOOST_CHECK(ClassesContiguousOrEmpty(aOnly));
+    BOOST_CHECK_EQUAL(aOnly.ClassForLockBlocks(96), 0);
+    BOOST_CHECK_EQUAL(aOnly.ClassForLockBlocks(97), -1);
+    BOOST_CHECK_EQUAL(aOnly.ClassForLockBlocks(240), -1);
+    Params overlap = p;                                     // B starting inside A is not contiguous
+    overlap.classMin[1] = 96;
+    BOOST_CHECK(!ClassesContiguousOrEmpty(overlap));
+    Params none = p;                                        // every class empty: nothing can mint
+    for (int i = 0; i < NUM_CLASSES; i++) { none.classMin[i] = 2; none.classMax[i] = 1; }
+    BOOST_CHECK(!ClassesContiguousOrEmpty(none));
+    Params zero = p;                                        // an enabled class starting at 0
+    zero.classMin[0] = 0;
+    BOOST_CHECK(!ClassesContiguousOrEmpty(zero));
+    BOOST_CHECK(!p.IsClassEnabled(-1));
+    BOOST_CHECK(!p.IsClassEnabled(NUM_CLASSES));
+}
+
+// Rule: HALT-2
+// W16 / H-11: the global-ratio halt sits below the base ratio of every *enabled* class, and the
+// recapitalisation floor is twice the halt; class C (300 %) is not below a 300 % halt, but it is off.
+BOOST_AUTO_TEST_CASE(halt2_floor_below_every_enabled_class_ratio)
+{
+    for (const Params* n : { &MainParams(), &TestParams() }) {
+        const Params& m = *n;
+        BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 30000);
+        BOOST_CHECK_EQUAL(m.recapRatioBps, 60000);
+        BOOST_CHECK_EQUAL(m.recapRatioBps, 2 * m.globalRatioHaltBps);
+        for (int i = 0; i < NUM_CLASSES; i++) {
+            if (m.IsClassEnabled(i)) BOOST_CHECK(m.globalRatioHaltBps < m.baseRatioBps[i]);
+        }
+        BOOST_CHECK(!(m.globalRatioHaltBps < m.baseRatioBps[2]));   // would fail were C enabled
+    }
+    const Params r = RegtestParams(10, 0, 0, 0);
+    BOOST_CHECK_EQUAL(r.recapRatioBps, 2 * r.globalRatioHaltBps);
+    for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(r.globalRatioHaltBps < r.baseRatioBps[i]);
 }
 
 // Rule: ACT-5
@@ -357,11 +443,12 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.payeeTiltBps, 10000);
     BOOST_CHECK_EQUAL(m.payeeWindow, 100);
     BOOST_CHECK_EQUAL(m.feeMin, 50000000);
-    BOOST_CHECK_EQUAL(m.feeBps, 25);
+    BOOST_CHECK_EQUAL(m.feeBps, 15);                          // H-4
     BOOST_CHECK_EQUAL(m.grace, 34560);
     BOOST_CHECK_EQUAL(m.claimThresholdBps, 11000);
     BOOST_CHECK_EQUAL(m.supplyCapBps, 1500);
-    BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 25000);
+    BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 30000);           // H-11
+    BOOST_CHECK_EQUAL(m.recapRatioBps, 60000);
     BOOST_CHECK_EQUAL(m.divergenceBps, 2000);
     BOOST_CHECK_EQUAL(m.volWindow, 2016);
     BOOST_CHECK_EQUAL(m.volStep, 48);
@@ -369,7 +456,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.sigmaRefBps, 10000);
     BOOST_CHECK_EQUAL(m.sigmaMultMaxBps, 30000);
     BOOST_CHECK_EQUAL(m.minMint, 10000);
-    BOOST_CHECK_EQUAL(m.maxMint, 1000000);
+    BOOST_CHECK_EQUAL(m.maxMint, 250000);                     // H-12: $2,500
     BOOST_CHECK_EQUAL(m.minOutput, 100);
     BOOST_CHECK_EQUAL(m.maxOutput, 10000000);
     BOOST_CHECK_EQUAL(m.tokenValue, TOKEN_VALUE);
@@ -413,6 +500,11 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(r.volWindow / r.volStep, 8);
     BOOST_CHECK_EQUAL(r.feeMin, m.feeMin);
     BOOST_CHECK_EQUAL(r.claimThresholdBps, m.claimThresholdBps);
+    // The regtest column keeps the v3 values the hardening plan changed on mainnet (H-4, H-11, H-12).
+    BOOST_CHECK_EQUAL(r.feeBps, 25);
+    BOOST_CHECK_EQUAL(r.globalRatioHaltBps, 25000);
+    BOOST_CHECK_EQUAL(r.recapRatioBps, 50000);
+    BOOST_CHECK_EQUAL(r.maxMint, 1000000);
     BOOST_CHECK(!RegtestParams(0, 0, 0, 0).IsConfigured());
     BOOST_CHECK(!ParamsForNetwork("regtest").IsConfigured());
     BOOST_CHECK_THROW(ParamsForNetwork("nope"), std::runtime_error);
@@ -428,7 +520,8 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     const Params& m = MainParams();
     BOOST_CHECK_EQUAL(PAYLOAD_VERSION, 3);
     BOOST_CHECK_EQUAL(PayloadVersion(), 3);
-    BOOST_CHECK_EQUAL(m.attestArmMin, 5);
+    BOOST_CHECK_EQUAL(m.attestArmMin, 7);                     // H-2 (D-4 had 5)
+    BOOST_CHECK_EQUAL(m.mintRequiresArmed, true);             // H-1
     BOOST_CHECK_EQUAL(m.attestArmDelay, 1152);
     BOOST_CHECK_EQUAL(m.attestRequired, true);
     BOOST_CHECK(m.bundleCarrier == BundleCarrier::SCRIPTSIG);
@@ -449,7 +542,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.emergencyPersist, 48);
     BOOST_CHECK_EQUAL(m.emergencyNoticeTtl, 1152);
     BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
-    BOOST_CHECK_EQUAL(m.attestFeeBps, 2500);
+    BOOST_CHECK_EQUAL(m.attestFeeBps, 5000);                  // H-4 (D-3 had 2,500)
     BOOST_CHECK_EQUAL(m.bondMin, 20000 * COIN);
     BOOST_CHECK_EQUAL(m.bondMinLock, 420480);
     BOOST_CHECK_EQUAL(m.bondMinLock, BLOCKS_PER_YEAR);
@@ -462,7 +555,10 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.carrierValue, 10000);
     BOOST_CHECK_EQUAL(m.attestInterval, 10);
     BOOST_CHECK_EQUAL(m.walletConfirmations, 6);
-    BOOST_CHECK_EQUAL(TestParams().attestArmMin, 5);
+    BOOST_CHECK_EQUAL(TestParams().attestArmMin, 7);
+    BOOST_CHECK_EQUAL(TestParams().mintRequiresArmed, true);
+    BOOST_CHECK_EQUAL(TestParams().attestFeeBps, 5000);
+    BOOST_CHECK_EQUAL(TestParams().feeBps, 15);
     BOOST_CHECK_EQUAL(TestParams().bondMin, 20000 * COIN);
     // "ARMED" means both the snapshot status and ATTEST_REQUIRED (W15).
     BOOST_CHECK(m.IsArmed(true));
@@ -471,8 +567,11 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     off.attestRequired = false;
     BOOST_CHECK(!off.IsArmed(true));
 
-    Params r = RegtestParams(150, 0, 0, 0);   // the two v3 flags default to 3 / scriptsig
+    Params r = RegtestParams(150, 0, 0, 0);   // the two v3 flags default to 3 / scriptsig, H-1's to off
     BOOST_CHECK_EQUAL(r.attestArmMin, 3);
+    BOOST_CHECK_EQUAL(r.mintRequiresArmed, false);
+    BOOST_CHECK_EQUAL(RegtestParams(150, 0, 0, 0, 3, BundleCarrier::SCRIPTSIG, true).mintRequiresArmed, true);
+    BOOST_CHECK_EQUAL(Params().mintRequiresArmed, false);
     BOOST_CHECK(r.bundleCarrier == BundleCarrier::SCRIPTSIG);
     BOOST_CHECK_EQUAL(r.attestArmDelay, 8);
     BOOST_CHECK_EQUAL(r.attestRequired, true);
@@ -661,7 +760,7 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
 }
 
 // Rule: RED-5
-// Overflow at PRICE_MIN: MAX_MINT * 11,000 * COIN / 100 = 1.1e16 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
+// Overflow at PRICE_MIN: MAX_MINT ($2,500, H-12) * 11,000 * COIN / 100 = 2.75e15 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
 BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
 {
     const Params& m = MainParams();
@@ -681,25 +780,28 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
 
 // Rule: AFEE-1
 // attestFeeZat = feeZat * ATTEST_FEE_BPS / 10^4 (floor), out of FEE-1's fee.
-BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_a_quarter_of_the_pool_fee)
+BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_half_of_the_pool_fee)
 {
     const Params& m = MainParams();
-    // The worked vault: 6,000 YEC pays 15 YEC to the pool and 3.75 YEC to the attestor.
+    // The worked vault (H-4: 15 bps, 5,000 bps): 6,000 YEC pays 9 YEC to the pool and 4.5 YEC to the attestor.
     const CAmount fee = FeeZat(6000 * COIN, m.feeMin, m.feeBps);
-    BOOST_CHECK_EQUAL(fee, 15 * COIN);
-    BOOST_CHECK_EQUAL(AttestFeeZat(fee, m.attestFeeBps), 375000000);
-    // The minimum fee: 0.5 YEC => 0.125 YEC.
-    BOOST_CHECK_EQUAL(AttestFeeZat(m.feeMin, m.attestFeeBps), 12500000);
+    BOOST_CHECK_EQUAL(fee, 9 * COIN);
+    BOOST_CHECK_EQUAL(AttestFeeZat(fee, m.attestFeeBps), 450000000);
+    // The minimum fee: 0.5 YEC => 0.25 YEC.
+    BOOST_CHECK_EQUAL(AttestFeeZat(m.feeMin, m.attestFeeBps), 25000000);
     // Floor.
-    BOOST_CHECK_EQUAL(AttestFeeZat(3, m.attestFeeBps), 0);
-    BOOST_CHECK_EQUAL(AttestFeeZat(4, m.attestFeeBps), 1);
-    BOOST_CHECK_EQUAL(AttestFeeZat(7, m.attestFeeBps), 1);
+    BOOST_CHECK_EQUAL(AttestFeeZat(1, m.attestFeeBps), 0);
+    BOOST_CHECK_EQUAL(AttestFeeZat(3, m.attestFeeBps), 1);
+    BOOST_CHECK_EQUAL(AttestFeeZat(7, m.attestFeeBps), 3);
+    // The regtest column keeps D-3's quarter: 15 YEC => 3.75 YEC, 7 zat => 1.
+    BOOST_CHECK_EQUAL(AttestFeeZat(15 * COIN, RegtestParams(1, 0, 0, 0).attestFeeBps), 375000000);
+    BOOST_CHECK_EQUAL(AttestFeeZat(7, RegtestParams(1, 0, 0, 0).attestFeeBps), 1);
     // Degenerate: zero or negative inputs give 0; 10^4 bps is the whole fee; MAX_MONEY does not overflow.
     BOOST_CHECK_EQUAL(AttestFeeZat(0, m.attestFeeBps), 0);
     BOOST_CHECK_EQUAL(AttestFeeZat(-1, m.attestFeeBps), 0);
     BOOST_CHECK_EQUAL(AttestFeeZat(fee, 0), 0);
     BOOST_CHECK_EQUAL(AttestFeeZat(fee, 10000), fee);
-    BOOST_CHECK_EQUAL(AttestFeeZat(MAX_MONEY, m.attestFeeBps), MAX_MONEY / 4);
+    BOOST_CHECK_EQUAL(AttestFeeZat(MAX_MONEY, m.attestFeeBps), MAX_MONEY / 2);
     BOOST_CHECK_EQUAL(AttestFeeZat(MAX_MONEY, 10000), MAX_MONEY);
 }
 

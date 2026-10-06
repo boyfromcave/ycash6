@@ -152,7 +152,8 @@ class Params(object):
     """Every value a rule reads (section 3.1).  Build with Params.regtest(...) or Params.mainnet(...)."""
 
     # The "hashed" record (section 3.6 Params): startHeight, sigmaRefBps, supplyCapBps, enforceUntil,
-    # and with v3 attestArmMin (u32) and bundleCarrier (u8) (M13).
+    # with v3 attestArmMin (u32) and bundleCarrier (u8), and with the hardening plan's H-1
+    # mintRequiresArmed (u8 boolean, SCHEMA_VERSION 5) (M13).
 
     def __init__(self, network, start_height, sigma_ref_bps, supply_cap_bps, enforce_until,
                  p_fast_window, p_mid_window, p_slow_window,
@@ -166,7 +167,7 @@ class Params(object):
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
                  price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
-                 recap_ratio_bps=50_000):
+                 recap_ratio_bps=50_000, mint_requires_armed=False):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -218,6 +219,7 @@ class Params(object):
         self.price_max = price_max
         self.attest_arm_min = attest_arm_min
         self.bundle_carrier = bundle_carrier
+        self.mint_requires_armed = bool(mint_requires_armed)   # H-1: MINT-4 refuses a mint whose R is not ARMED
         # v3 plan section 3.1 (the mainnet column unless `attest` overrides; regtest() passes its column)
         a = dict(attest_arm_delay=1_152, attest_required=True, n_slots=9, m_select=4, k_slack=2, bundle_max=6,
                  q_low_bps=3_333, q_high_bps=6_667, attest_max_age=20, pin_window=288, pin_delta_bps=500,
@@ -254,6 +256,10 @@ class Params(object):
     def min_fill_slow(self):
         return ceil_div(2 * self.p_slow_window, 3)
 
+    def class_enabled(self, term_class):
+        """H-5: a class with an empty term range (class_min > class_max) is disabled."""
+        return term_class in (0, 1, 2) and self.class_min[term_class] <= self.class_max[term_class]
+
     def class_range(self, term_class):
         """classRange(termClass) as (lo, hi) with lo <= d <= hi, or None for an invalid class."""
         if term_class not in (0, 1, 2):
@@ -262,11 +268,14 @@ class Params(object):
 
     @classmethod
     def regtest(cls, start_height, sigma_ref_bps=0, supply_cap_bps=0, enforce_until=0, attest_arm_min=3,
-                bundle_carrier=CARRIER_SCRIPTSIG):
+                bundle_carrier=CARRIER_SCRIPTSIG, mint_requires_armed=False):
+        # The regtest column keeps the v3 fee, cap and ratio values the hardening plan changed on
+        # mainnet (H-4, H-11, H-12); mint_requires_armed is -yellowbackmintrequiresarmed (H-1).
         return cls(
             network='regtest', start_height=start_height, sigma_ref_bps=sigma_ref_bps,
             supply_cap_bps=supply_cap_bps, enforce_until=enforce_until,
             attest_arm_min=attest_arm_min, bundle_carrier=bundle_carrier,
+            mint_requires_armed=mint_requires_armed,
             p_fast_window=8, p_mid_window=24, p_slow_window=64,
             signal_window=64, activation_threshold=48, participation_floor=39, activation_delay=64,
             enforcement_floor=32, enforcement_resume=39, valve_blocks=6, abandon_blocks=128,
@@ -287,17 +296,18 @@ class Params(object):
             supply_cap_bps=1_500, enforce_until=enforce_until,
             p_fast_window=96, p_mid_window=576, p_slow_window=2_016,
             signal_window=2_016, activation_threshold=1_512, participation_floor=1_210, activation_delay=2_016,
-            enforcement_floor=1_008, enforcement_resume=1_210, valve_blocks=6, abandon_blocks=4_032,
+            enforcement_floor=1_008, enforcement_resume=1_210, valve_blocks=6, abandon_blocks=34_560,
             n_reg=576, n_penalty=288, peer_lag=10, peer_min=5, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=576, payee_tilt_bps=10_000, payee_window=100,
-            fee_min=50_000_000, fee_bps=25, grace=34_560, claim_threshold_bps=11_000,
-            global_ratio_halt_bps=25_000, divergence_bps=2_000,
-            # class A [34,560, 103,680], B (103,680, 420,480], C (420,480, 2,102,400]
-            class_min=[34_560, 103_681, 420_481], class_max=[103_680, 420_480, 2_102_400],
+            fee_min=50_000_000, fee_bps=15, grace=34_560, claim_threshold_bps=11_000,     # H-4
+            global_ratio_halt_bps=30_000, recap_ratio_bps=60_000, divergence_bps=2_000,   # H-11
+            # class A [34,560, 103,680]; B and C disabled by an empty range at A's upper end (H-5)
+            class_min=[34_560, 103_681, 103_681], class_max=[103_680, 103_680, 103_680],
             base_ratio_bps=[50_000, 40_000, 30_000],
             vol_window=2_016, vol_step=48, vol_periods_per_year=8_760, sigma_mult_max_bps=30_000,
-            min_mint=10_000, max_mint=1_000_000, min_output=100, max_output=10_000_000,
-            token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2)
+            min_mint=10_000, max_mint=250_000, min_output=100, max_output=10_000_000,   # H-12
+            token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2,
+            attest_arm_min=7, attest={'attest_fee_bps': 5_000}, mint_requires_armed=True)   # H-2, H-4, H-1
 
 
 def params_from_getinfo(info):
@@ -314,7 +324,8 @@ def params_from_getinfo(info):
                                 supply_cap_bps=int(p.get('supplyCapBps', 0)),
                                 enforce_until=int(p.get('enforceUntilHeight', 0) or 0),
                                 attest_arm_min=int(attest.get('armMin', 3)),
-                                bundle_carrier=carrier)
+                                bundle_carrier=carrier,
+                                mint_requires_armed=bool(info.get('mintRequiresArmed', False)))
     else:
         params = Params.mainnet(int(p['startHeight']), int(p.get('enforceUntilHeight', 0) or 0),
                                 network=network)
@@ -1546,7 +1557,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2381,6 +2392,9 @@ class YellowbackModel(object):
         if (s.halt_mask & ~HALT_GLOBAL_RATIO) != 0:
             return 'mint-not-active'
         armed = self.armed_at(pl.ref_height)
+        # MINT-4 (H-1): with MINT_REQUIRES_ARMED an unarmed R halts the mint
+        if p.mint_requires_armed and not armed:
+            return 'mint-halted-unarmed'
         x_mint = s.p_mint
 
         def mint5(p_mint):
@@ -2400,9 +2414,11 @@ class YellowbackModel(object):
                 return v
         # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9). W20: above the cap a
         # mint is accepted iff its class minimum reaches the recapitalisation floor (the W16 gate)
+        # H-10: above the cap only class A (term_class 0) at or over the floor mints
         cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
         if (cap is not None and self.totals.supply_cents + pl.cents > cap
-                and min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps):
+                and (pl.term_class != 0
+                     or min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps)):
             return 'mint-supply-cap'
         # MINT-7
         if opret == 1:
@@ -2638,7 +2654,7 @@ class YellowbackModel(object):
         for h in sorted(self.snapshots):
             out += b'S' + _u32be(h) + _ser_snapshot(self.snapshots[h])
         out += (b'P' + _i32(p.start_height) + _i32(p.sigma_ref_bps) + _i32(p.supply_cap_bps) + _i32(p.enforce_until)
-                + _u32(p.attest_arm_min) + _u8(p.bundle_carrier))
+                + _u32(p.attest_arm_min) + _u8(p.bundle_carrier) + _u8(1 if p.mint_requires_armed else 0))
         # v3 (section 3.6 state-hash order): Attestors by seq, AttestorSeq, Attest, BundleLog by height, Notices by outpoint
         for seq in sorted(self.attestors):
             out += b'A' + struct.pack('>H', seq) + _ser_attestor(self.attestors[seq])
@@ -2959,7 +2975,8 @@ def replay_golden(doc):
     txs[0] the coinbase."""
     p = doc['params']
     params = Params.regtest(int(p['startHeight']), int(p['sigmaRefBps']), int(p['supplyCapBps']), int(p['enforceUntil']),
-                            int(p.get('attestArmMin', 3)), int(p.get('bundleCarrier', CARRIER_SCRIPTSIG)))
+                            int(p.get('attestArmMin', 3)), int(p.get('bundleCarrier', CARRIER_SCRIPTSIG)),
+                            bool(p.get('mintRequiresArmed', False)))
     model = YellowbackModel(params)
     for b in doc['blocks']:
         txs = [tx_from_hex(h) for h in b['txs']]

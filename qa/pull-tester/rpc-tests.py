@@ -55,6 +55,7 @@ BASE_SCRIPTS= [
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
     'yellowback_void_mint.py',
+    'yellowback_mint_armed.py',
     'yellowback_wallet_restore.py',
     'yellowback_claim.py',
     'yellowback_fee.py',
