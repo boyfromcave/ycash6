@@ -14,7 +14,11 @@
 #   push of a tag v*            build, smoke-test, and create a draft release (a prerelease when
 #                               the version has -rc/-beta); the tag must equal configure.ac's version
 #                               and the mainnet Yellowback heights must be set
-#                               (qa/yellowback-release-heights.sh, hardening F-5)
+#                               (qa/yellowback-release-heights.sh, hardening F-5), and the
+#                               version must be the line's (6.21.x harden, 6.22.x upgrade; O-7).
+#                               Nothing here creates a tag: a tag is pushed by hand per
+#                               doc/yellowback-release.md, and this workflow refuses it while
+#                               the line's mainnet heights are unset.
 #   workflow_dispatch           the same builds and smoke tests, artifacts only, no release
 #                               (a proving run before tagging)
 #
@@ -55,6 +59,8 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Render the version and check the tag
         id: v
         # The same rendering as configure.ac's _CLIENT_VERSION_SUFFIX: BUILD < 25 is -beta<BUILD+1>,
@@ -72,6 +78,15 @@ jobs:
             { echo "src/clientversion.h disagrees with configure.ac ($version)"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
             echo "tag ${GITHUB_REF_NAME} != configure.ac version v$version"; exit 1
+          fi
+          # One release line per node line (upgrade plan O-7): the harden line (no src/vault/)
+          # releases 6.21.x, the network-upgrade line (src/vault/ present) 6.22.x. A tag on the
+          # wrong line's version is refused; a proving run only warns.
+          if [ -d src/vault ]; then line=upgrade; want=6.22; else line=harden; want=6.21; fi
+          if [ "$maj.$min" != "$want" ]; then
+            msg="the $line line releases $want.x, but configure.ac says $maj.$min.$rev"
+            if [ "${GITHUB_REF_TYPE}" = tag ]; then echo "$msg"; exit 1; fi
+            echo "::warning::$msg (not a tag: continuing)"
           fi
           case "$sfx" in -rc*|-beta*) pre=true ;; *) pre=false ;; esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -131,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0       # share/genbuild.sh names the build from git describe (the tag)
 
       - name: Install build prerequisites (Linux)
@@ -155,13 +171,26 @@ jobs:
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Cache depends
-        if: matrix.kind != 'legacy'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # Proving runs (workflow_dispatch) only: a tag builds depends from source, so a release
+        # never links anything a cache entry put there (zizmor cache-poisoning). The key covers
+        # Cargo.lock/Cargo.toml because depends vendors the Rust crates into depends/<host>
+        # (see .github/actions/yellowback-depends).
+        id: depends
+        if: matrix.kind != 'legacy' && github.ref_type != 'tag'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 # zizmor: ignore[cache-poisoning] -- never runs on a tag (the if above)
         with:
           path: |
             depends/built
             depends/sources
-          key: release-depends-${{ matrix.platform }}-${{ hashFiles('depends/packages/**', 'depends/patches/**', 'depends/Makefile', 'depends/funcs.mk', 'depends/hosts/**', 'depends/builders/**') }}
+          key: release-depends-${{ matrix.platform }}-${{ hashFiles('depends/**', 'Cargo.lock', 'Cargo.toml') }}
+
+      - name: Fetch the Rust git dependencies (depends restored from the cache)
+        # The --offline build reads the [patch.crates-io] git crates from ~/.cargo/git, which only
+        # depends' `cargo vendor` fills; a restored depends tree did not run it.
+        if: steps.depends.outputs.cache-hit == 'true'
+        run: |
+          c=$(ls depends/*/native/bin/cargo | head -1)
+          RUSTC="$(dirname "$c")/rustc" "$c" fetch --locked --manifest-path Cargo.toml
 
       - name: Number of cores
         id: nproc
@@ -171,9 +200,10 @@ jobs:
         if: matrix.kind != 'legacy'
         env:
           HOST: ${{ matrix.host }}
+          NPROC: ${{ steps.nproc.outputs.count }}
         run: |
           [ -n "$HOST" ] || unset HOST
-          ./zcutil/build.sh -j${{ steps.nproc.outputs.count }}
+          ./zcutil/build.sh -j"$NPROC"
 
       - name: Build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
         if: matrix.kind == 'legacy'
@@ -237,6 +267,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-windows
@@ -246,9 +278,10 @@ jobs:
         run: Get-ChildItem dist/*.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath dist }
       - name: Run the .exe files
         shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          qa/yellowback-release-smoke.sh "dist/ycashd_v${{ needs.version.outputs.version }}_windows" \
-            "${{ needs.version.outputs.version }}" --version-only
+          qa/yellowback-release-smoke.sh "dist/ycashd_v${VERSION}_windows" "$VERSION" --version-only
 
   release:
     name: Draft release
@@ -261,6 +294,8 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-*

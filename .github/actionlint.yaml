@@ -1,0 +1,31 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# actionlint configuration (the `lint` job of yellowback-tests.yml runs actionlint; locally:
+# `actionlint` from the repository root, with shellcheck on PATH).
+#
+# The shellcheck classes ignored below are deliberate in these scripts, not oversights:
+#   SC2086 / SC2046  the CI lists (YELLOWBACK_SCRIPTS, STOCK_BASELINE, the frozen-file list) and
+#                    $(nproc) are word-split on purpose; quoting them would pass one argument.
+#   SC2010 / SC2012  `ls` over build-output directories whose names we create (no odd characters).
+#   SC2015           `a && b || c` used where c is the intended fallback of either failing.
+#   SC2016           single-quoted strings that hand $(...) to make or to a generated script.
+#   SC2129 / SC2231  style only.
+# The upstream zcashd workflows (ci.yml, ci-skip.yml, lints.yml, ...) are scoped to upstream's
+# own branches (see each file's Ycash note) and keep their content; the ignores for them below
+# are upstream's findings, recorded rather than edited.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'SC2086:'
+      - 'SC2046:'
+      - 'SC2010:'
+      - 'SC2012:'
+      - 'SC2015:'
+      - 'SC2016:'
+      - 'SC2129:'
+      - 'SC2231:'
+  .github/workflows/lints.yml:
+    ignore:
+      - 'the runner of "actions-rs/clippy-check@v1" action is too old'

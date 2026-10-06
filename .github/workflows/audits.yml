@@ -2,6 +2,11 @@ name: Audits
 
 on:
   pull_request:
+    # Ycash (2026-10-06): scoped to upstream zcashd's own branch. This fork has no `master` PRs;
+    # cargo vet / cargo deny against upstream's supply-chain store cannot vet the fork's git
+    # dependency on Ycash's librustzcash fork, so they failed on every fork PR. On the upgrade line
+    # (boyfromcave/librustzcash6) that repository's own CI audits that crate graph.
+    branches: master
   push:
     branches: master
 

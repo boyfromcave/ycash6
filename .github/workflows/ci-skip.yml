@@ -10,6 +10,9 @@ on:
   # - never running commands with the fork's code checked out (we only require
   #   its commits to be present in the repository).
   pull_request_target:
+    # Ycash (2026-10-06): scoped to upstream zcashd's own branch. This fork has no `master` PRs;
+    # the companion of ci.yml (see its note), and pull_request_target needs no wider reach than that.
+    branches: master
     # Any update here needs to be done for the `no-ci-required` step (see below),
     # and mirrored into `ci.yml`.
     paths:

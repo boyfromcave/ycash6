@@ -12,6 +12,9 @@ permissions:
 
 jobs:
   docker:
+    # Ycash (2026-10-06): upstream's image push to zodlinc on Docker Hub, with upstream's secrets;
+    # it can only fail here, so it runs only in upstream's own repository.
+    if: github.repository_owner == 'zcash'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout

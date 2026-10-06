@@ -19,8 +19,13 @@ name: yellowback tests
 # Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
 # The same zcutil/build.sh a developer runs locally, so a green CI and a green laptop mean the
 # same thing. Layout per the workspace plan (docs/plans/yellowback-v2-development-plan.md, §6.0
-# item 6): `main`, `audit` and `python` block merges; `nightly`, `weekly-fuzz` and the three
+# item 6): the push tier blocks merges -- since 2026-10-06 the old `main` job is `build` (once),
+# `unit`, `sidecars` and the sharded `functional` matrix, beside `audit`, `agent`, `python` and
+# `lint`, summarised by the one `gate` check ("push tier"); `nightly`, `weekly-fuzz` and the three
 # variant builds `lockorder`, `sanitizers` and `coverage` (Phase 3, P6) open an issue.
+# Shared steps live in .github/actions/yellowback-prereqs (apt, Python 3.11, pinned pip packages
+# of qa/yellowback-ci-requirements.txt) and .github/actions/yellowback-depends (the depends, cargo
+# home and cargo target caches, with why each key is what it is).
 #
 # Functional scripts are listed by name: rpc-tests.py does not glob. YELLOWBACK_SCRIPTS is the
 # current phase's list (Phase 3: yellowback_index yellowback_activation yellowback_rpc_contract;
@@ -31,26 +36,45 @@ name: yellowback tests
 # the fork binary without -yellowback (P5); the 6.20.0 list and why every other inherited script
 # is out are in doc/yellowback-baseline.md "Inherited functional suite at the pin".
 
-# Only this line's branch of record triggers a push build. ycash-dd's superseded v2 branch
-# (feature/yellowback-sf) has no counterpart here and, since 2026-10-01, is no comparison base for
-# anything (owner): this workflow measures every budget and the frozen set against the tag
-# ycash6-baseline. workflow_dispatch still runs this workflow against any ref when needed.
+# Triggers (CI/CD design of 2026-10-06, wt/BRIEFING-upgrade.md; upgrade plan "CI/CD"):
+#   push / pull_request on the node-line branches (one list, the `node-branches` anchor below):
+#     the push tier -- build once, unit tests, the functional suites sharded over one build
+#     artifact, the audit, the agent crate, the Python checks, lint. Target 25 min warm.
+#   schedule: ONLY the `schedule-dispatch` job. GitHub runs a scheduled workflow from the DEFAULT
+#     branch's copy of this file and checks out the default branch (feature/yellowback here), so
+#     a nightly defined on harden/yellowback or upgrade/vault never ran on those branches. The
+#     dispatcher instead starts this workflow by workflow_dispatch on every branch of the anchor
+#     (tier nightly at 03:00, weekly on Sunday 04:00), so each branch runs ITS OWN nightly. It
+#     takes effect once the default branch carries this file (or the default branch is switched
+#     to harden/yellowback for the duration of the hardening plan).
+#   workflow_dispatch, input `tier`: push (the push tier), nightly (variants, the long suites,
+#     the cross-repo runs), weekly (fuzzing), all (push + nightly). Any ref.
+# Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
 on:
   push:
-    branches:
+    branches: &node-branches
+      - harden/yellowback
+      - upgrade/vault
       - feature/yellowback
   pull_request:
-    branches:
-      - feature/yellowback
+    branches: *node-branches
   schedule:
     - cron: '0 3 * * *'
     - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
-      weekly_fuzz:
-        description: Run only the weekly fuzz job (six targets, about 3.5 hours)
-        type: boolean
-        default: false
+      tier:
+        description: 'Which tier to run: push, nightly (variants and long suites), weekly (fuzz, about 3.5 hours), all (push + nightly)'
+        type: choice
+        options: [push, nightly, weekly, all]
+        default: push
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yellowback-tests-${{ github.ref }}-${{ github.event_name }}-${{ inputs.tier || 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   # Plan section 6.0 item 6's list for Phase 6 and after, plus yellowback_hardening (Phase 8,
@@ -116,141 +140,211 @@ env:
   STOCK_BASELINE_MINEBLOCK: txn_doublespend.py --mineblock
 
 jobs:
-  main:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+  # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
+  # the top). A branch whose copy of this file does not accept `tier` yet (feature/yellowback until
+  # this file is merged back there) is skipped with a warning, never a red run.
+  schedule-dispatch:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: *node-branches
+    steps:
+      - name: Dispatch this workflow on the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ matrix.branch }}
+          TIER: ${{ github.event.schedule == '0 4 * * 0' && 'weekly' || 'nightly' }}
+        run: |
+          gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f tier="$TIER" \
+            || echo "::warning::could not dispatch the $TIER tier on $BRANCH (no such branch, or its copy of this workflow has no tier input)"
+
+  # ---------------------------------------------------------------------------------------------
+  # Push tier: build once, test many. `build` compiles ycashd, ycash-cli, ycash-tx and test_bitcoin
+  # once and hands them to `unit` and to every `functional` shard as one artifact; `sidecars` builds
+  # the two Rust sidecars (yolo, chain-viz) in parallel with it. Nothing is rebuilt per shard.
+  build:
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote and the devnet role presets start the quote
-        # agent, which reads TOML with the stdlib tomllib. Not newer: the inherited framework still
-        # imports asyncore, which 3.12 removed. pyzmq comes from pip because apt's python3-zmq is
-        # bound to the runner's interpreter.
         with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
-        # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
-        # one-line shim stands in for it). No framework file is changed.
-        run: |
-          python3 -m pip install --user simplejson pyzmq
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, zmq, simplejson, pyblake2'
-
-      - name: Cache depends
-        id: cache-depends
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          python: 'false'
+      - id: inputs
+        uses: ./.github/actions/yellowback-depends
+        with:
+          save-target: 'true'
+      - name: Cache ccache (C++ objects)
+        # depends builds ccache 4.12 and config.site hands it to configure (CCACHE=); its default
+        # directory on Linux is ~/.cache/ccache. One entry per commit; restored by branch, then
+        # by whatever this branch can see (its own and the default branch's).
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-
-      - name: Build depends
-        if: steps.cache-depends.outputs.cache-hit != 'true'
-        run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
-
-      - name: Cache zk parameters
-        id: cache-params
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.zcash-params
-          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-
-      - name: Fetch zk parameters
-        if: steps.cache-params.outputs.cache-hit != 'true'
-        run: ./zcutil/fetch-params.sh
-
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-build-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-build-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-build-
+      # No zk parameters: 6.20.0 bundles the Sapling parameters and the Sprout verifying key in the
+      # binary, and zcutil/fetch-params.sh only prints a deprecation notice and exits 0 (the
+      # params cache and fetch steps of the v4.5.0 copy are gone with it).
       - name: Build ycashd
-        run: ./zcutil/build.sh -j$(nproc)
+        run: ./zcutil/build.sh -j"$(nproc)"
+      - name: ccache statistics
+        if: always()
+        run: depends/x86_64-pc-linux-gnu/native/bin/ccache --show-stats || true
+      - name: Pack the build artifact
+        # tar keeps the executable bits (upload-artifact does not). tests_config.ini is configure's
+        # output that rpc-tests.py reads (SRCDIR/BUILDDIR are this same workspace path on every
+        # runner of this repository, so the shards can use it as is).
+        run: |
+          tar czf "$RUNNER_TEMP/ycash-build.tgz" src/ycashd src/ycash-cli src/ycash-tx src/test/test_bitcoin \
+            qa/pull-tester/tests_config.ini
+          ls -l "$RUNNER_TEMP/ycash-build.tgz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ycash-build
+          path: ${{ runner.temp }}/ycash-build.tgz
+          retention-days: 3
+          if-no-files-found: error
 
+  unit:
+    needs: build
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ycash-build
+          path: ${{ runner.temp }}
+      - run: tar xzf "$RUNNER_TEMP/ycash-build.tgz"
       - name: Unit tests (the whole test_bitcoin, P5)
         # Not only yellowback_*: the Phase 3 hooks sit in files that miner_tests, main_tests,
         # mempool_tests and rpc_tests cover.
         run: src/test/test_bitcoin --log_level=test_suite
 
-      - name: Check out yolo (the stratum pool yellowback_stratum drives)
-        if: ${{ !cancelled() }}
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+  # yellowback_stratum drives the real pool software (boyfromcave/yolo) and yellowback_chainviz the
+  # chain observer (boyfromcave/chain-viz), both at the commits pinned in env. Checked out into
+  # this job's workspace WITHOUT the node checkout around them, so neither the node's
+  # rust-toolchain.toml nor depends' .cargo/config (vendored crates-io) applies -- the reason the
+  # old main job built them from copies under $RUNNER_TEMP (run 36444762343). --locked at the pins
+  # (audit I-5); the cache is keyed on the two pins, which fix both Cargo.locks.
+  sidecars:
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ env.YOLO_REPO }}
           ref: ${{ env.YOLO_COMMIT }}
-          path: .yolo-ci
-      - name: Install a Rust toolchain for yolo
-        # SHA-pinned toolchain action instead of `curl https://sh.rustup.rs | sh` (audit I-4); yolo
-        # builds on stable and carries a Cargo.lock.
-        if: ${{ !cancelled() }}
+          path: yolo
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.CHAINVIZ_REPO }}
+          ref: ${{ env.CHAINVIZ_COMMIT }}
+          path: chain-viz
+          persist-credentials: false
+      - name: Install a Rust toolchain
+        # SHA-pinned toolchain action instead of `curl https://sh.rustup.rs | sh` (audit I-4).
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
         with:
           toolchain: stable
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: ${{ !cancelled() }}
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: yolo-cargo-${{ runner.os }}-${{ env.YOLO_COMMIT }}
-      - name: Build yolo and export YOLO_BIN
-        if: ${{ !cancelled() }}
-        # Built from a copy OUTSIDE this repository's tree. Both rustup and cargo resolve their
-        # configuration by walking up from the working directory, so a checkout under the
-        # workspace inherits two things meant for librustzcash: rust-toolchain (1.51, which
-        # cannot read yolo's v4 Cargo.lock -- run 36444762343) and the .cargo/config that the
-        # depends build writes to replace crates-io with the vendored sources (where yolo's
-        # crates do not exist). yolo's own rust-toolchain.toml (stable) covers the first;
-        # building under $RUNNER_TEMP covers both. RUSTUP_TOOLCHAIN pins stable regardless.
-        env:
-          RUSTUP_TOOLCHAIN: stable
+            yolo/target
+            chain-viz/target
+          key: sidecars-${{ runner.os }}-${{ env.YOLO_COMMIT }}-${{ env.CHAINVIZ_COMMIT }}
+          restore-keys: |
+            sidecars-${{ runner.os }}-
+      - name: Build yolo
+        # --features regtest: yellowback_stratum.py's negative cell passes --text --no-flags,
+        # which yolo accepts only in a regtest-feature build (yolo audit H-6).
+        working-directory: yolo
         run: |
-          rm -rf "$RUNNER_TEMP/yolo-ci"; cp -R .yolo-ci "$RUNNER_TEMP/yolo-ci"
-          cd "$RUNNER_TEMP/yolo-ci"
           rustup show active-toolchain
-          # --features regtest: yellowback_stratum.py's negative cell passes --text --no-flags,
-          # which yolo accepts only in a regtest-feature build (yolo audit H-6).
           cargo build --release --locked --features regtest
           ./target/release/yolo --version
-          echo "YOLO_BIN=$RUNNER_TEMP/yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
-      - name: Check out chain-viz (the chain observer yellowback_chainviz drives)
-        if: ${{ !cancelled() }}
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          repository: ${{ env.CHAINVIZ_REPO }}
-          ref: ${{ env.CHAINVIZ_COMMIT }}
-          path: .chain-viz-ci
-      - name: Build chain-viz and export CHAINVIZ_BIN
-        if: ${{ !cancelled() }}
-        # Same recipe as yolo: built from a copy outside this tree (rust-toolchain and the
-        # depends' .cargo/config would otherwise apply), on the stable toolchain the yolo step
-        # installed, with the same registry cache, --locked at the pinned commit (audit I-5).
-        env:
-          RUSTUP_TOOLCHAIN: stable
+      - name: Build chain-viz
+        working-directory: chain-viz
         run: |
-          rm -rf "$RUNNER_TEMP/chain-viz-ci"; cp -R .chain-viz-ci "$RUNNER_TEMP/chain-viz-ci"
-          cd "$RUNNER_TEMP/chain-viz-ci"
-          rustup show active-toolchain
           cargo build --release --locked
           ./target/release/chain-viz --version
-          echo "CHAINVIZ_BIN=$RUNNER_TEMP/chain-viz-ci/target/release/chain-viz" >> "$GITHUB_ENV"
+      - name: Pack the sidecars
+        run: tar czf "$RUNNER_TEMP/sidecars.tgz" -C yolo/target/release yolo -C "$GITHUB_WORKSPACE/chain-viz/target/release" chain-viz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidecars
+          path: ${{ runner.temp }}/sidecars.tgz
+          retention-days: 3
+          if-no-files-found: error
 
-      - name: Functional tests (Yellowback scripts of this phase)
-        # Runs even when an earlier step failed (the job still fails overall). A step that aborts
-        # the job hides everything after it: while two inherited unit cases were failing, this
-        # step and the one below never executed at all, so no functional suite had ever run on CI.
-        # One red result must never mask twelve unknown ones.
-        if: ${{ !cancelled() }}
+  # The merge-gate functional lists, sharded round-robin over one build artifact. yellowback shards
+  # run YELLOWBACK_SCRIPTS with --nozmq; stock shards run STOCK_BASELINE (it names zmq_test, so no
+  # --nozmq) and the last one also the quoted STOCK_BASELINE_MINEBLOCK entry. A shard whose share
+  # includes yellowback_stratum / yellowback_chainviz fails when the sidecar binary is missing:
+  # those scripts would SKIP and count as passes (audit I-3).
+  functional:
+    name: functional ${{ matrix.suite }} ${{ matrix.shard }}/${{ matrix.of }}
+    needs: [build, sidecars]
+    if: ${{ !cancelled() && needs.build.result == 'success' && github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: yellowback, shard: 1, of: 4}
+          - {suite: yellowback, shard: 2, of: 4}
+          - {suite: yellowback, shard: 3, of: 4}
+          - {suite: yellowback, shard: 4, of: 4}
+          - {suite: stock, shard: 1, of: 2}
+          - {suite: stock, shard: 2, of: 2}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ycash-build
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.suite == 'yellowback' && needs.sidecars.result == 'success'
+        with:
+          name: sidecars
+          path: ${{ runner.temp }}
+      - name: Unpack
+        run: |
+          tar xzf "$RUNNER_TEMP/ycash-build.tgz"
+          if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
+            mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
+            echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
+            echo "CHAINVIZ_BIN=$RUNNER_TEMP/sidecars/chain-viz" >> "$GITHUB_ENV"
+          fi
+      - name: Functional tests (this shard)
         # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below
         # does not have to glob all of /tmp (root-only /tmp/snap-private-tmp on the GitHub runners
         # makes upload-artifact fail with EACCES). --nocleanup is forwarded to every script:
@@ -261,35 +355,105 @@ jobs:
         # (ycash6-stock build: stockparity, stock_node, the demonstration) are the nightly's.
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
+          SUITE: ${{ matrix.suite }}
+          SHARD: ${{ matrix.shard }}
+          OF: ${{ matrix.of }}
         run: |
           mkdir -p "$TMPDIR"
           test -z "${REF_YCASHD:-}"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
-
-      - name: Functional tests (inherited stock baseline, without -yellowback)
-        if: ${{ !cancelled() }}
-        env:
-          TMPDIR: ${{ runner.temp }}/yellowback-tests
-        run: |
-          mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nocleanup $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
-
+          case "$SUITE" in
+            yellowback) all=$YELLOWBACK_SCRIPTS; flags=(--nozmq) ;;
+            stock)      all=$STOCK_BASELINE;     flags=() ;;
+          esac
+          sel=(); i=0
+          for n in $all; do
+            [ $((i % OF)) -eq $((SHARD - 1)) ] && sel+=("$n")
+            i=$((i + 1))
+          done
+          if [ "$SUITE" = stock ] && [ "$SHARD" = "$OF" ]; then sel+=("$STOCK_BASELINE_MINEBLOCK"); fi
+          for n in "${sel[@]}"; do
+            case "$n" in
+              yellowback_stratum)  test -x "${YOLO_BIN:-}"     || { echo "yolo was not built (sidecars job); $n would SKIP"; exit 1; } ;;
+              yellowback_chainviz) test -x "${CHAINVIZ_BIN:-}" || { echo "chain-viz was not built (sidecars job); $n would SKIP"; exit 1; } ;;
+            esac
+          done
+          echo "shard $SHARD/$OF of $SUITE: ${sel[*]}"
+          qa/pull-tester/rpc-tests.py -j4 "${flags[@]}" --nocleanup "${sel[@]}"
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: yellowback-test-logs
+          name: yellowback-test-logs-${{ matrix.suite }}-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: ignore
 
+  # Formatting and workflow lint (push tier). rustfmt over the node's own Rust (src/rust) with the
+  # toolchain the build pins (rust-toolchain.toml); actionlint over every workflow (.github/actionlint.yaml). Clippy is not
+  # run on the node's Rust here: it is upstream's crate, a clippy pass costs a second full
+  # compile, and the crates the Yellowback overlay changes (zcash_protocol & co.) are clippy-gated
+  # in librustzcash6's own CI.
+  lint:
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Read the toolchain pin (rust-toolchain.toml)
+        id: toolchain
+        run: |
+          chan=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$chan"
+          echo "channel=$chan" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt
+      - name: rustfmt (src/rust)
+        # rustfmt directly on the two crate roots of Cargo.toml (it follows their `mod` items), not
+        # `cargo fmt`: cargo would resolve the git dependencies first, and formatting needs none.
+        run: |
+          ed=$(sed -n 's/^edition = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$ed"
+          rustfmt --check --edition "$ed" src/rust/src/lib.rs src/rust/bin/wallet_tool.rs
+      - name: actionlint
+        if: ${{ !cancelled() }}
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          # Every workflow, with the ignores of .github/actionlint.yaml (shellcheck is on the runner image).
+          "$RUNNER_TEMP/actionlint" -color
+
+  # One required check for branch protection: green only when every push-tier job is.
+  gate:
+    name: push tier
+    needs: [build, unit, sidecars, functional, audit, agent, python, lint]
+    if: ${{ always() && github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Every push-tier job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"')
+          test -z "$bad" || { echo "not green: $bad"; exit 1; }
+
   audit:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Fetch the baseline tag
@@ -466,11 +630,13 @@ jobs:
   # GitHub's `paths:` filter is workflow-wide, not per job, so the gate is the presence check below
   # plus a cargo cache keyed on Cargo.lock; the crate is small and the job is cheap.
   agent:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Crate present?
         id: crate
         run: |
@@ -552,18 +718,16 @@ jobs:
           ! ls depends/packages | grep -qi 'iroh\|yellowback-attest' || exit 1
 
   python:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # yellowback-quote reads TOML with the stdlib tomllib (Python >= 3.11, plan section 5);
-        # ubuntu-22.04's python3 is 3.10. The functional script yellowback_quote.py runs the agent
-        # too, so it joins the main job's list only once that job's interpreter is >= 3.11.
         with:
-          python-version: '3.11'
-      - run: python3 -m pip install --user pyflakes
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)
@@ -621,7 +785,7 @@ jobs:
   # never the node's depends/. Also proves fixtures/expected.json is still what the Python
   # aggregator (the reference) computes, so the Rust/Python cross-check cannot drift silently.
   nightly:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["nightly", "all"]'), inputs.tier)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -629,37 +793,12 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11 for the quote agent's tomllib (see the main job); the devnet role presets need it.
         with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        run: |
-          python3 -m pip install --user simplejson pyzmq
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, zmq, simplejson, pyblake2, tomllib'
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.zcash-params
-          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-      - run: ./zcutil/fetch-params.sh
-      - run: ./zcutil/build.sh -j$(nproc)
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+      - uses: ./.github/actions/yellowback-depends
+      - name: Build ycashd
+        run: ./zcutil/build.sh -j"$(nproc)"
       - name: Build the stock 6.20.0 binary (branch ycash6-stock) for the stock-parity scripts
         # Plan P-5: the reference node is ycash6-stock (= tag ycash6-baseline + baseline fix 3, the
         # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. Same
@@ -877,7 +1016,7 @@ jobs:
   # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
   # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
   lockorder:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["nightly", "all"]'), inputs.tier)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -885,39 +1024,10 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
-        # at import (exit 1) and the suite reports "agent 2 exited with 1".
         with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        run: |
-          # pyzmq: STOCK_BASELINE names zmq_test.
-          python3 -m pip install --user simplejson pyzmq
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, zmq, simplejson, pyblake2, tomllib'
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.zcash-params
-          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-      - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+      - uses: ./.github/actions/yellowback-depends
       - name: Build with --enable-debug (defines DEBUG_LOCKORDER, configure.ac:244)
         # 6.20.0 has no DEBUG_LOCKORDER_LOGONLY switch and sync.cpp stays at zero delta (mapping §19 S3).
         # Stock 6.20.0 aborts on the first block relay between two peers (cs_vNodes vs the
@@ -977,7 +1087,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   sanitizers:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["nightly", "all"]'), inputs.tier)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -988,37 +1098,12 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake clang
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # The same interpreter as every other job that runs functional scripts.
         with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        run: |
-          python3 -m pip install --user simplejson
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, simplejson, pyblake2'
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
         with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.zcash-params
-          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-      - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+          apt-extra: clang
+      - uses: ./.github/actions/yellowback-depends
       - name: Sanitizer-friendly ASLR
         # The runner kernels' vm.mmap_rnd_bits=32 breaks the ASan/TSan shadow mapping of older
         # compiler-rt ("unexpected memory mapping"); LLVM 18+ re-execs around it, 28 makes it moot.
@@ -1088,7 +1173,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   coverage:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["nightly", "all"]'), inputs.tier)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -1096,38 +1181,12 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
-            automake lcov
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
-        # at import (exit 1) and the suite reports "agent 2 exited with 1".
         with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        run: |
-          python3 -m pip install --user simplejson
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, simplejson, pyblake2, tomllib'
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
         with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.zcash-params
-          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-      - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+          apt-extra: lcov
+      - uses: ./.github/actions/yellowback-depends
       - name: Build with --enable-lcov (configure.ac:167), unit and functional suites against the instrumented ycashd
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -1217,7 +1276,7 @@ jobs:
     # first run (36377015194) died in the third target with nothing committed. The budget starts
     # small to get baseline runs through; raise -max_total_time only while 6 x budget + relinks
     # stays under the cap, or split the targets into a matrix.
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz == true)
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly'
     runs-on: ubuntu-22.04
     timeout-minutes: 330
     permissions:
@@ -1226,19 +1285,13 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install build prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake clang
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: |
-            depends/x86_64-pc-linux-gnu
-            depends/built
-            depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+          persist-credentials: true  # the corpus PR step pushes a branch with this token
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt-extra: clang
+          python: 'false'
+      - uses: ./.github/actions/yellowback-depends
       - name: Fuzz every target for thirty minutes and minimise the corpus
         run: |
           set -e
@@ -1308,10 +1361,10 @@ jobs:
           git checkout -b "$branch"
           git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d))"
           git push origin "$branch"
-          # The branch of record, which must stay the same as the push/pull_request lists at the
-          # top of this file: feature/yellowback in ycash6 (the copy from ycash-dd still named
-          # ycash-dd's feature/yellowback-price-attest, which does not exist in this repository).
-          gh pr create --repo "$GITHUB_REPOSITORY" --base feature/yellowback --head "$branch" \
+          # The PR goes to the branch this run fuzzed (the dispatcher starts one weekly run per
+          # node-line branch). Until 2026-10-06 it was always feature/yellowback, the branch of
+          # record, whatever branch had been fuzzed.
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" --head "$branch" \
             --title "fuzz: weekly corpus update $(date +%Y-%m-%d)" \
             --body "$(printf '%s\n' \
               '## 1. What and why' '' \
