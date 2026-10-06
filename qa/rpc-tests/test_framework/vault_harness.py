@@ -18,6 +18,10 @@ each block the node connects (``sync_model``) and disconnects on a reorg:
   ``sendrawtransaction`` fails with ``node_reason`` in its message;
 - ``block_reject(hexes, node_reason, model_reason)``: the same transactions in a block built in
   Python and submitted with ``submitblock``; the block is refused and the tip does not move.
+- ``assert_template(label)`` (6.20.0): after every tip change ``sync_model`` sees, and at every
+  eviction, ``getblocktemplate`` succeeds and holds only mempool transactions: 6.20.0's
+  CreateNewBlock validates the template as a whole, so the mempool must never hold a
+  transaction invalid at tip + 1 (plan §15.5 finding 21).
 
 The node reports a template rule as its C++ reason (``src/vault/state.cpp``), a script failure
 as the interpreter's message (``ScriptErrorString``), a BIP68 lock as ``non-BIP68-final``
@@ -153,6 +157,8 @@ class VaultTestBase(BitcoinTestFramework):
             r = self.model.connect_block(h, blk.vtx)
             assert r is None, 'the node connected block %d (%s) but the model rejects tx %d: %s' % (h, bh, r[0], r[1])
             self.model_hashes[h] = bh
+        # 6.20.0: after every tip change a block template must build (finding 21).
+        self.assert_template('the template at height %d' % (tip + 1))
 
     def mine(self, n=1):
         hashes = self.node.generate(n)
@@ -195,9 +201,26 @@ class VaultTestBase(BitcoinTestFramework):
         t = tx_from_hex(hex_)
         self.node.lockunspent(False, [{'txid': '%064x' % i.prevout.hash, 'vout': i.prevout.n} for i in t.vin])
 
+    def assert_template(self, label, excluded=()):
+        """``getblocktemplate`` succeeds on node 0 right after a tip change that invalidated
+        mempool transactions, and the template holds only mempool transactions, none of
+        ``excluded``.  6.20.0's CreateNewBlock validates the whole template (TestBlockValidity)
+        instead of re-checking each transaction, so a vault transaction left in the mempool
+        invalid at tip + 1 would make it throw (plan §15.5 finding 21)."""
+        try:
+            tpl = self.node.getblocktemplate()
+        except JSONRPCException as e:
+            raise AssertionError('%s: getblocktemplate failed (%s)' % (label, e.error['message']))
+        assert_equal(tpl['height'], self.tip() + 1)
+        txids = [t['hash'] for t in tpl['transactions']]
+        pool = self.mempool()
+        assert all(t in pool for t in txids), '%s: a template transaction is not in the mempool' % label
+        assert not set(excluded) & set(txids), '%s: the template holds an evicted transaction' % label
+
     def assert_evicted(self, txid, label):
         """The mempool no longer holds ``txid`` (a re-check on ConnectTip / DisconnectTip
-        removed it, plan §15.6)."""
+        removed it, plan §15.6), and a block template built now succeeds without it."""
+        self.assert_template(label, [txid])
         assert txid not in self.mempool(), label
 
     def assert_connected(self, label, settle=6):
