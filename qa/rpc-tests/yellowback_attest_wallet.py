@@ -12,7 +12,8 @@ wait=False completed by the wallet's own thread), the Sapling-funded mint (the c
 transparent input), the armed refusals (bundle-insufficient, bundle-malformed, mint10-diverged
 before any transaction), a carrier orphaned by a restart and swept by yed_sweepcarriers after its
 window, the normal claim (clause a) and the emergency claim (yed_claimnotice, EMERGENCY_PERSIST,
-clause b with the RED-5 residual to the owner, to a ys1... address with the residual transparent),
+clause b with the RED-5 residual intent to the owner; since the vault upgrade a claim pays
+transparent intents released with vault_release after CLAIM_DELAY, U-23),
 yed_reportequivocation, dormancy and yed_revive, yed_withdrawbond before and after the locktime
 (from a wallet that imported the bond key), and that no stock command ever spends a carrier or a
 bond.
@@ -34,13 +35,32 @@ from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
     TOKEN_VALUE, YellowbackTestFramework, wallet_network_fee, assert_same_statehash, pubkey_to_address, set_quote,
-    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW,
+    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW, ym,
 )
 from test_framework.yellowback_attest import (
     REGISTRY, arming_state, decode_bundle, note_attestor_status, offline_bundle, offline_bundle_hex, offline_selection,
     outpoint_selector, register_and_arm, register_wallet_attestor, sign_attestation, two_step_pending, verify_attestation,
     wallet_claim, wallet_mint, wallet_notice, wallet_report_equivocation, hot_secret_for, model_check,
 )
+
+
+# The bond lock of the wallet registrations: BOND_MIN_LOCK plus room for the two claims' CLAIM_DELAY
+# releases (U-23), so the bond is still locked when the script reaches its withdrawal refusals.
+LOCK_BLOCKS = BOND_MIN_LOCK + 40
+
+
+def _release(test, claimant, vault_txid, claimed, miner, residual=None):
+    """U-23: after CLAIM_DELAY the claimant releases its intent (vout 0) and, with ``residual`` =
+    (vout, owner address), the owner's residual intent to the owner (the claimant pays the fee)."""
+    user = test.nodes[0]
+    release_at = min(i['releaseHeight'] for i in user.yed_getvault(vault_txid)['intents'])
+    while user.getblockcount() < release_at - 1:
+        test.mine(miner)
+    claimant.vault_release('%s:0' % claimed['txid'])
+    if residual is not None:
+        claimant.vault_release('%s:%d' % (claimed['txid'], residual[0]), residual[1])
+    test.sync_all()
+    test.mine(miner)
 
 
 def feed_pool(test, node, ref_height, selector, prices):
@@ -81,6 +101,9 @@ def node_selection(test, node, r):
 
 class YellowbackAttestWalletTest(YellowbackTestFramework):
 
+    def release(self, claimant, vault_txid, claimed, miner, residual=None):
+        return _release(self, claimant, vault_txid, claimed, miner, residual)
+
     def __init__(self):
         super().__init__(num_nodes=8)
 
@@ -106,7 +129,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_rpc_error('lock-below-min', wa.yed_registerattestor, 10, BOND_MIN_LOCK - 1)
         reg = {}
         for node, name in ((wa, 'A'), (wb, 'B')):
-            res, seq = register_wallet_attestor(self, node, 10, BOND_MIN_LOCK, 0)
+            res, seq = register_wallet_attestor(self, node, 10, LOCK_BLOCKS, 0)
             reg[seq] = res
             assert_equal(res['seq'], None)
             assert_equal(res['bondZat'], 10 * COIN)
@@ -123,7 +146,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
             assert_equal(payload['register']['bondAddress'], res['bondAddress'])
             assert_equal(payload['register']['flags'], res['flags'])
             assert_equal(pubkey_to_address(hex_str_to_bytes(payload['register']['bondPubKey'])), res['bondKeyAddress'])
-            assert_equal(res['bondLocktime'], node.getblockcount() + BOND_MIN_LOCK)     # tip + 1 + lockBlocks at build time
+            assert_equal(res['bondLocktime'], node.getblockcount() + LOCK_BLOCKS)       # tip + 1 + lockBlocks at build time
             # the same record the raw path would produce: the bond key address is the P2PKH of the payload's bondPubKey
             assert_equal(node.validateaddress(res['bondKeyAddress'])['ismine'], True)
             assert_equal(node.validateaddress(res['bondAddress'])['ismine'], False)      # the bond is not IsMine (R6)
@@ -471,9 +494,12 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         afee = [o for o in rawc1['vout'] if o['valueZat'] == c1['attestFeeZat'] and o['scriptPubKey']['addresses'] == [c1['attestPayee']]]
         assert_equal(len(afee), 1)
         vault1 = user.yed_getvault(v1['txid'])
-        assert_equal(c1['collateralOut'], vault1['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - wallet_network_fee(rawc1) - c1['feeZat'] - c1['attestFeeZat'])
+        # U-23: the claimant intent carries the whole collateral (no residual); the fees came from the claimant's YEC
+        assert_equal(c1['collateralOut'], vault1['collateralZat'])
+        assert ym.yed_intent_fields(hex_str_to_bytes(rawc1['vout'][0]['scriptPubKey']['hex'])) is not None
         assert_equal(user.yed_validaterawtransaction(rawc1['hex'])['verdict'], 'ok')
         self.mine(POOLS[1])
+        self.release(claimant, v1['txid'], c1, POOLS[1])
         assert_equal(user.yed_getvault(v1['txid'])['status'], 'CLAIMED')
         info1 = user.yed_gettxinfo(c1['txid'])
         assert_equal((info1['verdict'], info1['path']), ('ok', 'claim'))
@@ -510,9 +536,9 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         owner_addr = user.yed_getvault(v2['txid'])['ownerAddress']
         owner_t = user.validateaddress(user.yed_validateaddress(owner_addr)['transparentAddress'])['address']
         yec_owner_before = user.getbalance()
-        zs = claimant.z_getnewaddress('sapling')
-        c2 = wallet_claim(self, claimant, v2['txid'], zs, prices=11)
-        assert_equal((c2['claimPath'], c2['to'], c2['burnedCents']), ('b', zs, 10000))
+        to2 = claimant.getnewaddress()                       # U-23: a claim pays an intent, whose recipient is transparent
+        c2 = wallet_claim(self, claimant, v2['txid'], to2, prices=11)
+        assert_equal((c2['claimPath'], c2['to'], c2['burnedCents']), ('b', to2, 10000))
         # F-7 (regtest plan section 8.1; v3 plan 6.2 D-R-1): the claim spends a vault this wallet never
         # held. The inherited CommitTransaction indexes mapWallet by every input's txid and used to leave a
         # blank entry under the vault's id; the first trust walk over the unconfirmed claim (getbalance,
@@ -529,17 +555,19 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(c2['residualZat'], expected_residual)
         assert_greater_than(c2['residualZat'], 100000)
         rawc2 = claimant.getrawtransaction(c2['txid'], 1)
-        assert_equal(len(rawc2['vShieldedOutput']), 2)   # 6.20.0: the Sapling builder pads a bundle to two outputs (one dummy)
-        residual_out = [o for o in rawc2['vout'] if o['scriptPubKey'].get('addresses') == [owner_t]]
-        assert_equal(len(residual_out), 1)
-        assert_equal(residual_out[0]['valueZat'], c2['residualZat'])
+        residual_out = [(n, o) for n, o in enumerate(rawc2['vout']) if o['valueZat'] == c2['residualZat']
+                        and ym.yed_intent_fields(hex_str_to_bytes(o['scriptPubKey']['hex'])) is not None]
+        assert_equal(len(residual_out), 1)                    # RED-5: the owner's residual intent
         assert_equal(rawc2['vin'][-1]['txid'], c2['carrierTxid'])
-        assert_equal(c2['collateralOut'], vault2['collateralZat'] + CARRIER_VALUE + TOKEN_VALUE - wallet_network_fee(rawc2) - c2['feeZat'] - c2['attestFeeZat'] - c2['residualZat'])
+        assert_equal(c2['collateralOut'], vault2['collateralZat'] - c2['residualZat'])
         self.mine(POOLS[0])
+        vault2 = user.yed_getvault(v2['txid'])
+        assert_equal((vault2['status'], sorted(i['role'] for i in vault2['intents'])), ('CLAIMING', ['claimant', 'residual']))
+        self.release(claimant, v2['txid'], c2, POOLS[0], residual=(residual_out[0][0], owner_t))
         vault2 = user.yed_getvault(v2['txid'])
         assert_equal(vault2['status'], 'CLAIMED')
         assert_greater_than(user.getbalance() + Decimal('0.00000001'), yec_owner_before + Decimal(c2['residualZat']) / COIN)
-        assert_equal(claimant.z_getbalance(zs), Decimal(c2['collateralOut']) / COIN)
+        assert_equal(claimant.getreceivedbyaddress(to2), Decimal(c2['collateralOut']) / COIN)
         assert_equal(claimant.yed_getbalance()['confirmedCents'], 0)
         assert_same_statehash(self.enforcing_nodes(), 'claims')
 

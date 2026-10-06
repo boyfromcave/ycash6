@@ -49,10 +49,8 @@ from test_framework.util import (
     MAX_NODES,
     PortSeed,
     assert_equal,
-    connect_nodes_bi,
     rpc_auth_pair,
     rpc_port,
-    start_nodes,
     sync_blocks,
     sync_mempools,
 )
@@ -64,6 +62,7 @@ from test_framework.yellowback_util import (
     pool_args,
     round_robin_schedule,
     set_quote,
+    start_nodes_with_attestor_set,
 )
 from test_framework.yellowback_attest import wallet_mint
 
@@ -126,14 +125,13 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         self.pool_addresses = [address_of(w) for w in POOL_WIFS[:NODES]]
 
     def setup_network(self, split=False):
-        args = [pool_args(self.pool_addresses[i], ['-zmqpubhashblock=%s' % zmq_url(i), '-zmqpubhashtx=%s' % zmq_url(i)])
-                for i in range(NODES)]
-        self.nodes = start_nodes(NODES, self.options.tmpdir, extra_args=args)
+        # U-22: Yellowback is live only with the YED attestor set, created on node 0 first
+        self.nodes = start_nodes_with_attestor_set(
+            NODES, self.options.tmpdir,
+            lambda i: pool_args(self.pool_addresses[i], ['-zmqpubhashblock=%s' % zmq_url(i), '-zmqpubhashtx=%s' % zmq_url(i)]),
+            [(0, 1), (1, 2), (0, 2)])
         for i in range(NODES):
             self.nodes[i].importprivkey(POOL_WIFS[i], 'yellowback-payout', False)
-        connect_nodes_bi(self.nodes, 0, 1)
-        connect_nodes_bi(self.nodes, 1, 2)
-        connect_nodes_bi(self.nodes, 0, 2)
         self.is_network_split = False
         self.sync_all()
 

@@ -9,7 +9,7 @@ The transparent wallet lifecycle on the six-node regtest (plan Phase 6): mint (c
 floor, a plain-YEC burn, an under-assigned raw transfer), the one-step owner redemption (the
 enforcement fee at an eligible payee, raw redemptions paying outside E(R) or short rejected by
 enforcing nodes, a non-default eligible key accepted, FEE-0), the expired-transaction display
-(N39), the sweep refusals while enforcement is on (L10), and the Python model over the whole
+(N39), the retired yed_sweep (upgrade plan §6), and the Python model over the whole
 chain at the end (P8).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (a second wallet).
@@ -272,14 +272,14 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(nodes[2].yed_validaterawtransaction(hex_out)['verdict'], 'vault-spend-bad-payee')
         assert_equal(nodes[2].yed_validaterawtransaction(hex_out)['wouldBeRejected'], True)
         result, bad = mine_block_raw(nodes[2], [hex_out])
-        assert_equal(result, 'yellowback-vault-spend')
+        assert_equal(result, 'bad-yellowback-vault-spend-bad-payee')
         assert_equal(nodes[2].yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
 # Rule: RED-3
         print('raw_redemption_short_fee_rejected')
         hex_short = self.raw_redeem(user, vault_a, 10700, default, fee - 1, r)
         assert_equal(nodes[3].yed_validaterawtransaction(hex_short)['verdict'], 'vault-spend-bad-fee')
         result, _ = mine_block_raw(nodes[3], [hex_short])
-        assert_equal(result, 'yellowback-vault-spend')
+        assert_equal(result, 'bad-yellowback-vault-spend-bad-fee')
         assert_rpc_error('yellowback-vault-spend', nodes[3].sendrawtransaction, hex_short)
 # Rule: RED-1 RED-2 RED-3 MP-1
         print('raw_redemption_non_default_eligible_payee_accepted')
@@ -294,8 +294,6 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(closed_a['burnedCents'], 10700)
         assert_equal(closed_a['unbacked'], False)
         assert_equal(closed_a['feePaidZat'], fee)
-        assert_equal(nodes[2].yed_getinfo()['rejectedBlocks'], 1)
-        assert_equal(nodes[3].yed_getinfo()['rejectedBlocks'], 1)
         assert_banscore_zero(nodes)
         assert_equal(user.yed_getbalance()['confirmedCents'], 20100)
         self.checkpoint('raw redemption of A')
@@ -332,12 +330,11 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         self.checkpoint('redeem B')
 
 # Rule: RED-1 MP-1
-        print('sweep_refused_while_enforcing')
-        assert_equal(user.yed_getinfo()['abandoned'], False)
-        assert_rpc_error('sweep-not-abandoned', user.yed_sweep, mint_c['txid'], SWEEP_ACK)
-        assert_rpc_error('sweep-acknowledgement-missing', user.yed_sweep, mint_c['txid'], 'yes')
+        print('sweep_retired: yed_sweep is gone with abandonment (upgrade plan §6)')
+        assert 'abandoned' not in user.yed_getinfo()
+        assert_rpc_error('Method not found', user.yed_sweep, mint_c['txid'], SWEEP_ACK)
         assert_equal(user.yed_getvault(mint_c['txid'])['status'], 'ACTIVE')
-        assert_equal([p['canSweep'] for p in user.yed_listpositions('ACTIVE')], [False])
+        assert all('canSweep' not in p for p in user.yed_listpositions('ACTIVE'))
 
 # Rule: MINT-2
         print('expired_transaction_display: an observer mint left unmined past nExpiryHeight')

@@ -9,9 +9,10 @@ example shape in doc/yellowback-rpc-contract.json (generated from the document b
 every documented key present with its JSON type, nothing undocumented added, `null` accepted
 only where the text marks the field *null when …*, absence accepted only for fields the text
 marks **optional**. The wallet context is exercised in full (Phase 6): `yed_mint`, `yed_send`,
-`yed_sendmany`, `yed_redeem` on an ACTIVE vault and on a VOID vault (the release, L14),
-`yed_claim`, and `yed_sweep` under a forced abandonment (L10), plus every wallet error identifier
-of the *Error identifiers* table by its documented provocation. The node context is checked the
+`yed_sendmany`, `yed_redeem`, `yed_claim` (CLAIMING, then the release through `vault_release`,
+U-23), an invalid mint refused by the mempool and in a block, plus every wallet error identifier
+of the *Error identifiers* table by its documented provocation. rpcversion 5 (the vault upgrade):
+the VOID release, `yed_sweep` and the abandonment predicate are gone. The node context is checked the
 same way wherever the scenario passes it; the node-context error provocations that need a
 storage fault or a rejected block belong to the Phase 3 script.
 
@@ -24,7 +25,7 @@ bundleHex (and bundle-insufficient from the pool naming the missing seq), yed_sw
 dormancy and yed_revive, the emergency claim (yed_claimnotice, then yed_claim by clause b, the
 pool path throughout), yed_reportequivocation and yed_withdrawbond after the locktime.
 
-Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; sacrificed to the storage fault at the end).
+Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; stopped by the storage fault at the end).
 """
 
 import json
@@ -35,19 +36,17 @@ from test_framework.util import assert_equal, assert_greater_than
 from test_framework.util import bytes_to_hex_str
 from test_framework.yellowback_attest import wallet_mint, wallet_claim, wallet_notice, wallet_report_equivocation
 from test_framework.yellowback_util import (
-    ABANDON_BLOCKS,
     ATTEST_ARM_MIN,
     ATTEST_MAX_AGE,
     BOND_MATURITY,
     BOND_MIN_LOCK,
+    CLAIM_DELAY,
     COIN,
     DORMANCY_BLOCKS,
     DORMANCY_CHECK,
     EMERGENCY_PERSIST,
-    ENFORCEMENT_FLOOR,
     POOLS,
     REF_LAG,
-    STOCK,
     YellowbackTestFramework,
     build_mint_tx,
     mine_block_raw,
@@ -67,15 +66,14 @@ from test_framework.yellowback_attest import (
 )
 
 CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'doc', 'yellowback-rpc-contract.json')
-SWEEP_ACK = 'I understand this leaves YED unbacked'
 
 # Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
-    'yed_getvault': {'sweepBefore'},
-    'yed_listpositions': {'sweepBefore'},
-    'yed_listvaults': {'sweepBefore'},
+    'yed_getvault': {'intents'},          # while CLAIMING (U-23)
+    'yed_listpositions': {'intents'},
+    'yed_listvaults': {'intents'},
     'yed_getfeepayee': {'preferred'},
-    'yed_gettag': {'version', 'signal', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
+    'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'keyid', 'ismine', 'transparentAddress'},
     'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerPubKey', 'feeVout', 'attestFeeVout', 'assignments',
                           'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle'},
@@ -183,12 +181,12 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 4)
+        assert_equal(c.doc['rpcversion'], 5)
 
-        print('before activation: mintpol-not-active')
+        print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
-        assert_rpc_error('mintpol-not-active', user.yed_mint, 10000, 48)
-        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, 1, 10 * COIN)
+        assert_rpc_error('index-below-start', user.yed_mint, 10000, 48)
+        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount(), 10 * COIN)   # no tag yet
 
         print('activate at $50; fund the claimant')
         self.activate(POOLS, quote_usd=50)
@@ -232,7 +230,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(c.check('yed_listpositions', user.yed_listpositions()), [])
         assert_equal(c.check('yed_listtransactions', user.yed_listtransactions()), [])
 
-        print('yed_mint (twice: one to keep, one to release as VOID) and a raw VOID mint')
+        print('yed_mint (three times) and a raw invalid mint (U-23: no VOID vault)')
         assert_rpc_error('mint-bad-lock', user.yed_mint, 10000, 10)
         assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
         # audit F-1: maxCollateralZat bounds vout[0]; refused at preflight, so no carrier is ever built
@@ -251,18 +249,17 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(raw['hex']))
         self.sync_all()
         self.mine(POOLS[1])
-        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool template
-        # will ever carry the short-collateral mint: its block is assembled in Python (6.0 item 4).
+        assert_rpc_error('bad-yellowback-bad-mint-collateral', user.sendrawtransaction, void_hex)
         result, _ = mine_block_raw(nodes[POOLS[1]], [void_hex])
-        assert result is None, result
+        assert_equal(result, 'bad-yellowback-bad-mint-collateral')
         self.sync_all(blocks_only=True)
         vault_a = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
         assert_equal(vault_a['status'], 'ACTIVE')
-        assert 'sweepBefore' not in vault_a
-        void_vault = c.check('yed_getvault', user.yed_getvault(void_txid))
-        assert_equal((void_vault['status'], void_vault['sweepBefore']), ('VOID', void_vault['claimHeight']))
+        assert 'intents' not in vault_a
+        assert_equal(vault_a['scriptPubKey'], raw['vout'][0]['scriptPubKey']['hex'])
+        assert_rpc_error('vault-not-found', user.yed_getvault, void_txid)
         c.check('yed_listvaults', user.yed_listvaults())
-        c.check('yed_listvaults', user.yed_listvaults('VOID', 10, 0))
+        assert_equal(c.check('yed_listvaults', user.yed_listvaults('VOID', 10, 0)), [])
         c.check('yed_gettxinfo', user.yed_gettxinfo(mint_a['txid']))
         assert_rpc_error('vault-not-found', user.yed_getvault, '22' * 32)
         rows = c.check('yed_listunspent', user.yed_listunspent())
@@ -286,8 +283,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(len(rows), 3)
         c.check('yed_lockcoins', user.yed_lockcoins())
         positions = c.check('yed_listpositions', user.yed_listpositions())
-        assert_equal(len(positions), 4)
-        assert_equal(len(c.check('yed_listpositions', user.yed_listpositions('VOID'))), 1)
+        assert_equal(len(positions), 3)
+        assert_equal(len(c.check('yed_listpositions', user.yed_listpositions('VOID'))), 0)
 
         print('yed_send, yed_sendmany, their refusals')
         assert_rpc_error('not-a-yellowback-address', user.yed_send, user.getnewaddress(), 100)
@@ -346,23 +343,18 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal({x['txid'] for x in rows} >= {mint_a['txid'], sent['txid'], many['txid']}, True)
         c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
 
-        print('yed_redeem refusals, then the VOID release (L14) and the ACTIVE redemption')
+        print('yed_redeem refusals, then the ACTIVE redemption (selector 2); yed_sweep is gone')
         assert_rpc_error('vault-locked', user.yed_redeem, mint_a['txid'])
-        assert_rpc_error('vault-locked', user.yed_redeem, void_txid)
         assert_rpc_error('vault-not-owned', claimant.yed_redeem, mint_a['txid'])
         assert_rpc_error('vault-not-found', user.yed_redeem, '33' * 32)
         assert_rpc_error('claim-not-yet', claimant.yed_claim, mint_a['txid'])
-        assert_rpc_error('sweep-not-abandoned', user.yed_sweep, mint_a['txid'], SWEEP_ACK)
-        assert_rpc_error('sweep-acknowledgement-missing', user.yed_sweep, mint_a['txid'], 'sure')
-        lock = user.yed_getvault(void_txid)['lockHeight']
+        assert_rpc_error('Method not found', user.yed_sweep, mint_a['txid'], 'I understand this leaves YED unbacked')
+        lock = user.yed_getvault(mint_b['txid'])['lockHeight']
         self.mine_round_robin(POOLS, lock - user.getblockcount())
-        released = c.check('yed_redeem', user.yed_redeem(void_txid))
-        assert_equal((released['burnedCents'], released['feeZat'], released['payee']), (0, 0, None))
         redeemed = c.check('yed_redeem', user.yed_redeem(mint_b['txid']))
         assert_equal(redeemed['burnedCents'], 10000)
         self.sync_all()
         self.mine(POOLS[1])
-        assert_equal(user.yed_getvault(void_txid)['status'], 'CLOSED')
         assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'CLOSED')
         assert_rpc_error('vault-not-active', user.yed_redeem, mint_b['txid'])
         assert_rpc_error('vault-not-active', claimant.yed_claim, mint_b['txid'])
@@ -383,63 +375,42 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(user.yed_listclaimable(100, len(claimable)), [])
         # audit F-1: minOutZat floors what reaches the claimant; refused at preflight, before any carrier
         collateral_a = user.yed_getvault(mint_a['txid'])['collateralZat']
-        assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a)
+        assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a + 1)   # U-23: the intent carries the whole collateral here
         assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
-        # hardening H-9.3: maxBurnCents caps the YED the claim burns; refused at preflight (the debt is 10000)
-        assert_rpc_error('claim-burn-above-max', claimant.yed_claim, mint_a['txid'], '', '', False, 0, 9999)
-        assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
-        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2,
-                                                    max_burn_cents=10000))   # 100 + 10000 in, 1 YED change
+        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2))   # 100 + 10000 in, 1 YED change
         assert_greater_than(claimed['collateralOut'], collateral_a // 2)
         assert_equal(claimed['burnedCents'], 10000)
         self.sync_all()
         self.mine(POOLS[0])
-        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'CLAIMED')
+        claiming = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
+        assert_equal((claiming['status'], [x['role'] for x in claiming['intents']]), ('CLAIMING', ['claimant']))
+        assert_equal([v['status'] for v in c.check('yed_listvaults', user.yed_listvaults('CLAIMING'))], ['CLAIMING'])
         c.check('yed_listtransactions', claimant.yed_listtransactions())
-
-        print('yed_sweep under a forced abandonment (L10): mint first, then the pools stop signalling')
+        self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())
+        released = claimant.vault_release('%s:0' % claimed['txid'])
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'CLAIMED')
+        assert_equal(c.check('yed_gettxinfo', user.yed_gettxinfo(released))['type'], 'claim_release')
+        assert_equal(CLAIM_DELAY, user.yed_getactivation()['claimDelay'])
         for i in POOLS:
             set_quote(nodes[i], 50)
         self.mine_round_robin(POOLS, 64 + REF_LAG)
         assert_equal(user.yed_getstats()['mintingAllowed'], True)
-        mint_c = c.check('yed_mint', wallet_mint(self, user, 10000, 48))
-        self.sync_all()
-        self.mine(POOLS[1])
-        for i in POOLS:
-            self.restart(i, ['-yellowbacksignal=0'])
-            set_quote(nodes[i], 50)
-        self.mine_round_robin(POOLS, 64 - ENFORCEMENT_FLOOR + 1 + ABANDON_BLOCKS)
-        info = c.check('yed_getinfo', user.yed_getinfo())
-        assert_equal(info['abandoned'], True)
-        vault_c = c.check('yed_getvault', user.yed_getvault(mint_c['txid']))
-        assert_equal(vault_c['sweepBefore'], vault_c['claimHeight'])
-        pos = [p for p in c.check('yed_listpositions', user.yed_listpositions()) if p['txid'] == mint_c['txid']][0]
-        assert_equal((pos['canSweep'], pos['sweepBefore']), (True, vault_c['claimHeight']))
-        assert_rpc_error('sweep-acknowledgement-missing', user.yed_sweep, mint_c['txid'], 'I understand')
-        assert_rpc_error('vault-not-owned', claimant.yed_sweep, mint_c['txid'], SWEEP_ACK)
-        swept = c.check('yed_sweep', user.yed_sweep(mint_c['txid'], SWEEP_ACK))
-        assert_equal(swept['unbackedCents'], 10000)
-        c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(swept['hex']))
-        self.sync_all()
-        self.mine(STOCK)
-        assert_equal(user.yed_getvault(mint_c['txid'])['status'], 'CLOSED')
-        rows = c.check('yed_listtransactions', user.yed_listtransactions())
-        assert_equal([x['type'] for x in rows if x['txid'] == swept['txid']], ['sweep'])
+        c.check('yed_getinfo', user.yed_getinfo())
         c.check('yed_getactivation', user.yed_getactivation())
         c.check('yed_getstats', user.yed_getstats())
 
         seqs = self.v3_node_context(c, mint_a['txid'])
         self.v3_wallet_context(c, seqs)
 
-        print('yellowback-unhealthy on the observer after a storage fault; the allow-list still answers')
-        self.restart(5, ['-yellowbacktestfault=storage:commit'])
-        self.mine(POOLS[0])
-        assert_equal(nodes[5].yed_getinfo()['healthy'], False)
-        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_getbalance)
-        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_listpositions)
-        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_getstats)
-        c.check('yed_getinfo', nodes[5].yed_getinfo())
-        c.check('yed_gettag', nodes[5].yed_gettag(str(nodes[5].getblockcount())))
+        print('a storage fault stops the observer (U-21: an index that cannot evaluate a block stops the node)')
+        self.restart_quiet(5, ['-yellowbacktestfault=storage:commit'])
+        nodes[POOLS[0]].generate(1)
+        self.wait_stopped(5)
+        self.restart(5, ['-reindex-yellowback'])
+        c.check('yed_getinfo', self.nodes[5].yed_getinfo())
+        c.check('yed_gettag', self.nodes[5].yed_gettag(str(self.nodes[5].getblockcount())))
 
         documented = sorted(k for k in c.doc if k.startswith('yed_'))
         unchecked = sorted(set(documented) - c.checked - {'yed_estimatesend', 'yed_unlockcoin', 'yed_getblockverdict'})
@@ -560,14 +531,14 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         live = [seqs[0], seqs[2]]                    # seqs[1] was ejected by the node context
-        print('v3 wallet: the pools signal again and minting reopens; the user is funded for three vaults and a bond')
+        print('v3 wallet: minting is open; the user is funded for three vaults and a bond')
         for i in POOLS:
             self.restart(i)
             set_quote(nodes[i], 50)
         nodes[POOLS[0]].sendtoaddress(user.getnewaddress(), 60)
         self.sync_all()
         self.mine_round_robin(POOLS, 64 + REF_LAG)
-        assert_equal((user.yed_getinfo()['abandoned'], user.yed_getstats()['mintingAllowed']), (False, True))
+        assert_equal(user.yed_getstats()['mintingAllowed'], True)
 
 # Rule: REG-A1
         print('v3 wallet: yed_registerattestor from the user wallet, matured and seated')
@@ -665,6 +636,12 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal((claimed['claimPath'], claimed['burnedCents'], claimed['pEmerg']), ('b', 10000, usd_to_micro('10.20')))
         assert_equal(claimed['residualZat'], claimable[victim + ':0']['residualZat'])
         assert_greater_than(claimed['residualZat'], 0)
+        self.mine(POOLS[1])
+        claiming = user.yed_getvault(victim)
+        assert_equal((claiming['status'], sorted(x['role'] for x in claiming['intents'])), ('CLAIMING', ['claimant', 'residual']))
+        self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())
+        claimant.vault_release('%s:0' % claimed['txid'])
+        self.sync_all()
         self.mine(POOLS[1])
         assert_equal(user.yed_getvault(victim)['status'], 'CLAIMED')
 

@@ -184,7 +184,7 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         nodes = self.nodes
         for i in POOLS:
             wait_yed_healthy(nodes[i])
-            assert_equal(self.miner(i)['quoteKind'], 'signal')      # no quote yet, -yellowbacksignal=1
+            assert_equal(self.miner(i)['quoteKind'], 'none')        # no quote yet (the signal-only tag left with ACT-1)
             self.write_conf(i)
             self.write_mock(i, '2.00')
 
@@ -202,7 +202,6 @@ class YellowbackQuoteTest(YellowbackTestFramework):
             assert_equal(tag['kind'], 'quote')
             assert_equal(tag['priceMicroUsd'], 2_000_000)
             assert_equal(tag['sourceMask'], 0)                       # mock mode publishes mask 0
-            assert_equal(tag['signal'], True)
             assert_equal(tag['payoutAddress'], self.pool_addresses[POOLS.index(i)])
         # the stock node and the user node read the same tag (TAG-1 is a byte-level scan)
         tip = nodes[0].getblockcount()
@@ -220,7 +219,7 @@ class YellowbackQuoteTest(YellowbackTestFramework):
             h = nodes[i].getbestblockhash()
             assert_equal(nodes[0].yed_gettag(h), nodes[i].yed_gettag(h))
 
-        print('a stopped agent: its node is signal-only after -yellowbackquotemaxage')
+        print('a stopped agent: its node emits no tag after -yellowbackquotemaxage')
 # Rule: MINER-1
         self.advance_clock(1)                                        # the clock is now the mock clock on every node
         assert_equal(self.stop_agent(POOLS[2]), 0)                   # SIGTERM: a clean exit
@@ -228,13 +227,10 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         assert_equal(m['quoteKind'], 'quote')                        # the last quote is still fresh
         self.advance_clock(QUOTE_MAX_AGE + 1)
         m = self.miner(POOLS[2])
-        assert_equal(m['quoteKind'], 'signal')
+        assert_equal(m['quoteKind'], 'none')
         assert m['quoteAgeSeconds'] > QUOTE_MAX_AGE
         tag = self.mine_and_tag(POOLS[2])
-        assert_equal(tag['found'], True)
-        assert_equal(tag['kind'], 'signal')
-        assert_equal(tag['priceMicroUsd'], 0)
-        assert_equal(tag['signal'], True)
+        assert_equal((tag['found'], tag['kind']), (False, 'none'))
         # the two live agents re-stamp their quotes at the mock clock within a poll
         for i in POOLS[:2]:
             self.wait_kind(i, 'quote')
@@ -247,12 +243,12 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         assert_equal(self.miner(i)['quoteKind'], 'quote')            # the clock is frozen: the quote stays fresh
         p = self.start_agent(i, mock=False)                          # the real feed: one dead source
         started = time.time()
-        m = self.wait_kind(i, 'signal', timeout=60)                  # yed_setquote 0 after two failed polls
+        m = self.wait_kind(i, 'none', timeout=60)                    # yed_setquote 0 after two failed polls
         assert time.time() - started < 60
         assert_equal(m['quoteAgeSeconds'], None)
         assert p.poll() is None, 'the daemon exited on a source failure'
         tag = self.mine_and_tag(i)
-        assert_equal((tag['kind'], tag['priceMicroUsd']), ('signal', 0))
+        assert_equal((tag['found'], tag['kind']), (False, 'none'))
         assert_equal(self.stop_agent(i), 0)
         with open(os.path.join(self.options.tmpdir, 'quote-%d.log' % i)) as f:
             log = f.read()
@@ -291,7 +287,6 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         code, err = self.run_once(i)
         assert_equal(code, 0)
         assert_equal(self.wait_tag_price(i, 3_000_000)['kind'], 'quote')
-        assert_equal(self.nodes[0].yed_getinfo()['rejectedBlocks'], 0)
 
 
 if __name__ == '__main__':

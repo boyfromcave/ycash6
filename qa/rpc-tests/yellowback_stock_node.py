@@ -5,23 +5,20 @@
 
 """Phase 5 (plan section 6, Phase 5; section 8.3): the stock node is unaffected.
 
-Node 1 of the standard topology runs without ``-yellowback`` -- and with ``--stock-binary`` /
-``$REF_YCASHD`` it is a real ``ycash-legacy`` v4.5.0 binary (P9).  This script asserts that such a
+Node 1 of the standard topology runs without the YED attestor set, so Yellowback is not live on it
+(U-22; it does run the vault upgrade, a consensus parameter every node shares) -- and with
+``--stock-binary`` / ``$REF_YCASHD`` it is a real ``ycash-legacy`` v4.5.0 binary (P9; such a binary
+cannot follow a chain past the vault upgrade, so that variant ends at the upgrade height).  This script asserts that such a
 node has no ``yed_*`` command, that its ``getblocktemplate`` is v4.5.0's key for key with no
 ``yellowback`` object and the v4.5.0 ``mutable`` list, and that it mines and relays normally
 through the whole Yellowback lifecycle: before activation, across activation, through a mint, a
-correct redemption of its own making, a rule-breaking block the enforcing nodes reject, and the
-reorg that follows.  Nothing the module does reaches it.
+correct redemption of its own making, and a rule-breaking block every Yellowback node rejects as
+invalid (DoS 100 since the vault upgrade, U-21: the peers disconnect it), after which it is brought
+back (invalidateblock, a restart) and follows the valid chain.
 """
 
-import time
-
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import (
-    assert_equal,
-    assert_greater_than,
-    sync_blocks,
-)
+from test_framework.util import assert_equal, sync_blocks
 from test_framework.yellowback_util import (
     ENFORCING,
     OBSERVER,
@@ -34,6 +31,7 @@ from test_framework.yellowback_util import (
     assert_best_hash,
     build_mint_tx,
     build_vault_spend_raw,
+    debug_log_contains,
     wait_for_rejection,
     wait_yed_healthy,
     ym,
@@ -124,8 +122,7 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
 
     def stock_mines_the_whole_lifecycle(self):
         """A mint, a correct redemption and a rule-breaking block, all mined by node 1: the first
-        two are accepted by every node, the third is rejected by the enforcing nodes at DoS 0 and
-        node 1 stays a peer of each with ``banscore == 0``."""
+        two are accepted by every node, the third is rejected by every Yellowback node (DoS 100)."""
         user, stock = self.nodes[USER], self.nodes[STOCK]
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref, required = int(est['refHeight']), int(est['requiredZat'])
@@ -175,23 +172,15 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         bad_txid = stock.sendrawtransaction(bad)
         blockhash = stock.generate(1)[0]
         assert bad_txid in stock.getblock(blockhash)['tx']
-        wait_for_rejection([self.nodes[i] for i in ENFORCING], blockhash)
-        assert_banscore_zero([self.nodes[i] for i in ENFORCING])
-        for i in ENFORCING:
-            assert_greater_than(len(self.nodes[i].getpeerinfo()), 0)
-        sync_blocks([stock, self.nodes[OBSERVER]])
-        assert_equal(self.nodes[OBSERVER].getbestblockhash(), blockhash)
-        print('  the stock node mined a rule-breaking block; it was rejected at DoS 0')
+        wait_for_rejection([self.nodes[i] for i in ENFORCING + [OBSERVER]], blockhash)
+        assert debug_log_contains(self.options.tmpdir, POOLS[0], 'BAN THRESHOLD EXCEEDED')     # DoS 100 from node 1
+        print('  the stock node mined a rule-breaking block; every Yellowback node rejected it (DoS 100)')
 
-        k = 0
-        while stock.getbestblockhash() != self.nodes[POOLS[0]].getbestblockhash():
-            assert k < 40, 'the pools did not out-mine the stock branch'
-            self.nodes[POOLS[k % len(POOLS)]].generate(1)
-            time.sleep(0.4)
-            k += 1
-        if stock.getrawmempool():
-            self.restart(STOCK)
-            time.sleep(1)
+        for k in range(2):                             # the overlay moves on without node 1 (it is disconnected)
+            self.nodes[POOLS[k]].generate(1)
+            sync_blocks([self.nodes[i] for i in ENFORCING])
+        stock.invalidateblock(blockhash)
+        self.restart(STOCK)                            # its mempool goes; its edges come back
         self.sync_all(blocks_only=True)
         assert_best_hash(self.nodes, 'after the reorg')
         assert_banscore_zero(self.nodes)
