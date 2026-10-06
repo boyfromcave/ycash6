@@ -5,6 +5,11 @@ This is a **release candidate** for testing. It is ycashd 6.20.0 (the Ycash reba
 Zcash 6.x line) with the Ycash Yellowback (YED) overlay: a decentralized dollar on Ycash, where
 YED is minted against locked YEC and enforced by miners.
 
+> **Withdrawn heights (2026-10-05).** The mainnet heights below were withdrawn before rc1 was tagged
+> (hardening plan F-5, H-8): `src/yellowback/params.cpp` now leaves mainnet unset, so `-yellowback`
+> refuses mainnet as it refuses testnet, and the release workflow refuses to tag until a release
+> that passes the launch gates sets them again. These notes are kept as drafted on 2026-10-02.
+
 Yellowback on mainnet: start height 3,075,000
 ---------------------------------------------
 

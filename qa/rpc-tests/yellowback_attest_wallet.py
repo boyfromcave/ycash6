@@ -26,6 +26,7 @@ REGISTRY) by registering one attestor per block and counting; the wallet's own b
 node.
 """
 
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -585,9 +586,71 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(user.yed_getvault(rally['txid'])['status'], 'ACTIVE')
         assert_same_statehash(self.enforcing_nodes(), 'rally')
 
+# Rule: F-1
+        self.f1_back_to_back(user, claimant)
+
         print('the Python model over the whole chain')
         model_check(nodes[2], full=True)
         self.checkpoint('end')
+
+    def f1_back_to_back(self, user, claimant, rounds=30):
+        """Hardening F-1 (F-DEV-1): 30 mints, each followed by a send, with a block between every
+        step and no pause after it. Between a block and the notifier stamping it, the transaction it
+        mined is at wallet depth -1 and its inputs look unspent; a selector that re-chose them made
+        the next commit fail ("transaction commit failed") and left a depth -1 entry behind. The
+        mints alternate the two-step modes: wait=True (the RPC completes the MINT) and wait=False
+        (the wallet's completion thread does, right after the carrier's block)."""
+        print('F-1: %d back-to-back mints and sends, a block between each, both two-step modes' % rounds)
+        pool = POOLS[0]
+        # Small coins (the selector is smallest-first, so a stale spent input is the one it would pick),
+        # and enough of them that the last round still has confirmed YEC besides the change the
+        # previous block just created (at depth -1, so not yet spendable): 30 mints at $90 lock ~250 YEC.
+        for k in range(8):        # from every pool: one alone does not hold 600 YEC
+            self.nodes[POOLS[k % len(POOLS)]].sendtoaddress(user.getnewaddress(), 75)
+        self.sync_all()
+        self.mine(pool)
+        print('  user balance before the rounds: %s YEC' % user.getbalance())
+        to = claimant.yed_getnewaddress()
+        failures, txids = [], []
+
+        def mine_tight(miner):
+            # The block reaches the user's chain, then the call follows at once: the wallet notifier
+            # runs on whole seconds (validationinterface.cpp ThreadNotifyWallets), so the transaction
+            # just mined is still at wallet depth -1. sync_all's polling would hide the window.
+            best = self.nodes[miner].generate(1)[0]
+            deadline = time.time() + 60
+            while user.getbestblockhash() != best:
+                assert time.time() < deadline, 'block %s never reached the user' % best
+                time.sleep(0.02)
+        for i in range(rounds):
+            miner = pool                     # one miner: tight mining never races another pool into a fork
+            try:
+                if i % 2 == 0:
+                    m = wallet_mint(self, user, 10000, 48, prices=90, miner=miner)
+                    txids += [m['carrierTxid'], m['txid']]
+                else:
+                    ref = user.yed_getinfo()['height'] - REF_LAG
+                    res, txid = two_step_pending(self, user, 'yed_mint', 10000, 48, '', offline_bundle_hex(self, user, ref, b'', 90), miner=miner)
+                    txids += [res['carrierTxid'], txid]
+                mine_tight(miner)
+                txids.append(user.yed_send(to, 100)['txid'])      # selects YEC right after the block
+                self.sync_all()
+                mine_tight(miner)                                  # and the next carrier right after this one
+            except JSONRPCException as e:
+                failures.append((i, e.error['message']))
+                self.sync_all()
+                self.mine(pool)
+        assert_equal(failures, [])
+        self.sync_all()
+        deadline = time.time() + 30                                           # the notifier stamps the last block
+        while True:
+            unconfirmed = [t for t in txids if user.gettransaction(t)['confirmations'] < 1]
+            if not unconfirmed or time.time() > deadline:
+                break
+            time.sleep(0.5)
+        assert_equal(unconfirmed, [])                                         # no depth -1 entry left behind
+        assert_equal(claimant.yed_getbalance()['confirmedCents'] >= 100 * rounds, True)
+        assert_same_statehash(self.enforcing_nodes(), 'F-1 back to back')
 
 
 if __name__ == '__main__':

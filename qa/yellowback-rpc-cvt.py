@@ -27,7 +27,7 @@ END = "    // end yellowback\n"
 
 # v4.5.0 src/rpc/client.cpp: positions converted as JSON (numbers, objects, booleans).
 JSON_POSITIONS = {
-    "yed_buildbundle": {0}, "yed_claim": {3, 4}, "yed_claimnotice": {2},
+    "yed_buildbundle": {0}, "yed_claim": {3, 4, 5}, "yed_claimnotice": {2},
     "yed_estimatecollateral": {0, 1, 2}, "yed_estimatefee": {0}, "yed_estimatesend": {0},
     "yed_getfeepayee": {0, 1}, "yed_gethistory": {0, 1}, "yed_getprice": {0}, "yed_getselection": {0},
     "yed_getstatehash": {0}, "yed_listattestors": {0}, "yed_listclaimable": {0, 1}, "yed_listminers": {0, 1}, "yed_listtokens": {0, 1, 2, 3},

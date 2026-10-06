@@ -162,6 +162,23 @@ public:
     bool ReleaseLock(const COutPoint& out);
     /** H5: re-apply every lock this layer holds, after `lockunspent true` unlocked everything. */
     void ReapplyLocks();
+    /**
+     * Hardening F-1: lock every input of `tx` that is a plain YEC output of this wallet (the
+     * selected inputs, a carrier's funding inputs, a carrier change the main transaction spends)
+     * until `tx` is at wallet depth >= 1. Between the block that mines `tx` and the notifier
+     * stamping it, `tx` is at depth -1 and IsSpent no longer counts it, so without the lock the
+     * next SelectYec would choose those inputs again. Called by Commit on success (cs_wallet).
+     */
+    void LockSpentYec(const CTransaction& tx);
+    /**
+     * F-1: release the locks of LockSpentYec whose spender has settled: at wallet depth >= 1, gone
+     * from the wallet, or at depth -1 while the chainstate still holds the input unspent (the
+     * spender failed or expired; a mined-but-unstamped spender has already spent it there).
+     * cs_main and cs_wallet held by the caller (SelectYec).
+     */
+    void SettleYecLocks();
+    /** F-1: how many YEC inputs LockSpentYec holds (tests). */
+    size_t PendingYecLocks() const;
 
     CWallet* Wallet() const { return wallet; }
     YellowbackIndex* Index() const { return index; }
@@ -198,6 +215,8 @@ public:
     ~YellowbackWallet();
 
 private:
+    /** F-1: erase a transaction CommitTransaction recorded but the mempool refused (never mined, never relayed). */
+    void RemoveOrphan(const uint256& txid);
     void CompletionLoop();
     void StartupSweep();
     void LoadCarriers();
@@ -207,6 +226,7 @@ private:
     CWallet* wallet;
     YellowbackIndex* index;
     std::set<COutPoint> ourLocks; //!< cs_wallet
+    std::map<COutPoint, uint256> yecLocks; //!< cs_wallet: F-1, a spent YEC input -> its committed spender
     std::vector<CarrierRecord> carriers;                                           //!< cs_wallet
     std::map<std::tuple<uint16_t, uint32_t, uint256>, SignedAttestation> signedGuard;   //!< cs_wallet
     std::map<COutPoint, std::function<bool()>> pending;                            //!< pendingMutex

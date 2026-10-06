@@ -99,7 +99,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         print('initial synchronous index state')
         for node in self.enforcing_nodes():
             info = wait_yed_healthy(node)
-            assert_equal(info['rpcversion'], 3)
+            assert_equal(info['rpcversion'], 4)
             assert_equal(info['network'], 'regtest')
             assert_equal(info['height'], node.getblockcount())
             assert_equal(info['startHeight'], START_HEIGHT)

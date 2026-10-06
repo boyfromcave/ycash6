@@ -79,6 +79,23 @@ run you can live with); between them, keep 500 unless the quiet run is unaccepta
 shape is `ts,price_usd` (or `ts_iso,ts,price_usd`, what `--save-csv` writes); any hourly source
 will do, CoinGecko is just the one with a free 90-day hourly endpoint.
 
+## 3. `spreads.py failrate` — how often the agents fail closed (hardening F-2)
+
+```
+$V contrib/yellowback/attest/calibrate/spreads.py failrate spreads.csv                    # the agents' defaults
+$V contrib/yellowback/attest/calibrate/spreads.py failrate spreads.csv --min-sources 3    # the old sample value
+$V contrib/yellowback/attest/calibrate/spreads.py failrate spreads.csv --max-rate 0.5     # exit 1 above 0.5 %
+```
+
+Each row is fed to the agents' own aggregate (`yellowback_price.PriceFeed.aggregate`: median,
+outlier filter, `min_sources`, `min_venues`); a missing column is a dropped source. A row is one
+aggregate, so an hourly log (the reconstructed ones of yb-calibration, `data/local/`) measures
+hours, not blocks. On 2026-10-05: `spreads-reconstructed.csv` (no `max_age`) 0.47 % at
+`min_sources = 2` against 10.97 % at 3; `spreads-reconstructed-maxage1h.csv` 1.43 % against
+51.05 %; the live log (550 rows) 0.18 % against 2.36 %. D-RD-ATT-2's 0.2–0.3 % is per block, from
+ybcal's block-resolution replay. `YB_SPREADS_LOG=<csv>` runs the same replay as a test
+(`test_calibrate.SpreadsFailRate`, at most `YB_SPREADS_MAX_RATE` %, default 0.5).
+
 ## Tests
 
 ```

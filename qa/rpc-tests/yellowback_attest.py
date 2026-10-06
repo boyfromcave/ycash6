@@ -302,7 +302,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 3)
+        assert_equal(user.yed_getinfo()['rpcversion'], 4)
 
         print('activation at $%s, then the attestor wallets are funded' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)
