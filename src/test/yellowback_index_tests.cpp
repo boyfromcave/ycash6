@@ -17,6 +17,7 @@
 // fake index is never "contained" (the re-verification case uses a real
 // 100-block chain instead). Nothing here starts a node or the network.
 
+#include "vault/act.h"
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
 #include "yellowback/index.h"
@@ -50,6 +51,32 @@
 
 /** The YED attestor set the regtest parameters of these cases name (U-22). */
 static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
+/** P4-b: the attestor set of the live fixtures is a primitive set: this SET_CREATE (open, 15 seats, maturity 1). */
+static CMutableTransaction AttestorSetCreate()
+{
+    vault::Act a;
+    a.type = vault::ACT_SET_CREATE;
+    a.create.seats = 15;
+    a.create.unlockThreshold = 1;
+    a.create.cancelThreshold = 1;
+    a.create.slashThreshold = 1;
+    a.create.flags = vault::SET_FLAG_OPEN;
+    a.create.rateWindow = 1000;
+    a.create.livenessWindow = 1000000;
+    a.create.bondMin = 1;
+    a.create.maturity = 1;
+    unsigned char d[32];
+    memset(d, 0x42, 32);
+    CKey admit;
+    admit.Set(d, d + 32, true);
+    a.create.admitKey = admit.GetPubKey();
+    CMutableTransaction m;
+    m.vin.push_back(CTxIn(COutPoint(TestSet(), 1)));
+    m.vout.push_back(CTxOut(0, vault::EncodeAct(a)));
+    return m;
+}
+static inline uint256 LiveSet() { return CTransaction(AttestorSetCreate()).GetHash(); }
 
 using namespace yellowback;
 
@@ -154,7 +181,7 @@ struct Builder
         userKey = CKey::TestOnlyRandomKey(true);
         for (int k = 0; k < 6; k++) {
             hotKeys.push_back(DeterministicKey("yellowback-index-test-hot", k));
-            bondKeys.push_back(DeterministicKey("yellowback-index-test-bond", k));
+            bondKeys.push_back(hotKeys.back());     // P4-b: the member key is the bond key
         }
     }
 
@@ -283,14 +310,23 @@ struct Builder
         return State(index.View()).GetAttest();
     }
 
-    /** A registration of attestor i at the next height: vout[0] the 10 YEC bond (P2SH), vout[1] the payload, change. */
+    /** P4-b: attestor i joins the attestor set at the next height: vout[0] the 10 YEC bond (P2SH), vout[1] the SET_JOIN, change. */
     CMutableTransaction RegisterTx(int i, int nextHeight)
     {
         const uint32_t locktime = (uint32_t)(nextHeight + P.bondMinLock);
+        vault::Act a;
+        a.type = vault::ACT_SET_JOIN;
+        a.join.setId = P.attestorSetId;
+        a.join.memberKey = hotKeys[i].GetPubKey();
+        a.join.bondLocktime = locktime;
+        a.join.bondVout = 0;
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(10 * COIN, P2SHScript(BondScript(bondKeys[i].GetPubKey(), locktime))));
-        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRegister(hotKeys[i].GetPubKey(), bondKeys[i].GetPubKey(), locktime, 0)))));
+        std::vector<unsigned char> sig;
+        BOOST_REQUIRE(vault::SignRecoverable(hotKeys[i], vault::ActMsg(vault::EncodePayload(a), m.vin[0].prevout), sig));
+        a.sigs.push_back(sig);
+        m.vout.push_back(CTxOut(10 * COIN, P2SHScript(BondScript(hotKeys[i].GetPubKey(), locktime))));
+        m.vout.push_back(CTxOut(0, vault::EncodeAct(a)));
         m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
         return m;
     }
@@ -459,7 +495,9 @@ struct Live
     int vaultRef;
     bool jitter;           //!< v3: pools alternate price and price + 1 so PIN-1 never pins them when attestors move (a pool quoting one price is what PIN-1 pins)
 
-    explicit Live(const fs::path& dir) : P(RegtestParams(1, 0, 0, TestSet())), tip(chainActive.Genesis()), jitter(false)
+    bool setMined = false;
+
+    explicit Live(const fs::path& dir) : P(RegtestParams(1, 0, 0, LiveSet())), tip(chainActive.Genesis()), jitter(false)
     {
         index.reset(new YellowbackIndex(P, dir, 1 << 20, true));
         BOOST_REQUIRE(index->SyncToChain());
@@ -527,6 +565,10 @@ struct Live
     void Arm(int n = 3)
     {
         if (Tip() < P.startHeight + 130) Activate();
+        if (!setMined) {
+            MineWith({ AttestorSetCreate() });           // P4-b: the attestor set's SET_CREATE
+            setMined = true;
+        }
         for (int i = 0; i < n; i++) {
             MineWith({ b->RegisterTx(i, Tip() + 1) });
             BOOST_REQUIRE_MESSAGE(b->Attestor((uint16_t)i).has_value(), strprintf("attestor %d not registered at %d", i, Tip()));

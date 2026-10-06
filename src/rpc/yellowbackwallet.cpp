@@ -36,6 +36,7 @@
 #include "rpc/yellowbackrpc.h"
 #include "script/standard.h"
 #include "txmempool.h"
+#include "util/moneystr.h"
 #include "util/strencodings.h"
 #include "wallet/wallet.h"
 #include "yellowback/address.h"
@@ -1056,14 +1057,16 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
             "yed_registerattestor bondYec lockBlocks ( flags )\n"
-            "\nRegister this wallet as a price attestor (REG-A1): vout[0] the bond P2SH(bondScript(bondPubKey, tip + 1 + lockBlocks))\n"
-            "of bondYec, vout[1] the ATTESTOR_REGISTER payload, change. attestorPubKey (hot) and bondPubKey are two fresh keypool\n"
-            "keys: back up wallet.dat. The bond is not IsMine; the wallet finds it through Attestors by bondPubKey. seq is null\n"
-            "until the transaction confirms (yed_listattestors). Refused with bond-below-min, lock-below-min.\n"
+            "\nJoin the YED attestor set (P4-b: the attestor registry is the vault primitive's set attestorSetId) with a fresh\n"
+            "wallet key as the member key: set_join attestorSetId bondYec (tip + 1 + lockBlocks). vout[0] is the bond\n"
+            "P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG); the member key signs price attestations and receives the\n"
+            "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
+            "bond-below-min, lock-below-min (the module's floor: BOND_MIN, BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
+            "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
             "\nArguments:\n"
-            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN)\n"
-            "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK; bondLocktime = tip + 1 + lockBlocks\n"
-            "3. flags       (numeric, optional, default 0) bits 0-1 source tier, bit 2 pool operator\n"
+            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN and the set's bondmin)\n"
+            "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
+            "3. flags       (numeric, optional, default 0) accepted for compatibility and ignored (no longer recorded)\n"
             "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -1071,45 +1074,58 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     const int lockBlocks = params[1].get_int();
     const int flagsArg = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 0;
     if (flagsArg < 0 || flagsArg > 255) throw JSONRPCError(RPC_INVALID_PARAMETER, "flags must be a byte");
-    CReserveKey reservekey(pwalletMain);
-    BuiltTx built;
-    uint256 txid;
+    uint256 setId;
+    int64_t locktime = 0;
     int maturesAt = 0;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
-        {
-            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
-            LOCK(index.cs_yellowback);
-            EnsureHealthy(index);
-            try {
-                built = BuildRegisterAttestor(yw, bondZat, lockBlocks, (uint8_t)flagsArg, reservekey);
-            } catch (const std::runtime_error& e) {
-                ThrowBuildError(e);
-            }
-            maturesAt = chainActive.Height() + 1 + index.GetParams().bondMaturity;
-        }
-        txid = Commit(yw, built, &reservekey);
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        const yellowback::Params& p = index.GetParams();
+        if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
+        if (bondZat < p.bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
+        if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
+        locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
+        if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_VERIFY_REJECTED, "lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
+        setId = p.attestorSetId;
+        State st(index.View());
+        std::optional<AttestorSetRecord> z = st.GetAttestorSet();
+        maturesAt = chainActive.Height() + 1 + (int)std::max<int64_t>(z.has_value() ? (int64_t)z->maturity : 0, p.bondMaturity);
     }
+    // set_join takes cs_main, the wallet and (through the mempool) cs_yellowback itself: called with none held (N25)
+    UniValue jp(UniValue::VARR);
+    jp.push_back(setId.GetHex());
+    jp.push_back(ValueFromAmount(bondZat));
+    jp.push_back(locktime);
+    const UniValue joined = tableRPC.execute("set_join", jp);
+    if (!find_value(joined, "complete").get_bool()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "register-needs-admission: the attestor set is not open; collect the admission signatures with set_signact and send with set_sendact: "
+                           + find_value(joined, "hex").get_str());
+    }
+    const std::string memberHex = find_value(joined, "memberkey").get_str();
+    const std::vector<unsigned char> memberBytes = ParseHex(memberHex);
+    const CPubKey member(memberBytes.begin(), memberBytes.end());
+    const std::string txid = find_value(joined, "txid").get_str();
     KeyIO keyIO(::Params());
     UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
+    o.pushKV("txid", txid);
     o.pushKV("seq", NullUniValue);
-    o.pushKV("attestorPubKey", HexStr(built.attestorPubKey.begin(), built.attestorPubKey.end()));
-    o.pushKV("bondAddress", keyIO.EncodeDestination(CTxDestination(CScriptID(built.bondScript))));
-    o.pushKV("bondKeyAddress", keyIO.EncodeDestination(CTxDestination(built.bondPubKey.GetID())));
+    o.pushKV("attestorPubKey", memberHex);
+    o.pushKV("bondAddress", keyIO.EncodeDestination(CTxDestination(CScriptID(BondScript(member, (uint32_t)locktime)))));
+    o.pushKV("bondKeyAddress", keyIO.EncodeDestination(CTxDestination(member.GetID())));
     UniValue op(UniValue::VOBJ);
-    op.pushKV("txid", txid.GetHex());
+    op.pushKV("txid", txid);
     op.pushKV("vout", 0);
     o.pushKV("bondOutpoint", op);
-    o.pushKV("bondZat", built.bondZat);
-    o.pushKV("bondLocktime", (int64_t)built.bondLocktime);
+    o.pushKV("bondZat", bondZat);
+    o.pushKV("bondLocktime", locktime);
     UniValue fl(UniValue::VOBJ);
-    fl.pushKV("tier", (int)(built.flags & 3));
-    fl.pushKV("pool", (built.flags & 4) != 0);
+    fl.pushKV("tier", 0);
+    fl.pushKV("pool", false);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    o.pushKV("warning", built.warning);
+    o.pushKV("warning", "");
     return o;
 }
 
@@ -1173,18 +1189,19 @@ UniValue yed_revive(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 2)
         throw std::runtime_error(
             "yed_revive seq priceMicroUsd\n"
-            "\nRevive a DORMANT attestor whose hot key this wallet holds (REV-1): one attestation for citedHeight = tip - REF_LAG signed\n"
-            "through the equivocation guard, payload ATTESTOR_REVIVE, funded from confirmed YEC. Refused with attest-unknown-seq,\n"
-            "not-dormant, attest-key-not-held, attest-range, equivocation-guard.\n"
+            "\nRevive a DORMANT attestor whose member key this wallet holds (P4-b: a SET_HEARTBEAT of the member key to the\n"
+            "attestor set; ATTESTOR_REVIVE is invalid). Also signs one attestation for citedHeight = tip - REF_LAG through the\n"
+            "equivocation guard and returns it (feed it with yed_addattestation). The record is ELIGIBLE again at the SNAP of\n"
+            "the heartbeat's block. Refused with attest-unknown-seq, not-dormant, attest-key-not-held, attest-range,\n"
+            "equivocation-guard.\n"
             "\nResult: { \"txid\", \"seq\", \"citedHeight\", \"priceMicroUsd\", \"hex\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const int seqArg = params[0].get_int();
     if (seqArg < 0 || seqArg > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
     const int64_t price = params[1].get_int64();
-    CReserveKey reservekey(pwalletMain);
     BuiltTx built;
-    uint256 txid;
+    uint256 setId;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
@@ -1193,16 +1210,20 @@ UniValue yed_revive(const UniValue& params, bool fHelp)
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
-                built = BuildRevive(yw, (uint16_t)seqArg, price, reservekey);
+                built = BuildRevive(yw, (uint16_t)seqArg, price);
             } catch (const std::runtime_error& e) {
                 ThrowBuildError(e);
             }
+            setId = index.GetParams().attestorSetId;
         }
-        txid = Commit(yw, built, &reservekey);
     }
+    UniValue hp(UniValue::VARR);
+    hp.push_back(setId.GetHex());
+    hp.push_back(HexStr(built.attestorPubKey.begin(), built.attestorPubKey.end()));
+    const UniValue hb = tableRPC.execute("set_heartbeat", hp);
     const std::vector<unsigned char> att = EncodeAttestation(built.attestation);
     UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
+    o.pushKV("txid", find_value(hb, "txid").get_str());
     o.pushKV("seq", (int)built.seq);
     o.pushKV("citedHeight", (int64_t)built.attestation.citedHeight);
     o.pushKV("priceMicroUsd", (int64_t)built.attestation.priceMicroUsd);

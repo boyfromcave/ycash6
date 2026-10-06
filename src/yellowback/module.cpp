@@ -4,7 +4,9 @@
 
 #include "yellowback/module.h"
 
+#include "vault/state.h"
 #include "yellowback/script.h"
+#include "yellowback/state.h"
 
 #include <memory>
 #include <mutex>
@@ -55,6 +57,29 @@ std::optional<std::string> Module::ValidateSpend(const CTransaction& tx, size_t 
     if (spend.kind == vault::TemplateKind::VAULT && spend.selector == vault::SEL_UNLOCK) return std::string("bad-yellowback-vault-unlock");
     if (spend.kind == vault::TemplateKind::INTENT && spend.selector == vault::SEL_RELEASED) return std::string("bad-yellowback-intent-owner");
     return std::nullopt;
+}
+
+std::optional<vault::SetId> Module::GovernedSet() const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p) return std::nullopt;
+    return p->attestorSetId;
+}
+
+std::vector<CPubKey> Module::Ejections(const CTransaction& tx, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p || !ctx.state || !ctx.blockHashAt) return {};
+    std::optional<std::pair<Attestation, Attestation>> e = EquivocationEvidence(tx, *p);
+    if (!e || (int64_t)e->first.citedHeight >= ctx.height) return {};
+    std::optional<uint256> blockHash = ctx.blockHashAt((int64_t)e->first.citedHeight);
+    if (!blockHash) return {};
+    for (const auto& m : vault::GetMembers(*ctx.state, p->attestorSetId)) {
+        std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+        if (!b || b->frozen) continue;
+        if (EquivocatedBy(e.value(), m.first, blockHash.value())) return { m.first };
+    }
+    return {};
 }
 
 const vault::Module* RegisteredModule()

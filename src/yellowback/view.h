@@ -58,6 +58,13 @@
  * and removes C (Activation: ACT-1..6 left with the upgrade) and X (Rejected: a
  * failing block is consensus-invalid and the valve that read the table is gone).
  *
+ * P4-b (§15.10, the attestor registry on the primitive set) adds
+ *
+ *   Z                     AttestorSetRecord (attestorSetId's SET_CREATE parameters; hashed)
+ *
+ * and Attestors becomes the module's mirror of attestorSetId's members, keyed by the
+ * seq the module assigns at each SET_JOIN (the bundle format is unchanged).
+ *
  * The plan names the v3 prefixes T/B/N/M/L/E; T (Tip) and L (TxLog) were
  * already taken, so Attestors live under A and BundleLog under W.
  *
@@ -73,7 +80,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 6;   //!< 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 7;   //!< 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -293,7 +300,9 @@ struct AssignedOutput
  * the rule held (REG-A1 / NOT-1 / EQV-1 / REV-1), a failing one is non-Yellowback (N7).
  */
 enum class TxLogType : uint8_t { NONE = 0, MINT = 1, TRANSFER = 2, REDEEM = 3, ATTESTOR_REGISTER = 4, CLAIM_NOTICE = 5, EQUIVOCATION = 6, ATTESTOR_REVIVE = 7,
-                                 CLAIM_RELEASE = 8, CLAIM_CANCEL = 9 };   // U-23: an intent's release (selector 1) or attestor cancel (selector 2)
+                                 CLAIM_RELEASE = 8, CLAIM_CANCEL = 9,     // U-23: an intent's release (selector 1) or attestor cancel (selector 2)
+                                 ATTESTOR_SET_ACT = 10 };                // P4-b: a SET_HEARTBEAT / SET_REMOVE / SET_EQUIVOCATION of an attestor
+// P4-b: ATTESTOR_REGISTER now logs a SET_JOIN to attestorSetId (the payload of that name is invalid); ATTESTOR_REVIVE is no longer written.
 const char* TxLogTypeName(TxLogType t);
 
 /**
@@ -397,23 +406,31 @@ struct Totals
 enum class AttestorStatus : uint8_t { PENDING = 0, ELIGIBLE = 1, DORMANT = 2, EJECTED = 3, WITHDRAWN = 4 };
 const char* AttestorStatusName(AttestorStatus s);
 
-/** Attestors[seq] (REG-A1). Hashed. */
+/**
+ * Attestors[seq]. Since P4-b the module's mirror of one SET_JOIN to attestorSetId (§15.10): attestorPubKey =
+ * bondPubKey = the member key, bondOutpoint = txid:bondVout of the join, registerHeight = the join height,
+ * lastAct = the set's lastAct for the member (joinHeight + maturity, then each SET_HEARTBEAT). Hashed.
+ */
 struct AttestorRecord
 {
-    std::vector<unsigned char> attestorPubKey;   //!< the 33 payload bytes (REG-A1 admitted them as a valid key)
-    std::vector<unsigned char> bondPubKey;
-    COutPoint bondOutpoint;                      //!< txid:0 of the registration
+    std::vector<unsigned char> attestorPubKey;   //!< the member key (33 bytes)
+    std::vector<unsigned char> bondPubKey;       //!< the member key (bond B is keyed by it)
+    COutPoint bondOutpoint;                      //!< txid:bondVout of the SET_JOIN
     CAmount bondZat;
     uint32_t bondLocktime;
-    uint8_t flags;
-    int32_t registerHeight;
+    uint8_t flags;                               //!< REG-A1's payload flags; 0 since P4-b
+    int32_t registerHeight;                      //!< the SET_JOIN's height
     uint8_t status;                              //!< AttestorStatus
     int32_t statusHeight;
     int32_t bondSpentHeight;                     //!< 0 = unspent
     int32_t seatedSince;                         //!< the SNAP height at which the attestor entered seated[]; 0 = not seated
+    int32_t lastAct;                             //!< P4-b: the set's lastAct for this member
+    bool bondFrozen;                             //!< P4-b: the bond is frozen in the set (SET_REMOVE burn, SET_EQUIVOCATION, EQV-1)
 
     AttestorRecord() : bondZat(0), bondLocktime(0), flags(0), registerHeight(0), status((uint8_t)AttestorStatus::PENDING),
-                       statusHeight(0), bondSpentHeight(0), seatedSince(0) {}
+                       statusHeight(0), bondSpentHeight(0), seatedSince(0), lastAct(0), bondFrozen(false) {}
+
+    bool Frozen() const { return bondFrozen; }
 
     AttestorStatus Status() const { return (AttestorStatus)status; }
     CPubKey AttestorKey() const { return CPubKey(attestorPubKey.begin(), attestorPubKey.end()); }
@@ -433,6 +450,29 @@ struct AttestorRecord
         READWRITE(statusHeight);
         READWRITE(bondSpentHeight);
         READWRITE(seatedSince);
+        READWRITE(lastAct);
+        READWRITE(bondFrozen);
+    }
+};
+
+/** AttestorSet (P4-b): the parameters of attestorSetId's SET_CREATE the module reads (maturity and dormancy are
+ *  the set's, the set's seats bound N_SLOTS), written when the module sees that transaction. Hashed. */
+struct AttestorSetRecord
+{
+    int32_t createHeight;
+    uint8_t seats;
+    uint32_t maturity;
+    uint32_t livenessWindow;
+
+    AttestorSetRecord() : createHeight(0), seats(0), maturity(0), livenessWindow(0) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(createHeight);
+        READWRITE(seats);
+        READWRITE(maturity);
+        READWRITE(livenessWindow);
     }
 };
 
@@ -738,6 +778,7 @@ std::string Attest();
 std::string BundleLog(uint32_t height);
 std::string Notice(const COutPoint& out);
 std::string Intent(const COutPoint& out);
+std::string AttestorSet();
 extern const char PREFIX_ATTESTOR;
 extern const char PREFIX_BUNDLELOG;
 extern const char PREFIX_NOTICE;
@@ -794,6 +835,7 @@ public:
     std::optional<BundleLogRecord> GetBundleLog(uint32_t height) const;
     std::optional<NoticeRecord> GetNotice(const COutPoint& out) const;
     std::optional<IntentRecord> GetIntent(const COutPoint& out) const;
+    std::optional<AttestorSetRecord> GetAttestorSet() const;
     /** Every Attestors record in seq order. */
     std::vector<std::pair<uint16_t, AttestorRecord>> Attestors() const;
 
@@ -815,7 +857,8 @@ private:
  * (ascending outpoint), every Tokens record, Totals, every Snapshots record,
  * the Params record, then (v3) every Attestors record by seq, AttestorSeq,
  * Attest, every BundleLog row by height and every Notices record by
- * outpoint, then (the vault upgrade) every Intents record by outpoint. TxLog (L), Undo (U) and
+ * outpoint, then (the vault upgrade) every Intents record by outpoint, then (P4-b) the AttestorSet
+ * record. TxLog (L), Undo (U) and
  * BondIndex (B) are excluded.
  * When no Tip has been written yet the preimage carries a zero tip with
  * `network` as given (the Python model's `{height 0, zero hash}`).
