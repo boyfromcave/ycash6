@@ -41,7 +41,7 @@
  *   S<u32 height>         Snapshot
  *   G                     Totals
  *   X<blockhash>          RejectedRecord    (node-local, V13; not part of the state hash)
- *   P                     ParamsRecord      (the six hashed regtest values, N18, M13)
+ *   P                     ParamsRecord      (the seven hashed regtest values, N18, M13)
  *   U<blockhash>          Undo              (not part of the state hash)
  *
  * v3 (price attestation, v3 plan §3.6):
@@ -68,7 +68,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 4;   //!< 4: BundleLog rows carry citedHeights (audit A-2); a v3 directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 5;   //!< 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -666,7 +666,8 @@ struct RejectedRecord
 
 /**
  * Params: the regtest values in the state-hash preimage (M13, N18); written by the first applied
- * block. v3 appends attestArmMin (u32) and bundleCarrier (u8, the BundleCarrier enum value).
+ * block. v3 appends attestArmMin (u32) and bundleCarrier (u8, the BundleCarrier enum value); the
+ * hardening plan (H-1, SCHEMA_VERSION 5) appends mintRequiresArmed (u8 boolean).
  */
 struct ParamsRecord
 {
@@ -676,11 +677,13 @@ struct ParamsRecord
     int32_t enforceUntil;
     uint32_t attestArmMin;
     uint8_t bundleCarrier;
+    uint8_t mintRequiresArmed;
 
-    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), enforceUntil(0), attestArmMin(0), bundleCarrier(0) {}
+    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), enforceUntil(0), attestArmMin(0), bundleCarrier(0), mintRequiresArmed(0) {}
     explicit ParamsRecord(const Params& p)
         : startHeight(p.startHeight), sigmaRefBps(p.sigmaRefBps), supplyCapBps(p.supplyCapBps), enforceUntil(p.enforceUntilHeight),
-          attestArmMin((uint32_t)std::max(0, p.attestArmMin)), bundleCarrier((uint8_t)p.bundleCarrier) {}
+          attestArmMin((uint32_t)std::max(0, p.attestArmMin)), bundleCarrier((uint8_t)p.bundleCarrier),
+          mintRequiresArmed(p.mintRequiresArmed ? 1 : 0) {}
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
@@ -691,6 +694,7 @@ struct ParamsRecord
         READWRITE(enforceUntil);
         READWRITE(attestArmMin);
         READWRITE(bundleCarrier);
+        READWRITE(mintRequiresArmed);
     }
 };
 

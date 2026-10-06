@@ -27,7 +27,7 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `u32 signalCount`, `Activation` (as row 4's value), `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask` |
-| 9 | `Params` | `P` | `i32 startHeight`, `i32 sigmaRefBps`, `i32 supplyCapBps`, `i32 enforceUntil` |
+| 9 | `Params` | `P` | `i32 startHeight`, `i32 sigmaRefBps`, `i32 supplyCapBps`, `i32 enforceUntil`; v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1 (`SCHEMA_VERSION` 5): `u8 mintRequiresArmed` |
 
 Each record is its key immediately followed by its value. `TxLog`, `Rejected`, `Undo` are
 excluded (plan). Encodings:
@@ -112,7 +112,8 @@ excluded (plan). Encodings:
   `bad-mint-vault-script`. MINT-4: a missing snapshot or a non-ACTIVE status ⇒
   `mint-not-active`; then the halt bits in declaration order — `NOT_ACTIVE` ⇒ `mint-not-active`,
   `NO_PRICE` ⇒ `mint-halted-no-price`, `PARTICIPATION` **or** `ENFORCEMENT` ⇒
-  `mint-halted-participation`, `GLOBAL_RATIO`, `DIVERGENCE`. MINT-5: `mint-unsatisfiable` before
+  `mint-halted-participation`, `GLOBAL_RATIO`, `DIVERGENCE`; last (hardening H-1), with
+  `MINT_REQUIRES_ARMED` and `R` not ARMED ⇒ `mint-halted-unarmed`. MINT-5: `mint-unsatisfiable` before
   `bad-mint-collateral` (which also covers `< 4 · FEE_MIN`). MINT-6, MINT-7, MINT-8 (`bad-mint-fee`
   for every MINT-8 failure).
 - **E. XFER verdict precedence.** XFER-1 (`bad-transfer-assignment`), XFER-2

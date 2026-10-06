@@ -422,6 +422,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbacksupplycapbps=<bps>", "Yellowback supply cap as bps of market cap, 0 = none (regtest only)");
         strUsage += HelpMessageOpt("-yellowbackenforceuntil=<h>", "Yellowback enforcement sunset height, 0 = none (regtest only)");
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
+        strUsage += HelpMessageOpt("-yellowbackmintrequiresarmed", "Yellowback MINT_REQUIRES_ARMED: an unarmed mint is VOID (mint-halted-unarmed) (regtest only, default 0; always on mainnet and testnet)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
         strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], crash:<height>, template, novalve or schema (regtest only)");
     }
@@ -1334,7 +1335,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(_("Yellowback has no start height for this network yet."));
         }
     } else if (mapArgs.count("-yellowbackstartheight") || mapArgs.count("-yellowbacksigmaref") || mapArgs.count("-yellowbacksupplycapbps") || mapArgs.count("-yellowbackenforceuntil") || mapArgs.count("-reindex-yellowback") ||
-               mapArgs.count("-yellowbackattestarmmin") || mapArgs.count("-yellowbackbundlecarrier") ||
+               mapArgs.count("-yellowbackattestarmmin") || mapArgs.count("-yellowbackbundlecarrier") || mapArgs.count("-yellowbackmintrequiresarmed") ||
                mapArgs.count("-yellowbackenforce") || mapArgs.count("-yellowbackpayoutaddress") || mapArgs.count("-yellowbacksignal") || mapArgs.count("-yellowbacktestfault")) {
         return InitError(_("Yellowback options require -yellowback."));
     }

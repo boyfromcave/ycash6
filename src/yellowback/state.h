@@ -74,6 +74,7 @@ extern const char* const MINT_HALTED_NO_PRICE;
 extern const char* const MINT_HALTED_PARTICIPATION;
 extern const char* const MINT_HALTED_GLOBAL_RATIO;
 extern const char* const MINT_HALTED_DIVERGENCE;
+extern const char* const MINT_HALTED_UNARMED;
 // MINT-5
 extern const char* const BAD_MINT_COLLATERAL;
 extern const char* const MINT_UNSATISFIABLE;
