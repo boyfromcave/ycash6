@@ -125,10 +125,12 @@ codegen-units = 1
 # prefixes/HRPs/coin type. All six crates are pinned to the same revision to
 # keep the workspace coherent (f4jumble is a transitive dependency of the
 # patched zcash_address; it is unmodified but must share the same source).
+# boyfromcave/librustzcash6 is that fork (miodragpop/librustzcash ec525fae)
+# plus the Ycash Vault network upgrade, BranchId::Vault = 0x6d5b7a31.
 [patch.crates-io]
-zcash_protocol = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
-zcash_primitives = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
-f4jumble = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
-zcash_address = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
-zcash_encoding = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
-zcash_transparent = { git = "https://github.com/miodragpop/librustzcash.git", rev = "ec525fae828ff67af0bf5d1995acfe445340ce66" }
+zcash_protocol = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
+zcash_primitives = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
+f4jumble = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
+zcash_address = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
+zcash_encoding = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
+zcash_transparent = { git = "https://github.com/boyfromcave/librustzcash6.git", rev = "4867cf85199a6fc734bf4027bd001e9e4fca0011" }
