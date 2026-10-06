@@ -183,7 +183,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 3)
+        assert_equal(c.doc['rpcversion'], 4)
 
         print('before activation: mintpol-not-active')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
@@ -385,7 +385,11 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         collateral_a = user.yed_getvault(mint_a['txid'])['collateralZat']
         assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a)
         assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
-        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2))   # 100 + 10000 in, 1 YED change
+        # hardening H-9.3: maxBurnCents caps the YED the claim burns; refused at preflight (the debt is 10000)
+        assert_rpc_error('claim-burn-above-max', claimant.yed_claim, mint_a['txid'], '', '', False, 0, 9999)
+        assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
+        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2,
+                                                    max_burn_cents=10000))   # 100 + 10000 in, 1 YED change
         assert_greater_than(claimed['collateralOut'], collateral_a // 2)
         assert_equal(claimed['burnedCents'], 10000)
         self.sync_all()

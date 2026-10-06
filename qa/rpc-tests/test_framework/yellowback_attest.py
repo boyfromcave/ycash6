@@ -994,13 +994,17 @@ def wallet_mint(test, node, cents, lock_blocks, from_addr='', prices=None, miner
     return two_step(test, node, 'yed_mint', cents, lock_blocks, from_addr, bundle_hex, miner=miner, after_wait=after)
 
 
-def wallet_claim(test, node, vault_txid, to='', prices=None, miner=None, bundle_hex=None, min_out_zat=None):
+def wallet_claim(test, node, vault_txid, to='', prices=None, miner=None, bundle_hex=None, min_out_zat=None,
+                 max_burn_cents=None):
     """``yed_claim`` through ``two_step``; the selector is the vault outpoint, R the index tip.
-    ``min_out_zat`` is the fifth argument (audit F-1), omitted when None."""
+    ``min_out_zat`` is the fifth argument (audit F-1) and ``max_burn_cents`` the sixth (hardening
+    H-9.3), each omitted when None (``min_out_zat`` passed as 0 when only the sixth is given)."""
     ref_height = node.yed_getinfo()['height']
     if bundle_hex is None:
         bundle_hex = _bundle_arg(test, node, outpoint_selector(vault_txid, 0), prices, ref_height)
     after = () if min_out_zat is None else (min_out_zat,)
+    if max_burn_cents is not None:
+        after = (min_out_zat or 0, max_burn_cents)
     return two_step(test, node, 'yed_claim', vault_txid, to, bundle_hex, miner=miner, after_wait=after)
 
 

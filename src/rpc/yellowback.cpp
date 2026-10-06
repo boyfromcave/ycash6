@@ -57,7 +57,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 3;
+static const int YELLOWBACK_RPC_VERSION = 4;   // 4: the H-9.3 bounds (hardening plan)
 
 namespace {
 

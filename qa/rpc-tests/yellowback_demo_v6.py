@@ -305,7 +305,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         rows = []
         for i in OVERLAY:
             info = wait_yed_healthy(self.nodes[i], timeout=60)
-            assert_equal(info['rpcversion'], 3)
+            assert_equal(info['rpcversion'], 4)
             assert_equal(info['healthy'], True)
             assert_equal(info['height'], self.nodes[i].getblockcount())
             role = {0: 'user', 2: 'pool', 3: 'pool', 4: 'pool', 5: 'observer', 6: 'attestor wallet', 7: 'attestor wallet'}[i]

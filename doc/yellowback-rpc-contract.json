@@ -136,6 +136,12 @@
       ],
       "when": "no selection leaves YED change of 0 or ≥ MIN_OUTPUT (H2; a REDEEM or CLAIM burns a sub-dollar remainder instead, H4, so it reaches this only when even that is impossible): send cents − 50 from a single cents output. The message is structured and always has this shape: change-floor: <requested> cents cannot be sent from these coins without change below the $1.00 minimum output; nearest workable amounts: below <n\\"
     },
+    "claim-burn-above-max": {
+      "raisedBy": [
+        "yed_claim"
+      ],
+      "when": "maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1"
+    },
     "claim-not-underwater": {
       "raisedBy": [
         "yed_claim"
@@ -444,7 +450,7 @@
       "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command. Also the storage boundary of yed_addattestation and yed_buildbundle (audit A-3): a storage exception under either marks the index unhealthy and the call fails with yellowback-unhealthy: storage failure in AddAttestation: … / … in BuildBundle: …"
     }
   },
-  "rpcversion": 3,
+  "rpcversion": 4,
   "source": {
     "plan": "docs/plans/yellowback-v2-development-plan.md",
     "planV3": "docs/plans/yellowback-v3-development-plan.md",
@@ -489,7 +495,7 @@
     }
   },
   "yed_claim": {
-    "args": "<vaultTxid> [to] [bundleHex] [wait] [minOutZat]",
+    "args": "<vaultTxid> [to] [bundleHex] [wait] [minOutZat] [maxBurnCents]",
     "returns": {
       "aClaim": 395000,
       "attestFeeZat": 15703517,
@@ -839,7 +845,7 @@
       "protectedByIndex": true,
       "rebuilt": false,
       "rejectedBlocks": 0,
-      "rpcversion": 3,
+      "rpcversion": 4,
       "startHeight": 1,
       "sunset": false,
       "supplyCapReached": false,

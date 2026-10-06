@@ -341,9 +341,12 @@ struct ClaimPreflight
  * `minOutZat` (audit F-1): 0 = no bound; else refuse `claim-out-below-min` when what the claimant
  * receives at `to` would be below it — at preflight the collateral less the enforcement fee, the
  * attestor fee and the RED-5 residual; in BuildClaim the exact collateralOut.
+ * `maxBurnCents` (hardening H-9.3): 0 = no bound; else refuse `claim-burn-above-max` when the YED
+ * the claim burns exceeds it — at preflight the vault's mintedCents, in BuildClaim the exact burn
+ * (the debt plus any H4 sub-dollar remainder).
  */
 ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle,
-                              CAmount minOutZat = 0);
+                              CAmount minOutZat = 0, int64_t maxBurnCents = 0);
 
 /** v3: the notice's preflight (NOT-1 at R = index tip): `notice-standing`, `notice-not-underwater`, `bundle-insufficient`. */
 struct NoticePreflight
@@ -397,7 +400,7 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
  * Unsigned; SignVaultSpend(…, false) signs the vault, the YED inputs and the carrier.
  */
 BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier,
-                   CAmount minOutZat = 0);
+                   CAmount minOutZat = 0, int64_t maxBurnCents = 0);
 
 /** v3 CLAIM_NOTICE (§3.5): confirmed YEC inputs plus the carrier; the 0x06 payload and change. Signed. */
 BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserveKey& reservekey, const CarrierRecord& carrier);
