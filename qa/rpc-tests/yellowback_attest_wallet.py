@@ -140,7 +140,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
             assert_equal(raw['vout'][0]['scriptPubKey']['addresses'], [res['bondAddress']])
             assert_equal(res['bondOutpoint'], {'txid': res['txid'], 'vout': 0})
             act = node.vault_decodescript(raw['vout'][1]['scriptPubKey']['hex'])       # P4-b: a SET_JOIN, not ATTESTOR_REGISTER
-            assert_equal((act['type'], act['setid']), ('join', node.yed_getinfo()['upgrade']['attestorSetId']))
+            assert_equal((act['type'], act['acttype'], act['setid']), ('act', 'join', node.yed_getinfo()['upgrade']['attestorSetId']))
             # the record is a function of the act and vout[0]: the member key is the attestor key and the bond key
             assert_equal(act['memberkey'], res['attestorPubKey'])
             assert_equal(act['bondlocktime'], res['bondLocktime'])

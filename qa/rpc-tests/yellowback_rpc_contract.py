@@ -447,7 +447,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal((reg['type'], reg['seq']), ('register', int(rows[0]['seq'])))
         raw = user.getrawtransaction(reg_txid, 1)
         act = user.vault_decodescript(raw['vout'][1]['scriptPubKey']['hex'])       # P4-b: the registration is a SET_JOIN
-        assert_equal((act['type'], act['memberkey']), ('join', rows[0]['attestorPubKey']))
+        assert_equal((act['type'], act['acttype'], act['memberkey']), ('act', 'join', rows[0]['attestorPubKey']))
         # the retired ATTESTOR_REGISTER payload still decodes (yed_decodepayload's register shape), but is invalid
         legacy = user.decoderawtransaction(build_legacy_register_tx(user, rows[0]['attestorPubKey']))
         dec = c.check('yed_decodepayload', user.yed_decodepayload(legacy['vout'][1]['scriptPubKey']['hex'][4:]))
