@@ -225,6 +225,26 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     return o;
 }
 
+/** A CLAIMING vault's claim intents (U-23), as VaultToJSON in rpc/yellowback.cpp lists them under "intents". */
+UniValue ClaimIntentsJSON(YellowbackIndex& index, const COutPoint& out, const yellowback::Params& p)
+{
+    UniValue intents(UniValue::VARR);
+    index.View().Iterate(std::string(1, 'I'), [&](const std::string& k, const std::string& raw) {
+        IntentRecord ir;
+        if (k.size() == 37 && DeserializeRecord(raw, ir) && ir.vault == out) {
+            UniValue e(UniValue::VOBJ);
+            e.pushKV("txid", keys::OutPointHashOf(k).GetHex());
+            e.pushKV("vout", (int64_t)keys::OutPointIndexOf(k));
+            e.pushKV("role", ir.Role() == IntentRole::CLAIMANT ? "claimant" : "residual");
+            e.pushKV("height", ir.height);
+            e.pushKV("releaseHeight", (int64_t)ir.height + p.claimDelay);
+            intents.push_back(e);
+        }
+        return true;
+    });
+    return intents;
+}
+
 /**
  * Build, sign and commit a vault spend (yed_redeem / yed_claim). The Sapling shape
  * releases every lock for the proving step, then re-locks to sign (§4.6). `gate` runs the K7
@@ -1325,6 +1345,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         const COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
         UniValue o = VaultRow(out, v, p, est.claimable);
+        if (v.Status() == VaultStatus::CLAIMING) o.pushKV("intents", ClaimIntentsJSON(index, out, p));   // as yed_getvault (U-23)
         const bool active = v.Status() == VaultStatus::ACTIVE;
         std::optional<NoticeRecord> notice = active ? st.GetNotice(out) : std::nullopt;
         const bool noticed = notice.has_value();

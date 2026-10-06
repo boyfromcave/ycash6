@@ -236,6 +236,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         vb = n1.yed_getvault(mint_b)
         assert_equal(vb['status'], 'CLAIMING')
         assert_equal([(i['txid'], i['vout'], i['role']) for i in vb['intents']], [(claim_b, 0, 'claimant')])
+        pos = [r for r in n0.yed_listpositions() if r['txid'] == mint_b]           # the owner's row carries the intents too
+        assert_equal(len(pos), 1)
+        assert_equal((pos[0]['status'], pos[0]['intents']), ('CLAIMING', vb['intents']))
         craw = n1.getrawtransaction(claim_b, 1)
         assert craw['vin'][0]['scriptSig']['hex'] == '54', craw['vin'][0]['scriptSig']    # OP_4
         idec = n1.vault_decodescript(craw['vout'][0]['scriptPubKey']['hex'])
