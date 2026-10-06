@@ -660,7 +660,11 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.restart(2)
         self.sync_all(blocks_only=True)
         assert_best_hash(self.nodes)
-        self.mine(POOLS[0])
+        # the mint is valid again at the network's next height; node 0 holds it (pool 2's restart
+        # emptied its mempool, and 6.20.0 does not re-announce a mempool to a reconnected peer)
+        h = self.mine(0, blocks_only=True)[0]
+        assert stale in user.getblock(h)['tx']
+        self.sync_all()
         unlock_all(user)
         self.checkpoint('stale mint')
 
