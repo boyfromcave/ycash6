@@ -9,6 +9,8 @@ Two scripts and four checklists:
 | `stratum-miner` | a headless stratum client at regtest's Equihash 48,5 (the framework's Python solver): the GPU rig's stand-in for the pool seat (`docs/plans/role-pool-regtest-plan.md` §3.3); `--record` writes the wire exchange as JSONL |
 | `yellowback_stratum.py` (in `qa/rpc-tests/`) | the functional test of the stratum path: yolo on every payout × text cell, the miner, the tag on every accepted block, `--text --no-flags` dropping it; SKIPs without `YOLO_BIN` |
 | `stratum-perl-check` | proves `stratum-miner` against the Perl reference pools in `ref/yolo` on a two-node regtest and records `fixtures/stratum-perl-*.jsonl`; `YCASHD`/`YCASH_CLI` name the binaries |
+| `upgrade-walk` | the whole ecosystem on the vault upgrade, walked end to end on a running `up --role attestor --no-heartbeat --no-walk --no-sim` devnet; writes a transcript (section 6, `scenarios/upgrade-walk.md`; recorded run: `upgrade-walk-transcript.txt`) |
+| `bridge-sim` | the WYEC bridge persona (upgrade plan §4, P3): a guardian or relayer set, a mock burn feed, the daemon that posts, releases and cancels; `yellowback-devnet bridge …` drives it (section 6) |
 | `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists; `up --role` copies the role's into the session's `NOTES.md` |
 
 ## 0. Before you start
@@ -196,3 +198,30 @@ chain-viz --devnet <dir> --listen 127.0.0.1:<port> --record <dir>/chain-viz --pi
 ```
 
 with its output in `<dir>/chain-viz.log`, waits up to 15 s for its `listening on http://…` line and prints that URL as the last-but-one line of `up`'s summary; `devnet.json` records `chainviz = {pid, url, port, log, binary, pid_file, record}`. No binary found is one dim line and the devnet continues without it; `--no-viz` skips it. `status` prints the URL and whether the process is alive, `down` stops it (SIGTERM, SIGKILL after 5 s; by the record or the pid file), and `report` bundles `<dir>/chain-viz/session.jsonl` when the recording exists. chain-viz is strictly read-only against the nodes (plan §4.2); it is never part of `check`, so a dead visualizer does not fail the devnet.
+
+## 6. The vault upgrade walk and the bridge persona (`docs/plans/yellowback-upgrade-plan.md` §4, §5, §15)
+
+```bash
+yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 480
+../.venv/bin/python contrib/yellowback/devnet/upgrade-walk          # ~6 min; --skip / --only STEP,...; --summary out.json
+```
+
+`upgrade-walk` drives the devnet the way `scenarios/upgrade-walk.md` lists: attestor set membership
+(a join, maturity, a heartbeat, a member dormant under S15 and revived by its heartbeat), mints on
+the V template, transfers, an owner redeem and a renew, an underwater claim into a claimant intent
+with a reorg across it and the release after `CLAIM_DELAY`, a wrong-price claim cancelled by one
+attestor, an invalid mint refused by every mempool and its block rejected by every Yellowback
+node, chain-viz's vault panel and lightwalletd's vault calls compared with the node, and the
+bridge persona in both shapes. It mines every block itself (the heartbeat, walk and simulator
+must be off) and prints every call into the transcript.
+
+`yellowback-devnet bridge up [--shape guardians|relayer] | lock AMOUNT [--dest 0x…] | burn AMOUNT
+RECIPIENT [--id ID] | rogue AMOUNT | silence | unsilence | recover | status [--json] | down` runs
+`bridge-sim`, the Ycash half of the wYEC daemon with Ethereum replaced by a JSON-lines burn feed.
+`guardians` is O-2's 9 seats / 6 to unlock / 1 to cancel / 7 to slash, one member key in each of
+nodes 1–7, 9 and 10 (the stock node 1 coordinates: the bridge needs no YED); `relayer` is one
+relayer on node 2 with an OPEN challenger set on nodes 5–7 as the vaults' cancel set. Regtest
+values: delay 6, rate limit 50 % per 20-block epoch, livenessWindow 30, heartbeat every 8 blocks,
+`BRIDGE_MAX_AGE` 400. The daemon only ever calls stock RPCs and `set_*` / `vault_*`.
+
+`qa/rpc-tests/yellowback_devnet_upgrade.py` runs `up` and the walk's core (no clients) in CI time.

@@ -341,7 +341,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6 " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -349,7 +349,7 @@ jobs:
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
           # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6; do
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6; do
             test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
             grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
@@ -790,6 +790,18 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+      - name: Devnet on the vault upgrade end to end (extended)
+        # upgrade-walk's core through the devnet script (upgrade plan §4, §5, §15.10): attestor set
+        # membership and S15 dormancy, mint on the V template, transfer, redeem and renew, a claim
+        # with a reorg across it, an attestor's cancel, an invalid mint and block, and the WYEC
+        # bridge persona in both shapes. Same binary as the steps above.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
+          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from

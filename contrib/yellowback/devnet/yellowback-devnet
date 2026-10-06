@@ -30,7 +30,8 @@ Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
-cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
+cli [--node N | --datadir N] [-- args], down [--wipe], bridge {up [--shape guardians|relayer]|lock AMOUNT|burn AMOUNT RECIPIENT|rogue AMOUNT|
+silence|unsilence|recover|status|down} (the WYEC bridge persona, bridge-sim), vectors [--out DIR] [--seed N] [--count N]
 (JSON signing/address/template vectors for the YEW core, wallet plan W0c).
 """
 import argparse
@@ -492,7 +493,7 @@ def lightwalletd_check(state):
         except subprocess.CalledProcessError as error: return "lightwalletd yellowback probe failed: %s" % error.stderr.strip()
         bad = {k: v for k, v in yed.items() if "#" not in k and not (v == "ok" or v.startswith("FailedPrecondition"))}
         if bad: return "lightwalletd Yellowback methods not answering: %s" % json.dumps(bad, sort_keys=True)
-        if yed.get("GetYellowbackInfo#rpcversion") != "3": return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
+        if yed.get("GetYellowbackInfo#rpcversion") != "5": return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
     return None
 
 def lightwalletd(args):
@@ -1468,7 +1469,7 @@ def cli(args):
 def down(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     chainviz_stop(state)
-    for name in ("sim", "walk", "heartbeat", "lightwalletd"):
+    for name in ("sim", "walk", "heartbeat", "lightwalletd", "lightwalletd_baseline", "bridge"):
         _kill((state.get(name) or {}).get("pid"), name)
     for node, record in sorted((state.get("stratum") or {}).items()):
         _kill(record.get("pid"), "yolo beside node%s" % node)
@@ -1483,6 +1484,30 @@ def down(args):
     left = kill_nodes(directory)
     if left: print("%d node process(es) did not stop over RPC and were terminated" % len(left))
     if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
+
+# ---------------------------------------------------------------------------------- the bridge persona (upgrade plan section 4, P3)
+
+BRIDGE_SIM = os.path.join(HERE, "bridge-sim")
+
+def bridge(args):
+    """`bridge up|lock|burn|rogue|silence|unsilence|recover|status|down`: the WYEC bridge persona (bridge-sim).
+
+    up [--shape guardians|relayer] -- a 9/6/7 guardian set on nine nodes' wallets, or one relayer plus an OPEN
+                      challenger set; matures it and starts the daemon (heartbeats, burn feed -> intents,
+                      releases after the delay, cancels any intent it cannot match to a burn)
+    lock AMOUNT [--dest 0x..]  -- node 0 locks YEC under the set (a WYEC V + an opaque bytes32 destination)
+    burn AMOUNT RECIPIENT [--id ID] -- append a burn to the mock feed (<dir>/bridge-burns.jsonl)
+    rogue AMOUNT    -- the unlock quorum signs an intent with no burn; the daemon must cancel it
+    silence|unsilence -- stop/resume the members' heartbeats; recover -- node 0's owner spends on a released set
+    The daemon uses stock RPCs and set_*/vault_* only (never yed_*): WYEC is not a registered module."""
+    directory = os.path.abspath(args.dir)
+    load(directory)
+    argv = [sys.executable, BRIDGE_SIM, args.action] + list(args.values) + ["--dir", directory]
+    if args.action == "up": argv += ["--shape", args.shape]
+    if args.dest and args.action == "lock": argv += ["--dest", args.dest]
+    if args.id and args.action == "burn": argv += ["--id", args.id]
+    if args.json and args.action == "status": argv += ["--json"]
+    return subprocess.call(argv)
 
 # ---------------------------------------------------------------------------------- sessions, scenarios, reports (R5)
 
@@ -1853,6 +1878,12 @@ def main():
     command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--node", type=int, help="the node to open on (default: your seat)"); command.add_argument("--print", action="store_true")
     command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("--datadir", type=int, metavar="N", help="print node N's datadir and exit"); command.add_argument("args", nargs=argparse.REMAINDER)
     command = add("down", down); command.add_argument("--wipe", action="store_true")
+    command = add("bridge", bridge, help="the WYEC bridge persona (bridge-sim): up|lock|burn|rogue|silence|unsilence|recover|status|down")
+    command.add_argument("action", choices=("up", "lock", "burn", "rogue", "silence", "unsilence", "recover", "status", "down"))
+    command.add_argument("values", nargs="*", help="lock/rogue: AMOUNT; burn: AMOUNT RECIPIENT")
+    command.add_argument("--shape", choices=("guardians", "relayer"), default="guardians")
+    command.add_argument("--dest", help="lock: the 20- or 32-byte destination (hex), written as ABI bytes32")
+    command.add_argument("--id", help="burn: the burn's id in the feed"); command.add_argument("--json", action="store_true")
     command = add("vectors", vectors, help="write JSON signing/address/template vectors for the YEW core (wallet plan W0c)")
     command.add_argument("--out", help="output directory (default DIR/vectors)"); command.add_argument("--seed", type=int, default=1)
     command.add_argument("--count", type=int, default=12, help="transparent transactions (default 12)")

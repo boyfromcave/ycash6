@@ -220,6 +220,9 @@ EXTENDED_SCRIPTS = [
     'yellowback_attest_agent.py',
     # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
     'yellowback_devnet_roles.py',
+    # The devnet on the vault upgrade (upgrade plan §4, §5): upgrade-walk's core and the WYEC bridge
+    # persona through the devnet script; same Rust binary, SKIPs without it; < 10 minutes.
+    'yellowback_devnet_upgrade.py',
     'yellowback_sapling.py',
     'yellowback_wr_flags.py',
     'yellowback_stockparity.py',
