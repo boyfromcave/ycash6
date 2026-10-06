@@ -268,6 +268,29 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_validaterawtransaction",  {{s}, {}} },
     { "yed_withdrawbond",            {{o}, {s}} },
     // end yellowback
+    // the vault primitive (doc/vault-rpc.md)
+    { "vault_getinfo",               {{}, {}} },
+    { "set_list",                    {{}, {}} },
+    { "set_getinfo",                 {{s}, {o}} },
+    { "vault_list",                  {{}, {o}} },
+    { "vault_decodescript",          {{s}, {}} },
+    { "set_create",                  {{o}, {}} },
+    { "set_join",                    {{s, o, o}, {s}} },
+    { "set_heartbeat",               {{s}, {s}} },
+    { "set_buildact",                {{s, o}, {}} },
+    { "set_signact",                 {{s}, {s}} },
+    { "set_sendact",                 {{s}, {}} },
+    { "set_equivocation",            {{o}, {}} },
+    { "vault_lock",                  {{o}, {}} },
+    { "vault_buildunlock",           {{s, o}, {}} },
+    { "set_signunlock",              {{s}, {}} },
+    { "vault_buildcancel",           {{s}, {}} },
+    { "set_signcancel",              {{s}, {}} },
+    { "vault_send",                  {{s}, {}} },
+    { "vault_release",               {{s}, {s}} },
+    { "vault_ownerspend",            {{s, s}, {}} },
+    { "vault_app",                   {{s}, {o}} },
+    // end vault
 };
 
 #endif // ZCASH_RPC_COMMON_H

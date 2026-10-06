@@ -27,6 +27,8 @@ void RegisterAtomicSwapRPCCommands(CRPCTable &tableRPC);
 void RegisterYellowbackRPCCommands(CRPCTable &tableRPC);
 /** Register Yellowback wallet-context RPC commands (ENABLE_WALLET) */
 void RegisterYellowbackWalletRPCCommands(CRPCTable &tableRPC);
+/** Register the vault primitive's set_* / vault_* RPC commands (docs/vault-rpc.md) */
+void RegisterVaultRPCCommands(CRPCTable &tableRPC);
 
 static inline void RegisterAllCoreRPCCommands(CRPCTable &tableRPC)
 {
@@ -37,6 +39,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &tableRPC)
     RegisterRawTransactionRPCCommands(tableRPC);
     RegisterAtomicSwapRPCCommands(tableRPC);
     RegisterYellowbackRPCCommands(tableRPC);
+    RegisterVaultRPCCommands(tableRPC);
 }
 
 #endif // BITCOIN_RPC_REGISTER_H
