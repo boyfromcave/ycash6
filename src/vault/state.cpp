@@ -368,6 +368,7 @@ void VaultState::ApplyUndo(const BlockUndo& undo)
 std::optional<std::string> VaultState::ApplyTx(const CTransaction& tx, int64_t height, const CoinAccessor& coins)
 {
     VaultState child(*this);
+    child.blockHashes = blockHashes;
     auto err = child.ApplyTxInner(tx, height, coins);
     if (err) return err;
     MergeFrom(child);
@@ -383,6 +384,7 @@ std::optional<std::string> VaultState::ApplyBlock(const CBlock& block, int64_t h
     ModuleContext ctx;
     ctx.height = height;
     ctx.state = this;
+    ctx.blockHashAt = blockHashes;
     for (const auto& entry : Modules()) {
         if (auto err = entry.second->CheckBlock(block, pindex, ctx)) return err;
     }
@@ -568,6 +570,7 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
     ModuleContext ctx;
     ctx.height = h;
     ctx.state = this;
+    ctx.blockHashAt = blockHashes;
     if (tin) {
         const Tag& tag = tin->kind == TemplateKind::VAULT ? tin->vault.tag : tin->intent.tag;
         if (const Module* mod = FindModule(tag)) {
@@ -587,7 +590,41 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
         if (auto err = DecodeAct(tx.vout[actIndex].scriptPubKey, act)) return err;
         if (auto err = ApplyAct(tx, act, h)) return err;
     }
+
+    // ---- the module ejection hook (U-25): after the transaction's own rules and act ----
+    if (!tx.IsCoinBase()) ApplyEjections(tx, h);
     return std::nullopt;
+}
+
+// The same effect and condition as SET_EQUIVOCATION's (ApplyAct above), for the module hook.
+bool EjectAndFreeze(VaultState& st, const SetId& setId, const CPubKey& key)
+{
+    auto m = GetMember(st, setId, key);
+    if (!m) return false;
+    auto b = GetBond(st, m->bondOutpoint);
+    if (!b || b->frozen || b->setId != setId || b->memberKey != key) return false;
+    m->status = MEMBER_EJECTED;
+    m->bondFrozen = true;
+    b->frozen = true;
+    st.PutRecord(KeyMember(setId, key), *m);
+    st.PutRecord(KeyBond(m->bondOutpoint), *b);
+    return true;
+}
+
+void VaultState::ApplyEjections(const CTransaction& tx, int64_t h)
+{
+    for (const auto& entry : Modules()) ApplyEjectionsOf(*entry.second, tx, h);
+}
+
+void VaultState::ApplyEjectionsOf(const Module& module, const CTransaction& tx, int64_t h)
+{
+    const std::optional<SetId> governed = module.GovernedSet();
+    if (!governed || !GetSet(*this, *governed)) return;
+    ModuleContext ctx;
+    ctx.height = h;
+    ctx.state = this;
+    ctx.blockHashAt = blockHashes;
+    for (const CPubKey& key : module.Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
 }
 
 std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Act& act, int64_t h)
@@ -751,9 +788,11 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
     }
 }
 
-std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot)
+std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot,
+                                   const BlockHashFn& blockHashes)
 {
     VaultState tmp(snapshot.Base());
+    tmp.SetBlockHashes(blockHashes);
     return tmp.ApplyTx(tx, height, coins);
 }
 
