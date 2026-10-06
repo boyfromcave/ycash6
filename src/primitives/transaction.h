@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -312,6 +313,16 @@ public:
     // The only use of nSequence (via IsFinal) is in TransactionSignatureChecker::CheckLockTime
     // It disables the nLockTime feature when set to maxint.
     uint32_t nSequence;
+
+    /* BIP68 relative lock-time, enforced from UPGRADE_VAULT (plan §15.2), height-based only. */
+    /** Setting nSequence to this value for every input disables nLockTime. */
+    static const uint32_t SEQUENCE_FINAL = 0xffffffff;
+    /** Bit 31 set: nSequence is not interpreted as a relative lock-time. */
+    static const uint32_t SEQUENCE_LOCKTIME_DISABLE_FLAG = (1U << 31);
+    /** Bit 22 set: a time-based relative lock (BIP68); invalid under UPGRADE_VAULT. */
+    static const uint32_t SEQUENCE_LOCKTIME_TYPE_FLAG = (1U << 22);
+    /** The relative lock-time, in blocks, is the low 16 bits. */
+    static const uint32_t SEQUENCE_LOCKTIME_MASK = 0x0000ffff;
 
     CTxIn()
     {

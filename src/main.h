@@ -510,6 +510,43 @@ bool IsExpiringSoonTx(const CTransaction &tx, int nNextBlockHeight);
 bool CheckFinalTx(const CTransaction &tx, int flags = -1);
 
 /**
+ * The script verification flags UPGRADE_VAULT adds for a block at nHeight
+ * (SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT, plan §15.1), or 0 before it.
+ */
+unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params);
+
+/**
+ * BIP68 relative lock-time, height-based only (UPGRADE_VAULT, plan §15.2). Consensus
+ * critical; callers apply it only at heights where UPGRADE_VAULT is active.
+ *
+ * prevHeights[i] is the height of the coin tx.vin[i] spends. Returns std::nullopt if an
+ * input with the disable flag (bit 31) clear sets the type flag (bit 22): a time-based
+ * relative lock, which makes the transaction invalid. Otherwise returns the last height at
+ * which the transaction is not yet valid (-1 if it has no relative lock), exactly Bitcoin's
+ * CalculateSequenceLocks().first.
+ */
+std::optional<int> CalculateSequenceLocks(const CTransaction& tx, const std::vector<int>& prevHeights);
+
+/** True iff a block at nBlockHeight satisfies nMinHeight from CalculateSequenceLocks(). */
+bool EvaluateSequenceLocks(int nBlockHeight, int nMinHeight);
+
+/**
+ * Apply BIP68 to tx at nBlockHeight with its inputs from view (a coin at MEMPOOL_HEIGHT counts
+ * as nBlockHeight). Sets state on failure: "bad-txns-vault-timelock" for a time-based lock,
+ * "bad-txns-nonfinal" (fMempool false, DoS 100) or "non-BIP68-final" (fMempool true, DoS 0).
+ * Preconditions: tx is not a coinbase; view has every input.
+ */
+bool ContextualCheckSequenceLocks(const CTransaction& tx, const CCoinsViewCache& view, int nBlockHeight,
+                                  CValidationState& state, bool fMempool);
+
+/**
+ * Check if transaction's relative locks are satisfied by the next block to be created,
+ * with its inputs from the chain tip and the mempool. True before UPGRADE_VAULT.
+ * Requires cs_main and mempool.cs.
+ */
+bool CheckSequenceLocks(const CTransaction& tx);
+
+/**
  * Closure representing one script verification
  * Note that this stores references to the spending transaction
  */

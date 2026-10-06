@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -18,6 +19,8 @@
 #include <librustzcash.h>
 #include <rust/constants.h>
 #include <rust/transaction.h>
+
+#include <algorithm>
 
 using namespace std;
 
@@ -215,6 +218,23 @@ bool static CheckPubKeyEncoding(const valtype &vchSig, unsigned int flags, Scrip
     return true;
 }
 
+/**
+ * A set signature (plan §15.2 step 3): 65 bytes, header || r || s, the header 31..34 (compressed,
+ * recoverable: the signmessage format), and s at most half the curve order (low S).
+ */
+bool static IsCompactSetSignature(const valtype& vchSig) {
+    static const unsigned char HALF_ORDER[32] = {
+        0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+    };
+    if (vchSig.size() != 65)
+        return false;
+    if (vchSig[0] < 31 || vchSig[0] > 34)
+        return false;
+    // s is bytes 33..64, big-endian
+    return std::lexicographical_compare(HALF_ORDER, HALF_ORDER + 32, vchSig.begin() + 33, vchSig.end()) == false;
+}
+
 bool static CheckMinimalPush(const valtype& data, opcodetype opcode) {
     if (data.size() == 0) {
         // Could have used OP_0.
@@ -264,6 +284,7 @@ bool EvalScript(
     if (script.size() > MAX_SCRIPT_SIZE)
         return set_error(serror, SCRIPT_ERR_SCRIPT_SIZE);
     int nOpCount = 0;
+    int nSetSigCount = 0; // OP_CHECKSETSIG executions, at most one (plan §15.2)
     bool fRequireMinimal = (flags & SCRIPT_VERIFY_MINIMALDATA) != 0;
 
     try
@@ -388,7 +409,49 @@ bool EvalScript(
                     break;
                 }
 
-                case OP_NOP1: case OP_NOP3: case OP_NOP4: case OP_NOP5:
+                case OP_CHECKSEQUENCEVERIFY:
+                {
+                    if (!(flags & SCRIPT_VERIFY_CHECKSEQUENCEVERIFY)) {
+                        // not enabled; treat as a NOP3
+                        if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS) {
+                            return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS);
+                        }
+                        break;
+                    }
+
+                    if (stack.size() < 1)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+                    // nSequence, like nLockTime, is a 32-bit unsigned integer
+                    // field. See the comment in CHECKLOCKTIMEVERIFY regarding
+                    // 5-byte numeric operands.
+                    const CScriptNum nSequence(stacktop(-1), fRequireMinimal, 5);
+
+                    // In the rare event that the argument may be < 0 due to
+                    // some arithmetic being done first, you can always use
+                    // 0 MAX CHECKSEQUENCEVERIFY.
+                    if (nSequence < 0)
+                        return set_error(serror, SCRIPT_ERR_NEGATIVE_LOCKTIME);
+
+                    // To provide for future soft-fork extensibility, if the
+                    // operand has the disabled lock-time flag set,
+                    // CHECKSEQUENCEVERIFY behaves as a NOP.
+                    if ((nSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0)
+                        break;
+
+                    // Ycash enforces height-based relative locks only (plan
+                    // §15.2): an operand with the type flag (bit 22) fails.
+                    if ((nSequence & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) != 0)
+                        return set_error(serror, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+
+                    // Compare the specified sequence number with the input.
+                    if (!checker.CheckSequence(nSequence))
+                        return set_error(serror, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+
+                    break;
+                }
+
+                case OP_NOP1: case OP_NOP4: case OP_NOP5:
                 case OP_NOP6: case OP_NOP7: case OP_NOP8: case OP_NOP9: case OP_NOP10:
                 {
                     if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS)
@@ -942,6 +1005,72 @@ bool EvalScript(
                 }
                 break;
 
+                //
+                // Vault primitive (UPGRADE_VAULT, plan §15.2)
+                //
+                case OP_CHECKSETSIG:
+                {
+                    // (sig_k .. sig_1 setId role -- 1): the templates push
+                    // <setId:32> then <role> (OP_1 / OP_2), so role is on top.
+                    if (!(flags & SCRIPT_VERIFY_VAULT))
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+
+                    if (++nSetSigCount > 1)
+                        return set_error(serror, SCRIPT_ERR_SETSIG_COUNT);
+
+                    if (stack.size() < 2)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+                    const valtype vchRole = stacktop(-1);
+                    const valtype vchSetId = stacktop(-2);
+                    if (vchSetId.size() != 32 || vchRole.size() != 1 || (vchRole[0] != 1 && vchRole[0] != 2))
+                        return set_error(serror, SCRIPT_ERR_SETSIG);
+                    const uint256 setId(vchSetId);
+                    const uint8_t role = vchRole[0];
+                    popstack(stack);
+                    popstack(stack);
+
+                    std::optional<int> k = checker.SetThreshold(setId, role);
+                    if (!k || *k < 1 || *k > (int)stack.size())
+                        return set_error(serror, SCRIPT_ERR_SETSIG);
+
+                    std::vector<valtype> sigs;
+                    sigs.reserve(*k);
+                    for (int j = 0; j < *k; j++) {
+                        const valtype& vchSig = stacktop(-1);
+                        if (!IsCompactSetSignature(vchSig))
+                            return set_error(serror, SCRIPT_ERR_SETSIG);
+                        sigs.push_back(vchSig);
+                        popstack(stack);
+                    }
+                    // hand them over in push order, sig_1 first
+                    std::reverse(sigs.begin(), sigs.end());
+
+                    if (!checker.CheckSetSigs(setId, role, sigs, script, consensusBranchId))
+                        return set_error(serror, SCRIPT_ERR_SETSIG);
+
+                    stack.push_back(vchTrue);
+                }
+                break;
+
+                case OP_CHECKSETDORMANT:
+                {
+                    // (setId -- bool)
+                    if (!(flags & SCRIPT_VERIFY_VAULT))
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+
+                    if (stack.size() < 1)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+
+                    const valtype vchSetId = stacktop(-1);
+                    if (vchSetId.size() != 32)
+                        return set_error(serror, SCRIPT_ERR_SETSIG);
+                    popstack(stack);
+
+                    stack.push_back(checker.IsSetReleased(uint256(vchSetId)) ? vchTrue : vchFalse);
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1444,6 +1573,53 @@ bool TransactionSignatureChecker::CheckLockTime(const CScriptNum& nLockTime) con
     // inputs, but testing just this input minimizes the data
     // required to prove correct CHECKLOCKTIMEVERIFY execution.
     if (txTo->vin[nIn].IsFinal())
+        return false;
+
+    return true;
+}
+
+bool TransactionSignatureChecker::CheckSequence(const CScriptNum& nSequence) const
+{
+    // Relative lock times are supported by comparing the passed
+    // in operand to the sequence number of the input.
+    const int64_t txToSequence = (int64_t)txTo->vin[nIn].nSequence;
+
+    // Fail if the transaction's version number is not set high
+    // enough to trigger BIP 68 rules. (Ycash's nVersion is at least 4
+    // for every transaction that reaches this point under UPGRADE_VAULT.)
+    if (static_cast<uint32_t>(txTo->nVersion) < 2)
+        return false;
+
+    // Sequence numbers with their most significant bit set are not
+    // consensus constrained. Testing that the transaction's sequence
+    // number do not have this bit set prevents using this property
+    // to get around a CHECKSEQUENCEVERIFY check.
+    if (txToSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG)
+        return false;
+
+    // Mask off any bits that do not have consensus-enforced meaning
+    // before doing the integer comparisons
+    const uint32_t nLockTimeMask = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | CTxIn::SEQUENCE_LOCKTIME_MASK;
+    const int64_t txToSequenceMasked = txToSequence & nLockTimeMask;
+    const CScriptNum nSequenceMasked = nSequence & nLockTimeMask;
+
+    // There are two kinds of nSequence: lock-by-blockheight
+    // and lock-by-blocktime, distinguished by whether
+    // nSequenceMasked < CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG.
+    //
+    // We want to compare apples to apples, so fail the script
+    // unless the type of nSequenceMasked being tested is the same as
+    // the nSequenceMasked in the transaction.
+    if (!(
+        (txToSequenceMasked <  CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked <  CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) ||
+        (txToSequenceMasked >= CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked >= CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG)
+    )) {
+        return false;
+    }
+
+    // Now that we know we're comparing apples-to-apples, the
+    // comparison is a simple numeric one.
+    if (nSequenceMasked > txToSequenceMasked)
         return false;
 
     return true;

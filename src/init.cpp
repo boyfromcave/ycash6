@@ -1500,7 +1500,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             if (consensus.vUpgrades[i].nActivationHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
                 UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex(i), nActivationHeight);
             }
-            nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
+            // Vault activates without NU5..NU6.2 (docs/plans/yellowback-upgrade-plan.md §15.0
+            // U-9): its height must not back-fill theirs, or -nuparams=6d5b7a31:<h> alone would
+            // also activate NU5, NU6, NU6.1 and NU6.2 at <h>.
+            if (i != Consensus::UPGRADE_VAULT) {
+                nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
+            }
         }
     }
 

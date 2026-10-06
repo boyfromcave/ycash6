@@ -51,6 +51,9 @@ enum UpgradeIndex : uint32_t {
     UPGRADE_NU6,
     UPGRADE_NU6_1,
     UPGRADE_NU6_2,
+    // Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md §15.1). Activates without NU5,
+    // which Ycash never activates; CurrentEpoch() takes the highest active index.
+    UPGRADE_VAULT,
     // Add new network upgrades before this line.
     // NOTE: Also add new upgrades to NetworkUpgradeInfo in upgrades.cpp
     UPGRADE_ZFUTURE,

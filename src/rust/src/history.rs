@@ -53,7 +53,10 @@ fn dispatch<S, T>(cbranch: u32, input: S, v1: impl FnOnce(S) -> T, v2: impl FnOn
         | BranchId::Overwinter
         | BranchId::Sapling
         | BranchId::Heartwood
-        | BranchId::Canopy => v1(input),
+        | BranchId::Canopy
+        // Ycash activates Vault without NU5, so ConnectBlock builds V1 leaves
+        // (no Orchard root) in the Vault epoch; the tree must match them.
+        | BranchId::Vault => v1(input),
         _ => v2(input),
     }
 }
