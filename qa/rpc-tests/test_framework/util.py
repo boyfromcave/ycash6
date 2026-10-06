@@ -50,6 +50,13 @@ NU6_2_BRANCH_ID = 0x5437F330
 # activate on regtest with nuparams(VAULT_BRANCH_ID, h).
 VAULT_BRANCH_ID = 0x6D5B7A31
 
+def signing_branch_id(node):
+    """The consensus branch id a transaction signed now must commit to: the epoch of the next
+    block on ``node``'s tip (``getblockchaininfo``'s ``consensus.nextblock``), so a Python
+    signer picks VAULT_BRANCH_ID from the activation height on, and the previous epoch's id
+    before it."""
+    return int(node.getblockchaininfo()['consensus']['nextblock'], 16)
+
 # The maximum number of nodes a single test can spawn
 MAX_NODES = 8
 # Don't assign rpc or p2p ports lower than this
