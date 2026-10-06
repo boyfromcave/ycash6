@@ -37,6 +37,7 @@ from test_framework.util import PortSeed, get_rpc_proxy, hex_str_to_bytes       
 from test_framework.yellowback_util import build_mint_tx                                 # noqa: E402
 from test_framework.yellowback_attest import build_carrier_tx, build_mint_tx_v3          # noqa: E402
 import test_framework.yellowback_model as ym                                             # noqa: E402
+import test_framework.yellowback_util as _yu                                             # noqa: E402
 
 
 def main():
@@ -45,7 +46,9 @@ def main():
     ap.add_argument("--cents", type=int, required=True); ap.add_argument("--lock-blocks", type=int, required=True)
     ap.add_argument("--ref-height", type=int, required=True); ap.add_argument("--collateral-zat", type=int, required=True)
     ap.add_argument("--fee-addr"); ap.add_argument("--bundle-hex"); ap.add_argument("--attest-fee-addr"); ap.add_argument("--attest-fee-zat", type=int)
+    ap.add_argument("--attestor-set", required=True)
     args = ap.parse_args()
+    _yu.ATTESTOR_SET[0] = args.attestor_set          # U-23: the V template names the YED attestor set
     with open(os.path.join(os.path.abspath(args.dir), "devnet.json")) as f:
         state = json.load(f)
     PortSeed.n = state["portseed"]
