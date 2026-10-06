@@ -37,7 +37,7 @@ namespace yellowback {
 
 std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFeeVoutOut)
 {
-    const CScript vault = VaultScript(s.lockHeight, s.owner, s.claimHeight);
+    const CScript& vault = s.vaultScript;          // U-23: the primitive's V template
     if (vault.empty()) throw std::runtime_error("mint-bad-lock: cannot build the vault script");
     feeVout = s.payee.has_value() ? 3 : -1;
     // v3 AFEE-1: the attestor fee after the pool fee (vout[4] with both, vout[3] under FEE-0)
@@ -48,7 +48,7 @@ std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFee
                                                                      attestFeeVout < 0 ? FEE_VOUT_NONE : (uint8_t)attestFeeVout));
     if (payload.empty()) throw std::runtime_error("cannot encode the mint payload");
     std::vector<CTxOut> vout;
-    vout.push_back(CTxOut(s.collateralZat, P2SHScript(vault)));                        // vout[0] vault
+    vout.push_back(CTxOut(s.collateralZat, vault));                                     // vout[0] vault (bare V)
     vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(s.owner.GetID())));      // vout[1] token
     vout.push_back(CTxOut(0, PayloadScript(payload)));                                  // vout[2] payload
     if (s.payee.has_value()) vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value())));   // vout[3] fee
@@ -68,11 +68,64 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
         yedValue += c.token.nValue;
         yedIn += c.token.cents;
     }
+    CAmount fundValue = 0;
+    for (const auto& f : s.funding) {
+        plan.vin.push_back(CTxIn(f.first));
+        fundValue += f.second;
+    }
     const bool change = s.withPayload && s.changeCents > 0;
     const bool fee = s.withPayload && s.payee.has_value();
     const bool attest = s.withPayload && s.attestPayee.has_value();
     const bool residual = s.withPayload && s.residualZat > 0;
     if (residual && !s.ownerPubKey.IsValid()) throw std::runtime_error("vault-not-found: the residual needs the owner key");
+    if (!s.ownerPath && s.withPayload) {
+        // U-23: the claim moves the whole vault into intents; everything else is paid by the other inputs.
+        if (!s.collateralScript.has_value()) throw std::runtime_error("bad-address: a claim pays an intent, whose recipient is a transparent script; pass a transparent address");
+        const CAmount residualValue = residual ? s.residualZat : 0;
+        plan.collateralOut = s.vaultValue - residualValue;
+        if (plan.collateralOut <= 0) throw std::runtime_error("vault-value-too-small: the residual takes the whole vault");
+        const CAmount spare = s.carrierValue + yedValue + fundValue - s.networkFee - (fee ? s.feeZat : 0) - (attest ? s.attestFeeZat : 0) - (change ? TOKEN_VALUE : 0);
+        if (spare < 0) throw std::runtime_error(strprintf("insufficient-yec: the claim's fees need %s more", FormatMoney(-spare)));
+        plan.burnCents = yedIn - s.changeCents;
+        enum CSlot { INTENT, FEE, CHANGE, ATTEST, RESIDUAL, PAYLOAD, FUNDCHANGE };
+        std::vector<CSlot> order = { INTENT };
+        if (fee) order.push_back(FEE);
+        if (change) order.push_back(CHANGE);
+        if (attest && !fee && !change) order.push_back(PAYLOAD);   // AFEE-1 excludes vout[1]: the payload takes it
+        if (attest) order.push_back(ATTEST);
+        if (residual) order.push_back(RESIDUAL);
+        if (std::find(order.begin(), order.end(), PAYLOAD) == order.end()) order.push_back(PAYLOAD);
+        if (spare >= 1000 && !s.fundingChange.empty()) order.push_back(FUNDCHANGE);   // below that it joins the network fee
+        std::vector<Assignment> assignments;
+        for (size_t i = 0; i < order.size(); i++) {
+            switch (order[i]) {
+            case FEE: plan.feeVout = (int)i; break;
+            case CHANGE: plan.changeVout = (int)i; assignments.push_back(Assignment((uint8_t)i, (uint32_t)s.changeCents)); break;
+            case ATTEST: plan.attestFeeVout = (int)i; break;
+            case RESIDUAL: plan.residualVout = (int)i; break;
+            case FUNDCHANGE: plan.fundingChangeVout = (int)i; break;
+            default: break;
+            }
+        }
+        std::vector<unsigned char> payload = EncodePayload(Payload::Redeem((uint32_t)s.refHeight, plan.feeVout < 0 ? FEE_VOUT_NONE : (uint8_t)plan.feeVout, assignments,
+                                                                           plan.attestFeeVout < 0 ? FEE_VOUT_NONE : (uint8_t)plan.attestFeeVout));
+        if (payload.empty()) throw std::runtime_error("cannot encode the redeem payload");
+        const CScript claimant = vault::BuildIntent(vault::IntentFor(s.vaultParams, s.vaultScript, s.collateralScript.value()));
+        const CScript ownerIntent = residual ? vault::BuildIntent(vault::IntentFor(s.vaultParams, s.vaultScript, GetScriptForDestination(s.ownerPubKey.GetID()))) : CScript();
+        if (claimant.empty() || (residual && ownerIntent.empty())) throw std::runtime_error("vault-not-found: cannot build the claim intents");
+        for (CSlot slot : order) {
+            switch (slot) {
+            case INTENT: plan.vout.push_back(CTxOut(plan.collateralOut, claimant)); break;
+            case FEE: plan.vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value()))); break;
+            case CHANGE: plan.vout.push_back(CTxOut(TOKEN_VALUE, s.changeScript)); break;
+            case ATTEST: plan.vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value()))); break;
+            case RESIDUAL: plan.vout.push_back(CTxOut(residualValue, ownerIntent)); break;
+            case PAYLOAD: plan.vout.push_back(CTxOut(0, PayloadScript(payload))); break;
+            case FUNDCHANGE: plan.vout.push_back(CTxOut(spare, s.fundingChange)); break;
+            }
+        }
+        return plan;
+    }
     plan.collateralOut = s.vaultValue + s.carrierValue + yedValue - s.networkFee - (fee ? s.feeZat : 0) - (attest ? s.attestFeeZat : 0)
                          - (residual ? s.residualZat : 0) - (change ? TOKEN_VALUE : 0);
     if (plan.collateralOut <= 0) throw std::runtime_error("vault-value-too-small: the vault does not cover the fees");
@@ -156,10 +209,10 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
 {
     if (out.builder) throw std::runtime_error("FinishSapling must run before SignVaultSpend");
     const size_t extra = out.carrierVin >= 0 ? 2 : 1;
-    if (out.tx.vin.size() != out.yedPrevs.size() + extra) throw std::runtime_error("vault spend input count mismatch");
+    if (out.tx.vin.size() != out.yedPrevs.size() + out.fundPrevs.size() + extra) throw std::runtime_error("vault spend input count mismatch");
     if (ownerPath) {
-        // Owner signature: ZIP-243 over the vault script with the vault's nValue and the epoch
-        // branch id (both bound by the digest, mapping §13.1), as rpc/atomicswap.cpp signs by hand.
+        // Owner signature: ZIP-243 over the V script (bare: it is the scriptCode) with the vault's nValue
+        // and the epoch branch id (both bound by the digest, mapping §13.1), as rpc/atomicswap.cpp signs by hand.
         CKey ownerKey;
         if (!keystore.GetKey(out.ownerPubKey.GetID(), ownerKey)) throw std::runtime_error("vault-not-owned: owner key not available");
         const CTransaction txc(out.tx);
@@ -167,13 +220,19 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
         valtype ownerSig;
         if (!ownerKey.Sign(hash, ownerSig)) throw std::runtime_error("owner signature failed");
         ownerSig.push_back((unsigned char)SIGHASH_ALL);
-        out.tx.vin[0].scriptSig = OwnerScriptSig(ownerSig, out.vaultScript);
+        out.tx.vin[0].scriptSig = CScript() << ownerSig << OP_2;          // U-23: the V's owner selector
     } else {
-        out.tx.vin[0].scriptSig = ClaimScriptSig(out.vaultScript);
+        out.tx.vin[0].scriptSig = CScript() << OP_4;                      // U-23: the V's APP selector (the claim)
     }
     for (size_t i = 0; i < out.yedPrevs.size(); i++) {
         if (!SignSignature(keystore, out.yedPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
+        }
+    }
+    for (size_t i = 0; i < out.fundPrevs.size(); i++) {
+        const size_t nIn = 1 + out.yedPrevs.size() + i;
+        if (!SignSignature(keystore, out.fundPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), nIn, out.fundPrevs[i].second, SIGHASH_ALL, branchId)) {
+            throw std::runtime_error(strprintf("failed to sign fee input %u", (unsigned)i));
         }
     }
     if (out.carrierVin >= 0) SignCarrierInput(out.tx, (unsigned int)out.carrierVin, out.carrier.value(), keystore, branchId);
@@ -209,15 +268,20 @@ CScript PendingCarrierSig(const CarrierRecord& c)
     return CarrierScriptSig(c.bundle, valtype(MAX_SIG_SIZE, 0x30), CarrierScript(c.pk, BundleHash(c.bundle)));
 }
 
-VaultSpendPlan PlanPricedVaultSpend(VaultSpendShape& shape, const CKeyStore& keystore, const std::optional<CarrierRecord>& carrier)
+VaultSpendPlan PlanPricedVaultSpend(VaultSpendShape& shape, const CKeyStore& keystore, const std::optional<CarrierRecord>& carrier,
+                                    const std::vector<std::pair<CScript, CAmount>>& fundPrevs)
 {
-    // The fee moves collateralOut alone, never the shape, so one repricing settles it.
+    // The fee moves collateralOut (or, on a claim, the funding change) alone, never the shape, so one
+    // repricing settles it (a claim whose funding no longer covers it throws insufficient-yec).
     VaultSpendPlan plan = PlanVaultSpend(shape);
     CMutableTransaction probe;
     probe.vin = plan.vin;
     probe.vout = plan.vout;
-    probe.vin[0].scriptSig = shape.ownerPath ? OwnerScriptSig(valtype(MAX_SIG_SIZE, 0x30), shape.vaultScript) : ClaimScriptSig(shape.vaultScript);
+    // U-23: the V's selectors -- owner `<sig> OP_2`, claim `OP_4` (the V is bare: no script push)
+    probe.vin[0].scriptSig = shape.ownerPath ? (CScript() << valtype(MAX_SIG_SIZE, 0x30) << OP_2) : (CScript() << OP_4);
     for (size_t i = 0; i < shape.yedInputs.size(); i++) probe.vin[i + 1].scriptSig = PendingP2PKHSig(shape.yedInputs[i].token.scriptPubKey, keystore);
+    for (size_t i = 0; i < fundPrevs.size() && 1 + shape.yedInputs.size() + i < probe.vin.size(); i++)
+        probe.vin[1 + shape.yedInputs.size() + i].scriptSig = PendingP2PKHSig(fundPrevs[i].first, keystore);
     if (carrier.has_value()) probe.vin.push_back(CTxIn(carrier->outpoint, PendingCarrierSig(carrier.value())));
     const CAmount fee = NetworkFee(probe, 0, shape.collateralScript.has_value() ? 0 : 1);
     if (fee > shape.networkFee) {
@@ -692,8 +756,9 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     const CPubKey owner = vault.OwnerKey();
     VaultSpendShape shape;
     shape.vaultOut = vaultOut;
-    shape.vaultScript = VaultScript((uint32_t)vault.lockHeight, owner, (uint32_t)vault.claimHeight);
+    shape.vaultScript = YedVaultScript(ctx.params, owner, vault.lockHeight);       // U-23: the V template
     if (shape.vaultScript.empty()) throw std::runtime_error("vault-not-found: cannot reconstruct the vault script");
+    shape.vaultParams = YedVaultParams(ctx.params, owner, vault.lockHeight);
     shape.vaultValue = vault.collateralZat;
     shape.lockHeight = (uint32_t)vault.lockHeight;
     shape.claimHeight = (uint32_t)vault.claimHeight;
@@ -749,7 +814,6 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         out.payee = shape.payee;
         out.feeZat = shape.feeZat;
     }
-
     const uint32_t expiry = ctx.Expiry(R);
     if (dest.kind == AddressChoice::TRANSPARENT) {
         shape.collateralScript = GetScriptForDestination(dest.keyId);
@@ -760,15 +824,51 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         shape.collateralScript = GetScriptForDestination(fresh.GetID());
         out.collateralTo = KeyIO(::Params()).EncodeDestination(CTxDestination(fresh.GetID()));
     }
-    // P-2: the fee is the conventional fee of this shape; it comes out of the collateral.
-    VaultSpendPlan plan = PlanPricedVaultSpend(shape, ctx.wallet, extras ? std::optional<CarrierRecord>(extras->carrier) : std::nullopt);
+    const std::optional<CarrierRecord> pricedCarrier = extras ? std::optional<CarrierRecord>(extras->carrier) : std::nullopt;
+    VaultSpendPlan plan;
+    CPubKey fundingChangeKey;
+    if (kind == BuiltKind::CLAIM) {
+        // U-23: the vault's value goes to intents, so the network fee, the pool and attestor fees and the YED
+        // change's TOKEN_VALUE come from this wallet's YEC (after the YED inputs, before the carrier).
+        if (dest.kind == AddressChoice::SAPLING) throw std::runtime_error("bad-address: a claim pays an intent, whose recipient is a transparent script; pass a transparent address");
+        CAmount yedValue = 0;
+        for (const YedCoin& c : shape.yedInputs) yedValue += c.token.nValue;
+        // P-2 (6.20.0): the network fee is the conventional fee of the transaction the funding makes, so
+        // the funding is selected for the fee in force and selected again (with a margin) when the priced
+        // fee came out higher; below 1,000 zat the remainder joins the fee (PlanVaultSpend).
+        for (int pass = 0; ; pass++) {
+            shape.funding.clear();
+            shape.fundingChange.clear();
+            out.fundPrevs.clear();
+            const CAmount needed = shape.networkFee + shape.feeZat + (shape.attestPayee.has_value() ? shape.attestFeeZat : 0) +
+                                   (shape.changeCents > 0 ? TOKEN_VALUE : 0) - shape.carrierValue - yedValue + (pass > 0 ? 1000 : 0);
+            if (needed > 0) {
+                CMutableTransaction scratch;
+                ctx.SelectYec(needed, scratch, out.fundPrevs);
+                for (size_t i = 0; i < scratch.vin.size(); i++) shape.funding.push_back(std::make_pair(scratch.vin[i].prevout, out.fundPrevs[i].second));
+                if (!fundingChangeKey.IsValid()) fundingChangeKey = ctx.FreshKey("yellowback-change");
+                shape.fundingChange = GetScriptForDestination(fundingChangeKey.GetID());
+            }
+            const CAmount feeBefore = shape.networkFee;
+            try {
+                plan = PlanPricedVaultSpend(shape, ctx.wallet, pricedCarrier, out.fundPrevs);
+                break;
+            } catch (const std::runtime_error& e) {
+                const bool short_ = std::string(e.what()).rfind("insufficient-yec", 0) == 0;
+                if (!short_ || shape.networkFee == feeBefore || pass >= 3) throw;
+            }
+        }
+    } else {
+        // P-2: the fee is the conventional fee of this shape; it comes out of the collateral.
+        plan = PlanPricedVaultSpend(shape, ctx.wallet, pricedCarrier);
+    }
     ctx.fee = shape.networkFee;
     if (dest.kind == AddressChoice::SAPLING) {
         // Sapling shape (§4.6): the collateral is one Sapling note; vault, YED and carrier inputs go
         // in unsigned and are signed by SignVaultSpend() after FinishSapling().
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry);
         b.SetLockTime(plan.nLockTime);
-        b.AddTransparentInputUnsigned(vaultOut, ctx.SpentScript(vaultOut, P2SHScript(shape.vaultScript)), vault.collateralZat, 0xFFFFFFFE);
+        b.AddTransparentInputUnsigned(vaultOut, ctx.SpentScript(vaultOut, shape.vaultScript), vault.collateralZat, 0xFFFFFFFE);
         for (const YedCoin& c : shape.yedInputs) b.AddTransparentInputUnsigned(c.outpoint, c.token.scriptPubKey, c.token.nValue);
         if (extras) {
             const CarrierRecord& cr = extras->carrier;
@@ -921,11 +1021,10 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     g.claimHeight = g.lockHeight + p.grace;
     if (g.claimHeight >= (int64_t)LOCKTIME_THRESHOLD) throw std::runtime_error("mint-bad-lock: lockHeight + GRACE reaches LOCKTIME_THRESHOLD");
 
-    // MINTPOL-1 (§4.6): Snapshots[R].activation == ACTIVE, haltMask == 0, the cap has room.
+    // MINTPOL-1 (§4.6): haltMask == 0 at R, the cap has room (the activation state machine left with the upgrade, §6).
     std::optional<Snapshot> S = SnapshotAt(ctx.st, p, R);
-    if (!S.has_value() || !S->activation.IsActive() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
+    if (!S.has_value() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
     if (S->haltMask & HALT_NO_PRICE) throw std::runtime_error("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
-    if (S->haltMask & (HALT_PARTICIPATION | HALT_ENFORCEMENT)) throw std::runtime_error("mintpol-participation: minting is halted while miner participation is low (ACT-4)");
     // W16 / W20: the classes whose minimum ratio reaches the recapitalisation floor -- they mint through a
     // global-ratio halt and above the supply cap; the refusals below name them.
     const bool recap = MinRatioBps(ctx.params.baseRatioBps[g.termClass], S->sigmaMultBps) >= ctx.params.recapRatioBps;
@@ -1072,12 +1171,6 @@ void DryRunOrThrow(Context& ctx, const BuiltTx& out)
     case BuiltKind::EQUIVOCATION:
         if (!log.has_value() || log->Type() != TxLogType::EQUIVOCATION) throw std::runtime_error("not-equivocation: EQV-1 would not eject at height " + std::to_string(H));
         return;
-    case BuiltKind::REVIVE:
-        if (!log.has_value() || log->Type() != TxLogType::ATTESTOR_REVIVE) throw std::runtime_error("not-dormant: REV-1 would not revive at height " + std::to_string(H));
-        return;
-    case BuiltKind::REGISTER:
-        if (!log.has_value() || log->Type() != TxLogType::ATTESTOR_REGISTER) throw std::runtime_error("register-refused: REG-A1 would not admit this registration at height " + std::to_string(H));
-        return;
     default:
         return;
     }
@@ -1187,11 +1280,9 @@ ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, co
     pf.claimPath = c.claimPath;
     pf.residualZat = c.residualZat;
     CheckMaxBurn(vault.mintedCents, maxBurnCents);   // the debt alone; BuildClaim checks the exact burn
-    if (minOutZat > 0) {
-        BuiltTx probe;
-        AttestFeeFor(ctx, pf.refHeight, pf.selector, f, vault.collateralZat, probe);
-        CheckMinOut(vault.collateralZat - FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) - probe.attestFeeZat - c.residualZat, minOutZat);
-    }
+    // U-23: what reaches `to` is the claimant intent, the collateral less the RED-5 residual (the
+    // fees are paid from the claimant's own YEC), exactly BuildClaim's collateralOut.
+    if (minOutZat > 0) CheckMinOut(vault.collateralZat - c.residualZat, minOutZat);
     return pf;
 }
 
@@ -1322,6 +1413,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;
+    shape.vaultScript = YedVaultScript(p, owner, g.lockHeight);       // U-23
     int feeVout = -1, attestFeeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(shape, feeVout, &attestFeeVout);
     CAmount outputs = 0;
@@ -1604,53 +1696,6 @@ BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserv
     return out;
 }
 
-BuiltTx BuildRegisterAttestor(YellowbackWallet& yw, CAmount bondZat, int lockBlocks, uint8_t flags, CReserveKey& reservekey)
-{
-    Context ctx(yw);
-    const Params& p = ctx.params;
-    if (bondZat < p.bondMin) throw std::runtime_error(strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
-    if (lockBlocks < p.bondMinLock) throw std::runtime_error(strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
-    const int64_t locktime = (int64_t)ctx.chainHeight + 1 + lockBlocks;
-    if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw std::runtime_error("lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
-    const CPubKey hot = ctx.FreshKey("yellowback-attestor");
-    const CPubKey bond = ctx.FreshKey("yellowback-bond");
-    const CScript bondScript = BondScript(bond, (uint32_t)locktime);
-    if (bondScript.empty()) throw std::runtime_error("cannot build the bond script");
-    std::vector<unsigned char> payload = EncodePayload(Payload::AttestorRegister(hot, bond, (uint32_t)locktime, flags));
-    if (payload.empty()) throw std::runtime_error("cannot encode the registration payload");
-
-    BuiltTx out;
-    out.kind = BuiltKind::REGISTER;
-    out.refHeight = ctx.indexHeight;
-    out.attestorPubKey = hot;
-    out.bondPubKey = bond;
-    out.bondScript = bondScript;
-    out.bondZat = bondZat;
-    out.bondLocktime = (uint32_t)locktime;
-    out.flags = flags;
-    out.warning = ctx.KeypoolWarning();
-    CMutableTransaction mtx;
-    std::vector<std::pair<CScript, CAmount>> prevs;
-    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
-        mtx = ctx.NewTx(ctx.Expiry(ctx.chainHeight));
-        mtx.vout.push_back(CTxOut(bondZat, P2SHScript(bondScript)));       // vout[0] the bond
-        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));             // vout[1] the payload
-        prevs.clear();
-        const CAmount needed = bondZat + ctx.fee;
-        const CAmount selected = ctx.SelectYec(needed, mtx, prevs);
-        const CAmount change = selected - needed;
-        if (change > 0) {
-            CPubKey changeKey;
-            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-        }
-    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
-    ctx.SignInputs(mtx, prevs, 0);
-    out.tx = mtx;
-    DryRunOrThrow(ctx, out);   // REG-A1 at the next height
-    return out;
-}
-
 BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string& to)
 {
     Context ctx(yw);
@@ -1760,7 +1805,7 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
     return a;
 }
 
-BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, CReserveKey& reservekey)
+BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd)
 {
     Context ctx(yw);
     std::optional<AttestorRecord> rec = ctx.st.GetAttestor(seq);
@@ -1777,25 +1822,8 @@ BuiltTx BuildRevive(YellowbackWallet& yw, uint16_t seq, MicroUsd priceMicroUsd, 
     out.refHeight = cited;
     out.seq = seq;
     out.attestation = a;
-    std::vector<unsigned char> payload = EncodePayload(Payload::AttestorRevive(a.seq, a.priceMicroUsd, a.citedHeight, a.sig));
-    if (payload.empty()) throw std::runtime_error("cannot encode the revive payload");
-    CMutableTransaction mtx;
-    std::vector<std::pair<CScript, CAmount>> prevs;
-    do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
-        mtx = ctx.NewTx(ctx.Expiry(cited));
-        mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
-        prevs.clear();
-        const CAmount selected = ctx.SelectYec(ctx.fee, mtx, prevs);
-        const CAmount change = selected - ctx.fee;
-        if (change > 0) {
-            CPubKey changeKey;
-            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
-        }
-    } while (ctx.Reprice(ctx.FeeOf(mtx, prevs, 0)));
-    ctx.SignInputs(mtx, prevs, 0);
-    out.tx = mtx;
-    DryRunOrThrow(ctx, out);   // REV-1 at the next height
+    out.attestorPubKey = hot;
+    // P4-b: no transaction here; the caller broadcasts a SET_HEARTBEAT of the member key (set_heartbeat)
     return out;
 }
 
@@ -1807,8 +1835,8 @@ void CheckEquivocation(YellowbackWallet& yw, const Attestation& a, const Attesta
     if (a.priceMicroUsd == b.priceMicroUsd) throw std::runtime_error("not-equivocation: the prices are equal");
     std::optional<AttestorRecord> rec = ctx.st.GetAttestor(a.seq);
     if (!rec.has_value()) throw std::runtime_error(strprintf("not-equivocation: no attestor with seq %u", (unsigned)a.seq));
-    if (rec->Status() == AttestorStatus::WITHDRAWN || rec->Status() == AttestorStatus::EJECTED) {
-        throw std::runtime_error(strprintf("not-equivocation: seq %u is %s", (unsigned)a.seq, AttestorStatusName(rec->Status())));
+    if (rec->bondSpentHeight != 0 || rec->Frozen()) {   // P4-b: EQV-1 freezes an unspent, unfrozen bond
+        throw std::runtime_error(strprintf("not-equivocation: the bond of seq %u is %s", (unsigned)a.seq, rec->Frozen() ? "frozen" : "spent"));
     }
     if ((int64_t)a.citedHeight < ctx.params.startHeight || (int64_t)a.citedHeight > ctx.chainHeight) {
         throw std::runtime_error(strprintf("not-equivocation: cited height %u is not in this chain's index", a.citedHeight));
@@ -1912,19 +1940,6 @@ void DryRunBuilt(YellowbackWallet& yw, const BuiltTx& out)
 {
     Context ctx(yw);
     DryRunOrThrow(ctx, out);
-}
-
-BuiltTx BuildSweep(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to)
-{
-    Context ctx(yw);
-    const COutPoint vaultOut(vaultTxid, 0);
-    const VaultRecord vault = ctx.GetVault(vaultOut);
-    if (vault.Status() != VaultStatus::ACTIVE) throw std::runtime_error(strprintf("vault-not-active: the vault is %s", VaultStatusName(vault.Status())));
-    if (!yw.IsMineVault(vault)) throw std::runtime_error("vault-not-owned: the vault owner key is not in this wallet");
-    if ((int64_t)ctx.indexHeight < (int64_t)vault.lockHeight) {
-        throw std::runtime_error(strprintf("vault-locked: the vault is locked until height %d (tip %d)", vault.lockHeight, ctx.indexHeight));
-    }
-    return BuildVaultSpend(ctx, BuiltKind::SWEEP, vaultOut, vault, to, ctx.spendRefHeight);
 }
 
 void FinishSapling(BuiltTx& out)

@@ -24,15 +24,6 @@ void SetCommon(Params& p)
     p.pMidWindow  = 576;  p.pMidMinFill  = 384;    // ceil(2W/3) (L9)
     p.pSlowWindow = 2016; p.pSlowMinFill = 1344;
 
-    p.signalWindow        = 2016;
-    p.activationThreshold = 1512;   // 75 %
-    p.participationFloor  = 1210;   // 60 %
-    p.activationDelay     = 2016;
-    p.enforcementFloor    = 1008;   // 50 % (L3)
-    p.enforcementResume   = 1210;   // 60 %
-    p.valveBlocks         = 6;      // L7
-    p.abandonBlocks       = 34560;  // = GRACE (W21): thirty days before the module declares itself abandoned (L10, L12)
-
     p.nReg            = 576;
     p.peerLag         = 10;
     p.peerMin         = 5;
@@ -44,6 +35,7 @@ void SetCommon(Params& p)
     p.feeBps = 15;                  // H-4 (was 25)
 
     p.grace              = 34560;   // 30 d
+    p.claimDelay         = 1152;    // CLAIM_DELAY 1 d (U-23): the window in which one attestor can cancel a claim
     p.claimThresholdBps  = 11000;
     p.supplyCapBps       = 1500;    // 15 % of market cap (V21)
     p.globalRatioHaltBps = 30000;       // H-11 (was 25,000)
@@ -66,8 +58,6 @@ void SetCommon(Params& p)
     p.nPenalty       = 288;         // L6 wallet defaults
     p.accuracyWindow = 576;
     p.payeeTiltBps   = 10000;
-
-    p.enforceUntilHeight = 0;       // set per release beside startHeight (L8)
 
     // v3 §3.1: price attestation
     p.attestArmMin        = 7;      // ARM-1 (H-2; D-4 had 5)
@@ -108,10 +98,8 @@ void SetCommon(Params& p)
 } // namespace
 
 Params::Params()
-    : startHeight(0), enforceUntilHeight(0),
+    : startHeight(0), claimDelay(0),
       pFastWindow(0), pMidWindow(0), pSlowWindow(0), pFastMinFill(0), pMidMinFill(0), pSlowMinFill(0),
-      signalWindow(0), activationThreshold(0), participationFloor(0), activationDelay(0),
-      enforcementFloor(0), enforcementResume(0), valveBlocks(0), abandonBlocks(0),
       nReg(0), peerLag(0), peerMin(0), deviationBps(0), accuracyBandBps(0), payeeWindow(0),
       feeMin(0), feeBps(0),
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), recapRatioBps(0), divergenceBps(0),
@@ -146,16 +134,10 @@ const Params& MainParams()
         m.network = "main";
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
-        // startHeight and enforceUntilHeight are set per release (§3.1, K10, L8; Phase 10).
-        // Unset (hardening plan F-5, H-8, 2026-10-05): the 6.21.0-rc1 values (3,075,000 /
-        // 3,495,480) are withdrawn, so -yellowback refuses mainnet ("no start height") exactly as on
-        // testnet, until the release that passes the launch gates sets them again, identically on
-        // both node lines: START at least two weeks of blocks past that release (M14; 1,152 blocks
-        // a day at 75 s), ENFORCE_UNTIL = START + BLOCKS_PER_YEAR (420,480, L8; Ycash mainnet
-        // schedules no network upgrade, NU5 and later unset in chainparams.cpp). The release
-        // workflow refuses to tag while they are unset (qa/yellowback-release-heights.sh).
+        // U-22: startHeight is the UPGRADE_VAULT activation height and attestorSetId the network's
+        // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
+        // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
         m.startHeight = 0;
-        m.enforceUntilHeight = 0;
         return m;
     }();
     return p;
@@ -168,7 +150,7 @@ const Params& TestParams()
         t.network = "test";
         SetCommon(t);
         t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
-        // startHeight and enforceUntilHeight are set per release (Phase 9).
+        // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
         t.startHeight = 0;
         return t;
     }();
@@ -193,8 +175,8 @@ const char* BundleCarrierName(BundleCarrier carrier)
     return "unknown";
 }
 
-/** The §3.1 regtest column; only the seven arguments come from flags (M13). */
-Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
+/** The §3.1 regtest column; only the seven arguments come from the chain and flags (M13). */
+Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const uint256& attestorSetId,
                      int attestArmMin, BundleCarrier bundleCarrier, bool mintRequiresArmed)
 {
     Params r;
@@ -204,19 +186,12 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.pFastWindow = 8;  r.pFastMinFill = 4;
     r.pMidWindow  = 24; r.pMidMinFill  = 16;
     r.pSlowWindow = 64; r.pSlowMinFill = 43;
-    r.signalWindow        = 64;
-    r.activationThreshold = 48;
-    r.participationFloor  = 39;
-    r.activationDelay     = 64;
-    r.enforcementFloor    = 32;
-    r.enforcementResume   = 39;
-    r.valveBlocks         = 6;
-    r.abandonBlocks       = 128;
     r.nReg    = 24;
     r.peerLag = 4;
     r.peerMin = 3;
     r.payeeWindow = 10;
     r.grace = 24;
+    r.claimDelay = 10;
     // The hardening plan's mainnet values (H-4, H-11, H-12) stay out of the regtest column: its
     // scripts' fee, cap and recapitalisation arithmetic is written against the v3 values.
     r.feeBps             = 25;
@@ -255,7 +230,7 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.startHeight        = startHeight;
     r.sigmaRefBps        = sigmaRefBps;
     r.supplyCapBps       = supplyCapBps;
-    r.enforceUntilHeight = enforceUntil;
+    r.attestorSetId      = attestorSetId;
     r.attestArmMin       = attestArmMin;
     r.bundleCarrier      = bundleCarrier;
     r.mintRequiresArmed  = mintRequiresArmed;
@@ -271,24 +246,12 @@ const Params& SelectParams(const std::vector<Params>& sets, int height)
     return best ? *best : sets.front();
 }
 
-// Rule: ACT-5
-bool ParamSetStartAdmissible(int startHeight, int previousEnforceUntilHeight, int signalWindow,
-                             const std::function<bool(int)>& enforcementHaltedAt)
-{
-    if (previousEnforceUntilHeight > 0 && startHeight >= previousEnforceUntilHeight) return true;   // L8
-    if (signalWindow <= 0) return false;
-    for (int h = startHeight - signalWindow; h <= startHeight - 1; h++) {                              // W19: a full window of ENFORCEMENT
-        if (h < 0 || !enforcementHaltedAt(h)) return false;
-    }
-    return true;
-}
-
 const Params& ParamsForNetwork(const std::string& networkId)
 {
     if (networkId == "main") return MainParams();
     if (networkId == "test") return TestParams();
     if (networkId == "regtest") {
-        static Params r = RegtestParams(0, 0, 0, 0);
+        static Params r = RegtestParams(0, 0, 0, uint256());
         return r;
     }
     throw std::runtime_error("yellowback: unknown network " + networkId);

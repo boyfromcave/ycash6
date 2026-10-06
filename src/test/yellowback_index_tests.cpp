@@ -17,6 +17,7 @@
 // fake index is never "contained" (the re-verification case uses a real
 // 100-block chain instead). Nothing here starts a node or the network.
 
+#include "vault/act.h"
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
 #include "yellowback/index.h"
@@ -47,6 +48,35 @@
 
 #include <deque>
 #include <set>
+
+/** The YED attestor set the regtest parameters of these cases name (U-22). */
+static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
+/** P4-b: the attestor set of the live fixtures is a primitive set: this SET_CREATE (open, 15 seats, maturity 1). */
+static CMutableTransaction AttestorSetCreate()
+{
+    vault::Act a;
+    a.type = vault::ACT_SET_CREATE;
+    a.create.seats = 15;
+    a.create.unlockThreshold = 1;
+    a.create.cancelThreshold = 1;
+    a.create.slashThreshold = 1;
+    a.create.flags = vault::SET_FLAG_OPEN;
+    a.create.rateWindow = 1000;
+    a.create.livenessWindow = 1000000;
+    a.create.bondMin = 1;
+    a.create.maturity = 1;
+    unsigned char d[32];
+    memset(d, 0x42, 32);
+    CKey admit;
+    admit.Set(d, d + 32, true);
+    a.create.admitKey = admit.GetPubKey();
+    CMutableTransaction m;
+    m.vin.push_back(CTxIn(COutPoint(TestSet(), 1)));
+    m.vout.push_back(CTxOut(0, vault::EncodeAct(a)));
+    return m;
+}
+static inline uint256 LiveSet() { return CTransaction(AttestorSetCreate()).GetHash(); }
 
 using namespace yellowback;
 
@@ -151,7 +181,7 @@ struct Builder
         userKey = CKey::TestOnlyRandomKey(true);
         for (int k = 0; k < 6; k++) {
             hotKeys.push_back(DeterministicKey("yellowback-index-test-hot", k));
-            bondKeys.push_back(DeterministicKey("yellowback-index-test-bond", k));
+            bondKeys.push_back(hotKeys.back());     // P4-b: the member key is the bond key
         }
     }
 
@@ -230,11 +260,11 @@ struct Builder
     {
         CPubKey owner = ownerKey.GetPubKey();
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = VaultScript(lock, owner, (uint32_t)(lock + P.grace));
+        CScript vs = YedVaultScript(P, owner, lock);           // U-23: the V template
         CAmount collateral = Required(cents, 0, refHeight);
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(collateral, P2SHScript(vs)));
+        m.vout.push_back(CTxOut(collateral, vs));
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, owner, 3);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
@@ -251,11 +281,10 @@ struct Builder
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = VaultScript((uint32_t)v->lockHeight, v->OwnerKey(), (uint32_t)v->claimHeight);
         CMutableTransaction m;
         m.nLockTime = v->lockHeight;
         m.nExpiryHeight = expiry;
-        m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), OwnerScriptSig(valtype(71, 0x30), vs), 0xFFFFFFFE));
+        m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << valtype(71, 0x30) << OP_2, 0xFFFFFFFE));   // U-23: the V's owner selector
         for (const COutPoint& o : yed) m.vin.push_back(CTxIn(o));
         m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
         m.vout.push_back(CTxOut(FeeZat(v->collateralZat, P.feeMin, P.feeBps), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
@@ -281,14 +310,23 @@ struct Builder
         return State(index.View()).GetAttest();
     }
 
-    /** A registration of attestor i at the next height: vout[0] the 10 YEC bond (P2SH), vout[1] the payload, change. */
+    /** P4-b: attestor i joins the attestor set at the next height: vout[0] the 10 YEC bond (P2SH), vout[1] the SET_JOIN, change. */
     CMutableTransaction RegisterTx(int i, int nextHeight)
     {
         const uint32_t locktime = (uint32_t)(nextHeight + P.bondMinLock);
+        vault::Act a;
+        a.type = vault::ACT_SET_JOIN;
+        a.join.setId = P.attestorSetId;
+        a.join.memberKey = hotKeys[i].GetPubKey();
+        a.join.bondLocktime = locktime;
+        a.join.bondVout = 0;
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(10 * COIN, P2SHScript(BondScript(bondKeys[i].GetPubKey(), locktime))));
-        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRegister(hotKeys[i].GetPubKey(), bondKeys[i].GetPubKey(), locktime, 0)))));
+        std::vector<unsigned char> sig;
+        BOOST_REQUIRE(vault::SignRecoverable(hotKeys[i], vault::ActMsg(vault::EncodePayload(a), m.vin[0].prevout), sig));
+        a.sigs.push_back(sig);
+        m.vout.push_back(CTxOut(10 * COIN, P2SHScript(BondScript(hotKeys[i].GetPubKey(), locktime))));
+        m.vout.push_back(CTxOut(0, vault::EncodeAct(a)));
         m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
         return m;
     }
@@ -358,7 +396,7 @@ struct Builder
         CAmount collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[0], s.sigmaMultBps), pMint).value();
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(collateral, P2SHScript(VaultScript(lock, owner, (uint32_t)(lock + P.grace)))));
+        m.vout.push_back(CTxOut(collateral, YedVaultScript(P, owner, lock)));           // U-23: the V template
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         const int payee = FirstSeq(bundle);
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, owner, 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
@@ -370,24 +408,27 @@ struct Builder
         return m;
     }
 
-    /** A claim-path spend burning the vault's own token: vout[0] value, [1] fee, [2] payload, [3] attestor fee, [4] the residual when given. */
+    /** A claim-path spend (selector 4, U-23) burning the vault's own token: vout[0] the claimant's intent, [1] fee, [2] payload,
+     *  [3] attestor fee, [4] the owner's residual intent when given; the fees from a fake input. */
     CMutableTransaction ClaimTx(const uint256& vaultTxid, int refHeight, const valtype& bundle, std::optional<CAmount> residual)
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = VaultScript((uint32_t)v->lockHeight, v->OwnerKey(), (uint32_t)v->claimHeight);
+        const CScript vs = YedVaultScript(P, v->OwnerKey(), v->lockHeight);
+        const vault::VaultParams vp = YedVaultParams(P, v->OwnerKey(), v->lockHeight);
         CMutableTransaction m;
         m.nLockTime = v->claimHeight;
         m.nExpiryHeight = (uint32_t)(refHeight + P.refWindow);
-        m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), ClaimScriptSig(vs), 0xFFFFFFFE));
+        m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << OP_4, 0xFFFFFFFE));
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 1)));
-        m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        m.vin.push_back(CTxIn(FakeInput()));
+        m.vout.push_back(CTxOut(v->collateralZat - residual.value_or(0), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(userKey.GetPubKey().GetID())))));
         const CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         const int payee = FirstSeq(bundle);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {}, payee >= 0 ? 3 : FEE_VOUT_NONE)))));
         if (payee >= 0) m.vout.push_back(CTxOut(AttestFeeZat(fee, P.attestFeeBps), GetScriptForDestination(bondKeys[payee].GetPubKey().GetID())));
-        if (residual.has_value()) m.vout.push_back(CTxOut(residual.value(), GetScriptForDestination(v->OwnerKey().GetID())));
+        if (residual.has_value()) m.vout.push_back(CTxOut(residual.value(), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(v->OwnerKey().GetID())))));
         m.vin.push_back(CarrierIn(bundle));
         return m;
     }
@@ -415,13 +456,15 @@ struct Builder
     }
 };
 
-/** ConnectBlock's two calls for one synthetic block; returns CheckConnect's verdict (commits only when accepted). */
+/** ConnectBlock's two calls for one synthetic block; returns CheckConnect's verdict, "bad-yellowback-<verdict>", or
+ *  "failure: <why>" for a node failure (ConnectBlock aborts on it); commits only when accepted. */
 std::optional<std::string> Connect(YellowbackIndex& index, Chain::Node& n, bool fJustCheck = false)
 {
     LOCK(cs_main);
-    std::optional<std::string> bad = index.CheckConnect(n.block, n.idx.get(), fJustCheck);
-    if (!bad.has_value() && !fJustCheck) index.CommitConnect(n.block, n.idx.get());
-    return bad;
+    YellowbackIndex::ConnectCheck c = index.CheckConnect(n.block, n.idx.get(), fJustCheck);
+    if (c.failure) return "failure: " + *c.failure;
+    if (!c.invalid.has_value() && !fJustCheck) index.CommitConnect(n.block, n.idx.get());
+    return c.invalid;
 }
 
 int TipHeightOf(YellowbackIndex& index)
@@ -452,14 +495,14 @@ struct Live
     int vaultRef;
     bool jitter;           //!< v3: pools alternate price and price + 1 so PIN-1 never pins them when attestors move (a pool quoting one price is what PIN-1 pins)
 
-    explicit Live(const fs::path& dir, int until = 0) : P(RegtestParams(1, 0, 0, until)), tip(chainActive.Genesis()), jitter(false)
+    bool setMined = false;
+
+    explicit Live(const fs::path& dir) : P(RegtestParams(1, 0, 0, LiveSet())), tip(chainActive.Genesis()), jitter(false)
     {
         index.reset(new YellowbackIndex(P, dir, 1 << 20, true));
         BOOST_REQUIRE(index->SyncToChain());
         b.reset(new Builder(P, *index));
         MinerConfig cfg;
-        cfg.enforce = true;
-        cfg.signal = true;
         cfg.payoutKey = CKeyID(KeyOf(0));
         index->SetMinerConfig(cfg);
     }
@@ -480,8 +523,7 @@ struct Live
 
     void Activate()
     {
-        while (Tip() < P.startHeight + 2 * P.signalWindow + 2) MineQuote();
-        BOOST_REQUIRE(b->Snap(Tip()).activation.IsActive());
+        while (Tip() < P.startHeight + 130) MineQuote();          // every window filled (v2's start + 2 * signal window + 2)
         BOOST_REQUIRE_EQUAL(b->Snap(Tip()).haltMask, 0u);
     }
 
@@ -522,7 +564,11 @@ struct Live
     /** v3: activate (if needed), register n attestors one per block, mine until ARMED and one more (Snapshots[tip - 1] ARMED). */
     void Arm(int n = 3)
     {
-        if (Tip() < P.startHeight + 2 * P.signalWindow + 2) Activate();
+        if (Tip() < P.startHeight + 130) Activate();
+        if (!setMined) {
+            MineWith({ AttestorSetCreate() });           // P4-b: the attestor set's SET_CREATE
+            setMined = true;
+        }
         for (int i = 0; i < n; i++) {
             MineWith({ b->RegisterTx(i, Tip() + 1) });
             BOOST_REQUIRE_MESSAGE(b->Attestor((uint16_t)i).has_value(), strprintf("attestor %d not registered at %d", i, Tip()));
@@ -556,7 +602,7 @@ BOOST_FIXTURE_TEST_SUITE(yellowback_index_tests, IndexSetup)
 // Rule: BLK-3
 BOOST_AUTO_TEST_CASE(exception_boundary)
 {
-    yellowback::Params params = RegtestParams(1, 0, 0, 0);
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
     YellowbackIndex index(params, pathTemp / "yellowback-test", 1 << 20, true);
     BOOST_CHECK(index.SyncToChain());        // chain at genesis (< startHeight): empty and healthy
     BOOST_CHECK(index.IsHealthy());
@@ -584,7 +630,7 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
         LOCK(cs_main);
         BOOST_CHECK_NO_THROW(index.CheckConnect(n1.block, n1.idx.get(), false));
         BOOST_CHECK(!index.CommitConnect(n1.block, n1.idx.get()));
-        BOOST_CHECK(!index.MempoolCheckReason(CTransaction()).has_value());   // unhealthy: enforces nothing
+        BOOST_CHECK(index.MempoolCheckReason(CTransaction()).has_value());    // unhealthy: admits nothing (U-21)
     }
     BOOST_CHECK(!index.IsHealthy());
 
@@ -624,30 +670,27 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     // An unconfigured network (startHeight 0, as testnet until its release sets it) refuses to start.
     yellowback::Params unconfigured = MainParams();
     unconfigured.startHeight = 0;
-    unconfigured.enforceUntilHeight = 0;
     YellowbackIndex index5(unconfigured, pathTemp / "yellowback-test5", 1 << 20, true);
     BOOST_CHECK(!index5.SyncToChain());
     BOOST_CHECK(!index5.IsHealthy());
 }
 
 // Rule: BLK-3
-// Rule: BLK-2
 BOOST_AUTO_TEST_CASE(check_storage_fault_accepts_and_sets_unhealthy)
 {
-    // -yellowbacktestfault=storage:check: the fault fires once in CheckConnect; a rule-breaking
-    // block is accepted (nullopt), the index is unhealthy, nothing is written to Rejected.
+    // -yellowbacktestfault=storage:check: the fault fires once in CheckConnect. Since the vault upgrade (U-21) a
+    // storage failure is a node failure, never an acceptance: CheckConnect reports it (ConnectBlock aborts) and
+    // the index is unhealthy; nothing is committed. (The case keeps its v2 name.)
     Live live(pathTemp / "yb-check-fault");
     live.Activate();
     live.MintActive();
     BOOST_CHECK(!live.index->SetTestFault("storage:check").has_value());
     Chain::Node& bad = live.BadBlock();
     const int hashBefore = TipHeightOf(*live.index);
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
+    BOOST_CHECK_EQUAL(Connect(*live.index, bad).value_or("").substr(0, 8), "failure:");
     BOOST_CHECK(!live.index->IsHealthy());
     BOOST_CHECK(live.index->UnhealthyReason().find("CheckConnect") != std::string::npos);
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
     BOOST_CHECK_EQUAL(TipHeightOf(*live.index), hashBefore);
-    BOOST_CHECK(!live.index->IsEnforcing());
     // A bad spec is refused at once (init refuses to start).
     BOOST_CHECK(live.index->SetTestFault("storage:bogus").has_value());
     BOOST_CHECK(live.index->SetTestFault("storage:check:x:y").has_value());
@@ -658,7 +701,7 @@ BOOST_AUTO_TEST_CASE(check_storage_fault_accepts_and_sets_unhealthy)
 BOOST_AUTO_TEST_CASE(commit_storage_fault_sets_unhealthy)
 {
     // storage:commit:<height>: fires only at that height; CommitConnect returns false, the index is
-    // unhealthy, and the block still connects (nothing here can stop ConnectBlock).
+    // unhealthy (ConnectBlock then aborts the node, U-21).
     Live live(pathTemp / "yb-commit-fault");
     live.Activate();
     const int target = live.Tip() + 2;
@@ -669,7 +712,7 @@ BOOST_AUTO_TEST_CASE(commit_storage_fault_sets_unhealthy)
     Chain::Node& n = live.chain.Add(Builder::Block(h, Builder::Quote(50000, h % 3)));
     {
         LOCK(cs_main);
-        BOOST_CHECK(!live.index->CheckConnect(n.block, n.idx.get(), false).has_value());
+        BOOST_CHECK(!live.index->CheckConnect(n.block, n.idx.get(), false).invalid.has_value());
         BOOST_CHECK(!live.index->CommitConnect(n.block, n.idx.get()));
     }
     BOOST_CHECK(!live.index->IsHealthy());
@@ -723,7 +766,7 @@ BOOST_AUTO_TEST_CASE(undo_tip_mismatch_refuses)
 BOOST_AUTO_TEST_CASE(check_null_hash)
 {
     // K5: under TestBlockValidity pindex is indexDummy with a null phashBlock. CheckConnect keys on
-    // block.GetHash() and pprev only; fJustCheck never writes Rejected and never commits (§8.4 item 7).
+    // block.GetHash() and pprev only; fJustCheck never commits (§8.4 item 7).
     Live live(pathTemp / "yb-nullhash");
     live.Activate();
     live.MintActive();
@@ -738,18 +781,17 @@ BOOST_AUTO_TEST_CASE(check_null_hash)
     good.hashMerkleRoot = BlockMerkleRoot(good);
     {
         LOCK(cs_main);
-        BOOST_CHECK(!live.index->CheckConnect(good, &dummy, true).has_value());
+        BOOST_CHECK(!live.index->CheckConnect(good, &dummy, true).invalid.has_value());
     }
     CMutableTransaction s = live.b->SpendTx(live.vault, dummy.nHeight - 2, false);
     CBlock badBlock = Builder::Block(dummy.nHeight, std::nullopt, { s });
     badBlock.hashMerkleRoot = BlockMerkleRoot(badBlock);
     {
         LOCK(cs_main);
-        std::optional<std::string> bad = live.index->CheckConnect(badBlock, &dummy, true);
+        std::optional<std::string> bad = live.index->CheckConnect(badBlock, &dummy, true).invalid;
         BOOST_REQUIRE(bad.has_value());
         BOOST_CHECK(bad->find("vault-spend-malformed") != std::string::npos);
     }
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);          // fJustCheck: never recorded
     BOOST_CHECK_EQUAL(TipHeightOf(*live.index), tipBefore);     // never committed
     BOOST_CHECK(HashOf(*live.index) == before);
     BOOST_CHECK(live.index->IsHealthy());
@@ -761,7 +803,7 @@ BOOST_FIXTURE_TEST_CASE(check_reverify, TestChain100Setup)
 {
     // K6: a block already in chainActive (VerifyDB level 4, verifychain) is a silent no-op for both
     // hooks; the tip and the hash are unchanged and the index stays healthy.
-    yellowback::Params params = RegtestParams(1, 0, 0, 0);
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
     YellowbackIndex index(params, pathTemp / "yb-reverify", 1 << 20, true);
     BOOST_REQUIRE(index.SyncToChain());
     BOOST_REQUIRE_EQUAL(TipHeightOf(index), 100);
@@ -771,7 +813,7 @@ BOOST_FIXTURE_TEST_CASE(check_reverify, TestChain100Setup)
         CBlockIndex* pindex = chainActive[h];
         CBlock block;
         BOOST_REQUIRE(ReadBlockFromDisk(block, pindex, ::Params().GetConsensus()));
-        BOOST_CHECK(!index.CheckConnect(block, pindex, false).has_value());
+        BOOST_CHECK(!index.CheckConnect(block, pindex, false).invalid.has_value());
         BOOST_CHECK(index.CommitConnect(block, pindex));
     }
     BOOST_CHECK_EQUAL(TipHeightOf(index), 100);
@@ -788,30 +830,11 @@ BOOST_FIXTURE_TEST_CASE(check_reverify, TestChain100Setup)
         // A block whose parent is the tip but which is not in chainActive[100]'s slot: a fake sibling entry.
         CBlockIndex sibling = *tip;
         sibling.phashBlock = tip->phashBlock;
-        BOOST_CHECK(!index.CheckConnect(block, &sibling, false).has_value());
+        BOOST_CHECK(!index.CheckConnect(block, &sibling, false).invalid.has_value());
         BOOST_CHECK(index.CommitConnect(block, &sibling));
     }
     BOOST_CHECK_EQUAL(TipHeightOf(index), 100);
     BOOST_CHECK(HashOf(index) == before);
-}
-
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(check_no_enforce)
-{
-    // -yellowbackenforce=0: the same evaluation is logged and the block is accepted; nothing in Rejected.
-    Live live(pathTemp / "yb-noenforce");
-    live.Activate();
-    live.MintActive();
-    MinerConfig cfg = live.index->GetMinerConfig();
-    cfg.enforce = false;
-    live.index->SetMinerConfig(cfg);
-    BOOST_CHECK(!live.index->IsEnforcing());
-    Chain::Node& bad = live.BadBlock();
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad.idx->nHeight);   // committed: the vault is now CLOSED by a failing spend
-    BOOST_CHECK(live.index->IsHealthy());
-    BOOST_CHECK(!live.index->GetMinerStatus(0).signal);               // MINER-1: no signal bit without enforce
 }
 
 // Rule: BLK-3
@@ -823,8 +846,7 @@ BOOST_AUTO_TEST_CASE(check_unhealthy)
     live.MintActive();
     live.index->SetUnhealthy("test");
     Chain::Node& bad = live.BadBlock();
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
+    BOOST_CHECK_EQUAL(Connect(*live.index, bad).value_or("").substr(0, 8), "failure:");   // U-21: unhealthy aborts, never accepts
     BOOST_CHECK(policy::BuildTagScript(*live.index, 0).empty());     // MINER-3: no tag while unhealthy
 }
 
@@ -832,431 +854,25 @@ BOOST_AUTO_TEST_CASE(check_unhealthy)
 BOOST_AUTO_TEST_CASE(check_tip_mismatch)
 {
     // A block whose parent is not the index tip (and that is not a re-verification) marks the index
-    // unhealthy and is accepted; the storage is untouched.
+    // unhealthy and is a node failure (U-21); the storage is untouched.
     Live live(pathTemp / "yb-tipmismatch");
     live.Activate();
     Chain::Node& top = live.chain.nodes.back();
     const uint256 before = HashOf(*live.index);
     Chain::Node& stray = live.chain.Add(Builder::Block(top.idx->nHeight, Builder::Quote(50000, 2), {}, 99), top.idx->pprev);
-    BOOST_CHECK(!Connect(*live.index, stray).has_value());
+    BOOST_CHECK_EQUAL(Connect(*live.index, stray).value_or("").substr(0, 8), "failure:");
     BOOST_CHECK(!live.index->IsHealthy());
     BOOST_CHECK(live.index->UnhealthyReason().find("tip-mismatch") != std::string::npos);
     BOOST_CHECK(HashOf(*live.index) == before);
     // An empty index refuses a first block that is not at startHeight the same way.
-    yellowback::Params p5 = RegtestParams(5, 0, 0, 0);
+    yellowback::Params p5 = RegtestParams(5, 0, 0, TestSet());
     YellowbackIndex index5(p5, pathTemp / "yb-tipmismatch5", 1 << 20, true);
     BOOST_REQUIRE(index5.SyncToChain());
     {
         LOCK(cs_main);
-        BOOST_CHECK(!index5.CheckConnect(top.block, top.idx.get(), false).has_value());
+        BOOST_CHECK(index5.CheckConnect(top.block, top.idx.get(), false).failure.has_value());
     }
     BOOST_CHECK(!index5.IsHealthy());
-}
-
-// Rule: ACT-5
-// Rule: ACT-6
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(check_suspended)
-{
-    // Below ENFORCEMENT_FLOOR signals the ENFORCEMENT bit is set at H - 1 and BLK-2 rejects nothing,
-    // whatever -yellowbackenforce says; the verdict is still computed and logged.
-    Live live(pathTemp / "yb-suspended");
-    live.Activate();
-    live.MintActive();
-    while (live.b->Snap(live.Tip()).signalCount >= (uint32_t)live.P.enforcementFloor) live.MineQuote(50000, false);
-    BOOST_CHECK(live.b->Snap(live.Tip()).haltMask & HALT_ENFORCEMENT);
-    BOOST_CHECK(live.index->IsEnforcing());                            // the node-side flags are all on ...
-    Chain::Node& bad = live.BadBlock();
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());               // ... but ACT-5 is off at H
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK(live.index->IsHealthy());
-}
-
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(check_ibd_suppresses_reject)
-{
-    // N2: with fReindex set a healthy index evaluates, commits and returns nullopt; Rejected stays
-    // empty and enforcement stays on. The same for fImporting.
-    Live live(pathTemp / "yb-ibd");
-    live.Activate();
-    live.MintActive();
-    fReindex = true;
-    Chain::Node& bad = live.BadBlock();
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
-    fReindex = false;
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad.idx->nHeight);
-    BOOST_CHECK(live.index->IsEnforcing());
-    BOOST_CHECK_EQUAL(live.index->SuppressedCount(), 0);
-    std::optional<VaultRecord> v = live.b->Vault(live.vault);
-    BOOST_REQUIRE(v.has_value());
-    BOOST_CHECK(v->Status() == VaultStatus::CLOSED);                   // the failing spend closed it (IN-2)
-    // Undo it again and check that fImporting suppresses the same way.
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->UndoDisconnect(bad.idx.get()));
-    }
-    fImporting = true;
-    Chain::Node& bad2 = live.BadBlock(1);
-    BOOST_CHECK(!Connect(*live.index, bad2).has_value());
-    fImporting = false;
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    // And without either flag the same block is rejected.
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->UndoDisconnect(bad2.idx.get()));
-    }
-    Chain::Node& bad3 = live.BadBlock(2);
-    std::optional<std::string> reason = Connect(*live.index, bad3);
-    BOOST_REQUIRE(reason.has_value());
-    BOOST_CHECK(reason->find("vault-spend-malformed") != std::string::npos);
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
-    BOOST_CHECK(live.index->GetRejected(bad3.hash).has_value());
-    BOOST_CHECK_EQUAL(live.index->GetRejected(bad3.hash)->height, bad3.idx->nHeight);
-    BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad3.idx->nHeight - 1);   // never committed
-}
-
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(catchup_suppresses_reject)
-{
-    // L11: with pindexBestHeader a descendant of the block carrying VALVE_BLOCKS of work above the
-    // tip, CheckConnect accepts, counts suppressedBlocks, writes nothing to Rejected and leaves
-    // enforcing true; at five blocks of work it rejects.
-    Live live(pathTemp / "yb-catchup");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    // The node's tip is the regtest genesis (chainActive); the fake bad block sits at height H on
-    // the synthetic chain. The network's headers descend from it.
-    CBlockIndex* tip = chainActive.Tip();
-    const arith_uint256 proof = GetBlockProof(*tip);
-    std::deque<CBlockIndex> heads;
-    CBlockIndex* prev = bad.idx.get();
-    bad.idx->nChainWork = tip->nChainWork + proof;
-    for (int k = 1; k <= 5; k++) {
-        heads.emplace_back();
-        CBlockIndex& d = heads.back();
-        d.pprev = prev;
-        d.nHeight = prev->nHeight + 1;
-        d.nBits = tip->nBits;
-        d.nChainWork = tip->nChainWork + proof * (k + 1);
-        d.BuildSkip();
-        prev = &d;
-    }
-    CBlockIndex* savedBest = pindexBestHeader;
-    pindexBestHeader = &heads[4];                                      // tip + 6 blocks of work
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NetworkAlreadyBuiltOn(bad.idx.get()));
-    }
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
-    BOOST_CHECK_EQUAL(live.index->SuppressedCount(), 1);
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK(live.index->IsEnforcing());
-    BOOST_CHECK(!live.index->ValveTripped());
-    BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad.idx->nHeight);   // accepted and committed
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->UndoDisconnect(bad.idx.get()));
-    }
-    pindexBestHeader = &heads[3];                                      // tip + 5 blocks of work: rejected as usual
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(!live.index->NetworkAlreadyBuiltOn(bad.idx.get()));
-    }
-    std::optional<std::string> reason = Connect(*live.index, bad);
-    BOOST_REQUIRE(reason.has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
-    BOOST_CHECK_EQUAL(live.index->SuppressedCount(), 1);
-    pindexBestHeader = savedBest;
-}
-
-// Rule: ACT-7
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(valve_trips_at_six_blocks)
-{
-    // Six noted headers of one block of work each above the tip trip the valve; five do not. The
-    // note map is cleared, a Rejected hash absent from mapBlockIndex is skipped, the P1 text is in
-    // GetMiscWarning(), and afterwards nothing is rejected (check_tripped_valve_never_rejects).
-    Live live(pathTemp / "yb-valve");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    Chain::Node& bad2 = live.BadBlock(1);                          // a second rejected block, never indexed
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    BOOST_REQUIRE(Connect(*live.index, bad2).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 2);
-    CBlockIndex* tip = chainActive.Tip();
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    bad.idx->nChainWork = tip->nChainWork;                         // a sibling of the tip: no work above it
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->IsRejectedAncestor(bad.idx.get()));
-        BOOST_CHECK(!live.index->IsRejectedAncestor(tip));
-    }
-    // A header whose parent is unknown or not rejected is not the clause's business.
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(uint256S("ab"), 1, tip->nBits)));
-        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(tip->GetBlockHash(), 1, tip->nBits)));
-    }
-    uint256 prev = bad.hash;
-    for (int k = 1; k <= 5; k++) {
-        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));      // answered again, noted once
-        BOOST_CHECK(!live.index->ValveTripped());
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), (size_t)k);
-        prev = h.GetHash();
-    }
-    BOOST_CHECK(live.index->IsEnforcing());
-    {
-        CBlockHeader h6 = HeaderOn(prev, 6, tip->nBits);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h6));    // the tripping header is answered DoS 0 too
-        BOOST_CHECK(live.index->ValveTripped());
-        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(h6.GetHash(), 7, tip->nBits)));   // P3: inert from now on
-    }
-    BOOST_CHECK(!live.index->IsEnforcing());
-    BOOST_CHECK(live.index->IsHealthy());                          // unhealthyReason untouched
-    BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 0u);
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);             // cleared, bad2 skipped (not in mapBlockIndex)
-    BOOST_CHECK(!(bad.idx->nStatus & BLOCK_FAILED_MASK));          // ReconsiderBlock ran
-    {
-        // ... and durably, before Rejected was erased: the block index entry on disk is clear too
-        // (6.20.0 keeps a never-connected entry's FAILED mark across a restart).
-        CDiskBlockIndex onDisk;
-        BOOST_REQUIRE(pblocktree->Read(std::make_pair('b', bad.hash), onDisk));   // txdb.cpp DB_BLOCK_INDEX
-        BOOST_CHECK(!(onDisk.nStatus & BLOCK_FAILED_MASK));
-    }
-    const std::string warning = GetMiscWarning().first;
-    BOOST_CHECK_MESSAGE(warning.find(strprintf("Yellowback: work valve tripped at height %d (rejected root %s); enforcement off until restart", tip->nHeight, bad.hash.ToString())) != std::string::npos, warning);
-    BOOST_CHECK(!live.index->GetMinerStatus(0).signal);            // MINER-1: the signal bit is dropped
-    // check_tripped_valve_never_rejects: the same rule-breaking block is accepted now.
-    Chain::Node& bad3 = live.BadBlock(2);
-    BOOST_CHECK(!Connect(*live.index, bad3).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK_EQUAL(TipHeightOf(*live.index), bad3.idx->nHeight);
-}
-
-BOOST_AUTO_TEST_CASE(reindex_yellowback_reconsiders_rejected)
-{
-    // -reindex-yellowback erases Rejected, so it first clears the FAILED marks Rejected accounts for,
-    // durably (6.20.0 keeps a never-connected entry's mark across a restart; v4.5.0's
-    // RewindBlockIndex erased the entry, so the block was fetched and judged again).
-    fs::path dir = pathTemp / "yb-wipe-reconsider";
-    Live live(dir);
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    live.index.reset();                                            // close the directory first
-    live.index.reset(new YellowbackIndex(live.P, dir, 1 << 20, true));
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);             // read before the wipe
-    BOOST_CHECK(live.index->SyncToChain());
-    BOOST_CHECK_EQUAL(live.index->ReconsideredOnWipe(), 1);
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-    BOOST_CHECK(!(bad.idx->nStatus & BLOCK_FAILED_MASK));
-    CDiskBlockIndex onDisk;
-    BOOST_REQUIRE(pblocktree->Read(std::make_pair('b', bad.hash), onDisk));   // flushed before the wipe
-    BOOST_CHECK(!(onDisk.nStatus & BLOCK_FAILED_MASK));
-}
-
-// Rule: ACT-7
-BOOST_AUTO_TEST_CASE(check_tripped_valve_never_rejects)
-{
-    // Named for §8.4 item 3; the tripped-valve acceptance is asserted at the end of valve_trips_at_six_blocks
-    // and here again from a valve tripped by the smallest chain: a root that is the tip's sibling.
-    Live live(pathTemp / "yb-tripped");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    CBlockIndex* tip = chainActive.Tip();
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    bad.idx->nChainWork = tip->nChainWork;
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    uint256 prev = bad.hash;
-    for (int k = 1; k <= 6; k++) {
-        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
-        LOCK(cs_main);
-        live.index->NoteHeaderOnRejectedChain(h);
-        prev = h.GetHash();
-    }
-    BOOST_REQUIRE(live.index->ValveTripped());
-    for (int i = 0; i < 3; i++) {
-        Chain::Node& b = live.BadBlock(10 + i);
-        BOOST_CHECK(!Connect(*live.index, b).has_value());
-        BOOST_CHECK_EQUAL(TipHeightOf(*live.index), b.idx->nHeight);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->UndoDisconnect(b.idx.get()));
-    }
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
-}
-
-// Rule: ACT-7
-// Rule: BLK-2
-BOOST_AUTO_TEST_CASE(valve_trips_through_failed_child)
-{
-    // L11: the rejected root has two indexed BLOCK_FAILED_CHILD descendants; a header whose parent is
-    // the second is noted with that parent's real nChainWork, so the odometer starts at three blocks
-    // and trips three headers later.
-    Live live(pathTemp / "yb-valve-child");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    CBlockIndex* tip = chainActive.Tip();
-    const arith_uint256 proof = GetBlockProof(*tip);
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    bad.idx->nChainWork = tip->nChainWork;
-    Chain::Node& c1 = live.chain.Add(Builder::Block(bad.idx->nHeight + 1, std::nullopt, {}, 1), bad.idx.get());
-    Chain::Node& c2 = live.chain.Add(Builder::Block(bad.idx->nHeight + 2, std::nullopt, {}, 2), c1.idx.get());
-    c1.idx->nStatus |= BLOCK_FAILED_CHILD;
-    c2.idx->nStatus |= BLOCK_FAILED_CHILD;
-    c1.idx->nChainWork = tip->nChainWork + proof;
-    c2.idx->nChainWork = tip->nChainWork + proof * 2;
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    guard.Insert(c1.idx.get());
-    guard.Insert(c2.idx.get());
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->IsRejectedAncestor(c2.idx.get()));  // walks through the _CHILD marks
-    }
-    uint256 prev = c2.hash;
-    for (int k = 3; k <= 5; k++) {                                   // noted at 3p, 4p, 5p: no trip
-        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
-        BOOST_CHECK(!live.index->ValveTripped());
-        prev = h.GetHash();
-    }
-    BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 3u);
-    {
-        CBlockHeader h = HeaderOn(prev, 6, tip->nBits);              // 6p: trips
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
-    }
-    BOOST_CHECK(live.index->ValveTripped());
-    BOOST_CHECK(!(c2.idx->nStatus & BLOCK_FAILED_MASK));            // ReconsiderBlock cleared the descendants too
-}
-
-// Rule: ACT-7
-BOOST_AUTO_TEST_CASE(valve_note_map_bounded)
-{
-    // P2: the 65th header on one root is answered (true) but not noted; the sum stops growing. The
-    // valve itself is disabled (-yellowbacktestfault=novalve) so the chain can grow past six.
-    Live live(pathTemp / "yb-valve-cap");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    BOOST_CHECK(!live.index->SetTestFault("novalve").has_value());
-    CBlockIndex* tip = chainActive.Tip();
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    bad.idx->nChainWork = tip->nChainWork;
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    uint256 prev = bad.hash;
-    for (int k = 1; k <= VALVE_NOTE_CAP + 1; k++) {
-        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), (size_t)std::min(k, VALVE_NOTE_CAP));
-        prev = h.GetHash();
-    }
-    // Audit B-1: the descendants of the refused-but-unnoted header are answered true as well (DoS 0
-    // in AcceptBlockHeader, never the stock "prev block not found" DoS 10), and none is noted.
-    for (int k = VALVE_NOTE_CAP + 2; k <= VALVE_NOTE_CAP + 4; k++) {
-        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));      // answered again
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), (size_t)VALVE_NOTE_CAP);
-        prev = h.GetHash();
-    }
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(uint256S("cd"), 1, tip->nBits)));   // unknown parent: not ours
-    }
-    BOOST_CHECK(!live.index->ValveTripped());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
-    BOOST_CHECK(live.index->IsEnforcing());
-}
-
-// Rule: ACT-7
-BOOST_AUTO_TEST_CASE(valve_ignores_lowdiff_headers)
-{
-    // P2: a header whose target exceeds 132/100 of its parent's is answered but not noted; one within
-    // the loosening is noted.
-    Live live(pathTemp / "yb-valve-lowdiff");
-    live.Activate();
-    live.MintActive();
-    Chain::Node& bad = live.BadBlock();
-    BOOST_REQUIRE(Connect(*live.index, bad).has_value());
-    CBlockIndex* tip = chainActive.Tip();
-    bad.idx->nStatus |= BLOCK_FAILED_VALID;
-    bad.idx->nChainWork = tip->nChainWork;
-    MapGuard guard;
-    guard.Insert(bad.idx.get());
-    arith_uint256 parentTarget;
-    parentTarget.SetCompact(tip->nBits);
-    const uint32_t tooEasy = arith_uint256(parentTarget / 100 * 140).GetCompact();
-    const uint32_t withinBound = arith_uint256(parentTarget / 100 * 125).GetCompact();
-    {
-        LOCK(cs_main);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(bad.hash, 1, tooEasy)));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 0u);
-        CBlockHeader ok = HeaderOn(bad.hash, 2, withinBound);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(ok));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        // A header on the unnoted easy one: its parent is a remembered refusal (audit B-1), so it is
-        // answered DoS 0 too, and still not noted.
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(HeaderOn(bad.hash, 1, tooEasy).GetHash(), 3, tip->nBits)));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        // Chained on the noted one, the loosening is still measured against the rejected root's target
-        // (audit A-6): 125 % of 125 % compounds past 132 % and is not noted, nor is 140 % of 125 %.
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 4, arith_uint256(parentTarget / 100 * 125 / 100 * 125).GetCompact())));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 5, arith_uint256(parentTarget / 100 * 125 / 100 * 140).GetCompact())));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        // Within the root's bound, a second-generation note is still noted.
-        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 6, withinBound)));
-        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 2u);
-    }
-    BOOST_CHECK(!live.index->ValveTripped());
-}
-
-// Rule: ACT-5
-// Rule: MINER-1
-BOOST_AUTO_TEST_CASE(sunset_flag_stops_rejection_and_signal)
-{
-    // L8: past ENFORCE_UNTIL_HEIGHT the node tags and evaluates, rejects nothing, drops the signal
-    // bit and reports sunset; H == ENFORCE_UNTIL_HEIGHT is still enforced.
-    const int until = 1 + 2 * 64 + 2 + 3;
-    Live live(pathTemp / "yb-sunset", until);
-    live.Activate();
-    live.MintActive();
-    live.index->SetQuote(2000000, 1, 0);
-    BOOST_CHECK(!live.index->IsSunset());
-    BOOST_CHECK(live.index->GetMinerStatus(0).signal);
-    while (live.Tip() < until) live.MineQuote();
-    BOOST_CHECK(live.index->IsSunset());
-    BOOST_CHECK(!live.index->IsEnforcing());
-    BOOST_CHECK(!live.index->GetMinerStatus(0).signal);
-    BOOST_CHECK_EQUAL(live.index->GetMinerStatus(0).kind, "quote");   // still tags
-    Chain::Node& bad = live.BadBlock();
-    BOOST_CHECK(!Connect(*live.index, bad).has_value());
-    BOOST_CHECK_EQUAL(live.index->RejectedCount(), 0);
 }
 
 // Rule: MP-1
@@ -1296,7 +912,6 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
     BOOST_CHECK_EQUAL(live.index->MempoolCheckReason(CTransaction(lateExpiry)).value_or(""), "mempool-expiry");
     BOOST_CHECK(live.index->MempoolCheck(CTransaction(mint)));
     BOOST_CHECK(live.index->MempoolCheck(CTransaction(plain[0])));
-    BOOST_CHECK(!live.index->IsAbandoned());
 
     // Audit A-1: a peer streaming distinct garbage vault spends costs this node RED-1..5 per candidate, never a
     // ComputeSnapshot (the 2,016-height windows, the attestor scan). 1,000 distinct malformed spends of the
@@ -1376,9 +991,9 @@ BOOST_AUTO_TEST_CASE(coinbase_flags_empty_without_flag)
 // Rule: MINER-3
 BOOST_AUTO_TEST_CASE(miner_tag_script)
 {
-    // The tag a template carries: a quote tag while the quote is younger than quoteMaxAge, else a
-    // signal-only tag iff -yellowbacksignal, else nothing; the signal bit iff signal and enforce;
-    // no payout key means no tag; and COINBASE_FLAGS is empty without the flag (§8.4 item 2).
+    // The tag a template carries: a quote tag while the quote is younger than quoteMaxAge, else nothing
+    // (the signal-only tag and the signal bit left with ACT-1, upgrade plan §6); no payout key means no
+    // tag; and COINBASE_FLAGS is empty without the index (§8.4 item 2).
     BOOST_CHECK(g_yellowback == nullptr);
     BOOST_CHECK(COINBASE_FLAGS.empty());
     Live live(pathTemp / "yb-miner");
@@ -1397,7 +1012,7 @@ BOOST_AUTO_TEST_CASE(miner_tag_script)
         BOOST_CHECK(t->IsQuote());
         BOOST_CHECK_EQUAL(t->priceMicroUsd, 2000000u);
         BOOST_CHECK_EQUAL(t->sourceMask, 5);
-        BOOST_CHECK(t->Signal());
+        BOOST_CHECK(!t->Signal());
         BOOST_CHECK(t->payoutKey == KeyOf(0));
         MinerStatus st = live.index->GetMinerStatus(1050);
         BOOST_CHECK_EQUAL(st.kind, "quote");
@@ -1406,31 +1021,10 @@ BOOST_AUTO_TEST_CASE(miner_tag_script)
         BOOST_CHECK(st.eligible);
     }
     {
-        // Stale quote: signal-only.
-        std::optional<CoinbaseTag> t = FindTag((CScript() << h << OP_0) + policy::BuildTagScript(*live.index, 1101), h);
-        BOOST_REQUIRE(t.has_value());
-        BOOST_CHECK(!t->IsQuote());
-        BOOST_CHECK(t->Signal());
-        BOOST_CHECK_EQUAL(live.index->GetMinerStatus(1101).kind, "signal");
-    }
-    {
-        // No signal flag and a stale quote: no tag at all; a fresh quote still tags without the bit.
-        cfg.signal = false;
-        live.index->SetMinerConfig(cfg);
+        // Stale quote: no tag at all.
         BOOST_CHECK(policy::BuildTagScript(*live.index, 1101).empty());
         BOOST_CHECK_EQUAL(live.index->GetMinerStatus(1101).kind, "none");
-        std::optional<CoinbaseTag> t = FindTag((CScript() << h << OP_0) + policy::BuildTagScript(*live.index, 1050), h);
-        BOOST_REQUIRE(t.has_value());
-        BOOST_CHECK(!t->Signal());
-        // Signal without enforce: no bit (L3).
-        cfg.signal = true;
-        cfg.enforce = false;
-        live.index->SetMinerConfig(cfg);
-        t = FindTag((CScript() << h << OP_0) + policy::BuildTagScript(*live.index, 1050), h);
-        BOOST_REQUIRE(t.has_value());
-        BOOST_CHECK(!t->Signal());
-        // No payout key: no tag of either kind (MINER-2).
-        cfg.enforce = true;
+        // No payout key: no tag (MINER-2).
         cfg.payoutKey = std::nullopt;
         live.index->SetMinerConfig(cfg);
         BOOST_CHECK(policy::BuildTagScript(*live.index, 1050).empty());
@@ -1444,7 +1038,7 @@ BOOST_FIXTURE_TEST_CASE(params_change_wipes_on_start, TestChain100Setup)
     // A node restarted with different hashed parameters (the four regtest values) rebuilds:
     // SyncToChain wipes when the stored Params record differs, so params_mismatch_fails_loudly sees
     // the new record in the hash and index_start_height_above_tip sees no rows below the new start.
-    yellowback::Params original = RegtestParams(1, 0, 0, 0);
+    yellowback::Params original = RegtestParams(1, 0, 0, TestSet());
     uint256 h0;
     {
         YellowbackIndex index(original, pathTemp / "yb-params", 1 << 20, true);
@@ -1453,7 +1047,7 @@ BOOST_FIXTURE_TEST_CASE(params_change_wipes_on_start, TestChain100Setup)
         h0 = HashOf(index);
     }
     {
-        YellowbackIndex reopened(RegtestParams(1, 1, 0, 0), pathTemp / "yb-params", 1 << 20, false);
+        YellowbackIndex reopened(RegtestParams(1, 1, 0, TestSet()), pathTemp / "yb-params", 1 << 20, false);
         BOOST_REQUIRE(reopened.SyncToChain());
         BOOST_CHECK_EQUAL(TipHeightOf(reopened), 100);
         LOCK(reopened.cs_yellowback);
@@ -1463,7 +1057,7 @@ BOOST_FIXTURE_TEST_CASE(params_change_wipes_on_start, TestChain100Setup)
         BOOST_CHECK(reopened.GetStateHash() != h0);
     }
     {
-        YellowbackIndex back(RegtestParams(50, 0, 0, 0), pathTemp / "yb-params", 1 << 20, false);
+        YellowbackIndex back(RegtestParams(50, 0, 0, TestSet()), pathTemp / "yb-params", 1 << 20, false);
         BOOST_REQUIRE(back.SyncToChain());
         BOOST_CHECK_EQUAL(TipHeightOf(back), 100);
         LOCK(back.cs_yellowback);
@@ -1676,7 +1270,7 @@ BOOST_AUTO_TEST_CASE(buildbundle_missing_set)
     BuiltBundle sel = index.BuildBundleInfo(R, OutPointSelector(COutPoint(CTransaction(m).GetHash(), 0)));
     BOOST_CHECK_EQUAL(sel.selected.size(), 3u);
     // Unarmed heights build too (yed_buildbundle never refuses for arming): R below the arming.
-    const int early = live.P.startHeight + 2 * live.P.signalWindow + 2;
+    const int early = live.P.startHeight + 130;
     BuiltBundle unarmed = index.BuildBundleInfo(early, valtype());
     BOOST_CHECK(!unarmed.armed);
     BOOST_CHECK(unarmed.selected.empty());
@@ -1786,7 +1380,7 @@ BOOST_FIXTURE_TEST_CASE(schema3_rebuild_flag, TestChain100Setup)
     // A v2 index directory (Tip.schemaVersion 2) is wiped and rebuilt from the chain at start with
     // WasRebuilt() set (yed_getinfo.rebuilt); a current directory reopens without it; the same
     // -yellowbacktestfault=schema path the functional test uses reports it too.
-    yellowback::Params params = RegtestParams(1, 0, 0, 0);
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
     uint256 h0;
     {
         YellowbackIndex index(params, pathTemp / "yb-schema", 1 << 20, true);
@@ -1831,8 +1425,9 @@ BOOST_FIXTURE_TEST_CASE(schema3_rebuild_flag, TestChain100Setup)
 // Rule: RED-4
 BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
 {
-    // TPL-2 strict (v3 §3.9): a MINT that would be VOID by MINT-9 or MINT-10, a claim failing RED-5 and
-    // a CLAIM_NOTICE failing NOT-1 are skipped; their passing twins are kept. The claim is the
+    // The template follows validity (upgrade plan §6; v3's TPL-2 strict): a MINT failing MINT-9 or MINT-10 and
+    // a claim failing RED-5 are invalid and skipped; a CLAIM_NOTICE failing NOT-1 is a valid non-Yellowback
+    // transaction and kept; their passing twins are kept. The claim is the
     // emergency path: a 500 %-covered vault, attestors at a fifth of the pools (pEmerg under
     // EMERGENCY_RATIO, pClaim = xClaim above CLAIM_THRESHOLD), a notice, EMERGENCY_PERSIST blocks,
     // then a claim owing RED-5's residual.
@@ -1863,7 +1458,7 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     live.MineWith({ good });
     const uint256 vault = CTransaction(good).GetHash();
     BOOST_REQUIRE(b.Vault(vault)->Status() == VaultStatus::ACTIVE);
-    // NOT-1 fails on a healthy vault (attestors at the pools' price): skipped; holds at a fifth: kept.
+    // NOT-1 fails on a healthy vault (attestors at the pools' price): kept, it registers nothing; holds at a fifth: kept.
     const int R1 = live.Tip() - 1;
     const valtype selector = OutPointSelector(COutPoint(vault, 0));
     CMutableTransaction healthyNotice = b.NoticeTx(vault, R1, b.BundleFor(R1, selector, 50000));
@@ -1871,7 +1466,7 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     {
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
-        BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(healthyNotice), live.Tip() + 1));
+        BOOST_CHECK(policy::FilterTemplate(view, CTransaction(healthyNotice), live.Tip() + 1));
     }
     {
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
@@ -1886,12 +1481,12 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
         BOOST_CHECK_EQUAL(n->refHeight, R1);
         BOOST_CHECK_EQUAL(n->pEmerg, 10000);
     }
-    // A second notice while one stands is not registered (the reset attack) and is skipped by TPL-2.
+    // A second notice while one stands is not registered (the reset attack); it is valid, so kept.
     {
         const int R2 = live.Tip() - 1;
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
-        BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
+        BOOST_CHECK(policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
     }
     // EMERGENCY_PERSIST blocks later a claim opens by clause (b) and owes the residual.
     while (live.Tip() - 1 - R1 < live.P.emergencyPersist) live.MineQuote();
@@ -1924,7 +1519,7 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     BOOST_CHECK(verdict->find("red5-residual") != std::string::npos);
     live.MineWith({ withResidual });
     const VaultRecord after = b.Vault(vault).value();
-    BOOST_CHECK(after.Status() == VaultStatus::CLAIMED);
+    BOOST_CHECK(after.Status() == VaultStatus::CLAIMING);     // U-23: until its claimant intent is released
     {
         LOCK(index.cs_yellowback);
         State st(index.View());

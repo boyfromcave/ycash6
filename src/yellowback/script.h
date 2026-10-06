@@ -8,6 +8,7 @@
 #include "pubkey.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "vault/template.h"
 #include "yellowback/params.h"
 
 #include <string>
@@ -80,6 +81,22 @@ struct VaultSpendPath
  * not decided here.
  */
 std::optional<VaultSpendPath> ParseVaultSpendPath(const CScript& scriptSig);
+
+// ---------------------------------------------------------------- the vault upgrade (U-23)
+
+/**
+ * Since UPGRADE_VAULT the collateral of a mint is the primitive's vault template V
+ * (vault/template.h, docs/plans/yellowback-upgrade-plan.md §15.3, §15.10) with
+ *     tag = YED_TAG, setId = cancelSetId = attestorSetId, delay = CLAIM_DELAY,
+ *     ownerHeight = lockHeight, appHeight = lockHeight + GRACE, ownerKey = the payload's owner.
+ * The owner redeems with selector 2 (or 3 once the attestor set is released), the claim is
+ * selector 4 into intents, and the v2 P2SH VaultScript above is refused for new mints (MINT-3).
+ */
+extern const vault::Tag YED_TAG;
+/** The V parameters of a mint's vault (U-23). */
+vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t lockHeight);
+/** BuildVault(YedVaultParams(...)); empty when a field is out of range (the caller's MINT-2/3 then fails). */
+CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t lockHeight);
 
 // ---------------------------------------------------------------- v3 (§3.4): carrier and bond
 

@@ -59,6 +59,7 @@ HEARTBEAT_RATE = 2          # seconds per block: the budget below is measured in
 WALK_TICK = 3
 SHOCK = '-70%'              # class C (300 %) goes under CLAIM_THRESHOLD (110 %) at -63 %; class A (500 %) does not
 EMERGENCY_PERSIST = 4
+CLAIM_DELAY = 10              # regtest CLAIM_DELAY (U-23): the liquidator releases its claim after it
 STOCK, POOLS, ATTESTOR4, POPULATION, LIQUIDATOR = 1, (2, 3, 4), 8, 9, 10
 EXPECT = {
     # what each preset promises (plan section 3.1 / 3.2 as built: revision 3, I-1)
@@ -177,6 +178,14 @@ class Preset:
         check(state['population'] == POPULATION and state['liquidator'] == LIQUIDATOR, 'population/liquidator nodes are not 9/10')
         attestors = self.node(0).yed_listattestors()
         check(len(attestors) == want['attestors'], '%d attestors registered, expected %d' % (len(attestors), want['attestors']))
+        # P4-b: the registry is the attestor set; every record is a current member of it (the set's own view)
+        set_id = self.node(0).yed_getinfo()['upgrade']['attestorSetId']
+        members = {m['key']: m for m in self.node(0).set_getinfo(set_id)['memberlist']}
+        for rec in attestors:
+            m = members.get(rec['attestorPubKey'])
+            check(m is not None and m['status'] == 'active' and m['current'],
+                  'seq %s is not a current member of the attestor set: %s' % (rec['seq'], m))
+            check(m['lastact'] == rec['lastAct'], 'seq %s: lastAct %s, the set says %s' % (rec['seq'], rec['lastAct'], m['lastact']))
         # node 1 is stock: no yed_* at all
         try:
             self.node(STOCK).yed_getinfo()
@@ -289,7 +298,7 @@ class Preset:
                 if r['txid'] in population_vaults():
                     return r
             return None
-        row = self.wait_until(claimed, 60 + EMERGENCY_PERSIST + 30, 'the liquidator claiming a persona\'s vault')
+        row = self.wait_until(claimed, 60 + EMERGENCY_PERSIST + 30 + 2 * CLAIM_DELAY, 'the liquidator claiming a persona\'s vault (and releasing it, U-23)')
         closing = self.node(0).yed_gettxinfo(row['closingTxid'])
         check(closing['path'] == 'claim', 'the closing transaction is a %s, not a claim' % closing['path'])
         check(closing['claimPath'] in ('a', 'b'), 'claimPath %r' % closing['claimPath'])

@@ -15,6 +15,7 @@
 #include "yellowback/state.h"
 #include "yellowback/view.h"
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <map>
@@ -28,18 +29,26 @@ class CBlockHeader;
 class CBlockIndex;
 class CTxMemPool;
 class UniValue;
+namespace Consensus { struct Params; }
 
 /**
- * The Yellowback index (plan V2, §4.2a, §4.3): the overlay state kept
+ * The Yellowback index (plan V2, §4.2a, §4.3): the YED module's state kept
  * synchronous with chainActive by three hook calls in main.cpp —
  * CheckConnect in ConnectBlock's post-verification window, CommitConnect
  * after view.SetBestBlock, UndoDisconnect at the end of DisconnectBlock —
- * plus the N1 descendant clause in AcceptBlockHeader, MP-1 in
- * AcceptToMemoryPool and the mempool sweep in ConnectTip. Every hook is
- * called with cs_main held (asserted), takes cs_yellowback inside, and is a
- * no-op while the index is unhealthy (BLK-3: only a storage failure can make
- * the node accept a block it would otherwise reject, and then enforcement is
- * off until -reindex-yellowback).
+ * plus the mempool check in AcceptToMemoryPool and the mempool sweep in
+ * ConnectTip. Every hook is called with cs_main held (asserted) and takes
+ * cs_yellowback inside.
+ *
+ * Since the vault upgrade (docs/plans/yellowback-upgrade-plan.md §6, U-21,
+ * U-22) the index runs on every node of a network where UPGRADE_VAULT has a
+ * height and a YED attestor set is configured, from the activation height,
+ * and CheckConnect's verdict is a consensus rejection (DoS 100) with no
+ * node-local conjunct: the enforcement flag, the work valve, the rejected
+ * set, the IBD and catch-up suppression, the sunset and abandonment are
+ * gone. A storage failure is a node failure (the caller aborts), never an
+ * acceptance (BLK-3's fail-open is retired with the enforcing minority it
+ * protected).
  *
  * DigiByte keeps DigiDollar state in the chainstate itself and rejects in
  * consensus (ref/digibyte/src/validation.cpp); Ycash's chainstate flushes
@@ -52,31 +61,22 @@ class UniValue;
  * cs_yellowback; TemplateView holds cs_yellowback inside CreateNewBlock's
  * LOCK2(cs_main, mempool.cs); no RPC may take mempool.cs after cs_yellowback.
  *
- * Node-local bookkeeping that never feeds a rule (§3.10): the Rejected table
- * (X keys, sync writes, N8), the valve's header notes and state (ACT-7), the
- * enforcement flag, the quote holder (stamped by the RPC — no clock here,
- * M11), the payout key and the signal flag.
+ * Node-local bookkeeping that never feeds a rule (§3.10): the quote holder
+ * (stamped by the RPC — no clock here, M11) and the payout key.
  */
 namespace yellowback {
 
 /** Undo records older than this many blocks below the tip are pruned (V2: 4,096, the crash walk). */
 static const int UNDO_KEEP = 4096;
-/** ACT-7 / P2: the most headers the valve notes per rejected root. */
-static const int VALVE_NOTE_CAP = 64;
-/** Audit B-1: the most headers remembered as refused-but-unnoted (past the P2 bounds), so that their descendants stay at DoS 0. */
-static const size_t VALVE_REFUSED_CAP = 4096;
 
-/** The miner-side configuration read only on the miner path and in the hook's "what to do" branch (§3.10). */
+/** The miner-side configuration read only on the miner path (§3.10). The signal flag, the kill switch,
+ *  the template policy and -yellowbackrequirehealthy left with the vault upgrade (§6). */
 struct MinerConfig
 {
     std::optional<CKeyID> payoutKey;   //!< -yellowbackpayoutaddress or a P2PKH -mineraddress (MINER-2); none => no tag
-    bool signal;                       //!< -yellowbacksignal (L4 default per network)
-    bool enforce;                      //!< -yellowbackenforce (the kill switch, V13)
     int64_t quoteMaxAge;               //!< -yellowbackquotemaxage, seconds
-    std::string templatePolicy;        //!< "strict" | "consensus" (V14)
-    bool requireHealthy;               //!< -yellowbackrequirehealthy (K24)
 
-    MinerConfig() : signal(false), enforce(true), quoteMaxAge(1800), templatePolicy("strict"), requireHealthy(false) {}
+    MinerConfig() : quoteMaxAge(1800) {}
 };
 
 /** The quote yed_setquote stores (MINER-1). receivedAt is stamped by the RPC. */
@@ -95,29 +95,27 @@ CScript CoinbaseFlagsOf(const CScript& coinbaseScriptSig);
 /** What the next template's tag would be (yed_getinfo.miner, yed_setquote.nextTag, TemplateInfo). */
 struct MinerStatus
 {
-    std::string kind;                  //!< "quote" | "signal" | "none"
-    bool signal;                       //!< the signal bit the tag carries
+    std::string kind;                  //!< "quote" | "none" (the signal-only tag left with ACT-1, §6)
     std::optional<CKeyID> payoutKey;
     std::optional<int64_t> quoteAgeSeconds;
     bool registered;                   //!< REG-1 at the tip
     bool eligible;                     //!< in E(tip)
 
-    MinerStatus() : kind("none"), signal(false), registered(false), eligible(false) {}
+    MinerStatus() : kind("none"), registered(false), eligible(false) {}
 };
 
-/** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, no valve, or a schema mismatch at start. */
+/** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, or a schema mismatch at start. */
 struct TestFault
 {
     enum Hook { NONE, CHECK, COMMIT, UNDO };
     Hook storageHook;
     std::optional<int> height;        //!< fire at this height only (default: the next call)
     bool armed;                       //!< consumed on the first firing
-    bool templateFault;               //!< FilterTemplate disagrees with EvaluateBlock once (TPL-3)
-    bool noValve;                     //!< ACT-7 disabled (yellowback_runbook.py)
+    bool templateFault;               //!< FilterTemplate keeps one invalid transaction (TestBlockValidity then refuses the template)
     bool schemaMismatch;              //!< SyncToChain treats the stored tip as a foreign SCHEMA_VERSION once (the v3 rebuild path, yellowback_index.py)
     std::optional<int> crashHeight;   //!< CheckConnect flushes, then SIGKILLs the node, before judging this height (yellowback_index.py)
 
-    TestFault() : storageHook(NONE), armed(false), templateFault(false), noValve(false), schemaMismatch(false) {}
+    TestFault() : storageHook(NONE), armed(false), templateFault(false), schemaMismatch(false) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -252,15 +250,11 @@ public:
      * Bring the database in line with chainActive at startup: undo while the
      * stored tip is not in the active chain (covers the index being ahead of
      * an unflushed chainstate after a crash, V2), then apply forward from
-     * disk. Wipes and rebuilds on -reindex-yellowback (reconsidering the blocks
-     * Rejected names first), when the schema or network differs, an undo
+     * disk. Wipes and rebuilds when the schema or network differs, an undo
      * record is missing, or the chain is below startHeight. Takes cs_main.
      * Returns false only when the index ends up unhealthy.
      */
     bool SyncToChain();
-
-    /** Rejected blocks a wipe in SyncToChain reconsidered (init re-judges them; set only during init). */
-    int ReconsideredOnWipe() const { return reconsideredOnWipe; }
 
     /** Make every later hook return at once (shutdown). */
     void Stop();
@@ -296,78 +290,45 @@ public:
 
     // ------------------------------------------------------------------ hooks (cs_main held)
 
+    /** The outcome of CheckConnect: a consensus verdict, or a node failure the caller aborts on. */
+    struct ConnectCheck
+    {
+        std::optional<std::string> invalid;   //!< "bad-yellowback-<verdict>" when the block is invalid (DoS 100)
+        std::string reason;                   //!< "<verdict>:<txid>" (logs)
+        std::optional<std::string> failure;   //!< the index cannot evaluate the block (storage, tip mismatch): AbortNode
+    };
+
     /**
-     * ConnectBlock's check (BLK-1/BLK-2; the :3191-3193 window). H = pindex->nHeight.
-     * H < startHeight => nullopt. chainActive.Contains(pindex) => nullopt (a re-verification,
-     * K6). Consistency: (indexTip == null && H == startHeight) || indexTip.blockHash ==
-     * pindex->pprev->GetBlockHash(), else SetUnhealthy("tip-mismatch") => nullopt. Always
-     * evaluates (cache key {block.GetHash(), indexTipHash, paramsHash}, N9); returns a reason
-     * iff blockInvalid && enforcementOn && -yellowbackenforce && !valveTripped &&
-     * !IsInitialBlockDownload() && !fReindex && !fImporting (clauses 1-2) &&
-     * !NetworkAlreadyBuiltOn(pindex) (clause 3, L11: accepted, logged, counted in
-     * suppressedBlocks); on a reason writes Rejected with sync = true (N8; never under
-     * fJustCheck, whose block is never marked). A storage exception => SetUnhealthy(), nullopt
-     * (BLK-3). Never reads pindex->phashBlock (K5: TestBlockValidity's indexDummy has none).
+     * ConnectBlock's check (BLK-1, U-21). H = pindex->nHeight. H < startHeight => nothing.
+     * chainActive.Contains(pindex) => nothing (a re-verification, K6). Consistency:
+     * (indexTip == null && H == startHeight) || indexTip.blockHash == pindex->pprev->GetBlockHash(),
+     * else a failure (and the index is marked unhealthy). Always evaluates (cache key
+     * {block.GetHash(), indexTipHash, paramsHash}, N9); `invalid` iff blockInvalid -- in initial
+     * sync, reindex and import alike. A storage exception is a failure. Never reads
+     * pindex->phashBlock (K5: TestBlockValidity's indexDummy has none).
      */
-    std::optional<std::string> CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck);
-    /** The commit after view.SetBestBlock (never under fJustCheck): same guards; reuses the cache else re-evaluates; one batch; false => unhealthy (the block still connects). */
+    ConnectCheck CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck);
+    /** The commit after view.SetBestBlock (never under fJustCheck): same guards; reuses the cache else re-evaluates; one batch; false => a node failure (the caller aborts). */
     bool CommitConnect(const CBlock& block, const CBlockIndex* pindex);
-    /** DisconnectBlock's undo (inside `if (updateIndices)`): guard indexTip.blockHash == pindex->GetBlockHash(); false => unhealthy. */
+    /** DisconnectBlock's undo (inside `if (updateIndices)`): guard indexTip.blockHash == pindex->GetBlockHash(); false => a node failure. */
     bool UndoDisconnect(const CBlockIndex* pindex);
 
-    /**
-     * The N1 clause in AcceptBlockHeader and the ACT-7 odometer: true => the caller answers
-     * DoS(0, "bad-prevblk-yellowback"). Notes the header {hash -> root, work} only within the P2
-     * bounds (target <= parent target * 132 / 100; fewer than VALVE_NOTE_CAP notes per root);
-     * trips the valve in place when the noted work reaches tip.nChainWork + valveBlocks *
-     * GetBlockProof(*tip) (ReconsiderBlock loop, Rejected cleared, SetMiscWarning +
-     * CAlert::Notify, P1); returns false once tripped so the stock chain is accepted from the
-     * next announcement on (P3). A header refused outside the P2 bounds, and every descendant
-     * of one, is remembered in `refusedNotes` (bounded by VALVE_REFUSED_CAP, cleared when full)
-     * and answered true as well, so the stock `prev block not found` DoS 10 never reaches a peer
-     * relaying a long rejected chain (audit B-1).
-     */
-    bool NoteHeaderOnRejectedChain(const CBlockHeader& header);
-    /** Walks pprev through BLOCK_FAILED_CHILD marks to the first BLOCK_FAILED_VALID ancestor; its hash in Rejected? */
-    bool IsRejectedAncestor(const CBlockIndex* pindexPrev) const;
-    /** BLK-2 clause 3 (L11): pindexBestHeader descends from pindex and carries valveBlocks of work above the tip. */
-    bool NetworkAlreadyBuiltOn(const CBlockIndex* pindex) const;
-
-    /** ConnectTip's sweep (N5): takes mempool.cs, then cs_yellowback; removes every vault spend MempoolCheck now fails, with descendants. */
+    /** ConnectTip's sweep (N5): takes mempool.cs, then cs_yellowback; removes every transaction MempoolCheck now fails, with descendants. */
     void RemoveInvalidVaultSpends(CTxMemPool& pool);
     /**
-     * MP-1: true unless some input spends an ACTIVE vault (O(inputs) lookups, no SNAP, N6) and
-     * the spend either lacks the expiry bound (nExpiryHeight == 0 or > refHeight + REF_WINDOW)
-     * or fails RED-1..4 at the next height over a two-transaction pseudo-block (§4.3). True for
-     * every vault spend while IsAbandoned() (L13). Mints and transfers are never refused.
+     * The mempool's ordinary validity check (U-21): ProcessTx at the next height on a discarded
+     * overlay of the tip state, for a transaction that has a Yellowback payload, spends a token,
+     * vault or claim intent, or creates a YED-tagged template output; true unless it is invalid
+     * under the module. A vault spend also needs the expiry bound (nExpiryHeight != 0 and <=
+     * refHeight + REF_WINDOW, so it expires before RED-1's window closes). Every refusal is
+     * state-dependent (the tip moves), so the caller answers DoS 0.
      */
     bool MempoolCheck(const CTransaction& tx);
-    /** MempoolCheck's reason: nullopt = admitted; "mempool-expiry" or the RED verdict (K7; `mempool-check-failed:<verdict>`). */
+    /** MempoolCheck's reason: nullopt = admitted; "mempool-expiry" or the verdict (K7; `mempool-check-failed:<verdict>`). */
     std::optional<std::string> MempoolCheckReason(const CTransaction& tx);
 
     /** RAII holder of cs_yellowback over an overlay at the tip (caller holds cs_main, and mempool.cs when in CreateNewBlock). */
     yellowback::TemplateView TemplateView();
-
-    /** The §4.6 abandonment predicate (L10, L12): ENFORCEMENT set for abandonBlocks consecutive snapshots ending at the tip; from Snapshots alone. */
-    bool IsAbandoned() const;
-
-    // ------------------------------------------------------------------ enforcement state (node-local)
-
-    bool EnforceFlag() const { return miner.enforce; }
-    /** ACT-5's node-side conjuncts: -yellowbackenforce && healthy && !valveTripped && !sunset. */
-    bool IsEnforcing() const;
-    bool ValveTripped() const { return valveTripped; }
-    /** L8: the tip has reached ENFORCE_UNTIL_HEIGHT (the next block is past it); false when the set has no sunset. */
-    bool IsSunset() const;
-    int RejectedCount() const;
-    int SuppressedCount() const { return suppressedBlocks; }
-    /** Every hash in Rejected (cs_yellowback). */
-    std::vector<uint256> RejectedHashes() const;
-    std::optional<RejectedRecord> GetRejected(const uint256& blockHash) const;
-    /** Erase Rejected (the kill-switch loop after ReconsiderBlock; -reindex-yellowback wipes it with everything else). */
-    void ClearRejected();
-    /** The valve's note map size (unit tests). */
-    size_t ValveNoteCount() const;
 
     // ------------------------------------------------------------------ miner side
 
@@ -377,13 +338,15 @@ public:
     const PayeePolicy& GetPayeePolicy() const { return payeePolicy; }
     /** yed_setquote: the RPC stamps receivedAt (the only clock, M11). */
     void SetQuote(uint64_t priceMicroUsd, uint16_t sourceMask, int64_t receivedAt);
+    /** Bumped by every SetQuote (D-U6): getblocktemplate rebuilds its cached template when it moves. */
+    uint64_t QuoteGeneration() const { return quoteGeneration.load(); }
     QuoteHolder GetQuote() const;
     /** What the next template's tag would be, given `now` (cs_yellowback). */
     MinerStatus GetMinerStatus(int64_t now) const;
     /**
      * The getblocktemplate "yellowback" object (§4.4; V26): the tag the template carries
      * (COINBASE_FLAGS as CreateNewBlock set it, decoded), the quote's age, the miner's
-     * standing and the node's state. Caller holds cs_main; `now` is the RPC's clock (M11).
+     * standing and the index's health. Caller holds cs_main; `now` is the RPC's clock (M11).
      */
     UniValue TemplateInfo(int64_t now) const;
     /** The same, decoded from the coinbase scriptSig of the template actually being served (getblocktemplate
@@ -458,29 +421,16 @@ private:
         bool valid;
         Evaluation() : valid(false) {}
     };
-    struct HeaderNote
-    {
-        uint256 root;
-        arith_uint256 work;
-        uint32_t nBits;
-    };
 
     bool ApplyOne(const CBlock& block, int height, const uint256& hash, std::string& error);
     bool UndoOne(const uint256& hash, std::string& error);
     void Wipe(const std::string& why);
-    void LoadRejected();
     uint256 ParamsHash(const Params& p) const;
     /** Evaluate (or reuse the cache) for a block on top of the stored tip; fills `cache`. */
     const Evaluation& Evaluate(const CBlock& block, int height, const uint256& tipHash);
     /** The consistency guard shared by CheckConnect and CommitConnect; false => already marked unhealthy. */
     bool TipMatches(const CBlockIndex* pindex, std::optional<TipRecord>& tip, const char* hook);
     void MaybeFault(TestFault::Hook hook, int height);
-    std::optional<uint256> RejectedRootOf(const CBlockIndex* pindex) const;
-    void TripValve(const uint256& root);
-    /** B-1: remember `hash` as refused past the P2 bounds (bounded set) and answer true (DoS 0). cs_yellowback held. */
-    bool RefuseNote(const uint256& hash);
-    bool IsAbandonedLocked() const;
-    bool IsSunsetLocked() const;
     std::optional<std::string> MempoolCheckLocked(const CTransaction& tx);
     std::optional<std::string> MempoolCheckInner(const CTransaction& tx);
     bool AddAttestationLocked(const Attestation& att, std::string& reason, bool* replacedOut);
@@ -497,41 +447,37 @@ private:
     std::string unhealthyReason;
     bool stopped;
     bool rebuilt;
-    bool pendingWipe;      //!< -reindex-yellowback: SyncToChain wipes (under cs_main, after reconsidering Rejected)
-    int reconsideredOnWipe;
 
     MinerConfig miner;
     PayeePolicy payeePolicy;
     AttestPolicy attestPolicy;
     QuoteHolder quote;
+    std::atomic<uint64_t> quoteGeneration{0};   //!< D-U6: bumped by SetQuote
     TestFault testFault;
     AttestationPool pool;
     LruSigCache sigCache;
 
     Evaluation cache;
-    std::set<uint256> rejected;                 //!< the Rejected table, mirrored in memory (loaded at open)
-    std::map<uint256, HeaderNote> notes;        //!< ACT-7 odometer: refused headers -> root, accumulated work
-    std::map<uint256, int> notesPerRoot;
-    std::set<uint256> refusedNotes;             //!< ACT-7 / B-1: refused past the P2 bounds (and their descendants): terminal at DoS 0
-    bool valveTripped;
-    int suppressedBlocks;
-    bool sunsetLogged;
 };
 
-/** The node's index, or nullptr when -yellowback is off. */
+/** The node's index, or nullptr where YED is not configured (no UPGRADE_VAULT height or no attestor set, U-22). */
 extern YellowbackIndex* g_yellowback;
+/** True iff YED is live with this node's network and options (U-22); set in init step 3, before the RPC table and the index. */
+extern bool g_yellowbackLive;
 /** -yellowbackfee (>= DEFAULT_YELLOWBACK_FEE) and -yellowbackmintlag (REF_LAG). */
 extern CAmount g_yellowbackFee;
 extern int g_yellowbackMintLag;
 
 /**
- * Build the parameters for the running network from configuration (the four
- * regtest-only flags of §3.1: -yellowbackstartheight, -yellowbacksigmaref,
- * -yellowbacksupplycapbps, -yellowbackenforceuntil). Returns an error string
- * on a misconfiguration (start height missing, or a regtest flag on another
- * network).
+ * Build the parameters for the running network (U-22): startHeight is the UPGRADE_VAULT activation
+ * height of `consensus` (0 when it has none), attestorSetId the network's (regtest:
+ * -yellowbackattestorset=<setid>, mainnet and testnet unset), and on regtest the overrides
+ * -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackattestarmmin, -yellowbackbundlecarrier,
+ * -yellowbackmintrequiresarmed. The result is configured (Params::IsConfigured) iff YED is live on
+ * this network. Returns an error string on a misconfiguration (a malformed value, a regtest flag on
+ * another network, or a retired flag: -yellowbackstartheight, -yellowbackenforceuntil).
  */
-std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out);
+std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out);
 
 } // namespace yellowback
 

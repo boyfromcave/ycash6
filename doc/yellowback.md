@@ -1,7 +1,18 @@
 # Ycash Yellowback (YED) — user guide
 
 Ycash Yellowback (YED) is a decentralized, over-collateralised US-dollar stablecoin **overlay** on
-Ycash. **Yellowback v2 is a miner-enforced soft fork** (plan §1): Tier 1 mining policy plus one
+Ycash.
+
+> **On the vault upgrade line (`upgrade/vault`).** Yellowback is a rule module of the Ycash vault
+> primitive (`UPGRADE_VAULT`, docs/plans/yellowback-upgrade-plan.md §5, §15.10): its block verdict
+> is consensus from the upgrade height, the vault is the primitive's bare V template, and pool
+> signalling, lock-in, the work valve, the kill switch, the sunset, abandonment and `yed_sweep`
+> are retired (plan §6). Where the v2/v3 text below describes them, it is the history of the
+> design, not this node's behaviour; the sections *Activation and enforcement since the vault
+> upgrade* and *Releases and continuity* are current. The trust statement is the spec's §8.1 copy
+> (a CI byte-identity check) and changes with the spec.
+
+**Yellowback v2 is a miner-enforced soft fork** (plan §1): Tier 1 mining policy plus one
 block-validity hook in `main.cpp` that is inert until an activation derived from the chain itself,
 that only ever fires on transactions spending a Yellowback vault, that never bans a peer, that fails
 open only on a storage failure, and that an operator can switch off with one flag. Every block an
@@ -45,9 +56,9 @@ This file is the user-facing guide to the node and its wallet commands.
   blocks on regtest; longer on mainnet) and the claim price the maximum of the two longer ones. No
   price is defined until enough blocks in a window carry quotes, and minting is refused while any
   halt holds (`yed_getstats.mintingAllowed`, `halts`).
-- **Activation is by signalling.** Pools set a signal bit in the same tag; once 75 % of a window
-  signal the rules lock in and one window later they are active (`yed_getactivation`). Before that
-  the module only tags, filters and accounts. Minting is impossible before activation.
+- **Activation is the vault upgrade.** Yellowback is live from the `UPGRADE_VAULT` height on every
+  network that names a YED attestor set (U-22); `yed_getactivation` reports it. There is no
+  signalling and no lock-in (both retired with the upgrade, plan §6).
 - **Fees pay the enforcers.** Mints, redemptions and claims pay a fee (the larger of a flat minimum
   and a few basis points of the collateral) to a pool that published a quote in the `payeeWindow`
   blocks up to the transaction's reference height (100 on mainnet, 10 on regtest); the wallet picks the payee, avoiding pools whose quotes strayed
@@ -59,9 +70,11 @@ Every rule that matters reads a YEC/USD price: how much collateral a mint needs,
 becomes claimable. v2 took that price from one place — the quotes pools publish in their
 coinbases. v3 keeps those and adds a second, independent population.
 
-- **Attestors.** Anyone may post a long time-locked bond (`yed_registerattestor`) and then sign
-  prices with an off-chain agent (`contrib/yellowback/attest/`). Attestors send no transactions
-  after registering and need no domain, no open port and no funded hot wallet. The highest-weighted
+- **Attestors.** Anyone may post a long time-locked bond (`yed_registerattestor`: since the vault
+  upgrade a `SET_JOIN` to the YED attestor set, the primitive's signer set, P4-b) and then sign
+  prices with an off-chain agent (`contrib/yellowback/attest/`). After joining, an attestor's only
+  transactions are periodic `SET_HEARTBEAT`s (the set's member dormancy); it needs no domain, no
+  open port and only the node's own wallet. The highest-weighted
   bonds are *seated*; weight is bond size times age, so influence is slow, visible and costly to buy.
 - **Arming.** The layer switches on by itself: once seven attestors have matured bonds on mainnet
   (`ATTEST_ARM_MIN`, hardening H-2; three on regtest), a one-day countdown starts
@@ -101,9 +114,12 @@ options: `-reindex-yellowback` (wipe and rebuild the index), `-yellowbackfee=<za
 fee of every Yellowback transaction, minimum 1000), `-yellowbackmintlag=<blocks>` (default 2),
 `-yellowbackpreferredpayee=<s1…>` (where this wallet's own transactions pay their enforcement fee
 when that pool is eligible), `-debug=yellowback`. The mining-side options (`-yellowbackpayoutaddress`,
-`-yellowbacksignal`, `-yellowbackenforce`, `-yellowbackquotemaxage`, …) are in
-`doc/yellowback-mining.md`. Regtest additionally takes `-yellowbackstartheight`,
-`-yellowbacksigmaref`, `-yellowbacksupplycapbps` and `-yellowbackenforceuntil`.
+`-yellowbackquotemaxage`, …) are in `doc/yellowback-mining.md`. Regtest additionally takes
+`-yellowbacksigmaref` and `-yellowbacksupplycapbps`. Since the vault upgrade YED needs no flag:
+it is on wherever `UPGRADE_VAULT` and the attestor set are configured (regtest:
+`-nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>`); `-yellowbackenforce`,
+`-yellowbacksignal`, `-yellowbacktemplatepolicy` and `-yellowbackrequirehealthy` are logged and
+ignored, `-yellowbackstartheight` and `-yellowbackenforceuntil` are init errors (finding (31)).
 
 ## Using Yellowback from `ycash-cli`
 
@@ -115,7 +131,7 @@ chain tip) before any of these work.
 ycash-cli yed_getinfo                       # index height, healthy, enforcing, activation, abandoned, miner, params
 ycash-cli yed_getstats                      # supply, collateral, prices, halts, mintingAllowed
 ycash-cli yed_getprice                      # the three medians and their fill
-ycash-cli yed_getactivation                 # signaling / locked_in / active, signalCount
+ycash-cli yed_getactivation                 # the vault upgrade: status, activationHeight, attestorSetId
 ycash-cli yed_getnewaddress                 # a YED address (ye… on mainnet)
 ycash-cli yed_getbalance
 ycash-cli yed_estimatecollateral 10000 48   # YEC needed now to mint $100.00 with a 48-block lock (class A on regtest)
@@ -150,47 +166,22 @@ Never spend a YED output with a plain YEC command: the YED it carries is burned.
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
 them by accident; `lockunspent true` on one of them removes that protection.
 
-## If the pools stop enforcing: abandonment and the sweep
+## Activation and enforcement since the vault upgrade
 
-Enforcement is only as strong as the share of blocks that signal. `yed_getactivation.signalCount`
-and `yed_getstats.halts` show it:
+The v2/v3 section that stood here (*If the pools stop enforcing: abandonment and the sweep*)
+described a share of signalling blocks, the `PARTICIPATION` and `ENFORCEMENT` halts, abandonment
+and `yed_sweep`. On the vault upgrade line none of that exists (plan §6):
 
-- **Below 60 % of blocks signalling, minting pauses** (the `PARTICIPATION` halt); it resumes at
-  75 %. Existing YED stays redeemable by a minter who holds it.
-- **Below 50 %, block rejection pauses too** (the `ENFORCEMENT` halt): while it holds, neither the
-  owner path nor the claim path is policed — collateral can leave a vault without its burn, and
-  YED so left unbacked stays in circulation. Vaults untouched during the pause are protected again
-  when rejection resumes at 60 %.
-- **`ABANDON_BLOCKS` of the `ENFORCEMENT` halt is abandonment** (`yed_getinfo.abandoned`; 128
-  blocks on regtest, 34,560 — thirty days, the same length as `GRACE` — on mainnet; W21). It is
-  the minimum time the module waits for its developers after any halt, including a deliberate
-  freeze (`doc/yellowback-release.md`, "Freeze, then fix"). This is also where a sunset with no
-  successor release ends up. From then on every vault's claim path is spendable by anyone at its claim height and nobody
-  refuses the spend: whoever mines first takes the collateral.
-- **Every enforcement gap is such a window, not only abandonment** (audit A-5). The claim branch
-  of a vault script is `<claimHeight> CLTV DROP OP_TRUE`: the only thing that stops a claim
-  without its burn is an enforcing miner refusing the block. Whenever this node's enforcement
-  stands down — initial block download (more than 24 h behind), `-reindex` / `-loadblock`, the
-  work valve tripped, catch-up suppression (six blocks of work ahead on a rejected chain), the
-  `ENFORCEMENT` halt, the sunset — a stock-mined claim-path spend of any ACTIVE vault past its
-  claim height takes the collateral with no burn and the vault closes `unbacked`. At the sunset
-  with no successor release the gap lasts until abandonment is declared: the signal bits decay
-  below the floor over a window (2,016 blocks) and `ABANDON_BLOCKS` (34,560) follow, roughly a
-  month on mainnet during which `yed_sweep` is still refused on an owner's own node (MP-1 stands
-  down only under abandonment). **Owners: redeem, or let no vault sit past its claim height
-  across a sunset**; a wallet should warn at `ENFORCE_UNTIL_HEIGHT - grace` (the GUI's job, not
-  the node's).
-
-What an owner does under abandonment: **sweep before the claim height.** `yed_listpositions` shows
-`canSweep: true` and `sweepBefore` (the claim height) on every ACTIVE vault you own; `yed_sweep
-<vaultTxid> "I understand this leaves YED unbacked"` spends the vault back to you with no burn and
-no fee, and every node of every release relays and mines it like any other transaction (the
-command also returns the raw `hex` so you can submit it elsewhere). The YED minted against a swept
-or claimed vault is **unbacked** from then on — `yed_getvault.unbacked`, `Totals.unbackedCents` —
-which is why the acknowledgement is required; the claim path stays open to everyone, so the race is
-fair, but it is a race. Outside abandonment `yed_sweep` refuses (`sweep-not-abandoned`) and an
-enforcing pool would never mine such a spend. A VOID vault (a failed mint, which never carried a
-debt) is not affected: its owner releases it with `yed_redeem` at its lock height at any time.
+- The module's block verdict is a **consensus** rejection at every height where `UPGRADE_VAULT`
+  is active (U-21): a block that spends a YED vault against the rules is invalid on every
+  upgraded node, whoever mined it. No share of pools has to keep enforcing, and no gap opens in
+  initial block download, during a reindex or after a release date.
+- The vault is a bare V template (U-23): the owner redeems with the OWNER branch (selector 2,
+  REDEEM payload, RED rules as before); a claim moves the collateral into a claimant intent
+  (selector 4) that the YED attestor set may cancel (I-2) during `CLAIM_DELAY`, and that anyone
+  releases after it. There is no anyone-can-spend claim path and nothing to sweep.
+- If the attestor set goes dormant or winds down, the set is *released* and the owner recovers the
+  vault (selector 3) without any burn (plan §3.7).
 
 ## Rebuilding the index
 
@@ -198,9 +189,9 @@ The index lives under `<datadir>/yellowback/` and is rebuilt from the blocks on 
 missing, when the node was reindexed, or on `-reindex-yellowback`. `yed_getinfo.healthy: false`
 names the reason (`unhealthyReason`) and always means "restart with `-reindex-yellowback`". Every
 `yed_*` call except `yed_getinfo`, `yed_getblockverdict`, `yed_gettag`, `yed_decodepayload` and
-`yed_setquote` refuses while the index is unhealthy or behind the chain tip. Plain `-reindex` is
-safe on an enforcing node: nothing is rejected while the node is reindexing or in initial block
-download.
+`yed_setquote` refuses while the index is unhealthy or behind the chain tip. Since the vault
+upgrade the module's verdict is consensus, so a node whose index is unhealthy stops (`AbortNode`,
+finding (32)) rather than validate blocks without it; restart with `-reindex-yellowback`.
 
 ## How your YED is protected from being spent as plain YEC (H5–H10)
 
@@ -394,3 +385,12 @@ reported to miodragpop. The 42 entries that pass twice, including `zmq_test`, `i
 `getblocktemplate_longpoll`, are the `STOCK_BASELINE` that CI runs against the fork binary without
 `-yellowback`. One operator note follows from finding 7: on 6.20.0, `-lightwalletd` must be run
 together with `-insightexplorer`.
+
+## Releases and continuity
+
+On the vault upgrade line a parameter set is consensus from the `UPGRADE_VAULT` height and has no
+`ENFORCE_UNTIL_HEIGHT`: the sunset, renewal releases (W18) and the freeze-then-fix runbook (W19),
+which relied on pools stopping their signal to raise the `ENFORCEMENT` halt, are retired with the
+signalling (upgrade plan §6, §7). A parameter change is a network upgrade like any other,
+coordinated through a new branch ID (plan §8); a defect found before one ships is handled by the
+attestor set's cancel (I-2) for claims and by the owner branches for redemptions, not by a freeze.

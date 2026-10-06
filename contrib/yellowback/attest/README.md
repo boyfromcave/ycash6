@@ -5,7 +5,7 @@ long-running modes, beside a `ycashd -yellowback`.
 
 | Mode | Runs beside | Loop |
 |---|---|---|
-| `attest` | an attestor's node (registered with `yed_registerattestor`) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic |
+| `attest` | an attestor's node (registered with `yed_registerattestor`: since P4-b a SET_JOIN to the attestor set, the vault primitive's signer set) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic; every `heartbeat_blocks` blocks send `set_heartbeat <attestorSetId> <memberKey>` (an attestor without an act inside the set's `livenesswindow` is DORMANT, and signing is not an act) |
 | `subscribe` | any minting node (the devnet's node 0; YecWallet's bundled node) | join the topic; drop anything that is not 74 bytes, whose `seq` is not in `yed_listattestors` (refreshed every 60 s), that was already handed to the node (LRU of 4,096 frames), whose `citedHeight` is outside `[tip − 64, tip + 8]` of the node, or that exceeds the `seq`'s token bucket (`seq_burst`, `seq_refill_seconds`); push the rest with `yed_addattestation`; count acceptances; back off 1..60 s while the RPC is down; optionally poll `[subscribe] endpoints` over HTTPS as a second path |
 
 Plus two one-shot commands: `sources` (fetch every source once and show what resolved) and

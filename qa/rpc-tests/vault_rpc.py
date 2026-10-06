@@ -16,7 +16,9 @@ The vault primitive's set_* / vault_* RPCs end to end, on three nodes, through t
 - vault_lock; an unlock into an intent via vault_buildunlock + set_signunlock on two nodes +
   vault_send; vault_release refused before the delay and accepted after it;
 - a second unlock cancelled by one node (vault_buildcancel + set_signcancel + vault_send), its
-  value back in a byte-identical vault;
+  value back in a byte-identical vault; the cancel is built and signed while the intent is still in
+  the mempool (finding (50)) and broadcast after it confirms;
+- a third unlock whose cancel is accepted as the intent's mempool child, both confirming in one block;
 - vault_ownerspend after ownerHeight (selector 2);
 - a reorg across a set act (invalidateblock / reconsiderblock on every node): the state hash and
   set_getinfo return to the earlier state and back again, identically on every node;
@@ -242,16 +244,44 @@ class VaultRpcTest(BitcoinTestFramework):
         bu = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 2}])
         signed = n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])
         assert_equal(signed['complete'], True)
+        # sign once (SET_EQUIVOCATION): a different unlock of the same vault is refused by both signers,
+        # also after a restart; re-signing the identical transaction is idempotent
+        bu_other = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 3}])
+        assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
+        assert_raises_rpc('set-sign-once', n0.set_signunlock, bu_other['hex'])
+        assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
+        self.restart(1)
+        n1 = self.nodes[1]
+        assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
+        assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
         assert_raises_rpc('', n1.vault_send, signed['hex'])   # node 1 cannot sign node 0's fee inputs
         txid = n0.vault_send(signed['hex'])
-        self.mine(1)
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
+        # Finding (50): a watcher pre-builds and signs the cancel while the intent is in the mempool.
+        self.sync_all()
+        pre = n2.vault_buildcancel(intent_op)
+        assert_equal(pre['intentconfirmed'], False)
+        assert_equal(pre['deadline'], n2.getblockcount() + DELAY)    # if the intent confirms in the next block
+        assert_equal(pre['required'], 1)
+        pre_signed = n2.set_signcancel(pre['hex'])
+        assert_equal(pre_signed['complete'], True)
+        self.mine(1)
         assert_equal(n2.set_getinfo(setid)['lockedvalue'], Decimal('4'))
         bc = n2.vault_buildcancel(intent_op)
+        assert_equal(bc['intentconfirmed'], True)
+        assert_equal(bc['deadline'], pre['deadline'])
+        assert_equal(bc['cancelsetid'], pre['cancelsetid'])
         assert_equal(bc['required'], 1)
-        sc = n2.set_signcancel(bc['hex'])
-        assert_equal(sc['complete'], True)
-        cancel_txid = n2.vault_send(sc['hex'])
+        # The rebuild after confirmation is byte-identical to the mempool build (one sighash to sign);
+        # sign once: another cancel of the same intent is refused, re-signing the same one is idempotent.
+        assert_equal(bc['hex'], pre['hex'])
+        assert_equal(n2.vault_buildcancel(intent_op)['hex'], bc['hex'])
+        other = bc['hex'][:-38] + '01000000' + bc['hex'][-30:]               # the same cancel with nLockTime 1: another sighash
+        assert other != bc['hex']
+        assert_raises_rpc('set-sign-once', n2.set_signcancel, other)
+        assert_equal(n2.set_signcancel(bc['hex'])['hex'], pre_signed['hex'])
+        # The cancel signed before the intent was mined is still valid after it.
+        cancel_txid = n2.vault_send(pre_signed['hex'])
         self.mine(1)
         vaults = sorted(n1.vault_list({'kind': 'vault'}), key=lambda x: x['value'])
         assert_equal([x['value'] for x in vaults], [Decimal('2'), Decimal('4')])
@@ -271,6 +301,27 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal('0.0001'))
         assert_equal(len(n0.vault_list({'kind': 'vault'})), 1)
         assert_equal(n0.set_getinfo(setid)['lockedvalue'], Decimal('4'))
+
+        # ---- a cancel accepted as the mempool child of an unconfirmed intent ----
+        # AcceptToMemoryPool counts a mempool parent as confirming in the next block (coinHeight =
+        # tip+1, so I-2's h - coinHeight = 0 < delay); both then confirm in one block.
+        [v4] = n0.vault_list({'kind': 'vault'})
+        bu = n0.vault_buildunlock(v4['outpoint'], [{'address': addr1, 'amount': 1}])
+        txid = n0.vault_send(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'])
+        intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
+        self.sync_all()
+        sc = n1.set_signcancel(n1.vault_buildcancel(intent_op)['hex'])
+        assert_equal(sc['complete'], True)
+        child = n1.vault_send(sc['hex'])
+        self.sync_all()
+        for node in self.nodes:
+            assert_equal(sorted(node.getrawmempool()), sorted([txid, child]))
+        [blk] = self.mine(1)
+        assert_equal(sorted(n0.getblock(blk)['tx'][1:]), sorted([txid, child]))
+        assert_equal(n0.vault_list({'kind': 'intent'}), [])
+        assert_equal(sorted(x['value'] for x in n2.vault_list({'kind': 'vault'})), [Decimal('1'), Decimal('3')])
+        assert_equal(n0.set_getinfo(setid)['lockedvalue'], Decimal('4'))
+        assert_raises_rpc('not an unspent intent', n1.vault_buildcancel, intent_op)
 
         # ---- a reorg across a set act ----
         before = self.assert_consistent()
@@ -309,7 +360,7 @@ class VaultRpcTest(BitcoinTestFramework):
         self.mine(1)
         assert self.assert_consistent() != state
         info = self.nodes[2].vault_getinfo()
-        assert_equal((info['sets'], info['vaults'], info['intents']), (1, 1, 0))
+        assert_equal((info['sets'], info['vaults'], info['intents']), (1, 2, 0))
 
 
 if __name__ == '__main__':

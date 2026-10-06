@@ -517,8 +517,10 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
 
     LOCK(cs_main);
 
-    if (yellowback::g_yellowback && yellowback::g_yellowback->GetMinerConfig().requireHealthy && !yellowback::g_yellowback->IsHealthy())
-        throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; -yellowbackrequirehealthy refuses templates until -reindex-yellowback");
+    // The YED module is consensus at UPGRADE_VAULT (upgrade plan U-21): an index that cannot evaluate it
+    // cannot build a valid template (-yellowbackrequirehealthy is retired; this is always on).
+    if (yellowback::g_yellowback && !yellowback::g_yellowback->IsHealthy())
+        throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; restart with -reindex-yellowback");
 
     // Wallet or miner address is required because we support coinbasetxn
     if (GetArg("-mineraddress", "").empty()) {
@@ -683,13 +685,17 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     static CBlockIndex* pindexPrev;
     static int64_t nStart;
     static CBlockTemplate* pblocktemplate;
-    if (!lpval.isNull() || pindexPrev != chainActive.Tip() ||
+    // D-U6: a new or cleared pool quote (yed_setquote) rebuilds the cached template at once.
+    static uint64_t nQuoteGenerationLast = 0;
+    const uint64_t nQuoteGeneration = yellowback::g_yellowback ? yellowback::g_yellowback->QuoteGeneration() : 0;
+    if (!lpval.isNull() || pindexPrev != chainActive.Tip() || nQuoteGeneration != nQuoteGenerationLast ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - nStart > 5))
     {
         // Clear pindexPrev so future calls make a new block, despite any failures from here on
         pindexPrev = nullptr;
 
         nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
+        nQuoteGenerationLast = nQuoteGeneration;
 
         // If we're going to use the precomputed coinbase (empty block) and there are
         // transactions waiting in the mempool, make sure that on the next call to this

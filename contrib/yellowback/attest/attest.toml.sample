@@ -25,7 +25,8 @@ rpc_cookie = "~/.ycash/.cookie"
 # allow_insecure_rpc = true
 
 [attest]
-seq = 0                  # REQUIRED for `attest`: your registration sequence number (yed_listattestors after yed_registerattestor)
+seq = 0                  # REQUIRED for `attest`: your sequence number (yed_listattestors after yed_registerattestor, i.e. your SET_JOIN to the attestor set)
+heartbeat_blocks = 1152  # P4-b: a SET_HEARTBEAT every N blocks keeps the record out of the set's member dormancy (0 = never; must be below the set's livenesswindow)
 every_blocks = 10        # sign every N new blocks (regtest devnet: 4)
 fail_polls = 2           # after this many consecutive failed aggregates at a due tick: publish nothing until a good one (L5)
 ref_lag = 2              # citedHeight = tip - ref_lag

@@ -7,7 +7,7 @@
 chain-viz against the node (docs/plans/chain-viz-plan.md C5): the read-only observer's HTTP API
 checked against the nodes' own RPCs on a three-node regtest.
 
-Three pool nodes (every one enforcing, signalling, quoting $50), ZMQ ``hashblock``/``hashtx``
+Three pool nodes (every one quoting $50), ZMQ ``hashblock``/``hashtx``
 published by each on one endpoint (C-F-1), then the ``chain-viz`` binary on ``--nodes`` with
 ``--record``.  The test then
 
@@ -49,10 +49,8 @@ from test_framework.util import (
     MAX_NODES,
     PortSeed,
     assert_equal,
-    connect_nodes_bi,
     rpc_auth_pair,
     rpc_port,
-    start_nodes,
     sync_blocks,
     sync_mempools,
 )
@@ -64,6 +62,7 @@ from test_framework.yellowback_util import (
     pool_args,
     round_robin_schedule,
     set_quote,
+    start_nodes_with_attestor_set,
 )
 from test_framework.yellowback_attest import wallet_mint
 
@@ -126,14 +125,13 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         self.pool_addresses = [address_of(w) for w in POOL_WIFS[:NODES]]
 
     def setup_network(self, split=False):
-        args = [pool_args(self.pool_addresses[i], ['-zmqpubhashblock=%s' % zmq_url(i), '-zmqpubhashtx=%s' % zmq_url(i)])
-                for i in range(NODES)]
-        self.nodes = start_nodes(NODES, self.options.tmpdir, extra_args=args)
+        # U-22: Yellowback is live only with the YED attestor set, created on node 0 first
+        self.nodes = start_nodes_with_attestor_set(
+            NODES, self.options.tmpdir,
+            lambda i: pool_args(self.pool_addresses[i], ['-zmqpubhashblock=%s' % zmq_url(i), '-zmqpubhashtx=%s' % zmq_url(i)]),
+            [(0, 1), (1, 2), (0, 2)])
         for i in range(NODES):
             self.nodes[i].importprivkey(POOL_WIFS[i], 'yellowback-payout', False)
-        connect_nodes_bi(self.nodes, 0, 1)
-        connect_nodes_bi(self.nodes, 1, 2)
-        connect_nodes_bi(self.nodes, 0, 2)
         self.is_network_split = False
         self.sync_all()
 
@@ -373,6 +371,10 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         for node in self.nodes:
             assert_equal(node.yed_getactivation()['status'], 'active')
             assert_equal(node.yed_getstats()['mintingAllowed'], True)
+        # Since P4-a node 1's round-robin coinbases are still immature at its mint in check (c)
+        # (the vault activation is mined by node 0 first); fund it from node 0 (found by p6-chainviz).
+        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 100)
+        self.mine(0)
         try:
             record = self.start_chainviz()
             self.check_health()

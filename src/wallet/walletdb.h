@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -422,6 +423,11 @@ public:
     bool WriteAtomicSwap(const std::string& swapId, const CAtomicSwapInfo& swapInfo);
     bool ReadAtomicSwap(const std::string& swapId, CAtomicSwapInfo& swapInfo);
     bool EraseAtomicSwap(const std::string& swapId);
+
+    // Vault set signatures this wallet made (sign-once guard, plan §15 SET_EQUIVOCATION): per
+    // (setId, prevout), the role and sighash the wallet's members signed. Read on demand, never loaded.
+    bool WriteVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t role, const uint256& sighash);
+    bool ReadVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t& role, uint256& sighash);
 
     bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata &keyMeta);
     bool WriteCryptedKey(const CPubKey& vchPubKey, const std::vector<unsigned char>& vchCryptedSecret, const CKeyMetadata &keyMeta);

@@ -5,7 +5,8 @@
 /**
  * Yellowback wallet-context RPCs (plan §4.5, §4.6; doc/yellowback-rpc.md is
  * the contract): addresses, balances, mint, send, redeem (incl. the VOID
- * release, L14), claim, sweep (L10), positions, history, lock maintenance.
+ * release, L14), claim, positions, history, lock maintenance. (yed_sweep, the
+ * L10 abandonment sweep, left with the vault upgrade: upgrade plan §6.)
  * Lock order: cs_main -> cs_wallet -> mempool.cs -> cs_yellowback (§4.3, N25).
  * No RPC here may take mempool.cs after cs_yellowback: CreateNewBlock takes
  * them in that order (TemplateView inside LOCK2(cs_main, mempool.cs)) and so
@@ -35,6 +36,7 @@
 #include "rpc/yellowbackrpc.h"
 #include "script/standard.h"
 #include "txmempool.h"
+#include "util/moneystr.h"
 #include "util/strencodings.h"
 #include "wallet/wallet.h"
 #include "yellowback/address.h"
@@ -61,13 +63,12 @@ void EnsureWalletIsUnlocked();
 
 namespace {
 
-const char* const SWEEP_ACKNOWLEDGEMENT = "I understand this leaves YED unbacked";
 const char* const UNLOCK_ACKNOWLEDGEMENT = "I understand this burns YED";
 
 YellowbackWallet& EnsureYW()
 {
-    if (!fExperimentalYellowback || !g_yellowback) {
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback requires -experimentalfeatures -yellowback)");
+    if (!g_yellowbackLive || !g_yellowback) {
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback is not active: the vault upgrade or the YED attestor set is not configured on this network)");
     }
     if (!pwalletMain || !g_yellowbackWallet) throw JSONRPCError(RPC_WALLET_ERROR, "wallet is disabled");
     return *g_yellowbackWallet;
@@ -96,7 +97,7 @@ bool StartsWith(const std::string& s, const char* prefix)
 {
     const std::string msg = e.what();
     static const char* const RULE[] = { "mintpol-", "mint-unsatisfiable", "vault-locked", "claim-not-yet", "claim-not-underwater",
-                                        "sweep-not-abandoned", "mempool-check-failed",
+                                        "mempool-check-failed", "intent-", "yed-template-",
                                         // v3 (contract: RPC_VERIFY_REJECTED unless stated), incl. the dry run's verdict strings
                                         "bundle-insufficient", "mint9-", "mint10-", "red1-", "red5-", "afee1-", "notice-standing", "notice-not-underwater",
                                         "bond-below-min", "lock-below-min", "bond-locked", "bond-spent", "not-dormant", "not-equivocation",
@@ -104,7 +105,7 @@ bool StartsWith(const std::string& s, const char* prefix)
                                         "carrier-lapsed", "carrier-unconfirmed", "register-refused", "bad-mint-", "vault-spend-", "vault-claim-",
                                         "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-dry-run", nullptr };
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
-                                         "vault-not-owned", "not-a-yellowback-address", "sweep-acknowledgement-missing", "bad-address",
+                                         "vault-not-owned", "not-a-yellowback-address", "bad-address",
                                          "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
     // collateral-above-max, claim-out-below-min (audit F-1) and claim-burn-above-max (H-9.3) are caller bounds, not rules:
     // RPC_WALLET_ERROR below.
@@ -189,11 +190,11 @@ std::optional<int64_t> UnderwaterAt(const VaultRecord& v, const yellowback::Para
 }
 
 /**
- * The yed_getvault row (contract): the Vaults record plus claimable / underwaterAt / sweepBefore.
+ * The yed_getvault row (contract): the Vaults record plus claimable / underwaterAt.
  * Mirrors VaultToJSON in rpc/yellowback.cpp (Phase 3) field for field; `claimable` is the
  * caller's EstimateClaim verdict (RED-4 by either clause), as VaultToJSON reads it.
  */
-UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::Params& p, bool abandoned, bool claimable)
+UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::Params& p, bool claimable)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", out.hash.GetHex());
@@ -220,13 +221,33 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     std::optional<int64_t> at = UnderwaterAt(v, p);
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
     o.pushKV("voidReason", v.voidReason);
-    // K3 / L10: a VOID vault's claim path is unpoliced after claimHeight; an ACTIVE vault's is, under abandonment.
-    if (v.Status() == VaultStatus::VOIDED || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
+    const CScript spk = YedVaultScript(p, owner, v.lockHeight);       // U-23: the V template
+    o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     return o;
 }
 
+/** A CLAIMING vault's claim intents (U-23), as VaultToJSON in rpc/yellowback.cpp lists them under "intents". */
+UniValue ClaimIntentsJSON(YellowbackIndex& index, const COutPoint& out, const yellowback::Params& p)
+{
+    UniValue intents(UniValue::VARR);
+    index.View().Iterate(std::string(1, 'I'), [&](const std::string& k, const std::string& raw) {
+        IntentRecord ir;
+        if (k.size() == 37 && DeserializeRecord(raw, ir) && ir.vault == out) {
+            UniValue e(UniValue::VOBJ);
+            e.pushKV("txid", keys::OutPointHashOf(k).GetHex());
+            e.pushKV("vout", (int64_t)keys::OutPointIndexOf(k));
+            e.pushKV("role", ir.Role() == IntentRole::CLAIMANT ? "claimant" : "residual");
+            e.pushKV("height", ir.height);
+            e.pushKV("releaseHeight", (int64_t)ir.height + p.claimDelay);
+            intents.push_back(e);
+        }
+        return true;
+    });
+    return intents;
+}
+
 /**
- * Build, sign and commit a vault spend (yed_redeem / yed_claim / yed_sweep). The Sapling shape
+ * Build, sign and commit a vault spend (yed_redeem / yed_claim). The Sapling shape
  * releases every lock for the proving step, then re-locks to sign (§4.6). `gate` runs the K7
  * MempoolCheck before CommitTransaction.
  */
@@ -1056,14 +1077,16 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
             "yed_registerattestor bondYec lockBlocks ( flags )\n"
-            "\nRegister this wallet as a price attestor (REG-A1): vout[0] the bond P2SH(bondScript(bondPubKey, tip + 1 + lockBlocks))\n"
-            "of bondYec, vout[1] the ATTESTOR_REGISTER payload, change. attestorPubKey (hot) and bondPubKey are two fresh keypool\n"
-            "keys: back up wallet.dat. The bond is not IsMine; the wallet finds it through Attestors by bondPubKey. seq is null\n"
-            "until the transaction confirms (yed_listattestors). Refused with bond-below-min, lock-below-min.\n"
+            "\nJoin the YED attestor set (P4-b: the attestor registry is the vault primitive's set attestorSetId) with a fresh\n"
+            "wallet key as the member key: set_join attestorSetId bondYec (tip + 1 + lockBlocks). vout[0] is the bond\n"
+            "P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG); the member key signs price attestations and receives the\n"
+            "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
+            "bond-below-min, lock-below-min (the module's floor: BOND_MIN, BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
+            "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
             "\nArguments:\n"
-            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN)\n"
-            "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK; bondLocktime = tip + 1 + lockBlocks\n"
-            "3. flags       (numeric, optional, default 0) bits 0-1 source tier, bit 2 pool operator\n"
+            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN and the set's bondmin)\n"
+            "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
+            "3. flags       (numeric, optional, default 0) accepted for compatibility and ignored (no longer recorded)\n"
             "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -1071,45 +1094,58 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     const int lockBlocks = params[1].get_int();
     const int flagsArg = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 0;
     if (flagsArg < 0 || flagsArg > 255) throw JSONRPCError(RPC_INVALID_PARAMETER, "flags must be a byte");
-    CReserveKey reservekey(pwalletMain);
-    BuiltTx built;
-    uint256 txid;
+    uint256 setId;
+    int64_t locktime = 0;
     int maturesAt = 0;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
-        {
-            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
-            LOCK(index.cs_yellowback);
-            EnsureHealthy(index);
-            try {
-                built = BuildRegisterAttestor(yw, bondZat, lockBlocks, (uint8_t)flagsArg, reservekey);
-            } catch (const std::runtime_error& e) {
-                ThrowBuildError(e);
-            }
-            maturesAt = chainActive.Height() + 1 + index.GetParams().bondMaturity;
-        }
-        txid = Commit(yw, built, &reservekey);
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        const yellowback::Params& p = index.GetParams();
+        if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
+        if (bondZat < p.bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
+        if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
+        locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
+        if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_VERIFY_REJECTED, "lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
+        setId = p.attestorSetId;
+        State st(index.View());
+        std::optional<AttestorSetRecord> z = st.GetAttestorSet();
+        maturesAt = chainActive.Height() + 1 + (int)std::max<int64_t>(z.has_value() ? (int64_t)z->maturity : 0, p.bondMaturity);
     }
+    // set_join takes cs_main, the wallet and (through the mempool) cs_yellowback itself: called with none held (N25)
+    UniValue jp(UniValue::VARR);
+    jp.push_back(setId.GetHex());
+    jp.push_back(ValueFromAmount(bondZat));
+    jp.push_back(locktime);
+    const UniValue joined = tableRPC.execute("set_join", jp);
+    if (!find_value(joined, "complete").get_bool()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "register-needs-admission: the attestor set is not open; collect the admission signatures with set_signact and send with set_sendact: "
+                           + find_value(joined, "hex").get_str());
+    }
+    const std::string memberHex = find_value(joined, "memberkey").get_str();
+    const std::vector<unsigned char> memberBytes = ParseHex(memberHex);
+    const CPubKey member(memberBytes.begin(), memberBytes.end());
+    const std::string txid = find_value(joined, "txid").get_str();
     KeyIO keyIO(::Params());
     UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
+    o.pushKV("txid", txid);
     o.pushKV("seq", NullUniValue);
-    o.pushKV("attestorPubKey", HexStr(built.attestorPubKey.begin(), built.attestorPubKey.end()));
-    o.pushKV("bondAddress", keyIO.EncodeDestination(CTxDestination(CScriptID(built.bondScript))));
-    o.pushKV("bondKeyAddress", keyIO.EncodeDestination(CTxDestination(built.bondPubKey.GetID())));
+    o.pushKV("attestorPubKey", memberHex);
+    o.pushKV("bondAddress", keyIO.EncodeDestination(CTxDestination(CScriptID(BondScript(member, (uint32_t)locktime)))));
+    o.pushKV("bondKeyAddress", keyIO.EncodeDestination(CTxDestination(member.GetID())));
     UniValue op(UniValue::VOBJ);
-    op.pushKV("txid", txid.GetHex());
+    op.pushKV("txid", txid);
     op.pushKV("vout", 0);
     o.pushKV("bondOutpoint", op);
-    o.pushKV("bondZat", built.bondZat);
-    o.pushKV("bondLocktime", (int64_t)built.bondLocktime);
+    o.pushKV("bondZat", bondZat);
+    o.pushKV("bondLocktime", locktime);
     UniValue fl(UniValue::VOBJ);
-    fl.pushKV("tier", (int)(built.flags & 3));
-    fl.pushKV("pool", (built.flags & 4) != 0);
+    fl.pushKV("tier", 0);
+    fl.pushKV("pool", false);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    o.pushKV("warning", built.warning);
+    o.pushKV("warning", "");
     return o;
 }
 
@@ -1173,18 +1209,19 @@ UniValue yed_revive(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 2)
         throw std::runtime_error(
             "yed_revive seq priceMicroUsd\n"
-            "\nRevive a DORMANT attestor whose hot key this wallet holds (REV-1): one attestation for citedHeight = tip - REF_LAG signed\n"
-            "through the equivocation guard, payload ATTESTOR_REVIVE, funded from confirmed YEC. Refused with attest-unknown-seq,\n"
-            "not-dormant, attest-key-not-held, attest-range, equivocation-guard.\n"
+            "\nRevive a DORMANT attestor whose member key this wallet holds (P4-b: a SET_HEARTBEAT of the member key to the\n"
+            "attestor set; ATTESTOR_REVIVE is invalid). Also signs one attestation for citedHeight = tip - REF_LAG through the\n"
+            "equivocation guard and returns it (feed it with yed_addattestation). The record is ELIGIBLE again at the SNAP of\n"
+            "the heartbeat's block. Refused with attest-unknown-seq, not-dormant, attest-key-not-held, attest-range,\n"
+            "equivocation-guard.\n"
             "\nResult: { \"txid\", \"seq\", \"citedHeight\", \"priceMicroUsd\", \"hex\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const int seqArg = params[0].get_int();
     if (seqArg < 0 || seqArg > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
     const int64_t price = params[1].get_int64();
-    CReserveKey reservekey(pwalletMain);
     BuiltTx built;
-    uint256 txid;
+    uint256 setId;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
@@ -1193,16 +1230,20 @@ UniValue yed_revive(const UniValue& params, bool fHelp)
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
-                built = BuildRevive(yw, (uint16_t)seqArg, price, reservekey);
+                built = BuildRevive(yw, (uint16_t)seqArg, price);
             } catch (const std::runtime_error& e) {
                 ThrowBuildError(e);
             }
+            setId = index.GetParams().attestorSetId;
         }
-        txid = Commit(yw, built, &reservekey);
     }
+    UniValue hp(UniValue::VARR);
+    hp.push_back(setId.GetHex());
+    hp.push_back(HexStr(built.attestorPubKey.begin(), built.attestorPubKey.end()));
+    const UniValue hb = tableRPC.execute("set_heartbeat", hp);
     const std::vector<unsigned char> att = EncodeAttestation(built.attestation);
     UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
+    o.pushKV("txid", find_value(hb, "txid").get_str());
     o.pushKV("seq", (int)built.seq);
     o.pushKV("citedHeight", (int64_t)built.attestation.citedHeight);
     o.pushKV("priceMicroUsd", (int64_t)built.attestation.priceMicroUsd);
@@ -1296,53 +1337,13 @@ UniValue yed_signattestation(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yed_sweep(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() < 2 || params.size() > 3)
-        throw std::runtime_error(
-            std::string("yed_sweep \"vaultTxid\" \"acknowledgement\" ( \"to\" )\n"
-            "\nSweep an own ACTIVE vault under abandonment (L10): an owner-path spend with no burn and no fee, built only while\n"
-            "yed_getinfo.abandoned is true (sweep-not-abandoned otherwise). The vault is then CLOSED with unbacked = true.\n"
-            "After claimHeight the claim path is anyone-can-spend and nobody enforces RED-4: sweep before it or lose the\n"
-            "collateral. Also returns the raw hex so it can be submitted to any other node.\n"
-            "\nArguments:\n"
-            "1. \"vaultTxid\"        (string, required)\n"
-            "2. \"acknowledgement\"  (string, required) exactly \"") + SWEEP_ACKNOWLEDGEMENT + "\"\n"
-            "3. \"to\"               (string, optional) as yed_redeem\n"
-            "\nResult: { \"txid\", \"hex\", \"collateralOut\", \"to\", \"unbackedCents\" }\n");
-    YellowbackWallet& yw = EnsureYW();
-    YellowbackIndex& index = *yw.Index();
-    uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
-    if (params[1].get_str() != SWEEP_ACKNOWLEDGEMENT) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("sweep-acknowledgement-missing: the second argument must be exactly \"") + SWEEP_ACKNOWLEDGEMENT + "\"");
-    }
-    const std::string to = params.size() > 2 ? params[2].get_str() : "";
-    uint256 txid;
-    int64_t unbackedCents = 0;
-    BuiltTx built = RunVaultSpend(yw, [&]() {
-        // The §4.6 predicate from Snapshots alone (L12), never the node's own -yellowbackenforce.
-        if (!index.IsAbandoned()) throw std::runtime_error(strprintf("sweep-not-abandoned: the chain does not show abandonment (ENFORCEMENT set for %d blocks)", index.GetParams().abandonBlocks));
-        BuiltTx b = BuildSweep(yw, vaultTxid, to);
-        std::optional<VaultRecord> v = State(index.View()).GetVault(COutPoint(vaultTxid, 0));
-        unbackedCents = v.has_value() ? v->mintedCents : 0;
-        return b;
-    }, true, false, txid);
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
-    o.pushKV("hex", EncodeHexTx(CTransaction(built.tx)));
-    o.pushKV("collateralOut", built.collateralOut);
-    o.pushKV("to", built.collateralTo);
-    o.pushKV("unbackedCents", unbackedCents);
-    return o;
-}
-
 UniValue yed_listpositions(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "yed_listpositions ( \"status\" )\n"
             "\nThis wallet's vaults (owner key held): every yed_getvault field plus canRedeem (ACTIVE or VOID at or past\n"
-            "lockHeight; for VOID the release), canClaim (claimable and the wallet holds the debt) and canSweep (ACTIVE while abandoned).\n");
+            "lockHeight; for VOID the release) and canClaim (claimable and the wallet holds the debt).\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
@@ -1353,7 +1354,6 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     State st(index.View());
     const yellowback::Params& p = index.GetParams();
     const int h = IndexHeight(index);
-    const bool abandoned = index.IsAbandoned();
     const int64_t balance = yw.ConfirmedCents();
     // v3: claimable by either RED-4 clause and canNotice under this node's pEmerg come from the
     // same estimate yed_listclaimable and yed_getvault read (yellowback::rpc::EstimateClaim).
@@ -1365,7 +1365,8 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         if (!status.empty() && status != VaultStatusName(v.Status())) return true;
         const COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
-        UniValue o = VaultRow(out, v, p, abandoned, est.claimable);
+        UniValue o = VaultRow(out, v, p, est.claimable);
+        if (v.Status() == VaultStatus::CLAIMING) o.pushKV("intents", ClaimIntentsJSON(index, out, p));   // as yed_getvault (U-23)
         const bool active = v.Status() == VaultStatus::ACTIVE;
         std::optional<NoticeRecord> notice = active ? st.GetNotice(out) : std::nullopt;
         const bool noticed = notice.has_value();
@@ -1374,7 +1375,6 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
         o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
         o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
-        o.pushKV("canSweep", active && abandoned && h >= v.lockHeight);
         o.pushKV("canNotice", est.canNotice);
         arr.push_back(o);
         return true;
@@ -1388,7 +1388,9 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_listtransactions ( count skip )\n"
             "\nThis wallet's Yellowback history from the index, newest first: type is mint, send, receive, burn, redeem,\n"
-            "claim (this wallet claimed), claimed (an own vault was claimed), sweep (an own vault swept), plus own\n"
+            "claim (this wallet claimed, incl. its own vault), claimed (an own vault was claimed), claim_release / claim_cancel\n"
+            "(the intent of this wallet's claim released / cancelled), claim_released / claim_cancelled (the same, on an own\n"
+            "vault someone else claimed), sweep (an own vault swept), plus own\n"
             "transactions with a payload that expired unmined (\"expired\": true, verdict \"expired\").\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -1401,6 +1403,35 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
     State st(index.View());
     const int h = IndexHeight(index);
 
+    // U-23 pre-pass: the vaults this wallet claimed (a claim's TxLog names the vault in closedVaults and
+    // the burn in spentTokens; its release / cancel names the same vault), and where each cancel
+    // re-created a vault (a cancelled vault's record moves to the re-created outpoint).
+    std::set<COutPoint> claimedByMe;
+    std::map<COutPoint, COutPoint> reopenedAt;
+    index.View().Iterate("L", [&](const std::string& k, const std::string& raw) {
+        TxLogRecord l;
+        if (!DeserializeRecord(raw, l)) return true;
+        if (l.Type() == TxLogType::REDEEM && l.verdict == verdict::OK && l.path == "claim") {
+            bool burnedMine = false;
+            for (const AssignedOutput& a : l.spentTokens) if (yw.IsMineScript(a.scriptPubKey)) burnedMine = true;
+            if (burnedMine) for (const COutPoint& c : l.closedVaults) claimedByMe.insert(c);
+        }
+        if (l.Type() == TxLogType::CLAIM_CANCEL && l.closedVaults.size() == 1 && l.reopenedVaults.size() == 1)
+            reopenedAt[l.closedVaults[0]] = l.reopenedVaults[0];
+        return true;
+    });
+    // The vault record of `c`, following cancels to the re-created vault (the same position, the same owner).
+    auto vaultOf = [&](COutPoint c) -> std::optional<VaultRecord> {
+        for (size_t hops = 0; hops <= reopenedAt.size(); hops++) {
+            std::optional<VaultRecord> v = st.GetVault(c);
+            if (v.has_value()) return v;
+            auto it = reopenedAt.find(c);
+            if (it == reopenedAt.end()) return std::nullopt;
+            c = it->second;
+        }
+        return std::nullopt;
+    };
+
     struct Row { int height; UniValue o; };
     std::vector<Row> rows;
     index.View().Iterate("L", [&](const std::string& k, const std::string& raw) {
@@ -1412,7 +1443,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         for (const AssignedOutput& a : l.assigned) if (yw.IsMineScript(a.scriptPubKey)) received += a.cents;
         for (const AssignedOutput& a : l.spentTokens) if (yw.IsMineScript(a.scriptPubKey)) spent += a.cents;
         for (const COutPoint& c : l.closedVaults) {
-            std::optional<VaultRecord> v = st.GetVault(c);
+            std::optional<VaultRecord> v = vaultOf(c);
             if (v.has_value() && yw.IsMineVault(v.value())) {
                 closedMine = true;
                 if (v->unbacked) unbacked = true;
@@ -1423,16 +1454,28 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
             std::optional<VaultRecord> v = st.GetVault(COutPoint(txid, 0));
             mintMine = v.has_value() && yw.IsMineVault(v.value());
         }
-        if (received == 0 && spent == 0 && !closedMine && !mintMine) return true;
+        const bool intentSpend = l.Type() == TxLogType::CLAIM_RELEASE || l.Type() == TxLogType::CLAIM_CANCEL;
+        bool claimantMine = false;
+        for (const COutPoint& c : l.closedVaults) if (claimedByMe.count(c)) claimantMine = true;
+        if (received == 0 && spent == 0 && !closedMine && !mintMine && !(intentSpend && claimantMine)) return true;
         std::string type;
         int64_t amount = received - spent;
         const bool ok = l.verdict == verdict::OK;
+        std::string path = l.path;
         if (l.Type() == TxLogType::MINT) { type = "mint"; }
+        else if (intentSpend) {
+            // U-23: the claimant's intent released (CLAIMED) or cancelled by the attestor set (the vault
+            // ACTIVE again); the claimant's view wins when this wallet claimed its own vault. No YED moves
+            // (the claim burned it), so amountCents is 0; path is the claim's.
+            const bool release = l.Type() == TxLogType::CLAIM_RELEASE;
+            type = claimantMine ? (release ? "claim_release" : "claim_cancel") : (release ? "claim_released" : "claim_cancelled");
+            path = "claim";
+        }
+        else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }   // incl. a claim of an own vault
         else if (closedMine) {
             if (ok) type = l.path == "claim" ? "claimed" : "redeem";
             else type = l.path == "owner" ? "sweep" : "claimed";
         }
-        else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }
         else if (spent > 0 && l.burned > 0 && l.yedOut == received) { type = "burn"; }   // nothing left this wallet but the burn
         else if (spent > 0) { type = "send"; }        // incl. an own-to-own transfer (amountCents 0)
         else { type = "receive"; }
@@ -1442,7 +1485,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         o.pushKV("confirmations", h - l.height + 1);
         o.pushKV("type", type);
         o.pushKV("verdict", l.verdict);
-        o.pushKV("path", l.path);
+        o.pushKV("path", path);
         o.pushKV("yedIn", l.yedIn);
         o.pushKV("yedOut", l.yedOut);
         o.pushKV("burned", l.burned);
@@ -1627,7 +1670,6 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_sendmany",         &yed_sendmany,          false },
     { "yellowback", "yed_redeem",           &yed_redeem,            false },
     { "yellowback", "yed_claim",            &yed_claim,             false },
-    { "yellowback", "yed_sweep",            &yed_sweep,             false },
     { "yellowback", "yed_listpositions",    &yed_listpositions,     false },
     { "yellowback", "yed_listtransactions", &yed_listtransactions,  false },
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },

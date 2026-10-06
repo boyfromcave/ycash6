@@ -16,9 +16,14 @@ attestors move 6 % across two bundles: pinnedKeys fills, E(R) shrinks, xMint fol
 unpinned pool), pin_test_not_armed_without_bundles, the RED-5 residual through a notice,
 EMERGENCY_PERSIST blocks and an emergency claim whose residual lands in the owner's balance,
 not1_reset_attack_fails, a claim with a bundle by clause (a), equivocation => EJECTED on every
-node, dormancy => DORMANT then revive_raw => ELIGIBLE, the bond spend => WITHDRAWN while the
-ejected one stays EJECTED, and assert_model_matches(full=True) at the end; checkpoint() after
-every block.
+node, dormancy => DORMANT then a SET_HEARTBEAT => ELIGIBLE, the bond spend => WITHDRAWN while the
+ejected one's frozen bond cannot be spent, and assert_model_matches(full=True) at the end;
+checkpoint() after every block.
+
+P4-b: the registrations are SET_JOINs to the attestor set (a v3 ATTESTOR_REGISTER and
+ATTESTOR_REVIVE are refused, bad-yellowback-attestor-*-retired), the member key is the hot key and
+the bond key, the revival is a SET_HEARTBEAT, and EQV-1 freezes the ejected member's bond in the
+set (the primitive refuses its spend: bad-vault-bond-frozen).
 
 Every pool alternates its quote between P and P + $0.01 (``step``): PIN-1 pins a pool that quotes
 one price across the window whenever the attestors' bundles move, which is the design (proposal
@@ -33,23 +38,24 @@ from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import (
     ATTESTOR_WIFS,
-    BOND_WIFS,
     attestor_keys,
     bond_keys,
     bond_secret_for,
     build_bundle,
     build_carrier_tx,
+    build_legacy_register_tx,
     build_mint_tx_v3,
     build_register_tx,
     decode_bundle,
     encode_bundle,
     equivocation_raw,
     feed_all,
+    heartbeat_raw,
     hot_secret_for,
+    legacy_revive_raw,
     outpoint_selector,
     parse_attestation,
     post_notice_raw,
-    revive_raw,
     select_attestors,
     selection_pool,
     send_and_lock,
@@ -65,6 +71,7 @@ from test_framework.yellowback_util import (
     ATTEST_MAX_AGE,
     BOND_MATURITY,
     BPS,
+    CLAIM_DELAY,
     COIN,
     DORMANCY_CHECK,
     DORMANCY_MIN_BUNDLES,
@@ -79,9 +86,11 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_vault_spend_raw,
     fee_zat,
+    mine_block_raw,
     pubkey_to_address,
     usd_to_micro,
     wait_yed_healthy,
+    yed_params,
 )
 
 PRICE = Decimal('20.00')      # a high YEC price keeps the class-A collateral of a $100 mint at 25 YEC
@@ -205,6 +214,18 @@ class YellowbackAttestTest(YellowbackTestFramework):
         attest_payee = self.bond_key_address(seqs[0])
         hex_, owner_pub = build_mint_tx_v3(owner_node, CENTS, LOCK, ref, required, fee_addr=payee, carrier=carrier,
                                            attest_fee=(attest_payee, self.attest_fee(required)))
+        if expect == 'VOID':
+            # the vault upgrade (U-23): a failing mint is an invalid transaction, not a VOID vault. Every
+            # Yellowback mempool refuses it, and a block carrying it is rejected, with the MINT verdict.
+            reason = 'bad-yellowback-' + void_reason
+            rpc_error(reason, owner_node.sendrawtransaction, hex_)
+            result, _ = mine_block_raw(self.nodes[POOLS[0]], [hex_])
+            assert result is not None and result.startswith(reason), result
+            txid = owner_node.decoderawtransaction(hex_)['txid']
+            for node in self.enforcing_nodes() + [self.nodes[OBSERVER]]:
+                rpc_error('vault-not-found', node.yed_getvault, txid)
+            return {'txid': txid, 'ref': ref, 'owner': owner_pub, 'token': None, 'required': required, 'seqs': seqs,
+                    'payee': payee, 'attestPayee': attest_payee, 'attestFeeZat': self.attest_fee(required), 'invalid': True}
         txid = owner_node.sendrawtransaction(hex_)
         self.sync_all()
         self.step(miner, 1, 'mint')
@@ -242,10 +263,11 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(info['pMint'], min(info['xMint'], info['aMint']))
         return r
 
-    def claim_raw(self, claimant, vault_txid, token, prices, miner, residual_to=None, expect='CLAIMED'):
+    def claim_raw(self, claimant, vault_txid, token, prices, miner, residual_to=None, expect='CLAIMING'):
         """Feed at ``prices``, the node's bundle for (R, vault outpoint), the carrier, then the claim:
-        vout[0] value, [1] pool fee, [2] attestor fee, [3] the RED-5 residual when yed_listclaimable owes
-        one (to ``residual_to``, default the owner), [4] the REDEEM payload."""
+        vout[0] the claimant intent, [1] pool fee, [2] attestor fee, [3] the RED-5 residual intent when
+        yed_listclaimable owes one (paying ``residual_to``, default the owner), [4] the REDEEM payload,
+        then the YEC funding's change (U-23). ``release_claim`` completes it."""
         user = self.nodes[USER]
         node = self.nodes[claimant]
         ref = user.getblockcount() - REF_LAG
@@ -263,8 +285,10 @@ class YellowbackAttestTest(YellowbackTestFramework):
         payee = user.yed_getfeepayee(ref, collateral)
         extra = [(self.attest_fee(collateral), spk(self.bond_key_address(built['seqs'][0])))]
         residual = int(row['residualZat'])
+        owner = hex_str_to_bytes(live['ownerPubKey'])
+        residual_addr = residual_to or pubkey_to_address(owner)
         if residual > 0:
-            extra.append((residual, spk(residual_to or pubkey_to_address(hex_str_to_bytes(live['ownerPubKey'])))))
+            extra.append((residual, ym.yed_intent_script(yed_params(), owner, int(live['lockHeight']), spk(residual_addr))))
         hex_ = build_vault_spend_raw(node, live, 'claim', [token],
                                      payload=ym.encode_redeem(ref, 1, [], attest_fee_vout=2),
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
@@ -279,7 +303,23 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal((info['type'], info['path'], info['verdict'], info['claimPath'], info['residualZat'], info['aClaim']),
                      ('redeem', 'claim', 'ok', row['claimPath'], residual, built['aClaim']))
         assert_equal(info['pClaim'], max(info['xClaim'], info['aClaim']))
-        return {'txid': txid, 'ref': ref, 'row': row, 'residual': residual, 'info': info}
+        return {'txid': txid, 'ref': ref, 'row': row, 'residual': residual, 'info': info, 'claimant': claimant,
+                'vault': vault_txid, 'residualAddress': residual_addr, 'height': user.getblockcount()}
+
+    def release_claim(self, claimed, miner):
+        """After CLAIM_DELAY: the claimant releases its intent (vout 0) and, when RED-5 was due, the
+        claimant also releases the owner's residual intent (vout 3) to the owner's address, paying
+        the fee itself; the vault is CLAIMED everywhere."""
+        user = self.nodes[USER]
+        while user.getblockcount() < claimed['height'] + CLAIM_DELAY - 1:
+            self.step(miner, 1, 'claim delay')
+        node = self.nodes[claimed['claimant']]
+        node.vault_release('%s:0' % claimed['txid'])
+        if claimed['residual'] > 0:
+            node.vault_release('%s:3' % claimed['txid'], claimed['residualAddress'])
+        self.sync_all()
+        self.step(miner, 1, 'release')
+        self.assert_vault_everywhere(claimed['vault'], 'CLAIMED')
 
     def notice_raw(self, poster, vault_txid, prices, miner, expect_found=True):
         user = self.nodes[USER]
@@ -302,7 +342,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 4)
+        assert_equal(user.yed_getinfo()['rpcversion'], 5)
 
         print('activation at $%s, then the attestor wallets are funded' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)
@@ -325,20 +365,22 @@ class YellowbackAttestTest(YellowbackTestFramework):
         hot, bond = attestor_keys(N_ATTESTORS), bond_keys(N_ATTESTORS)
         for i in range(N_ATTESTORS):
             wallet = nodes[ATTESTOR_A] if i < 3 else nodes[ATTESTOR_B]
-            wallet.importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)
-            wallet.importprivkey(BOND_WIFS[i], 'yellowback-bond', False)
+            wallet.importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)      # the member key: hot key and bond key (P4-b)
+        print('P4-b: a v3 ATTESTOR_REGISTER is refused')
+        rpc_error('attestor-register-retired', user.sendrawtransaction, build_legacy_register_tx(nodes[ATTESTOR_A], hot[0][1]))
         reg_heights = {}
+        join_txids = []
         for block, members in enumerate(([0, 1], [2], [3, 4])):
             for i in members:
                 funder = nodes[ATTESTOR_A] if i < 3 else nodes[ATTESTOR_B]
                 hex_, _lt = build_register_tx(funder, hot[i][1], bond[i][1])
-                txid = send_and_lock(funder, hex_)
-                dec = user.yed_decodepayload(hex_)
-                assert_equal((dec['type'], dec['register']['attestorPubKey']), ('register', hot[i][1]))
+                join_txids.append(send_and_lock(funder, hex_))
             self.sync_all()
             self.step(POOLS[block], 1, 'registration')
             for i in members:
                 reg_heights[i] = user.getblockcount()
+        for txid in join_txids:
+            assert_equal(user.yed_gettxinfo(txid)['type'], 'register')
         recs = self.attestors()
         assert_equal(sorted(recs), [0, 1, 2, 3, 4])
         by_pub = {pk: i for i, (_s, pk) in enumerate(hot)}
@@ -477,7 +519,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
             rpc_error('bundle-insufficient', user.yed_buildbundle, r_reorg, '')
         # the raw mint carrying the stale-hash bundle, mined by node 1 (TPL-2 would keep it out of a pool's template)
         void_a = self.mint_raw(USER, reorg_bundle, r_reorg, int(est_a['requiredZat']), STOCK, expect='VOID', void_reason='mint9-bundle-sig', seqs=both)
-        assert_equal(user.yed_getvault(void_a['txid'])['voidReason'], 'mint9-bundle-sig')
+        assert_equal(void_a['invalid'], True)
         assert_same_statehash(self.enforcing_nodes() + [nodes[OBSERVER]], 'mint9-bundle-sig everywhere')
         # node 1's eight tagless blocks starve the mid window (16 of 24 needed; HALT_NO_PRICE): refill before the next mint
         self.pools_step(20, 'refill after the reorg')
@@ -540,10 +582,12 @@ class YellowbackAttestTest(YellowbackTestFramework):
         # ---------------------------------------------------------------- pinning (PIN-2, audit A-2)
 # Rule: PIN-2
         # xMint drops 10 % inside PIN_WINDOW (the pools move; the fast window follows in 8 blocks), which arms
-        # PIN-2. Two VOID mints then carry one and the same bundle (one attestation per seq, cited at c1): two
-        # BundleLog rows, one price, one cited height -- not a frozen quote, so nothing is pinned. A third VOID
+        # PIN-2. Two mints then carry one and the same bundle (one attestation per seq, cited at c1): two
+        # BundleLog rows, one price, one cited height -- not a frozen quote, so nothing is pinned. A third
         # mint with fresh attestations at c3 (same price) gives two distinct cited heights: the seqs are pinned.
-        print('PIN-2: a bundle reused across two VOID mints cannot pin its seqs; two cited heights can')
+        # (Before the vault upgrade these were VOID mints; a failing mint is now invalid and leaves no
+        # BundleLog row, so the three are ordinary ACTIVE mints.)
+        print('PIN-2: a bundle reused across two mints cannot pin its seqs; two cited heights can')
         low = PRICE * Decimal('0.90')
         self.set_prices(low)
         self.pools_step(8, 'pools down 10 %')
@@ -557,10 +601,10 @@ class YellowbackAttestTest(YellowbackTestFramework):
         pinnable = sorted(built['seqs'])
         assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(reused))), [c1])
         est = user.yed_estimatecollateral(CENTS, LOCK)
-        short = int(est['requiredZat']) // 2                  # MINT-5 fails after MINT-9 recorded the bundle (ARMED order)
-        # the carriers by pool 4 (quote tags keep the fast window filled), the VOID mints by the stock node (TPL-2)
-        self.mint_raw(USER, reused, ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
-        self.mint_raw(USER, reused, ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
+        enough = int(est['requiredZat'])
+        # the carriers and the mints by pool 4 (quote tags keep the fast window filled)
+        self.mint_raw(USER, reused, ref, enough, POOLS[2], seqs=pinnable)
+        self.mint_raw(USER, reused, ref, enough, POOLS[2], seqs=pinnable)
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], [])
         assert all(r['pinned'] is False for r in self.attestors().values())
@@ -569,7 +613,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         fresh = user.yed_buildbundle(ref, '')
         assert_equal(sorted(fresh['seqs']), pinnable)
         assert_equal(sorted(set(parse_attestation(a)[2] for a in decode_bundle(hex_str_to_bytes(fresh['hex'])))), [c3])
-        self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, short, STOCK, expect='VOID', void_reason='bad-mint-collateral', seqs=pinnable, carrier_miner=POOLS[2])
+        self.mint_raw(USER, hex_str_to_bytes(fresh['hex']), ref, enough, POOLS[2], seqs=pinnable)
         self.step(POOLS[2], 1, 'the row of the third mint enters W')   # W = (H - 1 - PIN_WINDOW, H - 1]: the tip's own row counts from the next SNAP
         p = user.yed_getprice()
         assert_equal(p['pinnedSeqs'], pinnable)
@@ -630,6 +674,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         before = nodes[ATTESTOR_A].getbalance()
         claimed = self.claim_raw(USER, v3['txid'], a1['token'], emerg, POOLS[1])
         assert_equal(claimed['row']['claimPath'], 'b')
+        self.release_claim(claimed, POOLS[1])
         after = nodes[ATTESTOR_A].getbalance()
         # node 6 also holds the bond keys of attestors 0-2: the attestor fee lands there when the bundle's first seq is one of them
         fee_to_owner = self.attest_fee(int(live['collateralZat'])) if nodes[ATTESTOR_A].validateaddress(
@@ -645,6 +690,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         crashed = {seq: CRASH for seq in seqs}
         claimed_a = self.claim_raw(USER, a0['txid'], a0['token'], crashed, POOLS[2])
         assert_equal((claimed_a['row']['claimPath'], claimed_a['residual']), ('a', 0))
+        self.release_claim(claimed_a, POOLS[2])
 
         # ---------------------------------------------------------------- equivocation
         eqv_seq = seq_of[4]
@@ -697,33 +743,39 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 1)   # SNAP seats before the dormancy pass (v3 §3.8 order)
         self.pools_step(1, 'after the dormancy check')
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 2)   # it leaves the seats at the next SNAP
-        print('revive_raw => ELIGIBLE')
+        print('P4-b: ATTESTOR_REVIVE is refused; a SET_HEARTBEAT => ELIGIBLE')
         cited = user.getblockcount() - REF_LAG
         att = sign_attestation(hot_secret_for(user, dormant), dormant, usd_to_micro(PRICE), cited, user.getblockhash(cited))
-        rev_txid = user.sendrawtransaction(revive_raw(user, att))
+        rpc_error('attestor-revive-retired', user.sendrawtransaction, legacy_revive_raw(user, att))
+        rev_txid = user.sendrawtransaction(heartbeat_raw(user, hot_secret_for(user, dormant)))
         self.sync_all()
         self.step(POOLS[1], 1, 'revive')
         self.assert_status_everywhere(dormant, 'ELIGIBLE')
-        assert_equal(user.yed_gettxinfo(rev_txid)['type'], 'revive')
+        assert_equal(user.yed_gettxinfo(rev_txid)['type'], 'set_act')
+        assert_equal(self.attestors()[dormant]['lastAct'], user.getblockcount())
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 1)
 
         # ---------------------------------------------------------------- bond withdrawal
-        print('bond spends after the locktime: WITHDRAWN, and the ejected one stays EJECTED')
+        print('bond spends after the locktime: WITHDRAWN; the ejected one\'s bond is frozen (P4-b) and stays EJECTED')
         recs = self.attestors()
         w_seq, e_seq = seq_of[0], eqv_seq
         locktime = max(int(recs[w_seq]['bondLocktime']), int(recs[e_seq]['bondLocktime']))
         while user.getblockcount() < locktime:
             self.pools_step(1, 'to the bond locktime')
         wallet = nodes[ATTESTOR_A]
-        for seq, expect in ((w_seq, 'WITHDRAWN'), (e_seq, 'EJECTED')):
-            rec = recs[seq]
-            hex_ = withdraw_bond_raw(wallet, rec, bond_secret_for(rec))
-            txid = wallet.sendrawtransaction(hex_)
-            self.sync_all()
-            self.step(POOLS[2], 1, 'bond spend')
-            assert_equal(user.getrawtransaction(txid, 1)['confirmations'], 1)
-            self.assert_status_everywhere(seq, expect)
-            assert_equal(self.attestors()[seq]['bondSpentHeight'], user.getblockcount())
+        assert recs[e_seq]['bondFrozen'] and not recs[w_seq]['bondFrozen']
+        members = user.set_getinfo(user.yed_getinfo()['upgrade']['attestorSetId'])['memberlist']
+        frozen = [m for m in members if m['key'] == recs[e_seq]['attestorPubKey']]
+        assert_equal((frozen[0]['status'], frozen[0]['bondfrozen']), ('ejected', True))
+        rpc_error('bad-vault-bond-frozen', wallet.sendrawtransaction, withdraw_bond_raw(wallet, recs[e_seq], bond_secret_for(recs[e_seq])))
+        rec = recs[w_seq]
+        txid = wallet.sendrawtransaction(withdraw_bond_raw(wallet, rec, bond_secret_for(rec)))
+        self.sync_all()
+        self.step(POOLS[2], 1, 'bond spend')
+        assert_equal(user.getrawtransaction(txid, 1)['confirmations'], 1)
+        self.assert_status_everywhere(w_seq, 'WITHDRAWN')
+        self.assert_status_everywhere(e_seq, 'EJECTED')
+        assert_equal(self.attestors()[w_seq]['bondSpentHeight'], user.getblockcount())
         rpc_error('attest-not-eligible', user.yed_addattestation, bytes_to_hex_str(
             sign_attestation(hot_secret_for(user, w_seq), w_seq, usd_to_micro(PRICE), user.getblockcount() - REF_LAG,
                              user.getblockhash(user.getblockcount() - REF_LAG))))

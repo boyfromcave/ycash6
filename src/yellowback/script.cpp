@@ -74,6 +74,29 @@ valtype StackElementFor(opcodetype opcode, const valtype& data)
 
 } // namespace
 
+// ---------------------------------------------------------------- the vault upgrade (U-23)
+
+const vault::Tag YED_TAG = { { 'Y', 'E', 'D', 0x00 } };
+
+vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t lockHeight)
+{
+    vault::VaultParams v;
+    v.tag = YED_TAG;
+    v.setId = p.attestorSetId;
+    v.cancelSetId = p.attestorSetId;
+    v.delay = p.claimDelay;
+    v.ownerHeight = lockHeight;
+    v.appHeight = lockHeight + p.grace;
+    v.ownerKey = owner;
+    return v;
+}
+
+CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t lockHeight)
+{
+    if (p.attestorSetId.IsNull()) return CScript();
+    return vault::BuildVault(YedVaultParams(p, owner, lockHeight));
+}
+
 // ---------------------------------------------------------------- v2 (§3.4)
 
 CScript VaultScript(uint32_t lockHeight, const CPubKey& owner, uint32_t claimHeight)

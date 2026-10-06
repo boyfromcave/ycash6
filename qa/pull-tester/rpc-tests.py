@@ -45,12 +45,16 @@ FLAKY_SCRIPTS = [
 BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
-    'yellowback_activation.py',
+    # YED on the vault primitive (upgrade plan §15.10, U-21..U-24): the attestor set, mint into the
+    # V template, owner redeem, claim into an intent, release, attestor cancel, an invalid mint
+    # refused by the mempool and its block by every node (DoS 100), a reorg across a claim.
+    # yellowback_activation, yellowback_enforcement and yellowback_attest_enforcement were removed
+    # with the enforcement machinery they tested (§6).
+    'yellowback_upgrade.py',
     'yellowback_mining.py',
     'yellowback_quote.py',
     'yellowback_rpc_contract.py',
     'yellowback_attest.py',
-    'yellowback_attest_enforcement.py',
     'yellowback_attest_wallet.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
@@ -62,7 +66,6 @@ BASE_SCRIPTS= [
     'yellowback_mempool_limits.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
-    'yellowback_enforcement.py',
     'yellowback_stock_node.py',
     'yellowback_framework_smoke.py',
     # Real pool software (yolo, Rust); SKIPs without YOLO_BIN (plan Phase 7).
@@ -74,6 +77,7 @@ BASE_SCRIPTS= [
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',
+    'vault_rpc_contract.py',
     # The primitive with raw transactions, cross-checked against VaultModel: set lifecycle, lock /
     # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
     # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
@@ -216,6 +220,9 @@ EXTENDED_SCRIPTS = [
     'yellowback_attest_agent.py',
     # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
     'yellowback_devnet_roles.py',
+    # The devnet on the vault upgrade (upgrade plan §4, §5): upgrade-walk's core and the WYEC bridge
+    # persona through the devnet script; same Rust binary, SKIPs without it; < 10 minutes.
+    'yellowback_devnet_upgrade.py',
     'yellowback_sapling.py',
     'yellowback_wr_flags.py',
     'yellowback_stockparity.py',

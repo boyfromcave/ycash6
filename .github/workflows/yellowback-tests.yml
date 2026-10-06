@@ -64,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites) or weekly (fuzz, about 3.5 hours)'
+        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites) or weekly (fuzz, every Yellowback* and Vault* target, about 4 hours)'
         type: choice
         options: [all, push, nightly, weekly]
         default: all
@@ -96,7 +96,7 @@ env:
   # ycash6 port (plan Phase 4): every BASE_SCRIPTS yellowback script of qa/pull-tester/rpc-tests.py,
   # i.e. the v4.5.0 list plus yellowback_wallet_lifecycle and the port's yellowback_framework_smoke;
   # yellowback_reorg_stress is retired (plan P-7). The four EXTENDED ones run in nightly or not at all.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_rpc vault_primitive vault_slashing vault_bridge
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
@@ -689,7 +689,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6 " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -697,7 +697,7 @@ jobs:
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
           # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6; do
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6; do
             test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
             grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
@@ -734,6 +734,9 @@ jobs:
           section() { awk -v h="$1" '$0 ~ h {f=1; next} f && /^#/ {exit} f' "$2" | awk 'NF{p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
           diff <(section '^### 8\.1 ' doc/yellowback-spec.md) <(section '^## Trust statement' doc/yellowback.md)
           python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
+          # The vault RPC contract (finding (47)) is generated from doc/vault-rpc.md and agrees with the
+          # RPC table in src/rpc/vault.cpp and the conversions in src/rpc/client.cpp.
+          python3 qa/vault-rpc-contract.py --check
 
       - name: v2 gates (blocking from Phase 3)
         # Every yed_* the node registers is in the RPC contract (P7); the Phase 3 acceptance
@@ -744,15 +747,17 @@ jobs:
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
           ! git grep -in roster -- src/yellowback || exit 1
-          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 4' doc/yellowback-rpc.md   # 4 since hardening H-9.3
-          python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
-          # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
-          # error identifier present in the generated JSON — the C++ agents implement these names.
+          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 5' doc/yellowback-rpc.md
+          # rpcversion 5 (the vault upgrade, upgrade plan §15.10): yed_getinfo carries the upgrade object
+          # and none of the retired enforcement fields (suppressedBlocks, valveTripped, abandoned, ...).
+          python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); r=d["yed_getinfo"]["returns"]; sys.exit(0 if "upgrade" in r and not set(r) & {"suppressedBlocks","rejectedBlocks","enforcing","valveTripped","sunset","abandoned","templatePolicy"} and "yed_sweep" not in d else 1)'
+          # v3 contract (Phase A0; rpcversion 5 since the vault upgrade): the attest object on yed_getinfo,
+          # every §4.5 command and error identifier present in the generated JSON — the C++ agents implement these names.
           python3 - <<'PY'
           import json, sys
           d = json.load(open("doc/yellowback-rpc-contract.json"))
           missing = []
-          if d.get("rpcversion") != 4: missing.append("rpcversion=4")   # 3 in v3 (W14); 4 since hardening H-9.3
+          if d.get("rpcversion") != 5: missing.append("rpcversion=5")
           if "attest" not in d["yed_getinfo"]["returns"]: missing.append("yed_getinfo.attest")
           for c in ["yed_listattestors", "yed_getattestations", "yed_addattestation", "yed_buildbundle", "yed_getselection",
                     "yed_getnotice", "yed_claimnotice", "yed_sweepcarriers", "yed_registerattestor", "yed_withdrawbond",
@@ -768,7 +773,12 @@ jobs:
           # The spec copy carries the v3 delta (make spec appends the v3 plan's section 3).
           grep -q '^## v3 delta' doc/yellowback-spec.md
           test -f doc/yellowback-attestor.md && test -f qa/yellowback-frozen-files.txt
-          git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(\|Misbehaving(' | { ! grep -v 'DoS(0'; } || exit 1
+          # U-21: the vault primitive's consensus checks (its block verdict, its timelock and the
+          # final-transaction check it extends) and the YED module's block verdict are consensus
+          # rejections (DoS 100); every other inserted DoS stays DoS(0).
+          git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(\|Misbehaving(' \
+            | grep -v -e 'DoS(100, error("ConnectBlock(): vault: %s"' -e 'DoS(100, error("ConnectBlock(): %s", yb\.reason' \
+                      -e '"bad-txns-vault-timelock")' -e '"bad-txns-nonfinal")' | { ! grep -v 'DoS(0'; } || exit 1
           # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
           echo "main.cpp residual (lines not mentioning g_yellowback):"
           git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | grep -v 'g_yellowback\|#include\|^+$\|^+++' || true
@@ -787,9 +797,11 @@ jobs:
           echo "rules with a tagged test:"; echo "$tagged" | tr '\n' ' '; echo
           test -n "$tagged"
           rc=0
+          # ACT-4 (participation), ACT-6 (the signal) and ACT-7 (the valve) left with the enforcement
+          # machinery in the vault upgrade (upgrade plan §6): no test can carry them.
           for id in TAG-1 TAG-2 TAG-3 TAG-4 TAG-5 PRICE-1 PRICE-2 SIGMA-1 FEE-0 FEE-1 FEE-2 FEE-W REG-1 REG-2 REG-3 REG-4 IN-1 IN-2 IN-3 TX-0 \
                     MINT-1 MINT-2 MINT-3 MINT-4 MINT-5 MINT-6 MINT-7 MINT-8 XFER-1 XFER-2 XFER-3 RED-1 RED-2 RED-3 RED-4 \
-                    ACT-1 ACT-2 ACT-3 ACT-4 ACT-5 ACT-6 ACT-7 HALT-1 HALT-2 HALT-3 HALT-4 BLK-1 BLK-2 BLK-3 TPL-1 TPL-2 TPL-3 \
+                    ACT-1 ACT-2 ACT-3 ACT-5 HALT-1 HALT-2 HALT-3 HALT-4 BLK-1 BLK-2 BLK-3 TPL-1 TPL-2 TPL-3 \
                     MP-1 MINER-1 MINER-2 MINER-3 MINTPOL-1 SNAP UNDO; do
             git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged: $id"; rc=1; }
           done
@@ -1102,6 +1114,18 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+      - name: Devnet on the vault upgrade end to end (extended)
+        # upgrade-walk's core through the devnet script (upgrade plan §4, §5, §15.10): attestor set
+        # membership and S15 dormancy, mint on the V template, transfer, redeem and renew, a claim
+        # with a reorg across it, an attestor's cancel, an invalid mint and block, and the WYEC
+        # bridge persona in both shapes. Same binary as the steps above.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
+          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from

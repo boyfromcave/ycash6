@@ -1,0 +1,560 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""bridge-sim: the WYEC bridge persona on the devnet (docs/plans/yellowback-upgrade-plan.md §4, P3), no Ethereum.
+
+The Ycash half of the wYEC bridge's daemon (§4.3), against a running yellowback-devnet, through
+the stock RPCs and the vault primitive's set_* / vault_* RPCs only -- never a yed_* call: WYEC is
+not a registered module tag (§15.7), so the primitive alone governs every spend here. Ethereum is
+replaced by a **mock burn feed**, a JSON-lines file (`<dir>/bridge-burns.jsonl`) that `burn`
+appends to, one object per finalised burn: {"id", "amount" (YEC), "recipient" (a Ycash
+t-address), "time"}.
+
+Two signer shapes (§4.2), chosen at `up --shape`:
+
+  guardians  9 seats, 6 to unlock, 1 to cancel, 7 to slash (O-2): nine member keys, one in each
+             of nine devnet nodes' wallets (nodes 1-7, 9, 10: the stock node 1 is a guardian too,
+             the bridge needs no YED); node 1 coordinates (creates the set, holds the admit key,
+             funds and broadcasts the unlocks and releases); the vault's cancel set is the
+             guardian set itself
+  relayer    the Foundation's single relayer (seats 1, unlock 1) on node 2, with an OPEN, bonded
+             challenger set on nodes 5, 6, 7 as the vaults' cancelSetId (one challenger cancels)
+
+The daemon (`run`, started by `up`) acts on every new tip:
+  - heartbeats every member key (SET_HEARTBEAT, U-19) every --heartbeat blocks unless silenced;
+  - turns each unconsumed burn into an unlock intent naming the burn's recipient (vault_buildunlock
+    on the coordinator, set_signunlock on the signer nodes until the unlock threshold, vault_send),
+    waiting for the next rate epoch when the set's cap is spent (S-3);
+  - releases each of its matured intents to the recipient (vault_release, U-15);
+  - is the "one honest watcher": every confirmed WYEC intent under its set that it cannot match
+    to a burn (SHA256(recipient script) and value) is cancelled back into the vault
+    (vault_buildcancel + set_signcancel on a canceller's node + vault_send, I-2).
+
+Commands (also as `yellowback-devnet bridge ...`):
+  up [--shape guardians|relayer]   create and populate the set(s), mature them, start the daemon
+  lock AMOUNT [--dest 0x..20 bytes] the owner (node 0) locks YEC under the set: a WYEC V (ownerHeight
+                                    = lockHeight + BRIDGE_MAX_AGE, appHeight 0) and the destination as an
+                                    ABI bytes32 OP_RETURN consensus never reads
+  burn AMOUNT RECIPIENT [--id ID]   append a burn to the mock feed
+  rogue AMOUNT                      the unlock quorum signs an intent with no burn behind it (a theft
+                                    attempt); the daemon must cancel it
+  silence | unsilence               the members stop (resume) heartbeating
+  recover                           the owner spends every lock and intent under a released set (selector 3)
+  status [--json]                   set, locks, burns, intents, cancels, heartbeats
+  down                              stop the daemon (state is kept in <dir>/bridge.json)
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from decimal import Decimal
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEVNET = os.path.join(HERE, "yellowback-devnet")
+
+
+def _load_devnet():
+    loader = importlib.machinery.SourceFileLoader("yellowback_devnet", DEVNET)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+dv = _load_devnet()
+from test_framework import vault as v              # noqa: E402  (template builders only; signing stays in the nodes)
+from test_framework import yellowback_model as ym  # noqa: E402  (the v4 transaction serialiser)
+
+TAG = "WYEC"
+COIN = 100_000_000
+FEE = 10_000
+OWNER = 0                    # the user who locks and, on a dormant set, recovers
+FUNDERS = (2, 3, 4)          # the pools: they hold the YEC that funds members and fees
+DELAY = 6                    # blocks an intent waits before release; a cancel must land within it
+BRIDGE_MAX_AGE = 400         # ownerHeight = lockHeight + this (O-5, a bridge constant, not consensus)
+RATE_BPS, RATE_WINDOW = 5000, 20
+LIVENESS = 30                # livenessWindow: blocks without a member act before the set is DORMANT
+HEARTBEAT_EVERY = 8
+SHAPES = {
+    "guardians": {"coordinator": 1, "signers": (1, 2, 3, 4, 5, 6, 7, 9, 10), "cancellers": None,
+                  "set": {"seats": 9, "unlockthreshold": 6, "cancelthreshold": 1, "slashthreshold": 7,
+                          "ratelimitbps": RATE_BPS, "ratewindow": RATE_WINDOW, "livenesswindow": LIVENESS,
+                          "maturity": 2, "bondmin": 1, "bondlockmin": 50}},
+    "relayer": {"coordinator": 2, "signers": (2,), "cancellers": (5, 6, 7),
+                "set": {"seats": 1, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1,
+                        "ratelimitbps": RATE_BPS, "ratewindow": RATE_WINDOW, "livenesswindow": LIVENESS,
+                        "maturity": 2, "bondmin": 5, "bondlockmin": 50},
+                "cancelset": {"seats": 5, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 3, "open": True,
+                              "livenesswindow": 1000, "maturity": 2, "bondmin": 1, "bondlockmin": 50}},
+}
+
+
+def jdump(x):
+    return json.dumps(x, default=str, sort_keys=True)
+
+
+def zat(amount):
+    return int((Decimal(str(amount)) * COIN).to_integral_value())
+
+
+class Bridge:
+    def __init__(self, directory):
+        self.dir = os.path.abspath(directory)
+        self.devnet = dv.load(self.dir)
+        self.path = os.path.join(self.dir, "bridge.json")
+        self.daemon_path = os.path.join(self.dir, "bridge-daemon.json")
+        self.feed = os.path.join(self.dir, "bridge-burns.jsonl")
+        self.rogues_path = os.path.join(self.dir, "bridge-rogues.jsonl")
+        self.silence_path = os.path.join(self.dir, "bridge-silence")
+        self.log_path = os.path.join(self.dir, "bridge-sim.log")
+
+    # ------------------------------------------------------------------ plumbing
+    def node(self, i, timeout=120):
+        return dv.rpc(self.devnet, i, timeout=timeout)
+
+    def tip(self):
+        return self.node(OWNER).getblockcount()
+
+    def load(self):
+        try:
+            with open(self.path) as f: return json.load(f)
+        except OSError: sys.exit("no bridge in %s (`bridge up` first)" % self.dir)
+
+    def save(self, path, obj):
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f: json.dump(obj, f, indent=2, default=str)
+        os.replace(tmp, path)
+
+    def log(self, text):
+        line = "%s h=%s %s" % (time.strftime("%H:%M:%S"), self._tip_or_dash(), text)
+        with open(self.log_path, "a") as f: f.write(line + "\n")
+        return line
+
+    def _tip_or_dash(self):
+        try: return self.tip()
+        except Exception: return "-"
+
+    def wait_mempool(self, txid, nodes=FUNDERS, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if all(txid in self.node(i).getrawmempool() for i in nodes): return
+            time.sleep(0.2)
+        raise RuntimeError("%s did not reach the pools' mempools" % txid)
+
+    def mine(self, n):
+        """`up` matures the sets itself (round-robin on the pools, as `yellowback-devnet mine`)."""
+        nodes = [self.node(i) for i in range(self.devnet["num_nodes"])]
+        for k in range(n):
+            self.node(FUNDERS[k % len(FUNDERS)]).generate(1)
+            dv.sync_blocks(nodes)
+
+    def burns(self):
+        out = []
+        try:
+            with open(self.feed) as f:
+                for line in f:
+                    line = line.strip()
+                    if line: out.append(json.loads(line))
+        except OSError: pass
+        return out
+
+    def recipient_hash(self, node, address):
+        spk = node.validateaddress(address)["scriptPubKey"]
+        return hashlib.sha256(bytes.fromhex(spk)).hexdigest()
+
+    def members(self, b):
+        return b["members"] + b.get("challengers", [])
+
+    def outputs(self, b, kind=None):
+        q = {"tag": TAG, "setid": b["set"]}
+        if kind: q["kind"] = kind
+        return self.node(OWNER).vault_list(q)
+
+    # ------------------------------------------------------------------ up
+    def fund(self, nodes, amount, coins=4):
+        """Several coins per node: every act, unlock and release spends a whole confirmed coin (the RPCs lock
+        what they choose) and its change confirms a block later, so a one-coin wallet stalls every other block."""
+        txids = []
+        for k, i in enumerate(nodes):
+            n = coins * (2 if i in (SHAPES["guardians"]["coordinator"], SHAPES["relayer"]["coordinator"]) else 1)
+            outs = {self.node(i).getnewaddress(): float(amount) / coins for _ in range(n)}
+            txids.append(self.node(FUNDERS[k % len(FUNDERS)]).sendmany("", outs))
+        for t in txids: self.wait_mempool(t)
+        self.mine(1)
+
+    def join_all(self, set_id, nodes, admit_node, bond, open_set=False):
+        """One SET_JOIN per node (a fresh wallet key each); a closed set's joins carry the admit key's signature,
+        added on the admit node and sent back to the member's node (§15.5: build, sign the act, sign and send)."""
+        lock = self.tip() + 1 + 120
+        members = []
+        for i in nodes:
+            res = self.node(i).set_join(set_id, bond, lock)
+            if not res.get("complete"):
+                signed = self.node(admit_node).set_signact(res["hex"], set_id)
+                if not signed.get("complete"): raise RuntimeError("join of node%d incomplete after the admit signature: %s" % (i, jdump(signed)))
+                txid = self.node(i).set_sendact(signed["hex"])
+            else:
+                txid = res["txid"]
+            members.append({"node": i, "key": res["memberkey"], "join": txid, "bond": res.get("bondoutpoint")})
+            print("  node%-2d joined %s: key %s (txid %s)" % (i, set_id[:16], res["memberkey"][:16], txid[:16]))
+        for m in members: self.wait_mempool(m["join"])
+        return members
+
+    def up(self, shape):
+        old = None
+        if os.path.exists(self.path):
+            old = json.load(open(self.path))
+            if dv.agent_alive(old.get("pid")): sys.exit("a bridge daemon is running (pid %d); `bridge down` first" % old["pid"])
+            os.replace(self.path, os.path.join(self.dir, "bridge-%s-%s.json" % (old.get("shape"), old.get("set", "x")[:8])))
+            for p in (self.feed, self.rogues_path, self.daemon_path, self.silence_path):
+                if os.path.exists(p): os.replace(p, p + ".%s" % old.get("set", "x")[:8])
+        cfg = SHAPES[shape]
+        coord = cfg["coordinator"]
+        print("bridge up: shape %s; coordinator node%d; signers %s%s" % (shape, coord, ",".join(map(str, cfg["signers"])),
+              "; challengers %s" % ",".join(map(str, cfg["cancellers"])) if cfg["cancellers"] else ""))
+        nodes = sorted(set(cfg["signers"]) | set(cfg["cancellers"] or ()) | {coord})
+        self.fund(nodes, 12)
+        created = self.node(coord).set_create(dict(cfg["set"]))
+        print("  set_create on node%d: setid %s admitkey %s" % (coord, created["setid"], created["admitkey"][:16]))
+        cancel_set = created["setid"]
+        if cfg.get("cancelset"):
+            ch = self.node(cfg["cancellers"][0]).set_create(dict(cfg["cancelset"]))
+            cancel_set = ch["setid"]
+            print("  set_create on node%d: challenger set %s (OPEN)" % (cfg["cancellers"][0], cancel_set))
+            self.wait_mempool(ch["txid"])
+        self.wait_mempool(created["txid"])
+        self.mine(1)                                    # a set exists from the block after its SET_CREATE
+        members = self.join_all(created["setid"], cfg["signers"], coord, cfg["set"]["bondmin"])
+        challengers = self.join_all(cancel_set, cfg["cancellers"], cfg["cancellers"][0], cfg["cancelset"]["bondmin"], True) if cfg.get("cancelset") else []
+        self.mine(1 + cfg["set"]["maturity"])
+        info = self.node(OWNER).set_getinfo(created["setid"])
+        if info["current"] != len(members): raise RuntimeError("only %d of %d members current: %s" % (info["current"], len(members), jdump(info)))
+        b = {"shape": shape, "set": created["setid"], "cancelset": cancel_set, "admitkey": created["admitkey"], "coordinator": coord,
+             "members": members, "challengers": challengers, "cancellers": list(cfg["cancellers"] or cfg["signers"]),
+             "signers": list(cfg["signers"]), "delay": DELAY, "bridge_max_age": BRIDGE_MAX_AGE, "heartbeat_every": HEARTBEAT_EVERY,
+             "created": self.tip(), "params": cfg["set"]}
+        self.save(self.path, b)
+        print("  %d members current in %s (unlock %d, cancel %d, slash %d, rate %d bps / %d blocks, liveness %d)"
+              % (info["current"], created["setid"][:16], info["unlockthreshold"], info["cancelthreshold"], info["slashthreshold"],
+                 info["ratelimitbps"], info["ratewindow"], info["livenesswindow"]))
+        self.start_daemon(b)
+
+    def start_daemon(self, b):
+        argv = [sys.executable, os.path.abspath(__file__), "run", "--dir", self.dir]
+        log = open(self.log_path, "a")
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        b["pid"] = proc.pid
+        self.save(self.path, b)
+        state = self.devnet_state()
+        state["bridge"] = {"pid": proc.pid, "shape": b["shape"], "set": b["set"], "log": self.log_path}
+        dv.save(self.dir, state)
+        print("  daemon started (pid %d), log %s, feed %s" % (proc.pid, self.log_path, self.feed))
+
+    def devnet_state(self):
+        return dv.load(self.dir)
+
+    # ------------------------------------------------------------------ owner commands
+    def lock(self, amount, dest):
+        """The owner's lock (§4.1 Lock): a WYEC V plus the destination OP_RETURN, built here and signed by node 0's
+        wallet: vault_lock has no destination parameter (finding), so the wallet builds the transaction itself."""
+        b = self.load()
+        n = self.node(OWNER)
+        dest_bytes = bytes.fromhex(dest[2:] if dest.startswith("0x") else dest)
+        if len(dest_bytes) == 20: dest_bytes = b"\x00" * 12 + dest_bytes      # ABI bytes32, left-padded (finding 27)
+        if len(dest_bytes) != 32 or dest_bytes[:2] == b"YV": sys.exit("destination must be 20 or 32 bytes and never begin 0x5956")
+        address = n.getnewaddress()
+        owner_key = bytes.fromhex(n.validateaddress(address)["pubkey"])
+        lock_h = self.tip() + 1
+        vp = v.VaultParams(TAG.encode(), v.txid_internal(b["set"]), v.txid_internal(b["cancelset"]), b["delay"],
+                           lock_h + b["bridge_max_age"], 0, owner_key)
+        value = zat(amount)
+        locked = {(c["txid"], c["vout"]) for c in n.listlockunspent()}
+        pending = {(i["txid"], i["vout"]) for t in n.getrawmempool() for i in n.getrawtransaction(t, 1)["vin"] if "txid" in i}
+        coins = sorted([u for u in n.listunspent(1) if u.get("spendable", True) and (u["txid"], u["vout"]) not in locked | pending
+                        and u["amount"] >= 1], key=lambda u: -u["amount"])
+        vin, total = [], 0
+        for u in coins:
+            vin.append((u["txid"], u["vout"], b"", 0xFFFFFFFF)); total += zat(u["amount"])
+            if total >= value + FEE: break
+        if total < value + FEE: sys.exit("node0 holds %s YEC, the lock needs %s" % (Decimal(total) / COIN, amount))
+        change = n.validateaddress(n.getnewaddress())["scriptPubKey"]
+        vout = [(value, v.vault_script(vp)), (0, bytes([v.OP_RETURN]) + v.push(dest_bytes))]
+        if total - value - FEE > 0: vout.append((total - value - FEE, bytes.fromhex(change)))
+        raw = ym.serialize_tx_v4(vin, vout, 0, self.tip() + 40).hex()
+        signed = n.signrawtransaction(raw)
+        if not signed["complete"]: sys.exit("signrawtransaction incomplete: %s" % jdump(signed.get("errors")))
+        try:
+            txid = n.sendrawtransaction(signed["hex"])
+        except Exception as error:
+            sys.exit("the lock was refused: %s" % getattr(error, "error", {}).get("message", error))
+        print("locked %s YEC under %s: %s:0 (owner key %s, ownerHeight %d, destination %s)"
+              % (amount, b["set"][:16], txid, owner_key.hex()[:16], lock_h + b["bridge_max_age"], dest_bytes.hex()))
+        self.wait_mempool(txid)
+        return txid
+
+    def burn(self, amount, recipient, burn_id=None):
+        burn_id = burn_id or "burn-%d" % int(time.time() * 1000)
+        if any(x["id"] == burn_id for x in self.burns()): sys.exit("burn %s is already in the feed" % burn_id)
+        record = {"id": burn_id, "amount": str(Decimal(str(amount))), "recipient": recipient, "time": int(time.time())}
+        with open(self.feed, "a") as f: f.write(json.dumps(record) + "\n")
+        print("burn %s appended to %s: %s YEC to %s" % (burn_id, self.feed, amount, recipient))
+
+    def sign_until_complete(self, b, hexstr, method, nodes):
+        """set_signunlock / set_signcancel across the nodes until the threshold is met; returns (hex, signer nodes)."""
+        signers = []
+        for i in nodes:
+            res = getattr(self.node(i), method)(hexstr)
+            if res.get("signatures", 0) > len(signers): signers.append(i)
+            hexstr = res["hex"]
+            if res.get("complete"): return hexstr, signers, res
+        raise RuntimeError("%s incomplete after nodes %s: %s" % (method, nodes, jdump({k: res.get(k) for k in ("signatures", "required")})))
+
+    def pick_vault(self, b, value, busy):
+        for r in sorted(self.outputs(b, "vault"), key=lambda r: -r["valuezat"]):
+            if r["outpoint"] not in busy and r["valuezat"] >= value: return r
+        return None
+
+    def post_intent(self, b, amount, recipient, busy=()):
+        """vault_buildunlock (funded by the coordinator) -> set_signunlock on the signers -> vault_send."""
+        value = zat(amount)
+        vault = self.pick_vault(b, value, busy)
+        if vault is None: raise RuntimeError("no WYEC vault under %s holds %s YEC" % (b["set"][:16], amount))
+        coord = self.node(b["coordinator"])
+        built = coord.vault_buildunlock(vault["outpoint"], [{"address": recipient, "amount": float(Decimal(str(amount)))}])
+        hexstr, signers, res = self.sign_until_complete(b, built["hex"], "set_signunlock", b["signers"])
+        txid = coord.vault_send(hexstr)
+        intent = "%s:%d" % (txid, built["intents"][0]["vout"])
+        return {"intent": intent, "txid": txid, "vault": vault["outpoint"], "signers": signers,
+                "recipienthash": built["intents"][0].get("recipienthash"), "sighash": res.get("sighash")}
+
+    def rogue(self, amount):
+        b = self.load()
+        attacker = self.node(3).getnewaddress()
+        try:
+            r = self.post_intent(b, amount, attacker)
+        except Exception as error:
+            sys.exit("rogue intent refused: %s" % error)
+        record = dict(r, amount=str(amount), recipient=attacker, time=int(time.time()), posted=self.tip())
+        with open(self.rogues_path, "a") as f: f.write(json.dumps(record) + "\n")
+        print("rogue intent %s: %s YEC to %s, signed by nodes %s with no burn behind it" % (r["intent"], amount, attacker, r["signers"]))
+        self.wait_mempool(r["txid"])
+
+    def silence(self, on):
+        if on:
+            open(self.silence_path, "w").write("%d\n" % self.tip())
+            print("the members stop heartbeating (%s); the set goes DORMANT livenessWindow blocks after the last act" % self.silence_path)
+        else:
+            if os.path.exists(self.silence_path): os.remove(self.silence_path)
+            print("heartbeats resume")
+
+    def recover(self):
+        """The owner's OWNER-RELEASED spends (selector 3, vault_ownerspend picks it) of every lock and intent it owns."""
+        b = self.load()
+        n = self.node(OWNER)
+        rows = n.vault_list({"tag": TAG, "setid": b["set"], "mine": True})
+        if not rows: print("node0 owns nothing under %s" % b["set"][:16]); return 0
+        failed = 0
+        for r in rows:
+            try:
+                res = n.vault_ownerspend(r["outpoint"], n.getnewaddress())
+                print("recovered %s %s (%s YEC): txid %s, selector %s" % (r["kind"], r["outpoint"], r["value"], res["txid"], res["selector"]))
+            except Exception as error:
+                failed += 1
+                print("%s %s: %s" % (r["kind"], r["outpoint"], getattr(error, "error", {}).get("message", error)))
+        return 1 if failed else 0
+
+    # ------------------------------------------------------------------ the daemon
+    def run(self):
+        b = self.load()
+        d = {}
+        if os.path.exists(self.daemon_path):
+            d = json.load(open(self.daemon_path))
+        d.setdefault("burns", {}); d.setdefault("cancels", {}); d.setdefault("heartbeats", []); d.setdefault("last_heartbeat", 0)
+        d.setdefault("errors", [])
+        stop = {"now": False}
+        signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("now", True))
+        self.log("daemon up: shape %s set %s cancelset %s" % (b["shape"], b["set"], b["cancelset"]))
+        last_tip = None
+        while not stop["now"]:
+            try:
+                tip = self.tip()
+                if tip != last_tip:
+                    self.tick(b, d, tip)
+                    last_tip = tip
+                    self.save(self.daemon_path, d)
+            except Exception as error:
+                msg = self.log("error: %r" % error)
+                d["errors"] = (d["errors"] + [msg])[-20:]
+                self.save(self.daemon_path, d)
+                last_tip = None
+            time.sleep(1)
+        self.log("daemon stopped")
+
+    def say(self, text):
+        self.log(text)
+
+    def tick(self, b, d, tip):
+        # 1. heartbeats (U-19: liveness counts SET_JOIN at maturity and SET_HEARTBEAT only)
+        silenced = os.path.exists(self.silence_path)
+        if not silenced and tip - d["last_heartbeat"] >= b["heartbeat_every"]:
+            sent = []
+            for m in self.members(b):
+                set_id = b["set"] if m in b["members"] else b["cancelset"]
+                try: sent.append(self.node(m["node"]).set_heartbeat(set_id, m["key"])["txid"])
+                except Exception as error: self.say("heartbeat of node%d failed: %s" % (m["node"], getattr(error, "error", {}).get("message", error)))
+            d["last_heartbeat"] = tip
+            d["heartbeats"] = (d["heartbeats"] + [{"height": tip, "count": len(sent)}])[-10:]
+            self.say("heartbeat: %d SET_HEARTBEAT act(s)" % len(sent))
+        # 2. burns -> intents
+        mempool = set(self.node(b["coordinator"]).getrawmempool())
+        busy = set()
+        for rec in d["burns"].values():
+            if rec.get("txid") in mempool: busy.add(rec.get("vault"))
+        for burn in self.burns():
+            rec = d["burns"].get(burn["id"])
+            if rec and rec.get("intent"): continue
+            rec = rec or {"amount": burn["amount"], "recipient": burn["recipient"], "seen": tip}
+            d["burns"][burn["id"]] = rec
+            rec["recipienthash"] = self.recipient_hash(self.node(OWNER), burn["recipient"])
+            info = self.node(OWNER).set_getinfo(b["set"])
+            available = info.get("unlockavailable")
+            if available is not None and zat(available) < zat(burn["amount"]):
+                if rec.get("waiting") != info.get("epoch"):
+                    self.say("burn %s (%s YEC) waits: the set may unlock %s YEC in epoch %s (S-3)" % (burn["id"], burn["amount"], available, info.get("epoch")))
+                rec["waiting"] = info.get("epoch")
+                continue
+            try:
+                r = self.post_intent(b, burn["amount"], burn["recipient"], busy)
+            except Exception as error:
+                rec["error"] = str(getattr(error, "error", {}).get("message", error))
+                self.say("burn %s: intent not posted: %s" % (burn["id"], rec["error"]))
+                continue
+            rec.update(r); rec.pop("error", None); rec["posted"] = tip
+            busy.add(r["vault"])
+            self.say("burn %s -> intent %s (%s YEC to %s), signed on nodes %s" % (burn["id"], r["intent"], burn["amount"], burn["recipient"], r["signers"]))
+        # 3. releases (U-15: after delay anyone may release; the daemon does it for its own intents)
+        intents = {r["outpoint"]: r for r in self.outputs(b, "intent")}
+        for burn_id, rec in d["burns"].items():
+            if not rec.get("intent") or rec.get("released"): continue
+            row = intents.get(rec["intent"])
+            if row is None: continue                  # unconfirmed, or already spent
+            if not row.get("mature"): continue
+            try:
+                rec["released"] = self.node(b["coordinator"]).vault_release(rec["intent"], rec["recipient"])
+                self.say("burn %s: released %s -> %s" % (burn_id, rec["intent"], rec["released"]))
+            except Exception as error:
+                self.say("release of %s: %s" % (rec["intent"], getattr(error, "error", {}).get("message", error)))
+        # 4. the watcher: an intent it cannot match to a burn is cancelled before it matures (I-2)
+        claimed = {rec["intent"] for rec in d["burns"].values() if rec.get("intent")}
+        for outpoint, row in intents.items():
+            if outpoint in claimed or outpoint in d["cancels"]: continue
+            match = None
+            for burn_id, rec in d["burns"].items():
+                if not rec.get("intent") and rec.get("recipienthash") in (row.get("recipienthash"),) and zat(rec["amount"]) == row["valuezat"]:
+                    match = burn_id
+            if match:
+                d["burns"][match]["intent"] = outpoint
+                self.say("intent %s matches burn %s (posted by someone else): adopted" % (outpoint, match)); continue
+            if not row.get("cancellable", True):
+                self.say("UNMATCHED intent %s is past its cancel deadline" % outpoint); continue
+            canceller = b["cancellers"][0]
+            try:
+                built = self.node(canceller).vault_buildcancel(outpoint)
+                hexstr, signers, _ = self.sign_until_complete(b, built["hex"], "set_signcancel", b["cancellers"])
+                txid = self.node(canceller).vault_send(hexstr)
+                d["cancels"][outpoint] = {"txid": txid, "by": signers, "height": tip, "value": row["value"], "recipienthash": row.get("recipienthash")}
+                self.say("UNMATCHED intent %s (%s YEC, recipienthash %s..): no burn in the feed; cancelled by node%s in %s"
+                         % (outpoint, row["value"], (row.get("recipienthash") or "")[:16], signers, txid))
+            except Exception as error:
+                self.say("cancel of %s failed: %s" % (outpoint, getattr(error, "error", {}).get("message", error)))
+
+    # ------------------------------------------------------------------ status / down
+    def status(self):
+        b = self.load()
+        d = json.load(open(self.daemon_path)) if os.path.exists(self.daemon_path) else {}
+        info = self.node(OWNER).set_getinfo(b["set"])
+        rogues = []
+        try:
+            for line in open(self.rogues_path):
+                if line.strip():
+                    r = json.loads(line)
+                    c = (d.get("cancels") or {}).get(r["intent"])
+                    r["cancelled"] = c["txid"] if c else None
+                    rogues.append(r)
+        except OSError: pass
+        locks = [{"txid": r["txid"], "outpoint": r["outpoint"], "value": r["value"], "ownerheight": r.get("ownerheight")} for r in self.outputs(b, "vault")]
+        burns = []
+        for burn in self.burns():
+            rec = (d.get("burns") or {}).get(burn["id"], {})
+            burns.append({"id": burn["id"], "amount": burn["amount"], "recipient": burn["recipient"], "intent": rec.get("intent"),
+                          "signers": rec.get("signers"), "released": rec.get("released"), "error": rec.get("error")})
+        return {"shape": b["shape"], "set": b["set"], "cancelset": b["cancelset"], "tip": self.tip(), "daemon": dv.agent_alive(b.get("pid")),
+                "pid": b.get("pid"), "silenced": os.path.exists(self.silence_path), "current": info["current"], "dormant": info["dormant"],
+                "released": info["released"], "lockedvalue": info["lockedvalue"], "epoch": info.get("epoch"),
+                "unlockable": float(info["unlockavailable"]) if info.get("unlockavailable") is not None else None,
+                "locks": locks, "intents": [r["outpoint"] for r in self.outputs(b, "intent")], "burns": burns, "rogues": rogues,
+                "cancels": d.get("cancels", {}), "heartbeats": d.get("heartbeats", []), "errors": d.get("errors", [])[-5:]}
+
+    def down(self):
+        b = self.load()
+        pid = b.get("pid")
+        if dv.agent_alive(pid):
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                if not dv.agent_alive(pid): break
+                time.sleep(0.25)
+            print("bridge daemon (pid %d) stopped" % pid)
+        else:
+            print("the bridge daemon is not running")
+        state = self.devnet_state()
+        state.pop("bridge", None)
+        dv.save(self.dir, state)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    def add(name, **kw):
+        p = sub.add_parser(name, **kw); p.add_argument("--dir", default=dv.DEFAULT_DIR); return p
+    add("up").add_argument("--shape", choices=sorted(SHAPES), default="guardians")
+    p = add("lock"); p.add_argument("amount"); p.add_argument("--dest", default="0x" + "11" * 20)
+    p = add("burn"); p.add_argument("amount"); p.add_argument("recipient"); p.add_argument("--id")
+    add("rogue").add_argument("amount")
+    add("silence"); add("unsilence"); add("recover"); add("down"); add("run")
+    add("status").add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    bridge = Bridge(args.dir)
+    if args.command == "up": bridge.up(args.shape)
+    elif args.command == "lock": bridge.lock(args.amount, args.dest)
+    elif args.command == "burn": bridge.burn(args.amount, args.recipient, args.id)
+    elif args.command == "rogue": bridge.rogue(args.amount)
+    elif args.command == "silence": bridge.silence(True)
+    elif args.command == "unsilence": bridge.silence(False)
+    elif args.command == "recover": return bridge.recover()
+    elif args.command == "run": bridge.run()
+    elif args.command == "down": bridge.down()
+    elif args.command == "status":
+        st = bridge.status()
+        if args.json: print(json.dumps(st, indent=2, default=str))
+        else:
+            print("bridge %s: set %s (cancel set %s); daemon %s; current %d, dormant %s, released %s; locked %s YEC, unlockable %s this epoch%s"
+                  % (st["shape"], st["set"][:16], st["cancelset"][:16], "up (pid %s)" % st["pid"] if st["daemon"] else "DOWN", st["current"],
+                     st["dormant"], st["released"], st["lockedvalue"], st["unlockable"], "; SILENCED" if st["silenced"] else ""))
+            for lk in st["locks"]: print("  lock   %s  %s YEC" % (lk["outpoint"], lk["value"]))
+            for i in st["intents"]: print("  intent %s" % i)
+            for bu in st["burns"]: print("  burn   %s  %s YEC -> %s  intent %s  released %s%s" % (bu["id"], bu["amount"], bu["recipient"], bu["intent"], bu["released"], ("  error " + bu["error"]) if bu["error"] else ""))
+            for r in st["rogues"]: print("  rogue  %s  %s YEC  cancelled %s" % (r["intent"], r["amount"], r["cancelled"]))
+            for e in st["errors"]: print("  error  %s" % e)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

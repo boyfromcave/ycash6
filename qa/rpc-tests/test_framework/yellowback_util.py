@@ -85,8 +85,8 @@ _point_ctypes_at_a_real_openssl()
 
 from .test_framework import BitcoinTestFramework
 from .util import (
+    VAULT_BRANCH_ID,
     assert_equal,
-    assert_greater_than,
     assert_start_raises_init_error,
     bitcoind_processes,
     bytes_to_hex_str,
@@ -97,8 +97,10 @@ from .util import (
     start_node,
     start_nodes,
     stop_node,
+    stop_nodes,
     sync_blocks,
     sync_mempools,
+    wait_bitcoinds,
 )
 from . import yellowback_model as ym
 from .yellowback_model import assert_model_matches  # noqa: F401  (re-exported, section 7)
@@ -133,10 +135,10 @@ YCASH_UPGRADE_ARGS = [
     nuparams(YCASH_CANOPY_BRANCH_ID, 1),
 ]
 
-# With every upgrade active from height 1 the epoch of every block a test mines is Canopy's, so
-# CurrentEpochBranchId(chainActive.Height() + 1) — the branch id the owner signature binds
-# (section 3.4) — is this on every node.
-SIGNING_BRANCH_ID = YCASH_CANOPY_BRANCH_ID
+# Every Yellowback transaction a test builds is signed after the vault upgrade (VAULT_ACTIVATION),
+# so CurrentEpochBranchId(chainActive.Height() + 1) — the branch id the owner signature binds
+# (section 3.4) — is the Vault branch's on every node (upgrade plan U-9).
+SIGNING_BRANCH_ID = VAULT_BRANCH_ID
 
 # ---------------------------------------------------------------------------
 # Section 3.1, the regtest column.  Names follow the plan; values are protocol on regtest and
@@ -150,7 +152,14 @@ BLOCKS_PER_HOUR = 48
 BLOCKS_PER_DAY = 1_152
 BLOCKS_PER_YEAR = 420_480
 
-START_HEIGHT = 1               # -yellowbackstartheight on every node (the same value, item 4)
+# The vault upgrade (docs/plans/yellowback-upgrade-plan.md section 15.10, U-22): every node runs
+# -nuparams=6d5b7a31:VAULT_ACTIVATION; Yellowback is live from that height on every node that is
+# also given the YED attestor set (-yellowbackattestorset=<setid>), which ``activate`` creates
+# (set_create on the user's node) right after the activation and then restarts the nodes with.
+VAULT_ACTIVATION = 103
+START_HEIGHT = VAULT_ACTIVATION  # = yellowbackStartHeight (U-22); -yellowbackstartheight is retired
+ATTESTOR_SET = [None]           # the current run's attestor set id (display hex), set by ``activate``
+CLAIM_DELAY = 10               # CLAIM_DELAY on regtest (U-23)
 TAG_MAGIC = ym.TAG_MAGIC
 TAG_VERSION = ym.TAG_VERSION
 TAG_SIZE = ym.TAG_SIZE
@@ -162,15 +171,6 @@ P_SLOW_WINDOW = 64
 MIN_FILL = (4, 16, 43)         # WINDOW_MIN_FILL: fast ceil(W/2); mid, slow ceil(2W/3) (V16, L9)
 REF_WINDOW = 40
 REF_LAG = 2
-SIGNAL_WINDOW = 64
-ACTIVATION_THRESHOLD = 48
-PARTICIPATION_FLOOR = 39
-ACTIVATION_DELAY = 64
-ENFORCEMENT_FLOOR = 32
-ENFORCEMENT_RESUME = 39
-VALVE_BLOCKS = 6
-VALVE_NOTE_CAP = 64
-ABANDON_BLOCKS = 128
 N_REG = 24
 N_PENALTY = 12
 PEER_LAG = 4
@@ -236,8 +236,8 @@ DORMANCY_CHECK = 4
 CARRIER_VALUE = 10_000         # wallet policy
 ATTEST_K = 4                   # agent policy: signing interval in blocks
 
-# the blocks activate() mines: one signal window, the activation delay, and the block after
-ACTIVATION_BLOCKS = SIGNAL_WINDOW + ACTIVATION_DELAY + 1     # 129
+# the quote blocks activate() mines once the attestor set is live: the slow window and a margin
+ACTIVATION_BLOCKS = P_SLOW_WINDOW + 6                         # 70
 
 # regtest address bytes (ref/ycash/src/chainparams.cpp:613-615)
 REGTEST_PUBKEY_ADDRESS = b'\x1c\x95'
@@ -267,17 +267,18 @@ POOL_WIFS = [
 ]
 
 
-def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=START_HEIGHT, genesis=None):
-    """Arguments for one node: the six -nuparams at height 1 (four here, two from start_node)
-    and, with ``yellowback``, ``-experimentalfeatures -yellowback -yellowbackstartheight=<h>
-    -yellowbacksigmaref=<sigma_ref>`` (0 fixes the sigma multiplier at 1; pass ``sigma_ref=None``
-    in a test about sigma to leave the node's default).  ``genesis`` is the v1 scripts' federation
-    genesis dict (retired at Phase 6): with it the v1 arguments are produced instead."""
-    args = list(YCASH_UPGRADE_ARGS)
-    if yellowback and genesis is not None:
-        args += ['-experimentalfeatures', '-yellowback'] + genesis_args(genesis)
-    elif yellowback:
-        args += ['-experimentalfeatures', '-yellowback', '-yellowbackstartheight=%d' % start_height]
+def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=None, genesis=None, attestor_set=None):
+    """Arguments for one node: the six -nuparams at height 1 (four here, two from start_node), the
+    vault upgrade at VAULT_ACTIVATION on every node (a consensus parameter), and, with
+    ``yellowback`` and an attestor set (``attestor_set``, default the run's ``ATTESTOR_SET``),
+    ``-yellowbackattestorset=<setid> -yellowbacksigmaref=<sigma_ref>`` (0 fixes the sigma multiplier
+    at 1; ``sigma_ref=None`` leaves the node's default).  Before ``activate`` has created the set a
+    Yellowback node runs without it (Yellowback is not live yet).  ``start_height`` is accepted and
+    ignored (U-22: the start is the activation height).  ``genesis`` (the retired v1 scripts) is ignored."""
+    args = list(YCASH_UPGRADE_ARGS) + [nuparams(VAULT_BRANCH_ID, VAULT_ACTIVATION)]
+    attestor_set = attestor_set or ATTESTOR_SET[0]
+    if yellowback and attestor_set:
+        args += ['-yellowbackattestorset=%s' % attestor_set]
         if sigma_ref is not None:
             args += ['-yellowbacksigmaref=%d' % sigma_ref]
     if extra:
@@ -285,15 +286,49 @@ def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=
     return args
 
 
+# P4-b: the set is the attestor registry: its livenessWindow is the attestors' member dormancy (an attestor that
+# sends no SET_HEARTBEAT for that many blocks is DORMANT), so the suites, whose attestors never heartbeat unless a
+# case says so, use a window far beyond any run; a suite that tests the set's dormancy creates its own.
+ATTESTOR_SET_LIVENESS = 100000
+ATTESTOR_SET_SPEC = {'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
+                     'open': True, 'maturity': 1, 'livenesswindow': ATTESTOR_SET_LIVENESS}
+
+
+def start_nodes_with_attestor_set(num, tmpdir, args_fn, edges):
+    """U-22 for a script on the plain BitcoinTestFramework: start ``num`` fresh nodes with
+    ``args_fn(i)``, connect ``edges``, mine node 0 to VAULT_ACTIVATION, create the YED attestor set
+    there (``set_create``: open, one cancel signature), mine it, then restart every node with
+    ``args_fn(i)`` again -- which now carries ``-yellowbackattestorset``.  Returns the nodes (tip
+    VAULT_ACTIVATION + 1, node 0 holding the coinbases)."""
+    ATTESTOR_SET[0] = None
+    nodes = start_nodes(num, tmpdir, extra_args=[args_fn(i) for i in range(num)])
+    for a, b in edges:
+        connect_nodes_bi(nodes, a, b)
+    nodes[0].generate(VAULT_ACTIVATION - nodes[0].getblockcount())
+    sync_blocks(nodes)
+    created = nodes[0].set_create(dict(ATTESTOR_SET_SPEC))
+    sync_mempools(nodes)
+    nodes[0].generate(1)
+    sync_blocks(nodes)
+    ATTESTOR_SET[0] = created['setid']
+    stop_nodes(nodes)
+    wait_bitcoinds()
+    nodes = start_nodes(num, tmpdir, extra_args=[args_fn(i) for i in range(num)])
+    for a, b in edges:
+        connect_nodes_bi(nodes, a, b)
+    sync_blocks(nodes)
+    return nodes
+
+
 def pool_args(payout_addr, extra=None, **kw):
-    """A pool: enforcing, signalling, tagging every block it mines with ``payout_addr``."""
-    return yellowback_node_args(['-yellowbackpayoutaddress=%s' % payout_addr, '-yellowbacksignal=1']
-                                + list(extra or []), **kw)
+    """A pool: tagging every block it mines with ``payout_addr`` (once Yellowback is live)."""
+    return yellowback_node_args(['-yellowbackpayoutaddress=%s' % payout_addr] + list(extra or []), **kw)
 
 
 def observer_args(extra=None, **kw):
-    """The non-enforcing observer (records ``unbacked``)."""
-    return yellowback_node_args(['-yellowbackenforce=0'] + list(extra or []), **kw)
+    """The observer: since the vault upgrade every Yellowback node validates the module (U-21);
+    the v2 non-enforcing observer (-yellowbackenforce=0) no longer exists."""
+    return yellowback_node_args(list(extra or []), **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -463,9 +498,14 @@ class YellowbackTestFramework(BitcoinTestFramework):
     initial_blocks = 101
     # 6.20.0: True starts every node on a fixed mock clock (advance_clock); see __init__.
     mock_clock = False
+    # U-22: create the YED attestor set (and restart onto it) at the end of setup_network, so
+    # every yed_* RPC exists when run_test starts; False leaves it to activate()
+    auto_attestor_set = True
 
     def __init__(self, num_nodes=6):
         super().__init__()
+        ATTESTOR_SET[0] = None            # each run creates its own attestor set (activate)
+        self.attestor_set = None
         self.num_nodes = num_nodes        # v3 scripts pass 8 (nodes 6-7 the attestor wallets)
         self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
         self.is_network_split = False
@@ -548,6 +588,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
             self.split_network()
         else:
             self.sync_all()
+        if self.yellowback_enabled and self.auto_attestor_set and not split:
+            # U-22: the yed_* RPCs exist only where Yellowback is live, so the set comes first
+            self.create_attestor_set()
 
     def live_edges(self):
         """``EDGES`` restricted to nodes this run actually started.  ``EDGES`` declares the
@@ -667,14 +710,34 @@ class YellowbackTestFramework(BitcoinTestFramework):
         self.last_round_robin = out
         return out
 
+    def create_attestor_set(self):
+        """U-22: mine to VAULT_ACTIVATION, create the YED attestor set on the user's node (open, one
+        cancel signature: ``set_create``), mine it, and restart every Yellowback node with
+        ``-yellowbackattestorset``.  Returns the set id; a no-op once the run has one."""
+        if ATTESTOR_SET[0] is not None and getattr(self, 'attestor_set', None) == ATTESTOR_SET[0]:
+            return ATTESTOR_SET[0]
+        user = self.nodes[USER]
+        while user.getblockcount() < VAULT_ACTIVATION:
+            self.mine(POOLS[0] if POOLS[0] < len(self.nodes) else USER, blocks_only=True)
+        created = user.set_create(dict(ATTESTOR_SET_SPEC))
+        self.sync_all()
+        self.mine(USER, blocks_only=True)
+        ATTESTOR_SET[0] = self.attestor_set = created['setid']
+        for i in range(len(self.nodes)):
+            if self.nodes[i] is not None and self.yellowback_enabled and i != STOCK:
+                self.restart(i)
+        self.sync_all(blocks_only=True)
+        return created['setid']
+
     def activate(self, pools=None, stock=None, quote_usd=None):
-        """Mine ``ACTIVATION_BLOCKS`` (129) round-robin over ``pools`` (plus ``stock`` in the
-        rotation when given) and assert ``yed_getactivation.status == "active"`` on every
-        enforcing node.  With ``quote_usd`` every pool quotes that price first so the windows fill
-        as the chain grows.  A caller that then mints mines ``REF_LAG + 1`` more blocks so
-        ``Snapshots[tip - REF_LAG]`` is ACTIVE (K16).  The first fresh block also takes every
-        node out of the cached chain's IBD (P12)."""
+        """U-22: the vault upgrade and the attestor set (``create_attestor_set``), then
+        ``ACTIVATION_BLOCKS`` (70) round-robin over ``pools`` (plus ``stock`` in the rotation when
+        given) so the price windows fill, and assert ``yed_getactivation.status == "active"`` on
+        every Yellowback node.  With ``quote_usd`` every pool quotes that price once the set is live.
+        A caller that then mints mines ``REF_LAG + 1`` more blocks (K16).  The first fresh block
+        also takes every node out of the cached chain's IBD (P12)."""
         pools = list(POOLS if pools is None else pools)
+        self.create_attestor_set()
         if quote_usd is not None:
             for i in pools:
                 self.quote(i, quote_usd)
@@ -712,6 +775,32 @@ class YellowbackTestFramework(BitcoinTestFramework):
         p = bitcoind_processes.pop(i)
         os.kill(p.pid, signal.SIGKILL)
         p.wait()
+        self.nodes[i] = None
+
+    def restart_quiet(self, i, extra=None):
+        """``restart`` with the node's stderr in ``node<i>/stderr.txt``: for a node expected to stop
+        itself (AbortNode writes its "fatal internal error" to stderr, and rpc-tests.py fails any
+        script whose stderr is not empty)."""
+        if self.nodes[i] is not None:
+            stop_node(self.nodes[i], i)
+        err = open(os.path.join(self.options.tmpdir, 'node%d' % i, 'stderr.txt'), 'w')
+        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i, extra) + self.clock_args(),
+                                   binary=self.node_binaries()[i], stderr=err)
+        if i in POOLS:
+            self.import_pool_keys(self.nodes)
+        if self.mock_time is not None:
+            self.nodes[i].setmocktime(self.mock_time)
+        self.reconnect(i)
+
+    def wait_stopped(self, i, timeout=60):
+        """Wait for node ``i`` to exit on its own (an AbortNode), reap it; the proxy becomes None."""
+        p = bitcoind_processes[i]
+        deadline = time.time() + timeout
+        while p.poll() is None:
+            if time.time() > deadline:
+                raise AssertionError('node %d did not stop within %ds' % (i, timeout))
+            time.sleep(0.25)
+        bitcoind_processes.pop(i)
         self.nodes[i] = None
 
     def restart(self, i, extra=None, timewait=None):
@@ -798,10 +887,8 @@ def assert_best_hash(nodes, label=''):
 
 
 def assert_rejected(node, blockhash):
-    """The node rejected ``blockhash`` under BLK-1: it counts in ``rejectedBlocks`` and sits off
-    the active chain (``confirmations == -1``)."""
-    info = node.yed_getinfo()
-    assert_greater_than(info['rejectedBlocks'], 0)
+    """The node rejected ``blockhash`` (U-21: an invalid block, DoS 100): it sits off the active
+    chain (``confirmations == -1``). ``rejectedBlocks`` left with the enforcement machinery."""
     assert_equal(node.getblock(blockhash)['confirmations'], -1)
 
 
@@ -964,10 +1051,17 @@ def _select_funding(node, needed):
     return chosen, total
 
 
+def yed_params():
+    """The model's regtest parameters for the run (the attestor set ``activate`` created): what the
+    YED V template is built from (U-23)."""
+    assert ATTESTOR_SET[0], 'no attestor set yet: call activate() first'
+    return ym.Params.regtest(VAULT_ACTIVATION, attestor_set=ATTESTOR_SET[0])
+
+
 def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=None, owner_pubkey=None,
                   fee_zat_override=None, term_class=None, expiry=None):
     """The raw MINT of section 3.5, funded from ``node``'s confirmed transparent coins and signed
-    with ``signrawtransaction``.  Outputs: vault ``vout[0]`` (P2SH of the vault script,
+    with ``signrawtransaction``.  Outputs: vault ``vout[0]`` (the YED V template, U-23,
     ``collateral_zat`` — from ``yed_estimatecollateral``), token ``vout[1]`` (P2PKH of the owner
     key, ``TOKEN_VALUE``), payload ``vout[2]`` (``feeVout = 3`` when ``fee_addr`` — from
     ``yed_getfeepayee`` — else ``0xFF``), fee ``vout[3]`` (``fee_zat(collateral)`` unless
@@ -985,12 +1079,11 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
         assert term_class is not None, 'lock_blocks %d is outside every class (pass term_class= to build it anyway)' % lock_blocks
     class_index = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
     lock_height = ref_height + lock_blocks
-    claim_height = lock_height + GRACE
-    vault = ym.vault_script(lock_height, owner, claim_height)
+    vault = ym.yed_vault_script(yed_params(), owner, lock_height)
     fee_vout = 3 if fee_addr else FEE_VOUT_NONE
     payload = ym.encode_mint(class_index, cents, lock_height, ref_height, owner, fee_vout)
     vout = [
-        (collateral_zat, ym.p2sh_script(vault)),
+        (collateral_zat, vault),
         (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner))),
         (0, bytes([ym.OP_RETURN]) + ym.push(payload)),
     ]
@@ -1039,10 +1132,12 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     the *correct* spends too.
 
     ``vault``: a ``yed_getvault`` result or ``vault_from_mint`` dict.  ``path``: ``'owner'``
-    (scriptSig ``<ownerSig> OP_1 <vaultScript>``, signed in Python with the owner key from
-    ``dumpprivkey`` — or ``owner_wif`` — over the ZIP-243 sighash with the vault's value and
-    ``branch_id``; ``nLockTime = lockHeight``) or ``'claim'`` (``OP_0 <vaultScript>``, unsigned;
-    ``nLockTime = claimHeight``).  ``vin[0].nSequence = 0xFFFFFFFE``.  ``burn_inputs``: YED token
+    (scriptSig ``<ownerSig> OP_2``, the V's owner selector, signed in Python with the owner key from
+    ``dumpprivkey`` — or ``owner_wif`` — over the ZIP-243 sighash of the bare V with the vault's value and
+    ``branch_id``; ``nLockTime = lockHeight``) or ``'claim'`` (``OP_4``, unsigned; ``nLockTime =
+    claimHeight``; U-23: ``vout[0]`` is then the claimant's intent paying ``to`` the collateral less
+    any residual intent in ``extra_outputs``, and what the fees need beyond the other inputs comes
+    from wallet inputs appended after every other input, their change last).  ``vin[0].nSequence = 0xFFFFFFFE``.  ``burn_inputs``: YED token
     outpoints of ``node``'s wallet (``'txid:n'``, ``(txid, n)`` or dicts), spent as ``vin[1..]``
     and signed by ``signrawtransaction``; ``[]`` for no burn.  Outputs: ``vout[0]`` the
     collateral plus the burned tokens' value minus ``YELLOWBACK_FEE`` and the enforcement fee to
@@ -1061,7 +1156,8 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     owner = hex_str_to_bytes(vault['ownerPubKey'])
     lock_height, claim_height = int(vault['lockHeight']), int(vault['claimHeight'])
     collateral = int(vault['collateralZat'])
-    script = ym.vault_script(lock_height, owner, claim_height)
+    params = yed_params()
+    script = ym.yed_vault_script(params, owner, lock_height)
     burns = [_outpoint(o) for o in burn_inputs]
     enforcement_fee = int(fee[1]) if fee else 0
     value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee + int(value_adjust)
@@ -1071,13 +1167,26 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         value -= sum(int(v) for v, _s in (extra_outputs or []))
     assert value > 0, 'the vault does not cover the fees'
     dest = to or node.getnewaddress()
-    vout = [(value, _spk_of_address(dest))]
+    funding = []
+    if path == 'claim':
+        # U-23: the vault's value goes to intents (the claimant's here; RED-5's residual intent, when due,
+        # is one of ``extra_outputs``); what the fees and the extra outputs take comes from a wallet input
+        claimed = collateral - sum(int(v) for v, s in (extra_outputs or []) if ym.yed_intent_fields(s) is not None)
+        spare = value - claimed
+        if spare < 0:
+            funding, total = _select_funding(node, -spare + 1000)
+            spare += total
+        vout = [(claimed, ym.yed_intent_script(params, owner, lock_height, _spk_of_address(dest)))]
+    else:
+        vout = [(value, _spk_of_address(dest))]
     if fee:
         vout.append((enforcement_fee, _spk_of_address(fee[0])))
     for v, s in (extra_outputs or []):
         vout.append((int(v), bytes(s)))
     if payload is not None:
         vout.append((0, bytes([ym.OP_RETURN]) + ym.push(bytes(payload))))
+    if path == 'claim' and spare >= 1000:
+        vout.append((spare, _spk_of_address(node.getnewaddress())))
     if expiry is None:
         if ref_height is None:
             ref_height = vault.get('refHeight')
@@ -1086,16 +1195,20 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         expiry = int(ref_height) + REF_WINDOW
     lock_time = lock_height if path == 'owner' else claim_height
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
+    carrier_vin = None
     if carrier is not None:
+        carrier_vin = len(vin)
         vin.append((carrier['txid'], int(carrier['vout']), b'', 0xFFFFFFFF))
     vin += [(t, n, b'', seq) for t, n, seq in (extra_vin or [])]
+    # the claim's YEC funding goes last, so the carrier and ``extra_vin`` keep the indices callers expect
+    vin += [(u['txid'], u['vout'], b'', 0xFFFFFFFF) for u in funding]
     raw = ym.serialize_tx_v4(vin, vout, lock_time, expiry)
-    if burns:
-        # the wallet signs the token inputs; it cannot solve OP_IF and leaves vin[0] empty
+    if burns or funding:
+        # the wallet signs the token and fee inputs; it cannot solve the V and leaves vin[0] empty
         raw = hex_str_to_bytes(node.signrawtransaction(bytes_to_hex_str(raw))['hex'])
     if carrier is not None:
         from . import yellowback_attest as ya
-        raw = hex_str_to_bytes(ya.spend_carrier(node, bytes_to_hex_str(raw), len(vin) - 1, carrier, carrier_wif, branch_id))
+        raw = hex_str_to_bytes(ya.spend_carrier(node, bytes_to_hex_str(raw), carrier_vin, carrier, carrier_wif, branch_id))
     from io import BytesIO
     from .mininode import CTransaction
     from .script import CScript, SIGHASH_ALL, SignatureHash
@@ -1112,11 +1225,11 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         assert_equal(key.get_pubkey(), owner)
         sighash = SignatureHash(CScript(script), tx, 0, SIGHASH_ALL, collateral, branch_id)[0]
         sig = _low_s(key.sign(sighash)) + bytes([SIGHASH_ALL])
-        sel = bytes([ym.OP_1]) if selector is None else selector
-        tx.vin[0].scriptSig = ym.push(sig) + sel + ym.push(script)
+        sel = bytes([ym.OP_2]) if selector is None else selector
+        tx.vin[0].scriptSig = ym.push(sig) + sel
     else:
-        sel = bytes([ym.OP_0]) if selector is None else selector
-        tx.vin[0].scriptSig = sel + ym.push(script)
+        sel = bytes([ym.OP_4]) if selector is None else selector
+        tx.vin[0].scriptSig = sel
     return bytes_to_hex_str(tx.serialize())
 
 
@@ -1237,7 +1350,7 @@ def wait_for_rejection(nodes, blockhash, timeout=30):
     for node in nodes:
         while True:
             try:
-                if node.getblock(blockhash)['confirmations'] == -1 and node.yed_getinfo()['rejectedBlocks'] > 0:
+                if node.getblock(blockhash)['confirmations'] == -1:
                     break
             except Exception:
                 pass

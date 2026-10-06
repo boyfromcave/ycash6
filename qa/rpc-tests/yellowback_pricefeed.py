@@ -336,7 +336,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, N_PENALTY + 1)         # the penalty above has lapsed
         set_quote(nodes[POOLS[2]], 52)
         self.mine_round_robin(POOLS, ACCURACY_WINDOW + PEER_LAG + 4)
-        set_quote(nodes[POOLS[0]], 0)                       # signal-only tags from now on
+        set_quote(nodes[POOLS[0]], 0)                       # no tag from now on (the signal-only tag left with ACT-1)
         self.mine_round_robin(POOLS, 12)
         r = user.getblockcount()
         rows = {row['payoutAddress']: row for row in user.yed_listminers()}
@@ -390,7 +390,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(p['pSlow'], 50 * USD)
         assert_equal(user.yed_listclaimable(), [])
         assert_equal(user.yed_gettag(str(user.getblockcount()))['found'], True)
-        assert_equal(user.yed_getactivation()['enforcementSuspended'], False)
+        assert_equal(user.yed_getactivation()['status'], 'active')
         print('  34 % forged, pools at 33 %: a quote-tag majority moves pSlow and pClaim, and the mint gate reflects it')
         self.mixed_window(21, 22, 21, 100 * USD, key20)
         p = self.price()

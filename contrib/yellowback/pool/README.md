@@ -5,8 +5,9 @@ What a mining pool does to carry the Yellowback coinbase tag, and the tools to c
 ## The tag in one paragraph
 
 A tag is 36 bytes pushed into the coinbase `scriptSig` as one direct push (`0x24` + 36 bytes)
-anywhere **after** the BIP34 height push: magic `YED!`, version `1`, flags (bit 0 = activation
-signal), `priceMicroUsd` (8 bytes LE; `0` = signal-only), `sourceMask` (2 bytes) and the 20-byte
+anywhere **after** the BIP34 height push: magic `YED!`, version `1`, flags (bit 0 was the
+activation signal; the vault upgrade retired signalling and the node writes `0`), `priceMicroUsd`
+(8 bytes LE; a node only tags a template while it holds a fresh quote), `sourceMask` (2 bytes) and the 20-byte
 Hash160 of the pool's enforcement-fee key (§3.2). The node reads it with a **byte-level scan** for
 the 5-byte pattern `24 59 45 44 21` — never a script parse — so raw extranonce bytes before or
 after it are harmless (TAG-1, V4). Only the first occurrence counts (TAG-5). No property of a
@@ -29,8 +30,8 @@ every coinbase the node builds:
 
 ## What an operator does (§5, M9)
 
-1. Run the release `ycashd` with the §4.7 options (`-yellowback -yellowbackpayoutaddress=<s1…>`,
-   the signal flag as the runbook says) and the quote agent:
+1. Run the release `ycashd` with the payout option (`-yellowbackpayoutaddress=<s1…>`; there is no
+   signal flag since the vault upgrade) and the quote agent:
    `yellowback-quote --conf yellowback-quote.toml` (copy `yellowback-quote.toml.sample`; a
    `systemd` unit and a `launchd` plist are in this directory). A pool on the `coinbasetxn` path
    needs nothing else.
