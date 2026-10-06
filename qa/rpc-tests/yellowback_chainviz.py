@@ -371,6 +371,10 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         for node in self.nodes:
             assert_equal(node.yed_getactivation()['status'], 'active')
             assert_equal(node.yed_getstats()['mintingAllowed'], True)
+        # Since P4-a node 1's round-robin coinbases are still immature at its mint in check (c)
+        # (the vault activation is mined by node 0 first); fund it from node 0 (found by p6-chainviz).
+        self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 100)
+        self.mine(0)
         try:
             record = self.start_chainviz()
             self.check_health()

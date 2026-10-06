@@ -575,7 +575,10 @@ UniValue vault_decodescript(const UniValue& params, bool fHelp)
             o.pushKV("error", *err);
         } else {
             o.pushKV("type", "act");
-            o.pushKVs(ActJSON(act, std::nullopt));
+            // The body's own "type" would duplicate the key; it is "acttype" here.
+            UniValue body = ActJSON(act, std::nullopt);
+            for (size_t i = 0; i < body.size(); ++i)
+                o.pushKV(body.getKeys()[i] == "type" ? "acttype" : body.getKeys()[i], body.getValues()[i]);
             std::vector<unsigned char> P = EncodePayload(act);
             o.pushKV("payload", HexStr(P));
         }
