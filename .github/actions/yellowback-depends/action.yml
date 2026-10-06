@@ -8,7 +8,10 @@
 # Why each key is what it is (2026-10-06):
 # - depends: its install step also VENDORS the Rust crates into depends/<host>/vendored-sources
 #   (depends/Makefile, `cargo vendor --locked --manifest-path ../Cargo.toml`), so the tree is a
-#   function of depends/** AND Cargo.lock/Cargo.toml. The key before this action hashed only
+#   function of depends' inputs AND Cargo.lock/Cargo.toml. The key hashes the depends INPUTS only
+#   (Makefile, funcs.mk, config.site.in, packages/, patches/, hosts/, builders/ — as ycash-dd does): `depends/**`
+#   also covers the built tree and the vendored crates, and the post-job save re-evaluates the key after the build,
+#   where hashFiles fails on that tree (run 37461531652, 2026-10-06). The key before this action hashed only
 #   depends/; a Cargo.lock change (the librustzcash6 repoint on upgrade/vault) then restored a
 #   vendored set without the new crates and the --offline build could not resolve them.
 # - cargo home: the vendored directory replaces crates-io only (.cargo/config.toml.offline); the
@@ -46,7 +49,7 @@ runs:
           depends/x86_64-pc-linux-gnu
           depends/built
           depends/sources
-        key: depends-${{ runner.os }}-${{ hashFiles('depends/**', 'Cargo.lock', 'Cargo.toml') }}
+        key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**', 'Cargo.lock', 'Cargo.toml') }}
     - name: Cache the cargo home (git dependencies for the offline build)
       id: cargo-home
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
