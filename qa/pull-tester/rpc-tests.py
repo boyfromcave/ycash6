@@ -45,12 +45,16 @@ FLAKY_SCRIPTS = [
 BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
-    'yellowback_activation.py',
+    # YED on the vault primitive (upgrade plan §15.10, U-21..U-24): the attestor set, mint into the
+    # V template, owner redeem, claim into an intent, release, attestor cancel, an invalid mint
+    # refused by the mempool and its block by every node (DoS 100), a reorg across a claim.
+    # yellowback_activation, yellowback_enforcement and yellowback_attest_enforcement were removed
+    # with the enforcement machinery they tested (§6).
+    'yellowback_upgrade.py',
     'yellowback_mining.py',
     'yellowback_quote.py',
     'yellowback_rpc_contract.py',
     'yellowback_attest.py',
-    'yellowback_attest_enforcement.py',
     'yellowback_attest_wallet.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
@@ -62,7 +66,6 @@ BASE_SCRIPTS= [
     'yellowback_mempool_limits.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
-    'yellowback_enforcement.py',
     'yellowback_stock_node.py',
     'yellowback_framework_smoke.py',
     # Real pool software (yolo, Rust); SKIPs without YOLO_BIN (plan Phase 7).

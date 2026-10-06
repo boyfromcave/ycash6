@@ -38,9 +38,9 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 5).  The C++ unit test
+# The pinned state hash of the golden sequence (regtest params {1, 0, 0, TEST_SET, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 6).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'd3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0'
+GOLDEN_STATE_HASH = '4abefe81e3822134b15fada7418d9abe9ab3d3dc3332da96b383ef8a6f97e907'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -71,6 +71,8 @@ class Chain(object):
         self.height = 0
         self.blocks = []       # golden document rows
         self.funding = 0
+        self.refused = {}      # U-21: txid -> the verdict that made it invalid (its block was rejected and mined again without it)
+        self.refused_logs = {}  # txid -> the model's TxLogRecord of the refused evaluation
 
     def block_hash(self, h):
         return ym.sha256(b'golden-block-%d' % h)[::-1].hex()
@@ -81,9 +83,11 @@ class Chain(object):
         return raw
 
     def mine(self, tag=None, txs=(), extranonce=b'', raw_scriptsig=None):
-        """Mine the next block.  ``tag`` = (flags, price, mask, key) or None; ``txs`` = raw hex list."""
-        self.height += 1
-        h = self.height
+        """Mine the next block.  ``tag`` = (flags, price, mask, key) or None; ``txs`` = raw hex list.
+        U-21: a block with an invalid transaction is rejected (recorded in the document as ``invalid``)
+        and the height is mined again without that transaction, as a miner's template filter would.
+        Returns the first verdict (the rejected block's when there was one)."""
+        h = self.height + 1
         if raw_scriptsig is not None:
             ss = raw_scriptsig
         else:
@@ -92,11 +96,29 @@ class Chain(object):
                 ss += ym.tag_push(*tag)
         cb = self.coinbase(h, ss)
         subsidy = ym.regtest_subsidy(h)
-        raws = [cb.hex()] + list(txs)
-        parsed = [ym.tx_from_hex(x) for x in raws]
-        verdict = self.model.feed_block(h, self.block_hash(h), ss.hex(), subsidy, parsed[1:])
-        self.blocks.append({'height': h, 'hash': self.block_hash(h), 'subsidyZat': subsidy, 'txs': raws})
-        return verdict
+        txs = list(txs)
+        first = None
+        while True:
+            raws = [cb.hex()] + txs
+            parsed = [ym.tx_from_hex(x) for x in raws]
+            verdict = self.model.feed_block(h, self.block_hash(h), ss.hex(), subsidy, parsed)
+            row = {'height': h, 'hash': self.block_hash(h), 'subsidyZat': subsidy, 'txs': raws}
+            if verdict is not None and verdict.block_invalid:
+                row['invalid'] = True
+                self.blocks.append(row)
+                bad = verdict.reason.split(':', 1)[1]
+                self.refused[bad] = verdict.verdict
+                self.refused_logs[bad] = self.model.last_failed
+                first = first or verdict
+                txs = [x for x in txs if txid_of(x) != bad]
+                continue
+            self.blocks.append(row)
+            self.height = h
+            return first or verdict
+
+    def void_reason(self, txid):
+        """What v2 called the VOID reason: the verdict that made the mint invalid ('' for an ACTIVE vault)."""
+        return self.refused.get(txid, '')
 
     def mine_n(self, n, price_fn=None, signal=True, key_fn=None):
         for _ in range(n):
@@ -124,7 +146,6 @@ class Chain(object):
         """``carrier`` = a bundle (bytes) carried by an extra input; ``attest_fee`` = (bond key hash, zat)
         paid at vout 4 (after the pool fee) and named by attestFeeVout."""
         lock = ref_height + lock_blocks if lock_height is None else lock_height
-        script = ym.vault_script(lock, owner, lock + self.params.grace)
         vin = [self.fund_input()] + [(t, n, b'', 0xFFFFFFFF) for t, n in yed_inputs]
         if carrier is not None:
             vin.append(self.carrier_input(carrier))
@@ -132,7 +153,9 @@ class Chain(object):
             fee_vout = 3 if fee_key is not None else ym.FEE_VOUT_NONE
         attest_fee_vout = 4 if attest_fee is not None else ym.FEE_VOUT_NONE
         payload = ym.encode_mint(term_class, cents, lock, ref_height, owner, fee_vout, attest_fee_vout)
-        vout0 = ym.p2sh_script(script) if vout0_script is None else vout0_script
+        if vout0_script is None:                                   # U-23: the V template (a P2PKH placeholder if it cannot be built)
+            vout0_script = ym.yed_vault_script(self.params, owner, lock) or ym.p2pkh_script(OWNER_KEYHASH)
+        vout0 = vout0_script
         vouts = [(collateral, vout0), (self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH))]
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
         if opret_at == 2:
@@ -162,23 +185,33 @@ class Chain(object):
     def spend_tx(self, vault_op, vault_script, path, yed_inputs, ref_height, fee_key, fee_value,
                  assignments=(), payload=None, collateral_out=10 ** 9, selector=None, script_sig=None,
                  extra_vaults=(), fee_vout=1, first_input=None, carrier=None, attest_fee=None, residual=None):
-        """A vault spend: vin[0] = vault (owner: <sig> OP_1 <script>; claim: OP_0 <script>),
-        vin[1..] = YED inputs, then the carrier input when ``carrier`` (a bundle) is given; vout[0] =
-        collateral, vout[1] = fee, vout[2] = OP_RETURN, vout[3..] = assigned token outputs, then the
-        attestor fee (``attest_fee`` = (bond key hash, zat)) and the residual (``residual`` = (owner key
-        hash, zat)) when given."""
+        """A vault spend (U-23): vin[0] = vault (owner: <sig> OP_2; claim: OP_4; ``selector`` = the
+        selector byte(s) to use instead), vin[1..] = YED inputs, then (claim) a fee input, then the carrier
+        input when ``carrier`` (a bundle) is given; vout[0] = collateral (owner) or the claimant's intent
+        paying OWNER_KEYHASH of the vault's value less the residual (claim), vout[1] = fee, vout[2] =
+        OP_RETURN, vout[3..] = assigned token outputs, then the attestor fee (``attest_fee`` = (bond key
+        hash, zat)) and the residual (``residual`` = (owner key hash, zat); the owner's intent on a claim).
+        ``vault_script`` is unused since the V is rebuilt from the model's record (kept for the call sites)."""
+        v = self.model.vaults.get(vault_op)
+        claim = path == 'claim'
         if script_sig is None:
             if selector is None:
-                selector = bytes([ym.OP_1]) if path == 'owner' else bytes([ym.OP_0])
-            script_sig = (ym.push(SIG71) if path == 'owner' else b'') + selector + ym.push(vault_script)
+                selector = bytes([ym.OP_2]) if path == 'owner' else bytes([ym.OP_4])
+            script_sig = (ym.push(SIG71) if path == 'owner' else b'') + selector
         vin = [(vault_op[0], vault_op[1], script_sig, 0xFFFFFFFE)]
         if first_input is not None:
             vin.insert(0, first_input)
         vin += [(t, n, b'', 0xFFFFFFFF) for t, n in yed_inputs]
-        vin += [(t, n, b'\x00' + ym.push(vault_script), 0xFFFFFFFE) for t, n in extra_vaults]
+        vin += [(t, n, ym.push(SIG71) + bytes([ym.OP_2]), 0xFFFFFFFE) for t, n in extra_vaults]
+        if claim:
+            vin.append(self.fund_input())
         if carrier is not None:
             vin.append(self.carrier_input(carrier))
-        vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
+        if claim and v is not None:
+            res = residual[1] if residual is not None else 0
+            vouts = [(v.collateral_zat - res, ym.yed_intent_script(self.params, v.owner_pubkey, v.lock_height, ym.p2pkh_script(OWNER_KEYHASH)))]
+        else:
+            vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
         vouts.append((fee_value, ym.p2pkh_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
         attest_fee_vout = 3 + len(assignments) if attest_fee is not None else ym.FEE_VOUT_NONE
         if payload is None:
@@ -190,8 +223,24 @@ class Chain(object):
         if attest_fee is not None:
             vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         if residual is not None:
-            vouts.append((residual[1], ym.p2pkh_script(residual[0])))
+            spk = ym.p2pkh_script(residual[0])
+            if claim and v is not None:
+                spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.lock_height, spk)
+            vouts.append((residual[1], spk))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
+
+    def release_tx(self, intent_op, value, recipient_spk=None):
+        """U-23: the RELEASE of a claim intent (selector 1, nSequence = CLAIM_DELAY) paying its recipient; a fee input."""
+        vin = [(intent_op[0], intent_op[1], bytes([ym.OP_1]), self.params.claim_delay), self.fund_input()]
+        return ym.serialize_tx_v4(vin, [(value, recipient_spk or ym.p2pkh_script(OWNER_KEYHASH))]).hex()
+
+    def cancel_tx(self, intent_op, vault_op_of_record, value):
+        """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
+        does not verify) re-creating the byte-identical vault at vout[0]; a fee input."""
+        v = self.model.vaults[vault_op_of_record]
+        spk = ym.yed_vault_script(self.params, v.owner_pubkey, v.lock_height)
+        vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), self.fund_input()]
+        return ym.serialize_tx_v4(vin, [(value, spk)]).hex()
 
     # -- v3 builders (section 3.5) -------------------------------------------
 
@@ -241,11 +290,12 @@ def txid_of(raw_hex):
 
 
 def activated_chain(params=None, **kw):
-    """A chain whose activation is ACTIVE at 128 and whose windows are full (quotes at 50,000)."""
+    """A chain whose windows are full (quotes at 50,000) at 135 (the module is active from START, U-22;
+    135 blocks keeps v2's heights, when activation took 128)."""
     params = params or ym.Params.regtest(1)
     c = Chain(params, **kw)
     c.mine_n(135, price_fn=lambda h: 50_000)
-    assert c.model.activation.status == ym.ACTIVE
+    assert c.model.snapshots[135].halt_mask == 0
     return c
 
 
@@ -563,114 +613,18 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(s.p_claim, max(s.p_mid, s.p_slow))
         self.assertEqual(s.p_claim, 500)
 
-    # Rule: ACT-2
-    def test_lock_in_at_exactly_the_threshold(self):
-        c = self.chain()
-        # 47 signals in the first 64 blocks: no lock-in at 64
-        c.mine_n(47, signal=True)
-        c.mine_n(17, signal=False)
-        self.assertEqual(c.model.snapshots[64].signal_count, 47)
-        self.assertEqual(c.model.activation.status, ym.SIGNALING)
-        # block 65: window (1, 65] holds 46 + 1 = 47 -> still no; block 66 with signals 2..47 + 65, 66 = 48
-        c.mine_n(1, signal=True)
-        self.assertEqual(c.model.snapshots[65].signal_count, 47)
-        self.assertEqual(c.model.activation.status, ym.SIGNALING)
-        c.mine_n(1, signal=True)
-        self.assertEqual(c.model.snapshots[66].signal_count, 47)   # signal at 1 and 2 dropped out
-        c2 = self.chain()
-        c2.mine_n(48, signal=True)
-        c2.mine_n(15, signal=False)
-        self.assertEqual(c2.model.activation.status, ym.SIGNALING)  # H = 63 < START + 64 - 1
-        c2.mine_n(1, signal=False)
-        self.assertEqual(c2.model.activation.status, ym.LOCKED_IN)
-        self.assertEqual((c2.model.activation.lock_in_height, c2.model.activation.activate_height), (64, 128))
-        self.assertEqual(c2.model.snapshots[64].activation.status, ym.LOCKED_IN)
-
-    # Rule: ACT-2
-    def test_lock_in_needs_start_plus_window(self):
-        c = Chain(ym.Params.regtest(10))
-        c.mine_n(9)                                    # below START: ignored, no snapshots
-        self.assertEqual(c.model.snapshots, {})
-        c.mine_n(63, signal=True)                      # heights 10..72
-        self.assertEqual(c.model.activation.status, ym.SIGNALING)
-        c.mine_n(1, signal=True)                       # 73 = 10 + 64 - 1
-        self.assertEqual(c.model.activation.status, ym.LOCKED_IN)
-        self.assertEqual(c.model.activation.lock_in_height, 73)
-
-    # Rule: ACT-3
-    def test_activation_at_activate_height_even_if_signalling_collapsed(self):
-        c = self.chain()
-        c.mine_n(64, signal=True)
-        self.assertEqual(c.model.activation.status, ym.LOCKED_IN)
-        c.mine_n(63, signal=False)
-        self.assertEqual(c.model.activation.status, ym.LOCKED_IN)
-        c.mine_n(1, signal=False)
-        self.assertEqual(c.model.activation.status, ym.ACTIVE)
-        s = c.model.snapshots[128]
-        self.assertTrue(s.halt_mask & ym.HALT_PARTICIPATION)
-        self.assertTrue(s.halt_mask & ym.HALT_ENFORCEMENT)
-        self.assertFalse(s.halt_mask & ym.HALT_NOT_ACTIVE)
-        self.assertFalse(c.model.enforcement_on(129))
-
-    # Rule: ACT-4
-    def test_participation_hysteresis(self):
-        c = self.chain()
-        c.mine_n(128, signal=True)
-        self.assertEqual(c.model.activation.status, ym.ACTIVE)
-        self.assertEqual(c.model.snapshots[128].halt_mask & ym.HALT_PARTICIPATION, 0)
-        # drop to exactly the floor (39 of 64): the bit stays clear
-        c.mine_n(25, signal=False)                     # window (65, 129]..(89, 153]: 39 signals at 153
-        self.assertEqual(c.model.snapshots[153].signal_count, 39)
-        self.assertEqual(c.model.snapshots[153].halt_mask & ym.HALT_PARTICIPATION, 0)
-        c.mine_n(1, signal=False)                      # 38 < 39: set
-        self.assertEqual(c.model.snapshots[154].signal_count, 38)
-        self.assertTrue(c.model.snapshots[154].halt_mask & ym.HALT_PARTICIPATION)
-        # recover: each new signal replaces one leaving the window, so the count stays 38 until the
-        # old signals are all out; at 201 the window (137, 201] holds 47: still set (hysteresis, K15); 48 clears
-        c.mine_n(47, signal=True)
-        self.assertEqual(c.model.snapshots[201].signal_count, 47)
-        self.assertTrue(c.model.snapshots[201].halt_mask & ym.HALT_PARTICIPATION)
-        self.assertTrue(c.model.snapshots[180].halt_mask & ym.HALT_PARTICIPATION)
-        c.mine_n(1, signal=True)
-        self.assertEqual(c.model.snapshots[202].signal_count, 48)
-        self.assertEqual(c.model.snapshots[202].halt_mask & ym.HALT_PARTICIPATION, 0)
-
-    # Rule: ACT-6
-    def test_enforcement_hysteresis(self):
-        c = self.chain()
-        c.mine_n(128, signal=True)
-        c.mine_n(32, signal=False)                     # count 32 = ENFORCEMENT_FLOOR: clear
-        self.assertEqual(c.model.snapshots[160].signal_count, 32)
-        self.assertEqual(c.model.snapshots[160].halt_mask & ym.HALT_ENFORCEMENT, 0)
-        self.assertTrue(c.model.snapshots[160].halt_mask & ym.HALT_PARTICIPATION)
-        self.assertTrue(c.model.enforcement_on(161))
-        c.mine_n(1, signal=False)                      # 31 < 32: set
-        self.assertTrue(c.model.snapshots[161].halt_mask & ym.HALT_ENFORCEMENT)
-        self.assertFalse(c.model.enforcement_on(162))
-        c.mine_n(38, signal=True)                      # (135, 199] holds 38 < ENFORCEMENT_RESUME 39: persists
-        self.assertEqual(c.model.snapshots[199].signal_count, 38)
-        self.assertTrue(c.model.snapshots[199].halt_mask & ym.HALT_ENFORCEMENT)
-        self.assertFalse(c.model.enforcement_on(200))
-        c.mine_n(1, signal=True)                       # 39: clears; PARTICIPATION (needs 48) stays
-        self.assertEqual(c.model.snapshots[200].signal_count, 39)
-        self.assertEqual(c.model.snapshots[200].halt_mask & ym.HALT_ENFORCEMENT, 0)
-        self.assertTrue(c.model.snapshots[200].halt_mask & ym.HALT_PARTICIPATION)
-        self.assertTrue(c.model.enforcement_on(201))
-
-    # Rule: ACT-5
-    def test_enforcement_sunset(self):
-        c = Chain(ym.Params.regtest(1, enforce_until=130))
-        c.mine_n(131, signal=True)
-        self.assertTrue(c.model.enforcement_on(130))
-        self.assertFalse(c.model.enforcement_on(131))
-        self.assertFalse(c.model.enforcement_on(1))    # Snapshots[0] is virtual
-
     # Rule: HALT-1
     def test_halts_no_price_and_not_active(self):
+        # the module is active from START (U-22): NOT_ACTIVE marks only the virtual snapshot below it
         c = self.chain()
         c.mine_n(1, signal=True)
-        self.assertEqual(c.model.snapshots[1].halt_mask, ym.HALT_NOT_ACTIVE | ym.HALT_NO_PRICE)
-        self.assertEqual(c.model.snapshots[1].halt_names(), ['NOT_ACTIVE', 'NO_PRICE'])
+        self.assertEqual(c.model.snapshots[1].halt_mask, ym.HALT_NO_PRICE)
+        self.assertEqual(c.model.snapshots[1].halt_names(), ['NO_PRICE'])
+        self.assertEqual(c.model.snapshot(0).halt_names(), ['NOT_ACTIVE', 'NO_PRICE'])
+        # non-signal tags halt nothing any more (v2's PARTICIPATION / ENFORCEMENT halts)
+        c2 = activated_chain()
+        c2.mine_n(40, signal=False, price_fn=lambda h: 50_000)
+        self.assertEqual(c2.model.snapshots[c2.height].halt_mask, 0)
 
     # Rule: HALT-3
     def test_divergence(self):
@@ -733,7 +687,6 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(v.virtual)
         self.assertEqual(v.halt_mask, ym.HALT_NOT_ACTIVE | ym.HALT_NO_PRICE)
         self.assertIsNone(v.p_mint)
-        self.assertEqual(v.activation.status, ym.SIGNALING)
         self.assertIsNone(m.snapshot(5))
         self.assertIsNone(m.feed_block(3, '00' * 32, ym.height_prefix(3).hex(), 1, []))
         self.assertEqual(m.tags, {})
@@ -762,11 +715,12 @@ class MintTests(unittest.TestCase):
         return txid_of(raw)
 
     def assertVoid(self, txid, reason):
-        v = self.c.model.vaults[(txid, 0)]
-        self.assertEqual(v.status, ym.V_VOID)
-        self.assertEqual(v.void_reason, reason)
-        self.assertEqual(self.c.model.txlog[txid].verdict, reason)
-        self.assertEqual(self.c.model.txlog[txid].yed_out, 0)
+        """U-21, section 15.10: a failing mint is an invalid transaction (v2 registered a VOID vault): its block
+        was rejected, nothing of it is in the state."""
+        self.assertEqual(self.c.refused.get(txid), reason)
+        self.assertNotIn((txid, 0), self.c.model.vaults)
+        self.assertNotIn(txid, self.c.model.txlog)
+        self.assertEqual(self.c.refused_logs[txid].yed_out, 0)
         self.assertNotIn((txid, 1), self.c.model.tokens)
         self.assertEqual(self.c.model.totals.supply_cents, 0)
 
@@ -807,11 +761,11 @@ class MintTests(unittest.TestCase):
         self.assertNotIn((t1, 1), c.model.tokens)
         self.assertIn((t2, 1), c.model.tokens)
         self.assertEqual(rec.spent_tokens, [(t1, 1)])
-        # a VOID mint with YED inputs burns them too
+        # an invalid mint with YED inputs burns nothing: it is never applied (U-21)
         t3 = self.mint(cents=5_000, yed_inputs=[(t2, 1)])
-        rec = c.model.txlog[t3]
-        self.assertEqual((rec.yed_in, rec.yed_out, rec.burned, rec.verdict), (10_000, 0, 10_000, 'bad-mint-amount'))
-        self.assertEqual(c.model.totals.supply_cents, 0)
+        self.assertEqual(c.refused[t3], 'bad-mint-amount')
+        self.assertIn((t2, 1), c.model.tokens)
+        self.assertEqual(c.model.totals.supply_cents, 10_000)
 
     # Rule: MINT-2
     def test_mint2_verdicts(self):
@@ -834,34 +788,41 @@ class MintTests(unittest.TestCase):
         # H = 275, ref = 139 < START (and outside the window) -> bad-mint-ref-height; H - 40 = 235 >= START
         raw = c.mint_tx(10_000, 48, 139, 10 ** 12, fee_key=KEY1)
         c.mine((1, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'bad-mint-ref-height')
+        self.assertEqual(c.void_reason(txid_of(raw)), 'bad-mint-ref-height')
 
     # Rule: MINT-3
     def test_mint3_verdicts(self):
         c = self.c
         ref = c.height - 1
-        # fewer than three outputs: a P2SH vout[0] and the OP_RETURN only
+        # fewer than three outputs: the V at vout[0] and the OP_RETURN only
         lock = ref + 48
-        script = ym.vault_script(lock, G_PUBKEY, lock + 24)
         pl = ym.encode_mint(0, 10_000, lock, ref, G_PUBKEY, 0xFF)
-        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.p2sh_script(script)), (0, bytes([ym.OP_RETURN]) + ym.push(pl))]).hex()
+        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_PUBKEY, lock)),
+                                                    (0, bytes([ym.OP_RETURN]) + ym.push(pl))]).hex()
         c.mine((1, 50_000, 0, KEY2), [raw])
         self.assertVoid(txid_of(raw), 'bad-mint-outputs')
         self.assertVoid(self.mint(owner=BAD_PUBKEY), 'bad-mint-owner-key')
         self.assertVoid(self.mint(vout0_script=ym.p2sh_script(b'\x51')), 'bad-mint-vault-script')
-        # a non-P2SH vout[0] creates no vault at all
-        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1, vout0_script=ym.p2pkh_script(KEY1))
-        c.mine((1, 50_000, 0, KEY2), [raw])
-        self.assertNotIn((txid_of(raw), 0), c.model.vaults)
-        self.assertNotIn(txid_of(raw), c.model.txlog)
+        # U-23: v2's P2SH vault is refused for new mints, and so is a P2PKH vout[0]
+        self.assertVoid(self.mint(vout0_script=ym.p2sh_script(ym.vault_script(c.height - 1 + 48, G_PUBKEY, c.height - 1 + 72))),
+                        'bad-mint-vault-script')
+        self.assertVoid(self.mint(vout0_script=ym.p2pkh_script(KEY1)), 'bad-mint-vault-script')
+        # a V under another set is not the YED vault
+        other = ym.Params.regtest(1, attestor_set='77' * 32)
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_PUBKEY, c.height - 1 + 48)), 'bad-mint-vault-script')
 
     # Rule: MINT-4
     def test_mint4_not_active(self):
+        # active from START (U-22): a mint at the first fully priced height goes through; before the windows fill, no price
         c = Chain(ym.Params.regtest(1))
-        c.mine_n(100, price_fn=lambda h: 50_000)       # LOCKED_IN, not yet ACTIVE
-        raw = c.mint_tx(10_000, 48, 99, 10 ** 12, fee_key=KEY1)
+        c.mine_n(20, price_fn=lambda h: 50_000)
+        raw = c.mint_tx(10_000, 48, 19, 10 ** 12, fee_key=KEY1)
         c.mine((1, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-not-active')
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-halted-no-price')
+        c.mine_n(80, price_fn=lambda h: 50_000)
+        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
+        c.mine((1, 50_000, 0, KEY1), [raw])
+        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].status, ym.V_ACTIVE)
 
     # Rule: MINT-4
     def test_mint4_halts(self):
@@ -873,13 +834,7 @@ class MintTests(unittest.TestCase):
         self.assertTrue(c2.model.snapshots[c2.height].halt_mask & ym.HALT_NO_PRICE)
         raw = c2.mint_tx(10_000, 48, c2.height - 1, 10 ** 12, fee_key=KEY1)
         c2.mine((1, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c2.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-halted-no-price')
-        c3 = activated_chain()
-        c3.mine_n(30, signal=False, price_fn=lambda h: 50_000)   # 34 signals < 39
-        self.assertTrue(c3.model.snapshots[c3.height].halt_mask & ym.HALT_PARTICIPATION)
-        raw = c3.mint_tx(10_000, 48, c3.height - 1, 10 ** 12, fee_key=KEY1)
-        c3.mine((0, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c3.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-halted-participation')
+        self.assertEqual(c2.void_reason(txid_of(raw)), 'mint-halted-no-price')
 
     # Rule: HALT-2
     def test_mint4_global_ratio(self):
@@ -892,12 +847,12 @@ class MintTests(unittest.TestCase):
         # W16: the halt stops the classes below the recapitalisation floor (class C, 300 %) ...
         raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 13, fee_key=KEY1, term_class=2)
         c.mine((1, 9_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-halted-global-ratio')
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-halted-global-ratio')
         # ... and lets class A (500 %) through, which is what repairs the ratio
         self.assertTrue(c.model.snapshots[c.height].halt_mask & ym.HALT_GLOBAL_RATIO)
         raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 13, fee_key=KEY1)
         c.mine((1, 9_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, '')
+        self.assertEqual(c.void_reason(txid_of(raw)), '')
 
     # Rule: MINT-5
     def test_mint5_collateral(self):
@@ -921,7 +876,7 @@ class MintTests(unittest.TestCase):
         self.assertEqual(s.sigma_mult_bps, 30_000)
         raw = c.mint_tx(1_000_000, 48, c.height - 1, ym.MAX_MONEY, fee_key=KEY1)
         c.mine((1, 100, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-unsatisfiable')
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-unsatisfiable')
 
     # Rule: MINT-6
     def test_mint6_supply_cap(self):
@@ -936,10 +891,10 @@ class MintTests(unittest.TestCase):
         # ends above the cap.
         raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 12, fee_key=KEY1, term_class=2)
         c.mine((1, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-supply-cap')
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-supply-cap')
         raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
         c.mine((1, 50_000, 0, KEY1), [raw])
-        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, '')
+        self.assertEqual(c.void_reason(txid_of(raw)), '')
         self.assertGreater(c.model.totals.supply_cents, cap)
 
     # Rule: MINT-7
@@ -1073,22 +1028,23 @@ class RedeemTests(unittest.TestCase):
         return txid_of(raw), verdict
 
     def assertFails(self, result, reason):
+        """U-21: the failing spend is an invalid transaction; its block is rejected and nothing changes (v2
+        closed the vault, unbacked when the burn fell short)."""
         txid, verdict = result
-        rec = self.c.model.txlog[txid]
+        rec = self.c.refused_logs[txid]
         self.assertEqual(rec.verdict, reason)
         self.assertEqual(rec.type, 'REDEEM')
         self.assertTrue(verdict.block_invalid)
-        self.assertTrue(verdict.enforcement_on)
         self.assertTrue(verdict.rejected)
         self.assertEqual(verdict.reason, '%s:%s' % (reason, txid))
+        self.assertNotIn(txid, self.c.model.txlog)
         v = self.c.model.vaults[self.vault]
-        self.assertEqual(v.status, ym.V_CLOSED)
+        self.assertEqual(v.status, ym.V_ACTIVE)
         self.assertEqual(rec.yed_out, 0)
-        self.assertEqual(rec.burned, rec.yed_in)
-        self.assertEqual(v.burned_cents, rec.yed_in)
-        self.assertEqual(v.unbacked, rec.yed_in < 10_000)
-        self.assertEqual(self.c.model.totals.unbacked_cents, max(0, 10_000 - rec.yed_in))
-        self.assertEqual(self.c.model.totals.collateral_zat, self.c.model.vaults[self.vault2].collateral_zat)
+        self.assertEqual(v.burned_cents, 0)
+        self.assertFalse(v.unbacked)
+        self.assertEqual(self.c.model.totals.unbacked_cents, 0)
+        self.assertEqual(self.c.model.totals.collateral_zat, self.coll + self.c.model.vaults[self.vault2].collateral_zat)
 
     # Rule: RED-1
     def test_owner_redeem_ok(self):
@@ -1115,7 +1071,11 @@ class RedeemTests(unittest.TestCase):
         self.setUp()
         self.assertFails(self.spend(payload=ym.encode_transfer([(3, 100)])), 'vault-spend-malformed')  # M3: TRANSFER payload
         self.setUp()
-        self.assertFails(self.spend(script_sig=ym.push(self.script)), 'vault-spend-malformed')        # one push
+        self.assertFails(self.spend(script_sig=ym.push(self.script)), 'vault-spend-malformed')        # no selector
+        self.setUp()
+        self.assertFails(self.spend(selector=bytes([ym.OP_1])), 'vault-spend-malformed')              # a set unlock is never a YED path
+        self.setUp()
+        self.assertFails(self.spend(selector=ym.push(b'\x02')), 'vault-spend-malformed')               # a non-minimal 2
         self.setUp()
         self.assertFails(self.spend(ref_height=self.c.height + 1), 'vault-spend-malformed')          # ref = H
         self.setUp()
@@ -1131,13 +1091,9 @@ class RedeemTests(unittest.TestCase):
         raw = c.spend_tx(self.vault, self.script, 'owner', [self.token, self.token2], c.height - 1, KEY1, self.fee,
                          [], extra_vaults=[self.vault2])
         c.mine((1, 50_000, 0, KEY2), [raw])
-        rec = c.model.txlog[txid_of(raw)]
-        self.assertEqual(rec.verdict, 'vault-spend-malformed')
-        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLOSED)
-        self.assertEqual(c.model.vaults[self.vault2].status, ym.V_CLOSED)
-        self.assertEqual(c.model.totals.unbacked_cents, 0)        # 20,000 burned covers both
-        self.assertEqual(c.model.totals.collateral_zat, 0)
-        self.assertEqual(sorted(rec.closed_vaults), sorted([self.vault, self.vault2]))
+        self.assertEqual(c.refused[txid_of(raw)], 'vault-spend-malformed')
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_ACTIVE)
+        self.assertEqual(c.model.vaults[self.vault2].status, ym.V_ACTIVE)
 
     # Rule: M3
     def test_m3_mint_payload_on_vault_spend(self):
@@ -1147,7 +1103,7 @@ class RedeemTests(unittest.TestCase):
         txid, verdict = self.spend(payload=pl)
         self.assertFails((txid, verdict), 'vault-spend-malformed')
         self.assertNotIn((txid, 0), c.model.vaults)             # no MINT rule ran
-        self.assertEqual(c.model.txlog[txid].type, 'REDEEM')
+        self.assertEqual(c.refused_logs[txid].type, 'REDEEM')
 
     # Rule: RED-2
     def test_red2_burn(self):
@@ -1184,7 +1140,7 @@ class RedeemTests(unittest.TestCase):
         self.setUp()
         c = self.c
         raw2 = ym.serialize_tx_v4(
-            [(self.vault[0], 0, ym.push(SIG71) + bytes([ym.OP_1]) + ym.push(self.script), 0xFFFFFFFE),
+            [(self.vault[0], 0, ym.push(SIG71) + bytes([ym.OP_2]), 0xFFFFFFFE),
              (self.token[0], 1, b'', 0xFFFFFFFF), (self.token2[0], 1, b'', 0xFFFFFFFF)],
             [(self.coll, ym.p2pkh_script(KEY1)), (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_redeem(c.height - 1, 0, [])))]).hex()
         verdict = c.mine((1, 50_000, 0, KEY2), [raw2])
@@ -1217,8 +1173,16 @@ class RedeemTests(unittest.TestCase):
         txid, verdict = self.spend(path='claim', assignments=[(3, 10_000)])
         self.assertFalse(verdict.block_invalid)
         v = c.model.vaults[self.vault]
-        self.assertEqual((v.status, v.burned_cents), (ym.V_CLAIMED, 10_000))
+        self.assertEqual((v.status, v.burned_cents), (ym.V_CLAIMING, 10_000))       # U-23: until the release
         self.assertEqual(c.model.txlog[txid].path, 'claim')
+        self.assertEqual(c.model.intents, {(txid, 0): c.model.intents[(txid, 0)]})
+        self.assertEqual(c.model.intents[(txid, 0)].role, ym.I_CLAIMANT)
+        self.assertEqual(c.model.totals.claimed_vaults, 0)
+        rel = c.release_tx((txid, 0), self.coll)
+        self.assertFalse(c.mine((1, 9_000, 0, KEY2), [rel]).block_invalid)
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMED)
+        self.assertEqual(c.model.txlog[txid_of(rel)].type, 'CLAIM_RELEASE')
+        self.assertEqual(c.model.intents, {})
         self.assertEqual(c.model.totals.claimed_vaults, 1)
         # claim at a reference height whose pClaim is undefined: not underwater (M1)
         self.setUp()
@@ -1230,42 +1194,6 @@ class RedeemTests(unittest.TestCase):
         self.assertIsNone(c.model.snapshot(c.height - 1).p_claim)
         self.assertFails(self.spend(path='claim', fee_vout=0xFF, fee_key=None), 'vault-claim-not-underwater')
 
-    # Rule: ACT-5
-    def test_block_valid_when_not_enforcing(self):
-        c = Chain(ym.Params.regtest(1, enforce_until=150))
-        c.mine_n(135, price_fn=lambda h: 50_000)
-        ref = c.height - 1
-        raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)
-        c.mine((1, 50_000, 0, KEY2), [raw])
-        vault = (txid_of(raw), 0)
-        script = ym.vault_script(ref + 48, G_PUBKEY, ref + 72)
-        c.mine_n(60, price_fn=lambda h: 50_000)        # past the sunset at 150
-        raw = c.spend_tx(vault, script, 'owner', [], c.height - 1, KEY1, 10 ** 9, payload=b'')
-        verdict = c.mine((1, 50_000, 0, KEY2), [raw])
-        self.assertTrue(verdict.block_invalid)
-        self.assertFalse(verdict.enforcement_on)
-        self.assertFalse(verdict.rejected)
-        self.assertTrue(c.model.vaults[vault].unbacked)
-        self.assertEqual(c.model.totals.unbacked_cents, 10_000)
-
-    # Rule: IN-2
-    def test_void_vault_spend_is_ordinary(self):
-        c = self.c
-        raw = c.mint_tx(5_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)     # VOID
-        c.mine((1, 50_000, 0, KEY2), [raw])
-        vault = (txid_of(raw), 0)
-        self.assertEqual(c.model.totals.void_vaults, 1)
-        script = ym.vault_script(c.height - 2 + 48, G_PUBKEY, c.height - 2 + 72)
-        raw = c.spend_tx(vault, script, 'owner', [], c.height - 1, None, 0, payload=b'')
-        verdict = c.mine((1, 50_000, 0, KEY2), [raw])
-        self.assertFalse(verdict.block_invalid)
-        v = c.model.vaults[vault]
-        self.assertEqual((v.status, v.unbacked, v.burned_cents, v.closing_txid), (ym.V_CLOSED, False, 0, txid_of(raw)))
-        self.assertEqual((c.model.totals.void_vaults, c.model.totals.closed_vaults), (0, 1))
-        rec = c.model.txlog[txid_of(raw)]
-        self.assertEqual((rec.type, rec.verdict, rec.closed_vaults), ('NONE', 'ok', [vault]))
-
-
 # ===========================================================================
 # section 3.6  State hash and the golden vector
 
@@ -1273,11 +1201,14 @@ GOLDEN_BLOCKS = 440
 
 
 def build_golden():
-    """The fixed synthetic sequence: regtest params {1, 0, 0, 0, 3, scriptsig}; 440 blocks; the v2
-    lifecycle to 224, then the v3 one: four registrations, arming, a mint with a bundle, a VOID mint
-    without one, a price fall, a notice and an emergency claim with a residual, dormancy, an
-    equivocation, a revival and two bond spends."""
-    params = ym.Params.regtest(1, 0, 0, 0)
+    """The fixed synthetic sequence: regtest params {1, 0, 0, TEST_SET, 3, scriptsig}; 440 blocks; the v2
+    lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
+    mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
+    intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
+    release, dormancy, an equivocation, a revival and two bond spends.  Three blocks are rejected and
+    mined again without the offending transaction (U-21): 137 (a mint of $50), 217 (an owner spend
+    with no payload) and 251 (an armed mint without a bundle)."""
+    params = ym.Params.regtest(1, 0, 0, ym.TEST_SET)
     c = Chain(params)
     price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (2_000 + (h % 3) * 5)  # noqa: E731
     key = lambda h: MINERS[h % 3]  # noqa: E731
@@ -1291,7 +1222,7 @@ def build_golden():
             txs_at['mint1'] = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)
             txs.append(txs_at['mint1'])
         elif h == 137:
-            txs_at['mint2'] = c.mint_tx(5_000, 48, 135, 10 ** 12, fee_key=KEY2)      # VOID: bad-mint-amount
+            txs_at['mint2'] = c.mint_tx(5_000, 48, 135, 10 ** 12, fee_key=KEY2)      # invalid: bad-mint-amount (block 137 rejected)
             txs.append(txs_at['mint2'])
         elif h == 140:
             txs_at['xfer1'] = c.transfer_tx([(txid_of(txs_at['mint1']), 1)], [(0, 6_000), (1, 4_000)])
@@ -1328,6 +1259,10 @@ def build_golden():
                                           payload=b'', collateral_out=v.collateral_zat - 1000)
             txs.append(txs_at['sweep4'])
         # ---- the v3 tail
+        elif h == 229:                                          # U-23: the claimant's intent of claim3 released after CLAIM_DELAY
+            v = c.model.vaults[(txid_of(txs_at['mint3']), 0)]
+            txs_at['release3'] = c.release_tx((txid_of(txs_at['claim3']), 0), v.collateral_zat)
+            txs.append(txs_at['release3'])
         elif 225 <= h <= 228:                                   # REG-A1: seq 0..3, 10 YEC bonds, locktime H + 200
             i = h - 225
             txs_at['reg%d' % i] = c.register_tx(ATTESTORS[i][1], BONDS[i][1], h + 200, 10 * ym.COIN, flags=i)
@@ -1346,7 +1281,7 @@ def build_golden():
                                         attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)))
             txs.append(txs_at['mint5'])
             v3['mint5_selected'] = sel
-        elif h == 251:                                          # MINT-9: the same shape without a carrier => VOID mint9-no-bundle
+        elif h == 251:                                          # MINT-9: the same shape without a carrier => invalid mint9-no-bundle (block 251 rejected)
             ref = 249
             txs_at['mint6'] = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY2)
             txs.append(txs_at['mint6'])
@@ -1379,6 +1314,17 @@ def build_golden():
                 v3['claim_height'] = h
                 v3['residual'] = residual
                 v3['dormancy_height'] = h + (-h) % 4            # the first DORMANCY_CHECK multiple at or after the claim
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1:      # U-23/U-24: an attestor cancels the claimant intent
+            vault = (txid_of(txs_at['mint5']), 0)
+            v = c.model.vaults[vault]
+            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'])
+            txs.append(txs_at['cancel5'])
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL]
+            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.p2pkh_script(ym.hash160(G_PUBKEY)))
+            txs.append(txs_at['release5r'])
+            v3['residual_vout'] = res[0][1]
         elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
             e = min(q for q in range(4) if q != v3['lazy'])
             v3['ejected'] = e
@@ -1416,15 +1362,17 @@ def build_golden():
 
 def golden_document(c):
     return {
-        'description': 'Yellowback v3 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
-                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 5; payload version 3; '
-                       '%d synthetic blocks (see test_yellowback_model.build_golden): the v2 lifecycle to 224, then '
-                       'registrations, arming, a mint with a bundle, a VOID mint without one, a notice and an emergency '
-                       'claim with a residual, dormancy, an equivocation, a revival and two bond spends. '
-                       'txs[0] of every block is the coinbase; the model reads its scriptSig only. '
-                       'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.' % GOLDEN_BLOCKS,
-        'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0,
+        'description': 'Yellowback state-hash golden vector on the vault upgrade: regtest params {startHeight 1, sigmaRefBps 0, '
+                       'supplyCapBps 0, attestorSetId %s, attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
+                       'SCHEMA_VERSION 6; payload version 3; '
+                       '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
+                       '(a claim into an intent and its release), then registrations, arming, a mint with a bundle, a notice, '
+                       'an emergency claim into a claimant and a residual intent, an attestor cancel of the claimant intent, '
+                       'the residual release, dormancy, an equivocation, a revival and two bond spends. '
+                       'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
+                       'vault-spend-malformed, 251 mint9-no-bundle) are rejected and not applied (U-21); the next entry '
+                       'is the same height mined again without the offending transaction.' % (ym.TEST_SET, GOLDEN_BLOCKS),
+        'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': ym.TEST_SET,
                    'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
@@ -1437,29 +1385,29 @@ class StateHashTests(unittest.TestCase):
 
     # Rule: N18
     def test_preimage_layout(self):
-        m = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3))
+        s = '0102030405060708' * 4                                   # an attestor set id (display hex)
+        m = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, s))
         pre = m.state_hash_preimage()
-        # T + i32 0 + zero hash + u32 5 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
+        # T + i32 0 + zero hash + u32 6 + "regtest"; G totals; P params; N + u16 0; M + UNARMED (no C: ACT-1..6 are gone)
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x05\x00\x00\x00')        # SCHEMA_VERSION 5 (H-1)
+        self.assertEqual(pre[37:41], b'\x06\x00\x00\x00')        # SCHEMA_VERSION 6 (the vault upgrade)
         self.assertEqual(pre[41:49], b'\x07regtest')
-        self.assertEqual(pre[49:59], b'C' + b'\x00' + bytes(8))
-        self.assertEqual(pre[59:60], b'G')
-        self.assertEqual(pre[60:100], bytes(40))
-        # P: the four v2 i32 fields, then v3's attestArmMin u32 (3) and bundleCarrier u8 (0 = scriptsig),
-        # then H-1's mintRequiresArmed u8 (0) (M13)
-        self.assertEqual(pre[100:123], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
-                         + b'\x03\x00\x00\x00' + b'\x00' + b'\x00')
+        self.assertEqual(pre[49:50], b'G')
+        self.assertEqual(pre[50:90], bytes(40))
+        # P: startHeight, sigmaRefBps, supplyCapBps (i32), attestorSetId (32 internal bytes), v3's attestArmMin
+        # u32 (3) and bundleCarrier u8 (0 = scriptsig), H-1's mintRequiresArmed u8 (0) (M13)
+        self.assertEqual(pre[90:141], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00'
+                         + bytes.fromhex(s)[::-1] + b'\x03\x00\x00\x00' + b'\x00' + b'\x00')
         # v3 (section 3.6): AttestorSeq (N + u16 next) and Attest (M + status u8 + i32 triggerHeight + i32 armHeight) always present
-        self.assertEqual(pre[123:126], b'N\x00\x00')
-        self.assertEqual(pre[126:], b'M' + bytes(9))
-        m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
-        self.assertEqual(m2.state_hash_preimage()[117:123], b'\x00\x00\x00\x00' + b'\x02' + b'\x00')
+        self.assertEqual(pre[141:144], b'N\x00\x00')
+        self.assertEqual(pre[144:], b'M' + bytes(9))
+        m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, s, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
+        self.assertEqual(m2.state_hash_preimage()[135:141], b'\x00\x00\x00\x00' + b'\x02' + b'\x00')
         self.assertNotEqual(m2.state_hash(), m.state_hash())
-        m3 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, mint_requires_armed=True))
-        self.assertEqual(m3.state_hash_preimage()[122:123], b'\x01')
+        m3 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, s, mint_requires_armed=True))
+        self.assertEqual(m3.state_hash_preimage()[140:141], b'\x01')
         self.assertNotEqual(m3.state_hash(), m.state_hash())
         self.assertEqual(m.state_hash(), ym.sha256(pre).hex())
 
@@ -1473,48 +1421,52 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[i + 5:i + 25], KEY1)
         self.assertEqual(pre[i + 25:i + 33], (50_000).to_bytes(8, 'little'))
         self.assertEqual(pre[i + 33:i + 36], b'\x01\x02\x01')
-        j = 49 + 36 + 10 + 41                                         # Tip, Tags[1], Activation, Totals
+        j = 49 + 36 + 41                                              # Tip, Tags[1], Totals
         self.assertEqual(pre[j:j + 5], b'S\x00\x00\x00\x01')
         rec = pre[j + 5:]
         self.assertEqual(rec[:32], bytes.fromhex(c.block_hash(1))[::-1])
-        self.assertEqual(rec[32:34], b'\x01\x01')                     # tagged, quote
-        self.assertEqual(rec[34:38], b'\x01\x00\x00\x00')             # signalCount
-        self.assertEqual(rec[38:47], b'\x00' + bytes(8))              # activation
-        self.assertEqual(rec[47:87], bytes(40))                       # five undefined prices as 0
-        self.assertEqual(rec[87:91], (10_000).to_bytes(4, 'little'))  # sigmaMultBps
-        self.assertEqual(rec[91:99], ym.regtest_subsidy(1).to_bytes(8, 'little'))
-        self.assertEqual(rec[99:115], bytes(16))                      # supply, collateral
-        self.assertEqual(rec[115:123], bytes(8))                      # globalRatio undefined
-        self.assertEqual(rec[123:127], b'\x03\x00\x00\x00')           # NOT_ACTIVE | NO_PRICE
-        self.assertEqual(rec[127:136], bytes(9))                      # v3: attest UNARMED/0/0
-        self.assertEqual(rec[136:139], b'\x00\x00\x00')               # seated, pinnedKeys, pinnedSeqs empty
-        self.assertEqual(rec[139:140], b'P')
+        self.assertEqual(rec[32:34], b'\x01\x01')                     # tagged, quote (signalCount and activation are gone)
+        self.assertEqual(rec[34:74], bytes(40))                       # five undefined prices as 0
+        self.assertEqual(rec[74:78], (10_000).to_bytes(4, 'little'))  # sigmaMultBps
+        self.assertEqual(rec[78:86], ym.regtest_subsidy(1).to_bytes(8, 'little'))
+        self.assertEqual(rec[86:102], bytes(16))                      # supply, collateral
+        self.assertEqual(rec[102:110], bytes(8))                      # globalRatio undefined
+        self.assertEqual(rec[110:114], b'\x02\x00\x00\x00')           # NO_PRICE (active from START, U-22)
+        self.assertEqual(rec[114:123], bytes(9))                      # v3: attest UNARMED/0/0
+        self.assertEqual(rec[123:126], b'\x00\x00\x00')               # seated, pinnedKeys, pinnedSeqs empty
+        self.assertEqual(rec[126:127], b'P')
 
     # Rule: N18
     def test_golden_vector(self):
         c, txs_at = build_golden()
         m = c.model
         # sanity on the sequence itself
-        self.assertEqual(m.activation.status, ym.ACTIVE)
-        self.assertEqual((m.activation.lock_in_height, m.activation.activate_height), (64, 128))
         self.assertNotIn(5, m.tags)
         self.assertNotIn(13, m.tags)
         self.assertIn(17, m.tags)
         self.assertFalse(m.tags[9].is_quote)
         self.assertEqual(m.vaults[(txid_of(txs_at['mint1']), 0)].status, ym.V_CLOSED)
-        self.assertEqual(m.vaults[(txid_of(txs_at['mint2']), 0)].void_reason, 'bad-mint-amount')
+        # U-21: three blocks rejected, none applied; the same heights mined again without the offending transaction
+        self.assertEqual([(v.height, v.verdict) for v in m.rejected],
+                         [(137, 'bad-mint-amount'), (217, 'vault-spend-malformed'), (251, 'mint9-no-bundle')])
+        self.assertTrue(all(v.rejected for v in m.rejected))
+        self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [137, 217, 251])
+        self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + 3)
+        self.assertNotIn((txid_of(txs_at['mint2']), 0), m.vaults)                      # no VOID vault (section 15.10)
+        self.assertEqual(c.refused[txid_of(txs_at['mint2'])], 'bad-mint-amount')
+        # U-23: claim3 left its vault CLAIMING; the release of its intent at 229 closed it
         self.assertEqual(m.vaults[(txid_of(txs_at['mint3']), 0)].status, ym.V_CLAIMED)
+        self.assertEqual(m.txlog[txid_of(txs_at['release3'])].type, 'CLAIM_RELEASE')
         v4 = m.vaults[(txid_of(txs_at['mint4']), 0)]
-        self.assertEqual((v4.status, v4.unbacked), (ym.V_CLOSED, True))
+        self.assertEqual((v4.status, v4.unbacked), (ym.V_ACTIVE, False))               # the sweep was refused
         self.assertEqual(m.txlog[txid_of(txs_at['xfer2'])].verdict, 'transfer-over-assigned')
         self.assertEqual(m.txlog[txid_of(txs_at['redeem1'])].verdict, 'ok')
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
-        self.assertEqual(m.txlog[txid_of(txs_at['sweep4'])].verdict, 'vault-spend-malformed')
-        self.assertTrue(m.blocks[217].rejected)
-        self.assertEqual([h for h, b in m.blocks.items() if b.block_invalid], [217])
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 0, 'activeVaults': 0,
-                                              'voidVaults': 2, 'closedVaults': 2, 'claimedVaults': 2,
-                                              'unbackedCents': 10_000})
+        self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
+        self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 5_971_140_315_110, 'activeVaults': 2,
+                                              'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
+                                              'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
         # the v3 tail (v3 plan section 3.8): arming, a bundled mint, a bundle-less VOID mint, notice + emergency claim
         # with a residual, dormancy, ejection, revival, bond spends
@@ -1526,13 +1478,24 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.snapshots[248].seated, [0, 1, 2, 3])
         mint5 = m.txlog[txid_of(txs_at['mint5'])]
         self.assertEqual((mint5.verdict, mint5.a_mint, sorted(mint5.bundle_seqs), mint5.attest_payee), ('ok', 9_000, sorted(v3['mint5_selected']), v3['mint5_selected'][0]))
-        self.assertEqual(m.vaults[(txid_of(txs_at['mint6']), 0)].void_reason, 'mint9-no-bundle')
+        self.assertEqual(c.refused[txid_of(txs_at['mint6'])], 'mint9-no-bundle')
         self.assertEqual(m.txlog[txid_of(txs_at['notice5'])].notice, True)
         self.assertEqual(m.bundle_log[290].a_claim, 1_850)
         claim5 = m.txlog[txid_of(txs_at['claim5'])]
         self.assertEqual((claim5.verdict, claim5.claim_path, claim5.residual_zat), ('ok', 'b', v3['residual']))
         self.assertTrue(claim5.residual_zat >= ym.Params.REGTEST_ATTEST['residual_min_zat'])
-        self.assertEqual(m.vaults[(txid_of(txs_at['mint5']), 0)].status, ym.V_CLAIMED)
+        # U-23/U-24: the attestor cancel re-created the vault at (cancel5, 0): the same position, ACTIVE, its
+        # collateral the claimant intent's value; the claim's 10,000-cent burn was not refunded
+        self.assertNotIn((txid_of(txs_at['mint5']), 0), m.vaults)
+        cancel = m.txlog[txid_of(txs_at['cancel5'])]
+        self.assertEqual(cancel.type, 'CLAIM_CANCEL')
+        self.assertEqual(cancel.closed_vaults, [(txid_of(txs_at['mint5']), 0)])
+        self.assertEqual(cancel.reopened_vaults, [(txid_of(txs_at['cancel5']), 0)])
+        v5 = m.vaults[(txid_of(txs_at['cancel5']), 0)]
+        self.assertEqual((v5.status, v5.minted_cents, v5.mint_height, v5.burned_cents), (ym.V_ACTIVE, 10_000, 250, 0))
+        self.assertEqual(claim5.burned, 10_000)
+        self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
+        self.assertEqual(m.intents, {})
         self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE
         lazy, e, w = v3['lazy'], v3['ejected'], v3['withdrawn']
         self.assertEqual(m.snapshots[v3['dormancy_height']].attest.status, ym.ARMED)
@@ -1554,14 +1517,14 @@ class StateHashTests(unittest.TestCase):
 
     # Rule: N18
     def test_hash_changes_with_params(self):
-        c1 = Chain(ym.Params.regtest(1, 0, 0, 0))
-        c2 = Chain(ym.Params.regtest(1, 0, 0, 999))
+        c1 = Chain(ym.Params.regtest(1, 0, 0, '11' * 32))
+        c2 = Chain(ym.Params.regtest(1, 0, 0, '22' * 32))
         c1.mine_n(3)
         c2.mine_n(3)
         self.assertNotEqual(c1.model.state_hash(), c2.model.state_hash())
-        # only P.enforceUntil differs: everything before it and the 19 bytes after it (attestArmMin, bundleCarrier,
+        # only P.attestorSetId differs: everything before it and the 19 bytes after it (attestArmMin, bundleCarrier,
         # mintRequiresArmed, N, M) agree
-        self.assertEqual(c1.model.state_hash_preimage()[:-23], c2.model.state_hash_preimage()[:-23])
+        self.assertEqual(c1.model.state_hash_preimage()[:-51], c2.model.state_hash_preimage()[:-51])
         self.assertEqual(c1.model.state_hash_preimage()[-19:], c2.model.state_hash_preimage()[-19:])
 
 
@@ -1587,8 +1550,9 @@ class JsonFeedTests(unittest.TestCase):
     # Rule: SNAP
     def test_params_from_getinfo(self):
         p = ym.params_from_getinfo({'network': 'regtest', 'params': {'startHeight': 5, 'sigmaRefBps': 10_000,
-                                                                     'supplyCapBps': 1_500, 'enforceUntilHeight': 0}})
-        self.assertEqual((p.start_height, p.sigma_ref_bps, p.supply_cap_bps, p.enforce_until), (5, 10_000, 1_500, 0))
+                                                                     'supplyCapBps': 1_500, 'attestorSetId': 'ab' * 32}})
+        self.assertEqual((p.start_height, p.sigma_ref_bps, p.supply_cap_bps, p.attestor_set), (5, 10_000, 1_500, 'ab' * 32))
+        self.assertEqual(p.claim_delay, 10)
         self.assertEqual(p.p_slow_window, 64)
 
 

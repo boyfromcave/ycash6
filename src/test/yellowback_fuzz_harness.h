@@ -59,6 +59,9 @@
 #include <string>
 #include <vector>
 
+/** The YED attestor set the regtest parameters of these cases name (U-22). */
+static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
 namespace yellowback_fuzz {
 
 /** Bounds-checked little-endian reader; a read past the end yields zero. */
@@ -164,6 +167,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         case VaultStatus::VOIDED: totals.voidVaults++; break;
         case VaultStatus::CLOSED: totals.closedVaults++; break;
         case VaultStatus::CLAIMED: totals.claimedVaults++; break;
+        case VaultStatus::CLAIMING: break;
         }
     }
     const uint8_t nTokens = r.U8() % 17;
@@ -177,7 +181,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
     }
     st.Put(keys::Totals(), totals);
     Snapshot prev;
-    prev.activation.status = r.U8() % 3;
+    (void)r.U8();                     // was the Activation status (ACT-1..6 left with the upgrade); kept so the corpus decodes as before
     prev.haltMask = r.U32();
     prev.pFast = r.I64();
     prev.pMid = r.I64();
@@ -186,11 +190,9 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
     prev.issuedZat = r.I64();
     if (prev.pFast > 0 && prev.pMid > 0 && prev.pSlow > 0) prev.pMint = std::min(prev.pFast, std::min(prev.pMid, prev.pSlow));
     if (prev.pMid > 0 && prev.pSlow > 0) prev.pClaim = std::max(prev.pMid, prev.pSlow);
-    Activation a;
-    a.status = r.U8() % 3;
-    a.lockInHeight = r.I32();
-    a.activateHeight = r.I32();
-    st.Put(keys::Activation(), a);
+    (void)r.U8();                     // was the carried Activation record (status, lockInHeight, activateHeight)
+    (void)r.I32();
+    (void)r.I32();
     const uint8_t hsel = r.U8();
     height = P.startHeight - 2 + (int)(hsel % (uint8_t)(P.volWindow + 11));
     if (height - 1 >= P.startHeight) st.Put(keys::Snapshot((uint32_t)(height - 1)), prev);
@@ -212,14 +214,14 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
 /**
  * The YellowbackEvaluate body. Returns 0 (ok), 1 (input discarded: the
  * block did not deserialise or repeats a txid), or a negative code naming the violated
- * property: -1 apply/undo identity, -2 overlay equivalence, -3 the
- * enforcement flag, -4 supply == sum of tokens. An exception is the
+ * property: -1 apply/undo identity, -2 overlay equivalence, -3 an invalid
+ * block names its verdict, -4 supply == sum of tokens. An exception is the
  * caller's failure (the target is total).
  */
 inline int RunEvaluate(const std::vector<unsigned char>& data)
 {
     using namespace yellowback;
-    const yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    const yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
     MemoryStateView base;
     int height = 0;
     CBlock block;
@@ -228,7 +230,6 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
     const MemoryStateView before = base;
     const int64_t supplyBefore = State(base).GetTotals().supplyCents;
     const int64_t tokensBefore = SumTokens(base);
-    const bool enforcing = EnforcementOn(State(base), P, height);
 
     // (ii) the overlay evaluation, committed into a copy
     MemoryStateView viaOverlay = base;
@@ -242,11 +243,10 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
     ApplyBlock(base, P, block, height, blockHash, 625000000, undo);
     if (!(viaOverlay == base)) return -2;
     if (!(SerializeRecord(undo) == SerializeRecord(ev.undo))) return -2;
-    // (iii)
-    if (ev.blockInvalid && ev.enforcementOn != enforcing) return -3;
-    if (ev.enforcementOn != enforcing) return -3;
+    // (iii) an invalid block names its verdict (U-21; -3 was the retired enforcement-flag property)
+    if (ev.blockInvalid && (ev.verdict.empty() || ev.reason.empty())) return -3;
     // (iv), given a consistent seed
-    if (supplyBefore == tokensBefore && State(base).GetTotals().supplyCents != SumTokens(base)) return -4;
+    if (!ev.blockInvalid && supplyBefore == tokensBefore && State(base).GetTotals().supplyCents != SumTokens(base)) return -4;   // an invalid block is never applied (U-21)
     // (i)
     UndoBlock(base, undo);
     if (!(base == before)) return -1;
@@ -257,7 +257,7 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
 inline int RunPayee(const std::vector<unsigned char>& data)
 {
     using namespace yellowback;
-    const yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    const yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
     MemoryStateView view;
     State st(view);
     Reader r(data);

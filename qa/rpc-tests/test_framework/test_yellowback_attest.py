@@ -382,6 +382,9 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(tx.expiry_height, 190 + yu.REF_WINDOW)
 
     def test_mint_v3_layout(self):
+        # U-23: the vault output is the YED V template, built from the run's attestor set
+        saved, yu.ATTESTOR_SET[0] = yu.ATTESTOR_SET[0], '5e' * 32
+        self.addCleanup(lambda: yu.ATTESTOR_SET.__setitem__(0, saved))
         node = self.node()
         bundle = ya.encode_bundle([ya.sign_attestation(ya.attestor_keys(1)[0][0], 1, 1_000_000, 2, BH_ONE)])
         carrier = ya.build_carrier_tx(node, bundle, send=False)
@@ -392,6 +395,7 @@ class BuilderTests(unittest.TestCase):
                                           attest_fee=(bond_addr, 12_500_000))
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(len(tx.vout), 6)
+        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), bytes.fromhex(owner), 190 + 48))
         p = ym.script_single_push(tx.vout[2].script)
         self.assertEqual(len(p), 52)
         self.assertEqual(p[:4], b'YB\x03\x01')

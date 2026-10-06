@@ -7,6 +7,7 @@
 #include "arith_uint256.h"
 #include "crypto/sha256.h"
 #include "script/script.h"
+#include "vault/template.h"
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
 #include "yellowback/math.h"
@@ -32,7 +33,6 @@ const char* const BAD_MINT_OWNER_KEY = "bad-mint-owner-key";
 const char* const BAD_MINT_VAULT_SCRIPT = "bad-mint-vault-script";
 const char* const MINT_NOT_ACTIVE = "mint-not-active";
 const char* const MINT_HALTED_NO_PRICE = "mint-halted-no-price";
-const char* const MINT_HALTED_PARTICIPATION = "mint-halted-participation";
 const char* const MINT_HALTED_GLOBAL_RATIO = "mint-halted-global-ratio";
 const char* const MINT_HALTED_DIVERGENCE = "mint-halted-divergence";
 const char* const MINT_HALTED_UNARMED = "mint-halted-unarmed";
@@ -56,6 +56,11 @@ const char* const MINT10_DIVERGED = "mint10-diverged";
 const char* const RED1_BUNDLE_PREFIX = "red1-bundle-";
 const char* const RED5_RESIDUAL = "red5-residual";
 const char* const AFEE1_FEE = "afee1-fee";
+const char* const VAULT_CLAIM_INTENTS = "vault-claim-intents";
+const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
+const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
+const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
+const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BUNDLE_STAT = "stat";
 } // namespace verdict
 
@@ -71,6 +76,26 @@ std::optional<CKeyID> P2PKHKey(const CScript& s)
         return std::nullopt;
     }
     return CKeyID(uint160(std::vector<unsigned char>(s.begin() + 3, s.begin() + 23)));
+}
+
+CScript P2PKHOf(const CKeyID& key)
+{
+    return CScript() << OP_DUP << OP_HASH160 << ToByteVector(key) << OP_EQUALVERIFY << OP_CHECKSIG;
+}
+
+/** A YED-tagged V (or I) among the outputs (U-23): the only template outputs the module itself creates. */
+bool IsYedVaultOutput(const CScript& spk)
+{
+    vault::VaultParams v;
+    return vault::ParseVault(spk, v) && v.tag == YED_TAG;
+}
+
+bool IsYedIntentOutput(const CScript& spk, vault::IntentParams* out = nullptr)
+{
+    vault::IntentParams i;
+    if (!vault::ParseIntent(spk, i) || i.tag != YED_TAG) return false;
+    if (out) *out = i;
+    return true;
 }
 
 /** Tags[h] for h >= START_HEIGHT (nothing below it is read). */
@@ -305,14 +330,16 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     // MINT-3
     if (tx.vout.size() < 3) return verdict::BAD_MINT_OUTPUTS;
     if (!p.ownerPubKey.IsValid() || !p.ownerPubKey.IsCompressed() || !p.ownerPubKey.IsFullyValid()) return verdict::BAD_MINT_OWNER_KEY;
-    const CScript expected = P2SHScript(VaultScript(p.lockHeight, p.ownerPubKey, (uint32_t)(lock + P.grace)));
-    if (!tx.vout[0].scriptPubKey.IsPayToScriptHash() || tx.vout[0].scriptPubKey != expected) return verdict::BAD_MINT_VAULT_SCRIPT;
-    // MINT-4
+    // U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight = lockHeight,
+    // appHeight = lockHeight + GRACE); v2's P2SH VaultScript is refused for new mints.
+    const CScript expected = YedVaultScript(P, p.ownerPubKey, lock);
+    if (expected.empty() || tx.vout[0].scriptPubKey != expected) return verdict::BAD_MINT_VAULT_SCRIPT;
+    // MINT-4 (ACT-5's activation and the PARTICIPATION/ENFORCEMENT halts left with the upgrade, §6: the
+    // module is active from START_HEIGHT; NOT_ACTIVE is the virtual snapshot below it)
     const std::optional<Snapshot>& S = ctx.Snap(ref);
-    if (!S.has_value() || !S->activation.IsActive()) return verdict::MINT_NOT_ACTIVE;
+    if (!S.has_value()) return verdict::MINT_NOT_ACTIVE;
     if (S->haltMask & HALT_NOT_ACTIVE) return verdict::MINT_NOT_ACTIVE;
     if (S->haltMask & HALT_NO_PRICE) return verdict::MINT_HALTED_NO_PRICE;
-    if (S->haltMask & (HALT_PARTICIPATION | HALT_ENFORCEMENT)) return verdict::MINT_HALTED_PARTICIPATION;
     // HALT-2 (amended, W16): the global-ratio halt stops a mint only when the mint's own minimum
     // ratio is below the recapitalisation floor. Every class minimum exceeds the halt floor, so a
     // mint can only raise the global ratio; the floor keeps the best-backed class open to do so.
@@ -384,7 +411,7 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     return verdict::OK;
 }
 
-/** MINT-1..10. Returns true when a Vaults entry (ACTIVE or VOID) was created. */
+/** MINT-1..10. Returns true when the mint holds (an ACTIVE Vaults entry was created); false makes the transaction invalid (§15.10: no VOID vault). */
 bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const Payload& p, unsigned int opReturnIndex,
                TxLogRecord& log, Totals& totals)
 {
@@ -431,13 +458,6 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     }
     log.verdict = v;
     log.yedOut = 0;
-    if (!tx.vout.empty() && tx.vout[0].scriptPubKey.IsPayToScriptHash()) {
-        vault.status = (uint8_t)VaultStatus::VOIDED;
-        vault.voidReason = v;
-        ctx.st.Put(keys::Vault(vaultOut), vault);
-        totals.voidVaults++;
-        return true;
-    }
     return false;
 }
 
@@ -488,18 +508,23 @@ struct RedFacts
     std::optional<uint16_t> attestPayee;
     CAmount residualZat;
     std::string claimPath;     //!< "a" | "b" | ""
+    int claimantVout;          //!< U-23: the claim's claimant intent (-1 on the owner path)
+    int residualVout;          //!< U-23: the owner's residual intent (-1 when none is due)
 
-    RedFacts() : attestFeeZat(0), residualZat(0) {}
+    RedFacts() : attestFeeZat(0), residualZat(0), claimantVout(-1), residualVout(-1) {}
 };
 
+/** The path a V spend takes (§15.3 selectors, U-23): 2 and 3 are the owner's, 4 the claim; 1 (a set unlock) is never a YED path. */
+bool IsOwnerSelector(uint8_t sel) { return sel == vault::SEL_OWNER || sel == vault::SEL_RELEASED; }
+
 std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::optional<FoundPayload>& fp,
-                       const std::vector<SpentVault>& active, const std::optional<VaultSpendPath>& path, Cents yedIn, RedFacts& facts)
+                       const std::vector<SpentVault>& active, const std::optional<uint8_t>& selector, Cents yedIn, RedFacts& facts)
 {
     const Params& P = ctx.params;
     const int64_t H = ctx.height;
     // RED-1
     if (active.size() != 1 || tx.vin.empty() || !(active[0].outpoint == tx.vin[0].prevout)) return verdict::VAULT_SPEND_MALFORMED;
-    if (!path.has_value()) return verdict::VAULT_SPEND_MALFORMED;
+    if (!selector.has_value() || !(IsOwnerSelector(selector.value()) || selector.value() == vault::SEL_APP)) return verdict::VAULT_SPEND_MALFORMED;
     if (!fp.has_value() || fp->payload.type != PayloadType::REDEEM) return verdict::VAULT_SPEND_MALFORMED;
     const Payload& p = fp->payload;
     const int64_t ref = p.refHeight;
@@ -508,7 +533,21 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         if ((Cents)a.cents < P.minOutput || (Cents)a.cents > P.maxOutput) return verdict::VAULT_SPEND_MALFORMED;
     }
     const VaultRecord& vault = active[0].record;
-    const bool claim = !path->ownerPath;
+    const bool claim = selector.value() == vault::SEL_APP;
+    // U-23: a claim moves the whole vault into intents (the primitive's S-2 holds: every I output carries
+    // this V's parameters and Σ I >= V.value); the module wants one claimant intent, at most one owner
+    // residual intent (RED-5 decides which is due) and no re-lock.
+    std::vector<unsigned int> intents;
+    if (claim) {
+        const CScript vaultSpk = YedVaultScript(P, vault.OwnerKey(), vault.lockHeight);
+        const uint256 vaultHash = vault::ScriptHash256(vaultSpk);
+        for (unsigned int j = 0; j < tx.vout.size(); j++) {
+            if (tx.vout[j].scriptPubKey == vaultSpk) return verdict::VAULT_CLAIM_INTENTS;
+            vault::IntentParams ip;
+            if (IsYedIntentOutput(tx.vout[j].scriptPubKey, &ip) && ip.vaultHash == vaultHash) intents.push_back(j);
+        }
+        if (intents.empty() || intents.size() > 2) return verdict::VAULT_CLAIM_INTENTS;
+    }
     const bool armed = claim && ctx.Armed(ref);      // the owner path reads no bundle (RED-1 amended)
     // RED-1 (amended): the claim path needs BUNDLE-1 with selector = vaultOutpoint and aClaim defined when ARMED
     if (armed) {
@@ -560,90 +599,169 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
             if (!persisted || !IsUnderwater(vault.collateralZat, pEmerg, vault.mintedCents, P.emergencyRatioBps)) return verdict::VAULT_CLAIM_NOT_UNDERWATER;
             facts.claimPath = "b";
         }
-        // RED-5: the residual above the claimant's cap goes back to the owner (R1: no margin under (b) alone)
+        // RED-5: the residual above the claimant's cap goes back to the owner (R1: no margin under (b) alone).
+        // U-23: it is the owner's residual intent, paying P2PKH(owner) at least the residual; the other
+        // intent is the claimant's. With no residual due the claim has exactly one intent.
         if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
         facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
         if (facts.residualZat >= P.residualMinZat) {
             const CPubKey owner = vault.OwnerKey();
-            bool paid = false;
-            for (unsigned int j = 0; j < tx.vout.size() && !paid; j++) {
-                if (j == fp->opReturnIndex || j == p.feeVout || j == p.attestFeeVout || assignedVouts.count(j)) continue;
-                std::optional<CKeyID> key = P2PKHKey(tx.vout[j].scriptPubKey);
-                if (key.has_value() && owner.IsValid() && key.value() == owner.GetID() && tx.vout[j].nValue >= facts.residualZat) paid = true;
+            if (!owner.IsValid() || intents.size() != 2) return verdict::RED5_RESIDUAL;
+            const uint256 ownerHash = vault::ScriptHash256(P2PKHOf(owner.GetID()));
+            for (unsigned int j : intents) {
+                vault::IntentParams ip;
+                IsYedIntentOutput(tx.vout[j].scriptPubKey, &ip);
+                if (ip.recipientHash == ownerHash && tx.vout[j].nValue >= facts.residualZat) { facts.residualVout = (int)j; break; }
             }
-            if (!paid) return verdict::RED5_RESIDUAL;
+            if (facts.residualVout < 0) return verdict::RED5_RESIDUAL;
+            facts.claimantVout = (int)(intents[0] == (unsigned int)facts.residualVout ? intents[1] : intents[0]);
+        } else {
+            if (intents.size() != 1) return verdict::VAULT_CLAIM_INTENTS;
+            facts.claimantVout = (int)intents[0];
         }
     }
     return verdict::OK;
 }
 
-/** Applies IN-2 for the ACTIVE vaults either way. Returns true iff RED-1..5 failed. `active` records are updated in place. */
+/** RED-1..5 over a spend of an ACTIVE vault. Returns true iff they failed (the transaction is then invalid). */
 bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const std::optional<FoundPayload>& fp,
-                     std::vector<SpentVault>& active, Cents yedIn, TxLogRecord& log, Totals& totals)
+                     std::vector<SpentVault>& active, Cents yedIn, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
 {
-    std::optional<VaultSpendPath> path = tx.vin.empty() ? std::nullopt : ParseVaultSpendPath(tx.vin[0].scriptSig);
-    if (path.has_value()) log.path = path->ownerPath ? "owner" : "claim";
+    std::optional<uint8_t> selector = tx.vin.empty() ? std::nullopt : vault::ParseSelector(tx.vin[0].scriptSig);
+    if (selector.has_value() && (IsOwnerSelector(selector.value()) || selector.value() == vault::SEL_APP)) {
+        log.path = IsOwnerSelector(selector.value()) ? "owner" : "claim";
+    }
     RedFacts facts;
-    const std::string v = RedVerdict(ctx, tx, fp, active, path, yedIn, facts);
+    const std::string v = RedVerdict(ctx, tx, fp, active, selector, yedIn, facts);
     LogBundle(log, facts.bundle);
     log.residualZat = facts.residualZat;
     log.claimPath = facts.claimPath;
-    if (v == verdict::OK) {
-        const Payload& p = fp->payload;
-        VaultRecord& vault = active[0].record;
-        for (const Assignment& a : p.assignments) {
-            const COutPoint out(txid, a.vout);
-            TokenRecord tok;
-            tok.cents = a.cents;
-            tok.nValue = tx.vout[a.vout].nValue;
-            tok.scriptPubKey = tx.vout[a.vout].scriptPubKey;
-            tok.height = ctx.height;
-            ctx.st.Put(keys::Token(out), tok);
-            AssignedOutput ao;
-            ao.outpoint = out;
-            ao.cents = a.cents;
-            ao.scriptPubKey = tok.scriptPubKey;
-            log.assigned.push_back(ao);
-        }
-        log.yedOut = p.AssignedCents();
-        log.verdict = verdict::OK;
-        vault.status = (uint8_t)(path->ownerPath ? VaultStatus::CLOSED : VaultStatus::CLAIMED);
-        vault.closeHeight = ctx.height;
-        vault.closingTxid = txid;
-        vault.unbacked = false;
-        vault.feePaidZat = 0; // rewritten by the close: the fee this spend paid (0 under FEE-0), SERIALISATION.md §3 J
-        if (!ctx.Eligible((int)p.refHeight).empty()) {
-            vault.feePaidZat = tx.vout[p.feeVout].nValue;
-            log.feeZat = vault.feePaidZat;
-            std::optional<CKeyID> key = P2PKHKey(tx.vout[p.feeVout].scriptPubKey);
-            log.hasPayee = key.has_value();
-            if (key.has_value()) log.payee = key.value();
-        }
-        if (facts.attestPayee.has_value()) {
-            log.attestFeeZat = tx.vout[p.attestFeeVout].nValue;
-            log.hasAttestPayee = true;
-            log.attestPayee = facts.attestPayee.value();
-        }
-        totals.collateralZat -= vault.collateralZat;
-        if (totals.activeVaults > 0) totals.activeVaults--;
-        if (path->ownerPath) totals.closedVaults++;
-        else totals.claimedVaults++;
-        log.closedVaults.push_back(active[0].outpoint);
-        return false;
+    if (v != verdict::OK) {
+        log.verdict = v;
+        log.yedOut = 0;
+        return true;
     }
-    log.verdict = v;
-    log.yedOut = 0;
-    for (SpentVault& s : active) {
-        s.record.status = (uint8_t)VaultStatus::CLOSED;
-        s.record.closeHeight = ctx.height;
-        s.record.closingTxid = txid;
-        totals.collateralZat -= s.record.collateralZat;
-        if (totals.activeVaults > 0) totals.activeVaults--;
+    const bool ownerPath = IsOwnerSelector(selector.value());
+    const Payload& p = fp->payload;
+    VaultRecord& vault = active[0].record;
+    for (const Assignment& a : p.assignments) {
+        const COutPoint out(txid, a.vout);
+        TokenRecord tok;
+        tok.cents = a.cents;
+        tok.nValue = tx.vout[a.vout].nValue;
+        tok.scriptPubKey = tx.vout[a.vout].scriptPubKey;
+        tok.height = ctx.height;
+        ctx.st.Put(keys::Token(out), tok);
+        AssignedOutput ao;
+        ao.outpoint = out;
+        ao.cents = a.cents;
+        ao.scriptPubKey = tok.scriptPubKey;
+        log.assigned.push_back(ao);
+    }
+    log.yedOut = p.AssignedCents();
+    log.verdict = verdict::OK;
+    // U-23: the owner's spend closes the vault; a claim leaves it CLAIMING until its claimant intent is
+    // released (CLAIMED) or cancelled by the attestor set (ACTIVE again at the re-created vault).
+    vault.status = (uint8_t)(ownerPath ? VaultStatus::CLOSED : VaultStatus::CLAIMING);
+    vault.closeHeight = ctx.height;
+    vault.closingTxid = txid;
+    vault.unbacked = false;
+    vault.feePaidZat = 0; // rewritten by the close: the fee this spend paid (0 under FEE-0), SERIALISATION.md §3 J
+    if (!ctx.Eligible((int)p.refHeight).empty()) {
+        vault.feePaidZat = tx.vout[p.feeVout].nValue;
+        log.feeZat = vault.feePaidZat;
+        std::optional<CKeyID> key = P2PKHKey(tx.vout[p.feeVout].scriptPubKey);
+        log.hasPayee = key.has_value();
+        if (key.has_value()) log.payee = key.value();
+    }
+    if (facts.attestPayee.has_value()) {
+        log.attestFeeZat = tx.vout[p.attestFeeVout].nValue;
+        log.hasAttestPayee = true;
+        log.attestPayee = facts.attestPayee.value();
+    }
+    totals.collateralZat -= vault.collateralZat;
+    if (totals.activeVaults > 0) totals.activeVaults--;
+    if (ownerPath) {
         totals.closedVaults++;
-        log.closedVaults.push_back(s.outpoint);
+    } else {
+        for (int j : { facts.claimantVout, facts.residualVout }) {
+            if (j < 0) continue;
+            IntentRecord ir;
+            ir.vault = active[0].outpoint;
+            ir.role = (uint8_t)(j == facts.claimantVout ? IntentRole::CLAIMANT : IntentRole::RESIDUAL);
+            ir.height = ctx.height;
+            ctx.st.Put(keys::Intent(COutPoint(txid, (uint32_t)j)), ir);
+            yedOutputs.insert((unsigned int)j);
+        }
     }
-    return true;
+    log.closedVaults.push_back(active[0].outpoint);
+    return false;
+}
+
+/** A spent claim intent (U-23). */
+struct SpentIntent
+{
+    COutPoint outpoint;
+    IntentRecord record;
+    size_t vin;
+};
+
+/**
+ * U-23, U-24: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
+ * already checked the delay (BIP68 / I-2) and the payment (I-1 / I-2); the module moves its records:
+ * the claimant intent's release closes the vault (CLAIMED); its cancel re-creates the byte-identical
+ * vault, which becomes the same position again (ACTIVE at the new outpoint, its collateral the re-lock's
+ * value), and the claim's burn is not refunded (U-24). The owner's residual intent may only be released.
+ * The re-created vault must be vout[0]. Returns the verdict; OK on success.
+ */
+std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const SpentIntent& in,
+                             const std::optional<FoundPayload>& fp, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
+{
+    const Params& P = ctx.params;
+    std::optional<uint8_t> selector = vault::ParseSelector(tx.vin[in.vin].scriptSig);
+    if (!selector.has_value() || !(selector.value() == vault::SEL_UNLOCK || selector.value() == vault::SEL_OWNER)) return verdict::INTENT_SPEND_MALFORMED;
+    if (fp.has_value()) return verdict::INTENT_SPEND_MALFORMED;           // a release or cancel carries no Yellowback payload
+    const bool cancel = selector.value() == vault::SEL_OWNER;
+    if (cancel && in.record.Role() == IntentRole::RESIDUAL) return verdict::INTENT_CANCEL_RESIDUAL;
+    std::optional<VaultRecord> vault = ctx.st.GetVault(in.record.vault);
+    ctx.st.EraseKey(keys::Intent(in.outpoint));
+    log.type = (uint8_t)(cancel ? TxLogType::CLAIM_CANCEL : TxLogType::CLAIM_RELEASE);
+    if (in.record.Role() == IntentRole::RESIDUAL) return verdict::OK;    // the owner's residual: nothing else moves
+    if (!vault.has_value() || vault->Status() != VaultStatus::CLAIMING) return verdict::OK;   // cannot happen; stated for totality
+    if (!cancel) {
+        vault->status = (uint8_t)VaultStatus::CLAIMED;
+        ctx.st.Put(keys::Vault(in.record.vault), vault.value());
+        totals.claimedVaults++;
+        log.closedVaults.push_back(in.record.vault);
+        return verdict::OK;
+    }
+    const CScript vaultSpk = YedVaultScript(P, vault->OwnerKey(), vault->lockHeight);
+    int relock = -1;
+    for (unsigned int j = 0; j < tx.vout.size(); j++) {
+        if (tx.vout[j].scriptPubKey != vaultSpk) continue;
+        if (relock >= 0) return verdict::INTENT_CANCEL_NO_VAULT;
+        relock = (int)j;
+    }
+    // The re-created vault is vout[0] (vault_buildcancel's shape), so the position stays "txid:0" as every
+    // Yellowback position is (the wallet addresses vaults by txid).
+    if (relock != 0) return verdict::INTENT_CANCEL_NO_VAULT;
+    const COutPoint reopened(txid, (uint32_t)relock);
+    VaultRecord v = vault.value();
+    v.status = (uint8_t)VaultStatus::ACTIVE;
+    v.collateralZat = tx.vout[relock].nValue;
+    v.closeHeight = 0;
+    v.closingTxid = uint256();
+    v.burnedCents = 0;
+    ctx.st.EraseKey(keys::Vault(in.record.vault));
+    ctx.st.Put(keys::Vault(reopened), v);
+    if (ctx.st.Has(keys::Notice(in.record.vault))) ctx.st.EraseKey(keys::Notice(in.record.vault));
+    totals.collateralZat += v.collateralZat;
+    totals.activeVaults++;
+    log.closedVaults.push_back(in.record.vault);
+    log.reopenedVaults.push_back(reopened);
+    yedOutputs.insert((unsigned int)relock);
+    return verdict::OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +919,9 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     Cents yedIn = 0;
     bool bondSpent = false;
     std::vector<SpentVault> active, voids;
-    for (const CTxIn& in : tx.vin) {
+    std::vector<SpentIntent> intents;
+    for (size_t vin = 0; vin < tx.vin.size(); vin++) {
+        const CTxIn& in = tx.vin[vin];
         const COutPoint& prev = in.prevout;
         if (std::optional<TokenRecord> tok = ctx.st.GetToken(prev)) {
             yedIn += tok->cents;
@@ -815,6 +935,11 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         if (std::optional<VaultRecord> v = ctx.st.GetVault(prev)) {
             if (v->Status() == VaultStatus::ACTIVE && !Contains(active, prev)) active.push_back({ prev, v.value() });
             else if (v->Status() == VaultStatus::VOIDED && !Contains(voids, prev)) voids.push_back({ prev, v.value() });
+        }
+        if (std::optional<IntentRecord> ir = ctx.st.GetIntent(prev)) {   // U-23: a claim intent
+            bool dup = false;
+            for (const SpentIntent& si : intents) dup = dup || si.outpoint == prev;
+            if (!dup) intents.push_back({ prev, ir.value(), vin });
         }
         // IN-2 (amended): a bond spend withdraws the attestor unless it is EJECTED; the record stays
         if (std::optional<uint16_t> seq = ctx.st.GetBondIndex(prev)) {
@@ -835,16 +960,32 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
 
     // ---- outputs
     std::optional<FoundPayload> fp = FindPayload(tx);
-    bool touched = !log.spentTokens.empty() || !active.empty() || !voids.empty() || bondSpent;
-    if (!active.empty()) {
-        // M3: a transaction spending an ACTIVE vault sees RED-1..4 only, whatever its payload.
+    // The output indices a rule below created as YED-tagged templates (U-23); any other is invalid.
+    std::set<unsigned int> yedOutputs;
+    bool touched = !log.spentTokens.empty() || !active.empty() || !voids.empty() || bondSpent || !intents.empty();
+    auto fail = [&](const std::string& v) -> TxOutcome& {
+        log.verdict = v;
+        log.yedOut = 0;
+        out.invalid = true;
+        return out;
+    };
+    if (!intents.empty()) {
+        // U-23: a claim intent's release or cancel (the primitive admits one template input per transaction, S-1)
+        if (intents.size() != 1 || !active.empty()) return fail(verdict::INTENT_SPEND_MALFORMED);
+        const std::string v = ApplyIntentSpend(ctx, tx, txid, intents[0], fp, log, totals, yedOutputs);
+        if (v != verdict::OK) return fail(v);
+        touched = true;
+    } else if (!active.empty()) {
+        // M3: a transaction spending an ACTIVE vault sees RED-1..5 only, whatever its payload.
         log.type = (uint8_t)TxLogType::REDEEM;
         out.vaultSpend = true;
-        out.redFailed = ApplyVaultSpend(ctx, tx, txid, fp, active, yedIn, log, totals);
+        if (ApplyVaultSpend(ctx, tx, txid, fp, active, yedIn, log, totals, yedOutputs)) return fail(log.verdict);
         touched = true;
     } else if (fp.has_value() && fp->payload.type == PayloadType::MINT) {
         log.type = (uint8_t)TxLogType::MINT;
-        if (ApplyMint(ctx, tx, txid, fp->payload, fp->opReturnIndex, log, totals)) touched = true;
+        if (!ApplyMint(ctx, tx, txid, fp->payload, fp->opReturnIndex, log, totals)) return fail(log.verdict);   // §15.10: no VOID vault
+        yedOutputs.insert(0u);
+        touched = true;
     } else if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
         log.type = (uint8_t)(fp->payload.type == PayloadType::TRANSFER ? TxLogType::TRANSFER : TxLogType::REDEEM);
         ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log);
@@ -869,7 +1010,14 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         }
     }
 
-    // ---- IN-2 for VOID vaults: an ordinary spend that closes them (K3)
+    // ---- U-23: a YED-tagged vault or intent output exists only as a mint's vault, a claim's intents or a
+    // cancel's re-created vault
+    for (unsigned int j = 0; j < tx.vout.size(); j++) {
+        const CScript& spk = tx.vout[j].scriptPubKey;
+        if (!yedOutputs.count(j) && (IsYedVaultOutput(spk) || IsYedIntentOutput(spk))) return fail(verdict::YED_TEMPLATE_OUTPUT);
+    }
+
+    // ---- IN-2 for VOID vaults (none is created since the vault upgrade; kept for a pre-upgrade record): an ordinary spend that closes them (K3)
     for (SpentVault& s : voids) {
         s.record.status = (uint8_t)VaultStatus::CLOSED;
         s.record.closeHeight = ctx.height;
@@ -887,10 +1035,6 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     totals.supplyCents -= burned;
     for (SpentVault& s : active) {
         s.record.burnedCents = burned;
-        if (out.redFailed) {
-            s.record.unbacked = burned < s.record.mintedCents;
-            totals.unbackedCents += std::max<int64_t>(0, s.record.mintedCents - burned);
-        }
         ctx.st.Put(keys::Vault(s.outpoint), s.record);
         if (ctx.st.Has(keys::Notice(s.outpoint))) ctx.st.EraseKey(keys::Notice(s.outpoint));   // IN-2: the vault left ACTIVE
     }
@@ -949,25 +1093,6 @@ std::optional<Snapshot> SnapshotAt(const State& st, const Params& P, int64_t hei
     if (height < P.startHeight) return Snapshot::Virtual();
     if (height < 0 || height > 0xFFFFFFFFLL) return std::nullopt;
     return st.GetSnapshot((uint32_t)height);
-}
-
-bool EnforcementOn(const State& st, const Params& P, int height)
-{
-    std::optional<Snapshot> prev = SnapshotAt(st, P, (int64_t)height - 1);
-    if (!prev.has_value() || !prev->activation.IsActive()) return false;
-    if (prev->haltMask & HALT_ENFORCEMENT) return false;
-    if (P.enforceUntilHeight > 0 && height > P.enforceUntilHeight) return false;
-    return true;
-}
-
-uint32_t SignalCount(const State& st, const Params& P, int height)
-{
-    uint32_t n = 0;
-    for (int64_t h = std::max<int64_t>((int64_t)height - P.signalWindow + 1, P.startHeight); h <= height; h++) {
-        std::optional<TagRecord> t = TagAt(st.View(), P, h);
-        if (t.has_value() && t->signal) n++;
-    }
-    return n;
 }
 
 std::vector<CKeyID> EligiblePayees(const StateView& view, const Params& P, int refHeight)
@@ -1081,24 +1206,11 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     const int64_t H = height;
     Judge(st, P, H);                                                                    // REG-4
 
-    // ACT-1..3
-    const uint32_t count = SignalCount(st, P, height);
-    Activation a = st.GetActivation();
-    const Activation aBefore = a;
-    if (a.Status() == ActivationStatus::SIGNALING && H >= (int64_t)P.startHeight + P.signalWindow - 1 && count >= (uint32_t)std::max(0, P.activationThreshold)) {
-        a.status = (uint8_t)ActivationStatus::LOCKED_IN;
-        a.lockInHeight = height;
-        a.activateHeight = (int32_t)(H + P.activationDelay);
-    }
-    if (a.Status() == ActivationStatus::LOCKED_IN && H >= a.activateHeight) a.status = (uint8_t)ActivationStatus::ACTIVE;
-    if (!(a == aBefore) || !st.Has(keys::Activation())) st.Put(keys::Activation(), a);
-
+    // (ACT-1..3 left with the vault upgrade, §6: the module is active from START_HEIGHT)
     Snapshot s;
     s.blockHash = blockHash;
     s.tagged = tag.has_value();
     s.quote = tag.has_value() && tag->IsQuote();
-    s.signalCount = count;
-    s.activation = a;
 
     // ---- v3 (v3 plan §3.8 SNAP): maturity, ARM-1/2, PIN-1/2, seating; dormancy after the halts
     std::vector<std::pair<uint16_t, AttestorRecord>> attestors = st.Attestors();
@@ -1234,23 +1346,14 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     std::optional<int64_t> ratio = GlobalRatioBps(s.collateralZat, pMint, s.supplyCents);
     s.globalRatioBps = ratio.value_or(0);
 
-    // HALT-1..4, ACT-4, ACT-6
+    // HALT-1..3 (HALT-4's NOT_ACTIVE, ACT-4's PARTICIPATION and ACT-6's ENFORCEMENT left with the upgrade, §6)
     uint32_t mask = 0;
-    if (!a.IsActive()) mask |= HALT_NOT_ACTIVE;                                                              // HALT-4
     if (!pMint.has_value()) mask |= HALT_NO_PRICE;                                                          // HALT-1
     if (pMint.has_value() && s.supplyCents > 0 && ratio.has_value() && ratio.value() < P.globalRatioHaltBps) mask |= HALT_GLOBAL_RATIO; // HALT-2
     if (pFast.has_value() && pMid.has_value() && pSlow.has_value()) {                                       // HALT-3
         const int64_t k = BPS - P.divergenceBps;
         if (pFast.value() * BPS < k * pMid.value() || pMid.value() * BPS < k * pSlow.value()) mask |= HALT_DIVERGENCE;
     }
-    bool part = (prev.haltMask & HALT_PARTICIPATION) != 0;                                                  // ACT-4
-    if (part) part = count < (uint32_t)std::max(0, P.activationThreshold);
-    if (a.IsActive() && count < (uint32_t)std::max(0, P.participationFloor)) part = true;
-    if (part) mask |= HALT_PARTICIPATION;
-    bool enf = (prev.haltMask & HALT_ENFORCEMENT) != 0;                                                     // ACT-6
-    if (enf) enf = count < (uint32_t)std::max(0, P.enforcementResume);
-    if (a.IsActive() && count < (uint32_t)std::max(0, P.enforcementFloor)) enf = true;
-    if (enf) mask |= HALT_ENFORCEMENT;
     s.haltMask = mask;
 
     // dormancy (v3, S15): only at H mod DORMANCY_CHECK == 0, with seatedSince and the BundleLog window (H - DORMANCY_BLOCKS, H]
@@ -1302,12 +1405,10 @@ BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, c
     State st(overlay, &ev.undo);
     EvalContext ctx(st, params, height, cache);
 
-    // The records the state hash always carries (Params, Totals, Activation; v3 AttestorSeq, Attest) exist from the first applied block.
+    // The records the state hash always carries (Params, Totals; v3 AttestorSeq, Attest) exist from the first applied block.
     if (!st.Has(keys::Params())) st.Put(keys::Params(), ParamsRecord(params));
     if (!st.Has(keys::Totals())) st.Put(keys::Totals(), Totals());
     if (!st.Has(keys::AttestorSeq())) st.Put(keys::AttestorSeq(), AttestorSeqRecord());
-
-    ev.enforcementOn = EnforcementOn(st, params, height);                                // ACT-5, from Snapshots[H - 1]
 
     // TAG-1..5: the coinbase scriptSig, read first
     std::optional<CoinbaseTag> tag;
@@ -1323,15 +1424,30 @@ BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, c
         st.Put(keys::Tag((uint32_t)height), t);
     }
 
-    // Transactions in block order (TX-0 skips every coinbase)
+    // Transactions in block order (TX-0 skips every coinbase, whose outputs may not be YED templates either,
+    // U-23). BLK-1: the first invalid transaction makes the block invalid; the rest is not evaluated (the
+    // caller discards the overlay).
     for (const CTransaction& tx : block.vtx) {
-        if (tx.IsCoinBase()) continue;
-        TxOutcome o = ProcessTxImpl(ctx, tx);
-        if (o.relevant) ev.txlogs.push_back(std::make_pair(tx.GetHash(), o.log));
-        if (o.redFailed && !ev.blockInvalid) {                                             // BLK-1
-            ev.blockInvalid = true;
-            ev.reason = o.log.verdict + ":" + tx.GetHash().GetHex();
+        if (tx.IsCoinBase()) {
+            for (const CTxOut& o : tx.vout) {
+                if (IsYedVaultOutput(o.scriptPubKey) || IsYedIntentOutput(o.scriptPubKey)) {
+                    ev.blockInvalid = true;
+                    ev.verdict = verdict::YED_TEMPLATE_OUTPUT;
+                    ev.reason = ev.verdict + ":" + tx.GetHash().GetHex();
+                    return ev;
+                }
+            }
+            continue;
         }
+        TxOutcome o = ProcessTxImpl(ctx, tx);
+        if (o.invalid) {
+            ev.txlogs.push_back(std::make_pair(tx.GetHash(), o.log));   // the dry runs (DryRun, yed_getblockverdict) read its verdict
+            ev.blockInvalid = true;
+            ev.verdict = o.log.verdict;
+            ev.reason = o.log.verdict + ":" + tx.GetHash().GetHex();
+            return ev;
+        }
+        if (o.relevant) ev.txlogs.push_back(std::make_pair(tx.GetHash(), o.log));
     }
 
     // BundleLog[H] (R12), before SNAP: dormancy reads the row of H

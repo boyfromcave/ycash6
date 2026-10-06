@@ -4,12 +4,15 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-VOID mints (plan §3.8 MINT-1..8, V3, K3, L14): every failing MINT rule registers a VOID vault
-whose collateral is locked until lockHeight and released by yed_redeem with no burn and no fee
-(void_release_via_yed_redeem); a mint before activation is VOID; a mint under each halt is VOID
-and the wallet refuses it with the matching mintpol-* identifier (MINTPOL-1); the supply-cap race
-across a reorg voids the loser (mint6_cap_race_after_reorg); above the cap only a class at or over
-RECAP_RATIO_BPS mints (W20: class A passes, supplyCapReached and mintableClasses show it).
+Failing mints (plan §3.8 MINT-1..8). Before the vault upgrade every failing MINT rule registered a
+VOID vault; since it (upgrade plan U-23) a failing mint is an invalid transaction: every Yellowback
+mempool refuses it with bad-yellowback-<verdict> (DoS 0) and a block carrying it is rejected with
+the same reason, so no vault, no TxLog row and no state change exist for it. The script keeps one
+case per MINT rule and per halt (the wallet refusing the same mint with the matching mintpol-*
+identifier, MINTPOL-1), the supply-cap race across a reorg (the loser becomes invalid on the joined
+chain, mint6_cap_race_after_reorg), and the soft cap (W20: above the cap only a class whose minimum
+ratio reaches RECAP_RATIO_BPS mints, class A, mint6_cap_is_soft). The VOID release (L14), the mint
+before activation and the participation halt left with VOID vaults and ACT-1..7 (upgrade plan §6).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer; every overlay node runs with the same
 -yellowbacksupplycapbps so the cap verdict is one every node records.
@@ -27,7 +30,6 @@ from test_framework.util import (
 from test_framework.yellowback_util import (
     COIN,
     FEE_VOUT_NONE,
-    GRACE,
     POOLS,
     REF_LAG,
     REF_WINDOW,
@@ -41,12 +43,12 @@ from test_framework.yellowback_util import (
     node_pubkey,
     set_quote,
     term_class_of,
-    wallet_network_fee,
+    yed_params,
 )
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint
 
-SUPPLY_CAP_BPS = 60
+SUPPLY_CAP_BPS = 130         # issuance counts from the upgrade height (U-22), so the cap needs about twice the v2 bps
 
 
 def assert_rpc_error(substr, fn, *args):
@@ -60,7 +62,7 @@ def assert_rpc_error(substr, fn, *args):
 
 class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
-    initial_blocks = 112     # eleven mature coinbases (68.75 YEC) fund the pre-activation raw mint
+    initial_blocks = 112     # eleven mature coinbases (68.75 YEC) fund the first raw mints
 
     def node_args(self, i, extra=None):
         if i != STOCK:
@@ -74,14 +76,13 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         owner_hex = node_pubkey(node)
         owner = hex_str_to_bytes(owner_hex)
         lock_height = ref + lock_blocks
-        claim_height = lock_height + GRACE
-        script = vault_script if vault_script is not None else ym.vault_script(lock_height, owner, claim_height)
+        script = vault_script if vault_script is not None else ym.yed_vault_script(yed_params(), owner, lock_height)
         fee_vout = 3 if fee_addr else FEE_VOUT_NONE
         if payload is None:
             payload = ym.encode_mint('ABC'.index(term_class_of(lock_blocks) or 'A'), cents, lock_height, ref, owner, fee_vout)
         token = (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner)))
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
-        vout = [(collateral, ym.p2sh_script(script))] + ([token, opret] if token_first else [opret, token])
+        vout = [(collateral, script)] + ([token, opret] if token_first else [opret, token])
         enforcement_fee = 0
         if fee_addr:
             enforcement_fee = fee_zat(collateral) if fee is None else fee
@@ -114,25 +115,31 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         return armed_raw_mint(self, node, cents, lock_blocks, ref, collateral, self.price_at(node, ref, 'pMint'), fee_addr=fee_addr)[0]
 
     def send_and_mine(self, node, hex_, miner):
-        """Mine ``hex_`` in a block of its own, assembled in Python on ``miner``.  TPL-2 (strict,
-        the daemon default) skips a MINT whose verdict would be VOID, so no node's template will
-        ever carry the mints this script is about: the block is built by hand (plan 6.0 item 4,
-        docs/mapping.md section 13.5).  ``miner``'s own coinbase tag is used, so the price and
-        signal windows advance exactly as they would with ``generate``."""
+        """Mine ``hex_`` (a valid transaction) in a block of its own, assembled in Python on ``miner``
+        (``miner``'s own coinbase tag is used, so the price windows advance as with ``generate``)."""
         txid = node.decoderawtransaction(hex_)['txid']
         result, _ = mine_block_raw(self.nodes[miner], [hex_])
         assert result is None, result
         self.sync_all(blocks_only=True)
         return txid
 
-    def expect_void(self, txid, reason):
+    def expect_invalid(self, node, hex_, reason, miner):
+        """U-23: ``hex_`` is an invalid transaction with verdict ``reason``: every Yellowback mempool
+        refuses it (``bad-yellowback-<reason>``), a block assembled around it on ``miner`` is
+        rejected with the same reason, and no node records a vault or a TxLog row for it."""
+        txid = node.decoderawtransaction(hex_)['txid']
+        assert_equal(node.yed_validaterawtransaction(hex_)['verdict'], reason)
         for i in (0, 2, 3, 4, 5):
-            v = self.nodes[i].yed_getvault(txid)
-            assert_equal((v['status'], v['voidReason']), ('VOID', reason))
-            assert_equal(v['sweepBefore'], v['claimHeight'])
-            assert_equal(self.nodes[i].yed_gettxinfo(txid)['verdict'], reason)
-            assert_equal(self.nodes[i].yed_gettxinfo(txid)['yedOut'], 0)
+            assert_rpc_error('bad-yellowback-' + reason, self.nodes[i].sendrawtransaction, hex_)
+        tip = self.nodes[miner].getbestblockhash()
+        result, _ = mine_block_raw(self.nodes[miner], [hex_])
+        assert_equal(result, 'bad-yellowback-' + reason)
+        assert_equal(self.nodes[miner].getbestblockhash(), tip)
+        for i in (0, 2, 3, 4, 5):
+            assert_rpc_error('vault-not-found', self.nodes[i].yed_getvault, txid)
+            assert_rpc_error('tx-not-found', self.nodes[i].yed_gettxinfo, txid)
         assert_same_statehash(self.enforcing_nodes())
+        return txid
 
     def ref(self):
         return self.nodes[0].yed_getinfo()['height'] - REF_LAG
@@ -144,16 +151,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         nodes = self.nodes
         user, stock, observer = nodes[0], nodes[STOCK], nodes[5]
 
-# Rule: MINT-4 MINTPOL-1 HALT-4
-        print('mint4_not_active: a mint before activation is VOID; the wallet refuses with mintpol-not-active')
-        assert_equal(user.yed_getactivation()['status'], 'signaling')
-        assert_rpc_error('mintpol-not-active', user.yed_mint, 10000, 48)
-        void_na = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN), 0)   # node 0 mines: no tag
-        self.expect_void(void_na, 'mint-not-active')
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], 1)
-        assert_equal(nodes[2].yed_getstats()['collateralZat'], 0)     # VOID collateral is outside Totals
-
-        print('activate at $50')
+        print('activate at $50 (the upgrade is active from the start: no mint before activation exists, U-22)')
         self.activate(POOLS, quote_usd=50)
         user.sendtoaddress(observer.getnewaddress(), 100)
         self.sync_all()
@@ -169,8 +167,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         assert 'NO_PRICE' in user.yed_gethistory(self.ref(), self.ref())[0]['haltMask']
         assert_equal(user.yed_getprice(self.ref())['pFast'], None)
         assert_rpc_error('mintpol-no-price', user.yed_mint, 10000, 48)
-        void_np = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN), POOLS[0])
-        self.expect_void(void_np, 'mint-halted-no-price')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN), 'mint-halted-no-price', POOLS[0])
         self.mine_round_robin(POOLS, 20)
         assert_equal(user.yed_getstats()['mintingAllowed'], True)
 
@@ -181,8 +178,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, 8 + REF_LAG)
         assert_equal(user.yed_gethistory(self.ref(), self.ref())[0]['haltMask'], ['DIVERGENCE'])
         assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 48)
-        void_dv = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN), POOLS[1])
-        self.expect_void(void_dv, 'mint-halted-divergence')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN), 'mint-halted-divergence', POOLS[1])
         for i in POOLS:
             set_quote(nodes[i], 50)
         self.mine_round_robin(POOLS, 12)
@@ -190,27 +186,23 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, REF_LAG)
 
 # Rule: MINT-1
-        print('mint1_malformed_payload: a truncated MINT payload is not a mint at all (no vault, no TxLog row)')
+        print('mint1_malformed_payload: a truncated MINT payload is not a mint, so its YED vault output is one no rule created')
         good_payload = ym.encode_mint(0, 10000, self.ref() + 48, self.ref(), hex_str_to_bytes(node_pubkey(user)), FEE_VOUT_NONE)
-        txid = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN, payload=good_payload[:-5]), POOLS[2])
-        assert_rpc_error('vault-not-found', user.yed_getvault, txid)
-        assert_rpc_error('tx-not-found', nodes[2].yed_gettxinfo, txid)
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], 3)
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN, payload=good_payload[:-5]), 'yed-template-output', POOLS[2])
+        assert_equal(nodes[2].yed_getstats()['voidVaults'], 0)
 
 # Rule: MINT-2
         print('mint2_bad_ref_height: refHeight = H - 41 is outside the window')
         old = self.ref() - (REF_WINDOW - REF_LAG)     # H - R = 41 at confirmation
         # nExpiryHeight = R + REF_WINDOW would be the next block: the mempool refuses that as
         # expiring soon (TX_EXPIRING_SOON_THRESHOLD), so this adversarial mint carries a later expiry
-        void_ref = self.send_and_mine(user, self.raw_mint(user, 10000, 48, old, 10 * COIN, expiry=user.getblockcount() + 10), POOLS[0])
-        self.expect_void(void_ref, 'bad-mint-ref-height')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, old, 10 * COIN, expiry=user.getblockcount() + 10), 'bad-mint-ref-height', POOLS[0])
 
 # Rule: MINT-3
         print('mint3_bad_vault_script: vout[0] commits to a vault script with another lockHeight')
         r = self.ref()
-        wrong = ym.vault_script(r + 49, hex_str_to_bytes(node_pubkey(user)), r + 49 + GRACE)
-        void_vs = self.send_and_mine(user, self.raw_mint(user, 10000, 48, r, 10 * COIN, vault_script=wrong), POOLS[1])
-        self.expect_void(void_vs, 'bad-mint-vault-script')
+        wrong = ym.yed_vault_script(yed_params(), hex_str_to_bytes(node_pubkey(user)), r + 49)
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, 10 * COIN, vault_script=wrong), 'bad-mint-vault-script', POOLS[1])
 
 # Rule: MINT-5 K14
         print('mint5_bad_collateral: 0.00001 YEC short of the requirement')
@@ -218,11 +210,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         req = self.collateral()
         # armed (R15): MINT-8 precedes MINT-5, so the shape carries the pool fee too; unarmed the v2 order stands
         col_fee = user.yed_getfeepayee(r, req - 1000)['eligible'][0] if self.armed else None
-        void_col = self.send_and_mine(user, self.raw_mint_v3(user, 10000, 48, r, req - 1000, fee_addr=col_fee), POOLS[2])
-        self.expect_void(void_col, 'bad-mint-collateral')
-        void_col_vault = user.yed_getvault(void_col)
-        assert_equal(void_col_vault['collateralZat'], req - 1000)
-        assert_equal(void_col_vault['mintedCents'], 10000)     # recorded from the payload; a VOID vault carries no debt
+        self.expect_invalid(user, self.raw_mint_v3(user, 10000, 48, r, req - 1000, fee_addr=col_fee), 'bad-mint-collateral', POOLS[2])
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 0)
         print('the wallet never under-collateralises: yed_mint at the same snapshot is ACTIVE')
         good = self.mint(user, 10000, 48)
@@ -234,18 +222,15 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: MINT-7
         print('mint7_bad_token_output: vout[1] is the OP_RETURN')
-        void_tok = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), self.collateral(), token_first=False), POOLS[1])
-        self.expect_void(void_tok, 'bad-mint-token-output')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), self.collateral(), token_first=False), 'bad-mint-token-output', POOLS[1])
 
 # Rule: MINT-8 FEE-2
         print('mint8_bad_fee: the fee output pays a key outside E(R); then a short fee to an eligible key')
         r = self.ref()
-        void_fee = self.send_and_mine(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=stock.getnewaddress()), POOLS[2])
-        self.expect_void(void_fee, 'bad-mint-fee')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=stock.getnewaddress()), 'bad-mint-fee', POOLS[2])
         r = self.ref()
         eligible = user.yed_getfeepayee(r, self.collateral())['eligible'][0]
-        void_short = self.send_and_mine(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=eligible, fee=fee_zat(self.collateral()) - 1), POOLS[0])
-        self.expect_void(void_short, 'bad-mint-fee')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=eligible, fee=fee_zat(self.collateral()) - 1), 'bad-mint-fee', POOLS[0])
         print('and the same shape with the right fee is ACTIVE')
         r = self.ref()
         # armed: pMint = min(xMint, aMint) is the attested price, so the requirement is sized at it
@@ -255,40 +240,17 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_getvault(ok)['status'], 'ACTIVE')
         assert_equal(user.yed_getvault(ok)['feePaidZat'], fee_zat(col))
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000)
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], 9)
+        assert_equal(nodes[2].yed_getstats()['voidVaults'], 0)
         self.checkpoint('rule cases')
-
-# Rule: MINT-4 ACT-4 MINTPOL-1
-        print('mintpol-participation: the pools stop signalling; 27 unsignalled blocks set PARTICIPATION')
-        for i in POOLS:
-            self.restart(i, ['-yellowbacksignal=0'])
-            set_quote(nodes[i], 50)
-        self.mine_round_robin(POOLS, 27 + REF_LAG)
-        act = user.yed_getactivation()
-        assert_equal(act['mintHalted'], True)
-        assert_equal(act['status'], 'active')
-        assert_rpc_error('mintpol-participation', user.yed_mint, 10000, 48)
-        void_pa = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), self.collateral()), POOLS[0])
-        self.expect_void(void_pa, 'mint-halted-participation')
-        for i in POOLS:
-            self.restart(i)
-            set_quote(nodes[i], 50)
-        self.mine_round_robin(POOLS, 48 + REF_LAG)
-        assert_equal(user.yed_getactivation()['mintHalted'], False)
-        assert_equal(user.yed_getstats()['mintingAllowed'], True)
 
 # Rule: MINT-6 UNDO
         print('mint6_cap_race_after_reorg: two mints that together exceed the cap on different branches')
-        # W20: the cap is soft above RECAP_RATIO_BPS, so class A (500 %) mints through it; the race
-        # is run with class C (300 %, lock 145), the class the cap still refuses
         stats = user.yed_getstats()
         headroom = stats['supplyCapCents'] - stats['supplyCents']
         m = (headroom * 6 // 10) // 100 * 100
         assert_greater_than(m, 10000)
-        void_before = stats['voidVaults']
-        assert_equal((user.yed_getinfo()['supplyCapReached'], sorted(stats['mintableClasses'])), (False, ['A', 'B', 'C']))
         self.split_network()
-        mint_x = self.mint(user, m, 145)                   # the carrier's block, then the mint's
+        mint_x = self.mint(user, m, 145)                   # class C (300 %): the cap stays hard for it (W20); the carrier's block, then the mint's
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_x['txid'])['status'], 'ACTIVE')
@@ -298,32 +260,37 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.join_network()
         assert_equal(user.getbestblockhash(), stock.getbestblockhash())
         assert_equal(user.yed_getvault(mint_y['txid'])['status'], 'ACTIVE')
-        assert mint_x['txid'] in user.getrawmempool()
-        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
-        # On the joined chain X is over the cap, so its verdict is VOID and TPL-2 (strict) keeps
-        # it out of every template — including the one that would confirm the race.  Its block is
-        # assembled in Python, and the stock half never held X so its mempool is not synced here
-        # (plan 6.0 item 4, docs/mapping.md section 13.5).  v3: X's carrier came back with it and
-        # must confirm first (a pool template carries the carrier and skips X).
-        x_hex = user.getrawtransaction(mint_x['txid'])
+        # On the joined chain X is over the cap: an invalid transaction (U-23), dropped from every
+        # mempool at the new tip (the ConnectTip sweep). X's carrier came back with it and confirms
+        # in the next pool block; a block assembled around X itself is rejected.
+        x_hex = user.gettransaction(mint_x['txid'])['hex']      # no -txindex, and X has left the mempool
         nodes[POOLS[1]].generate(1)
         self.sync_all(blocks_only=True)
-        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
-        assert mint_x['txid'] in user.getrawmempool()
-        result, _ = mine_block_raw(nodes[POOLS[1]], [x_hex])
-        assert result is None, result
-        self.sync_all(blocks_only=True)
-        self.expect_void(mint_x['txid'], 'mint-supply-cap')
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 1)
+        for i in (0, 2, 3, 4):
+            assert mint_x['txid'] not in nodes[i].getrawmempool()
+        self.expect_invalid(user, x_hex, 'mint-supply-cap', POOLS[1])
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000 + m)
         stats = user.yed_getstats()      # v3: the carrier blocks added issuance, so the cap moved; provoke it from the current numbers
-        over = stats['supplyCapCents'] - stats['supplyCents'] + 100
-        # W20 / MINTPOL-1: a class C mint over the cap is refused and the message names the class that
-        # can mint (A, at a sigma multiplier of 1); the same amount as class A passes the gate
+        over = stats['supplyCapCents'] - stats['supplyCents'] + 2000   # the carrier's and the mint's blocks add issuance (~190 cents of cap each here): stay over the moving cap
+        self.checkpoint('cap race')
+
+# Rule: MINT-6 MINTPOL-1
+        print('mint6_cap_is_soft (W20): at the cap class C is refused and the message names class A; class A mints through and the cap is reached')
         msg = assert_rpc_error('mintpol-cap', user.yed_mint, over, 145)
         assert 'class A' in msg, msg
-        assert_equal(user.yed_getinfo()["supplyCapReached"], over < 10100)     # headroom below the smallest mint
-        self.checkpoint('cap race')
+        assert_equal(user.yed_getinfo()['supplyCapReached'], False)
+        assert_equal(stats['mintableClasses'], ['A', 'B', 'C'])
+        mint_a = self.mint(user, over, 48)
+        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
+        self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
+        stats = user.yed_getstats()
+        assert_greater_than(stats['supplyCents'], stats['supplyCapCents'])
+        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['A']))
+        msg = assert_rpc_error('mintpol-cap', user.yed_mint, 10000, 145)
+        assert 'class A' in msg, msg
+        self.model_check(nodes[2])
+        self.checkpoint('soft cap')
 
 # Rule: MINT-4 HALT-2 MINTPOL-1
         print('mintpol-global-ratio: the price falls to $20 and the global ratio to 200 %')
@@ -337,69 +304,23 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)
         assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 48)
         assert_equal(user.yed_getstats()['mintableClasses'], [])
-        void_gr = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[2])
-        self.expect_void(void_gr, 'mint-halted-global-ratio')
+        self.expect_invalid(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[2])
 
-# Rule: HALT-2 MINT-6 MINTPOL-1
-        print('W16 and W20 under this script\'s supply cap: the windows agree at $20, the halt persists, the cap -- proportional to the price -- is reached, and class A mints through both')
+# Rule: HALT-2 MINTPOL-1
+        print('W16 under this script\'s supply cap: the windows agree at $20, the halt persists, and the cap -- proportional to the price -- binds first')
         self.mine_round_robin(POOLS, 64)
         stats = user.yed_getstats()
         assert_equal(stats['haltMask'], ['GLOBAL_RATIO'])
         # SUPPLY_CAP_BPS is tiny here (the cap-race case above): the price drop shrank the cap under the
-        # supply. W20: the cap is soft above RECAP_RATIO_BPS, so the class at the floor (A) is the one
-        # class that can mint -- through the halt (W16) and above the cap (W20) alike
+        # supply, so the halt and the cap both hold; each lets through only the classes at the
+        # recapitalisation floor (W16, W20), class A here
         assert_greater_than(stats['supplyCents'] + 10000, stats['supplyCapCents'])
-        assert_equal((stats['mintingAllowed'], stats['mintableClasses']), (False, ['A']))
-        assert_equal(user.yed_getinfo()['supplyCapReached'], True)
+        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['A']))
         assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C: the halt, before the cap
-        void_c = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[1])
-        self.expect_void(void_c, 'mint-halted-global-ratio')
-        supply_before = stats['supplyCents']
-        mint_a = self.mint(user, 10000, 48)                                     # class A: through the halt, above the cap
-        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
-        self.mine(POOLS[0])                                                     # a pool template carries it (TPL-2: the verdict is OK)
-        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
-        stats = user.yed_getstats()
-        assert_equal(stats['supplyCents'], supply_before + 10000)
-        assert_greater_than(stats['supplyCents'], stats['supplyCapCents'])
-        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintableClasses']), (True, ['A']))
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 100)     # class B (400 % at 1x): the halt too
+        self.expect_invalid(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[1])
         self.model_check(nodes[2])
-
-# Rule: RED-1 IN-2 K3
-        print('void_release_via_yed_redeem (L14): the collateral of the under-collateralised mint comes back with no burn and no fee')
-        locked = user.yed_getvault(void_gr)
-        assert_greater_than(locked['lockHeight'], user.getblockcount())
-        assert_rpc_error('vault-locked', user.yed_redeem, void_gr)
-        assert_equal([p['canRedeem'] for p in user.yed_listpositions() if p['txid'] == void_gr], [False])
-        v = user.yed_getvault(void_col)
-        assert_greater_than(user.getblockcount() + 1, v['lockHeight'])
-        pos = [p for p in user.yed_listpositions('VOID') if p['txid'] == void_col][0]
-        assert_equal((pos['canRedeem'], pos['canClaim'], pos['canSweep'], pos['sweepBefore']), (True, False, False, v['claimHeight']))
-        assert_rpc_error('vault-not-active', user.yed_claim, void_col)
-        yec_before = user.getbalance()
-        released = user.yed_redeem(void_col)
-        assert_equal((released['burnedCents'], released['feeZat'], released['payee']), (0, 0, None))
-        raw = user.getrawtransaction(released['txid'], 1)
-        assert_equal(released['collateralOut'], v['collateralZat'] - wallet_network_fee(raw))
-        assert_equal(len(raw['vin']), 1)
-        assert_equal(len(raw['vout']), 1)
-        assert_equal(raw['vout'][0]['scriptPubKey']['addresses'], [released['to']])
-        assert_equal(raw['locktime'], v['lockHeight'])
-        assert_equal(nodes[2].yed_validaterawtransaction(raw['hex'])['wouldBeRejected'], False)
-        sync_mempools(nodes)                      # enforcing, stock and observer all admit it
-        assert released['txid'] in stock.getrawmempool()
-        self.mine(STOCK)                          # the stock node mines it
-        for i in (0, 2, 3, 4, 5):
-            c = nodes[i].yed_getvault(void_col)
-            assert_equal((c['status'], c['unbacked'], c['burnedCents'], c['closingTxid']), ('CLOSED', False, 0, released['txid']))
-        assert_greater_than(user.getbalance(), yec_before + 9)
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 2)   # + cap race + global ratio (C) + W16's class C - the release
-        assert_equal(nodes[2].yed_gettxinfo(released['txid'])['closedVaults'], [{'txid': void_col, 'vout': 0}])
-        rows = {r_['txid']: r_ for r_ in user.yed_listtransactions()}
-        assert_equal(rows[released['txid']]['unbacked'], False)
-        assert_rpc_error('vault-not-active', user.yed_redeem, void_col)
-        self.model_check(nodes[2])
-        self.checkpoint('release')
+        self.checkpoint('end')
 
 
 if __name__ == '__main__':

@@ -43,10 +43,8 @@ from test_framework.util import (
     PORT_MIN,
     PORT_RANGE,
     assert_equal,
-    connect_nodes_bi,
     rpc_auth_pair,
     rpc_port,
-    start_nodes,
     sync_blocks,
 )
 from test_framework.yellowback_util import (
@@ -55,6 +53,7 @@ from test_framework.yellowback_util import (
     pool_args,
     set_quote,
     usd_to_micro,
+    start_nodes_with_attestor_set,
     yellowback_node_args,
 )
 
@@ -97,9 +96,9 @@ class YellowbackStratumTest(BitcoinTestFramework):
         self.pool_address = address_of(POOL_WIFS[0])
 
     def setup_network(self, split=False):
-        args = [pool_args(self.pool_address), yellowback_node_args()]
-        self.nodes = start_nodes(2, self.options.tmpdir, extra_args=args)
-        connect_nodes_bi(self.nodes, 0, 1)
+        # U-22: Yellowback is live only with the YED attestor set, created on node 0 first
+        self.nodes = start_nodes_with_attestor_set(
+            2, self.options.tmpdir, lambda i: pool_args(self.pool_address) if i == 0 else yellowback_node_args(), [(0, 1)])
         self.is_network_split = False
         self.nodes[0].importprivkey(POOL_WIFS[0], 'yellowback-payout', False)
         self.sync_all()

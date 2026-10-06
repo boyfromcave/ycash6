@@ -43,7 +43,13 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "d3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0";
+const std::string GOLDEN_HASH = "4abefe81e3822134b15fada7418d9abe9ab3d3dc3332da96b383ef8a6f97e907";
+
+/** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
+uint256 TestSet()
+{
+    return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7");
+}
 
 uint160 KeyOf(int i)
 {
@@ -61,7 +67,7 @@ struct MintOpts
     std::optional<CPubKey> owner;
     std::vector<unsigned char> rawOwner; //!< overrides the key bytes in the payload
     int extraOutputs = 0;
-    bool p2shVault = true;
+    bool p2shVault = true;           //!< the vault output is the V template (U-23; the name predates it); false = P2PKH(owner)
     std::vector<COutPoint> yedInputs;
     std::optional<CScript> vaultScriptOverride;
     // v3
@@ -114,14 +120,15 @@ struct Fixture
     MemoryStateView view;
     std::map<int, UndoRecord> undos;
     std::map<int, BlockEvaluation> evals;
+    std::map<uint256, TxLogRecord> refused;  //!< U-21: transactions the module made invalid, which Mine() left out of the block
     int tip;
     CKey ownerKey, userKey;
     int fakeCounter;
     std::vector<CKey> hotKeys, bondKeys;    //!< v3: attestor i registers with hotKeys[i] / bondKeys[i] and becomes seq i
     SigCache* cache = nullptr;
 
-    explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int until = 0, int armMin = 3)
-        : P(RegtestParams(start, sigmaRef, capBps, until, armMin)), tip(start - 1), fakeCounter(0)
+    explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int armMin = 3)
+        : P(RegtestParams(start, sigmaRef, capBps, TestSet(), armMin)), tip(start - 1), fakeCounter(0)
     {
         ownerKey = CKey::TestOnlyRandomKey(true);
         userKey = CKey::TestOnlyRandomKey(true);
@@ -182,20 +189,46 @@ struct Fixture
         return cb;
     }
 
-    /** Evaluate and commit a block at the next height (or `height`). */
-    BlockEvaluation Mine(const std::optional<CoinbaseTag>& tag = std::nullopt, std::vector<CMutableTransaction> txs = {}, int height = -1)
+    /** Evaluate a block at the next height (or `height`) without committing it. */
+    BlockEvaluation Evaluate(const std::optional<CoinbaseTag>& tag, const std::vector<CMutableTransaction>& txs, int height = -1)
     {
         if (height < 0) height = tip + 1;
         CBlock block;
         block.vtx.push_back(CTransaction(Coinbase(height, tag)));
         for (auto& m : txs) block.vtx.push_back(CTransaction(m));
         OverlayStateView overlay(view);
-        BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, FakeHash(height), SUBSIDY, cache);
-        overlay.Commit();
-        undos[height] = ev.undo;
-        evals[height] = ev;
-        tip = height;
-        return ev;
+        return EvaluateBlock(overlay, P, block, height, FakeHash(height), SUBSIDY, cache);
+    }
+
+    /**
+     * Evaluate and commit a block at the next height (or `height`). U-21: a transaction the module makes
+     * invalid would make the block invalid, so, as the template filter does, it is left out (its log kept
+     * in `refused`, Log() returns it) and the block is evaluated again without it.
+     */
+    BlockEvaluation Mine(const std::optional<CoinbaseTag>& tag = std::nullopt, std::vector<CMutableTransaction> txs = {}, int height = -1)
+    {
+        if (height < 0) height = tip + 1;
+        for (;;) {
+            CBlock block;
+            block.vtx.push_back(CTransaction(Coinbase(height, tag)));
+            for (auto& m : txs) block.vtx.push_back(CTransaction(m));
+            OverlayStateView overlay(view);
+            BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, FakeHash(height), SUBSIDY, cache);
+            if (ev.blockInvalid) {
+                BOOST_REQUIRE(!ev.txlogs.empty());
+                const uint256 bad = ev.txlogs.back().first;
+                refused[bad] = ev.txlogs.back().second;
+                size_t before = txs.size();
+                txs.erase(std::remove_if(txs.begin(), txs.end(), [&](const CMutableTransaction& m) { return CTransaction(m).GetHash() == bad; }), txs.end());
+                BOOST_REQUIRE(txs.size() < before);
+                continue;
+            }
+            overlay.Commit();
+            undos[height] = ev.undo;
+            evals[height] = ev;
+            tip = height;
+            return ev;
+        }
     }
 
     void Undo()
@@ -212,11 +245,12 @@ struct Fixture
         while (tip < h) Mine(Quote(price, (tip + 1) % 3, signal));
     }
 
-    /** ACTIVE with every window filled and no halt: quote+signal to START + 2 * SIGNAL_WINDOW + 2. */
+    /** Every window filled and no halt (the module is active from START, U-22): quotes to START + 130 (v2's
+     *  START + 2 * SIGNAL_WINDOW + 2, kept so the cases' heights stay as they were). */
+    static const int ACTIVATE_BLOCKS = 130;
     void Activate(MicroUsd price = 50000)
     {
-        MineQuotesTo(P.startHeight + 2 * P.signalWindow + 2, price);
-        BOOST_REQUIRE(Snap(tip).activation.IsActive());
+        MineQuotesTo(P.startHeight + ACTIVATE_BLOCKS, price);
         BOOST_REQUIRE_EQUAL(Snap(tip).haltMask, 0u);
     }
 
@@ -225,7 +259,20 @@ struct Fixture
     Totals GetTotals() const { return State(const_cast<MemoryStateView&>(view)).GetTotals(); }
     std::optional<VaultRecord> Vault(const uint256& txid) const { return State(const_cast<MemoryStateView&>(view)).GetVault(COutPoint(txid, 0)); }
     std::optional<TokenRecord> Token(const uint256& txid, uint32_t n) const { return State(const_cast<MemoryStateView&>(view)).GetToken(COutPoint(txid, n)); }
-    std::optional<TxLogRecord> Log(const uint256& txid) const { return State(const_cast<MemoryStateView&>(view)).GetTxLog(txid); }
+    std::optional<TxLogRecord> Log(const uint256& txid) const
+    {
+        std::optional<TxLogRecord> l = State(const_cast<MemoryStateView&>(view)).GetTxLog(txid);
+        if (l.has_value()) return l;
+        auto it = refused.find(txid);
+        if (it != refused.end()) return it->second;
+        return std::nullopt;
+    }
+    /** U-21: the verdict that made `txid` invalid, or "" when it was not refused. */
+    std::string Refused(const uint256& txid) const
+    {
+        auto it = refused.find(txid);
+        return it == refused.end() ? std::string() : it->second.verdict;
+    }
 
     CAmount Required(Cents cents, int termClass, int refHeight) const
     {
@@ -240,7 +287,7 @@ struct Fixture
     {
         CPubKey owner = o.owner.value_or(ownerKey.GetPubKey());
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = o.vaultScriptOverride.value_or(VaultScript(lock, owner, (uint32_t)(lock + P.grace)));
+        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, owner, lock));     // U-23: the V template
         CAmount collateral = o.collateral;
         // An invalid class is a payload the verdict rejects (bad-mint-class). Collateral is
         // computed from a real class so the helper does not index baseRatioBps out of range;
@@ -249,7 +296,7 @@ struct Fixture
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
         for (const COutPoint& op : o.yedInputs) m.vin.push_back(CTxIn(op));
-        m.vout.push_back(CTxOut(collateral, o.p2shVault ? P2SHScript(vs) : GetScriptForDestination(owner.GetID())));
+        m.vout.push_back(CTxOut(collateral, o.p2shVault ? vs : GetScriptForDestination(owner.GetID())));
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, owner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
                                   o.attestPayee >= 0 ? o.attestFeeVout : FEE_VOUT_NONE);
@@ -283,20 +330,32 @@ struct Fixture
         return m;
     }
 
-    /** vin[0] = vault (or a YED input when !vaultFirst), YED inputs; vout[0] collateral, vout[1] fee, vout[2] OP_RETURN, vout[3..] tokens. */
+    /**
+     * vin[0] = vault (or a YED input when !vaultFirst), YED inputs; vout[0] collateral, vout[1] fee, vout[2] OP_RETURN,
+     * vout[3..] tokens. U-23: the owner path's scriptSig is `<sig> OP_2`, the claim's `OP_4`; a claim's vout[0] is the
+     * claimant's intent (paying userKey) of the vault's value less the residual, and the residual (residualValue) is
+     * the owner's intent (paying residualScript, default P2PKH(owner)); the fees come from a fake extra input.
+     */
     CMutableTransaction SpendTx(const uint256& vaultTxid, const std::vector<COutPoint>& yed, int refHeight, SpendOpts o = SpendOpts())
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = VaultScript((uint32_t)v->lockHeight, v->OwnerKey(), (uint32_t)v->claimHeight);
-        CScript sig = o.scriptSig.value_or(o.ownerPath ? OwnerScriptSig(valtype(71, 0x30), vs) : ClaimScriptSig(vs));
+        CScript vs = YedVaultScript(P, v->OwnerKey(), v->lockHeight);
+        CScript sig = o.scriptSig.value_or(o.ownerPath ? (CScript() << valtype(71, 0x30) << OP_2) : (CScript() << OP_4));
+        const vault::VaultParams vp = YedVaultParams(P, v->OwnerKey(), v->lockHeight);
         CMutableTransaction m;
         m.nLockTime = o.ownerPath ? v->lockHeight : v->claimHeight;
         if (!o.vaultFirst) m.vin.push_back(CTxIn(yed.front()));
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), sig, 0xFFFFFFFE));
         for (const COutPoint& e : o.extraVaults) m.vin.push_back(CTxIn(e, sig, 0xFFFFFFFE));
         for (size_t i = o.vaultFirst ? 0 : 1; i < yed.size(); i++) m.vin.push_back(CTxIn(yed[i]));
-        m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        if (o.ownerPath) {
+            m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        } else {
+            const CAmount residual = o.residualValue.value_or(0);
+            m.vout.push_back(CTxOut(v->collateralZat - residual, vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(userKey.GetPubKey().GetID())))));
+            m.vin.push_back(CTxIn(FakeInput()));     // the claim's fees (the vault's value goes to intents)
+        }
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
         CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(v->collateralZat, P.feeMin, P.feeBps);
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
@@ -315,7 +374,8 @@ struct Fixture
             m.vout.push_back(CTxOut(afee, GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID())));
         }
         if (o.residualValue.has_value()) {
-            m.vout.push_back(CTxOut(o.residualValue.value(), o.residualScript.value_or(GetScriptForDestination(v->OwnerKey().GetID()))));
+            const CScript to = o.residualScript.value_or(GetScriptForDestination(v->OwnerKey().GetID()));
+            m.vout.push_back(CTxOut(o.residualValue.value(), o.ownerPath ? to : vault::BuildIntent(vault::IntentFor(vp, vs, to))));
         }
         if (o.bundle.has_value()) m.vin.push_back(CarrierIn(o.bundle.value()));
         return m;
@@ -355,7 +415,7 @@ struct Fixture
     /** Activate (if needed), register n attestors and mine until ARMED. */
     void Arm(int n = 3, MicroUsd price = 50000)
     {
-        if (tip < P.startHeight + 2 * P.signalWindow + 2) Activate(price);
+        if (tip < P.startHeight + ACTIVATE_BLOCKS) Activate(price);
         Register(n);
         while (!Attest().IsArmed()) Mine(Quote(price, (tip + 1) % 3));
         Mine(Quote(price, (tip + 1) % 3));       // one more: a transaction at tip + 1 reads Snapshots[tip - 1], which must be ARMED
@@ -475,11 +535,10 @@ struct Fixture
         CMutableTransaction m = MintTx(cents, lockBlocks, ref);
         Mine(Quote(50000, (tip + 1) % 3), { m });
         const uint256 txid = CTransaction(m).GetHash();
-        BOOST_REQUIRE(Vault(txid).has_value());
         Snapshot rs = Snap(ref);
-        BOOST_REQUIRE_MESSAGE(Vault(txid)->status == (uint8_t)VaultStatus::ACTIVE,
+        BOOST_REQUIRE_MESSAGE(Vault(txid).has_value() && Vault(txid)->status == (uint8_t)VaultStatus::ACTIVE,
                               strprintf("MintActive at %d ref %d: %s (supply %d collateral %d ratio %d pMint %d mask %u)", tip, ref,
-                                        Vault(txid)->voidReason, rs.supplyCents, rs.collateralZat, rs.globalRatioBps, rs.pMint, rs.haltMask));
+                                        Refused(txid), rs.supplyCents, rs.collateralZat, rs.globalRatioBps, rs.pMint, rs.haltMask));
         return txid;
     }
 };
@@ -519,7 +578,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_golden, json_tests::yellowback_golden + sizeof(json_tests::yellowback_golden))));
     BOOST_REQUIRE(doc.isObject());
     const UniValue& pj = doc["params"];
-    yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), pj["enforceUntil"].get_int(),
+    yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), uint256S(pj["attestorSetId"].get_str()),
                                          pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
                                          pj["mintRequiresArmed"].get_bool());
     MemoryStateView view;
@@ -541,18 +600,25 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         OverlayStateView overlay(view);
         BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, hash, b["subsidyZat"].get_int64());
         overlay.Discard();
+        if (ev.blockInvalid) {
+            // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
+            // the next entry is the same height mined again without the offending transaction.
+            static const std::map<int, std::string> expected = {
+                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 251, "mint9-no-bundle" } };
+            invalidBlocks++;
+            BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
+            BOOST_REQUIRE(expected.count(height));
+            BOOST_CHECK_EQUAL(ev.verdict, expected.at(height));
+            BOOST_CHECK_EQUAL(ev.reason.substr(0, ev.verdict.size() + 1), ev.verdict + ":");
+            continue;
+        }
+        BOOST_CHECK(!b.exists("invalid") || !b["invalid"].get_bool());
         UndoRecord undo;
         BOOST_REQUIRE(!ApplyBlock(view, P, block, height, hash, b["subsidyZat"].get_int64(), undo).has_value());
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
-        if (ev.blockInvalid) {
-            invalidBlocks++;
-            BOOST_CHECK_EQUAL(height, 217);              // BLK-1 with enforcement on; applied anyway for the vector
-            BOOST_CHECK(ev.enforcementOn);
-            BOOST_CHECK_EQUAL(ev.reason.substr(0, 22), "vault-spend-malformed:");
-        }
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 1);
+    BOOST_CHECK_EQUAL(invalidBlocks, 3);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -581,10 +647,9 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
 BOOST_AUTO_TEST_CASE(tag3_signal_only_registers_nobody)
 {
     Fixture f;
-    f.Mine(Fixture::SignalOnly(1));                       // signal-only: counts for ACT-1, no quote, no payee
+    f.Mine(Fixture::SignalOnly(1));                       // signal-only: no quote, no payee (ACT-1 left with the upgrade)
     BOOST_CHECK(f.Snap(1).tagged);
     BOOST_CHECK(!f.Snap(1).quote);
-    BOOST_CHECK_EQUAL(f.Snap(1).signalCount, 1u);
     BOOST_CHECK(EligiblePayees(f.view, f.P, 1).empty());
     BOOST_CHECK(!Registered(f.view, f.P, CKeyID(KeyOf(1)), 1));
     f.Mine(Fixture::Quote(50000, 2));
@@ -600,7 +665,6 @@ BOOST_AUTO_TEST_CASE(tag3_signal_only_registers_nobody)
     ev = f.Mine(std::nullopt);
     BOOST_CHECK(!ev.blockInvalid);
     BOOST_CHECK(!f.Snap(4).tagged);
-    BOOST_CHECK_EQUAL(f.Snap(4).signalCount, 2u);
     // REG-1 lapse: registration ends N_REG blocks after the last quote.
     BOOST_CHECK(Registered(f.view, f.P, CKeyID(KeyOf(2)), 2 + f.P.nReg - 1));
     BOOST_CHECK(!Registered(f.view, f.P, CKeyID(KeyOf(2)), 2 + f.P.nReg));
@@ -655,118 +719,6 @@ BOOST_AUTO_TEST_CASE(price1_mid_slow_need_two_thirds)
     BOOST_CHECK(f.Snap(44).PMint().has_value());
 }
 
-// Rule: ACT-1
-// Rule: ACT-2
-// Rule: ACT-3
-// Rule: ACT-4
-// Rule: HALT-4
-BOOST_AUTO_TEST_CASE(act2_lockin_at_exactly_threshold_then_delay)
-{
-    Fixture f;
-    // 47 signalling blocks (18..64) in the first 64: no lock-in at 64; the 48th signal at 65 locks in.
-    for (int h = 1; h <= 64; h++) f.Mine(Fixture::Quote(50000, h % 3, h >= 18));
-    BOOST_CHECK_EQUAL(f.Snap(64).signalCount, 47u);
-    BOOST_CHECK_EQUAL(f.Snap(64).activation.status, (uint8_t)ActivationStatus::SIGNALING);
-    BOOST_CHECK(f.Snap(64).haltMask & HALT_NOT_ACTIVE);
-    f.Mine(Fixture::Quote(50000, 0, true));
-    BOOST_CHECK_EQUAL(f.Snap(65).signalCount, 48u);
-    BOOST_CHECK_EQUAL(f.Snap(65).activation.status, (uint8_t)ActivationStatus::LOCKED_IN);
-    BOOST_CHECK_EQUAL(f.Snap(65).activation.lockInHeight, 65);
-    BOOST_CHECK_EQUAL(f.Snap(65).activation.activateHeight, 65 + 64);
-    // ACT-3 exactly at activateHeight, whatever the signalling does meanwhile (here it collapses: ACT-4 halts).
-    f.MineQuotesTo(128, 50000, false);
-    BOOST_CHECK_EQUAL(f.Snap(128).activation.status, (uint8_t)ActivationStatus::LOCKED_IN);
-    f.Mine(Fixture::Quote(50000, 2, false));
-    BOOST_CHECK_EQUAL(f.Snap(129).activation.status, (uint8_t)ActivationStatus::ACTIVE);
-    BOOST_CHECK(!(f.Snap(129).haltMask & HALT_NOT_ACTIVE));
-    BOOST_CHECK(f.Snap(129).haltMask & HALT_PARTICIPATION);   // signalCount 0 < 39
-    BOOST_CHECK(f.Snap(129).haltMask & HALT_ENFORCEMENT);
-    BOOST_CHECK(!EnforcementOn(State(f.view), f.P, 130));
-}
-
-// Rule: ACT-2
-// Rule: ACT-4
-BOOST_AUTO_TEST_CASE(act2_lockin_needs_full_window)
-{
-    // START = 10: lock-in is possible only at H >= START + 63 even if the count is reached earlier.
-    Fixture f(10);
-    for (int h = 10; h <= 60; h++) f.Mine(Fixture::Quote(50000, h % 3));   // 51 signals by 60, but H < 73
-    BOOST_CHECK_EQUAL(f.Snap(60).activation.status, (uint8_t)ActivationStatus::SIGNALING);
-    f.MineQuotesTo(72);
-    BOOST_CHECK_EQUAL(f.Snap(72).activation.status, (uint8_t)ActivationStatus::SIGNALING);
-    f.MineQuotesTo(73);
-    BOOST_CHECK_EQUAL(f.Snap(73).activation.status, (uint8_t)ActivationStatus::LOCKED_IN);
-}
-
-// Rule: ACT-4
-// Rule: ACT-6
-// Rule: ACT-5
-BOOST_AUTO_TEST_CASE(act6_enforcement_floor_and_hysteresis)
-{
-    Fixture f;
-    f.Activate();
-    const int h0 = f.tip;
-    BOOST_CHECK(EnforcementOn(State(f.view), f.P, h0 + 1));
-    // Drop signalling to 38 of 64 (below PARTICIPATION_FLOOR 39, above ENFORCEMENT_FLOOR 32): mint halt only.
-    int signals = 64;
-    while (signals > 38) { f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, false)); signals--; }
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 38u);
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_PARTICIPATION);
-    BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_ENFORCEMENT));
-    BOOST_CHECK(EnforcementOn(State(f.view), f.P, f.tip + 1));
-    // Below 32: ENFORCEMENT set; it implies PARTICIPATION.
-    while (signals > 31) { f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, false)); signals--; }
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 31u);
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_ENFORCEMENT);
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_PARTICIPATION);
-    BOOST_CHECK(!EnforcementOn(State(f.view), f.P, f.tip + 1));
-    // Empty the window of signals, then refill: held while < ENFORCEMENT_RESUME (39): at 38 still set;
-    // cleared at 39. PARTICIPATION stays until 48.
-    while (signals > 0) { f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, false)); signals--; }
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 0u);
-    while (signals < 38) { f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, true)); signals++; }
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 38u);
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_ENFORCEMENT);
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, true)); signals++;
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 39u);
-    BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_ENFORCEMENT));
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_PARTICIPATION);
-    while (signals < 47) { f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, true)); signals++; }
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_PARTICIPATION);
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, true));
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).signalCount, 48u);
-    BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_PARTICIPATION));
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).haltMask, 0u);
-    // Every bit implies PARTICIPATION whenever ENFORCEMENT is set, over the whole run.
-    for (int h = h0; h <= f.tip; h++) {
-        const uint32_t m = f.Snap(h).haltMask;
-        if (m & HALT_ENFORCEMENT) BOOST_CHECK(m & HALT_PARTICIPATION);
-    }
-}
-
-// Rule: ACT-5
-BOOST_AUTO_TEST_CASE(act5_sunset_stops_rejection)
-{
-    Fixture f(1, 0, 0, 0);
-    f.Activate();
-    const uint256 vault = f.MintActive();
-    // Same chain, a parameter set whose sunset is behind us: enforcementOn is false with the same blockInvalid.
-    yellowback::Params sunset = RegtestParams(1, 0, 0, f.tip);
-    CMutableTransaction sweep = f.SpendTx(vault, {}, f.tip - 1, [] { SpendOpts o; o.payload = false; return o; }());
-    CBlock block;
-    block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, std::nullopt)));
-    block.vtx.push_back(CTransaction(sweep));
-    OverlayStateView a(f.view);
-    BlockEvaluation live = EvaluateBlock(a, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
-    OverlayStateView b(f.view);
-    BlockEvaluation past = EvaluateBlock(b, sunset, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
-    BOOST_CHECK(live.blockInvalid && live.enforcementOn);
-    BOOST_CHECK(past.blockInvalid && !past.enforcementOn);
-    BOOST_CHECK_EQUAL(live.reason, past.reason);
-    BOOST_CHECK(EnforcementOn(State(f.view), sunset, f.tip));       // H == ENFORCE_UNTIL_HEIGHT is still enforced
-    BOOST_CHECK(!EnforcementOn(State(f.view), sunset, f.tip + 1));
-}
-
 // Rule: HALT-1
 // Rule: HALT-2
 // Rule: HALT-3
@@ -774,9 +726,9 @@ BOOST_AUTO_TEST_CASE(act5_sunset_stops_rejection)
 BOOST_AUTO_TEST_CASE(halt2_halt3_clear_with_undefined_price)
 {
     Fixture f;
-    // Before any price: HALT-1 and HALT-4 by name, HALT-2/3 clear (M1).
+    // Before any price: HALT-1 by name, HALT-2/3 clear (M1); HALT-4 marks only the virtual snapshot (U-22).
     f.Mine(Fixture::Quote(50000, 0));
-    BOOST_CHECK_EQUAL(f.Snap(1).haltMask, (uint32_t)(HALT_NOT_ACTIVE | HALT_NO_PRICE));
+    BOOST_CHECK_EQUAL(f.Snap(1).haltMask, (uint32_t)HALT_NO_PRICE);
     f.Activate();
     const uint256 vault = f.MintActive(10000);
     // HALT-2 at the exact threshold: ratio 250% => not below => clear; 249.99% => set.
@@ -923,7 +875,7 @@ BOOST_AUTO_TEST_CASE(fee2_eligible_set_window_edges)
 // Rule: FEE-1
 BOOST_AUTO_TEST_CASE(fee1_min_dominates_small_vault)
 {
-    const yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    const yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
     BOOST_CHECK_EQUAL(FeeZat(100 * COIN, P.feeMin, P.feeBps), P.feeMin);                  // 0.25% of 100 YEC < 0.5 YEC
     BOOST_CHECK_EQUAL(FeeZat(200 * COIN, P.feeMin, P.feeBps), P.feeMin);                  // exactly 0.5 YEC
     BOOST_CHECK_EQUAL(FeeZat(200 * COIN + 400, P.feeMin, P.feeBps), P.feeMin + 1);
@@ -1087,17 +1039,33 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, v.collateralZat);
     BOOST_CHECK_EQUAL(f.GetTotals().activeVaults, 1u);
-    // MINT-1 fails (version 1 payload): non-Yellowback, no vault, no log.
+    // MINT-1 fails (version 1 payload): non-Yellowback, so its YED vault output is one no rule created (U-23):
+    // the transaction is invalid; no vault.
     CMutableTransaction bad = f.MintTx(10000, 48, f.tip - 1);
     std::vector<unsigned char> data = EncodePayload(Payload::Mint(0, 10000, f.tip + 47, f.tip - 1, f.ownerKey.GetPubKey(), 3));
     data[2] = 0x01;
     bad.vout[2] = CTxOut(0, PayloadScript(data));
     f.Mine(Fixture::Quote(50000, 1), { bad });
     BOOST_CHECK(!f.Vault(CTransaction(bad).GetHash()).has_value());
+    BOOST_CHECK_EQUAL(f.Refused(CTransaction(bad).GetHash()), verdict::YED_TEMPLATE_OUTPUT);
+    // The same with the vault output a plain P2PKH: non-Yellowback, no vault, no log.
+    bad.vout[0].scriptPubKey = GetScriptForDestination(f.userKey.GetPubKey().GetID());
+    f.Mine(Fixture::Quote(50000, 1), { bad });
+    BOOST_CHECK(!f.Vault(CTransaction(bad).GetHash()).has_value());
     BOOST_CHECK(!f.Log(CTransaction(bad).GetHash()).has_value());
-    // TX-0: a coinbase carrying a MINT payload registers nothing.
+    // TX-0: a coinbase carrying a MINT payload registers nothing (its outputs, without the V, are ordinary).
     CMutableTransaction cb = Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 2));
     cb.vout = f.MintTx(10000, 48, f.tip - 1).vout;
+    {
+        // ...but a coinbase may not create a YED vault either (U-23).
+        CBlock withV;
+        withV.vtx.push_back(CTransaction(cb));
+        OverlayStateView o2(f.view);
+        BlockEvaluation ev2 = EvaluateBlock(o2, f.P, withV, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
+        BOOST_CHECK(ev2.blockInvalid);
+        BOOST_CHECK_EQUAL(ev2.verdict, verdict::YED_TEMPLATE_OUTPUT);
+    }
+    cb.vout[0].scriptPubKey = GetScriptForDestination(f.userKey.GetPubKey().GetID());
     CBlock block;
     block.vtx.push_back(CTransaction(cb));
     OverlayStateView overlay(f.view);
@@ -1116,17 +1084,20 @@ BOOST_AUTO_TEST_CASE(tx0_coinbase_payload_registers_nothing)
     cb.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100) })))));
     State st(f.view);
     TxOutcome r = ProcessTx(st, f.P, CTransaction(cb), f.tip + 1);
-    BOOST_CHECK(!r.relevant && !r.vaultSpend && !r.redFailed);
+    BOOST_CHECK(!r.relevant && !r.vaultSpend && !r.invalid);
     BOOST_CHECK_EQUAL(r.log.verdict, verdict::NON_YELLOWBACK);
 }
 
 namespace {
 
-/** Mine a MINT at the next height and return its VOID reason ("" for ACTIVE, "none" when no vault was created). */
+/** Mine a MINT at the next height and return the verdict that made it invalid (U-21; "" for an ACTIVE vault,
+ *  "none" when the transaction is not a mint and created no vault). `invalid`: the mint was refused. */
 std::string MintVerdictOf(Fixture& f, const CMutableTransaction& m, bool* invalid = nullptr)
 {
-    BlockEvaluation ev = f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { m });
-    if (invalid) *invalid = ev.blockInvalid;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { m });
+    const std::string refused = f.Refused(CTransaction(m).GetHash());
+    if (invalid) *invalid = !refused.empty();
+    if (!refused.empty()) return refused;
     std::optional<VaultRecord> v = f.Vault(CTransaction(m).GetHash());
     if (!v.has_value()) return "none";
     return v->Status() == VaultStatus::ACTIVE ? "" : v->voidReason;
@@ -1141,7 +1112,7 @@ BOOST_AUTO_TEST_CASE(mint2_every_clause_voids)
     f.Activate();
     bool invalid = false;
     { MintOpts o; o.termClass = 3; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o), &invalid), "bad-mint-class"); }
-    BOOST_CHECK(!invalid);
+    BOOST_CHECK(invalid);                                   // U-21: a failing mint is an invalid transaction
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(5000, 48, f.tip - 1)), "bad-mint-amount");
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(1000001, 48, f.tip - 1)), "bad-mint-amount");
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, (int)LOCKTIME_THRESHOLD - f.P.grace - (f.tip - 1), f.tip - 1)), "bad-mint-lock-height");
@@ -1153,16 +1124,13 @@ BOOST_AUTO_TEST_CASE(mint2_every_clause_voids)
     f.MineQuotesTo(f.tip + 40);                                                                       // so that H - 40 is past activation
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 39)), "");                         // ref = H - 40 (H = tip + 1)
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 40)), "bad-mint-ref-height");      // ref = H - 41
-    // The VOID record copies the payload verbatim, with feePaidZat 0 and its collateral outside Totals.
+    // §15.10: no VOID record; the failing mint leaves nothing behind.
     const Totals before = f.GetTotals();
     CMutableTransaction m = f.MintTx(5000, 48, f.tip - 1);
     BOOST_CHECK_EQUAL(MintVerdictOf(f, m), "bad-mint-amount");
-    const VaultRecord v = f.Vault(CTransaction(m).GetHash()).value();
-    BOOST_CHECK_EQUAL(v.mintedCents, 5000);
-    BOOST_CHECK_EQUAL(v.feePaidZat, 0);
-    BOOST_CHECK_EQUAL(v.voidReason, "bad-mint-amount");
+    BOOST_CHECK(!f.Vault(CTransaction(m).GetHash()).has_value());
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, before.collateralZat);
-    BOOST_CHECK_EQUAL(f.GetTotals().voidVaults, before.voidVaults + 1);
+    BOOST_CHECK_EQUAL(f.GetTotals().voidVaults, before.voidVaults);
     BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, before.supplyCents);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(m).GetHash())->verdict, "bad-mint-amount");
     BOOST_CHECK_EQUAL(f.Log(CTransaction(m).GetHash())->yedOut, 0);
@@ -1175,7 +1143,7 @@ BOOST_AUTO_TEST_CASE(mint2_regtest_height_underflow)
     Fixture f;
     f.MineQuotesTo(4);
     MintOpts o; o.collateral = 1000000000000LL; o.feeKey = 0;
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 1, o)), "mint-not-active");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 1, o)), "mint-halted-no-price");   // the module is active; no price yet
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 0, o)), "bad-mint-ref-height");   // below START_HEIGHT
 }
 
@@ -1186,8 +1154,9 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
     f.Activate();
     CMutableTransaction two = f.MintTx(10000, 48, f.tip - 1);
     two.vout.resize(2);
-    two.vout[1] = CTxOut(0, two.vout[0].scriptPubKey);   // keep vout[0] P2SH; no third output
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, two), "none");   // two outputs cannot carry an OP_RETURN at all: non-Yellowback
+    two.vout[1] = CTxOut(0, two.vout[0].scriptPubKey);   // keep vout[0] the V; no third output
+    // Two outputs cannot carry an OP_RETURN at all: non-Yellowback, so its YED vaults are outputs no rule created (U-23).
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, two), verdict::YED_TEMPLATE_OUTPUT);
     CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1);
     m.vout.resize(3);
     m.vout[1] = m.vout[2];
@@ -1202,7 +1171,17 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
         BOOST_CHECK(v == "bad-mint-owner-key" || v == "bad-mint-vault-script");
     }
     { MintOpts o; o.vaultScriptOverride = VaultScript(f.tip + 60, f.ownerKey.GetPubKey(), f.tip + 84); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
-    { MintOpts o; o.p2shVault = false; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "none"); }   // not P2SH: no VOID vault either
+    // U-23: v2's P2SH vault (with the payload's own lock) is refused for new mints.
+    { const uint32_t lock = f.tip - 1 + 48;
+      MintOpts o; o.vaultScriptOverride = P2SHScript(VaultScript(lock, f.ownerKey.GetPubKey(), lock + f.P.grace));
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
+    // A V under another set or delay is not the YED vault either.
+    { const int64_t lock = f.tip - 1 + 48;
+      vault::VaultParams vp = YedVaultParams(f.P, f.ownerKey.GetPubKey(), lock);
+      vp.delay += 1;
+      MintOpts o; o.vaultScriptOverride = vault::BuildVault(vp);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
+    { MintOpts o; o.p2shVault = false; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }   // no V at all
 }
 
 // Rule: MINT-4
@@ -1210,24 +1189,24 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
 // Rule: HALT-1
 BOOST_AUTO_TEST_CASE(mint4_not_active_and_halts)
 {
-    Fixture f;
-    f.MineQuotesTo(100);                                    // LOCKED_IN, not ACTIVE
-    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-not-active"); }
+    // ACT-1..6 left with the vault upgrade (§6): the module is active from START; NOT_ACTIVE is the virtual
+    // snapshot below it, and the participation halt no longer exists.
+    Fixture f(10);
+    f.MineQuotesTo(20);                                     // the slow window is not filled yet: no price
+    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-halted-no-price"); }
+    { MintOpts o; o.collateral = 1000000000000LL; o.feeKey = -1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 9, o)), "bad-mint-ref-height"); }   // R below START
     f.Activate();
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
-    // Participation halt: 26 non-signal blocks bring the count to 38.
+    // Non-signal tags halt nothing (v2's PARTICIPATION halt is gone).
     for (int i = 0; i < 26; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, false));
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_PARTICIPATION);
-    BOOST_CHECK(!(f.Snap(f.tip - 1).haltMask & HALT_PARTICIPATION));
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip)), "mint-halted-participation");     // R = the halted snapshot
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 2)), "");                          // R = the block before it
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).haltMask, 0u);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip)), "");
     // A refHeight whose snapshot was clear still mints (MINT-4 reads R, not H).
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 25)), "");
     // No price: nine untagged blocks empty the fast window.
     for (int i = 0; i < 9; i++) f.Mine(std::nullopt);
     BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_NO_PRICE);
-    { MintOpts o; o.collateral = 1000000000000LL; o.feeKey = 0; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-halted-no-price"); }   // NO_PRICE precedes PARTICIPATION
-    BOOST_CHECK_EQUAL(HaltMaskNames(HALT_NO_PRICE | HALT_ENFORCEMENT).size(), 2u);
+    { MintOpts o; o.collateral = 1000000000000LL; o.feeKey = 0; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-halted-no-price"); }
 }
 
 // Rule: MINT-4
@@ -1254,19 +1233,19 @@ BOOST_AUTO_TEST_CASE(mint4_divergence_and_global_ratio)
 }
 
 // Rule: MINT-4
-// H-1: with MINT_REQUIRES_ARMED an unarmed R halts the mint (VOID, mint-halted-unarmed) after every
+// H-1: with MINT_REQUIRES_ARMED an unarmed R halts the mint (invalid, mint-halted-unarmed) after every
 // halt bit; once ARMED the mint is judged exactly as before (MINT-9 needs its bundle).
 BOOST_AUTO_TEST_CASE(mint4_requires_armed)
 {
     Fixture f;
     f.P.mintRequiresArmed = true;
-    f.MineQuotesTo(100);                                    // LOCKED_IN: mint-not-active precedes the new clause
-    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-not-active"); }
+    f.MineQuotesTo(20);                                     // no price yet: mint-halted-no-price precedes the new clause
+    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-halted-no-price"); }
     f.Activate();
     BOOST_REQUIRE(!f.Armed());
     bool invalid = true;
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1), &invalid), verdict::MINT_HALTED_UNARMED);
-    BOOST_CHECK(!invalid);                                  // VOID like any halted mint, never an invalid block
+    BOOST_CHECK(invalid);                                   // U-21: invalid like any halted mint
     BOOST_CHECK_EQUAL(std::string(verdict::MINT_HALTED_UNARMED), "mint-halted-unarmed");
     Fixture g;                                              // the same chain without the parameter mints (v2 path)
     g.Activate();
@@ -1353,8 +1332,7 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     // alternating between $0.05 and $0.05075 every VOL_STEP (8) blocks: every sample step is a
     // +-1.49 % return, sigma ~ 1.39 x SIGMA_REF.
     Fixture h(1, 10000, 1, 0);
-    while (h.tip < h.P.startHeight + 2 * h.P.signalWindow + 2) h.Mine(Fixture::Quote(((h.tip + 1) / 8) % 2 ? 50750 : 50000, (h.tip + 1) % 3));
-    BOOST_REQUIRE(h.Snap(h.tip).activation.IsActive());
+    while (h.tip < h.P.startHeight + Fixture::ACTIVATE_BLOCKS) h.Mine(Fixture::Quote(((h.tip + 1) / 8) % 2 ? 50750 : 50000, (h.tip + 1) % 3));
     BOOST_REQUIRE_EQUAL(h.Snap(h.tip).haltMask, 0u);
     const int mult = h.Snap(h.tip - 1).sigmaMultBps;
     BOOST_CHECK(mult >= 12500 && mult < 16667);
@@ -1376,7 +1354,7 @@ BOOST_AUTO_TEST_CASE(mint7_token_output_is_not_the_opreturn)
     std::swap(m.vout[1], m.vout[2]);                        // OP_RETURN at vout[1]
     bool invalid = false;
     BOOST_CHECK_EQUAL(MintVerdictOf(f, m, &invalid), "bad-mint-token-output");
-    BOOST_CHECK(!invalid);
+    BOOST_CHECK(invalid);
 }
 
 // Rule: MINT-8
@@ -1482,14 +1460,14 @@ BOOST_AUTO_TEST_CASE(xfer1_xfer2_xfer3_and_burns)
 
 namespace {
 
-struct RedResult { std::string verdict; bool invalid; bool enforcing; VaultRecord vault; TxLogRecord log; };
+/** U-21: `invalid` = the module refused the spend (Mine left it out of the block; the vault is untouched). */
+struct RedResult { std::string verdict; bool invalid; VaultRecord vault; TxLogRecord log; };
 
 RedResult Spend(Fixture& f, const uint256& vaultTxid, const CMutableTransaction& tx)
 {
-    BlockEvaluation ev = f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { tx });
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { tx });
     RedResult r;
-    r.invalid = ev.blockInvalid;
-    r.enforcing = ev.enforcementOn;
+    r.invalid = !f.Refused(CTransaction(tx).GetHash()).empty();
     r.vault = f.Vault(vaultTxid).value();
     std::optional<TxLogRecord> log = f.Log(CTransaction(tx).GetHash());
     r.verdict = log.has_value() ? log->verdict : "none";
@@ -1515,7 +1493,6 @@ BOOST_AUTO_TEST_CASE(red_owner_redeem_passes_and_closes)
     RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip));
     BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
     BOOST_CHECK(!r.invalid);
-    BOOST_CHECK(r.enforcing);
     BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
     BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);
     BOOST_CHECK(!r.vault.unbacked);
@@ -1548,22 +1525,20 @@ BOOST_AUTO_TEST_CASE(red2_missing_and_short_burn)
       CMutableTransaction tx = f.SpendTx(a, { COutPoint(a, 1) }, f.tip, o);
       RedResult r = Spend(f, a, tx);
       BOOST_CHECK_EQUAL(r.verdict, "vault-spend-missing-burn");
-      BOOST_CHECK(r.invalid && r.enforcing);
-      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
-      BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);        // everything burns (IN-3): 10,000 in, nothing out
-      BOOST_CHECK(!r.vault.unbacked);                        // burned == mintedCents after the failure (M3)
+      BOOST_CHECK(r.invalid);                                // U-21: an invalid transaction, never mined
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
+      BOOST_CHECK(f.Token(a, 1).has_value());               // nothing burned either
       BOOST_CHECK(!f.Token(CTransaction(tx).GetHash(), 3).has_value());
       BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);
     }
-    // Assign 6,000 of 10,000: burn 4,000 < 10,000 => short; unbacked by 6,000.
+    // Assign 6,000 of 10,000: burn 4,000 < 10,000 => short.
     { SpendOpts o; o.assigned = { Assignment(3, 6000) };
       RedResult r = Spend(f, b, f.SpendTx(b, { COutPoint(b, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-spend-short-burn");
       BOOST_CHECK(r.invalid);
-      BOOST_CHECK(!r.vault.unbacked);                        // the failure burns every input: 10,000 == mintedCents
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
       BOOST_CHECK_EQUAL(r.log.yedOut, 0);
-      BOOST_CHECK_EQUAL(r.log.burned, 10000);
-      BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);    // burned (10,000, all inputs) is not < mintedCents
+      BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 20000);  // nothing burned
     }
 }
 
@@ -1572,7 +1547,8 @@ BOOST_AUTO_TEST_CASE(red2_missing_and_short_burn)
 // Rule: IN-3
 BOOST_AUTO_TEST_CASE(in3_burn_recorded_on_closed_vault)
 {
-    // A spend that burns only 4,000 against a 10,000 debt: unbacked = true, unbackedCents += 6,000.
+    // A spend that burns only 4,000 against a 10,000 debt is invalid (U-21; v2 closed the vault unbacked):
+    // the vault, the supply and the collateral are untouched.
     Fixture f;
     f.Activate();
     const uint256 a = f.MintActive(10000);
@@ -1581,11 +1557,13 @@ BOOST_AUTO_TEST_CASE(in3_burn_recorded_on_closed_vault)
     const uint256 sid = CTransaction(split).GetHash();
     RedResult r = Spend(f, a, f.SpendTx(a, { COutPoint(sid, 0) }, f.tip));
     BOOST_CHECK_EQUAL(r.verdict, "vault-spend-short-burn");
-    BOOST_CHECK_EQUAL(r.vault.burnedCents, 4000);
-    BOOST_CHECK(r.vault.unbacked);
-    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 6000);
-    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 6000);
-    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 0);       // a closed vault's collateral leaves either way
+    BOOST_CHECK(r.invalid);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(r.vault.burnedCents, 0);
+    BOOST_CHECK(!r.vault.unbacked);
+    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);
+    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 1000000000000LL);
 }
 
 // Rule: RED-3
@@ -1630,25 +1608,40 @@ BOOST_AUTO_TEST_CASE(red4_claim_path_underwater_at_r)
     Fixture f;
     f.Activate();
     const uint256 v = f.MintActive(10000);
-    // Not underwater at $0.05: a claim fails, and the vault closes unbacked on a node that applies it.
+    // Not underwater at $0.05: the claim is invalid (U-21); the vault stays ACTIVE.
     { SpendOpts o; o.ownerPath = false;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-claim-not-underwater");
-      BOOST_CHECK(r.invalid && r.enforcing);
+      BOOST_CHECK(r.invalid);
       BOOST_CHECK_EQUAL(r.log.path, "claim");
-      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE); }
     // Crash to $0.009 for a whole slow window: pClaim 9,000 => 10,000 YEC backs $100 at 90% < 110%.
     const uint256 w = f.MintActive(10000);
     for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
     BOOST_CHECK(IsUnderwater(1000000000000LL, 9000, 10000, f.P.claimThresholdBps));
     { SpendOpts o; o.ownerPath = false;
-      RedResult r = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o));
+      CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
+      RedResult r = Spend(f, w, claim);
       BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
       BOOST_CHECK(!r.invalid);
-      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMED);
+      // U-23: the claim leaves the vault CLAIMING, its value in the claimant's intent; the release closes it.
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING);
+      BOOST_CHECK_EQUAL(f.GetTotals().claimedVaults, 0u);
+      BOOST_CHECK_EQUAL(f.GetTotals().activeVaults, 1u);     // v (the first mint) only
+      const COutPoint intent(CTransaction(claim).GetHash(), 0);
+      BOOST_REQUIRE(State(f.view).GetIntent(intent).has_value());
+      CMutableTransaction rel;
+      rel.vin.push_back(CTxIn(intent, CScript() << OP_1, (uint32_t)f.P.claimDelay));
+      rel.vin.push_back(CTxIn(f.FakeInput()));
+      rel.vout.push_back(CTxOut(1000000000000LL, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
+      f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { rel });
+      BOOST_CHECK_EQUAL(f.Refused(CTransaction(rel).GetHash()), "");
+      BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMED);
+      BOOST_CHECK(!State(f.view).GetIntent(intent).has_value());
+      BOOST_CHECK_EQUAL(f.Log(CTransaction(rel).GetHash())->type, (uint8_t)TxLogType::CLAIM_RELEASE);
       BOOST_CHECK_EQUAL(f.GetTotals().claimedVaults, 1u);
-      BOOST_CHECK_EQUAL(f.GetTotals().closedVaults, 1u); }
+      BOOST_CHECK_EQUAL(f.GetTotals().closedVaults, 0u); }
     // A vault minted at $0.009 is fully backed at that price, so the same claim fails (RED-4 reads R, M13).
     // One more block first: the snapshot at the claim block has supply 0, so HALT-2 is clear for the new mint.
     f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
@@ -1691,12 +1684,12 @@ BOOST_AUTO_TEST_CASE(red1_structure_and_selectors)
     { uint256 v = vault(); SpendOpts o; o.vaultFirst = false;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-spend-malformed"); BOOST_CHECK(r.invalid); }
-    // Two ACTIVE vaults in one transaction fail, and both close.
+    // Two ACTIVE vaults in one transaction fail (the primitive's S-1 refuses it too); both stay ACTIVE.
     { uint256 v = vault(); uint256 w = vault(); SpendOpts o; o.extraVaults = { COutPoint(w, 0) };
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1), COutPoint(w, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-spend-malformed");
-      BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLOSED);
-      BOOST_CHECK_EQUAL(r.log.closedVaults.size(), 2u); }
+      BOOST_CHECK(r.invalid);
+      BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::ACTIVE); }
     // A one-push scriptSig and a non-push-only scriptSig fail RED-1 (M1).
     { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << std::vector<unsigned char>(20, 1);
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-malformed"); }
@@ -1714,31 +1707,25 @@ BOOST_AUTO_TEST_CASE(red1_structure_and_selectors)
     // An assignment outside [MIN_OUTPUT, MAX_OUTPUT] is RED-1 (XFER-1 inside a vault spend).
     { uint256 v = vault(); uint256 w = vault(); SpendOpts o; o.assigned = { Assignment(3, 99) };
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1), COutPoint(w, 1) }, f.tip, o)).verdict, "vault-spend-malformed"); }
-    // K4 selectors: OP_2 and a non-minimal 1 are owner selectors; 0x80 is a claim selector.
-    auto script = [&](const uint256& v) { VaultRecord r = f.Vault(v).value(); CScript vs = VaultScript(r.lockHeight, r.OwnerKey(), r.claimHeight); return valtype(vs.begin(), vs.end()); };
-    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(71, 0x30) << OP_2 << script(v);
+    // U-23 selectors (§15.3): OP_2 and OP_3 are the owner's, OP_4 the claim, OP_1 (a set unlock) never a
+    // YED path; anything but the exact one-byte OP_1..OP_4 is not a selector (K4's OP_IF readings are gone).
+    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(71, 0x30) << OP_2;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, verdict::OK); BOOST_CHECK_EQUAL(r.log.path, "owner"); }
-    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(71, 0x30) << valtype{ 0x01 } << script(v);
+    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(71, 0x30) << OP_3;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, verdict::OK); BOOST_CHECK_EQUAL(r.log.path, "owner"); }
-    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype{ 0x80 } << script(v);
+    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(65, 0x1f) << OP_1;
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(r.verdict, "vault-spend-malformed"); BOOST_CHECK(r.invalid); }
+    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << valtype(71, 0x30) << valtype{ 0x02 };   // a non-minimal 2
+      BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-malformed"); }
+    { uint256 v = vault(); SpendOpts o; o.scriptSig = CScript() << OP_4;     // the claim selector with the owner's outputs: no intents
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_INTENTS); BOOST_CHECK_EQUAL(r.log.path, "claim"); }
+    { uint256 v = vault(); SpendOpts o; o.ownerPath = false;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-claim-not-underwater"); BOOST_CHECK_EQUAL(r.log.path, "claim"); }
-}
-
-// Rule: RED-1
-BOOST_AUTO_TEST_CASE(tpl2_declines_nonwallet_selector)
-{
-    // The OP_2 selector is consensus-valid (K4) and RED-1 accepts it; the strict template shape
-    // (exactly <sig> OP_1 <script> / OP_0 <script>) is what Phase 4's FilterTemplate declines (TPL-2).
-    CScript vs = VaultScript(1000, CPubKey(ParseHex("02cb81cc0269783ebd9e6484b5495343036874a407856f230a8ee0384986759e70")), 1024);
-    std::optional<VaultSpendPath> op2 = ParseVaultSpendPath(CScript() << valtype(71, 0x30) << OP_2 << valtype(vs.begin(), vs.end()));
-    BOOST_REQUIRE(op2.has_value());
-    BOOST_CHECK(op2->ownerPath);
-    BOOST_CHECK(op2->selector != valtype{ 0x01 });                  // not the wallet's OP_1
-    std::optional<VaultSpendPath> op1 = ParseVaultSpendPath(OwnerScriptSig(valtype(71, 0x30), vs));
-    BOOST_CHECK(op1->ownerPath && op1->selector == valtype{ 0x01 } && op1->pushes == 3);
 }
 
 // Rule: RED-1
@@ -1752,92 +1739,27 @@ BOOST_AUTO_TEST_CASE(m3_vault_spend_with_mint_payload)
     // A vault spend carrying a well-formed MINT payload: RED-1..4 only, no new vault, TxLog.type REDEEM.
     CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1);
     VaultRecord vr = f.Vault(v).value();
-    m.vin.insert(m.vin.begin(), CTxIn(COutPoint(v, 0), OwnerScriptSig(valtype(71, 0x30), VaultScript(vr.lockHeight, vr.OwnerKey(), vr.claimHeight)), 0xFFFFFFFE));
-    BlockEvaluation ev = f.Mine(Fixture::Quote(50000, 0), { m });
+    m.vin.insert(m.vin.begin(), CTxIn(COutPoint(v, 0), CScript() << valtype(71, 0x30) << OP_2, 0xFFFFFFFE));
+    BlockEvaluation ev = f.Evaluate(Fixture::Quote(50000, 0), { m });
     const uint256 txid = CTransaction(m).GetHash();
-    BOOST_CHECK(ev.blockInvalid);
+    BOOST_CHECK(ev.blockInvalid);                                    // U-21
+    BOOST_CHECK_EQUAL(ev.verdict, "vault-spend-malformed");
+    BOOST_REQUIRE_EQUAL(ev.txlogs.size(), 1u);
+    BOOST_CHECK_EQUAL(ev.txlogs[0].second.type, (uint8_t)TxLogType::REDEEM);
+    f.Mine(Fixture::Quote(50000, 0), { m });
     BOOST_CHECK(!f.Vault(txid).has_value());
     BOOST_CHECK(!f.Token(txid, 1).has_value());
-    BOOST_CHECK_EQUAL(f.Log(txid)->type, (uint8_t)TxLogType::REDEEM);
-    BOOST_CHECK_EQUAL(f.Log(txid)->verdict, "vault-spend-malformed");
-    BOOST_CHECK_EQUAL(f.Vault(v)->status, (uint8_t)VaultStatus::CLOSED);
-    BOOST_CHECK(f.Vault(v)->unbacked);
-    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 10000);
-    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);            // the token of v is still out there
-    // A full burn to the wrong payee: RED-3 fails, but unbacked = false (burned == mintedCents) and nothing is added.
+    BOOST_CHECK_EQUAL(f.Vault(v)->status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);
+    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
+    // A full burn to the wrong payee: RED-3 fails; invalid like any other failure.
     const uint256 w = f.MintActive(10000);
     SpendOpts o; o.feeKey = 7;
     RedResult r = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o));
     BOOST_CHECK_EQUAL(r.verdict, "vault-spend-bad-payee");
     BOOST_CHECK(r.invalid);
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
-    BOOST_CHECK(!r.vault.unbacked);
-    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 10000);
-}
-
-// Rule: IN-2
-// Rule: RED-1
-BOOST_AUTO_TEST_CASE(in2_void_vault_spend_closes)
-{
-    Fixture f;
-    f.Activate();
-    CMutableTransaction bad = f.MintTx(5000, 48, f.tip - 1);
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, bad), "bad-mint-amount");
-    const uint256 v = CTransaction(bad).GetHash();
-    // Any spend of a VOID vault is an ordinary spend: no rule, never invalid, CLOSED with unbacked = false (K3, L14).
-    SpendOpts o; o.payload = false; o.ownerPath = false;
-    RedResult r = Spend(f, v, f.SpendTx(v, {}, f.tip, o));
-    BOOST_CHECK(!r.invalid);
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
-    BOOST_CHECK(!r.vault.unbacked);
-    BOOST_CHECK_EQUAL(r.vault.closeHeight, f.tip);
-    BOOST_CHECK_EQUAL(r.log.type, (uint8_t)TxLogType::NONE);
-    BOOST_CHECK_EQUAL(r.log.verdict, verdict::OK);
-    BOOST_CHECK_EQUAL(r.log.closedVaults.size(), 1u);
-    BOOST_CHECK_EQUAL(f.GetTotals().voidVaults, 0u);
-    BOOST_CHECK_EQUAL(f.GetTotals().closedVaults, 1u);
-}
-
-// Rule: RED-1
-// Rule: ACT-5
-// Rule: ACT-6
-BOOST_AUTO_TEST_CASE(blk1_invalid_iff_enforcement_on)
-{
-    Fixture f;
-    f.Activate();
-    const uint256 v = f.MintActive(10000);
-    // ENFORCEMENT set: 33 non-signal blocks bring the count to 31.
-    for (int i = 0; i < 33; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3, false));
-    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_ENFORCEMENT);
-    SpendOpts o; o.payload = false;
-    RedResult r = Spend(f, v, f.SpendTx(v, {}, f.tip, o));
-    BOOST_CHECK_EQUAL(r.verdict, "vault-spend-malformed");
-    BOOST_CHECK(r.invalid);
-    BOOST_CHECK(!r.enforcing);
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
-    BOOST_CHECK(r.vault.unbacked);
-    // LOCKED_IN followed by a collapse: ACTIVE at activateHeight with both bits set, no enforcement.
-    Fixture g;
-    g.MineQuotesTo(64);                                                    // LOCKED_IN at 64
-    g.MineQuotesTo(129, 50000, false);
-    BOOST_CHECK(g.Snap(128).activation.IsActive());
-    BOOST_CHECK(g.Snap(128).haltMask & HALT_PARTICIPATION);
-    BOOST_CHECK(g.Snap(128).haltMask & HALT_ENFORCEMENT);
-    BOOST_CHECK(!EnforcementOn(State(g.view), g.P, 129));
-    BOOST_CHECK(!g.evals[129].enforcementOn);
-}
-
-// Rule: RED-1
-BOOST_AUTO_TEST_CASE(blk2_dos_level_zero)
-{
-    // The hook's caller answers a Yellowback-invalid block with DoS 0 and this reject reason (BLK-2, N1).
-    CValidationState state;
-    BOOST_CHECK(!state.DoS(0, false, REJECT_INVALID, "yellowback-vault-spend"));
-    int nDoS = 99;
-    BOOST_CHECK(state.IsInvalid(nDoS));
-    BOOST_CHECK_EQUAL(nDoS, 0);
-    BOOST_CHECK_EQUAL(state.GetRejectReason(), "yellowback-vault-spend");
-    BOOST_CHECK_EQUAL(state.GetRejectCode(), REJECT_INVALID);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);
 }
 
 // ===========================================================================
@@ -1914,7 +1836,7 @@ BOOST_AUTO_TEST_CASE(overlay_view_equivalence)
     const uint256 v = f.MintActive(10000);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
-    block.vtx.push_back(CTransaction(f.SpendTx(v, {}, f.tip)));
+    block.vtx.push_back(CTransaction(f.SpendTx(v, { COutPoint(v, 1) }, f.tip)));     // a valid redeem (an invalid block is not applied)
     OverlayStateView outer(f.view);
     StateView& outerBase = outer;   // nest, do not copy (the copy constructor is deleted; mapping.md section 13.6)
     OverlayStateView inner(outerBase);
@@ -1925,7 +1847,8 @@ BOOST_AUTO_TEST_CASE(overlay_view_equivalence)
     inner.Commit();
     outer.Commit();
     BOOST_CHECK(copy == f.view);
-    BOOST_CHECK_EQUAL(a.reason, std::string("vault-spend-missing-burn:") + block.vtx[1].GetHash().GetHex());
+    BOOST_CHECK(!a.blockInvalid);
+    BOOST_CHECK_EQUAL(f.Vault(v)->status, (uint8_t)VaultStatus::CLOSED);
     BOOST_CHECK(SerializeRecord(a.undo) == SerializeRecord(undo));
     BOOST_CHECK(SerializeRecord(a.snapshot) == SerializeRecord(State(copy).GetSnapshot((uint32_t)f.tip + 1).value()));
 }
@@ -1937,15 +1860,15 @@ BOOST_AUTO_TEST_CASE(overlay_view_equivalence)
 BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
 {
     // An empty view at H = START_HEIGHT: a MINT, a REDEEM naming a non-existent vault and a TRANSFER of unknown
-    // tokens all get verdicts, nothing throws, and the block is never invalid.
-    yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    // tokens all get verdicts and nothing throws; the mint (refHeight not below H) is invalid (U-21), the rest is not.
+    yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
     MemoryStateView view;
     CKey k; k = CKey::TestOnlyRandomKey(true);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(1, std::nullopt)));
     CMutableTransaction mint;
     mint.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
-    mint.vout.push_back(CTxOut(1000000000000LL, P2SHScript(VaultScript(49, k.GetPubKey(), 73))));
+    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, k.GetPubKey(), 49)));
     mint.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(k.GetPubKey().GetID())));
     mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, k.GetPubKey(), FEE_VOUT_NONE)))));
     block.vtx.push_back(CTransaction(mint));
@@ -1964,14 +1887,21 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     OverlayStateView overlay(view);
     BlockEvaluation ev;
     BOOST_REQUIRE_NO_THROW(ev = EvaluateBlock(overlay, P, block, 1, uint256S("aa"), SUBSIDY));
-    BOOST_CHECK(!ev.blockInvalid);
-    BOOST_CHECK(!ev.enforcementOn);
-    BOOST_REQUIRE_EQUAL(ev.txlogs.size(), 1u);                     // only the VOID mint touched the state
+    BOOST_CHECK(ev.blockInvalid);
+    BOOST_REQUIRE_EQUAL(ev.txlogs.size(), 1u);                     // the evaluation stops at the invalid mint
     BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, "bad-mint-ref-height");   // refHeight 1 is not <= H - 1 = 0
-    BOOST_CHECK_EQUAL(ev.snapshot.haltMask, (uint32_t)(HALT_NOT_ACTIVE | HALT_NO_PRICE));
-    // Missing Snapshots[H - 1] above START_HEIGHT (a hole) is "undefined": enforcement off, nothing thrown.
+    BOOST_CHECK_EQUAL(ev.verdict, "bad-mint-ref-height");
+    // Without the mint the block is valid and nothing touched the state.
+    CBlock rest = block;
+    rest.vtx.erase(rest.vtx.begin() + 1);
+    overlay.Discard();
+    BOOST_REQUIRE_NO_THROW(ev = EvaluateBlock(overlay, P, rest, 1, uint256S("aa"), SUBSIDY));
+    BOOST_CHECK(!ev.blockInvalid);
+    BOOST_CHECK(ev.txlogs.empty());
+    BOOST_CHECK_EQUAL(ev.snapshot.haltMask, (uint32_t)(HALT_NO_PRICE));
+    // Missing Snapshots[H - 1] above START_HEIGHT (a hole) is "undefined": nothing thrown, the mint still invalid.
     BOOST_REQUIRE_NO_THROW(ev = EvaluateBlock(overlay, P, block, 500, uint256S("bb"), SUBSIDY));
-    BOOST_CHECK(!ev.enforcementOn);
+    BOOST_CHECK(ev.blockInvalid);
     BOOST_CHECK_EQUAL(ev.txlogs.size(), 1u);
     BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, "bad-mint-ref-height");
     // ProcessTx on a lone State with no Totals/Activation records.
@@ -1979,12 +1909,10 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     State st(bare);
     BOOST_REQUIRE_NO_THROW(ProcessTx(st, P, CTransaction(redeem), 7));
     BOOST_REQUIRE_NO_THROW(ProcessTx(st, P, CTransaction(mint), 7));
-    BOOST_CHECK(!EnforcementOn(st, P, 7));
     BOOST_CHECK(!DefaultPayee(bare, P, 7, {}, PayeePolicy::Defaults(P)).has_value());
 }
 
 // Rule: SNAP
-// Rule: ACT-5
 // Rule: MINT-4
 BOOST_AUTO_TEST_CASE(virtual_snapshot_below_start_height)
 {
@@ -1993,22 +1921,20 @@ BOOST_AUTO_TEST_CASE(virtual_snapshot_below_start_height)
     std::optional<Snapshot> v = SnapshotAt(st, f.P, 49);
     BOOST_REQUIRE(v.has_value());
     BOOST_CHECK_EQUAL(v->haltMask, (uint32_t)(HALT_NOT_ACTIVE | HALT_NO_PRICE));
-    BOOST_CHECK_EQUAL(v->activation.status, (uint8_t)ActivationStatus::SIGNALING);
     BOOST_CHECK(!v->PFast().has_value() && !v->PMint().has_value() && !v->PClaim().has_value());
     BOOST_CHECK_EQUAL(v->issuedZat, 0);
-    BOOST_CHECK(!EnforcementOn(st, f.P, 50));
     // Blocks below START_HEIGHT are ignored completely.
     BlockEvaluation below = f.Mine(Fixture::Quote(50000, 0), {}, 49);
     BOOST_CHECK(f.view.Map().empty());
-    BOOST_CHECK(!below.enforcementOn && below.txlogs.empty());
+    BOOST_CHECK(!below.blockInvalid && below.txlogs.empty());
     // At H = START_HEIGHT: the tag counts, issuedZat starts from 0, MINT-4 is false.
     BlockEvaluation at = f.Mine(Fixture::Quote(50000, 0), {}, 50);
-    BOOST_CHECK(!at.enforcementOn);
+    BOOST_CHECK(!at.blockInvalid);
     BOOST_CHECK_EQUAL(f.Snap(50).issuedZat, SUBSIDY);
-    BOOST_CHECK_EQUAL(f.Snap(50).signalCount, 1u);
+    BOOST_CHECK(f.Snap(50).tagged);
     BOOST_CHECK(!State(f.view).GetSnapshot(49).has_value());
     MintOpts o; o.collateral = 1000000000000LL; o.feeKey = 0;
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 50, o)), "mint-not-active");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 50, o)), "mint-halted-no-price");     // active from START (U-22), no price yet
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, 49, o)), "bad-mint-ref-height");
 }
 
@@ -2031,7 +1957,7 @@ BOOST_AUTO_TEST_CASE(snapshot_undefined_price_is_zero)
     t.pFast = 1;
     f.view.Write(keys::Snapshot(1), SerializeRecord(t));
     BOOST_CHECK(Hash(f.view) != h1);
-    BOOST_CHECK_EQUAL(HaltMaskNames(s.haltMask)[1], "NO_PRICE");
+    BOOST_CHECK_EQUAL(HaltMaskNames(s.haltMask)[0], "NO_PRICE");
 }
 
 // Rule: SNAP
@@ -2060,7 +1986,7 @@ BOOST_AUTO_TEST_CASE(snap_written_for_every_height_ge_start)
 BOOST_AUTO_TEST_CASE(params_selected_by_height)
 {
     // Two regtest sets: the second starts at 100 with a supply cap; EvaluateBlock reads the set SelectParams picks.
-    std::vector<yellowback::Params> sets = { RegtestParams(1, 0, 0, 0), RegtestParams(100, 0, 1, 0) };
+    std::vector<yellowback::Params> sets = { RegtestParams(1, 0, 0, TestSet()), RegtestParams(100, 0, 1, TestSet()) };
     BOOST_CHECK_EQUAL(SelectParams(sets, 1).startHeight, 1);
     BOOST_CHECK_EQUAL(SelectParams(sets, 99).startHeight, 1);
     BOOST_CHECK_EQUAL(SelectParams(sets, 100).startHeight, 100);
@@ -2100,7 +2026,7 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
         m.vin.push_back(CTxIn(f.FakeInput()));
         m.vout.push_back(CTxOut(1000, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
         std::vector<unsigned char> data;
-        if (i % 3 == 0) data = EncodePayload(Payload::Mint(0, 10000, f.tip + 40, f.tip - 1, f.ownerKey.GetPubKey(), 3));   // MINT-3 fails: bad outputs
+        if (i % 3 == 0) data = EncodePayload(Payload::Redeem((uint32_t)f.tip - 1, FEE_VOUT_NONE, {}));                    // a REDEEM of nothing: XFER-3 (a failing mint is invalid since U-21)
         else if (i % 3 == 1) data = EncodePayload(Payload::Transfer({ Assignment(0, 100) }));                               // XFER-3 fails
         else data = std::vector<unsigned char>(80, 0x42);                                                                   // non-Yellowback
         m.vout.push_back(CTxOut(0, PayloadScript(data)));
@@ -2173,10 +2099,9 @@ struct EmergencyFixture
     }
     RedResult Mine(const CMutableTransaction& tx)
     {
-        BlockEvaluation ev = f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3), { tx });
+        f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3), { tx });
         RedResult r;
-        r.invalid = ev.blockInvalid;
-        r.enforcing = ev.enforcementOn;
+        r.invalid = !f.Refused(CTransaction(tx).GetHash()).empty();
         r.vault = f.Vault(w).value();
         std::optional<TxLogRecord> log = f.Log(CTransaction(tx).GetHash());
         r.verdict = log.has_value() ? log->verdict : "none";
@@ -2271,7 +2196,7 @@ BOOST_AUTO_TEST_CASE(arm1_triggers_at_exact_block)
     BOOST_CHECK_EQUAL(f.Snap(f.tip).attest.status, (uint8_t)AttestStatus::TRIGGERED);
     BOOST_CHECK(!f.Armed());
     // attestArmMin 0 never arms
-    Fixture g(1, 0, 0, 0, 0);
+    Fixture g(1, 0, 0, 0);
     g.Activate();
     g.Register(3);
     for (int i = 0; i < 20; i++) g.Mine(Fixture::Quote(50000, (g.tip + 1) % 3));
@@ -2348,7 +2273,7 @@ BOOST_AUTO_TEST_CASE(weight_clamped_before_trigger)
     AttestorRecord rec;
     rec.bondZat = 10 * COIN;
     rec.registerHeight = 100;
-    yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
     AttestState m;
     m.status = (uint8_t)AttestStatus::TRIGGERED;
     m.triggerHeight = 150;
@@ -2506,12 +2431,12 @@ BOOST_AUTO_TEST_CASE(mint10_diverged_void)
     Fixture f;
     f.Arm();
     // pools 50,000; attestors 40,000: |x - a| / min = 25 % > 15 %
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 40000)), verdict::MINT10_DIVERGED);
-    BOOST_CHECK_EQUAL(f.Vault(f.evals[f.tip].txlogs[0].first)->voidReason, verdict::MINT10_DIVERGED);
-    BOOST_CHECK_EQUAL(f.Log(f.evals[f.tip].txlogs[0].first)->aMint, 40000);          // the bundle facts are logged on a VOID mint too
-    // BUNDLE-1 held, so the row is logged whatever the verdict (R12)
-    BOOST_REQUIRE(f.BundleRow(f.tip).has_value());
-    BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->aMint, 40000);
+    CMutableTransaction m = f.MintV3(10000, 40000);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, m), verdict::MINT10_DIVERGED);
+    BOOST_CHECK(!f.Vault(CTransaction(m).GetHash()).has_value());
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(m).GetHash())->aMint, 40000);          // the evaluation's bundle facts
+    // U-21: the invalid mint is not in the block, so its bundle writes no BundleLog row (R12 reads mined transactions)
+    BOOST_CHECK(!f.BundleRow(f.tip).has_value());
     // above as well: 57,501 > 57,500
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 57501)), verdict::MINT10_DIVERGED);
 }
@@ -2606,8 +2531,8 @@ BOOST_AUTO_TEST_CASE(red1_claim_needs_bundle)
     { SpendOpts o; o.ownerPath = false;
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
       BOOST_CHECK_EQUAL(r.verdict, "red1-bundle-shape");
-      BOOST_CHECK(r.invalid && r.enforcing);
-      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+      BOOST_CHECK(r.invalid);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE); }
     // The claim's selection is selected(R, vaultOutpoint): an attestor outside it (there is exactly one of the four) is "member".
     Fixture g;
     g.Arm(4);
@@ -2684,7 +2609,7 @@ BOOST_AUTO_TEST_CASE(red4b_needs_notice_and_persist)
     BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
     BOOST_CHECK(!r.invalid);
     BOOST_CHECK_EQUAL(r.log.claimPath, "b");
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMED);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING);     // U-23: until the claimant's intent is released
     BOOST_CHECK_EQUAL(r.log.aClaim, g.attPrice);
 }
 
@@ -2723,10 +2648,11 @@ BOOST_AUTO_TEST_CASE(red4b_before_arming_false)
     State(f.view).Put(keys::Notice(COutPoint(v, 0)), n);
     SpendOpts o;
     o.ownerPath = false;
-    BlockEvaluation ev = f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3), { f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o) });
+    BlockEvaluation ev = f.Evaluate(Fixture::Quote(11500, (f.tip + 1) % 3), { f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o) });
     BOOST_CHECK(ev.blockInvalid);
+    BOOST_REQUIRE(!ev.txlogs.empty());
     BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
-    BOOST_CHECK(!f.Notice(v).has_value());          // and the close deleted it (IN-2)
+    BOOST_CHECK(f.Notice(v).has_value());           // U-21: the invalid claim is never applied; the vault and its notice stay
 }
 
 // Rule: RED-5
@@ -2783,7 +2709,7 @@ BOOST_AUTO_TEST_CASE(red5_residual_below_dust_vacuous)
     BOOST_CHECK(residual < g.f.P.residualMinZat);
     // and the math: a residual under the floor needs no output
     BOOST_CHECK_EQUAL(ResidualZat(ClaimantMaxZat(10000, (int)BPS, 11500).value() + 50000, ClaimantMaxZat(10000, (int)BPS, 11500)), 50000);
-    BOOST_CHECK(50000 < RegtestParams(1, 0, 0, 0).residualMinZat);
+    BOOST_CHECK(50000 < RegtestParams(1, 0, 0, TestSet()).residualMinZat);
 }
 
 // Rule: RED-5
@@ -2797,9 +2723,8 @@ BOOST_AUTO_TEST_CASE(red5_residual_to_wrong_key_invalid)
     o.residualScript = GetScriptForDestination(g.f.userKey.GetPubKey().GetID());
     RedResult r = g.Mine(g.Claim(o));
     BOOST_CHECK_EQUAL(r.verdict, verdict::RED5_RESIDUAL);
-    BOOST_CHECK(r.invalid && r.enforcing);
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
-    BOOST_CHECK(r.vault.unbacked == false);         // the burn was complete; only RED-5 failed
+    BOOST_CHECK(r.invalid);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
 }
 
 // Rule: RED-5
@@ -2821,7 +2746,7 @@ BOOST_AUTO_TEST_CASE(red5_normal_claim_residual_zero)
     BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
     BOOST_CHECK_EQUAL(r.log.claimPath, "a");
     BOOST_CHECK_EQUAL(r.log.residualZat, 0);        // underwater under pClaim => collateral < claimantMax at 110 %
-    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMED);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING);
     BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->aClaim, 9000);
 }
 
@@ -2865,10 +2790,11 @@ BOOST_AUTO_TEST_CASE(not1_deleted_when_vault_closes)
     g.f.Undo();
     BOOST_CHECK(g.f.Notice(g.w).has_value());
     BOOST_CHECK_EQUAL(Hash(g.f.view), before);
-    // and an unpoliced spend (no payload) deletes it too
+    // a spend with no payload is invalid (RED-1, U-21): the vault and its notice stay
     SpendOpts o; o.payload = false;
-    g.Mine(g.f.SpendTx(g.w, {}, g.f.tip - 1, o));
-    BOOST_CHECK(!g.f.Notice(g.w).has_value());
+    RedResult bad = g.Mine(g.f.SpendTx(g.w, {}, g.f.tip - 1, o));
+    BOOST_CHECK(bad.invalid);
+    BOOST_CHECK(g.f.Notice(g.w).has_value());
 }
 
 // Rule: EQV-1

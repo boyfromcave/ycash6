@@ -5,8 +5,14 @@
 
 """Phase 4 (plan section 6, Phase 4; section 3.9 TPL-1..3, MP-1, MINER-1..3; section 4.4):
 tag emission, getblocktemplate fields and the pool path, invalid tags, the coinbase payload
-(TX-0), quote staleness, the template policies, MP-1 and the ConnectTip sweep."""
+(TX-0), quote staleness, the template filter, MP-1 and the ConnectTip sweep.
 
+Since the vault upgrade (upgrade plan §6, U-21..U-23) a tag carries no signal bit and a stale or
+cleared quote means no tag; the template carries exactly the valid transactions (strict and
+consensus policy are one); a failing mint is an invalid transaction the mempool refuses; an
+unhealthy index stops the node (getblocktemplate refuses before that, always)."""
+
+import os
 import time
 
 from test_framework.authproxy import JSONRPCException
@@ -113,7 +119,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
             self.nodes[i].setmocktime(self.mock_time)
         self.reconnect(i)
 
-    def assert_tag(self, ref, kind, payout=None, price=None, signal=None):
+    def assert_tag(self, ref, kind, payout=None, price=None):
         tag = self.nodes[0].yed_gettag(str(ref))
         if kind == 'none':
             assert_equal(tag['found'], False)
@@ -124,9 +130,15 @@ class YellowbackMiningTest(YellowbackTestFramework):
             assert_equal(tag['payoutAddress'], payout)
         if price is not None:
             assert_equal(tag['priceMicroUsd'], price)
-        if signal is not None:
-            assert_equal(tag['signal'], signal)
+        assert 'signal' not in tag
         return tag
+
+    def mine_empty(self, n, i=2):
+        """``n`` Python-assembled blocks on pool ``i`` with only the coinbase (the mempool stays as it is)."""
+        for _ in range(n):
+            result, _bh = mine_block_raw(self.nodes[i], [])
+            assert_equal(result, None)
+            self.sync_all(blocks_only=True)
 
     # ------------------------------------------------------------------ the cases
 
@@ -147,7 +159,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         for i in POOLS:
             node, addr = self.pool(i)
             h = self.mine(i)[0]
-            tag = self.assert_tag(h, 'quote', payout=addr, price=PRICE, signal=True)
+            tag = self.assert_tag(h, 'quote', payout=addr, price=PRICE)
             assert_equal(tag['sourceMask'], 1)
             assert_equal(self.nodes[0].getblock(h)['height'], node.getblockcount())
         self.checkpoint('tagged generate blocks')
@@ -159,7 +171,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         node, addr = self.pool(2)
         gbt = node.getblocktemplate()
         flags = gbt['coinbaseaux']['flags']
-        expected = ym.tag_push(1, PRICE, 1, self.pool_key[0])
+        expected = ym.tag_push(0, PRICE, 1, self.pool_key[0])       # flags 0: no signal bit (ACT-1 retired)
         assert_equal(flags, bytes_to_hex_str(expected))
         assert_equal(len(hex_str_to_bytes(flags)), 37)
         assert_equal(flags[:10], '2459454421')
@@ -173,22 +185,13 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(yb['tag'], flags)
         assert_equal(yb['kind'], 'quote')
         assert_equal(yb['priceMicroUsd'], PRICE)
-        assert_equal(yb['signal'], True)
         assert_equal(yb['payoutAddress'], addr)
         assert_greater_than(yb['quoteAgeSeconds'] + 1, 0)
         assert_equal(yb['registered'], True)
         assert_equal(yb['eligible'], True)
-        assert_equal(yb['activation'], 'signaling')
-        assert_equal(type(yb['signalCount']), int)
-        assert_equal(yb['enforcing'], True)
-        assert_equal(yb['valveTripped'], False)
-        assert_equal(yb['sunset'], False)
         assert_equal(yb['healthy'], True)
-        assert_equal(yb['templatePolicy'], 'strict')
         assert_equal(sorted(yb.keys()), sorted([
-            'tag', 'kind', 'priceMicroUsd', 'quoteAgeSeconds', 'signal', 'payoutAddress', 'registered',
-            'eligible', 'activation', 'signalCount', 'enforcing', 'valveTripped', 'sunset', 'healthy',
-            'templatePolicy']))
+            'tag', 'kind', 'priceMicroUsd', 'quoteAgeSeconds', 'payoutAddress', 'registered', 'eligible', 'healthy']))
 
     def pool_path_end_to_end(self):
         # Rule: MINER-1 TAG-1
@@ -204,7 +207,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.sync_all(blocks_only=True)
         assert_best_hash(self.nodes)
         assert_equal(self.nodes[0].getbestblockhash(), bh)
-        self.assert_tag(bh, 'quote', payout=addr, price=PRICE, signal=True)
+        self.assert_tag(bh, 'quote', payout=addr, price=PRICE)
         mined = self.nodes[0].getblock(bh, 2)['tx'][0]
         assert bytes_to_hex_str(extranonce) in mined['vin'][0]['coinbase']
         self.checkpoint('pool path')
@@ -214,7 +217,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         print('tag2_invalid_tag_is_no_tag')
         stock = self.nodes[STOCK]
         bad_tags = [
-            ('version 2', ym.tag_push(1, PRICE, 1, self.pool_key[0], version=2)),
+            ('version 2', ym.tag_push(0, PRICE, 1, self.pool_key[0], version=2)),
             ('flags 0x02', ym.tag_push(0x02, PRICE, 1, self.pool_key[0])),
             ('price PRICE_MAX + 1', ym.tag_push(1, PRICE_MAX + 1, 1, self.pool_key[0])),
         ]
@@ -268,115 +271,77 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.assert_tag(bh, 'quote', payout=addr)      # the scriptSig was untouched
         self.checkpoint('coinbase payload')
 
-    def quote_staleness_signal_only(self):
+    def quote_staleness_no_tag(self):
         # Rule: MINER-1
         # P12: the clock advances by setmocktime, never sleep; default -yellowbackquotemaxage is 1800 s.
-        print('a quote older than -yellowbackquotemaxage gives a signal-only tag')
+        print('a quote older than -yellowbackquotemaxage gives no tag (the signal-only tag left with ACT-1)')
         node, addr = self.pool(2)
         set_quote(node, '2.00')
         assert_equal(node.getblocktemplate()['yellowback']['kind'], 'quote')
         self.advance_clock(1801)
         h = self.mine(2)[0]
-        self.assert_tag(h, 'signal', payout=addr, price=0, signal=True)
+        self.assert_tag(h, 'none')
         yb = node.getblocktemplate()['yellowback']
-        assert_equal(yb['kind'], 'signal')
+        assert_equal(yb['kind'], 'none')
         assert_equal(yb['priceMicroUsd'], 0)
         assert_greater_than(yb['quoteAgeSeconds'], 1800)
-        assert_equal(yb['tag'], bytes_to_hex_str(ym.tag_push(1, 0, 0, self.pool_key[0])))
+        assert_equal(yb['tag'], '')
         self.requote()
         h = self.mine(2)[0]
         self.assert_tag(h, 'quote', payout=addr, price=PRICE)
 
-    def setquote_zero_signal_only(self):
+    def setquote_zero_no_tag(self):
         # Rule: MINER-1
-        print('yed_setquote 0 gives a signal-only tag')
+        print('yed_setquote 0 gives no tag')
         node, addr = self.pool(3)
         r = set_quote(node, 0)
         assert_equal(r['priceMicroUsd'], 0)
-        assert_equal(r['nextTag']['kind'], 'signal')
+        assert_equal(r['nextTag']['kind'], 'none')
         yb = node.getblocktemplate()['yellowback']
-        assert_equal(yb['kind'], 'signal')
+        assert_equal(yb['kind'], 'none')
         assert_equal(yb['quoteAgeSeconds'], None)
+        assert_equal(node.getblocktemplate()['coinbaseaux']['flags'], '')
         h = self.mine(3)[0]
-        self.assert_tag(h, 'signal', payout=addr, price=0, signal=True)
+        self.assert_tag(h, 'none')
         set_quote(node, '2.00')
         h = self.mine(3)[0]
         self.assert_tag(h, 'quote', payout=addr, price=PRICE)
 
-    def setquote_rebuilds_template(self):
+    def retired_signal_flag_ignored(self):
         # Rule: MINER-1
-        # D-U6: a new quote reaches the very next template, with no block and no clock step in
-        # between: getblocktemplate rebuilds its cached block when the quote generation moves.
-        print('yed_setquote reaches the next getblocktemplate without a new block')
-        node, addr = self.pool(2)
-        set_quote(node, '2.00')
-        self.mine(2)
-        gbt = node.getblocktemplate()
-        assert_equal(gbt['yellowback']['priceMicroUsd'], PRICE)
-        prev = gbt['previousblockhash']
-        set_quote(node, '3.00')
-        gbt = node.getblocktemplate()
-        assert_equal(gbt['previousblockhash'], prev)
-        tag = bytes_to_hex_str(ym.tag_push(1, 3_000_000, 1, self.pool_key[0]))
-        assert_equal(len(tag), 2 * 37)
-        assert_equal(gbt['yellowback']['tag'], tag)
-        assert_equal(gbt['coinbaseaux']['flags'], tag)
-        assert_equal(gbt['yellowback']['priceMicroUsd'], 3_000_000)
-        set_quote(node, 0)
-        gbt = node.getblocktemplate()
-        assert_equal(gbt['previousblockhash'], prev)
-        assert_equal(gbt['yellowback']['kind'], 'signal')
-        assert_equal(gbt['yellowback']['priceMicroUsd'], 0)
-        assert_equal(gbt['yellowback']['tag'], bytes_to_hex_str(ym.tag_push(1, 0, 0, self.pool_key[0])))
-        set_quote(node, '2.00')
-
-    def no_signal_no_quote_no_tag(self):
-        # Rule: MINER-1
-        print('-yellowbacksignal=0 and no quote: no tag')
+        print('-yellowbacksignal=0 is retired: logged and ignored, the quote tag is unchanged')
         self.restart(4, ['-yellowbacksignal=0'])
         node, addr = self.pool(4)
-        gbt = node.getblocktemplate()
-        assert_equal(gbt['coinbaseaux']['flags'], '')
-        assert_equal(gbt['yellowback']['kind'], 'none')
-        assert_equal(gbt['yellowback']['tag'], '')
-        assert_equal(gbt['yellowback']['signal'], False)
-        assert_equal(gbt['yellowback']['payoutAddress'], addr)
-        h = self.mine(4)[0]
-        self.assert_tag(h, 'none')
-        # D-U6: with no signal bit, clearing the quote leaves the very next template untagged
-        gbt = node.getblocktemplate()
         set_quote(node, '2.00')
         gbt = node.getblocktemplate()
         assert_equal(gbt['yellowback']['kind'], 'quote')
-        assert_equal(len(gbt['coinbaseaux']['flags']), 2 * 37)
-        set_quote(node, 0)
-        gbt = node.getblocktemplate()
-        assert_equal(gbt['coinbaseaux']['flags'], '')
-        assert_equal(gbt['yellowback']['kind'], 'none')
-        assert_equal(gbt['yellowback']['tag'], '')
-        # the signal bit alone (no quote) is a signal-only tag
-        self.restart(4)
+        assert_equal(gbt['coinbaseaux']['flags'], bytes_to_hex_str(ym.tag_push(0, PRICE, 1, self.pool_key[2])))
         h = self.mine(4)[0]
-        self.assert_tag(h, 'signal', payout=addr, price=0, signal=True)
-        set_quote(node, '2.00')
+        self.assert_tag(h, 'quote', payout=addr, price=PRICE)
+        assert debug_log_has(self.options.tmpdir, 4, '-yellowbacksignal is retired with the vault upgrade and ignored')
+        self.restart(4)
+        set_quote(self.nodes[4], '2.00')
 
-    def unhealthy_index_no_tag(self):
+    def unhealthy_index_stops_the_node(self):
         # Rule: MINER-3
-        # K24: -yellowbackrequirehealthy makes getblocktemplate refuse while unhealthy.
-        print('an unhealthy index emits no tag; -yellowbackrequirehealthy refuses templates')
-        self.restart(4, ['-yellowbacktestfault=storage:commit', '-yellowbackrequirehealthy'])
+        # U-21: a block verdict is consensus, so an index that cannot evaluate a block stops the node
+        # (AbortNode) instead of following the chain unpoliced; -yellowbackrequirehealthy is retired
+        # (getblocktemplate always refuses while unhealthy). -reindex-yellowback recovers.
+        print('an index storage fault stops the node; -reindex-yellowback recovers it')
+        self.restart_quiet(4, ['-yellowbacktestfault=storage:commit'])
         node, addr = self.pool(4)
         set_quote(node, '2.00')
         assert_equal(node.getblocktemplate()['yellowback']['healthy'], True)
-        h = self.mine(4)[0]                      # the commit fault fires; the block still connects
-        assert_equal(node.yed_getinfo()['healthy'], False)
-        self.assert_tag(h, 'quote', payout=addr)  # built while the index was still healthy
-        rpc_error('yellowback-unhealthy', node.getblocktemplate)
-        h = self.mine(4)[0]
-        self.assert_tag(h, 'none')
-        assert_best_hash(self.nodes)
+        try:
+            node.generate(1)                     # the commit fault fires in ConnectBlock: AbortNode
+        except Exception:
+            pass
+        self.wait_stopped(4)
+        assert debug_log_has(self.options.tmpdir, 4, 'Failed to write to the Yellowback index')
         self.restart(4, ['-reindex-yellowback'])
+        node = self.nodes[4]
         wait_yed_healthy(node)
+        self.sync_all(blocks_only=True)
         set_quote(node, '2.00')
         h = self.mine(4)[0]
         self.assert_tag(h, 'quote', payout=addr)
@@ -390,14 +355,14 @@ class YellowbackMiningTest(YellowbackTestFramework):
         taddr = node.getnewaddress()
         zaddr = node.z_getnewaddress('sapling')
         stop_node(node, 2)
-        self.start_custom(2, yellowback_node_args(['-mineraddress=%s' % taddr, '-yellowbacksignal=1'], sigma_ref=0))
+        self.start_custom(2, yellowback_node_args(['-mineraddress=%s' % taddr], sigma_ref=0))
         node = self.nodes[2]
         assert_equal(set_quote(node, '2.00')['nextTag']['payoutAddress'], taddr)
         assert_equal(node.getblocktemplate()['yellowback']['payoutAddress'], taddr)
         h = self.mine(2)[0]
         self.assert_tag(h, 'quote', payout=taddr, price=PRICE)
         stop_node(node, 2)
-        self.start_custom(2, yellowback_node_args(['-mineraddress=%s' % zaddr, '-yellowbacksignal=1'], sigma_ref=0))
+        self.start_custom(2, yellowback_node_args(['-mineraddress=%s' % zaddr], sigma_ref=0))
         node = self.nodes[2]
         rpc_error('no-payout-address', set_quote, node, '2.00')
         yb = node.getblocktemplate()['yellowback']
@@ -448,14 +413,20 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(signed['complete'], True)
         return signed['hex']
 
-    def template_policy_strict_vs_consensus(self):
+    def template_carries_the_valid_transactions(self):
         # Rule: TPL-2 MINT-5 XFER-2
-        # V14: strict leaves a VOID-bound mint and a would-burn transfer in the mempool and out of the block; consensus includes them.
-        print('template policy: strict vs consensus')
+        # U-21/U-23: a failing mint is invalid (the mempool refuses it, DoS 0); a would-burn transfer is
+        # valid (XFER-2 burns) and the template carries it (strict and consensus policy are one now).
+        print('template: an invalid mint is refused, a would-burn transfer is mined')
         user = self.nodes[0]
         ref, required, payee = self.mint_inputs()
         void_hex, _ = build_mint_tx(user, CENTS, LOCK, ref, required // 2, fee_addr=payee)
-        void_txid = send_locked(user, void_hex)                # MP-1 never refuses a mint
+        v = user.yed_validaterawtransaction(void_hex)
+        assert_equal((v['verdict'], v['blockValid'], v['wouldBeRejected']), ('bad-mint-collateral', False, True))
+        for i in [0] + POOLS:
+            rpc_error('bad-yellowback-bad-mint-collateral', self.nodes[i].sendrawtransaction, void_hex)
+        result, _ = mine_block_raw(self.nodes[3], [void_hex])          # a block carrying it is rejected
+        assert_equal(result, 'bad-yellowback-bad-mint-collateral')
         a_hex, a_owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=payee)
         a_txid = send_locked(user, a_hex)
         c_hex, c_owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=payee)
@@ -463,14 +434,11 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.vault_a = vault_from_mint(a_hex, LOCK, ref, a_owner)
         self.vault_c = vault_from_mint(c_hex, LOCK, ref, c_owner)
         self.sync_all()
-        assert_equal(user.yed_validaterawtransaction(void_hex)['wouldBeRejected'], False)
         in_tpl = gbt_hashes(self.nodes[2].getblocktemplate())
         assert a_txid in in_tpl and c_txid in in_tpl
-        assert void_txid not in in_tpl
-        h = self.mine(2)[0]                                     # strict
+        h = self.mine(2)[0]
         mined = user.getblock(h)['tx']
-        assert a_txid in mined and c_txid in mined and void_txid not in mined
-        assert void_txid in user.getrawmempool() and void_txid in self.nodes[2].getrawmempool()
+        assert a_txid in mined and c_txid in mined
         assert_equal(user.yed_gettxinfo(a_txid)['verdict'], 'ok')
         assert_equal(user.yed_getvault(a_txid)['status'], 'ACTIVE')
         # a would-burn TRANSFER of vault A's token: 4,000 of 10,000 cents assigned, 6,000 burn
@@ -481,32 +449,15 @@ class YellowbackMiningTest(YellowbackTestFramework):
         rpc_error('yed-burn-refused', user.sendrawtransaction, burn_hex)        # H7 (audit C-7): 6,000 of 10,000 would burn
         burn_txid = send_locked(user, burn_hex, allow_yed_burn=True)
         self.sync_all()
-        in_tpl = gbt_hashes(self.nodes[2].getblocktemplate())
-        assert burn_txid not in in_tpl and void_txid not in in_tpl
+        assert burn_txid in gbt_hashes(self.nodes[2].getblocktemplate())
         h = self.mine(2)[0]
-        mined = user.getblock(h)['tx']
-        assert burn_txid not in mined and void_txid not in mined
-        # consensus policy on pool 3 (its mempool restarts empty: resend both)
-        self.restart(3, ['-yellowbacktemplatepolicy=consensus'])
-        pool3 = self.nodes[3]
-        set_quote(pool3, '2.00')
-        assert_equal(pool3.sendrawtransaction(void_hex), void_txid)
-        assert_equal(pool3.sendrawtransaction(burn_hex), burn_txid)
-        gbt = pool3.getblocktemplate()
-        assert_equal(gbt['yellowback']['templatePolicy'], 'consensus')
-        in_tpl = gbt_hashes(gbt)
-        assert void_txid in in_tpl and burn_txid in in_tpl
-        h = self.mine(3)[0]
-        mined = user.getblock(h)['tx']
-        assert void_txid in mined and burn_txid in mined
-        assert_equal(user.yed_gettxinfo(void_txid)['verdict'], 'bad-mint-collateral')
-        assert_equal(user.yed_getvault(void_txid)['status'], 'VOID')
+        assert burn_txid in user.getblock(h)['tx']
         info = user.yed_gettxinfo(burn_txid)
         assert_equal(info['verdict'], 'burned')
         assert_equal(info['burned'], 6_000)
         assert_equal(info['yedOut'], 4_000)
         unlock_all(user)   # 6.20.0: lockunspent needs both arguments
-        self.checkpoint('consensus template mined')
+        self.checkpoint('valid template mined')
 
     def tpl1_template_includes_chained_mint_transfer(self):
         # Rule: TPL-1 XFER-1
@@ -564,14 +515,13 @@ class YellowbackMiningTest(YellowbackTestFramework):
                                         fee=(payee, fee_zat(collateral)), expiry=expiry)
         v = user.yed_validaterawtransaction(bad_hex)
         assert_equal(v['wouldBeRejected'], True)
-        rpc_error('yellowback-vault-spend', user.sendrawtransaction, bad_hex)
+        rpc_error('bad-yellowback-vault-spend', user.sendrawtransaction, bad_hex)
         bad_txid = stock.sendrawtransaction(bad_hex)           # script-valid: the stock node relays it
         wait_for_mempool(stock, bad_txid)
         time.sleep(2)                                           # relay to the pools is refused by MP-1
         for i in POOLS:
             assert bad_txid not in self.nodes[i].getrawmempool()
             assert bad_txid not in gbt_hashes(self.nodes[i].getblocktemplate())
-        assert_equal(self.nodes[3].getblocktemplate()['yellowback']['templatePolicy'], 'consensus')
         self.mine_round_robin(POOLS, 5)                         # the stock node drops it at expiry + 1
         wait_for_mempool(stock, bad_txid, present=False)
         self.checkpoint('block-invalid spend expired')
@@ -590,39 +540,36 @@ class YellowbackMiningTest(YellowbackTestFramework):
         fee = (payee, fee_zat(collateral))
         no_expiry = build_vault_spend_raw(user, vault, 'owner', [self.token_b], payload=self.redeem_payload(ref), fee=fee, expiry=0)
         assert_equal(user.yed_validaterawtransaction(no_expiry)['wouldBeRejected'], True)
-        rpc_error('yellowback-vault-spend', user.sendrawtransaction, no_expiry)
+        rpc_error('bad-yellowback-mempool-expiry', user.sendrawtransaction, no_expiry)
         for i in POOLS:
-            rpc_error('yellowback-vault-spend', self.nodes[i].sendrawtransaction, no_expiry)
-        # back to strict on pool 3 before the admitted spend sits in every mempool
-        self.restart(3)
-        set_quote(self.nodes[3], '2.00')
-        # a valid spend with the bound: admitted everywhere; its OP_2 selector (K4: an owner selector
-        # consensus accepts) is not the wallet's shape, so strict templates leave it (TPL-2) and it
-        # sits in the mempools until removeExpired drops it
+            rpc_error('bad-yellowback-mempool-expiry', self.nodes[i].sendrawtransaction, no_expiry)
+        # a valid spend with the bound: admitted everywhere. The pools would mine it at once (the template
+        # carries every valid transaction), so the chain advances on empty Python-assembled blocks
+        # until removeExpired and the ConnectTip sweep drop it.
         tip = user.getblockcount()
         ref = tip - REF_LAG
         expiry = ref + REF_WINDOW
         payee = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
         fee = (payee, fee_zat(collateral))
         ok_hex = build_vault_spend_raw(user, vault, 'owner', [self.token_b], payload=self.redeem_payload(ref), fee=fee,
-                                       expiry=expiry, selector=b"\x52")  # OP_2
+                                       expiry=expiry)
         assert_equal(user.yed_validaterawtransaction(ok_hex)['wouldBeRejected'], False)
         ok_txid = user.sendrawtransaction(ok_hex)
         self.sync_mempools(self.nodes)
         for i in POOLS:
             assert ok_txid in self.nodes[i].getrawmempool()
-            assert ok_txid not in gbt_hashes(self.nodes[i].getblocktemplate())
-        self.mine_round_robin(POOLS, expiry - 1 - user.getblockcount())
+            assert ok_txid in gbt_hashes(self.nodes[i].getblocktemplate())
+        self.mine_empty(expiry - 1 - user.getblockcount())
         assert_equal(user.getblockcount(), expiry - 1)
         for node in self.nodes:
             assert ok_txid in node.getrawmempool()
         # tip = expiry: the enforcing nodes' ConnectTip sweep drops it first (at the next height
         # RED-1's window has closed, N5); tip = expiry + 1: the stock node's removeExpired
-        self.mine_round_robin(POOLS, 1)
+        self.mine_empty(1)
         for node in self.enforcing_nodes():
             wait_for_mempool(node, ok_txid, present=False)
         assert ok_txid in stock.getrawmempool()
-        self.mine_round_robin(POOLS, 1)
+        self.mine_empty(1)
         for node in self.nodes:
             wait_for_mempool(node, ok_txid, present=False)
         rpc_error('expir', stock.sendrawtransaction, ok_hex)
@@ -670,9 +617,56 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert spend_txid not in user.getrawmempool()
         assert spend_txid not in gbt_hashes(pool2.getblocktemplate())
         assert_equal(pool2.yed_validaterawtransaction(spend_hex)['wouldBeRejected'], True)
-        rpc_error('yellowback-vault-spend', pool2.sendrawtransaction, spend_hex)
+        rpc_error('bad-yellowback-vault-spend', pool2.sendrawtransaction, spend_hex)
         assert_equal(user.yed_getvault(self.vault_c['txid'])['status'], 'ACTIVE')
         self.checkpoint('after the reorg')
+
+    def stale_invalid_mint_never_templated(self):
+        # Rule: TPL-1 MINT-2
+        # 6.20.0 (upgrade plan finding 28): TestNewBlockAtTipValidity runs the YED module's block check
+        # (ConnectBlock, fJustCheck) but no scripts, and nothing re-checks a mint on DisconnectTip, so a
+        # mint can sit in the mempool invalid at the next height. Its reference height is the tip: valid
+        # at tip + 1; after invalidateblock(tip) the next height is the old tip and MINT-2 fails
+        # (bad-mint-ref-height). The template must skip it (FilterTemplate); the negative control is
+        # -yellowbacktestfault=template, which keeps one invalid candidate: the template check refuses it.
+        print('stale_invalid_mint_never_templated: a mint made invalid by a disconnect stays in the mempool, never in a template')
+        user, pool2 = self.nodes[0], self.nodes[2]
+        self.restart(2, ['-yellowbacktestfault=template', '-debug=yellowback'])
+        pool2 = self.nodes[2]
+        self.mine(POOLS[0])
+        tip, tip_hash = user.getblockcount(), user.getbestblockhash()
+        _ref, required, _payee = self.mint_inputs()
+        payee = user.yed_getfeepayee(tip, 2 * required)['default']['payoutAddress']
+        stale_hex, _o = build_mint_tx(user, CENTS, LOCK, tip, 2 * required, fee_addr=payee)
+        stale = send_locked(user, stale_hex)
+        self.sync_all()
+        assert stale in pool2.getrawmempool()
+        pool2.invalidateblock(tip_hash)
+        assert_equal(pool2.getblockcount(), tip - 1)
+        assert stale in pool2.getrawmempool(), 'the disconnect dropped the stale mint: nothing left to test'
+        assert_equal(pool2.yed_validaterawtransaction(stale_hex)['verdict'], 'bad-mint-ref-height')
+        # the negative control: the faulted template keeps it, and the module's block check refuses the template
+        msg = rpc_error('bad-yellowback-bad-mint-ref-height', pool2.getblocktemplate)
+        assert 'TestNewBlockAtTipValidity' in msg, msg
+        # the filter: never in a template, and the block mined from one is valid without it
+        assert stale not in gbt_hashes(pool2.getblocktemplate())
+        h = pool2.generate(1)[0]
+        assert stale not in pool2.getblock(h)['tx']
+        assert_equal(pool2.getbestblockhash(), h)
+        assert debug_log_has(self.options.tmpdir, 2, 'FilterTemplate: skipping %s' % stale)
+        # rejoin: pool 2 forgets the fork it built and follows the network again
+        pool2.invalidateblock(h)
+        pool2.reconsiderblock(tip_hash)
+        self.restart(2)
+        self.sync_all(blocks_only=True)
+        assert_best_hash(self.nodes)
+        # the mint is valid again at the network's next height; node 0 holds it (pool 2's restart
+        # emptied its mempool, and 6.20.0 does not re-announce a mempool to a reconnected peer)
+        h = self.mine(0, blocks_only=True)[0]
+        assert stale in user.getblock(h)['tx']
+        self.sync_all()
+        unlock_all(user)
+        self.checkpoint('stale mint')
 
     # ------------------------------------------------------------------ run
 
@@ -686,11 +680,10 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.pool_path_end_to_end()
         self.tag2_invalid_tag_is_no_tag()
         self.tx0_coinbase_payload_registers_nothing()
-        self.quote_staleness_signal_only()
-        self.setquote_zero_signal_only()
-        self.setquote_rebuilds_template()
-        self.no_signal_no_quote_no_tag()
-        self.unhealthy_index_no_tag()
+        self.quote_staleness_no_tag()
+        self.setquote_zero_no_tag()
+        self.retired_signal_flag_ignored()
+        self.unhealthy_index_stops_the_node()
         self.miner2_default_from_mineraddress()
         self.miner2_non_p2pkh_refused()
 
@@ -698,7 +691,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.activate(quote_usd='2.00')
         self.mine(2, REF_LAG + 1)
         self.checkpoint('active')
-        self.template_policy_strict_vs_consensus()
+        self.template_carries_the_valid_transactions()
         self.tpl1_template_includes_chained_mint_transfer()
         print('the locks pass')
         self.mine_round_robin(POOLS, LOCK + 2)
@@ -706,7 +699,13 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.block_invalid_vault_spend()
         self.mp1_expiry_required()
         self.mp1_reorg_reevaluates_mempool()
+        self.stale_invalid_mint_never_templated()
         self.gbt_shape_without_flag()
+
+
+def debug_log_has(tmpdir, i, needle):
+    with open(os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log'), encoding='utf-8', errors='replace') as f:
+        return needle in f.read()
 
 
 def _spk(node, addr):
