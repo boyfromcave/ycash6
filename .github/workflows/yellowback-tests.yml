@@ -48,7 +48,7 @@ on:
   workflow_dispatch:
     inputs:
       weekly_fuzz:
-        description: Run only the weekly fuzz job (six targets, about 3.5 hours)
+        description: Run only the weekly fuzz job (seven targets, about 4 hours)
         type: boolean
         default: false
 
@@ -633,7 +633,10 @@ jobs:
         # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
-        run: python3 src/test/gen_yellowback_corpus.py --check
+        # The vault primitive's target (src/fuzzing/Vault) has its own generator (gen_vault_corpus.py).
+        run: |
+          python3 src/test/gen_yellowback_corpus.py --check
+          python3 src/test/gen_vault_corpus.py --check
       - name: The attestation known-answer vectors regenerate byte for byte (BUNDLE-1, R13)
         # The generator has no --check mode: regenerate, then require a clean tree.
         if: ${{ !cancelled() }}
@@ -859,7 +862,7 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle Vault; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -881,7 +884,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-fuzz-findings
-          path: src/fuzzing/Yellowback*/output/crash-*
+          path: |
+            src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault/output/crash-*
           if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
@@ -1290,7 +1295,7 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           # No full build ran in this job, so the target-only make needs the cxx bridge headers.
           qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle Vault; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -1310,7 +1315,9 @@ jobs:
             i=0; for f in src/fuzzing/$t/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
           done
           python3 src/test/gen_yellowback_corpus.py --write || true
-          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp
+          python3 src/test/gen_vault_corpus.py --write || true
+          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp \
+            src/fuzzing/Vault/input src/fuzzing/Vault/crashes src/test/vault_fuzz_tests.cpp
       - name: Upload corpus and crashes
         # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
         if: always()
@@ -1321,6 +1328,9 @@ jobs:
             src/fuzzing/Yellowback*/input
             src/fuzzing/Yellowback*/crashes
             src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault/input
+            src/fuzzing/Vault/crashes
+            src/fuzzing/Vault/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
         env:
