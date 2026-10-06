@@ -774,7 +774,11 @@ jobs:
         # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
-        run: python3 src/test/gen_yellowback_corpus.py --check
+        # The vault primitive's target (src/fuzzing/Vault) has its own generator once it is ported
+        # (ycash-dd: gen_vault_corpus.py); checked the same way when present.
+        run: |
+          python3 src/test/gen_yellowback_corpus.py --check
+          if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
       - name: The attestation known-answer vectors regenerate byte for byte (BUNDLE-1, R13)
         # The generator has no --check mode: regenerate, then require a clean tree.
         if: ${{ !cancelled() }}
@@ -975,7 +979,11 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          # Every Yellowback* and Vault* target that has a fuzz.cpp (the vault primitive's target joins
+          # when it is ported; ycash-dd has src/fuzzing/Vault), so a new target needs no edit here.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)  # `; true`: the last glob may match nothing, and bash -e would end the step on that status
+          echo "fuzz targets:" $targets
+          for t in $targets; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -997,7 +1005,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-fuzz-findings
-          path: src/fuzzing/Yellowback*/output/crash-*
+          path: |
+            src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault*/output/crash-*
           if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
@@ -1320,7 +1330,11 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           # No full build ran in this job, so the target-only make needs the cxx bridge headers.
           qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          # Every Yellowback* and Vault* target that has a fuzz.cpp (the vault primitive's target joins
+          # when it is ported; ycash-dd has src/fuzzing/Vault), so a new target needs no edit here.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)  # `; true`: the last glob may match nothing, and bash -e would end the step on that status
+          echo "fuzz targets:" $targets
+          for t in $targets; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -1332,7 +1346,7 @@ jobs:
             # Overriding ycashd_LDFLAGS also drops 6.20.0's Linux '--whole-archive -ljemalloc' (src/Makefile.am),
             # which is wanted: a jemalloc malloc would shadow ASan's allocator.
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
-            mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
+            mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged src/fuzzing/$t/input src/fuzzing/$t/crashes
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=1800 || true
             # Crashes become permanent replay cases; the minimised corpus (seeds + new coverage) replaces input/.
             for c in src/fuzzing/$t/output/crash-*; do [ -f "$c" ] && cp "$c" "src/fuzzing/$t/crashes/$(date +%Y%m%d)-$(basename "$c")"; done
@@ -1340,7 +1354,12 @@ jobs:
             i=0; for f in src/fuzzing/$t/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
           done
           python3 src/test/gen_yellowback_corpus.py --write || true
-          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp
+          for t in $targets; do git add -f "src/fuzzing/$t/input" "src/fuzzing/$t/crashes"; done
+          git add -f src/test/yellowback_fuzz_tests.cpp
+          if [ -f src/test/gen_vault_corpus.py ]; then
+            python3 src/test/gen_vault_corpus.py --write || true
+            git add -f src/test/vault_fuzz_tests.cpp
+          fi
       - name: Upload corpus and crashes
         # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
         if: always()
@@ -1351,6 +1370,9 @@ jobs:
             src/fuzzing/Yellowback*/input
             src/fuzzing/Yellowback*/crashes
             src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault*/input
+            src/fuzzing/Vault*/crashes
+            src/fuzzing/Vault*/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
         env:
@@ -1370,7 +1392,7 @@ jobs:
             --title "fuzz: weekly corpus update $(date +%Y-%m-%d)" \
             --body "$(printf '%s\n' \
               '## 1. What and why' '' \
-              "Weekly libFuzzer run (30 min per target, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/Yellowback*/input/ and the C++ replay table src/test/yellowback_fuzz_tests.cpp was regenerated by gen_yellowback_corpus.py --write. Maintenance; no code change." '' \
+              "Weekly libFuzzer run (30 min per target, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/*/input/ and the C++ replay tables src/test/yellowback_fuzz_tests.cpp (and src/test/vault_fuzz_tests.cpp where present) were regenerated by gen_yellowback_corpus.py / gen_vault_corpus.py --write. Maintenance; no code change." '' \
               '## 2. How it was verified' '' \
               "The fuzz targets ran to their time cap in the workflow; the replay table is regenerated from the corpus. **Any file under src/fuzzing/*/crashes/ in this diff is a finding: replay it and fix before merging.** No crashes/ files = merge." '' \
               '## 3. What this PR touches in src/' '' \
@@ -1380,8 +1402,8 @@ jobs:
         # step turns the run red afterwards instead of reporting a crash as a green run.
         if: always()
         run: |
-          if ls src/fuzzing/Yellowback*/output/crash-* >/dev/null 2>&1; then
-            ls -l src/fuzzing/Yellowback*/output/crash-*
+          if ls src/fuzzing/*/output/crash-* >/dev/null 2>&1; then
+            ls -l src/fuzzing/*/output/crash-*
             echo "::error::a fuzz target crashed: replay the input from the artifact (or crashes/ in the corpus PR) and fix"
             exit 1
           fi
