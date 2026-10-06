@@ -38,9 +38,9 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig}).  The C++ unit test
+# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 5).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6'
+GOLDEN_STATE_HASH = 'd3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1417,14 +1417,15 @@ def build_golden():
 def golden_document(c):
     return {
         'description': 'Yellowback v3 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
-                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig)}; payload version 3; '
+                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
+                       'SCHEMA_VERSION 5; payload version 3; '
                        '%d synthetic blocks (see test_yellowback_model.build_golden): the v2 lifecycle to 224, then '
                        'registrations, arming, a mint with a bundle, a VOID mint without one, a notice and an emergency '
                        'claim with a residual, dormancy, an equivocation, a revival and two bond spends. '
                        'txs[0] of every block is the coinbase; the model reads its scriptSig only. '
                        'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.' % GOLDEN_BLOCKS,
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0,
-                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG},
+                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
         'totals': c.model.totals.as_dict(),

@@ -43,7 +43,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ad712915bbff4bb528fb9f97cb4a9f20ff7c03a2514a12787731c5d738be49a6";
+const std::string GOLDEN_HASH = "d3d60429bd45d653c2ebf131ae8ed12bfe571650f586cf6ce41bea58439cdbd0";
 
 uint160 KeyOf(int i)
 {
@@ -520,7 +520,8 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     BOOST_REQUIRE(doc.isObject());
     const UniValue& pj = doc["params"];
     yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), pj["enforceUntil"].get_int(),
-                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int());
+                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
+                                         pj["mintRequiresArmed"].get_bool());
     MemoryStateView view;
     const MemoryStateView empty = view;
     std::vector<UndoRecord> undos;
