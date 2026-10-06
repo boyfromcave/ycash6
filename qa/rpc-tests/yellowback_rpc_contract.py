@@ -55,6 +55,7 @@ from test_framework.yellowback_util import (
 )
 from test_framework.yellowback_attest import (
     build_carrier_tx,
+    build_legacy_register_tx,
     encode_bundle,
     equivocation_raw,
     feed,
@@ -445,7 +446,11 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         reg = c.check('yed_gettxinfo', user.yed_gettxinfo(reg_txid))
         assert_equal((reg['type'], reg['seq']), ('register', int(rows[0]['seq'])))
         raw = user.getrawtransaction(reg_txid, 1)
-        dec = c.check('yed_decodepayload', user.yed_decodepayload(raw['vout'][1]['scriptPubKey']['hex'][4:]))
+        act = user.vault_decodescript(raw['vout'][1]['scriptPubKey']['hex'])       # P4-b: the registration is a SET_JOIN
+        assert_equal((act['type'], act['memberkey']), ('join', rows[0]['attestorPubKey']))
+        # the retired ATTESTOR_REGISTER payload still decodes (yed_decodepayload's register shape), but is invalid
+        legacy = user.decoderawtransaction(build_legacy_register_tx(user, rows[0]['attestorPubKey']))
+        dec = c.check('yed_decodepayload', user.yed_decodepayload(legacy['vout'][1]['scriptPubKey']['hex'][4:]))
         assert_equal((dec['type'], dec['register']['bondKeyAddress']), ('register', rows[0]['bondKeyAddress']))
 
         print('v3: the empty pool, then feed_all; yed_getattestations / yed_addattestation / yed_buildbundle / yed_getselection')
@@ -602,7 +607,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[wseq], 'ELIGIBLE')
-        assert_equal(user.yed_gettxinfo(revived['txid'])['type'], 'revive')
+        assert_equal(user.yed_gettxinfo(revived['txid'])['type'], 'set_act')        # P4-b: the revival is a SET_HEARTBEAT
 
 # Rule: NOT-1 RED-4 RED-5
         print('v3 wallet: the emergency claim of vault %s from the pool: notice, persistence, clause (b)' % vaults[0]['txid'][:8])

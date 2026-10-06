@@ -134,6 +134,8 @@ pub struct Attestor {
     pub allow_mock_off_regtest: bool,
     pub seq: u16,
     pub published: u64,
+    /// P4-b: the height of the last SET_HEARTBEAT sent (or attempted: a failure retries a block later).
+    pub last_heartbeat: Option<u32>,
 }
 
 impl Attestor {
@@ -163,6 +165,7 @@ impl Attestor {
             allow_mock_off_regtest,
             seq,
             published: 0,
+            last_heartbeat: None,
         })
     }
 
@@ -279,6 +282,73 @@ impl Attestor {
         Tick::Published(att)
     }
 
+    /// P4-b: the attestor registry is the vault primitive's attestor set, whose member dormancy
+    /// (no act within its livenessWindow) unseats an attestor that only signs prices (signing is not
+    /// an act, U-19). Every `heartbeat_blocks` blocks: `set_heartbeat <attestorSetId> <memberKey>`, the
+    /// member key being this seq's `attestorPubKey` (the node's wallet holds it, as for
+    /// `yed_signattestation`). Returns whether a heartbeat was sent.
+    pub async fn heartbeat(&mut self, height: u32) -> bool {
+        let every = self.cfg.attest.heartbeat_blocks;
+        if every == 0 {
+            return false;
+        }
+        if let Some(last) = self.last_heartbeat {
+            if height < last.saturating_add(every) {
+                return false;
+            }
+        }
+        // a failure (not yet mature, the node busy) retries at the next block, not at the next poll
+        self.last_heartbeat = Some(height.saturating_sub(every).saturating_add(1));
+        let set_id = match self.node.call("yed_getinfo", vec![]).await {
+            Ok(v) => v
+                .get("upgrade")
+                .and_then(|u| u.get("attestorSetId"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            Err(e) => {
+                tracing::error!("yed_getinfo failed ({e}); heartbeat retried next block");
+                return false;
+            }
+        };
+        let member = match self.node.call("yed_listattestors", vec![]).await {
+            Ok(Value::Array(rows)) => rows
+                .iter()
+                .find(|r| r.get("seq").and_then(Value::as_u64) == Some(self.seq as u64))
+                .and_then(|r| r.get("attestorPubKey").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string(),
+            Ok(_) => String::new(),
+            Err(e) => {
+                tracing::error!("yed_listattestors failed ({e}); heartbeat retried next block");
+                return false;
+            }
+        };
+        if set_id.is_empty() || member.is_empty() {
+            tracing::warn!(
+                "no attestor set or no record for seq {}; heartbeat retried next block",
+                self.seq
+            );
+            return false;
+        }
+        match self
+            .node
+            .call("set_heartbeat", vec![json!(set_id), json!(member)])
+            .await
+        {
+            Ok(v) => {
+                self.last_heartbeat = Some(height);
+                let txid = v.get("txid").and_then(Value::as_str).unwrap_or("?").to_string();
+                tracing::info!("heartbeat for seq {} at height {height}: {txid}", self.seq);
+                true
+            }
+            Err(e) => {
+                tracing::warn!("set_heartbeat for seq {} failed: {e}; retrying next block", self.seq);
+                false
+            }
+        }
+    }
+
     /// The exit code: the loop runs until a signal (0); 2 is a bad configuration found at runtime.
     pub async fn run(mut self) -> anyhow::Result<i32> {
         let network = self.wait_network().await;
@@ -305,6 +375,7 @@ impl Attestor {
             match self.getinfo().await {
                 Ok((_, h)) if h >= 0 => {
                     self.tick(h as u32, transport.as_mut()).await;
+                    self.heartbeat(h as u32).await;
                 }
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
                 Err(e) => tracing::error!("yed_getinfo failed: {e}; retrying"),
@@ -538,6 +609,61 @@ mod tests {
         // the tick was not consumed: the next poll at the same height tries again
         assert_eq!(a.tick(10, &mut t).await, Tick::RpcError);
         assert_eq!(a.published, 0);
+    }
+
+    /// P4-b: a SET_HEARTBEAT of the seq's member key every heartbeat_blocks blocks; a failure retries a block later;
+    /// 0 never heartbeats.
+    #[tokio::test]
+    async fn heartbeat_every_n_blocks() {
+        let fail = Arc::new(AtomicU32::new(1));
+        let f = fail.clone();
+        let m = MockNode::start(None, move |method, params| match method {
+            "yed_getinfo" => {
+                Ok(json!({"network": "regtest", "height": 10, "upgrade": {"attestorSetId": "ab".repeat(32)}}))
+            }
+            "yed_listattestors" => Ok(
+                json!([{"seq": 2, "attestorPubKey": "02".to_string() + &"11".repeat(32)}, {"seq": 1, "attestorPubKey": "03".to_string() + &"22".repeat(32)}]),
+            ),
+            "set_heartbeat" => {
+                assert_eq!(params[0], json!("ab".repeat(32)));
+                assert_eq!(params[1], json!("03".to_string() + &"22".repeat(32)));
+                if f.load(Ordering::SeqCst) > 0 {
+                    f.fetch_sub(1, Ordering::SeqCst);
+                    Err((-5, "this wallet holds no current member key of the set".into()))
+                } else {
+                    Ok(json!({"txid": "cd".repeat(32)}))
+                }
+            }
+            _ => Err((-32601, "Method not found".into())),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let text = format!(
+            "[node]\nrpc_url = \"{}\"\n[attest]\nseq = 1\nheartbeat_blocks = 20\n[transport]\nkind = \"dir\"\npath = \"{}\"\n",
+            m.url,
+            dir.path().display()
+        );
+        let cfg = config::parse(&text).unwrap();
+        let mut a = Attestor::new(cfg, Some(PathBuf::from("/dev/null")), false).unwrap();
+        assert!(!a.heartbeat(100).await); // the node refuses (not yet mature): retried at 101, not at 120
+        assert!(!a.heartbeat(100).await);
+        assert!(a.heartbeat(101).await);
+        assert!(!a.heartbeat(120).await);
+        assert!(a.heartbeat(121).await);
+        let hb = m
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "set_heartbeat")
+            .count();
+        assert_eq!(hb, 3);
+        let text0 = format!(
+            "[node]\nrpc_url = \"{}\"\n[attest]\nseq = 1\nheartbeat_blocks = 0\n[transport]\nkind = \"dir\"\npath = \"{}\"\n",
+            m.url,
+            dir.path().display()
+        );
+        let mut never = Attestor::new(config::parse(&text0).unwrap(), Some(PathBuf::from("/dev/null")), false).unwrap();
+        assert!(!never.heartbeat(500).await);
     }
 
     #[test]

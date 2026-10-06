@@ -16,7 +16,8 @@ clause b with the RED-5 residual intent to the owner; since the vault upgrade a 
 transparent intents released with vault_release after CLAIM_DELAY, U-23),
 yed_reportequivocation, dormancy and yed_revive, yed_withdrawbond before and after the locktime
 (from a wallet that imported the bond key), and that no stock command ever spends a carrier or a
-bond.
+bond. P4-b: yed_registerattestor is a SET_JOIN to the attestor set (one wallet key is the member,
+hot and bond key), yed_revive a SET_HEARTBEAT.
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 claimant, 6-7 attestor wallets.
 
@@ -138,14 +139,13 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
             assert_equal(raw['vout'][0]['valueZat'], 10 * COIN)
             assert_equal(raw['vout'][0]['scriptPubKey']['addresses'], [res['bondAddress']])
             assert_equal(res['bondOutpoint'], {'txid': res['txid'], 'vout': 0})
-            payload = node.yed_decodepayload(raw['vout'][1]['scriptPubKey']['hex'][4:])
-            assert_equal((payload['valid'], payload['type']), (True, 'register'))
-            # the record the raw path produces is a function of the payload and vout[0]: same keys, locktime, bond address
-            assert_equal(payload['register']['attestorPubKey'], res['attestorPubKey'])
-            assert_equal(payload['register']['bondLocktime'], res['bondLocktime'])
-            assert_equal(payload['register']['bondAddress'], res['bondAddress'])
-            assert_equal(payload['register']['flags'], res['flags'])
-            assert_equal(pubkey_to_address(hex_str_to_bytes(payload['register']['bondPubKey'])), res['bondKeyAddress'])
+            act = node.vault_decodescript(raw['vout'][1]['scriptPubKey']['hex'])       # P4-b: a SET_JOIN, not ATTESTOR_REGISTER
+            assert_equal((act['type'], act['setid']), ('join', node.yed_getinfo()['upgrade']['attestorSetId']))
+            # the record is a function of the act and vout[0]: the member key is the attestor key and the bond key
+            assert_equal(act['memberkey'], res['attestorPubKey'])
+            assert_equal(act['bondlocktime'], res['bondLocktime'])
+            assert_equal(act['bondvout'], 0)
+            assert_equal(pubkey_to_address(hex_str_to_bytes(act['memberkey'])), res['bondKeyAddress'])
             assert_equal(res['bondLocktime'], node.getblockcount() + LOCK_BLOCKS)       # tip + 1 + lockBlocks at build time
             # the same record the raw path would produce: the bond key address is the P2PKH of the payload's bondPubKey
             assert_equal(node.validateaddress(res['bondKeyAddress'])['ismine'], True)
@@ -397,7 +397,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(raweq['vin'][-1]['txid'], eq['carrierTxid'])
         self.mine(POOLS[0])
         note_attestor_status(2, 'EJECTED')
-        assert_rpc_error('not-equivocation: seq 2 is EJECTED', claimant.yed_reportequivocation, bytes_to_hex_str(a), bytes_to_hex_str(b))
+        assert_rpc_error('not-equivocation: the bond of seq 2 is frozen', claimant.yed_reportequivocation, bytes_to_hex_str(a), bytes_to_hex_str(b))
         assert_same_statehash(self.enforcing_nodes(), 'ejection')
         print('  a mint after the ejection: the selection no longer includes seq 2 and the bundle still verifies')
         self.mine_round_robin(POOLS, 2)

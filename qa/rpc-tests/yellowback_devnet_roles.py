@@ -178,6 +178,14 @@ class Preset:
         check(state['population'] == POPULATION and state['liquidator'] == LIQUIDATOR, 'population/liquidator nodes are not 9/10')
         attestors = self.node(0).yed_listattestors()
         check(len(attestors) == want['attestors'], '%d attestors registered, expected %d' % (len(attestors), want['attestors']))
+        # P4-b: the registry is the attestor set; every record is a current member of it (the set's own view)
+        set_id = self.node(0).yed_getinfo()['upgrade']['attestorSetId']
+        members = {m['key']: m for m in self.node(0).set_getinfo(set_id)['memberlist']}
+        for rec in attestors:
+            m = members.get(rec['attestorPubKey'])
+            check(m is not None and m['status'] == 'active' and m['current'],
+                  'seq %s is not a current member of the attestor set: %s' % (rec['seq'], m))
+            check(m['lastact'] == rec['lastAct'], 'seq %s: lastAct %s, the set says %s' % (rec['seq'], rec['lastAct'], m['lastact']))
         # node 1 is stock: no yed_* at all
         try:
             self.node(STOCK).yed_getinfo()
