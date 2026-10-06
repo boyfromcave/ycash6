@@ -26,6 +26,8 @@
 #include "script/sign.h"
 #include "script/standard.h"
 #include "uint256.h"
+#include "vault/checker.h"
+#include "vault/node.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #endif
@@ -1234,7 +1236,19 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
         UpdateTransaction(mergedTx, i, sigdata);
 
         ScriptError serror = SCRIPT_ERR_OK;
-        if (!VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txConst, txdata, i, amount), consensusBranchId, &serror)) {
+        // UPGRADE_VAULT adds CSV and the set opcodes at the next block (plan §15.5 finding 17);
+        // OP_CHECKSETSIG then verifies against the set state at the tip.
+        const unsigned int vaultFlags = GetVaultScriptFlags(chainActive.Height() + 1, Params().GetConsensus());
+        bool fVerified;
+        if (vaultFlags) {
+            PrecomputedTransactionData vaultTxdata(txConst, allPrevOutputs);
+            fVerified = VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags,
+                                     vault::SetSigChecker(&txConst, i, amount, false, vaultTxdata, vault::TipSnapshot(), chainActive.Height() + 1),
+                                     consensusBranchId, &serror);
+        } else {
+            fVerified = VerifyScript(txin.scriptSig, prevPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txConst, txdata, i, amount), consensusBranchId, &serror);
+        }
+        if (!fVerified) {
             TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
         }
     }

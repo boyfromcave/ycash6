@@ -38,6 +38,7 @@
 #include "validationinterface.h"
 #include "zip317.h"
 #include "yellowback/policy.h"
+#include "vault/node.h"
 
 #include <librustzcash.h>
 #include <rust/bridge.h>
@@ -370,6 +371,23 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
     CCoinsViewCache view(pcoinsTip);
 
+    // UPGRADE_VAULT (plan §15.6 "Miner"): acts and the rate limit apply against a running copy
+    // of the set state; a transaction that fails is skipped. 6.20.0 keeps no per-template coins
+    // view (it does not UpdateCoins), so coins come from the tip and the mempool: a mempool coin
+    // is an in-block parent here (isStillDependent), at the template's height.
+    std::optional<vault::VaultState> vaultRunningHolder;
+    std::optional<CCoinsViewMemPool> vaultMemPoolView;
+    std::optional<CCoinsViewCache> vaultCoinsView;
+    std::optional<vault::ViewCoinAccessor> vaultCoinsHolder;
+    vaultRunning = nullptr;
+    vaultCoins = nullptr;
+    if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
+        vaultRunning = &vaultRunningHolder.emplace(*vault::g_vaultdb);
+        vaultMemPoolView.emplace(pcoinsTip, mempool);
+        vaultCoinsView.emplace(&*vaultMemPoolView);
+        vaultCoins = &vaultCoinsHolder.emplace(*vaultCoinsView, nHeight);
+    }
+
     SaplingMerkleTree sapling_tree;
     assert(view.GetSaplingAnchorAt(view.GetBestAnchor(SAPLING), sapling_tree));
 
@@ -546,6 +564,17 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     // Yellowback TPL-1/2, last refusal before AddToBlock (only a turnstile violation follows, mapping §19)
     if (ybview && !yellowback::policy::FilterTemplate(*ybview, iter->GetTx(), nHeight)) return false;
 
+    // UPGRADE_VAULT: the transaction's acts and template rules against the running set state, as a
+    // trial on a child overlay committed only once nothing else can refuse the transaction (below).
+    std::optional<vault::VaultState> vaultTrial;
+    if (vaultRunning) {
+        vaultTrial.emplace(*vaultRunning);
+        if (auto vaultBad = vaultTrial->ApplyTx(iter->GetTx(), nHeight, *vaultCoins)) {
+            LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", iter->GetTx().GetHash().ToString(), vaultBad->c_str());
+            return false;
+        }
+    }
+
     if (chainparams.ZIP209Enabled()) {
         // Does this transaction lead to a turnstile violation?
 
@@ -583,6 +612,13 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
         sproutValue = sproutValueDummy;
         saplingValue = saplingValueDummy;
         orchardValue = orchardValueDummy;
+    }
+
+    if (vaultTrial) {
+        for (const auto& change : vaultTrial->Changes()) {
+            if (change.second) vaultRunning->Put(change.first, *change.second);
+            else vaultRunning->Erase(change.first);
+        }
     }
 
     return true;

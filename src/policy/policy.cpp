@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -12,6 +13,7 @@
 #include "tinyformat.h"
 #include "util/system.h"
 #include "util/strencodings.h"
+#include "vault/act.h"
 
 CAmount PerSaplingOutputFees(const CTransaction& tx)
 {
@@ -130,10 +132,23 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
         }
     }
 
+    // UPGRADE_VAULT (plan §15.3, §15.5): the V and I templates are standard, and a `YV` act
+    // OP_RETURN may carry up to MAX_VAULT_ACT_BYTES, only where the upgrade is active.
+    const bool vaultActive = chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT);
+
     unsigned int nDataOut = 0;
     txnouttype whichType;
     for (const CTxOut& txout : tx.vout) {
+        if (vaultActive && fAcceptDatacarrier && vault::IsActOutput(txout.scriptPubKey) &&
+            txout.scriptPubKey.size() <= MAX_VAULT_ACT_BYTES && txout.scriptPubKey.IsPushOnly(txout.scriptPubKey.begin() + 1)) {
+            nDataOut++;
+            continue;
+        }
         if (!::IsStandard(txout.scriptPubKey, whichType)) {
+            reason = "scriptpubkey";
+            return false;
+        }
+        if ((whichType == TX_VAULT || whichType == TX_VAULT_INTENT) && !vaultActive) {
             reason = "scriptpubkey";
             return false;
         }
@@ -173,6 +188,9 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
         const CScript& prevScript = prev.scriptPubKey;
         if (!Solver(prevScript, whichType, vSolutions))
             return false;
+        // A template input's scriptSig (push-only, IsStandardTx) is checked by the vault rules (S-1).
+        if (whichType == TX_VAULT || whichType == TX_VAULT_INTENT)
+            continue;
         int nArgsExpected = ScriptSigArgsExpected(whichType, vSolutions);
         if (nArgsExpected < 0)
             return false;

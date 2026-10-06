@@ -24,6 +24,7 @@ class CScript;
 
 namespace Consensus { struct Params; };
 namespace yellowback { class TemplateView; }
+namespace vault { class VaultState; class CoinAccessor; }
 
 static const bool DEFAULT_GENERATE = false;
 static const int DEFAULT_GENERATE_THREADS = 1;
@@ -132,6 +133,10 @@ private:
 
     // Yellowback (TPL-1/2): the template's overlay view; points into CreateNewBlock's frame, valid only during it
     yellowback::TemplateView* ybview = nullptr;
+    // UPGRADE_VAULT (plan §15.6 "Miner"): the running set state of the template and the coins its
+    // transactions spend (tip + in-block parents); point into CreateNewBlock's frame, valid only during it
+    vault::VaultState* vaultRunning = nullptr;
+    const vault::CoinAccessor* vaultCoins = nullptr;
 
     // Variables used for addScoreTxs and addPriorityTxs
     int lastFewTxs;

@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2017-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -53,6 +54,10 @@ enum txnouttype
     TX_SCRIPTHASH,
     TX_MULTISIG,
     TX_NULL_DATA, //!< unspendable OP_RETURN script that carries data
+    // The vault primitive's bare templates (docs/plans/yellowback-upgrade-plan.md §15.3);
+    // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
+    TX_VAULT,        //!< vault V
+    TX_VAULT_INTENT, //!< intent I
 };
 
 class CNoDestination {

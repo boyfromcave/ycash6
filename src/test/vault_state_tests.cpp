@@ -11,6 +11,7 @@
 #include "vault/checker.h"
 #include "vault/db.h"
 #include "vault/module.h"
+#include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
 
@@ -19,6 +20,7 @@
 #include "script/interpreter.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
+#include "undo.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -698,6 +700,117 @@ BOOST_AUTO_TEST_CASE(cancel_relocks)
     // The re-created vault is byte-identical and spendable again.
     COutPoint back = FindOut(cancel, vspk);
     BOOST_CHECK(!c.Try(SpendTx(c, back, 2, {CTxOut(10000, Recipient(64))})));
+}
+
+BOOST_AUTO_TEST_CASE(template_out_index)
+{
+    // The 'v' index (vault_list; an intent's height for the start-up replay): every V / I output
+    // created from activation, with its height, value and script (an intent also its
+    // originating V script), erased when the output is spent, restored by the block undo.
+    Chain c;
+    CKey owner = MakeKey(50);
+    SetId s = SetWithMembers(c, {MakeKey(1)});
+    VaultParams vp = VaultFor(s, owner);
+    CScript vspk = BuildVault(vp);
+    COutPoint vout = Lock(c, vp, 10000);
+    auto rv = GetTemplateOut(c.kv, vout);
+    BOOST_REQUIRE(rv);
+    BOOST_CHECK_EQUAL(rv->kind, 0);
+    BOOST_CHECK_EQUAL(rv->height, c.h - 1);
+    BOOST_CHECK_EQUAL(rv->value, 10000);
+    BOOST_CHECK(rv->scriptPubKey == vspk);
+    BOOST_CHECK(rv->origin.empty());
+
+    CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    CMutableTransaction unlock = SpendTx(c, vout, 1, {CTxOut(4000, ispk), CTxOut(6000, vspk)});
+    std::map<std::string, std::string> before = c.kv.data;
+    BOOST_REQUIRE(!c.Block1(unlock));
+    BOOST_CHECK(!GetTemplateOut(c.kv, vout));
+    COutPoint iout = FindOut(unlock, ispk);
+    COutPoint relock = FindOut(unlock, vspk);
+    auto ri = GetTemplateOut(c.kv, iout);
+    BOOST_REQUIRE(ri);
+    BOOST_CHECK_EQUAL(ri->kind, 1);
+    BOOST_CHECK_EQUAL(ri->height, c.h - 1);
+    BOOST_CHECK_EQUAL(ri->value, 4000);
+    BOOST_CHECK(ri->origin == vspk);
+    BOOST_REQUIRE(GetTemplateOut(c.kv, relock));
+    auto list = ListTemplateOuts(c.kv);
+    BOOST_CHECK_EQUAL(list.size(), 2U);
+    for (const auto& e : list) BOOST_CHECK(e.first == iout || e.first == relock);
+
+    // The block undo restores the index byte for byte.
+    {
+        MemoryKV kv = c.kv;
+        VaultState st(kv);
+        st.ApplyUndo(c.history.back().second);
+        kv.Apply(st.Changes());
+        BOOST_CHECK(kv.data == before);
+    }
+
+    // A failed transaction leaves no index entry; a release erases the intent's.
+    BOOST_CHECK(c.Try(SpendTx(c, iout, 1, {CTxOut(3999, Recipient(60))})));
+    BOOST_CHECK(GetTemplateOut(c.kv, iout));
+    c.Empty(4);
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, iout, 1, {CTxOut(4000, Recipient(60))})));
+    BOOST_CHECK(!GetTemplateOut(c.kv, iout));
+    BOOST_CHECK_EQUAL(ListTemplateOuts(c.kv).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(coins_from_undo)
+{
+    // vault::CoinsFromUndo (the start-up replay's accessor): scripts and values from the undo
+    // record; heights from the record, the block itself, or the template-output index.
+    Chain c;
+    CKey owner = MakeKey(50);
+    SetId s = SetWithMembers(c, {MakeKey(1)});
+    VaultParams vp = VaultFor(s, owner);
+    CScript vspk = BuildVault(vp);
+    COutPoint vout = Lock(c, vp, 10000);
+    CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    CMutableTransaction unlock = SpendTx(c, vout, 1, {CTxOut(10000, ispk)});
+    BOOST_REQUIRE(!c.Block1(unlock));
+    COutPoint iout = FindOut(unlock, ispk);
+    const int64_t ih = c.h - 1;
+
+    CMutableTransaction coinbase;
+    coinbase.vin.push_back(CTxIn());
+    coinbase.vout.push_back(CTxOut(1, Recipient(70)));
+    CMutableTransaction cancel = SpendTx(c, iout, 2, {CTxOut(10000, vspk)}, false);
+    CMutableTransaction child; // spends an output created earlier in the same block
+    child.vin.push_back(CTxIn(COutPoint(CTransaction(cancel).GetHash(), 0), CScript() << OP_2, 0xffffffff));
+    child.vout.push_back(CTxOut(9000, Recipient(71)));
+    CBlock block;
+    block.vtx = {CTransaction(coinbase), CTransaction(cancel), CTransaction(child)};
+
+    CBlockUndo undo;
+    undo.vtxundo.resize(2);
+    undo.vtxundo[0].vprevout.push_back(CTxInUndo(CTxOut(10000, ispk))); // nHeight 0: not the tx's last output
+    undo.vtxundo[1].vprevout.push_back(CTxInUndo(CTxOut(10000, vspk)));
+    MapCoinAccessor coins;
+    BOOST_REQUIRE(CoinsFromUndo(block, undo, c.h, c.kv, coins));
+    SpentCoin got;
+    BOOST_REQUIRE(coins.GetSpentCoin(iout, got));
+    BOOST_CHECK_EQUAL(got.height, ih);            // from the 'v' index
+    BOOST_CHECK(got.scriptPubKey == ispk);
+    BOOST_REQUIRE(coins.GetSpentCoin(child.vin[0].prevout, got));
+    BOOST_CHECK_EQUAL(got.height, c.h);           // created in the block
+    BOOST_CHECK_EQUAL(got.value, 10000);
+
+    // The undo record's height wins when it has one.
+    undo.vtxundo[0].vprevout[0].nHeight = 7;
+    MapCoinAccessor coins2;
+    BOOST_REQUIRE(CoinsFromUndo(block, undo, c.h, c.kv, coins2));
+    BOOST_REQUIRE(coins2.GetSpentCoin(iout, got));
+    BOOST_CHECK_EQUAL(got.height, 7);
+
+    // An intent with no height anywhere cannot be replayed; a mismatched undo is refused.
+    undo.vtxundo[0].vprevout[0].nHeight = 0;
+    MemoryKV empty;
+    MapCoinAccessor coins3;
+    BOOST_CHECK(!CoinsFromUndo(block, undo, c.h, empty, coins3));
+    undo.vtxundo.pop_back();
+    BOOST_CHECK(!CoinsFromUndo(block, undo, c.h, c.kv, coins3));
 }
 
 BOOST_AUTO_TEST_CASE(app_branch)

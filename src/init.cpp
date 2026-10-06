@@ -43,6 +43,7 @@
 #include "util/moneystr.h"
 #include "validationinterface.h"
 #include "yellowback/index.h"
+#include "vault/node.h"
 #ifdef ENABLE_WALLET
 #include "yellowback/wallet.h"
 #endif
@@ -229,6 +230,11 @@ void Shutdown()
         LOCK(cs_main);
         if (pcoinsTip != NULL) {
             FlushStateToDisk();
+        }
+        if (vault::g_vaultdb) {
+            vault::g_vaultdb->Flush();
+            delete vault::g_vaultdb;
+            vault::g_vaultdb = nullptr;
         }
         delete pcoinsTip;
         pcoinsTip = NULL;
@@ -511,7 +517,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-regtestenablezip209", "Enable ZIP 209 turnstile enforcement on regtest without zeroing shielded pool balances (regtest-only)");
     }
     std::string debugCategories = "addrman, antispam, bench, coindb, db, deletetx, http, libevent, lock, mempool, mempoolrej, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, valuepool, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, valuepool, vault, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ". " +
         _("For multiple specific categories use -debug=<category> multiple times."));
@@ -2124,6 +2130,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return false;
     }
     LogPrintf(" block index %15dms\n", GetTimeMillis() - nStart);
+
+    // The vault primitive's set-state database (docs/plans/yellowback-upgrade-plan.md U-18), on
+    // every node: empty until UPGRADE_VAULT activates, wiped by -reindex (and, on 6.20.0, by
+    // -reindex-chainstate, which rebuilds the chainstate from genesis), and reconciled with
+    // chainActive here (disconnect off-chain blocks by its own undo, replay the rest from disk)
+    // before anything else can connect a block.
+    vault::g_vaultdb = new vault::VaultDB(GetDataDir() / "vaults", 1 << 22, false, fReindex || fReindexChainState);
+    {
+        LOCK(cs_main);
+        std::string vaultErr;
+        if (!fReindex && !fReindexChainState && !vault::Reconcile(chainparams, vaultErr))
+            return InitError(vaultErr + ". " + _("Restart with -reindex to rebuild the vault database."));
+    }
 
     // ********************************************************* Step 8: load wallet
 #ifdef ENABLE_WALLET
