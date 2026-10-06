@@ -575,6 +575,7 @@ void YellowbackIndex::SetQuote(uint64_t priceMicroUsd, uint16_t sourceMask, int6
     quote.priceMicroUsd = priceMicroUsd;
     quote.sourceMask = sourceMask;
     quote.receivedAt = receivedAt;
+    ++quoteGeneration;
 }
 
 QuoteHolder YellowbackIndex::GetQuote() const
