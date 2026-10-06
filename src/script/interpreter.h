@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -12,6 +13,7 @@
 
 #include <rust/transaction.h>
 
+#include <optional>
 #include <vector>
 #include <stdint.h>
 #include <string>
@@ -89,6 +91,16 @@ enum
     //
     // See BIP65 for details.
     SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY = (1U << 9),
+
+    // Verify CHECKSEQUENCEVERIFY (OP_NOP3)
+    //
+    // See BIP112 for details. Ycash enforces it from UPGRADE_VAULT, height-based only
+    // (docs/plans/yellowback-upgrade-plan.md §15.2).
+    SCRIPT_VERIFY_CHECKSEQUENCEVERIFY = (1U << 10),
+
+    // Evaluate OP_CHECKSETSIG (0xc0) and OP_CHECKSETDORMANT (0xc1), the vault primitive's
+    // opcodes (UPGRADE_VAULT, plan §15.2). Without it both are SCRIPT_ERR_BAD_OPCODE.
+    SCRIPT_VERIFY_VAULT = (1U << 11),
 };
 
 bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
@@ -149,6 +161,40 @@ public:
          return false;
     }
 
+    // BIP112 (OP_CHECKSEQUENCEVERIFY).
+    virtual bool CheckSequence(const CScriptNum& nSequence) const
+    {
+         return false;
+    }
+
+    // The vault primitive (plan §15.2). The defaults fail: only vault::SetSigChecker, which
+    // holds a set-state snapshot, can satisfy OP_CHECKSETSIG.
+
+    // The number of signatures `role` (1 unlock, 2 cancel) of set `setId` requires, or
+    // nullopt if the set is unknown.
+    virtual std::optional<int> SetThreshold(const uint256& setId, uint8_t role) const
+    {
+        return std::nullopt;
+    }
+
+    // True iff `sigs` are 65-byte recoverable signatures by distinct current members of
+    // `setId` over the set-signature message for `role` and this input.
+    virtual bool CheckSetSigs(
+        const uint256& setId,
+        uint8_t role,
+        const std::vector<std::vector<unsigned char>>& sigs,
+        const CScript& scriptCode,
+        uint32_t consensusBranchId) const
+    {
+        return false;
+    }
+
+    // True iff `setId` is released (dormant, wound down, or unknown) at the spending height.
+    virtual bool IsSetReleased(const uint256& setId) const
+    {
+        return false;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -167,6 +213,7 @@ public:
     TransactionSignatureChecker(const CTransaction* txToIn, const PrecomputedTransactionData& txdataIn, unsigned int nInIn, const CAmount& amountIn) : txTo(txToIn), nIn(nInIn), amount(amountIn), txdata(txdataIn) {}
     bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, uint32_t consensusBranchId) const;
     bool CheckLockTime(const CScriptNum& nLockTime) const;
+    bool CheckSequence(const CScriptNum& nSequence) const;
 };
 
 class MutableTransactionSignatureChecker : public TransactionSignatureChecker

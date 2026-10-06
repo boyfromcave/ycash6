@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2019-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -66,6 +67,10 @@ const char* ScriptErrorString(const ScriptError serror)
             return "Dummy CHECKMULTISIG argument must be zero";
         case SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS:
             return "NOPx reserved for soft-fork upgrades";
+        case SCRIPT_ERR_SETSIG:
+            return "OP_CHECKSETSIG or OP_CHECKSETDORMANT failed";
+        case SCRIPT_ERR_SETSIG_COUNT:
+            return "More than one OP_CHECKSETSIG in a script evaluation";
         case SCRIPT_ERR_PUBKEYTYPE:
             return "Public key is neither compressed or uncompressed";
         case SCRIPT_ERR_UNKNOWN_ERROR:

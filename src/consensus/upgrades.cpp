@@ -85,6 +85,13 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         .strInfo = "See https://z.cash/upgrade/nu6.2/ for details.",
     },
     {
+        // No Equihash override: the epoch inherits (192, 7) from the Ycash entry,
+        // the same parameters as the epoch before it (plan §15.1).
+        .nBranchId = 0x6d5b7a31,
+        .strName = "Vault",
+        .strInfo = "Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md)",
+    },
+    {
         .nBranchId = 0xffffffff,
         .strName = "ZFUTURE",
         .strInfo = "Future network upgrade (integration testing only)",
@@ -137,6 +144,18 @@ uint32_t CurrentEpochBranchId(int nHeight, const Consensus::Params& params) {
 uint32_t PrevEpochBranchId(uint32_t currentBranchId, const Consensus::Params& params) {
     for (int idx = Consensus::BASE_SPROUT + 1; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
         if (currentBranchId == NetworkUpgradeInfo[idx].nBranchId) {
+            // Vault follows NU5..NU6.2, which Ycash never activates (NO_ACTIVATION_HEIGHT on every
+            // network): its previous epoch is the highest upgrade below it that has an
+            // activation height, so a signature under that epoch's branch ID is diagnosed as
+            // "old-consensus-branch-id" (plan §15.1).
+            if (idx == Consensus::UPGRADE_VAULT) {
+                for (int prev = idx - 1; prev > Consensus::BASE_SPROUT; prev--) {
+                    if (params.vUpgrades[prev].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+                        return NetworkUpgradeInfo[prev].nBranchId;
+                    }
+                }
+                return NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId;
+            }
             return NetworkUpgradeInfo[idx - 1].nBranchId;
         }
     }

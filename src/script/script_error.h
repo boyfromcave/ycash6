@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2019-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -52,6 +53,10 @@ typedef enum ScriptError_t
 
     /* softfork safeness */
     SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS,
+
+    /* OP_CHECKSETSIG / OP_CHECKSETDORMANT (vault primitive) */
+    SCRIPT_ERR_SETSIG,
+    SCRIPT_ERR_SETSIG_COUNT,
 
     SCRIPT_ERR_ERROR_COUNT
 } ScriptError;

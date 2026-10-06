@@ -71,7 +71,7 @@ env:
   # ycash6 port (plan Phase 4): every BASE_SCRIPTS yellowback script of qa/pull-tester/rpc-tests.py,
   # i.e. the v4.5.0 list plus yellowback_wallet_lifecycle and the port's yellowback_framework_smoke;
   # yellowback_reorg_stress is retired (plan P-7). The four EXTENDED ones run in nightly or not at all.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags vault_upgrade
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
@@ -337,7 +337,7 @@ jobs:
           # directly) and must be run by some job: registered-but-never-run is how the v2
           # enforcement suite and then the whole v3 attestation suite sat silent in CI.
           # The allow-list names only the scripts a nightly step runs by name (audit I-1).
-          for f in qa/rpc-tests/yellowback_*.py; do
+          for f in qa/rpc-tests/yellowback_*.py qa/rpc-tests/vault_*.py; do
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
@@ -951,7 +951,7 @@ jobs:
           qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
       - name: Yellowback unit tests under DEBUG_LOCKORDER (AssertLockHeld aborts)
-        run: src/test/test_bitcoin --run_test='yellowback_*'
+        run: src/test/test_bitcoin --run_test='yellowback_*,vault_*'
       - name: Functional suite under DEBUG_LOCKORDER (log-only; the next step judges the reports)
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -1073,7 +1073,7 @@ jobs:
           bin=src/.libs/ycashd; test -f "$bin" || bin=src/ycashd
           nm "$bin" | grep -c . >/dev/null
           ! nm "$bin" | grep -q 'ycash_je_' || exit 1
-          src/test/test_bitcoin --run_test='yellowback_*'
+          src/test/test_bitcoin --run_test='yellowback_*,vault_*'
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |

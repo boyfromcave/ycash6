@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -164,6 +165,7 @@ enum opcodetype
     OP_NOP2 = 0xb1,
     OP_CHECKLOCKTIMEVERIFY = OP_NOP2,
     OP_NOP3 = 0xb2,
+    OP_CHECKSEQUENCEVERIFY = OP_NOP3,
     OP_NOP4 = 0xb3,
     OP_NOP5 = 0xb4,
     OP_NOP6 = 0xb5,
@@ -171,6 +173,11 @@ enum opcodetype
     OP_NOP8 = 0xb7,
     OP_NOP9 = 0xb8,
     OP_NOP10 = 0xb9,
+
+    // Ycash vault primitive (UPGRADE_VAULT, docs/plans/yellowback-upgrade-plan.md §15.2);
+    // SCRIPT_ERR_BAD_OPCODE unless SCRIPT_VERIFY_VAULT is set. 0xbb-0xbf stay unassigned.
+    OP_CHECKSETSIG = 0xc0,
+    OP_CHECKSETDORMANT = 0xc1,
 
     OP_INVALIDOPCODE = 0xff,
 };
@@ -259,6 +266,10 @@ public:
 
     inline CScriptNum operator+(   const CScriptNum& rhs) const { return operator+(rhs.m_value);   }
     inline CScriptNum operator-(   const CScriptNum& rhs) const { return operator-(rhs.m_value);   }
+
+    // BIP112 (OP_CHECKSEQUENCEVERIFY) masks its operand.
+    inline CScriptNum operator&(   const int64_t& rhs)    const { return CScriptNum(m_value & rhs);}
+    inline CScriptNum operator&(   const CScriptNum& rhs) const { return operator&(rhs.m_value);   }
 
     inline CScriptNum& operator+=( const CScriptNum& rhs)       { return operator+=(rhs.m_value);  }
     inline CScriptNum& operator-=( const CScriptNum& rhs)       { return operator-=(rhs.m_value);  }

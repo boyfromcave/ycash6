@@ -68,6 +68,8 @@ BASE_SCRIPTS= [
     'yellowback_stratum.py',
     # chain-viz (Rust); SKIPs without CHAINVIZ_BIN (plan Phase 7).
     'yellowback_chainviz.py',
+    # The vault primitive network upgrade (docs/plans/yellowback-upgrade-plan.md §15.9).
+    'vault_upgrade.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

@@ -121,6 +121,7 @@ BITCOIN_TESTS =\
   test/univalue_tests.cpp \
   test/util_tests.cpp \
   test/vault_act_tests.cpp \
+  test/vault_script_tests.cpp \
   test/vault_state_tests.cpp \
   test/vault_template_tests.cpp \
   test/vault_vectors_tests.cpp \

@@ -148,6 +148,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
+        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -443,6 +448,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
+        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -674,6 +684,10 @@ public:
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): set by -nuparams=6d5b7a31:<height>.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
