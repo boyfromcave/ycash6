@@ -105,7 +105,10 @@ env:
   # this commit (its main on 2026-10-01; bump by PR, audit I-5) and built --locked the same way,
   # exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: c388ed218a06ea59701ecbda9130d9789cb0a969
+  # On the upgrade line: chain-viz's upgrade/vault (rpcversion 5 tolerant, set/vault panels; upgrade
+  # plan P6), the build yellowback_chainviz passed against on ycash-dd. It must be pushed to
+  # boyfromcave/chain-viz before this pin resolves.
+  CHAINVIZ_COMMIT: b4eb44b568555ae9482a7245f6c9514f9bb10fc3
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
