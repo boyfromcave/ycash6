@@ -260,6 +260,8 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_raises_rpc('matures at height', n1.vault_release, '%s:0' % claim_b)
         self.mine(CLAIM_DELAY - 1)
         rel = n1.vault_release('%s:0' % claim_b)
+        # yed_validaterawtransaction verifies scripts under the vault flags at tip + 1: the RELEASE's CSV passes
+        assert_equal(n1.yed_validaterawtransaction(n1.getrawtransaction(rel))['valid'], True)
         self.mine()
         assert_equal(n0.yed_getvault(mint_b)['status'], 'CLAIMED')
         assert rel in n1.getblock(n1.getbestblockhash())['tx']
@@ -273,7 +275,8 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         built = n2.vault_buildcancel('%s:0' % claim_c)
         signed = n1.set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
-        cancel = n2.vault_send(signed['hex'])
+        cancel = n2.vault_send(signed['hex'])                                     # vault_send signs the fee inputs
+        assert_equal(n2.yed_validaterawtransaction(n2.getrawtransaction(cancel))['valid'], True)   # OP_CHECKSETSIG at the tip set state
         self.mine()
         assert_raises_rpc('', n0.yed_getvault, mint_c)                          # the record moved to the re-created vault
         vc = n0.yed_getvault(cancel)

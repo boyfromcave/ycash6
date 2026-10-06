@@ -67,7 +67,7 @@ void FetchInputs(const CTransaction& tx, CCoinsViewCache& view);
 /** The branch ID every Yellowback signer uses (§3.4): CurrentEpochBranchId(chainActive.Height() + 1). Requires cs_main. */
 uint32_t SignerBranchId();
 
-/** True iff every input of `tx` passes VerifyScript under STANDARD_SCRIPT_VERIFY_FLAGS against `view`. */
+/** True iff every input of `tx` passes VerifyScript under STANDARD_SCRIPT_VERIFY_FLAGS (plus GetVaultScriptFlags(tip + 1) with the tip set snapshot once UPGRADE_VAULT is active there) against `view`. Requires cs_main. */
 bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32_t branchId, std::string& error);
 
 } // namespace yellowback

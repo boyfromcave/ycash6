@@ -12,6 +12,8 @@
 #include "script/script_error.h"
 #include "txmempool.h"
 #include "util/time.h"
+#include "vault/checker.h"
+#include "vault/node.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
 #include "yellowback/state.h"
@@ -111,6 +113,7 @@ uint32_t SignerBranchId()
 
 bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32_t branchId, std::string& error)
 {
+    AssertLockHeld(cs_main);
     // 6.20.0: PrecomputedTransactionData needs every spent output (ZIP-244), so gather them first.
     std::vector<CTxOut> prevouts;
     prevouts.reserve(tx.vin.size());
@@ -122,12 +125,22 @@ bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32
         }
         prevouts.push_back(coins->vout[tx.vin[i].prevout.n]);
     }
-    const PrecomputedTransactionData txdata(tx, prevouts);
+    PrecomputedTransactionData txdata(tx, prevouts);   // non-const: SetSigChecker takes it by reference
+    // UPGRADE_VAULT adds CSV and the set opcodes at the next block (finding 17): an intent RELEASE
+    // (OP_CHECKSEQUENCEVERIFY) and an OP_CHECKSETSIG / OP_CHECKSETDORMANT spend verify under them,
+    // against the set state at the tip, exactly as signrawtransaction does.
+    const int next = chainActive.Height() + 1;
+    const unsigned int vaultFlags = GetVaultScriptFlags(next, ::Params().GetConsensus());
+    std::shared_ptr<const vault::SetSnapshot> snapshot = vaultFlags ? vault::TipSnapshot() : nullptr;
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxOut& prev = prevouts[i];
         ScriptError serror = SCRIPT_ERR_OK;
-        if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS,
-                          TransactionSignatureChecker(&tx, txdata, i, prev.nValue), branchId, &serror)) {
+        const bool ok = snapshot
+            ? VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags,
+                           vault::SetSigChecker(&tx, i, prev.nValue, false, txdata, snapshot, next), branchId, &serror)
+            : VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS,
+                           TransactionSignatureChecker(&tx, txdata, i, prev.nValue), branchId, &serror);
+        if (!ok) {
             error = strprintf("input %u fails script verification: %s", i, ScriptErrorString(serror));
             return false;
         }
