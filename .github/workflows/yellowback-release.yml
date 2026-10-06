@@ -182,7 +182,7 @@ jobs:
           path: |
             depends/built
             depends/sources
-          key: release-depends-${{ matrix.platform }}-${{ hashFiles('depends/**', 'Cargo.lock', 'Cargo.toml') }}
+          key: release-depends-${{ matrix.platform }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**', 'Cargo.lock', 'Cargo.toml') }}
 
       - name: Fetch the Rust git dependencies (depends restored from the cache)
         # The --offline build reads the [patch.crates-io] git crates from ~/.cargo/git, which only
