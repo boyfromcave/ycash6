@@ -553,9 +553,6 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     if (IsExpiredTx(iter->GetTx(), nHeight))
         return false;
 
-    // Yellowback TPL-1/2, last refusal before AddToBlock (only a turnstile violation follows, mapping §19)
-    if (ybview && !yellowback::policy::FilterTemplate(*ybview, iter->GetTx(), nHeight)) return false;
-
     // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx
     if (vaultRun) {
         if (auto vaultBad = vaultRun->Try(iter->GetTx())) {
@@ -563,6 +560,11 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
             return false;
         }
     }
+
+    // The YED module (upgrade plan U-21), after the primitive's trial: a candidate the module finds invalid
+    // at nHeight, after the candidates before it, is skipped; a kept one's effect joins the template overlay,
+    // so it runs last but the turnstile (6.20.0's TestBlockValidity runs no scripts, finding 28).
+    if (ybview && !yellowback::policy::FilterTemplate(*ybview, iter->GetTx(), nHeight)) return false;
 
     if (chainparams.ZIP209Enabled()) {
         // Does this transaction lead to a turnstile violation?
