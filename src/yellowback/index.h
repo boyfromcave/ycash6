@@ -15,6 +15,7 @@
 #include "yellowback/state.h"
 #include "yellowback/view.h"
 
+#include <atomic>
 #include <functional>
 #include <list>
 #include <map>
@@ -337,6 +338,8 @@ public:
     const PayeePolicy& GetPayeePolicy() const { return payeePolicy; }
     /** yed_setquote: the RPC stamps receivedAt (the only clock, M11). */
     void SetQuote(uint64_t priceMicroUsd, uint16_t sourceMask, int64_t receivedAt);
+    /** Bumped by every SetQuote (D-U6): getblocktemplate rebuilds its cached template when it moves. */
+    uint64_t QuoteGeneration() const { return quoteGeneration.load(); }
     QuoteHolder GetQuote() const;
     /** What the next template's tag would be, given `now` (cs_yellowback). */
     MinerStatus GetMinerStatus(int64_t now) const;
@@ -449,6 +452,7 @@ private:
     PayeePolicy payeePolicy;
     AttestPolicy attestPolicy;
     QuoteHolder quote;
+    std::atomic<uint64_t> quoteGeneration{0};   //!< D-U6: bumped by SetQuote
     TestFault testFault;
     AttestationPool pool;
     LruSigCache sigCache;

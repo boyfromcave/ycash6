@@ -685,13 +685,17 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     static CBlockIndex* pindexPrev;
     static int64_t nStart;
     static CBlockTemplate* pblocktemplate;
-    if (!lpval.isNull() || pindexPrev != chainActive.Tip() ||
+    // D-U6: a new or cleared pool quote (yed_setquote) rebuilds the cached template at once.
+    static uint64_t nQuoteGenerationLast = 0;
+    const uint64_t nQuoteGeneration = yellowback::g_yellowback ? yellowback::g_yellowback->QuoteGeneration() : 0;
+    if (!lpval.isNull() || pindexPrev != chainActive.Tip() || nQuoteGeneration != nQuoteGenerationLast ||
         (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - nStart > 5))
     {
         // Clear pindexPrev so future calls make a new block, despite any failures from here on
         pindexPrev = nullptr;
 
         nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
+        nQuoteGenerationLast = nQuoteGeneration;
 
         // If we're going to use the precomputed coinbase (empty block) and there are
         // transactions waiting in the mempool, make sure that on the next call to this
