@@ -112,7 +112,8 @@ excluded (plan). Encodings:
   `bad-mint-vault-script`. MINT-4: a missing snapshot or a non-ACTIVE status ⇒
   `mint-not-active`; then the halt bits in declaration order — `NOT_ACTIVE` ⇒ `mint-not-active`,
   `NO_PRICE` ⇒ `mint-halted-no-price`, `PARTICIPATION` **or** `ENFORCEMENT` ⇒
-  `mint-halted-participation`, `GLOBAL_RATIO`, `DIVERGENCE`. MINT-5: `mint-unsatisfiable` before
+  `mint-halted-participation`, `GLOBAL_RATIO`, `DIVERGENCE`; last (hardening H-1), with
+  `MINT_REQUIRES_ARMED` and `R` not ARMED ⇒ `mint-halted-unarmed`. MINT-5: `mint-unsatisfiable` before
   `bad-mint-collateral` (which also covers `< 4 · FEE_MIN`). MINT-6, MINT-7, MINT-8 (`bad-mint-fee`
   for every MINT-8 failure).
 - **E. XFER verdict precedence.** XFER-1 (`bad-transfer-assignment`), XFER-2
