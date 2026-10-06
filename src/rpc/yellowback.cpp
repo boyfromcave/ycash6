@@ -57,7 +57,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 4;   // 4: the H-9.3 bounds (hardening plan)
+static const int YELLOWBACK_RPC_VERSION = 5;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents
 
 namespace {
 
@@ -67,7 +67,7 @@ const int MAX_LISTMINERS_WINDOW = 4032;
 
 YellowbackIndex& EnsureIndex()
 {
-    if (!fExperimentalYellowback || !g_yellowback) {
+    if (!g_yellowbackLive || !g_yellowback) {
         throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback requires -experimentalfeatures -yellowback)");
     }
     return *g_yellowback;
@@ -117,16 +117,6 @@ std::string ClassLetter(uint8_t termClass)
     return termClass < NUM_CLASSES ? std::string(1, (char)('A' + termClass)) : std::to_string((int)termClass);
 }
 
-const char* ActivationLower(ActivationStatus s)
-{
-    switch (s) {
-    case ActivationStatus::SIGNALING: return "signaling";
-    case ActivationStatus::LOCKED_IN: return "locked_in";
-    case ActivationStatus::ACTIVE: return "active";
-    }
-    return "signaling";
-}
-
 std::string TypeLower(TxLogType t)
 {
     switch (t) {
@@ -137,6 +127,8 @@ std::string TypeLower(TxLogType t)
     case TxLogType::CLAIM_NOTICE: return "notice";
     case TxLogType::EQUIVOCATION: return "equivocation";
     case TxLogType::ATTESTOR_REVIVE: return "revive";
+    case TxLogType::CLAIM_RELEASE: return "claim_release";
+    case TxLogType::CLAIM_CANCEL: return "claim_cancel";
     case TxLogType::NONE: break;
     }
     return "none";
@@ -228,7 +220,7 @@ UniValue UnderwaterAt(const VaultRecord& v, const yellowback::Params& p)
     return UniValue((int64_t)q.GetLow64());
 }
 
-UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex& index, const std::optional<Snapshot>& tipSnap, bool abandoned)
+UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex& index, const std::optional<Snapshot>& tipSnap)
 {
     const yellowback::Params& p = index.GetParams();
     const int tip = index.TipHeight();
@@ -259,8 +251,27 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("claimable", claimable);
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOIDED ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
-    // K3 / L10: a VOID vault's claim path is unpoliced after claimHeight; an ACTIVE vault's under abandonment.
-    if (v.Status() == VaultStatus::VOIDED || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
+    // U-23: the vault's V scriptPubKey (the primitive's template, tag YED) and, while CLAIMING, its claim intents.
+    const CScript spk = YedVaultScript(p, owner, v.lockHeight);
+    o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
+    if (v.Status() == VaultStatus::CLAIMING) {
+        UniValue intents(UniValue::VARR);
+        State st(index.View());
+        index.View().Iterate(std::string(1, 'I'), [&](const std::string& k, const std::string& raw) {
+            IntentRecord ir;
+            if (k.size() == 37 && DeserializeRecord(raw, ir) && ir.vault == out) {
+                UniValue e(UniValue::VOBJ);
+                e.pushKV("txid", keys::OutPointHashOf(k).GetHex());
+                e.pushKV("vout", (int64_t)keys::OutPointIndexOf(k));
+                e.pushKV("role", ir.Role() == IntentRole::CLAIMANT ? "claimant" : "residual");
+                e.pushKV("height", ir.height);
+                e.pushKV("releaseHeight", (int64_t)ir.height + p.claimDelay);
+                intents.push_back(e);
+            }
+            return true;
+        });
+        o.pushKV("intents", intents);
+    }
     yellowback::rpc::PushNoticeFields(o, State(index.View()), p, out, v);
     return o;
 }
@@ -368,6 +379,7 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l, const Yellowback
     o.pushKV("assigned", AssignedToJSON(l.assigned));
     o.pushKV("spentTokens", OutPointsToJSON(l.spentTokens));
     o.pushKV("closedVaults", OutPointsToJSON(l.closedVaults));
+    o.pushKV("reopenedVaults", OutPointsToJSON(l.reopenedVaults));      // U-23: the vault a cancel re-created
     o.pushKV("expired", expired);
     PushTxLogV3(o, l, index, refHeight, tx);
     return o;
@@ -389,12 +401,17 @@ std::optional<int> RefHeightOf(const uint256& txid, const TxLogRecord& l, const 
     return std::nullopt;
 }
 
-UniValue ActivationToJSON(const Activation& a)
+/** The vault upgrade's status (yed_getinfo.upgrade, yed_getactivation; U-22). */
+UniValue UpgradeToJSON(const yellowback::Params& p, int indexHeight)
 {
     UniValue o(UniValue::VOBJ);
-    o.pushKV("status", ActivationLower(a.Status()));
-    o.pushKV("lockInHeight", a.lockInHeight);
-    o.pushKV("activateHeight", a.activateHeight);
+    o.pushKV("name", "Vault");
+    o.pushKV("branchId", strprintf("%08x", (uint32_t)0x6d5b7a31));
+    o.pushKV("status", indexHeight >= p.startHeight ? "active" : "pending");
+    o.pushKV("activationHeight", p.startHeight);
+    o.pushKV("attestorSetId", p.attestorSetId.GetHex());
+    o.pushKV("claimDelay", p.claimDelay);
+    o.pushKV("height", indexHeight);
     return o;
 }
 
@@ -413,8 +430,6 @@ UniValue SnapshotToJSON(int height, const Snapshot& s)
     o.pushKV("blockHash", s.blockHash.GetHex());
     o.pushKV("tagged", s.tagged);
     o.pushKV("quote", s.quote);
-    o.pushKV("signalCount", (int64_t)s.signalCount);
-    o.pushKV("activation", ActivationToJSON(s.activation));
     o.pushKV("pFast", PriceOrNull(s.PFast()));
     o.pushKV("pMid", PriceOrNull(s.PMid()));
     o.pushKV("pSlow", PriceOrNull(s.PSlow()));
@@ -439,7 +454,6 @@ UniValue TagToJSON(const std::optional<CoinbaseTag>& tag)
     }
     o.pushKV("kind", tag->IsQuote() ? "quote" : "signal");
     o.pushKV("version", (int)TAG_VERSION);
-    o.pushKV("signal", tag->Signal());
     o.pushKV("priceMicroUsd", (int64_t)tag->priceMicroUsd);
     o.pushKV("sourceMask", (int)tag->sourceMask);
     o.pushKV("payoutAddress", P2PKHAddress(CKeyID(tag->payoutKey)));
@@ -567,10 +581,12 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
             "yed_getinfo\n"
-            "\nYellowback index status, activation, miner state and parameters (doc/yellowback-rpc.md).\n"
-            "Never refuses while the index is unhealthy. supplyCapReached (W20): at the tip the smallest mint\n"
-            "would exceed the supply cap, so only class A at or over RECAP_RATIO_BPS mints (H-10; false with no cap).\n"
-            "mintRequiresArmed (H-1): true when a mint whose reference height is not ARMED is VOID (mint-halted-unarmed).\n"
+            "\nYellowback index status, the vault upgrade, miner state and parameters (doc/yellowback-rpc.md).\n"
+            "Never refuses while the index is unhealthy.\n"
+            "supplyCapReached (W20): true when the next mint of any class would exceed the supply cap at the tip\n"
+            "snapshot (supplyCents + MIN_MINT > supplyCapCents); false when the cap is undefined. Above the cap\n"
+            "only class A, when its minimum ratio reaches params.recapRatioBps, mints (H-10; yed_getstats.mintableClasses).\n"
+            "mintRequiresArmed (H-1): true when a mint whose reference height is not ARMED is invalid (mint-halted-unarmed).\n"
             "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
     YellowbackIndex& index = EnsureIndex();
@@ -587,7 +603,6 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     std::optional<TipRecord> tip = st.GetTip();
     const int h = tip.has_value() ? tip->height : -1;
     std::optional<Snapshot> snap = h >= 0 ? st.GetSnapshot((uint32_t)h) : std::nullopt;
-    const MinerConfig& cfg = index.GetMinerConfig();
     const PayeePolicy& pp = index.GetPayeePolicy();
     const MinerStatus ms = index.GetMinerStatus(now);
 
@@ -601,17 +616,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("startHeight", p.startHeight);
     o.pushKV("healthy", index.IsHealthy());
     o.pushKV("unhealthyReason", index.UnhealthyReason());
-    o.pushKV("enforcing", index.IsEnforcing());
-    o.pushKV("valveTripped", index.ValveTripped());
-    o.pushKV("sunset", index.IsSunset());
-    o.pushKV("rejectedBlocks", index.RejectedCount());
-    o.pushKV("suppressedBlocks", index.SuppressedCount());
-    o.pushKV("templatePolicy", cfg.templatePolicy);
-    o.pushKV("abandoned", index.IsAbandoned());
-    // W20: at the tip the smallest mint of any class would exceed the supply cap; false when the cap
-    // is undefined. Above it only class A at or over RECAP_RATIO_BPS mints (H-10; yed_getstats.mintableClasses).
     {
-        std::optional<Cents> cap = snap.has_value() ? SupplyCapCents(snap->issuedZat, snap->PMint(), p.supplyCapBps) : std::nullopt;
+        // W20: the next mint of any class would exceed the cap at the tip (false with no cap, no price or an empty index)
+        const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
+        std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), p.supplyCapBps);
         o.pushKV("supplyCapReached", cap.has_value() && st.GetTotals().supplyCents + p.minMint > cap.value());
     }
     o.pushKV("mintRequiresArmed", p.mintRequiresArmed);     // H-1: MINT-4 refuses a mint whose R is not ARMED (hashed on regtest, M13)
@@ -626,14 +634,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
 #endif
     o.pushKV("rebuilt", index.WasRebuilt());
 
-    UniValue act(UniValue::VOBJ);
-    const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
-    act.pushKV("status", ActivationLower(a.Status()));
-    act.pushKV("lockInHeight", a.lockInHeight);
-    act.pushKV("activateHeight", a.activateHeight);
-    act.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
-    act.pushKV("window", p.signalWindow);
-    o.pushKV("activation", act);
+    o.pushKV("upgrade", UpgradeToJSON(p, h));
 
     // v3 (contract: attest): the arming state at the tip, the seated count, this node's pool.
     {
@@ -659,7 +660,6 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
 
     UniValue miner(UniValue::VOBJ);
     miner.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(P2PKHAddress(ms.payoutKey.value())) : NullUniValue);
-    miner.pushKV("signal", ms.signal);
     miner.pushKV("quoteKind", ms.kind);
     miner.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
     miner.pushKV("registered", ms.registered);
@@ -668,7 +668,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
 
     UniValue prm(UniValue::VOBJ);
     prm.pushKV("startHeight", p.startHeight);
-    prm.pushKV("enforceUntilHeight", p.enforceUntilHeight);
+    prm.pushKV("attestorSetId", p.attestorSetId.GetHex());
+    prm.pushKV("claimDelay", p.claimDelay);
     prm.pushKV("sigmaRefBps", p.sigmaRefBps);
     prm.pushKV("supplyCapBps", p.supplyCapBps);
     prm.pushKV("refLag", g_yellowbackMintLag);
@@ -679,13 +680,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("feeBps", p.feeBps);
     prm.pushKV("tokenValueZat", p.tokenValue);
     prm.pushKV("feeZat", g_yellowbackFee);
-    prm.pushKV("valveBlocks", p.valveBlocks);
-    prm.pushKV("abandonBlocks", p.abandonBlocks);
     UniValue windows(UniValue::VOBJ);
     windows.pushKV("fast", p.pFastWindow);
     windows.pushKV("mid", p.pMidWindow);
     windows.pushKV("slow", p.pSlowWindow);
-    windows.pushKV("signal", p.signalWindow);
     prm.pushKV("windows", windows);
     UniValue minFill(UniValue::VOBJ);
     minFill.pushKV("fast", p.pFastMinFill);
@@ -754,7 +752,7 @@ UniValue yed_getstatehash(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "yed_getstatehash ( height )\n"
-            "\nSHA-256 over the §3.6 preimage of every index table (TxLog, Rejected and Undo excluded).\n"
+            "\nSHA-256 over the §3.6 preimage of every index table (TxLog and Undo excluded).\n"
             "If height is given it must equal the index height.\n"
             "\nResult:\n{ \"height\": n, \"blockhash\": \"hex\", \"statehash\": \"hex\" }\n");
 
@@ -812,19 +810,19 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), index.GetParams().supplyCapBps);
     o.pushKV("supplyCapCents", PriceOrNull(cap));
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
-    // W16 / W20: the classes a mint can use now. Every class when nothing halts and the cap has room
-    // for the smallest mint; under a global-ratio halt alone or at the cap, those whose minimum ratio
-    // reaches the recapitalisation floor; none under any other halt.
-    UniValue mintable(UniValue::VARR);
     const auto& P = index.GetParams();
+    // W20: the cap is reached when the next mint of any class would exceed it (yed_getinfo.supplyCapReached)
     const bool capReached = cap.has_value() && t.supplyCents + P.minMint > cap.value();
     // H-1: with MINT_REQUIRES_ARMED nothing mints while the tip is not ARMED (MINT-4, mint-halted-unarmed)
     const bool unarmedHalt = P.mintRequiresArmed && !P.IsArmed(s.attest.IsArmed());
-    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && !capReached && !unarmedHalt);   // one cap predicate with supplyCapReached (W20)
-    // Once the cap is reached class A alone mints, at the recapitalisation floor (H-10); a disabled class is never listed (H-5).
-    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && !unarmedHalt) {
+    o.pushKV("mintingAllowed", s.haltMask == 0 && !capReached && !unarmedHalt);
+    // W16/W20: the classes a mint can use now. Every enabled class when nothing halts and the cap has
+    // room; under a global-ratio halt alone those whose minimum ratio reaches the recapitalisation
+    // floor; once the cap is reached class A alone, at that floor (H-10); none under any other halt.
+    UniValue mintable(UniValue::VARR);
+    if ((s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && !unarmedHalt) {
         for (int i = 0; i < NUM_CLASSES; i++) {
-            if (!P.IsClassEnabled(i)) continue;
+            if (!P.IsClassEnabled(i)) continue;                                    // H-5
             const bool atFloor = MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps;
             if (capReached ? (i == 0 && atFloor) : (!(s.haltMask & HALT_GLOBAL_RATIO) || atFloor)) mintable.push_back(ClassLetter((uint8_t)i));
         }
@@ -895,50 +893,13 @@ UniValue yed_getactivation(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
             "yed_getactivation\n"
-            "\nThe ACT-1..7 state at the tip with the network constants and a signal-count history.\n");
+            "\nThe vault upgrade's status (upgrade plan §15.10, U-22): Yellowback is consensus from the UPGRADE_VAULT\n"
+            "activation height with the network's attestor set; ACT-1..7 (signalling, lock-in, the valve, the sunset)\n"
+            "are retired. Result: {status \"active\"|\"pending\", activationHeight, branchId, attestorSetId, claimDelay, height}.\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
-    EnsureHealthy(index);
-    const yellowback::Params& p = index.GetParams();
-    State st(index.View());
-    const int tip = IndexHeight(index);
-    std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
-    const uint32_t mask = snap.has_value() ? snap->haltMask : 0;
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("status", ActivationLower(a.Status()));
-    o.pushKV("lockInHeight", a.lockInHeight);
-    o.pushKV("activateHeight", a.activateHeight);
-    o.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
-    o.pushKV("window", p.signalWindow);
-    o.pushKV("threshold", p.activationThreshold);
-    o.pushKV("participationFloor", p.participationFloor);
-    o.pushKV("enforcementFloor", p.enforcementFloor);
-    o.pushKV("enforcementResume", p.enforcementResume);
-    o.pushKV("mintHalted", (mask & HALT_PARTICIPATION) != 0);
-    o.pushKV("enforcementSuspended", (mask & HALT_ENFORCEMENT) != 0);
-    o.pushKV("enforcing", index.IsEnforcing());
-    o.pushKV("valveTripped", index.ValveTripped());
-    o.pushKV("sunset", index.IsSunset());
-    o.pushKV("enforceUntilHeight", p.enforceUntilHeight);
-    UniValue history(UniValue::VARR);
-    const int step = std::max(1, p.signalWindow / 8);
-    std::vector<int> heights;
-    for (int i = 0; i < 8; i++) {
-        const int h = tip - i * step;
-        if (h < p.startHeight) break;
-        heights.push_back(h);
-    }
-    for (auto it = heights.rbegin(); it != heights.rend(); ++it) {
-        std::optional<Snapshot> s = st.GetSnapshot((uint32_t)*it);
-        UniValue row(UniValue::VOBJ);
-        row.pushKV("height", *it);
-        row.pushKV("signalCount", s.has_value() ? (int64_t)s->signalCount : 0);
-        history.push_back(row);
-    }
-    o.pushKV("history", history);
-    return o;
+    return UpgradeToJSON(index.GetParams(), IndexHeight(index));
 }
 
 UniValue yed_listminers(const UniValue& params, bool fHelp)
@@ -1073,7 +1034,6 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
     o.pushKV("receivedAt", now);
     UniValue next(UniValue::VOBJ);
     next.pushKV("kind", ms.kind);
-    next.pushKV("signal", ms.signal);
     next.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(P2PKHAddress(ms.payoutKey.value())) : NullUniValue);
     o.pushKV("nextTag", next);
     return o;
@@ -1148,7 +1108,7 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
     if (!v.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault-not-found: no vault at " + txid.GetHex() + ":0");
     const int tip = IndexHeight(index);
     std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    return VaultToJSON(out, v.value(), index, snap, index.IsAbandoned());
+    return VaultToJSON(out, v.value(), index, snap);
 }
 
 UniValue yed_listvaults(const UniValue& params, bool fHelp)
@@ -1156,22 +1116,21 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 3)
         throw std::runtime_error(
             "yed_listvaults ( \"status\" count skip )\n"
-            "\nVaults in outpoint order, optionally filtered by status (ACTIVE|VOID|CLOSED|CLAIMED); paged (default count 100).\n");
+            "\nVaults in outpoint order, optionally filtered by status (ACTIVE|CLAIMING|CLOSED|CLAIMED; VOID is accepted and never matches since the vault upgrade); paged (default count 100).\n");
 
     YellowbackIndex& index = EnsureIndex();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
     int count = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 100;
     int skip = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 0;
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
-    if (!status.empty() && status != "ACTIVE" && status != "VOID" && status != "CLOSED" && status != "CLAIMED") {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "status must be ACTIVE, VOID, CLOSED or CLAIMED");
+    if (!status.empty() && status != "ACTIVE" && status != "VOID" && status != "CLOSED" && status != "CLAIMED" && status != "CLAIMING") {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "status must be ACTIVE, CLAIMING, VOID, CLOSED or CLAIMED");
     }
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     const int tip = IndexHeight(index);
     std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    const bool abandoned = index.IsAbandoned();
     UniValue list(UniValue::VARR);
     int seen = 0;
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
@@ -1181,7 +1140,7 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
         if (seen++ < skip) return true;
         if ((int)list.size() >= count) return false;
         COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
-        list.push_back(VaultToJSON(out, v, index, snap, abandoned));
+        list.push_back(VaultToJSON(out, v, index, snap));
         return true;
     });
     return list;
@@ -1529,7 +1488,7 @@ UniValue yed_getblockverdict(const UniValue& params, bool fHelp)
     UniValue o(UniValue::VOBJ);
     o.pushKV("blockInvalid", ev.blockInvalid);
     o.pushKV("reason", ev.reason);
-    o.pushKV("enforcementOn", ev.enforcementOn);
+    o.pushKV("verdict", ev.verdict);
     UniValue txs(UniValue::VARR);
     for (const auto& e : ev.txlogs) {
         UniValue t(UniValue::VOBJ);
@@ -1980,7 +1939,7 @@ void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)
     // fork binary would not look like v4.5.0 to an operator.  InitExperimentalMode() has already
     // run when RegisterAllCoreRPCCommands is called (init.cpp), so the flag is readable here.
     // Found by qa/rpc-tests/yellowback_stock_node.py.
-    if (!fExperimentalYellowback) return;
+    if (!g_yellowbackLive) return;
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);
 }

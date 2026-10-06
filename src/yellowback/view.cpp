@@ -81,7 +81,6 @@ void OverlayStateView::Commit()
 namespace keys {
 
 const char PREFIX_UNDO = 'U';
-const char PREFIX_REJECTED = 'X';
 const char PREFIX_TXLOG = 'L';
 const char PREFIX_ATTESTOR = 'A';
 const char PREFIX_BUNDLELOG = 'W';
@@ -113,13 +112,11 @@ static std::string HashKey(char prefix, const uint256& hash)
 std::string Tip() { return "T"; }
 std::string Tag(uint32_t height) { return "Q" + U32BE(height); }
 std::string Judgement(uint32_t height) { return "J" + U32BE(height); }
-std::string Activation() { return "C"; }
 std::string Vault(const COutPoint& out) { return OutPointKey('V', out); }
 std::string Token(const COutPoint& out) { return OutPointKey('K', out); }
 std::string TxLog(const uint256& txid) { return HashKey(PREFIX_TXLOG, txid); }
 std::string Snapshot(uint32_t height) { return "S" + U32BE(height); }
 std::string Totals() { return "G"; }
-std::string Rejected(const uint256& blockHash) { return HashKey(PREFIX_REJECTED, blockHash); }
 std::string Params() { return "P"; }
 std::string Undo(const uint256& blockHash) { return HashKey(PREFIX_UNDO, blockHash); }
 std::string Attestor(uint16_t seq)
@@ -134,6 +131,7 @@ std::string AttestorSeq() { return "N"; }
 std::string Attest() { return "M"; }
 std::string BundleLog(uint32_t height) { return std::string(1, PREFIX_BUNDLELOG) + U32BE(height); }
 std::string Notice(const COutPoint& out) { return OutPointKey(PREFIX_NOTICE, out); }
+std::string Intent(const COutPoint& out) { return OutPointKey('I', out); }
 
 uint16_t SeqOf(const std::string& key)
 {
@@ -193,13 +191,11 @@ bool DeserializeRecord(const std::string& s, T& t)
 YB_RECORD(TipRecord)
 YB_RECORD(TagRecord)
 YB_RECORD(Judgement)
-YB_RECORD(Activation)
 YB_RECORD(VaultRecord)
 YB_RECORD(TokenRecord)
 YB_RECORD(TxLogRecord)
 YB_RECORD(Totals)
 YB_RECORD(Snapshot)
-YB_RECORD(RejectedRecord)
 YB_RECORD(ParamsRecord)
 YB_RECORD(UndoRecord)
 YB_RECORD(AttestorRecord)
@@ -208,17 +204,8 @@ YB_RECORD(AttestorSeqRecord)
 YB_RECORD(AttestState)
 YB_RECORD(BundleLogRecord)
 YB_RECORD(NoticeRecord)
+YB_RECORD(IntentRecord)
 #undef YB_RECORD
-
-const char* ActivationStatusName(ActivationStatus s)
-{
-    switch (s) {
-    case ActivationStatus::SIGNALING: return "SIGNALING";
-    case ActivationStatus::LOCKED_IN: return "LOCKED_IN";
-    case ActivationStatus::ACTIVE: return "ACTIVE";
-    }
-    return "UNKNOWN";
-}
 
 const char* VaultStatusName(VaultStatus s)
 {
@@ -227,6 +214,7 @@ const char* VaultStatusName(VaultStatus s)
     case VaultStatus::VOIDED: return "VOID";
     case VaultStatus::CLOSED: return "CLOSED";
     case VaultStatus::CLAIMED: return "CLAIMED";
+    case VaultStatus::CLAIMING: return "CLAIMING";
     }
     return "UNKNOWN";
 }
@@ -242,6 +230,8 @@ const char* TxLogTypeName(TxLogType t)
     case TxLogType::CLAIM_NOTICE: return "CLAIM_NOTICE";
     case TxLogType::EQUIVOCATION: return "EQUIVOCATION";
     case TxLogType::ATTESTOR_REVIVE: return "ATTESTOR_REVIVE";
+    case TxLogType::CLAIM_RELEASE: return "CLAIM_RELEASE";
+    case TxLogType::CLAIM_CANCEL: return "CLAIM_CANCEL";
     }
     return "UNKNOWN";
 }
@@ -329,13 +319,6 @@ std::optional<Judgement> State::GetJudgement(uint32_t height) const
     return j;
 }
 
-Activation State::GetActivation() const
-{
-    Activation a;
-    if (!Get(keys::Activation(), a)) return Activation();
-    return a;
-}
-
 std::optional<VaultRecord> State::GetVault(const COutPoint& out) const
 {
     VaultRecord v;
@@ -369,13 +352,6 @@ Totals State::GetTotals() const
     Totals t;
     if (!Get(keys::Totals(), t)) return Totals();
     return t;
-}
-
-std::optional<RejectedRecord> State::GetRejected(const uint256& blockHash) const
-{
-    RejectedRecord r;
-    if (!Get(keys::Rejected(blockHash), r)) return std::nullopt;
-    return r;
 }
 
 std::optional<ParamsRecord> State::GetParamsRecord() const
@@ -427,6 +403,13 @@ std::optional<NoticeRecord> State::GetNotice(const COutPoint& out) const
     return n;
 }
 
+std::optional<IntentRecord> State::GetIntent(const COutPoint& out) const
+{
+    IntentRecord r;
+    if (!Get(keys::Intent(out), r)) return std::nullopt;
+    return r;
+}
+
 std::vector<std::pair<uint16_t, AttestorRecord>> State::Attestors() const
 {
     std::vector<std::pair<uint16_t, AttestorRecord>> out;
@@ -458,7 +441,8 @@ uint256 StateHash(const StateView& view, const std::string& network)
     // Then the tables in the §3.6 order; each Iterate visits its keys in ascending order,
     // which is ascending height (big-endian keys) or ascending outpoint.
     // v3 appends Attestors (A), AttestorSeq (N), Attest (M), BundleLog (W) and Notices (E); BondIndex (B) is derived.
-    for (const char* prefix : { "Q", "J", "C", "V", "K", "G", "S", "P", "A", "N", "M", "W", "E" }) {
+    // The vault upgrade drops Activation (C) and appends Intents (I).
+    for (const char* prefix : { "Q", "J", "V", "K", "G", "S", "P", "A", "N", "M", "W", "E", "I" }) {
         view.Iterate(prefix, [&](const std::string& k, const std::string& v) {
             feed(k, v);
             return true;

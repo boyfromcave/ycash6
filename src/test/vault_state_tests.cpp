@@ -13,6 +13,8 @@
 #include "vault/module.h"
 #include "vault/node.h"
 #include "vault/state.h"
+#include "yellowback/module.h"
+#include "yellowback/script.h"
 #include "vault/template.h"
 
 #include "key.h"
@@ -1072,11 +1074,64 @@ BOOST_AUTO_TEST_CASE(set_sig_checker)
     BOOST_CHECK(!none.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighash)}, scriptCode, branch));
 }
 
-BOOST_AUTO_TEST_CASE(module_table_empty)
+BOOST_AUTO_TEST_CASE(module_table_registers_yed)
 {
-    BOOST_CHECK(Modules().empty());
-    BOOST_CHECK(FindModule(Tag{{'Y', 'E', 'D', 0x00}}) == nullptr);
+    // P4 (§15.7): the table holds exactly YED; WYEC is never registered (§4).
+    BOOST_CHECK_EQUAL(Modules().size(), 1u);
+    const Module* yed = FindModule(Tag{{'Y', 'E', 'D', 0x00}});
+    BOOST_REQUIRE(yed != nullptr);
+    BOOST_CHECK(yed == yellowback::RegisteredModule());
     BOOST_CHECK(FindModule(Tag{{'W', 'Y', 'E', 'C'}}) == nullptr);
+
+    // Unconfigured (no attestor set, U-22): the module accepts everything (the §5.4 fallback).
+    yellowback::ClearModuleParams();
+    const uint256 set = uint256S("0x5e7");
+    const yellowback::Params p = yellowback::RegtestParams(10, 0, 0, set);
+    CKey owner = CKey::TestOnlyRandomKey(true);
+    VaultParams good = yellowback::YedVaultParams(p, owner.GetPubKey(), 100);
+    VaultParams other = good;
+    other.setId = uint256S("0x99");
+    CMutableTransaction mtx;
+    const CTransaction tx(mtx);
+    ModuleContext ctx;
+    BOOST_CHECK(!yed->ValidateCreate(tx, 0, other, ctx).has_value());
+    TemplateSpend unlock;
+    unlock.kind = TemplateKind::VAULT;
+    unlock.selector = SEL_UNLOCK;
+    BOOST_CHECK(!yed->ValidateSpend(tx, 0, unlock, ctx).has_value());
+
+    // Configured: the YED vault's shape, no set unlock of a YED vault, no owner-released spend of a YED intent.
+    yellowback::SetModuleParams(p);
+    BOOST_CHECK(!yed->ValidateCreate(tx, 0, good, ctx).has_value());
+    BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, other, ctx).value_or(""), "bad-yellowback-vault-set");
+    VaultParams cancel = good;
+    cancel.cancelSetId = uint256S("0x98");
+    BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, cancel, ctx).value_or(""), "bad-yellowback-vault-set");
+    VaultParams delay = good;
+    delay.delay = p.claimDelay + 1;
+    BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, delay, ctx).value_or(""), "bad-yellowback-vault-delay");
+    VaultParams app = good;
+    app.appHeight = good.ownerHeight;
+    BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, app, ctx).value_or(""), "bad-yellowback-vault-height");
+    BOOST_CHECK_EQUAL(yed->ValidateSpend(tx, 0, unlock, ctx).value_or(""), "bad-yellowback-vault-unlock");
+    for (uint8_t sel : { SEL_OWNER, SEL_RELEASED, SEL_APP }) {
+        TemplateSpend s;
+        s.kind = TemplateKind::VAULT;
+        s.selector = sel;
+        BOOST_CHECK(!yed->ValidateSpend(tx, 0, s, ctx).has_value());
+    }
+    TemplateSpend ownerIntent;
+    ownerIntent.kind = TemplateKind::INTENT;
+    ownerIntent.selector = SEL_RELEASED;
+    BOOST_CHECK_EQUAL(yed->ValidateSpend(tx, 0, ownerIntent, ctx).value_or(""), "bad-yellowback-intent-owner");
+    for (uint8_t sel : { SEL_UNLOCK, SEL_OWNER }) {
+        TemplateSpend s;
+        s.kind = TemplateKind::INTENT;
+        s.selector = sel;
+        BOOST_CHECK(!yed->ValidateSpend(tx, 0, s, ctx).has_value());
+    }
+    yellowback::ClearModuleParams();
+    BOOST_CHECK(!yed->ValidateCreate(tx, 0, other, ctx).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(record_serialization)

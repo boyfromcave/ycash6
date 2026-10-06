@@ -22,7 +22,7 @@ class CTransaction;
  * Application modules (docs/plans/yellowback-upgrade-plan.md §3.8, §15.7). Registration is
  * this compile-time table, not a transaction: adding a module is a network upgrade. A module
  * runs after the primitive's rules for a template input or V output whose tag it owns, and
- * can only reject. The table is empty in P2; P4 registers {'Y','E','D',0x00}. `WYEC` is never
+ * can only reject. P4 registers {'Y','E','D',0x00} (yellowback::Module); `WYEC` is never
  * registered (§4).
  */
 namespace vault {

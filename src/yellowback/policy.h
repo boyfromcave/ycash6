@@ -32,10 +32,8 @@ namespace policy {
 
 /**
  * MINER-1..3 with the clock as a parameter: a quote tag iff a quote younger
- * than -yellowbackquotemaxage is held, else a signal-only tag iff
- * -yellowbacksignal, else an empty script; the signal bit iff
- * -yellowbacksignal and -yellowbackenforce and the valve has not tripped and
- * the tip is not past ENFORCE_UNTIL_HEIGHT (L3, L7, L8); payoutKey from
+ * than -yellowbackquotemaxage is held, else an empty script (the signal-only
+ * tag and the signal bit left with ACT-1, upgrade plan §6); payoutKey from
  * -yellowbackpayoutaddress (MINER-2; none => empty script); empty while the
  * index is unhealthy (MINER-3). Returns the push `0x24 ‖ 36 bytes`
  * (TagPush) that COINBASE_FLAGS carries (V5).
@@ -46,25 +44,14 @@ CScript BuildTagScript(const YellowbackIndex& index, int64_t now);
 CScript TagScript(const YellowbackIndex& index);
 
 /**
- * The template filter (TPL-1..3, §3.9, §4.4). Called by CreateNewBlock for
- * every candidate, in selection order, immediately before UpdateCoins, on the
- * TemplateView it holds inside LOCK2(cs_main, mempool.cs). Dry-runs ProcessTx
- * on a nested overlay; true keeps the transaction and commits its effect to
- * the template overlay so later candidates see it (in-block chaining and
- * first-claim-wins exactly as ConnectBlock will evaluate them); false skips it.
- *
- * False for: a vault spend that fails RED-1..5 (TPL-1; any activation state)
- * and, under -yellowbacktemplatepolicy=strict (the default, V14), a MINT that
- * would register VOID (MINT-9/10 included), a TRANSFER that would burn, a
- * claim-path spend of a VOID vault, a vault spend whose scriptSig is not
- * exactly the wallet's `<sig> OP_1 <script>` / `OP_0 <script>`, a vault spend
- * without the MP-1 expiry, and a CLAIM_NOTICE that NOT-1 would not register
- * (TPL-2). The dry run goes through the index's W8 signature cache. While IsAbandoned() holds every vault spend passes (L13).
- * Under `consensus` only TPL-1 applies. True (no dry run) for a transaction
- * with no Tokens/Vaults input and no payload, and for everything while the
- * index is unhealthy (BLK-3: an unhealthy node polices nothing).
- * -yellowbacktestfault=template lets one failing vault spend through (TPL-3's
- * companion: TestBlockValidity then throws).
+ * The template's validity filter (§3.9, §4.4; since the vault upgrade TPL-1/2 and the strict policy
+ * are gone, upgrade plan §6). Called by CreateNewBlock for every candidate, in selection order,
+ * immediately before UpdateCoins, on the TemplateView it holds inside LOCK2(cs_main, mempool.cs).
+ * Dry-runs ProcessTx on a nested overlay; true keeps the transaction and commits its effect to the
+ * template overlay so later candidates see it; false skips a transaction that is invalid under the
+ * module at this height (and every candidate while the index is unhealthy, or on a storage failure).
+ * The dry run goes through the index's W8 signature cache. -yellowbacktestfault=template lets one
+ * invalid transaction through (TestBlockValidity then refuses the template).
  */
 bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight);
 

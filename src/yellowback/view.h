@@ -34,13 +34,11 @@
  *   T                     Tip
  *   Q<u32 height>         TagRecord         (valid coinbase tags >= START_HEIGHT)
  *   J<u32 height>         Judgement         (REG-4, written at height + PEER_LAG)
- *   C                     Activation        (the carried ACT-2/3 state)
  *   V<outpoint>           VaultRecord
  *   K<outpoint>           TokenRecord
  *   L<txid>               TxLogRecord       (history; not part of the state hash, N7)
  *   S<u32 height>         Snapshot
  *   G                     Totals
- *   X<blockhash>          RejectedRecord    (node-local, V13; not part of the state hash)
  *   P                     ParamsRecord      (the seven hashed regtest values, N18, M13)
  *   U<blockhash>          Undo              (not part of the state hash)
  *
@@ -52,6 +50,13 @@
  *   M                     AttestState       (the carried ARM-1/2 state; copied into Snapshots)
  *   W<u32 height>         BundleLogRecord   (one row per height with >= 1 verified bundle)
  *   E<outpoint>           NoticeRecord      (a standing CLAIM_NOTICE per ACTIVE vault; NOT-1)
+ *
+ * The vault upgrade (docs/plans/yellowback-upgrade-plan.md §15.10, U-23) adds
+ *
+ *   I<outpoint>           IntentRecord      (a claim intent output -> its vault; hashed)
+ *
+ * and removes C (Activation: ACT-1..6 left with the upgrade) and X (Rejected: a
+ * failing block is consensus-invalid and the valve that read the table is gone).
  *
  * The plan names the v3 prefixes T/B/N/M/L/E; T (Tip) and L (TxLog) were
  * already taken, so Attestors live under A and BundleLog under W.
@@ -68,7 +73,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 5;   //!< 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 6;   //!< 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -193,37 +198,10 @@ struct Judgement
     }
 };
 
-/** Activation.status, declaration order (ACT-2/3; status never moves backward). */
-enum class ActivationStatus : uint8_t { SIGNALING = 0, LOCKED_IN = 1, ACTIVE = 2 };
-const char* ActivationStatusName(ActivationStatus s);
-
-struct Activation
-{
-    uint8_t status;           //!< ActivationStatus
-    int32_t lockInHeight;
-    int32_t activateHeight;
-
-    Activation() : status((uint8_t)ActivationStatus::SIGNALING), lockInHeight(0), activateHeight(0) {}
-
-    ActivationStatus Status() const { return (ActivationStatus)status; }
-    bool IsActive() const { return Status() == ActivationStatus::ACTIVE; }
-
-    friend bool operator==(const Activation& a, const Activation& b)
-    {
-        return a.status == b.status && a.lockInHeight == b.lockInHeight && a.activateHeight == b.activateHeight;
-    }
-
-    ADD_SERIALIZE_METHODS;
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITE(status);
-        READWRITE(lockInHeight);
-        READWRITE(activateHeight);
-    }
-};
-
 /** Vaults.status, declaration order (§3.6). */
-enum class VaultStatus : uint8_t { ACTIVE = 0, VOIDED = 1, CLOSED = 2, CLAIMED = 3 };   // VOIDED, not VOID: <windows.h> #defines VOID
+// VOIDED, not VOID: <windows.h> #defines VOID. Since the vault upgrade a failing mint is invalid, so
+// VOIDED is never produced (§15.10); CLAIMING (U-23) is a vault whose claim intents await CLAIM_DELAY.
+enum class VaultStatus : uint8_t { ACTIVE = 0, VOIDED = 1, CLOSED = 2, CLAIMED = 3, CLAIMING = 4 };
 const char* VaultStatusName(VaultStatus s);
 
 struct VaultRecord
@@ -231,18 +209,18 @@ struct VaultRecord
     std::vector<unsigned char> ownerPubKey;   //!< the 33 payload bytes verbatim (valid or not; a VOID vault may carry an invalid key)
     uint8_t termClass;                        //!< the payload byte (0/1/2 = A/B/C; a VOID vault may carry any value)
     int32_t lockHeight;
-    int32_t claimHeight;                      //!< lockHeight + GRACE
-    CAmount collateralZat;                    //!< vout[0].nValue
+    int32_t claimHeight;                      //!< lockHeight + GRACE (the V's appHeight)
+    CAmount collateralZat;                    //!< the V output's value (vout[0] of the mint, or the cancel's re-lock)
     int64_t mintedCents;
     int32_t mintHeight;
     int32_t refHeight;
     uint8_t status;                           //!< VaultStatus
-    std::string voidReason;                   //!< the MINT verdict for a VOID vault, else ""
+    std::string voidReason;                   //!< always "" since the vault upgrade (a failing mint is invalid)
     int32_t closeHeight;
     uint256 closingTxid;
     int64_t burnedCents;                      //!< IN-3's burn of the closing transaction
     CAmount feePaidZat;                       //!< the mint's fee, rewritten by a passing redeem/claim (0 under FEE-0)
-    bool unbacked;                            //!< closed by a spend that failed RED-1..4 with burned < mintedCents
+    bool unbacked;                            //!< always false since the vault upgrade (a failing spend is invalid)
 
     VaultRecord() : termClass(0), lockHeight(0), claimHeight(0), collateralZat(0), mintedCents(0), mintHeight(0), refHeight(0),
                     status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false) {}
@@ -314,7 +292,8 @@ struct AssignedOutput
  * REDEEM). v3 adds the four attestation types; a TxLog entry of those types is written only when
  * the rule held (REG-A1 / NOT-1 / EQV-1 / REV-1), a failing one is non-Yellowback (N7).
  */
-enum class TxLogType : uint8_t { NONE = 0, MINT = 1, TRANSFER = 2, REDEEM = 3, ATTESTOR_REGISTER = 4, CLAIM_NOTICE = 5, EQUIVOCATION = 6, ATTESTOR_REVIVE = 7 };
+enum class TxLogType : uint8_t { NONE = 0, MINT = 1, TRANSFER = 2, REDEEM = 3, ATTESTOR_REGISTER = 4, CLAIM_NOTICE = 5, EQUIVOCATION = 6, ATTESTOR_REVIVE = 7,
+                                 CLAIM_RELEASE = 8, CLAIM_CANCEL = 9 };   // U-23: an intent's release (selector 1) or attestor cancel (selector 2)
 const char* TxLogTypeName(TxLogType t);
 
 /**
@@ -347,6 +326,7 @@ struct TxLogRecord
     std::string claimPath;       //!< "a" | "b" | "" (the RED-4 clause that opened a passing claim)
     bool notice;                 //!< this transaction wrote a Notices record (NOT-1)
     uint16_t attestorSeq;        //!< the seq REG-A1 assigned, EQV-1 ejected or REV-1 revived
+    std::vector<COutPoint> reopenedVaults;   //!< U-23: the vault a cancel re-created (the position's new outpoint)
 
     TxLogRecord() : height(0), type((uint8_t)TxLogType::NONE), yedIn(0), yedOut(0), burned(0), feeZat(0), hasPayee(false),
                     aMint(0), aClaim(0), attestFeeZat(0), hasAttestPayee(false), attestPayee(0), residualZat(0), notice(false), attestorSeq(0) {}
@@ -381,6 +361,7 @@ struct TxLogRecord
         READWRITE(claimPath);
         READWRITE(notice);
         READWRITE(attestorSeq);
+        READWRITE(reopenedVaults);
     }
 };
 
@@ -561,7 +542,31 @@ struct NoticeRecord
     }
 };
 
+/** Intents[intentOutpoint] (U-23): a claim's intent output and the vault it was claimed from. Hashed. */
+enum class IntentRole : uint8_t { CLAIMANT = 0, RESIDUAL = 1 };
+
+struct IntentRecord
+{
+    COutPoint vault;         //!< the claimed vault's outpoint (its Vaults record is CLAIMING)
+    uint8_t role;            //!< IntentRole: the claimant's debt-worth, or the owner's residual (RED-5)
+    int32_t height;          //!< the claim's height
+
+    IntentRecord() : role((uint8_t)IntentRole::CLAIMANT), height(0) {}
+
+    IntentRole Role() const { return (IntentRole)role; }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(vault);
+        READWRITE(role);
+        READWRITE(height);
+    }
+};
+
 /** haltMask bits, declaration order (§3.6). */
+// HALT_PARTICIPATION and HALT_ENFORCEMENT (ACT-4, ACT-6) are no longer set since the vault upgrade
+// (§6); their bits stay reserved. HALT_NOT_ACTIVE marks only the virtual snapshot below the start.
 enum HaltBit : uint32_t {
     HALT_NOT_ACTIVE    = 1 << 0,
     HALT_NO_PRICE      = 1 << 1,
@@ -583,8 +588,6 @@ struct Snapshot
     uint256 blockHash;
     bool tagged;
     bool quote;
-    uint32_t signalCount;
-    Activation activation;
     int64_t pFast;
     int64_t pMid;
     int64_t pSlow;
@@ -603,7 +606,7 @@ struct Snapshot
     std::vector<uint160> pinnedKeys;      //!< PIN-1: payoutKeys excluded from the medians and E(H)
     std::vector<uint16_t> pinnedSeqs;     //!< PIN-2: seq excluded from selection at this height
 
-    Snapshot() : tagged(false), quote(false), signalCount(0), pFast(0), pMid(0), pSlow(0), pMint(0), pClaim(0),
+    Snapshot() : tagged(false), quote(false), pFast(0), pMid(0), pSlow(0), pMint(0), pClaim(0),
                  sigmaMultBps(10000), issuedZat(0), supplyCents(0), collateralZat(0), globalRatioBps(0), haltMask(0) {}
 
     /** The virtual snapshot every rule sees below START_HEIGHT (§3.6). */
@@ -628,8 +631,6 @@ struct Snapshot
         READWRITE(blockHash);
         READWRITE(tagged);
         READWRITE(quote);
-        READWRITE(signalCount);
-        READWRITE(activation);
         READWRITE(pFast);
         READWRITE(pMid);
         READWRITE(pSlow);
@@ -648,40 +649,25 @@ struct Snapshot
     }
 };
 
-/** Rejected[blockHash]: a block this node refused (BLK-2; node-local, never a state input, V13). */
-struct RejectedRecord
-{
-    int32_t height;
-    std::string reason;
-
-    RejectedRecord() : height(0) {}
-
-    ADD_SERIALIZE_METHODS;
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITE(height);
-        READWRITE(reason);
-    }
-};
-
 /**
  * Params: the regtest values in the state-hash preimage (M13, N18); written by the first applied
  * block. v3 appends attestArmMin (u32) and bundleCarrier (u8, the BundleCarrier enum value); the
- * hardening plan (H-1, SCHEMA_VERSION 5) appends mintRequiresArmed (u8 boolean).
+ * hardening plan (H-1, SCHEMA_VERSION 5) appends mintRequiresArmed (u8 boolean); the vault upgrade
+ * (SCHEMA_VERSION 6) replaces enforceUntil with attestorSetId (32 raw bytes, U-22).
  */
 struct ParamsRecord
 {
     int32_t startHeight;
     int32_t sigmaRefBps;
     int32_t supplyCapBps;
-    int32_t enforceUntil;
+    uint256 attestorSetId;
     uint32_t attestArmMin;
     uint8_t bundleCarrier;
     uint8_t mintRequiresArmed;
 
-    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), enforceUntil(0), attestArmMin(0), bundleCarrier(0), mintRequiresArmed(0) {}
+    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), attestArmMin(0), bundleCarrier(0), mintRequiresArmed(0) {}
     explicit ParamsRecord(const Params& p)
-        : startHeight(p.startHeight), sigmaRefBps(p.sigmaRefBps), supplyCapBps(p.supplyCapBps), enforceUntil(p.enforceUntilHeight),
+        : startHeight(p.startHeight), sigmaRefBps(p.sigmaRefBps), supplyCapBps(p.supplyCapBps), attestorSetId(p.attestorSetId),
           attestArmMin((uint32_t)std::max(0, p.attestArmMin)), bundleCarrier((uint8_t)p.bundleCarrier),
           mintRequiresArmed(p.mintRequiresArmed ? 1 : 0) {}
 
@@ -691,7 +677,7 @@ struct ParamsRecord
         READWRITE(startHeight);
         READWRITE(sigmaRefBps);
         READWRITE(supplyCapBps);
-        READWRITE(enforceUntil);
+        READWRITE(attestorSetId);
         READWRITE(attestArmMin);
         READWRITE(bundleCarrier);
         READWRITE(mintRequiresArmed);
@@ -738,13 +724,11 @@ namespace keys {
 std::string Tip();
 std::string Tag(uint32_t height);
 std::string Judgement(uint32_t height);
-std::string Activation();
 std::string Vault(const COutPoint& out);
 std::string Token(const COutPoint& out);
 std::string TxLog(const uint256& txid);
 std::string Snapshot(uint32_t height);
 std::string Totals();
-std::string Rejected(const uint256& blockHash);
 std::string Params();
 std::string Undo(const uint256& blockHash);
 std::string Attestor(uint16_t seq);
@@ -753,6 +737,7 @@ std::string AttestorSeq();
 std::string Attest();
 std::string BundleLog(uint32_t height);
 std::string Notice(const COutPoint& out);
+std::string Intent(const COutPoint& out);
 extern const char PREFIX_ATTESTOR;
 extern const char PREFIX_BUNDLELOG;
 extern const char PREFIX_NOTICE;
@@ -760,7 +745,6 @@ extern const char PREFIX_NOTICE;
 uint16_t SeqOf(const std::string& key);
 uint32_t HeightOf(const std::string& key);
 extern const char PREFIX_UNDO;
-extern const char PREFIX_REJECTED;
 extern const char PREFIX_TXLOG;
 /** The txid of a vault/token key (the 32 bytes after the prefix); zero if the key is too short. */
 uint256 OutPointHashOf(const std::string& key);
@@ -797,13 +781,11 @@ public:
     std::optional<TipRecord> GetTip() const;
     std::optional<TagRecord> GetTag(uint32_t height) const;
     std::optional<Judgement> GetJudgement(uint32_t height) const;
-    Activation GetActivation() const;                                   //!< SIGNALING/0/0 when absent
     std::optional<VaultRecord> GetVault(const COutPoint& out) const;
     std::optional<TokenRecord> GetToken(const COutPoint& out) const;
     std::optional<TxLogRecord> GetTxLog(const uint256& txid) const;
     std::optional<Snapshot> GetSnapshot(uint32_t height) const;
     Totals GetTotals() const;
-    std::optional<RejectedRecord> GetRejected(const uint256& blockHash) const;
     std::optional<ParamsRecord> GetParamsRecord() const;
     std::optional<AttestorRecord> GetAttestor(uint16_t seq) const;
     std::optional<uint16_t> GetBondIndex(const COutPoint& out) const;
@@ -811,6 +793,7 @@ public:
     AttestState GetAttest() const;                                      //!< UNARMED/0/0 when absent
     std::optional<BundleLogRecord> GetBundleLog(uint32_t height) const;
     std::optional<NoticeRecord> GetNotice(const COutPoint& out) const;
+    std::optional<IntentRecord> GetIntent(const COutPoint& out) const;
     /** Every Attestors record in seq order. */
     std::vector<std::pair<uint16_t, AttestorRecord>> Attestors() const;
 
@@ -828,11 +811,12 @@ private:
 /**
  * The state hash (§3.6 *State hash*, N18): SHA-256 over the concatenation,
  * in this order, of key ‖ value for Tip, every Tags record (ascending
- * height), every Judgements record, Activation, every Vaults record
+ * height), every Judgements record, every Vaults record
  * (ascending outpoint), every Tokens record, Totals, every Snapshots record,
  * the Params record, then (v3) every Attestors record by seq, AttestorSeq,
  * Attest, every BundleLog row by height and every Notices record by
- * outpoint. TxLog (L), Rejected (X), Undo (U) and BondIndex (B) are excluded.
+ * outpoint, then (the vault upgrade) every Intents record by outpoint. TxLog (L), Undo (U) and
+ * BondIndex (B) are excluded.
  * When no Tip has been written yet the preimage carries a zero tip with
  * `network` as given (the Python model's `{height 0, zero hash}`).
  */

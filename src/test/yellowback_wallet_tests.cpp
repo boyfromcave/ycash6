@@ -28,6 +28,9 @@
 #include <memory>
 #include <thread>
 
+/** The YED attestor set the regtest parameters of these cases name (U-22). */
+static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
 using namespace yellowback;
 
 namespace {
@@ -44,7 +47,7 @@ struct YbWalletSetup : public TestingSetup
         bool fFirstRun;
         wallet = new CWallet(::Params(), "yb_wallet_test.dat");
         wallet->LoadWallet(fFirstRun);
-        index.reset(new YellowbackIndex(RegtestParams(1, 0, 0, 0), pathTemp / "yb-wallet-index", 1 << 20, true));
+        index.reset(new YellowbackIndex(RegtestParams(1, 0, 0, TestSet()), pathTemp / "yb-wallet-index", 1 << 20, true));
     }
     ~YbWalletSetup()
     {

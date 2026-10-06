@@ -517,8 +517,10 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
 
     LOCK(cs_main);
 
-    if (yellowback::g_yellowback && yellowback::g_yellowback->GetMinerConfig().requireHealthy && !yellowback::g_yellowback->IsHealthy())
-        throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; -yellowbackrequirehealthy refuses templates until -reindex-yellowback");
+    // The YED module is consensus at UPGRADE_VAULT (upgrade plan U-21): an index that cannot evaluate it
+    // cannot build a valid template (-yellowbackrequirehealthy is retired; this is always on).
+    if (yellowback::g_yellowback && !yellowback::g_yellowback->IsHealthy())
+        throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; restart with -reindex-yellowback");
 
     // Wallet or miner address is required because we support coinbasetxn
     if (GetArg("-mineraddress", "").empty()) {
