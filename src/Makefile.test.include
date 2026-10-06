@@ -46,6 +46,7 @@ JSON_TEST_FILES = \
   test/data/sapling_key_components.json \
   test/data/yellowback_golden.json \
   test/data/yellowback_attest_vectors.json \
+  test/data/vault_vectors.json \
   test/data/unified_addrs.json \
   test/data/unified_full_viewing_keys.json \
   test/data/zip0244.json
@@ -119,6 +120,10 @@ BITCOIN_TESTS =\
   test/uint256_tests.cpp \
   test/univalue_tests.cpp \
   test/util_tests.cpp \
+  test/vault_act_tests.cpp \
+  test/vault_state_tests.cpp \
+  test/vault_template_tests.cpp \
+  test/vault_vectors_tests.cpp \
   test/sha256compress_tests.cpp \
   test/yellowback_address_tests.cpp \
   test/yellowback_attest_tests.cpp \
