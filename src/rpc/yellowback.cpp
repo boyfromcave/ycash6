@@ -1976,6 +1976,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
         e.claimable = mature && IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
         e.claimPath = e.claimable ? "a" : "";
         if (e.claimable) e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, p.claimThresholdBps, e.pClaim.value()));
+        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
         return e;
     }
     std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)r);
@@ -2005,6 +2006,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     if (e.claimable && e.pClaim.has_value()) {
         const int marginBps = underA ? p.claimThresholdBps : (int)BPS;
         e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, e.pClaim.value()));
+        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
     }
     const bool standing = notice.has_value() && (int64_t)tip - notice->height <= p.emergencyNoticeTtl;
     e.canNotice = v.Status() == VaultStatus::ACTIVE && !standing && !e.claimable &&

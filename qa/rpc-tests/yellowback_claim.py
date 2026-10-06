@@ -36,6 +36,7 @@ from test_framework.util import (
 from test_framework.yellowback_util import (
     CLAIM_DELAY,
     POOLS,
+    RESIDUAL_MIN_ZAT,
     REF_LAG,
     STOCK,
     YellowbackTestFramework,
@@ -221,13 +222,20 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         vault_v3 = user.yed_getvault(mint_v3['txid'])
         payees = user.yed_getfeepayee(r, vault_v3['collateralZat'], outpoint_selector(mint_v3['txid']))
         supply_before = nodes[2].yed_getstats()['supplyCents']
+        # yed_listclaimable.residualZat is what the builder pays: RED-5's floor applied (0 below RESIDUAL_MIN_ZAT)
+        listed = {x['vault']: x for x in claimant.yed_listclaimable()}
+        for row in listed.values():
+            assert row['residualZat'] == 0 or row['residualZat'] >= RESIDUAL_MIN_ZAT, row
+        listed_v3 = listed[mint_v3['txid'] + ':0']
         claimed = self.claim(claimant, mint_v3['txid'])
+        assert_equal(listed_v3['residualZat'], claimed['residualZat'])
         assert_equal(claimed['burnedCents'], 10000)
         assert_equal(claimed['feeZat'], payees['feeZat'])
         assert_equal(claimed['payee'], payees['default']['payoutAddress'])
         # U-23: the claimant intent carries the collateral less the RED-5 residual; the fees come from the claimant's YEC
         assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] - claimed['residualZat'])
         assert_equal((claimed['claimPath'], claimed['residualZat'], claimed['pending']), ('a', 0, False))
+        raw = claimant.getrawtransaction(claimed['txid'], 1)
         assert_equal(raw['locktime'], v3_claim_height)
         assert_equal(raw['vin'][0]['txid'], mint_v3['txid'])
         assert_equal(raw['vin'][0]['scriptSig']['hex'], '54')            # OP_4: the V's claim selector
