@@ -303,6 +303,33 @@ class YellowbackMiningTest(YellowbackTestFramework):
         h = self.mine(3)[0]
         self.assert_tag(h, 'quote', payout=addr, price=PRICE)
 
+    def setquote_rebuilds_template(self):
+        # Rule: MINER-1
+        # D-U6: a new quote reaches the very next template, with no block and no clock step in
+        # between: getblocktemplate rebuilds its cached block when the quote generation moves.
+        print('yed_setquote reaches the next getblocktemplate without a new block')
+        node, addr = self.pool(2)
+        set_quote(node, '2.00')
+        self.mine(2)
+        gbt = node.getblocktemplate()
+        assert_equal(gbt['yellowback']['priceMicroUsd'], PRICE)
+        prev = gbt['previousblockhash']
+        set_quote(node, '3.00')
+        gbt = node.getblocktemplate()
+        assert_equal(gbt['previousblockhash'], prev)
+        tag = bytes_to_hex_str(ym.tag_push(1, 3_000_000, 1, self.pool_key[0]))
+        assert_equal(len(tag), 2 * 37)
+        assert_equal(gbt['yellowback']['tag'], tag)
+        assert_equal(gbt['coinbaseaux']['flags'], tag)
+        assert_equal(gbt['yellowback']['priceMicroUsd'], 3_000_000)
+        set_quote(node, 0)
+        gbt = node.getblocktemplate()
+        assert_equal(gbt['previousblockhash'], prev)
+        assert_equal(gbt['yellowback']['kind'], 'signal')
+        assert_equal(gbt['yellowback']['priceMicroUsd'], 0)
+        assert_equal(gbt['yellowback']['tag'], bytes_to_hex_str(ym.tag_push(1, 0, 0, self.pool_key[0])))
+        set_quote(node, '2.00')
+
     def no_signal_no_quote_no_tag(self):
         # Rule: MINER-1
         print('-yellowbacksignal=0 and no quote: no tag')
@@ -316,6 +343,17 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(gbt['yellowback']['payoutAddress'], addr)
         h = self.mine(4)[0]
         self.assert_tag(h, 'none')
+        # D-U6: with no signal bit, clearing the quote leaves the very next template untagged
+        gbt = node.getblocktemplate()
+        set_quote(node, '2.00')
+        gbt = node.getblocktemplate()
+        assert_equal(gbt['yellowback']['kind'], 'quote')
+        assert_equal(len(gbt['coinbaseaux']['flags']), 2 * 37)
+        set_quote(node, 0)
+        gbt = node.getblocktemplate()
+        assert_equal(gbt['coinbaseaux']['flags'], '')
+        assert_equal(gbt['yellowback']['kind'], 'none')
+        assert_equal(gbt['yellowback']['tag'], '')
         # the signal bit alone (no quote) is a signal-only tag
         self.restart(4)
         h = self.mine(4)[0]
@@ -650,6 +688,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.tx0_coinbase_payload_registers_nothing()
         self.quote_staleness_signal_only()
         self.setquote_zero_signal_only()
+        self.setquote_rebuilds_template()
         self.no_signal_no_quote_no_tag()
         self.unhealthy_index_no_tag()
         self.miner2_default_from_mineraddress()

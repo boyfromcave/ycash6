@@ -1066,6 +1066,9 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
     }
     const int64_t now = GetTime();      // the clock's one home (M11)
     index.SetQuote((uint64_t)price, (uint16_t)mask, now);
+    // D-U6: a quote changes the template. Counting it as a mempool update lets getblocktemplate rebuild a cached
+    // block older than 5 s, and a waiting longpoll return at its next check, instead of keeping the old tag.
+    mempool.AddTransactionsUpdated(1);
     const MinerStatus ms = index.GetMinerStatus(now);
     UniValue o(UniValue::VOBJ);
     o.pushKV("priceMicroUsd", price);
