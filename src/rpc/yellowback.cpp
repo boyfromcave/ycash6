@@ -5,8 +5,8 @@
 /**
  * Yellowback node-context RPCs (plan §4.5; the contract is doc/yellowback-rpc.md,
  * rpcversion 3, whose fenced json blocks define every return shape and error
- * identifier). They work without a wallet and are gated by
- * -experimentalfeatures -yellowback. The index is synchronous with chainActive
+ * identifier). They work without a wallet and answer -32601 unless Yellowback is
+ * live (UPGRADE_VAULT and the YED attestor set configured, U-22). The index is synchronous with chainActive
  * (V2), so every reply is for the tip.
  *
  * While the index is unhealthy every command refuses with `yellowback-unhealthy`
@@ -68,7 +68,7 @@ const int MAX_LISTMINERS_WINDOW = 4032;
 YellowbackIndex& EnsureIndex()
 {
     if (!g_yellowbackLive || !g_yellowback) {
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback requires -experimentalfeatures -yellowback)");
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback is not active: the vault upgrade or the YED attestor set is not configured on this network)");
     }
     return *g_yellowback;
 }

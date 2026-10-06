@@ -67,7 +67,7 @@ const char* const UNLOCK_ACKNOWLEDGEMENT = "I understand this burns YED";
 YellowbackWallet& EnsureYW()
 {
     if (!g_yellowbackLive || !g_yellowback) {
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback requires -experimentalfeatures -yellowback)");
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback is not active: the vault upgrade or the YED attestor set is not configured on this network)");
     }
     if (!pwalletMain || !g_yellowbackWallet) throw JSONRPCError(RPC_WALLET_ERROR, "wallet is disabled");
     return *g_yellowbackWallet;

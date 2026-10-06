@@ -121,8 +121,10 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
   not, a v3 wallet always takes the carrier step for these commands: before arming the bundle
   is empty and the carrier is still created, so one code path exists (the carrier costs
   `CARRIER_VALUE` = 10,000 zat plus the network fee).
-- **Gating.** Every command requires `-experimentalfeatures -yellowback`; without them the node
-  answers JSON-RPC `-32601` "Method not found". Every refusal is `RPC_INVALID_PARAMETER` (a bad
+- **Gating.** Every command requires Yellowback to be live: the vault upgrade scheduled and the
+  network's YED attestor set configured (U-22; regtest: `-nuparams=6d5b7a31:<h>` and
+  `-yellowbackattestorset=<setid>`); otherwise the node answers JSON-RPC `-32601` "Method not
+  found (Yellowback is not active: …)". Every refusal is `RPC_INVALID_PARAMETER` (a bad
   argument), `RPC_WALLET_ERROR` (funds, locking) or `RPC_VERIFY_REJECTED` (a rule), with a
   message that **begins with a stable identifier** from the table in *Error identifiers*; the
   wallet matches the identifier, never the text after it.
