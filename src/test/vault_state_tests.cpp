@@ -17,6 +17,7 @@
 #include "yellowback/script.h"
 #include "vault/template.h"
 
+#include "chain.h"
 #include "key.h"
 #include "primitives/block.h"
 #include "script/interpreter.h"
@@ -1169,6 +1170,126 @@ BOOST_AUTO_TEST_CASE(record_serialization)
     BlockUndo v;
     s3 >> v;
     BOOST_CHECK(v.entries == u.entries);
+}
+
+/** A module that is not in the compile-time table (the table is empty until P4): it governs one
+ *  set and names, as evidence, every member key pushed in an OP_RETURN output
+ *  `OP_RETURN <pubkey> <block hash> <height LE32>` whose hash is the chain's block at that height. */
+struct EjectingTestModule : public Module {
+    std::optional<SetId> governed;
+    mutable std::vector<int64_t> heightsSeen;
+    std::optional<SetId> GovernedSet() const override { return governed; }
+    std::vector<CPubKey> Ejections(const CTransaction& tx, const ModuleContext& ctx) const override
+    {
+        heightsSeen.push_back(ctx.height);
+        std::vector<CPubKey> out;
+        for (const CTxOut& o : tx.vout) {
+            CScript::const_iterator pc = o.scriptPubKey.begin();
+            opcodetype op;
+            valtype key, hash, height;
+            if (!o.scriptPubKey.GetOp(pc, op) || op != OP_RETURN) continue;
+            if (!o.scriptPubKey.GetOp(pc, op, key) || !o.scriptPubKey.GetOp(pc, op, hash) || !o.scriptPubKey.GetOp(pc, op, height)) continue;
+            if (hash.size() != 32 || height.size() != 4 || !ctx.blockHashAt) continue;
+            const int64_t h = height[0] | (height[1] << 8) | (height[2] << 16) | ((int64_t)height[3] << 24);
+            const std::optional<uint256> want = ctx.blockHashAt(h);
+            if (!want || uint256(hash) != *want) continue;
+            out.push_back(CPubKey(key.begin(), key.end()));
+        }
+        return out;
+    }
+};
+
+BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1)
+{
+    // U-25 (P4-b, the primitive's half): a module names members of the one set it governs; the
+    // primitive ejects each and freezes its bond (SET_EQUIVOCATION's effect) in the same overlay,
+    // undo-covered, and never invalidates the transaction or touches another set. The YED module's
+    // EQV-1 evidence is ported with the YED half; here a test module stands in for it.
+    Chain c;
+    const CKey k1 = MakeKey(61), k2 = MakeKey(62), k3 = MakeKey(65), outsider = MakeKey(63);
+    const SetId s = SetWithMembers(c, {k1, k2});
+    const SetId other = SetWithMembers(c, {k3});
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    const COutPoint bond3 = Member(c, other, k3).bondOutpoint;
+    const int64_t cited = c.h - 3;
+    auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xab; return x; };
+    BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
+    auto evidence = [&](const CKey& k, int64_t at, const uint256& hash) {
+        const valtype le = {(unsigned char)(at & 0xff), (unsigned char)((at >> 8) & 0xff), (unsigned char)((at >> 16) & 0xff), (unsigned char)((at >> 24) & 0xff)};
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(c.Fund()));
+        m.vout.push_back(CTxOut(0, CScript() << OP_RETURN << ToByteVector(k.GetPubKey()) << ToByteVector(hash) << le));
+        return CTransaction(m);
+    };
+    const CTransaction e = evidence(k1, cited, fakeHash(cited));
+
+    // Through ApplyTx the hook runs over the compile-time table (empty before P4; a registered
+    // module names nothing for this transaction): nothing happens and the transaction is valid.
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); BOOST_CHECK_EQUAL(*Res(st.ApplyTx(e, c.h, c.coins)), "OK"); BOOST_CHECK(st.Changes().empty()); }
+
+    EjectingTestModule mod;
+    // No governed set; a governed set that does not exist: nothing happens, Ejections is not asked.
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); st.ApplyEjectionsOf(mod, e, c.h); BOOST_CHECK(st.Changes().empty()); }
+    mod.governed = uint256S("0x5e7");
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); st.ApplyEjectionsOf(mod, e, c.h); BOOST_CHECK(st.Changes().empty()); }
+    BOOST_CHECK(mod.heightsSeen.empty());
+    mod.governed = s;
+    // No block hashes: the module cannot check its evidence, nothing happens.
+    { VaultState st(c.kv); st.ApplyEjectionsOf(mod, e, c.h); BOOST_CHECK(st.Changes().empty()); }
+    // Evidence over the wrong hash; a key that is not a member; a member of another set: nothing happens.
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); st.ApplyEjectionsOf(mod, evidence(k1, cited, fakeHash(cited + 1)), c.h); BOOST_CHECK(st.Changes().empty()); }
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); st.ApplyEjectionsOf(mod, evidence(outsider, cited, fakeHash(cited)), c.h); BOOST_CHECK(st.Changes().empty()); }
+    { VaultState st(c.kv); st.SetBlockHashes(hashes); st.ApplyEjectionsOf(mod, evidence(k3, cited, fakeHash(cited)), c.h); BOOST_CHECK(st.Changes().empty());
+      BOOST_CHECK(!GetBond(st, bond3)->frozen); BOOST_CHECK_EQUAL(GetMember(st, other, k3.GetPubKey())->status, MEMBER_ACTIVE); }
+
+    // The evidence: k1 EJECTED and its bond frozen; k2 untouched; the module saw the block height.
+    VaultState st(c.kv);
+    st.SetBlockHashes(hashes);
+    mod.heightsSeen.clear();
+    st.ApplyEjectionsOf(mod, e, c.h);
+    BOOST_CHECK(mod.heightsSeen == std::vector<int64_t>{c.h});
+    BOOST_CHECK_EQUAL(GetMember(st, s, k1.GetPubKey())->status, MEMBER_EJECTED);
+    BOOST_CHECK(GetMember(st, s, k1.GetPubKey())->bondFrozen);
+    BOOST_CHECK(GetBond(st, bond1)->frozen);
+    BOOST_CHECK_EQUAL(GetMember(st, s, k2.GetPubKey())->status, MEMBER_ACTIVE);
+    // In the same overlay a later spend of the frozen bond is invalid; a second report changes nothing.
+    {
+        CMutableTransaction spend;
+        spend.vin.push_back(CTxIn(bond1));
+        spend.vout.push_back(CTxOut(500, GetScriptForDestination(k1.GetPubKey().GetID())));
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(spend), c.h, c.coins)), "bad-vault-bond-frozen");
+        const auto before = st.Changes();
+        st.ApplyEjectionsOf(mod, evidence(k1, cited - 1, fakeHash(cited - 1)), c.h);
+        BOOST_CHECK(st.Changes() == before);
+        BOOST_CHECK(!EjectAndFreeze(st, s, k1.GetPubKey()));
+        BOOST_CHECK(!EjectAndFreeze(st, s, outsider.GetPubKey()));
+        BOOST_CHECK(st.Changes() == before);
+    }
+    // The block's undo restores the base byte for byte.
+    const BlockUndo undo = st.MakeUndo();
+    MemoryKV after = c.kv;
+    after.Apply(st.Changes());
+    VaultState back(after);
+    back.ApplyUndo(undo);
+    after.Apply(back.Changes());
+    BOOST_CHECK(after.data == c.kv.data);
+
+    // AncestorHashes (the node's provider): the block's ancestors, inclusive of `prev`; nothing above or below.
+    std::vector<uint256> ids(5);
+    std::vector<CBlockIndex> idx(5);
+    for (int i = 0; i < 5; i++) {
+        ids[i] = fakeHash(1000 + i);
+        idx[i].phashBlock = &ids[i];
+        idx[i].nHeight = i;
+        idx[i].pprev = i ? &idx[i - 1] : nullptr;
+        idx[i].BuildSkip();
+    }
+    const BlockHashFn anc = AncestorHashes(&idx[3]);
+    BOOST_CHECK(anc(0) == std::optional<uint256>(ids[0]));
+    BOOST_CHECK(anc(3) == std::optional<uint256>(ids[3]));
+    BOOST_CHECK(!anc(4));
+    BOOST_CHECK(!anc(-1));
+    BOOST_CHECK(!AncestorHashes(nullptr)(0));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

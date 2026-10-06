@@ -10,6 +10,7 @@
 #include "pubkey.h"
 #include "serialize.h"
 #include "vault/act.h"
+#include "vault/module.h"
 #include "vault/template.h"
 
 #include <functional>
@@ -334,6 +335,16 @@ public:
     const std::map<std::string, std::optional<std::string>>& Changes() const { return changes; }
     void Clear() { changes.clear(); }
 
+    /** Ancestor block hashes for the module ejection hook (U-25): the block's own ancestors in
+     *  ConnectBlock and replay, the tip's in the mempool and the miner. Unset, no module that
+     *  needs a block hash finds anything to eject. */
+    void SetBlockHashes(const BlockHashFn& fn) { blockHashes = fn; }
+
+    /** The module ejection hook (U-25) for one module: what ApplyTx runs, after the
+     *  transaction's own rules and act, for each registered module. Public so a unit test can
+     *  drive the hook with a module that is not in the compile-time table. */
+    void ApplyEjectionsOf(const Module& module, const CTransaction& tx, int64_t height);
+
     void Put(const std::string& key, const std::string& value) { changes[key] = value; }
     void Erase(const std::string& key) { changes[key] = std::nullopt; }
 
@@ -344,13 +355,21 @@ private:
     std::optional<std::string> ApplyTxInner(const CTransaction& tx, int64_t height, const CoinAccessor& coins);
     std::optional<std::string> ApplyAct(const CTransaction& tx, const Act& act, int64_t height);
     void MergeFrom(const VaultState& child);
+    void ApplyEjections(const CTransaction& tx, int64_t height);
 
     const KVReader& base;
     std::map<std::string, std::optional<std::string>> changes;
+    BlockHashFn blockHashes;
 };
 
 /** Mempool check: would `tx` apply at `height` (tip+1) over the snapshot's base? */
-std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot);
+std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot,
+                                   const BlockHashFn& blockHashes = BlockHashFn());
+
+/** Eject a member and freeze its bond (SET_EQUIVOCATION's effect, §15.5; the module ejection
+ *  hook's, U-25): only a member of `setId` whose bond is unspent (indexed) and not frozen.
+ *  Returns false (and changes nothing) otherwise. */
+bool EjectAndFreeze(VaultState& st, const SetId& setId, const CPubKey& key);
 
 } // namespace vault
 

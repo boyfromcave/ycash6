@@ -41,6 +41,11 @@ extern VaultDB* g_vaultdb;
  *  the parent of the next block), or nullptr without a database. */
 std::shared_ptr<const SetSnapshot> TipSnapshot();
 
+/** Ancestor hashes of `prev` (inclusive) for the module ejection hook (U-25): heights above
+ *  prev's or below 0 read as nullopt. Block index entries live for the process, so the
+ *  function may outlive the caller's cs_main section, but it is only called under it. */
+BlockHashFn AncestorHashes(const CBlockIndex* prev);
+
 /** True iff the database is at the parent of `pindex`: its tip marker is pindex->pprev, or it has
  *  no tip and pindex is the first block at which UPGRADE_VAULT is active. */
 bool AtParentOf(const CBlockIndex* pindex, const Consensus::Params& params);
