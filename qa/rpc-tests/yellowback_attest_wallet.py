@@ -602,10 +602,14 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         (the wallet's completion thread does, right after the carrier's block)."""
         print('F-1: %d back-to-back mints and sends, a block between each, both two-step modes' % rounds)
         pool = POOLS[0]
-        for _ in range(4):        # small coins: the selector is smallest-first, so a stale spent input is the one it would pick
-            self.nodes[pool].sendtoaddress(user.getnewaddress(), 75)
+        # Small coins (the selector is smallest-first, so a stale spent input is the one it would pick),
+        # and enough of them that the last round still has confirmed YEC besides the change the
+        # previous block just created (at depth -1, so not yet spendable): 30 mints at $90 lock ~250 YEC.
+        for k in range(8):        # from every pool: one alone does not hold 600 YEC
+            self.nodes[POOLS[k % len(POOLS)]].sendtoaddress(user.getnewaddress(), 75)
         self.sync_all()
         self.mine(pool)
+        print('  user balance before the rounds: %s YEC' % user.getbalance())
         to = claimant.yed_getnewaddress()
         failures, txids = [], []
 
@@ -637,7 +641,13 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
                 self.sync_all()
                 self.mine(pool)
         assert_equal(failures, [])
-        unconfirmed = [t for t in txids if user.gettransaction(t)['confirmations'] < 1]
+        self.sync_all()
+        deadline = time.time() + 30                                           # the notifier stamps the last block
+        while True:
+            unconfirmed = [t for t in txids if user.gettransaction(t)['confirmations'] < 1]
+            if not unconfirmed or time.time() > deadline:
+                break
+            time.sleep(0.5)
         assert_equal(unconfirmed, [])                                         # no depth -1 entry left behind
         assert_equal(claimant.yed_getbalance()['confirmedCents'] >= 100 * rounds, True)
         assert_same_statehash(self.enforcing_nodes(), 'F-1 back to back')
