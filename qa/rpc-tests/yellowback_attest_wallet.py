@@ -585,9 +585,51 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(user.yed_getvault(rally['txid'])['status'], 'ACTIVE')
         assert_same_statehash(self.enforcing_nodes(), 'rally')
 
+# Rule: F-1
+        self.f1_back_to_back(user, claimant)
+
         print('the Python model over the whole chain')
         model_check(nodes[2], full=True)
         self.checkpoint('end')
+
+    def f1_back_to_back(self, user, claimant, rounds=30):
+        """Hardening F-1 (F-DEV-1): 30 mints, each followed by a send, with a block between every
+        step and no pause after it. Between a block and the notifier stamping it, the transaction it
+        mined is at wallet depth -1 and its inputs look unspent; a selector that re-chose them made
+        the next commit fail ("transaction commit failed") and left a depth -1 entry behind. The
+        mints alternate the two-step modes: wait=True (the RPC completes the MINT) and wait=False
+        (the wallet's completion thread does, right after the carrier's block)."""
+        print('F-1: %d back-to-back mints and sends, a block between each, both two-step modes' % rounds)
+        pool = POOLS[0]
+        for _ in range(4):        # small coins: the selector is smallest-first, so a stale spent input is the one it would pick
+            self.nodes[pool].sendtoaddress(user.getnewaddress(), 75)
+        self.sync_all()
+        self.mine(pool)
+        to = claimant.yed_getnewaddress()
+        failures, txids = [], []
+        for i in range(rounds):
+            miner = POOLS[i % len(POOLS)]
+            try:
+                if i % 2 == 0:
+                    m = wallet_mint(self, user, 10000, 48, prices=90, miner=miner)
+                    txids += [m['carrierTxid'], m['txid']]
+                else:
+                    ref = user.yed_getinfo()['height'] - REF_LAG
+                    res, txid = two_step_pending(self, user, 'yed_mint', 10000, 48, '', offline_bundle_hex(self, user, ref, b'', 90), miner=miner)
+                    txids += [res['carrierTxid'], txid]
+                self.mine(miner)
+                txids.append(user.yed_send(to, 100)['txid'])      # selects YEC right after the block
+                self.sync_all()
+                self.mine(miner)
+            except JSONRPCException as e:
+                failures.append((i, e.error['message']))
+                self.sync_all()
+                self.mine(pool)
+        assert_equal(failures, [])
+        unconfirmed = [t for t in txids if user.gettransaction(t)['confirmations'] < 1]
+        assert_equal(unconfirmed, [])                                         # no depth -1 entry left behind
+        assert_equal(claimant.yed_getbalance()['confirmedCents'] >= 100 * rounds, True)
+        assert_same_statehash(self.enforcing_nodes(), 'F-1 back to back')
 
 
 if __name__ == '__main__':

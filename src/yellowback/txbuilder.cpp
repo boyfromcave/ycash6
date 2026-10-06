@@ -508,6 +508,7 @@ struct Context
                       const CScript* only = nullptr, const std::string& onlyText = "") const
     {
         if (needed <= 0) return 0;
+        yw.SettleYecLocks();   // F-1: hand back the inputs of a spender that failed
         std::vector<COutput> coins;
         wallet.AvailableCoins(coins, std::nullopt, true, nullptr, false, true, false, 1);
         std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() < b.Value(); });
@@ -521,6 +522,10 @@ struct Context
             if (c.tx->vout[c.i].scriptPubKey.IsPayToScriptHash()) continue;
             COutPoint o(c.tx->GetHash(), c.i);
             if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) continue;
+            // F-1: a coin the chainstate has already spent. Its spender is mined but the notifier has
+            // not stamped it yet (wallet depth -1), so IsSpent no longer counts it and AvailableCoins
+            // offers the coin again; choosing it would make the commit fail as a double spend.
+            if (!CoinAvailable(o)) continue;
             mtx.vin.push_back(CTxIn(o));
             prevs.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
             selected += c.Value();
