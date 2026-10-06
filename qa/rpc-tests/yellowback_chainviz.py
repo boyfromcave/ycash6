@@ -7,7 +7,7 @@
 chain-viz against the node (docs/plans/chain-viz-plan.md C5): the read-only observer's HTTP API
 checked against the nodes' own RPCs on a three-node regtest.
 
-Three pool nodes (every one enforcing, signalling, quoting $50), ZMQ ``hashblock``/``hashtx``
+Three pool nodes (every one quoting $50), ZMQ ``hashblock``/``hashtx``
 published by each on one endpoint (C-F-1), then the ``chain-viz`` binary on ``--nodes`` with
 ``--record``.  The test then
 

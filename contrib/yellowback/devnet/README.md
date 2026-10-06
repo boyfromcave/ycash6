@@ -66,7 +66,7 @@ yellowback-devnet up --role pool        # you: a pool on node 4, a plain miner a
 | 0 | **you** (minter) | funding + subscriber | funding + subscriber |
 | 1 | stock (no `-yellowback`) | stock | stock |
 | 2–3 | pools, automated | pools, automated | pools, automated |
-| 4 | pool, automated | pool, automated | **you**: no payout, no signal, no quote |
+| 4 | pool, automated | pool, automated | **you**: no payout, no quote |
 | 5–7 | attestors, automated | attestors, automated | attestors, automated |
 | 8 | 4th attestor, automated | **you**: 13 YEC, unregistered, no agent | 4th attestor, automated |
 | 9 | simulated population | simulated population | simulated population |
@@ -110,9 +110,8 @@ Every bundle-carrying call is two-step and made with `wait=true`, so the persona
 ### The pool seat (`pool`)
 
 ```bash
-yellowback-devnet pool 4 configure       # restart node 4 with its payout address and -yellowbacksignal=1 (scenario 3 step 2)
+yellowback-devnet pool 4 configure       # restart node 4 with its payout address (scenario 3 step 2)
 yellowback-devnet pool 4 quote start     # the real yellowback-quote agent beside it; `stop` lets the quote go stale past 120 s
-yellowback-devnet pool 3 signal off      # a pool keeps mining and quoting but its tags carry no signal bit; two silent pools of three cross the 60 % pause
 yellowback-devnet mine 3 4               # your blocks are yours to mine
 ```
 

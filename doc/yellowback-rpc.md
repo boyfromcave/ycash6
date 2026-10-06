@@ -75,9 +75,10 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
 - **Outpoints** are objects `{"txid": "<hex>", "vout": n}`; a vault is named by its outpoint
   string `"<txid>:0"` where the prototype did (`vault`).
 - **Term classes** are the strings `"A"`, `"B"`, `"C"`; vault statuses `"ACTIVE"`, `"VOID"`,
-  `"CLOSED"`, `"CLAIMED"`; activation statuses `"signaling"`, `"locked_in"`, `"active"`; halt-mask
+  `"CLOSED"`, `"CLAIMED"`, `"CLAIMING"`; upgrade statuses (`yed_getactivation`) `"pending"`,
+  `"active"` (the v2 `"signaling"` / `"locked_in"` left with signalling, upgrade plan §6); halt-mask
   names `"NOT_ACTIVE"`, `"NO_PRICE"`, `"PARTICIPATION"`, `"GLOBAL_RATIO"`, `"DIVERGENCE"`,
-  `"ENFORCEMENT"` (§3.6).
+  `"ENFORCEMENT"` (§3.6; `PARTICIPATION` and `ENFORCEMENT` are no longer set since the upgrade).
 - **Payees** are rendered as the P2PKH address (`s1…` mainnet, `sm…` testnet/regtest) of the key
   hash, `null` when there is none (FEE-0, or a VOID release / sweep).
 - **Verdicts** are the §4.2a strings (`ok`, `bad-mint-collateral`, `vault-spend-malformed`, …).

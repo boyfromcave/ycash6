@@ -6,7 +6,7 @@
 """A one-laptop Yellowback v3 regtest network, ARMED when `up` returns, with a seat left empty.
 
 The plain devnet (`up`, today's behaviour) is eight nodes: node 0 the funded wallet, node 1
-stock, nodes 2-4 signalling pools with fixed payout addresses, nodes 5-7 attestor nodes that
+stock, nodes 2-4 quoting pools with fixed payout addresses, nodes 5-7 attestor nodes that
 register (10 YEC, 200 blocks) and arm the layer, each with a real `yellowback-attest attest`
 beside it and one `subscribe` beside node 0, all on the `dir` transport. `--no-attest` gives
 back the five-node v2 devnet.
@@ -28,7 +28,7 @@ side; YELLOWBACK_WALLET_BIN, YELLOWBACK_ATTEST_BIN and CHAINVIZ_BIN name the bin
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
 [--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
-attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
+attestor N {stop|start|price USD}, pool N {configure|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
 cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
 (JSON signing/address/template vectors for the YEW core, wallet plan W0c).
@@ -83,7 +83,7 @@ ROLES = {
     "attestor": {"seat": ATTESTOR4, "auto_pools": POOLS, "auto_attestors": ATTESTORS,
                  "what": "one bonded attestor; your registration, your bond and your agent are yours to do"},
     "pool": {"seat": 4, "auto_pools": (2, 3), "auto_attestors": ATTESTORS + (ATTESTOR4,),
-             "what": "one mining pool; your payout address, your signalling, your quote and your blocks are yours to do"},
+             "what": "one mining pool; your payout address, your quote and your blocks are yours to do"},
 }
 
 def _default_dir():
@@ -388,7 +388,7 @@ def load(directory):
         with open(path(directory)) as file: state = json.load(file)
     except OSError: sys.exit("no devnet at %s (run `up` first)" % directory)
     PortSeed.n = state["portseed"]
-    # Every command that restarts a node (`pool N configure`, `signal`, …) starts it through the
+    # Every command that restarts a node (`pool N configure`, …) starts it through the
     # framework, which reads ZCASHD from the environment; only `up` used to export it, so a
     # restart from a fresh shell silently launched `bitcoind` from PATH. The recorded binary wins
     # unless the caller set one deliberately.
@@ -760,6 +760,7 @@ def up(args):
              "rpc": {str(n): {"url": rpc_url(n), "port": rpc_port(n), "user": rpc_auth_pair(n)[0], "password": rpc_auth_pair(n)[1]} for n in range(count)},
              "nodes": {str(n): {"zmq": zmq_record(n)} for n in range(count)},
              "heartbeat": {}, "walk": {}, "sim": {}, "session": None,
+             # A configured pool (payout key, quoting); the key name predates the vault upgrade, which retired signalling.
              "pool_signal": {str(pool): pool in preset["auto_pools"] or role == "none" for pool in POOLS}}
     try:
         print("[1/%d] starting %d regtest nodes in %s (role: %s)" % (steps, count, directory, role))
@@ -793,7 +794,7 @@ def up(args):
         else:
             print("[3/%d] setting $%s quotes on pools 2-4" % (steps, args.price))
             for node in POOLS: set_quote(nodes[node], args.price)
-        print("[4/%d] mining %d signalling blocks round-robin across the automated pools" % (steps, ACTIVATION_BLOCKS + 2))
+        print("[4/%d] mining %d quote-tagged blocks round-robin across the automated pools (the price windows fill)" % (steps, ACTIVATION_BLOCKS + 2))
         auto = auto_pools(state)
         for block in range(ACTIVATION_BLOCKS + 2):
             nodes[auto[block % len(auto)]].generate(1); sync_blocks(nodes)
@@ -1036,32 +1037,24 @@ def sim(args):
 # ---------------------------------------------------------------------------------- pool (the `pool` preset)
 
 def pool(args):
-    """`pool N configure|signal on|off|quote start|stop`: the pool operator's moves (scenario 3).
+    """`pool N configure|quote start|stop|stratum ...`: the pool operator's moves (scenario 3).
 
-    configure  -- restart pool N with its payout address and -yellowbacksignal=1 (step 2)
-    signal off -- restart it with -yellowbacksignal=0: it keeps mining and quoting, but its tags
-                  carry no signal bit; two of three silent pools cross the 60 % pause (step 4)
+    configure  -- restart pool N with its payout address (step 2)
     quote start|stop -- run or kill the real yellowback-quote agent beside it (step 3); a stopped
-                  agent shows as quoteKind "signal" once the quote is older than -yellowbackquotemaxage"""
+                  agent's templates carry no tag (quoteKind "none") once the quote is older than
+                  -yellowbackquotemaxage
+
+    The vault upgrade retired pool signalling, lock-in and the valve (upgrade plan §6): there is no
+    `signal` move any more, and -yellowbacksignal is ignored by the node."""
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     node = args.node
     if node not in all_pools(state): sys.exit("pool must be one of %s" % ", ".join(str(p) for p in all_pools(state)))
     address = pool_address(state, node)
     extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agent_pids(state) else []
     if args.action == "configure":
-        restart_node(state, node, pool_args(address, extra), "with payout address %s and -yellowbacksignal=1" % address)
+        restart_node(state, node, pool_args(address, extra), "with payout address %s" % address)
         state["pool_signal"][str(node)] = True; save(directory, state)
-        print("node%d is now a signalling pool; `pool %d quote start` runs its quote agent, `mine N %d` mines its blocks" % (node, node, node))
-        return
-    if args.action == "signal":
-        if args.value not in ("on", "off"): sys.exit("pool N signal on|off")
-        on = args.value == "on"
-        restart_node(state, node, pool_args(address, extra + ["-yellowbacksignal=%d" % (1 if on else 0)]),
-                     "with -yellowbacksignal=%d" % (1 if on else 0))
-        state["pool_signal"][str(node)] = on; save(directory, state)
-        silent = [p for p, s in state["pool_signal"].items() if not s]
-        print("node%d %s signalling; silent pools: %s. Share of signalling tags over the last 64 blocks decides: below 60 %% minting pauses, below 50 %% rejection pauses, 75 %%/60 %% recover"
-              % (node, "resumed" if on else "stopped", ", ".join("node%s" % p for p in silent) or "none"))
+        print("node%d is now a configured pool; `pool %d quote start` runs its quote agent, `mine N %d` mines its blocks" % (node, node, node))
         return
     if args.action == "quote":
         if args.value not in ("start", "stop"): sys.exit("pool N quote start|stop")
@@ -1074,7 +1067,7 @@ def pool(args):
             return
         if not agent_alive(pid): print("the quote agent of node%d is not running" % node); return
         stop_agents(state, only=node); mark_stopped(state, "quote-%d" % node, True); save(directory, state)
-        print("stopped; node%d keeps its last quote for %d s, then its tags fall back to signal-only (quoteKind \"signal\")" % (node, QUOTE_MAX_AGE))
+        print("stopped; node%d keeps its last quote for %d s, then its templates carry no tag (quoteKind \"none\")" % (node, QUOTE_MAX_AGE))
         return
     if args.action == "stratum":
         if args.value not in ("start", "stop", "status"): sys.exit("pool N stratum start [--stratum-text TEXT]|stop|status")
@@ -1297,7 +1290,7 @@ def status(args):
     for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s share %s" % (row["payoutAddress"], json.dumps(row["registered"]), json.dumps(row["eligible"]), row.get("share")))
     for pool_node in all_pools(state):
         miner = rpc(state, pool_node).yed_getinfo()["miner"] if alive(state, pool_node) else {}
-        print("node%d next tag: %s (quote age %s s, signal %s)%s" % (pool_node, miner.get("quoteKind", "?"), miner.get("quoteAgeSeconds"), json.dumps(miner.get("signal")),
+        print("node%d next tag: %s (quote age %s s)%s" % (pool_node, miner.get("quoteKind", "?"), miner.get("quoteAgeSeconds"),
                                                                      "   <- you" if role_of(state) == "pool" and pool_node == seat_of(state) else ""))
     for pool_node in sorted(int(k) for k in (state.get("stratum") or {})): print(stratum_line(state, pool_node))
     agents = agent_pids(state)
@@ -1353,9 +1346,9 @@ def mine(args):
     """`mine N` mines round-robin on the automated pools, as the heartbeat does, so every block
     carries a quote tag. `mine N <node>` mines on one node, and refuses a node whose blocks would
     carry no tag (the user seat, the stock node, a pool with no payout key) unless `--untagged` says
-    that is the point: 50 tagless blocks in a 64-block window empty the price windows (NO_PRICE),
-    halt minting (PARTICIPATION) and suspend block rejection (ENFORCEMENT, ACT-6) — a majority
-    walking away, impersonated by one careless command (chain-viz plan C-F34)."""
+    that is the point: 50 tagless blocks in a 64-block window empty the price windows and halt
+    minting (NO_PRICE) — a majority walking away, impersonated by one careless command (chain-viz
+    plan C-F34). Since the vault upgrade there is no participation halt or enforcement pause."""
     state = load(os.path.abspath(args.dir))
     nodes = [rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)]
     start = rpc(state, USER).getblockcount()
@@ -1375,11 +1368,9 @@ def mine(args):
         try: kind = node.yed_getinfo().get("miner", {}).get("quoteKind", "none")
         except Exception: kind = "none"                     # a stock node: no yed_getinfo
         if kind == "none":
-            sys.exit("node%d's blocks would carry no Yellowback tag (no payout key or no -yellowback): %d of them drain the price windows,\n"
-                     "halt minting and suspend enforcement. `mine %d` mines on the pools; `mine %d %d --untagged` does this on purpose."
+            sys.exit("node%d's blocks would carry no Yellowback tag (no payout key, no quote, or no Yellowback): %d of them drain the price\n"
+                     "windows and halt minting. `mine %d` mines on the pools; `mine %d %d --untagged` does this on purpose."
                      % (args.node, args.blocks, args.blocks, args.blocks, args.node))
-        if kind == "signal":
-            print("note: node%d's quote is stale (quoteKind \"signal\"): its blocks signal but carry no price" % args.node)
     if stratum:
         stratum_mine(state, args.node, args.blocks)        # a stratum seat: node -> yolo -> stratum-miner -> submitblock
     else:
@@ -1848,7 +1839,7 @@ def main():
     command.add_argument("--drift", type=float, default=WALK_DRIFT, help="walk: %% per minute"); command.add_argument("--vol", type=float, default=WALK_VOL, help="walk: %% per tick"); command.add_argument("--tick", type=int, default=WALK_TICK, help="walk: seconds per tick")
     command.add_argument("--shock", metavar="PCT", help="a step change, written --shock=-35%% (the = keeps the minus from reading as a flag)")
     command = add("attestor", attestor); command.add_argument("node", type=int); command.add_argument("action", choices=("stop", "start", "price")); command.add_argument("usd", nargs="?")
-    command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "signal", "quote", "stratum")); command.add_argument("value", nargs="?")
+    command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "quote", "stratum")); command.add_argument("value", nargs="?")
     command.add_argument("--stratum-text", metavar="TEXT", help="stratum start: yolo's coinbase text (default: the last one, else none)")
     command = add("sim", sim); command.add_argument("action", choices=("start", "stop", "stats"), nargs="?", default="stats"); command.add_argument("--profile", choices=("demo", "fast"))
     command = add("notice", notice); command.add_argument("vaulttxid")
@@ -1871,7 +1862,7 @@ def main():
     if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
     if args.command == "attestor" and args.action == "price" and args.usd is None:
         parser.error("attestor N price needs a USD amount")
-    if args.command in ("pool",) and args.action in ("signal", "quote", "stratum") and args.value is None:
+    if args.command in ("pool",) and args.action in ("quote", "stratum") and args.value is None:
         parser.error("pool N %s needs a value" % args.action)
     return args.fn(args) or 0
 
