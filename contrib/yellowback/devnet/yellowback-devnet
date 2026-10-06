@@ -60,11 +60,12 @@ import test_framework.util as _util
 _util.MAX_NODES = 12
 from test_framework.util import (PortSeed, bitcoind_processes, connect_nodes_bi,          # noqa: E402
                                  get_rpc_proxy, hex_str_to_bytes, initialize_chain_clean, rpc_auth_pair,
-                                 rpc_port, rpc_url, start_node, sync_blocks, sync_mempools)
+                                 rpc_port, rpc_url, start_node, stop_node, sync_blocks, sync_mempools)
 from test_framework.yellowback_util import (ACTIVATION_BLOCKS, ATTEST_ARM_DELAY, ATTEST_ARM_MIN,  # noqa: E402
                                             BOND_MATURITY, M_SELECT, POOL_WIFS, REF_LAG, SIGNING_BRANCH_ID,
-                                            address_of, pool_args, set_quote, wait_yed_healthy,
+                                            VAULT_ACTIVATION, address_of, pool_args, set_quote, wait_yed_healthy,
                                             yellowback_node_args)
+import test_framework.yellowback_util as _yu                                                # noqa: E402
 import test_framework.yellowback_model as ym                                                # noqa: E402
 
 NODES, USER, POOLS = 5, 0, (2, 3, 4)          # the v2 core; ATTESTORS extend it to eight
@@ -392,6 +393,9 @@ def load(directory):
     # restart from a fresh shell silently launched `bitcoind` from PATH. The recorded binary wins
     # unless the caller set one deliberately.
     os.environ.setdefault("ZCASHD", state["bitcoind"])
+    # U-22: every Yellowback node runs with the YED attestor set `up` created; the framework's node
+    # arguments (pool_args, yellowback_node_args) read it from here in every later command
+    _yu.ATTESTOR_SET[0] = state.get("attestor_set")
     return state
 def save(directory, state):
     tmp = path(directory) + ".tmp"
@@ -582,7 +586,7 @@ def liveness(state):
     node = rpc(state, USER)
     try:
         info = node.yed_getinfo()
-        if info["activation"]["status"] != "active": errors.append("activation is %s" % info["activation"]["status"])
+        if info["upgrade"]["status"] != "active": errors.append("the vault upgrade is %s" % info["upgrade"]["status"])
         if attestors_of(state) and info["attest"]["status"] != "ARMED": errors.append("attestation is %s" % info["attest"]["status"])
     except Exception as error:
         errors.append("yed_getinfo on node0: %s" % error)
@@ -727,13 +731,17 @@ def up(args):
     pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agents_wanted else None
     # node 0 also serves lightwalletd (`lightwalletd` below): the server's getaddresstxids needs the
     # address index, which is experimental and needs -txindex (both are only ever set on a fresh datadir here).
-    node_args = {USER: yellowback_node_args() + ["-insightexplorer", "-txindex"], STOCK: yellowback_node_args(yellowback=False)}
-    for index, pool in enumerate(POOLS):
-        if pool in preset["auto_pools"] or role == "none": node_args[pool] = pool_args(addresses[index], pool_extra)
-        else: node_args[pool] = yellowback_node_args(pool_extra)      # your pool: a plain miner, no payout, no signal
-    for node in range(NODES, count):
-        node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: enforcing, no payout, no signal
-    for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
+    def build_node_args():
+        node_args = {USER: yellowback_node_args() + ["-experimentalfeatures", "-insightexplorer", "-txindex"], STOCK: yellowback_node_args(yellowback=False)}
+        for index, pool in enumerate(POOLS):
+            if pool in preset["auto_pools"] or role == "none": node_args[pool] = pool_args(addresses[index], pool_extra)
+            else: node_args[pool] = yellowback_node_args(pool_extra)      # your pool: a plain miner, no payout
+        for node in range(NODES, count):
+            node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: no payout
+        for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
+        return node_args
+    _yu.ATTESTOR_SET[0] = None
+    node_args = build_node_args()
     if agents_wanted and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
     if attest and not os.access(ATTEST_AGENT, os.X_OK):
         sys.exit("yellowback-attest not found at %s\n  build it with: cd %s && cargo build --release\n"
@@ -760,8 +768,22 @@ def up(args):
         for left in range(count):
             for right in range(left + 1, count): connect_nodes_bi(nodes, left, right)
         for index, node in enumerate(POOLS): nodes[node].importprivkey(POOL_WIFS[index], "yellowback-payout", False)
-        print("[2/%d] funding node0 with 101 untagged blocks" % steps)
-        nodes[USER].generate(101); wait(nodes, state)
+        print("[2/%d] funding node0 with 101 untagged blocks; the vault upgrade and the YED attestor set (U-22)" % steps)
+        nodes[USER].generate(max(101, VAULT_ACTIVATION - nodes[USER].getblockcount())); sync_blocks(nodes)
+        created = nodes[USER].set_create({"seats": 15, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1,
+                                          "open": True, "maturity": 1})
+        sync_mempools(nodes)
+        nodes[USER].generate(1); sync_blocks(nodes)
+        _yu.ATTESTOR_SET[0] = state["attestor_set"] = created["setid"]
+        node_args = build_node_args()
+        state["node_args"] = {str(k): v for k, v in node_args.items()}
+        for index in range(count):
+            if index == STOCK: continue
+            stop_node(nodes[index], index)
+            nodes[index] = start_quiet(directory, index, node_args[index])
+        for left in range(count):
+            for right in range(left + 1, count): connect_nodes_bi(nodes, left, right)
+        wait(nodes, state)
         if nodes[USER].getbalance() <= 0: raise RuntimeError("node0 has no mature balance")
         write_mock(directory, args.price)
         if agents_wanted:
