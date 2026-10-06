@@ -261,7 +261,6 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_sendmany",                {{o}, {}} },
     { "yed_setquote",                {{o, o}, {}} },
     { "yed_signattestation",         {{o, o}, {o}} },
-    { "yed_sweep",                   {{s, s}, {s}} },
     { "yed_sweepcarriers",           {{}, {}} },
     { "yed_unlockcoin",              {{s, o, s}, {}} },
     { "yed_validateaddress",         {{s}, {}} },
