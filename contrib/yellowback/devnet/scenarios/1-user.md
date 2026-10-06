@@ -28,7 +28,7 @@ yellowback-devnet wallet                # opens YecWallet on node 0, your seat
 yellowback-devnet status                # the seat banner, the heartbeat, the price, the personas
 ```
 
-**Automated around you:** 3 pools quoting and signalling, 4 attestors signing, a heartbeat
+**Automated around you:** 3 pools quoting, 4 attestors signing, a heartbeat
 mining one block every 15 s, a price walking gently, and six personas on nodes 9 and 10
 minting, redeeming, trading and liquidating (`yellowback-devnet sim stats`).
 

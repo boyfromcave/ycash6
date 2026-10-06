@@ -336,7 +336,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, N_PENALTY + 1)         # the penalty above has lapsed
         set_quote(nodes[POOLS[2]], 52)
         self.mine_round_robin(POOLS, ACCURACY_WINDOW + PEER_LAG + 4)
-        set_quote(nodes[POOLS[0]], 0)                       # signal-only tags from now on
+        set_quote(nodes[POOLS[0]], 0)                       # no tag from now on (the signal-only tag left with ACT-1)
         self.mine_round_robin(POOLS, 12)
         r = user.getblockcount()
         rows = {row['payoutAddress']: row for row in user.yed_listminers()}

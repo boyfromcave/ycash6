@@ -46,9 +46,10 @@ Python is always the workspace venv (`../.venv/bin/python`), never the system in
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up          # ~6 min on 6.20.0: 8 nodes, funded, activated, ARMED
 ```
 
-Node 0 is the funded wallet, node 1 is a stock (unpatched) node, nodes 2–4 are signalling pools,
-nodes 5–7 attestor nodes. `up` mines 101 blocks to fund node 0, sets a $50 quote on each pool,
-mines 131 signalling blocks so the chain is **active**, registers the three attestors
+Node 0 is the funded wallet, node 1 is a stock (unpatched) node, nodes 2–4 are quoting pools,
+nodes 5–7 attestor nodes. `up` mines past the vault upgrade height, creates the YED attestor set,
+sets a $50 quote on each pool, mines quote-tagged blocks round-robin so the price windows fill
+(there is no signalling or lock-in since the vault upgrade), registers the three attestors
 (`yed_registerattestor 10 200`: since P4-b a `SET_JOIN` to the YED attestor set, which `up` creates
 with `bondmin` 10, `bondlockmin` 200 and `livenesswindow` 1,000; each agent sends a
 `SET_HEARTBEAT` every 100 blocks), mines through `BOND_MATURITY` and `ATTEST_ARM_DELAY` so the

@@ -77,6 +77,7 @@ BASE_SCRIPTS= [
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',
+    'vault_rpc_contract.py',
     # The primitive with raw transactions, cross-checked against VaultModel: set lifecycle, lock /
     # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
     # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
@@ -219,6 +220,9 @@ EXTENDED_SCRIPTS = [
     'yellowback_attest_agent.py',
     # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
     'yellowback_devnet_roles.py',
+    # The devnet on the vault upgrade (upgrade plan §4, §5): upgrade-walk's core and the WYEC bridge
+    # persona through the devnet script; same Rust binary, SKIPs without it; < 10 minutes.
+    'yellowback_devnet_upgrade.py',
     'yellowback_sapling.py',
     'yellowback_wr_flags.py',
     'yellowback_stockparity.py',

@@ -48,7 +48,7 @@ on:
   workflow_dispatch:
     inputs:
       weekly_fuzz:
-        description: Run only the weekly fuzz job (six targets, about 3.5 hours)
+        description: Run only the weekly fuzz job (seven targets, about 4 hours)
         type: boolean
         default: false
 
@@ -71,7 +71,7 @@ env:
   # ycash6 port (plan Phase 4): every BASE_SCRIPTS yellowback script of qa/pull-tester/rpc-tests.py,
   # i.e. the v4.5.0 list plus yellowback_wallet_lifecycle and the port's yellowback_framework_smoke;
   # yellowback_reorg_stress is retired (plan P-7). The four EXTENDED ones run in nightly or not at all.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_rpc vault_primitive vault_slashing vault_bridge
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
@@ -341,7 +341,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6 " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -349,7 +349,7 @@ jobs:
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
           # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity yellowback_demo_v6; do
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6; do
             test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
             grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
@@ -386,6 +386,9 @@ jobs:
           section() { awk -v h="$1" '$0 ~ h {f=1; next} f && /^#/ {exit} f' "$2" | awk 'NF{p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
           diff <(section '^### 8\.1 ' doc/yellowback-spec.md) <(section '^## Trust statement' doc/yellowback.md)
           python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
+          # The vault RPC contract (finding (47)) is generated from doc/vault-rpc.md and agrees with the
+          # RPC table in src/rpc/vault.cpp and the conversions in src/rpc/client.cpp.
+          python3 qa/vault-rpc-contract.py --check
 
       - name: v2 gates (blocking from Phase 3)
         # Every yed_* the node registers is in the RPC contract (P7); the Phase 3 acceptance
@@ -630,7 +633,10 @@ jobs:
         # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
-        run: python3 src/test/gen_yellowback_corpus.py --check
+        # The vault primitive's target (src/fuzzing/Vault) has its own generator (gen_vault_corpus.py).
+        run: |
+          python3 src/test/gen_yellowback_corpus.py --check
+          python3 src/test/gen_vault_corpus.py --check
       - name: The attestation known-answer vectors regenerate byte for byte (BUNDLE-1, R13)
         # The generator has no --check mode: regenerate, then require a clean tree.
         if: ${{ !cancelled() }}
@@ -784,6 +790,18 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+      - name: Devnet on the vault upgrade end to end (extended)
+        # upgrade-walk's core through the devnet script (upgrade plan §4, §5, §15.10): attestor set
+        # membership and S15 dormancy, mint on the V template, transfer, redeem and renew, a claim
+        # with a reorg across it, an attestor's cancel, an invalid mint and block, and the WYEC
+        # bridge persona in both shapes. Same binary as the steps above.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
+          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from
@@ -856,7 +874,7 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main --disable-werror \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle Vault; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -878,7 +896,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-fuzz-findings
-          path: src/fuzzing/Yellowback*/output/crash-*
+          path: |
+            src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault/output/crash-*
           if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
@@ -1287,7 +1307,7 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           # No full build ran in this job, so the target-only make needs the cxx bridge headers.
           qa/yellowback-cxxbridge-headers.sh . -j$(nproc)
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle Vault; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
             # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
             ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
@@ -1307,7 +1327,9 @@ jobs:
             i=0; for f in src/fuzzing/$t/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
           done
           python3 src/test/gen_yellowback_corpus.py --write || true
-          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp
+          python3 src/test/gen_vault_corpus.py --write || true
+          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp \
+            src/fuzzing/Vault/input src/fuzzing/Vault/crashes src/test/vault_fuzz_tests.cpp
       - name: Upload corpus and crashes
         # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
         if: always()
@@ -1318,6 +1340,9 @@ jobs:
             src/fuzzing/Yellowback*/input
             src/fuzzing/Yellowback*/crashes
             src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault/input
+            src/fuzzing/Vault/crashes
+            src/fuzzing/Vault/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
         env:

@@ -34,6 +34,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                                 "qa", "rpc-tests"))
 from test_framework.yellowback_model import ripemd160 as _yb_ripemd160   # noqa: E402
+from test_framework import vault as _vault   # noqa: E402  (the primitive's V / I / act builders, upgrade plan §15)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(HERE)
@@ -327,9 +328,37 @@ def claim_sig(script, selector=op(OP_0)):
     return selector + push(script)
 
 
+# ---------------------------------------------------------------- the upgrade's shapes (upgrade plan §15.3, U-23)
+# The YED attestor set of the harness's regtest parameters (TestSet() in yellowback_fuzz_harness.h), as the
+# 32 internal bytes a template pushes: uint256S parses display order (63 digits: a leading 0), reversed.
+TEST_SET = bytes.fromhex("05e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7")[::-1]
+YED_TAG = b"YED\x00"
+CLAIM_DELAY = 10   # RegtestParams.claimDelay
+
+
+def yed_vault_params(lock, key=KEY):
+    """A MINT's vault after the upgrade (U-23): a bare V with tag YED\\0, setId = cancelSetId = the attestor set."""
+    return _vault.VaultParams(YED_TAG, TEST_SET, TEST_SET, CLAIM_DELAY, lock, lock + GRACE, key)
+
+
+def yed_vault(lock, key=KEY):
+    return _vault.vault_script(yed_vault_params(lock, key))
+
+
+def yed_intent(lock, recipient_spk, key=KEY):
+    return _vault.intent_script(_vault.intent_for(yed_vault_params(lock, key), recipient_spk))
+
+
 def script_corpus():
     v = vault()
+    yv = yed_vault(120000)
     return [
+        # the upgrade's YED vault is a bare V template (U-23), which the v2/v3 P2SH parsers must refuse
+        ("yed_v_template", yv),
+        ("yed_v_owner_scriptsig", push(FAKE_SIG) + op(OP_1 + 1)),
+        ("yed_v_app_scriptsig", op(OP_1 + 3)),
+        ("yed_v_as_redeem", push(FAKE_SIG) + op(OP_1) + push(yv)),
+        ("yed_i_template", yed_intent(120000, op(OP_DUP, 0xA9) + push(bytes(20)) + op(0x88, OP_CHECKSIG))),
         ("vault", v),
         ("vault_4byte_heights", vault(9000000, 9000000 + 34560)),
         ("vault_mixed_widths", vault(8388607, 8388607 + 34560)),
@@ -517,6 +546,27 @@ def evaluate_corpus():
     equivocation_tx = tx_v4([(fill(0x68), 0, carrier_sig, 0xFFFFFFFF)], [(0, opret(equivocation())), (1000, p2pkh(key20(5)))])
     revive_tx = tx_v4([(fill(0x69), 0, b"", 0xFFFFFFFF)], [(0, opret(revive(seq=0, price=50000, cited=8))), (1000, p2pkh(key20(5)))])
     bond_spend_tx = tx_v4([(fill(0x6A), 0, push(FAKE_SIG) + push(bond_script), 0xFFFFFFFE)], [(10 ** 9 - 1000, p2pkh(key20(5)))], lock_time=H + 200)
+    # The upgrade's shapes (U-23, P4-b): a MINT whose vault is the bare YED V template, the owner redeem
+    # (selector 2) and the claim (selector 4, APP) of such a vault into YED intents, an intent release
+    # and cancel, and the attestor set's own acts (SET_JOIN, SET_HEARTBEAT) that the module mirrors.
+    yv = yed_vault(56)
+    yv_seeded = yed_vault(100)
+    mint_v_tx = tx_v4([(fill(0x50), 0, b"", 0xFFFFFFFF)],
+                      [(10 ** 12, yv), (10000, p2pkh(KEY[1:21])), (0, opret(mint_pl)), (2500000000, fee)])
+    redeem_v_tx = tx_v4([(fill(1), 0, push(FAKE_SIG) + op(OP_1 + 1), 0xFFFFFFFE), (fill(0x80), 0, b"", 0xFFFFFFFF)],
+                        [(10 ** 12 - 1000, p2pkh(bytes(20))), (2500000000, fee), (0, opret(redeem_pl))], lock_time=100)
+    claimant = p2pkh(key20(7))
+    claim_v_tx = tx_v4([(fill(1), 0, op(OP_1 + 3), 0xFFFFFFFE), (fill(0x80), 0, b"", 0xFFFFFFFF)],
+                       [(10 ** 12 - 10 ** 9, yed_intent(100, claimant)), (10 ** 9, yed_intent(100, p2pkh(KEY[1:21]))),
+                        (2500000000, fee), (0, opret(redeem(8, 1, [], attest_fee=3)))], lock_time=124)
+    release_i_tx = tx_v4([(fill(0x6B), 0, op(OP_1), CLAIM_DELAY)], [(10 ** 12 - 10 ** 9, claimant)])
+    cancel_i_tx = tx_v4([(fill(0x6B), 0, push(bytes(65)) + op(OP_1 + 1), 0xFFFFFFFF), (fill(0x6C), 0, b"", 0xFFFFFFFF)],
+                        [(10 ** 12 - 10 ** 9, yv_seeded)])
+    join_p = _vault.encode_act(_vault.act_set_join(TEST_SET, KEY2, H + 300))
+    join_tx = tx_v4([(fill(0x6D), 0, b"", 0xFFFFFFFF)],
+                    [(10 ** 9, _vault.bond_spk(KEY2, H + 300)), (0, _vault.act_script(join_p, [bytes([31]) + bytes(64)] * 2))])
+    hb_p = _vault.encode_act(_vault.act_set_heartbeat(TEST_SET, KEY2))
+    heartbeat_tx = tx_v4([(fill(0x6E), 0, b"", 0xFFFFFFFF)], [(0, _vault.act_script(hb_p, [bytes([31]) + bytes(64)]))])
     base = dict(tags=quotes, vaults=[active, void], tokens=tokens, prev=ev_prev(), act=ev_act(), hsel=hsel)
 
     def mk(name, blk=None, **kw):
@@ -538,6 +588,16 @@ def evaluate_corpus():
         mk("sweep_no_payload", blk=block([cb, sweep_tx])),
         mk("sweep_enforcement_suspended", blk=block([cb, sweep_tx]), prev=ev_prev(mask=0x24)),
         mk("void_vault_spend", blk=block([cb, void_spend])),
+        mk("upgrade_mint_v_template", blk=block([cb, mint_v_tx])),
+        mk("upgrade_mint_v_and_xfer", blk=block([cb, mint_v_tx, xfer_tx])),
+        mk("upgrade_redeem_owner_v", blk=block([cb, redeem_v_tx])),
+        mk("upgrade_claim_app_intents", blk=block([cb, claim_v_tx]), prev=ev_prev(p_fast=9000, p_mid=9000, p_slow=9000)),
+        mk("upgrade_claim_not_underwater", blk=block([cb, claim_v_tx])),
+        mk("upgrade_intent_release", blk=block([cb, release_i_tx])),
+        mk("upgrade_intent_cancel", blk=block([cb, cancel_i_tx])),
+        mk("upgrade_set_join", blk=block([cb, join_tx])),
+        mk("upgrade_set_heartbeat", blk=block([cb, heartbeat_tx])),
+        mk("upgrade_join_then_heartbeat", blk=block([cb, join_tx, heartbeat_tx])),
         mk("transfer_ok", blk=block([cb, xfer_tx])),
         mk("transfer_over_assigned", blk=block([cb, over_tx])),
         mk("plain_and_garbage", blk=block([cb, plain_tx, garbage_tx])),

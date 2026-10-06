@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -84,6 +85,21 @@ bool CWalletDB::EraseExTx(uint256 hash)
 {
     nWalletDBUpdateCounter++;
     return Erase(std::make_pair(std::string("extx"), hash));
+}
+
+bool CWalletDB::WriteVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t role, const uint256& sighash)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("vaultsetsig"), std::make_pair(setId, prevout)), std::make_pair(role, sighash));
+}
+
+bool CWalletDB::ReadVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t& role, uint256& sighash)
+{
+    std::pair<uint8_t, uint256> v;
+    if (!Read(std::make_pair(std::string("vaultsetsig"), std::make_pair(setId, prevout)), v)) return false;
+    role = v.first;
+    sighash = v.second;
+    return true;
 }
 
 bool CWalletDB::WriteAtomicSwap(const std::string& swapId, const CAtomicSwapInfo& swapInfo)
