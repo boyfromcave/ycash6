@@ -841,7 +841,7 @@ Result of `yed_decodepayload`:
 
 Arguments: `hex` (string; a complete, normally signed transaction). Dry run of §3.8 at the tip
 (`EvaluateBlock` over a one-transaction pseudo-block at `tip + 1`, exactly `MempoolCheck`'s
-predicate) plus `VerifyAllInputs` for the scripts (`valid`). For a vault spend `blockValid` is
+predicate) plus `VerifyAllInputs` for the scripts (`valid`): every input verified as the mempool would at `tip + 1` — `STANDARD_SCRIPT_VERIFY_FLAGS` plus the UPGRADE_VAULT flags (CSV, the set opcodes) once active, `OP_CHECKSETSIG`/`OP_CHECKSETDORMANT` against the set state at the tip, and the BIP68 sequence locks (an intent RELEASE whose input has not aged is `valid: false`, `invalidReason` `non-BIP68-final`). **Optional:** `invalidReason` (string) is present only when `valid` is false: `input <n> fails script verification: <script error>`, `input <n> is unknown or spent`, `non-BIP68-final` or `bad-txns-vault-timelock`. For a vault spend `blockValid` is
 RED-1..5 (the rule a block carrying it must pass) and `wouldBeRejected` says whether the mempool
 refuses it — `!blockValid`, or the MP-1 expiry bound (`mempoolExpiryOk` false:
 `nExpiryHeight == 0` or `> refHeight + REF_WINDOW`). `unconfirmedInputs` lists inputs the index does not know (unconfirmed parents; the

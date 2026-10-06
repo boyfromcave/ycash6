@@ -79,6 +79,7 @@ OPTIONAL = {
                           'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle'},
     'yed_getnotice': {'vault', 'txid', 'height', 'refHeight', 'pEmerg', 'emergencyOpenAt', 'expiresAt'},
     'yed_gettxinfo': {'seq'},
+    'yed_validaterawtransaction': {'invalidReason'},   # only when valid is false
 }
 
 # Fields the text marks *null when …* although the example shows a value (by path suffix).

@@ -1397,7 +1397,8 @@ UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "yed_validaterawtransaction \"hex\"\n"
-            "\nDry run of §3.8 at the tip over a one-transaction pseudo-block (MempoolCheck's predicate) plus script verification.\n");
+            "\nDry run of §3.8 at the tip over a one-transaction pseudo-block (MempoolCheck's predicate) plus script verification\n"
+            "at tip + 1 (the vault flags, the set state at the tip and BIP68); \"invalidReason\" says why when \"valid\" is false.\n");
 
     YellowbackIndex& index = EnsureIndex();
     CTransaction tx;
@@ -1430,7 +1431,9 @@ UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
     CCoinsViewCache view(pcoinsTip);
     FetchInputs(tx, view);
     std::string err;
-    o.pushKV("valid", VerifyAllInputs(tx, view, SignerBranchId(), err));
+    const bool scriptsValid = VerifyAllInputs(tx, view, SignerBranchId(), err);
+    o.pushKV("valid", scriptsValid);
+    if (!scriptsValid) o.pushKV("invalidReason", err);
     o.pushKV("verdict", relevant ? log.verdict : std::string(verdict::OK));
     o.pushKV("type", relevant ? TypeLower(log.Type()) : std::string("none"));
     o.pushKV("path", log.path);

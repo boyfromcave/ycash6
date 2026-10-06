@@ -6,6 +6,7 @@
 
 #include "chainparams.h"
 #include "consensus/upgrades.h"
+#include "consensus/validation.h"
 #include "main.h"
 #include "policy/policy.h"
 #include "script/interpreter.h"
@@ -114,6 +115,15 @@ uint32_t SignerBranchId()
 bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32_t branchId, std::string& error)
 {
     AssertLockHeld(cs_main);
+    // As signrawtransaction (plan §15.5 finding 17): UPGRADE_VAULT adds CSV and the set opcodes
+    // by height at the next block, never to the static STANDARD set, and OP_CHECKSETSIG /
+    // OP_CHECKSETDORMANT read the set state at the tip.
+    const Consensus::Params& consensus = ::Params().GetConsensus();
+    const int nextHeight = chainActive.Height() + 1;
+    const unsigned int vaultFlags = GetVaultScriptFlags(nextHeight, consensus);
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags;
+    std::shared_ptr<const vault::SetSnapshot> snapshot;
+    if (vaultFlags) snapshot = vault::TipSnapshot();
     // 6.20.0: PrecomputedTransactionData needs every spent output (ZIP-244), so gather them first.
     std::vector<CTxOut> prevouts;
     prevouts.reserve(tx.vin.size());
@@ -125,23 +135,27 @@ bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32
         }
         prevouts.push_back(coins->vout[tx.vin[i].prevout.n]);
     }
-    PrecomputedTransactionData txdata(tx, prevouts);   // non-const: SetSigChecker takes it by reference
-    // UPGRADE_VAULT adds CSV and the set opcodes at the next block (finding 17): an intent RELEASE
-    // (OP_CHECKSEQUENCEVERIFY) and an OP_CHECKSETSIG / OP_CHECKSETDORMANT spend verify under them,
-    // against the set state at the tip, exactly as signrawtransaction does.
-    const int next = chainActive.Height() + 1;
-    const unsigned int vaultFlags = GetVaultScriptFlags(next, ::Params().GetConsensus());
-    std::shared_ptr<const vault::SetSnapshot> snapshot = vaultFlags ? vault::TipSnapshot() : nullptr;
+    PrecomputedTransactionData txdata(tx, prevouts);
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxOut& prev = prevouts[i];
         ScriptError serror = SCRIPT_ERR_OK;
-        const bool ok = snapshot
-            ? VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags,
-                           vault::SetSigChecker(&tx, i, prev.nValue, false, txdata, snapshot, next), branchId, &serror)
-            : VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS,
+        const bool ok = vaultFlags
+            ? VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, flags,
+                           vault::SetSigChecker(&tx, i, prev.nValue, false, txdata, snapshot, nextHeight), branchId, &serror)
+            : VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, flags,
                            TransactionSignatureChecker(&tx, txdata, i, prev.nValue), branchId, &serror);
         if (!ok) {
             error = strprintf("input %u fails script verification: %s", i, ScriptErrorString(serror));
+            return false;
+        }
+    }
+    // BIP68 relative lock-times (UPGRADE_VAULT, plan §15.2) as AcceptToMemoryPool applies them:
+    // a script's OP_CHECKSEQUENCEVERIFY only compares the operand with nSequence; whether the
+    // input has aged that far is the sequence lock (mempool parents confirm at the next block).
+    if (consensus.NetworkUpgradeActive(nextHeight, Consensus::UPGRADE_VAULT) && !tx.IsCoinBase()) {
+        CValidationState state;
+        if (!ContextualCheckSequenceLocks(tx, view, nextHeight, state, true)) {
+            error = state.GetRejectReason();
             return false;
         }
     }

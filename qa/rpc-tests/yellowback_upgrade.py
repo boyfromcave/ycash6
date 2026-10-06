@@ -28,6 +28,7 @@ Ycash Yellowback (YED) on the vault primitive, end to end (docs/plans/yellowback
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_upgrade.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
+import hashlib
 import os
 import time
 from io import BytesIO
@@ -229,7 +230,8 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert n0.yed_getvault(mint_b)['claimable']
 
         print('an underwater claim (selector 4) moves the vault into a claimant intent: CLAIMING')
-        _res, claim_b = self.two_step(n1, 'yed_claim', mint_b, '')
+        to_b = n1.getnewaddress()
+        _res, claim_b = self.two_step(n1, 'yed_claim', mint_b, to_b)
         claim_block = self.mine()[0]
         vb = n1.yed_getvault(mint_b)
         assert_equal(vb['status'], 'CLAIMING')
@@ -258,10 +260,20 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
 
         print('the release waits CLAIM_DELAY, then pays the claimant: CLAIMED')
         assert_raises_rpc('matures at height', n1.vault_release, '%s:0' % claim_b)
-        self.mine(CLAIM_DELAY - 1)
-        rel = n1.vault_release('%s:0' % claim_b)
-        # yed_validaterawtransaction verifies scripts under the vault flags at tip + 1: the RELEASE's CSV passes
-        assert_equal(n1.yed_validaterawtransaction(n1.getrawtransaction(rel))['valid'], True)
+        # yed_validaterawtransaction verifies as the mempool does at tip + 1 (the vault flags, the set
+        # state, BIP68; plan §15 finding 56): an unaged RELEASE is invalid, an aged one valid, and
+        # sendrawtransaction agrees both times.
+        rel_hex = self.release_hex(n1, claim_b, idec['recipienthash'], n1.validateaddress(to_b)['scriptPubKey'])
+        self.mine(CLAIM_DELAY - 2)
+        v = n1.yed_validaterawtransaction(rel_hex)
+        assert_equal((v['valid'], v.get('invalidReason'), v['verdict'], v['type']), (False, 'non-BIP68-final', 'ok', 'claim_release'))
+        assert_raises_rpc('non-BIP68-final', n1.sendrawtransaction, rel_hex)
+        self.mine()
+        for n in self.yb():
+            v = n.yed_validaterawtransaction(rel_hex)
+            assert_equal((v['valid'], v['verdict'], v['type'], v['wouldBeRejected']), (True, 'ok', 'claim_release', False))
+            assert 'invalidReason' not in v, v
+        rel = n1.sendrawtransaction(rel_hex)
         self.mine()
         assert_equal(n0.yed_getvault(mint_b)['status'], 'CLAIMED')
         assert rel in n1.getblock(n1.getbestblockhash())['tx']
@@ -275,8 +287,17 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         built = n2.vault_buildcancel('%s:0' % claim_c)
         signed = n1.set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
-        cancel = n2.vault_send(signed['hex'])                                     # vault_send signs the fee inputs
-        assert_equal(n2.yed_validaterawtransaction(n2.getrawtransaction(cancel))['valid'], True)   # OP_CHECKSETSIG at the tip set state
+        # the OP_CHECKSETSIG input is complete; the fee inputs are not signed yet: invalid, naming one of them
+        v = n2.yed_validaterawtransaction(signed['hex'])
+        assert_equal((v['valid'], v['type']), (False, 'claim_cancel'))
+        assert v['invalidReason'].startswith('input ') and 'fails script verification' in v['invalidReason'], v
+        assert not v['invalidReason'].startswith('input 0 '), v           # the set-signature input verifies
+        full = n2.signrawtransaction(signed['hex'])
+        assert_equal(full['complete'], True)                               # signrawtransaction verifies OP_CHECKSETSIG (finding 17)
+        v = n2.yed_validaterawtransaction(full['hex'])
+        assert_equal((v['valid'], v['verdict'], v['type']), (True, 'ok', 'claim_cancel'))
+        assert 'invalidReason' not in v, v
+        cancel = n2.sendrawtransaction(full['hex'])
         self.mine()
         assert_raises_rpc('', n0.yed_getvault, mint_c)                          # the record moved to the re-created vault
         vc = n0.yed_getvault(cancel)
@@ -312,6 +333,22 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert found, 'node 0 did not score the relayer of the invalid block 100'
         for n in self.yb():
             assert_equal(n.getbestblockhash(), tip)
+
+    def release_hex(self, node, intent_txid, recipient_hash, recipient_spk):
+        """The RELEASE of intent ``intent_txid``:0 (selector 1, nSequence = CLAIM_DELAY) to ``recipient_spk``, as
+        vault_release builds it: the whole intent value to the recipient, the fee from ``node``'s wallet, signed there."""
+        spk = hex_str_to_bytes(recipient_spk)
+        h = hashlib.sha256(spk).digest()
+        assert recipient_hash in (h.hex(), h[::-1].hex()), (recipient_hash, h.hex())
+        value = node.getrawtransaction(intent_txid, 1)['vout'][0]['valueZat']
+        coin = [u for u in node.listunspent() if u['amount'] > 1][0]
+        change = hex_str_to_bytes(node.validateaddress(node.getnewaddress())['scriptPubKey'])
+        fee = 10_000
+        vin = [(intent_txid, 0, bytes([0x51]), CLAIM_DELAY), (coin['txid'], coin['vout'], b'', 0xFFFFFFFF)]
+        vout = [(value, spk), (int(coin['amount'] * ym.COIN) - fee, change)]
+        signed = node.signrawtransaction(ym.serialize_tx_v4(vin, vout, 0, 0).hex())
+        assert signed['complete'], signed
+        return signed['hex']
 
     def bad_mint(self, node):
         """A $50 mint (MINT-2: bad-mint-amount) on the YED V, signed by ``node``'s wallet."""
