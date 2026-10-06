@@ -151,6 +151,10 @@ ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v
 ATTEST_LOCK_BLOCKS = 200      # regtest bondMinLock
 ATTEST_FUND_YEC = 11          # the bond plus room for the fee
 ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
+# P4-b: the attestor registry is the YED attestor set (a vault primitive signer set): its livenesswindow is the
+# attestors' member dormancy, so every agent sends a SET_HEARTBEAT well inside it (signing is not an act, U-19).
+ATTEST_SET_LIVENESS = 1000    # blocks: about four hours at the heartbeat's 15 s per block
+ATTEST_HEARTBEAT_BLOCKS = 100
 POPULATION_FUND_YEC = 260     # the five minter/holder personas share this wallet (yellowback-sim)
 LIQUIDATOR_FUND_YEC = 160     # the liquidator's own inventory mint plus carriers and notices
 SEAT_ATTESTOR_FUND_YEC = 13   # the owner's bond (10), its fee, and a few YEC for a yed_revive
@@ -166,6 +170,7 @@ rpc_password = "%(password)s"
 [attest]
 seq = %(seq)s
 every_blocks = %(every)d
+heartbeat_blocks = %(heartbeat)d
 fail_polls = 2
 ref_lag = %(ref_lag)d
 poll_seconds = 2
@@ -340,7 +345,8 @@ def _kill(pid, label):
 def attest_conf_text(directory, node, seq):
     user, password = rpc_auth_pair(node)
     return ATTEST_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password,
-                          "seq": seq, "every": ATTEST_INTERVAL, "ref_lag": REF_LAG, "bus": bus_path(directory)}
+                          "seq": seq, "every": ATTEST_INTERVAL, "heartbeat": ATTEST_HEARTBEAT_BLOCKS, "ref_lag": REF_LAG,
+                          "bus": bus_path(directory)}
 
 def start_attest_agent(directory, node, seq):
     """`yellowback-attest attest` beside attestor `node`, reading that attestor's own mock price
@@ -602,7 +608,8 @@ def liveness(state):
 # ---------------------------------------------------------------------------------- up
 
 def arm_attestors(state, nodes, price, steps=6):
-    """Register the automated attestor nodes with yed_registerattestor, mine through
+    """Register the automated attestor nodes with yed_registerattestor (P4-b: a SET_JOIN of a fresh wallet key to
+    the YED attestor set; the key signs prices, holds the bond and receives the attestor fee), mine through
     BOND_MATURITY and ATTEST_ARM_DELAY so the devnet ends ARMED (ARM-1/ARM-2), then start one
     `attest` agent per attestor and one `subscribe` beside every minting node on the `dir`
     transport and wait for poolFresh >= M_SELECT.
@@ -770,8 +777,11 @@ def up(args):
         for index, node in enumerate(POOLS): nodes[node].importprivkey(POOL_WIFS[index], "yellowback-payout", False)
         print("[2/%d] funding node0 with 101 untagged blocks; the vault upgrade and the YED attestor set (U-22)" % steps)
         nodes[USER].generate(max(101, VAULT_ACTIVATION - nodes[USER].getblockcount())); sync_blocks(nodes)
+        # P4-b: the set is the attestor registry: its bond floor is YED's (BOND_MIN, BOND_MIN_LOCK) and its
+        # livenesswindow the attestors' member dormancy
         created = nodes[USER].set_create({"seats": 15, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1,
-                                          "open": True, "maturity": 1})
+                                          "open": True, "maturity": 1, "bondmin": ATTEST_BOND_YEC,
+                                          "bondlockmin": ATTEST_LOCK_BLOCKS, "livenesswindow": ATTEST_SET_LIVENESS})
         sync_mempools(nodes)
         nodes[USER].generate(1); sync_blocks(nodes)
         _yu.ATTESTOR_SET[0] = state["attestor_set"] = created["setid"]

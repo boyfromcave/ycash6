@@ -49,7 +49,9 @@ Python is always the workspace venv (`../.venv/bin/python`), never the system in
 Node 0 is the funded wallet, node 1 is a stock (unpatched) node, nodes 2–4 are signalling pools,
 nodes 5–7 attestor nodes. `up` mines 101 blocks to fund node 0, sets a $50 quote on each pool,
 mines 131 signalling blocks so the chain is **active**, registers the three attestors
-(`yed_registerattestor 10 200`), mines through `BOND_MATURITY` and `ATTEST_ARM_DELAY` so the
+(`yed_registerattestor 10 200`: since P4-b a `SET_JOIN` to the YED attestor set, which `up` creates
+with `bondmin` 10, `bondlockmin` 200 and `livenesswindow` 1,000; each agent sends a
+`SET_HEARTBEAT` every 100 blocks), mines through `BOND_MATURITY` and `ATTEST_ARM_DELAY` so the
 layer is **ARMED**, and starts one real `yellowback-attest attest` per attestor plus a
 `subscribe` beside node 0 on the `dir` transport. The first mint builds its bundle from that
 pool. `up --no-attest` is the five-node v2 devnet.

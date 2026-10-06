@@ -59,9 +59,11 @@ Every rule that matters reads a YEC/USD price: how much collateral a mint needs,
 becomes claimable. v2 took that price from one place — the quotes pools publish in their
 coinbases. v3 keeps those and adds a second, independent population.
 
-- **Attestors.** Anyone may post a long time-locked bond (`yed_registerattestor`) and then sign
-  prices with an off-chain agent (`contrib/yellowback/attest/`). Attestors send no transactions
-  after registering and need no domain, no open port and no funded hot wallet. The highest-weighted
+- **Attestors.** Anyone may post a long time-locked bond (`yed_registerattestor`: since the vault
+  upgrade a `SET_JOIN` to the YED attestor set, the primitive's signer set, P4-b) and then sign
+  prices with an off-chain agent (`contrib/yellowback/attest/`). After joining, an attestor's only
+  transactions are periodic `SET_HEARTBEAT`s (the set's member dormancy); it needs no domain, no
+  open port and only the node's own wallet. The highest-weighted
   bonds are *seated*; weight is bond size times age, so influence is slow, visible and costly to buy.
 - **Arming.** The layer switches on by itself: once seven attestors have matured bonds on mainnet
   (`ATTEST_ARM_MIN`, hardening H-2; three on regtest), a one-day countdown starts
