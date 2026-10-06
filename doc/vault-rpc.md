@@ -10,6 +10,11 @@ applications on top of it; nothing here is YED-specific.
 Every node has these RPCs and the set-state database `<datadir>/vaults/`; no flag enables them.
 The database is empty until the upgrade activates (regtest: `-nuparams=6d5b7a31:<height>`).
 
+The machine-readable form of this document is `doc/vault-rpc-contract.json`, generated from it by
+`qa/vault-rpc-contract.py` (`--check` verifies the committed copy, the RPC table in
+`src/rpc/vault.cpp` and the conversions in `src/rpc/client.cpp`); `qa/rpc-tests/vault_rpc_contract.py`
+checks live answers against it. Edit this document, then regenerate.
+
 ## Conventions
 
 - **Set id**: the txid of the set's `SET_CREATE` transaction, as a txid hex string.
@@ -20,7 +25,9 @@ The database is empty until the upgrade activates (regtest: `-nuparams=6d5b7a31:
 - **Keys**: 33-byte compressed public keys in hex. RPCs that sign (member, admit and owner
   signatures) use the private key of that public key in **this node's wallet**; where a key
   parameter is optional, a new wallet key is generated.
-- **Amounts** are YEC (decimal) like every other Ycash RPC; `valuezat` fields are zatoshi.
+- **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields
+  (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
+  the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
 - **Fees**: every transaction these RPCs build pays a flat 10,000 zatoshi from the wallet's
   confirmed transparent P2PKH coins (change to a new wallet address). Coins chosen are locked in
   the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
@@ -30,46 +37,100 @@ The database is empty until the upgrade activates (regtest: `-nuparams=6d5b7a31:
 - **Errors**: RPC error `-8` (invalid parameter), `-5` (unknown set / outpoint / address),
   `-4` (wallet: key not in the wallet, signing failed), `-6` (insufficient funds), `-1` (misc:
   the upgrade is not active, a branch is not open yet), `-26` (rejected by the mempool, with
-  `"<code>: <reason>"`, e.g. `"16: bad-vault-act-seats"`), `-25` (missing inputs).
+  `"<code>: <reason>"`, e.g. `"16: bad-vault-act-seats"`), `-25` (missing inputs). The reasons a
+  client can rely on are listed under *Error reasons*.
+
+## Contract notation
+
+Each command below has a `Params:` line and a `Result:` line in this notation, which the
+contract generator reads (the prose around them is not part of the contract).
+
+| type | JSON | meaning |
+|---|---|---|
+| `str` | string | text |
+| `hex` | string | hex-encoded bytes (a transaction, a script, a signature, a tag) |
+| `hash` | string | 32 bytes, 64 hex digits (a txid or set id in RPC byte order; a sighash in raw order) |
+| `key` | string | a 33-byte compressed public key, 66 hex digits |
+| `outpoint` | string | `"txid:n"` in results; parameters also accept `{"txid", "vout"}` |
+| `address` | string | a transparent address of this network |
+| `int` | number | an integer |
+| `height` | number | a block height (integer) |
+| `bool` | boolean | |
+| `yec` | number | an amount in YEC, decimal with up to 8 places (1 YEC = 100,000,000 zatoshi) |
+| `zat` | number | an amount in zatoshi (integer) |
+| `any` | any | a JSON value |
+
+`{"k": T, "k"?: T}` is an object (`?`: the field may be absent; the prose says when), `[T]` an
+array of `T`, `T|U` either (`null` is the JSON null), `"text"` that exact string, and `...Name`
+inside an object adds the fields of the named shape below (a shape that is a choice of objects
+makes the object that choice). Parameters are listed in order, `name?` marks an optional one.
+Undocumented result fields are a contract violation; so is a missing field not marked `?`.
+
+### Shapes
+
+- `SetParams` = `{"seats": int, "unlockthreshold": int, "cancelthreshold": int, "slashthreshold": int, "open": bool, "ratelimitbps": int, "ratewindow": int, "livenesswindow": int, "bondmin": yec, "bondlockmin": int, "maturity": int, "admitkey": key}`
+- `Set` = `{"setid": hash, "height": height, ...SetParams, "createheight": height, "winddownheight": height, "lockedvalue": yec, "epoch": int, "epochbasis": yec, "epochused": yec, "unlockavailable"?: yec, "members": int, "active": int, "current": int, "dormant": bool, "released": bool}`
+- `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "wallet": bool}`
+- `VaultFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerheight": height, "appheight": height, "ownerkey": key}`
+- `IntentFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerkey": key, "recipienthash": hash, "vaulthash": hash}`
+- `TemplateOut` = `{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "vault", "value": yec, "valuezat": zat, "height": height, "script": hex, ...VaultFields, "wallet": bool}|{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "intent", "value": yec, "valuezat": zat, "height": height, "script": hex, ...IntentFields, "matureheight": height, "mature": bool, "cancellable": bool, "origin": hex, "wallet": bool}`
+- `ActType` = `"create"|"join"|"heartbeat"|"remove"|"equivocation"|"winddown"`
+- `Proof` = `{"setid": hash, "prevout": outpoint, "rolea": int, "sighasha": hash, "siga": hex, "roleb": int, "sighashb": hash, "sigb": hex}`
+- `ActBody` = `{"acttype": "create", ...SetParams}|{"acttype": "join", "setid": hash, "memberkey": key, "bondlocktime": height, "bondvout": int}|{"acttype": "heartbeat", "setid": hash, "memberkey": key}|{"acttype": "remove", "setid": hash, "memberkey": key, "burn": int}|{"acttype": "equivocation", ...Proof}|{"acttype": "winddown", "setid": hash}`
+- `ActResult` = `{"hex": hex, "type": ActType, "complete": bool, "signatures": int, "required": int}`
+- `SetSigResult` = `{"hex": hex, "complete": bool, "signatures": int, "required": int, "sighash": hash, "setsigs": [{"key": key, "sig": hex}]}`
+- `IntentOut` = `{"vout": int, "amount": yec, "recipient": hex, "recipienthash": hash}`
+- `Recipient` = `{"address"?: address, "script"?: hex, "amount": yec}`
 
 ## Read RPCs (no wallet needed)
 
 ### `vault_getinfo`
-Result: `{"branchid": "6d5b7a31", "activationheight": n (-1 if unscheduled), "active": bool (at
-the next block), "height": tip, "dbtip": {"hash","height"} | null, "sets": n, "vaults": n,
-"intents": n, "lockedvalue": x, "statehash": "hex"}`. `dbtip` is the block the set state is at
-(null before the first active block). `statehash` is SHA256d over every state record (sets,
-members, bonds, the template-output index) in key order: two nodes on the same chain report the
-same value.
+Params: `[]`
+
+Result: `{"branchid": str, "activationheight": int, "active": bool, "height": height, "dbtip": {"hash": hash, "height": height}|null, "sets"?: int, "vaults"?: int, "intents"?: int, "lockedvalue"?: yec, "statehash"?: hash}`
+
+`branchid` is `"6d5b7a31"`; `activationheight` is -1 if unscheduled; `active` is at the next
+block; `height` is the tip. `dbtip` is the block the set state is at (null before the first
+active block). `statehash` is SHA256d over every state record (sets, members, bonds, the
+template-output index) in key order: two nodes on the same chain report the same value. The
+counts, `lockedvalue` and `statehash` are absent only when the vault database is not open.
 
 ### `set_list`
+Params: `[]`
+
+Result: `[Set]`
+
 Every set: the `set_getinfo` fields without `memberlist`.
 
 ### `set_getinfo "setid" ( height )`
-The set's `SET_CREATE` parameters (`seats`, `unlockthreshold`, `cancelthreshold`,
-`slashthreshold`, `open`, `ratelimitbps`, `ratewindow`, `livenesswindow`, `bondmin`,
-`bondlockmin`, `maturity`, `admitkey`), `createheight`, `winddownheight` (0 = none), the rate
-fields (`lockedvalue`, `epoch`, `epochbasis`, `epochused`, and `unlockavailable` when rate
-limited), counts (`members`, `active`, `current`), the §15.4 predicates `dormant` and
-`released`, and `memberlist`: `[{"key", "status": active|removed|ejected|withdrawn, "current",
-"live", "joinheight", "lastact", "bondoutpoint", "bondvalue", "bondlocktime", "bondfrozen",
-"wallet" (this wallet holds the key)}]`. Predicates are evaluated at `height` (default: the
-next block) over the state at the tip. Error `-5` for an unknown set.
+Params: `["setid": hash, "height"?: height]`
+
+Result: `{...Set, "memberlist": [Member]}`
+
+The set's `SET_CREATE` parameters, `createheight`, `winddownheight` (0 = none), the rate fields
+(`lockedvalue`, `epoch`, `epochbasis`, `epochused`, and `unlockavailable` only when the set is
+rate limited), counts (`members`, `active`, `current`), the §15.4 predicates `dormant` and
+`released`, and `memberlist` (`wallet`: this wallet holds the key). Predicates are evaluated at
+`height` (default: the next block) over the state at the tip. Error `-5` for an unknown set.
 
 ### `vault_list ( {"tag", "setid", "owner", "kind": "vault"|"intent", "mine": bool} )`
+Params: `["filter"?: {"tag"?: str, "setid"?: hash, "owner"?: key, "kind"?: "vault"|"intent", "mine"?: bool}]`
+
+Result: `[TemplateOut]`
+
 The unspent V and I outputs confirmed since activation (the database's template-output index),
 optionally filtered (`setid` matches either set of the template; `mine` = the owner key is in
-this wallet). Each entry: `txid`, `vout`, `outpoint`, `kind`, `value`, `valuezat`, `height`,
-`script`, the template fields (`tag`, `tagtext`, `setid`, `cancelsetid`, `delay`, `ownerkey`;
-V: `ownerheight`, `appheight`; I: `recipienthash`, `vaulthash`, `matureheight`, `mature`,
-`cancellable`, `origin` = the script of the vault it was unlocked from), `wallet`.
+this wallet). For an intent, `origin` is the script of the vault it was unlocked from.
 
 ### `vault_decodescript "hex"`
-Decodes a V or I scriptPubKey (`type` `vault` / `intent` with its fields), a `YV` act OP_RETURN
-(`type` `act`, the act's own type as `acttype`, the decoded body, `payload`, `signatures`; or `error` with the decode reason), a
-bond redeem script (`type` `bond`, `locktime`, `memberkey`, its P2SH `scriptpubkey` and
-`address`), `malformed` (a template skeleton with a non-minimal push or out-of-range field), or
-`none`.
+Params: `["hex": hex]`
+
+Result: `{"type": "vault", ...VaultFields}|{"type": "intent", ...IntentFields}|{"type": "malformed"}|{"type": "act", ...ActBody, "signatures": [{"sig": hex}], "payload": hex}|{"type": "act", "error": str}|{"type": "bond", "locktime": height, "memberkey": key, "scriptpubkey": hex, "address": address}|{"type": "none"}`
+
+Decodes a V or I scriptPubKey, a `YV` act OP_RETURN (the act's own type as `acttype`, the
+decoded body, `payload`, `signatures`; or `error` with the decode reason), a bond redeem script
+(its P2SH `scriptpubkey` and `address`), `malformed` (a template skeleton with a non-minimal push
+or out-of-range field), or `none`.
 
 ## Act RPCs (wallet)
 
@@ -79,98 +140,180 @@ outpoint, and they are part of the output, so the order is always: **build** (fu
 that funded it).
 
 ### `set_create {params}`
-Params: `seats` (1–15), `unlockthreshold`, `cancelthreshold` (default 1), `slashthreshold`
-(default `unlockthreshold`), `open` (default false), `ratelimitbps` (0 = no limit), `ratewindow`
-(default 144), `livenesswindow` (default 1000), `bondmin` (default 1), `bondlockmin` (default 0),
-`maturity` (default 0), `admitkey` (default a new wallet key). Funded, signed, broadcast.
-Result: `{"txid", "setid", "admitkey"}`. The set exists from the block after the one it confirms in.
+Params: `["params": {"seats": int, "unlockthreshold": int, "cancelthreshold"?: int, "slashthreshold"?: int, "open"?: bool, "ratelimitbps"?: int, "ratewindow"?: int, "livenesswindow"?: int, "bondmin"?: yec, "bondlockmin"?: int, "maturity"?: int, "admitkey"?: key}]`
+
+Result: `{"txid": hash, "setid": hash, "admitkey": key}`
+
+`seats` 1–15; defaults: `cancelthreshold` 1, `slashthreshold` = `unlockthreshold`, `open`
+false, `ratelimitbps` 0 (no limit), `ratewindow` 144, `livenesswindow` 1000, `bondmin` 1,
+`bondlockmin` 0, `maturity` 0, `admitkey` a new wallet key. Funded, signed, broadcast. The set
+exists from the block after the one it confirms in.
 
 ### `set_join "setid" bondamount bondlocktime ( "memberkey" )`
+Params: `["setid": hash, "bondamount": yec, "bondlocktime": height, "memberkey"?: key]`
+
+Result: `{"txid"?: hash, ...ActResult, "memberkey": key, "bondoutpoint": outpoint}`
+
 Builds the `SET_JOIN` with the bond `P2SH(<bondlocktime> CLTV DROP <memberkey> CHECKSIG)` at
 `vout 0`, adds the member's signature and whatever admission signatures this wallet holds (the
 admit key while the set has fewer than `slashthreshold` current members, current members'
 keys after that; none for an open set). Complete → signed and broadcast (`txid` present);
-otherwise the partially signed `hex` is returned. Result: `{"txid"?, "hex", "type", "complete",
-"signatures", "required", "memberkey", "bondoutpoint"}`.
+otherwise the partially signed `hex` is returned.
 
 ### `set_heartbeat "setid" ( "memberkey" )`
+Params: `["setid": hash, "memberkey"?: key]`
+
+Result: `{"txid": hash, "memberkey": key}`
+
 A `SET_HEARTBEAT` for a current member key of this wallet (default: the first), broadcast.
-Result: `{"txid", "memberkey"}`.
 
 ### `set_buildact "type" {params}`
+Params: `["type": ActType, "params": {"setid"?: hash, "memberkey"?: key, "bondamount"?: yec, "bondlocktime"?: height, "burn"?: bool, "prevout"?: outpoint, "rolea"?: int, "sighasha"?: hash, "siga"?: hex, "roleb"?: int, "sighashb"?: hash, "sigb"?: hex, "seats"?: int, "unlockthreshold"?: int, "cancelthreshold"?: int, "slashthreshold"?: int, "open"?: bool, "ratelimitbps"?: int, "ratewindow"?: int, "livenesswindow"?: int, "bondmin"?: yec, "bondlockmin"?: int, "maturity"?: int, "admitkey"?: key}]`
+
+Result: `ActResult`
+
 An unsigned, funded act transaction. Types and params: `create` (as `set_create`), `join`
 (`setid`, `bondamount`, `bondlocktime`, `memberkey` — any key), `heartbeat` (`setid`,
 `memberkey`), `remove` (`setid`, `memberkey` = the member removed, `burn` bool: freeze its bond),
-`equivocation` (as `set_equivocation`), `winddown` (`setid`). Result: `{"hex", "type",
-"complete": false (unless no signature is needed), "signatures": 0, "required"}`.
+`equivocation` (as `set_equivocation`), `winddown` (`setid`). `complete` is false (unless no
+signature is needed) and `signatures` 0.
 
 ### `set_signact "hex" ( "setid" )`
+Params: `["hex": hex, "setid"?: hash]`
+
+Result: `ActResult`
+
 Adds this wallet's act signatures: the member's own first signature (join, heartbeat), then
 admission / co-signer signatures up to what the act needs at the next block (a remove never by
-its target). The inputs must still be unsigned. Result: as `set_buildact`.
+its target). The inputs must still be unsigned.
 
 ### `set_sendact "hex"`
-Signs this wallet's inputs and broadcasts. Result: txid.
+Params: `["hex": hex]`
+
+Result: `hash`
+
+Signs this wallet's inputs and broadcasts. Result: the txid.
 
 ### `set_equivocation {proof}`
-Proof: `{"setid", "prevout", "rolea", "sighasha", "siga", "roleb", "sighashb", "sigb"}` (roles
-1 unlock / 2 cancel; sighashes as 32 raw bytes in hex, as `set_signunlock` / `set_signcancel`
-report them; signatures 65-byte recoverable). Anyone may submit; the member is EJECTED and its
-bond frozen. Result: txid.
+Params: `["proof": Proof]`
+
+Result: `hash`
+
+Roles 1 unlock / 2 cancel; sighashes as 32 raw bytes in hex, as `set_signunlock` /
+`set_signcancel` report them; signatures 65-byte recoverable. Anyone may submit; the member is
+EJECTED and its bond frozen. Result: the txid.
 
 ## Vault RPCs (wallet)
 
 ### `vault_lock {params}`
-`{"tag", "setid", "cancelsetid" (default setid), "delay" (1–65535), "ownerheight", "appheight"
-(default 0 = no APP branch), "amount", "ownerkey" (default a new wallet key)}`. Both sets must be
-confirmed. Result: `{"txid", "vout": 0, "outpoint", "script", "ownerkey"}`.
+Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "ownerkey"?: key}]`
+
+Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "ownerkey": key}`
+
+`delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch), `ownerkey`
+to a new wallet key. Both sets must be confirmed. `vout` is 0.
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...]`
-The UNLOCK spend (selector 1) of a vault: an intent per recipient, the remainder re-locked in a
-byte-identical vault (S-2), fee inputs from this wallet (unsigned). Result: `{"hex", "intents":
-[{"vout", "amount", "recipient", "recipienthash"}], "required"}`. The rate limit (S-3) is checked
-when it is sent.
+Params: `["outpoint": outpoint, "recipients": [Recipient]]`
+
+Result: `{"hex": hex, "intents": [IntentOut], "required": int}`
+
+The UNLOCK spend (selector 1) of a vault: an intent per recipient (exactly one of `address` or
+`script`), the remainder re-locked in a byte-identical vault (S-2), fee inputs from this wallet
+(unsigned). The rate limit (S-3) is checked when it is sent.
 
 ### `set_signunlock "hex"`
+Params: `["hex": hex]`
+
+Result: `SetSigResult`
+
 Adds this wallet's current-member signatures over the set-signature message (plan §15.2 step 4)
-for the vault's `setid`, up to `unlockthreshold`. Result: `{"hex", "complete", "signatures",
-"required", "sighash", "setsigs": [{"key", "sig"}]}`. Signing two different spends of one
-outpoint is provable equivocation: sign only the transaction you mean.
+for the vault's `setid`, up to `unlockthreshold`. Signing two different spends of one outpoint
+is provable equivocation: sign only the transaction you mean.
 
 ### `vault_buildcancel "intentoutpoint"`
+Params: `["intentoutpoint": outpoint]`
+
+Result: `{"hex": hex, "required": int, "cancelsetid": hash, "deadline": height, "intentconfirmed": bool}`
+
 The CANCEL spend (selector 2) of an unmatured intent: its value back into the vault it was
-unlocked from (I-2). Result: `{"hex", "required", "cancelsetid", "deadline", "intentconfirmed"}`
-(`deadline` = the last height a cancel can confirm at). An intent still in the mempool can be
-cancelled too: its originating vault script is read from the vault coin its transaction spends,
-`intentconfirmed` is false and `deadline` assumes the intent confirms in the next block. The
-mempool accepts the cancel as the intent's child (a mempool parent counts as confirming in the
-next block, so I-2 holds), and both may confirm in one block; a cancel signed before the intent
-confirms stays valid after it. So a watcher can build and sign a cancel the moment an intent
-appears.
+unlocked from (I-2). `deadline` is the last height a cancel can confirm at. An intent still in
+the mempool can be cancelled too: its originating vault script is read from the vault coin its
+transaction spends, `intentconfirmed` is false and `deadline` assumes the intent confirms in the
+next block. The mempool accepts the cancel as the intent's child (a mempool parent counts as
+confirming in the next block, so I-2 holds), and both may confirm in one block; a cancel signed
+before the intent confirms stays valid after it. So a watcher can build and sign a cancel the
+moment an intent appears.
 
 ### `set_signcancel "hex"`
+Params: `["hex": hex]`
+
+Result: `SetSigResult`
+
 As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`.
 
 ### `vault_send "hex"`
+Params: `["hex": hex]`
+
+Result: `hash`
+
 Signs this wallet's inputs of a built vault spend (the template input's scriptSig is kept) and
-broadcasts. Result: txid. The node that funded the spend must send it.
+broadcasts. Result: the txid. The node that funded the spend must send it.
 
 ### `vault_release "intentoutpoint" ( "address"|"script" )`
+Params: `["intentoutpoint": outpoint, "recipient"?: str]`
+
+Result: `hash`
+
 The RELEASE (selector 1, `nSequence = delay`) of a matured intent, paying its value to the
-recipient, fee from this wallet. The intent commits only `SHA256(recipient script)`, so the
-recipient is the argument, or a script this node built the intent for, or one of this wallet's
-P2PKH scripts. Error `-1` "matures at height h" before `coinHeight + delay`. Result: txid.
+recipient (an address or a script in hex), fee from this wallet. The intent commits only
+`SHA256(recipient script)`, so the recipient is the argument, or a script this node built the
+intent for, or one of this wallet's P2PKH scripts. Error `-1` "matures at height h" before
+`coinHeight + delay`. Result: the txid.
 
 ### `vault_ownerspend "outpoint" "address"`
+Params: `["outpoint": outpoint, "address": address]`
+
+Result: `{"txid": hash, "selector": int}`
+
 Spends a vault with its owner key (in this wallet) to `address`, less the fee: selector 2 with
 `nLockTime = ownerheight` once the next block is above `ownerheight`, else selector 3 when the
-set is released (dormant or wound down). An intent has only selector 3. Result: `{"txid",
-"selector"}`.
+set is released (dormant or wound down). An intent has only selector 3.
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
+Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`
+
+Result: `{"hex": hex, "intents": [IntentOut]}`
+
 The APP spend skeleton (selector 4, `nLockTime = appheight`) with intents and re-lock as
 `vault_buildunlock`, fee inputs unsigned, for a module to complete; send with `vault_send`.
-Result: `{"hex", "intents"}`.
+
+## Error reasons
+
+The error messages a client may match on (a substring of the RPC error's `message`), with their
+code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
+
+| code | message | raised by | provoked by |
+|---|---|---|---|
+| -1 | `is not active at the next block` | every act and vault RPC | `set_create` before activation |
+| -8 | `the set parameters are out of range` | `set_create`, `set_buildact` | `seats` 16 |
+| -5 | `unknown set` | `set_getinfo`, `set_join`, `set_heartbeat`, `set_buildact`, `vault_lock` | `set_getinfo` of a random id |
+| -4 | `this wallet holds no current member key of the set` | `set_heartbeat` | a heartbeat for a set with no members |
+| -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set |
+| -8 | `unknown act type` | `set_buildact` | type `"bogus"` |
+| -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |
+| -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
+| -8 | `vault parameters out of range` | `vault_lock` | `delay` 0 |
+| -8 | `not an unspent vault output` | `vault_buildunlock`, `vault_app` | a spent vault outpoint |
+| -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
+| -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
+| -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
+| -8 | `not an unspent intent output` | `vault_buildcancel`, `vault_release` | a released intent |
+| -1 | `can no longer be cancelled` | `vault_buildcancel` | an intent past its delay |
+| -1 | `matures at height` | `vault_release` | an intent before its delay |
+| -1 | `owner branch opens at height` | `vault_ownerspend` | a vault before `ownerheight` |
+| -8 | `has no APP branch` | `vault_app` | a vault with `appheight` 0 |
+| -1 | `the APP branch opens at height` | `vault_app` | a vault before `appheight` |
 
 ## Example flow (regtest, three nodes A, B, C)
 
