@@ -138,6 +138,12 @@ env:
   # flag, so it is its own variable, always passed quoted.
   STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock zmq_test
   STOCK_BASELINE_MINEBLOCK: txn_doublespend.py --mineblock
+  # The upgrade line's audit compares against the other node line and the workspace generator:
+  # ycash-dd (public) at the same branch, and boyfromcave/yellowback at a commit that carries
+  # scripts/extract_spec.py's upgrade mode (382d1dc, findings (39)/(44); bump by PR).
+  OTHER_LINE_REPO: boyfromcave/ycash-dd
+  YB_WORKSPACE_REPO: boyfromcave/yellowback
+  YB_WORKSPACE_COMMIT: 3fc32a2cc8c3826e312f56c6ad05a32fe21e7cd5
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -465,9 +471,179 @@ jobs:
           git fetch --no-tags origin +refs/tags/ycash6-baseline:refs/tags/ycash6-baseline
           git rev-parse --verify 'ycash6-baseline^{commit}'
 
+      - name: Which line is this tree?
+        # One workflow serves both node-line branches: the line is read from the tree, not the ref
+        # (pull requests and up/* branches have their own ref names). src/vault/ exists only on
+        # the network-upgrade line (UPGRADE_VAULT, upgrade plan §15).
+        id: line
+        run: |
+          if [ -d src/vault ]; then line=upgrade; else line=harden; fi
+          echo "line=$line" >> "$GITHUB_OUTPUT"
+          echo "node line: $line"
+
       - name: Frozen set at zero delta and the line budgets (plan §2)
-        # One script so the gate a developer runs locally is the gate CI runs.
-        run: qa/yellowback-audit.sh ycash6-baseline
+        # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
+        # the frozen and budget legs are REPORT-ONLY (upgrade plan §7 G-9, §9): they print the
+        # delta and the consensus review gate (the consensus-diff artifact below, two reviewers)
+        # judges it; the script's rpcCvtTable leg still fails.
+        env:
+          LINE: ${{ steps.line.outputs.line }}
+        run: |
+          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only ycash6-baseline
+          else qa/yellowback-audit.sh ycash6-baseline; fi
+
+      - name: Consensus-diff report for the two-reviewer gate (upgrade plan §7 G-9)
+        # Every changed line under the consensus paths, against this line's pristine pin
+        # (ycash6-legacy = miodragpop/ycash dev-rebase-6.20.0 @ 040894344b). The design's five
+        # paths plus the three that 6.20.0's upgrade work also routes through the gate:
+        # src/policy/ (finding (29)) and Cargo.toml / src/rust/ (the librustzcash6 repoint,
+        # finding (23)). Uploaded as the artifact `consensus-diff`; the summary goes to the run page.
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        run: |
+          git fetch --no-tags origin +refs/heads/ycash6-legacy:refs/remotes/origin/ycash6-legacy
+          base=origin/ycash6-legacy
+          paths="src/consensus/ src/script/ src/main.cpp src/primitives/ src/vault/ src/policy/ Cargo.toml src/rust/"
+          out="$RUNNER_TEMP/consensus-diff"; mkdir -p "$out"
+          # shellcheck disable=SC2086
+          git diff -U0 "$base"...HEAD -- $paths > "$out/consensus.diff"
+          # shellcheck disable=SC2086
+          git diff --numstat "$base"...HEAD -- $paths > "$out/numstat.txt"
+          {
+            echo "## Consensus-diff report ($(git rev-parse --short HEAD) vs ycash6-legacy)"
+            echo
+            echo "Every line below needs two reviewers independent of its author, with the four-part check in the PR body (upgrade plan §7 G-9)."
+            echo
+            echo '| file | + | - |'; echo '|---|---:|---:|'
+            awk '{printf "| %s | %s | %s |\n", $3, $1, $2}' "$out/numstat.txt"
+            awk '{a+=$1; d+=$2} END {printf "| **total** | **%d** | **%d** |\n", a, d}' "$out/numstat.txt"
+          } | tee "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$out/numstat.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        with:
+          name: consensus-diff
+          path: ${{ runner.temp }}/consensus-diff
+          if-no-files-found: error
+
+      - name: The DoS rule (upgrade line; encoded by function, not by line number)
+        # The upgrade makes Yellowback and the vault primitive consensus (U-21): a BLOCK that breaks
+        # one of their rules is rejected with DoS 100, while a MEMPOOL refusal is state-dependent
+        # (a peer on another tip sees a different set state; findings (25), (24)) and is DoS 0.
+        # Encoded over main.cpp's inserted lines by enclosing function (the hunk header):
+        #   AcceptToMemoryPool   every inserted DoS is DoS(0
+        #   ConnectBlock / CheckBlock / ContextualCheckBlock(Header) / CheckBlockHeader
+        #                        every inserted vault/yellowback verdict is DoS(100
+        #   `DoS(fMempool ? 0 : 100` is the one both-ways form (the vault timelock in CheckFinalTx)
+        #   no Misbehaving( is ever inserted; anything else is printed for the reviewer.
+        # And the verdict levels live in main.cpp only: src/vault/ and src/yellowback/ call no DoS.
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        run: |
+          ! grep -n "DoS(\|Misbehaving(" src/vault/*.cpp src/vault/*.h src/yellowback/*.cpp src/yellowback/*.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
+          git diff -U0 ycash6-baseline...HEAD -- src/main.cpp | awk '
+            /^@@/ { fn = ""; ctx = $0; sub(/^@@[^@]*@@ ?/, "", ctx); if (match(ctx, /[A-Za-z_][A-Za-z0-9_:]*\(/)) fn = substr(ctx, RSTART, RLENGTH - 1); next }
+            /^\+\+\+/ { next }
+            /^\+/ && /DoS\(|Misbehaving\(/ {
+              line = substr($0, 2); gsub(/^[ \t]+/, "", line)
+              if (line ~ /Misbehaving\(/) { print "FAIL (no ban entry point may be added): " fn ": " line; bad = 1; next }
+              lvl = line; sub(/.*DoS\(/, "", lvl); sub(/,.*/, "", lvl)
+              verdict = (line ~ /[Vv]ault|[Yy]ellowback|yb\.|ybBad/)
+              if (fn ~ /AcceptToMemoryPool/) {
+                if (lvl != "0") { print "FAIL (mempool refusals are state-dependent: DoS 0): " fn ": " line; bad = 1 } else print "ok   mempool  DoS 0   " fn ": " line
+              } else if (fn ~ /^(ConnectBlock|CheckBlock|ContextualCheckBlock|ContextualCheckBlockHeader|CheckBlockHeader)$/ && verdict) {
+                if (lvl != "100") { print "FAIL (a block breaking a consensus rule is DoS 100): " fn ": " line; bad = 1 } else print "ok   block    DoS 100 " fn ": " line
+              } else if (lvl == "fMempool ? 0 : 100") {
+                print "ok   both     0/100   " fn ": " line
+              } else {
+                print "note (reviewer)       " fn ": " line
+              }
+            }
+            END { exit bad }'
+
+      - name: Determinism of the vault primitive (src/vault)
+        # Consensus code reads no clock, no randomness, no floating point and no configuration;
+        # only the node glue (node.cpp/node.h) may touch the mempool. Comment lines are skipped.
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        run: |
+          ! grep -nE 'GetTime|GetAdjustedTime|GetRand|insecure_rand|std::rand|random_device|mt19937|<chrono>|std::chrono|\bdouble\b|\bfloat\b|GetArg|GetBoolArg|mapArgs|pwalletMain' src/vault/*.cpp src/vault/*.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
+          ! grep -n 'mempool\.' src/vault/*.cpp src/vault/*.h | grep -vE '^src/vault/node\.(cpp|h):' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
+          ! grep -nE 'evhttp|socket|\bconnect\(' src/vault/*.cpp src/vault/*.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
+
+      - name: Attribution and naming (both rules, encoded over the fork delta)
+        # Attribution (owner rule 2026-10-01): every file the fork adds carries "The Ycash
+        # developers"; an upstream file the fork modifies that has a copyright block carries a
+        # Ycash line too; no existing copyright line is ever removed. Naming: the software is
+        # Ycash (no "ycash6" in src/), and no DigiDollar/ydollar naming enters the code
+        # (AGENTS.md rule 6; DigiDollar is allowed in comments that cite the upstream file).
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          base=ycash6-baseline
+          while read -r f; do
+            grep -q 'The Ycash developers' "$f" || { echo "new file without the Ycash notice: $f"; rc=1; }
+          done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/')
+          while read -r f; do
+            if grep -q 'Copyright' "$f" && ! grep -q 'Ycash developers' "$f"; then echo "modified upstream file without a Ycash line: $f"; rc=1; fi
+          done < <(git diff --name-only --diff-filter=M "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$')
+          removed=$(git diff "$base" HEAD | grep -E '^-[^-].*Copyright' || true)
+          [ -z "$removed" ] || { echo "copyright lines removed (never allowed):"; echo "$removed"; rc=1; }
+          hits=$(git grep -n -i 'ycash6' -- src || true)
+          [ -z "$hits" ] || { echo "'ycash6' in src/ (the software is Ycash):"; echo "$hits"; rc=1; }
+          added=$(git diff "$base" HEAD -- src qa contrib doc | grep -E '^\+[^+]' || true)
+          hits=$(printf '%s\n' "$added" | grep -E 'ydollar|YDollar|\byd_' || true)
+          [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; rc=1; }
+          hits=$(printf '%s\n' "$added" | grep -E -i 'digidollar' | grep -vE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
+          [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
+          exit $rc
+
+      - name: Cross-line vectors (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
+        # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
+        # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
+        # PR's base for a pull request; upgrade/vault when ycash-dd has no such branch).
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        env:
+          REF: ${{ github.base_ref || github.ref_name }}
+        run: |
+          url="https://github.com/$OTHER_LINE_REPO.git"
+          other=upgrade/vault
+          if git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then other=$REF; fi
+          git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
+          echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
+          rc=0
+          for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json; do
+            mine=$(sha256sum < "$f" | cut -c1-64)
+            theirs=$(git show "other-line/head:$f" | sha256sum | cut -c1-64)
+            if [ "$mine" = "$theirs" ]; then echo "identical: $f ($mine)"
+            else echo "::error::$f differs from $OTHER_LINE_REPO $other (here $mine, there $theirs)"; rc=1; fi
+          done
+          exit $rc
+
+      - name: RPC contract at rpcversion 5 through the workspace generator (findings (39), (44))
+        # The upgrade line's doc/yellowback-rpc-contract.json must be exactly what the workspace's
+        # scripts/extract_spec.py produces from this tree's doc/yellowback-rpc.md in its upgrade
+        # mode (the doc is the whole contract there), at the workspace commit pinned in env.
+        # Only the contract is compared: the spec copy also embeds plan text that moves with the
+        # workspace (`make spec-check-upgrade` checks it there).
+        if: steps.line.outputs.line == 'upgrade' && !cancelled()
+        run: |
+          git init -q "$RUNNER_TEMP/ws"
+          git -C "$RUNNER_TEMP/ws" fetch -q --depth 1 "https://github.com/$YB_WORKSPACE_REPO.git" "$YB_WORKSPACE_COMMIT"
+          git -C "$RUNNER_TEMP/ws" checkout -q FETCH_HEAD
+          EXTRACT_SPEC_NODE6_DIR="$GITHUB_WORKSPACE" WS="$RUNNER_TEMP/ws" python3 - <<'PY'
+          import difflib, json, os, sys
+          sys.path.insert(0, os.path.join(os.environ["WS"], "scripts"))
+          import extract_spec as x
+          doc = os.path.join(os.environ["GITHUB_WORKSPACE"], "doc", "yellowback-rpc.md")
+          if x.doc_line(doc) != "upgrade":
+              sys.exit("doc/yellowback-rpc.md is rpcversion %s; the upgrade line is rpcversion >= 5" % x.rpcdoc_version(doc))
+          want = x.contract_text(x.read_plan(), x.read_plan_v3(), doc, x.RPCDOC6_REL)
+          have = open("doc/yellowback-rpc-contract.json", encoding="utf-8", newline="").read()
+          if json.loads(have).get("rpcversion") != 5:
+              sys.exit("contract rpcversion is not 5")
+          if have != want:
+              sys.stdout.writelines(difflib.unified_diff(have.splitlines(True), want.splitlines(True), "committed", "generated"))
+              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec in the workspace)")
+          print("contract: rpcversion 5, identical to the generator's output (%d bytes)" % len(have))
+          PY
 
       - name: Determinism, no clock, no sockets, no bans (plan §3.10, §8.4 items 2 and 8)
         # The state machine and the pure modules may not read the clock, the mempool, the wallet
