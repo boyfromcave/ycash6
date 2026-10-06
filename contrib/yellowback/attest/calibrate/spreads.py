@@ -264,6 +264,46 @@ def cmd_analyze(args):
 
 
 # ---------------------------------------------------------------------------
+# failrate (hardening plan F-2): how often the agents' aggregate fails closed on a log
+
+def fail_closed(rows, **settings):
+    """(failed, total) over a spreads log's rows: a row fails when the agents' own aggregate
+    (yellowback_price.PriceFeed.aggregate, with FEED_DEFAULTS and ``settings`` over them) has no
+    answer for the prices the row holds -- fewer than min_sources live, or fewer than min_sources
+    or min_venues after the outlier filter. A missing column is a source the agent dropped (a
+    failed fetch, or a stale venue in a log reconstructed with max_age). One row stands for one
+    aggregate: an hourly log measures hours, not blocks."""
+    feed = yp.PriceFeed(SOURCES, None, dict(yp.FEED_DEFAULTS, **settings))
+    failed = 0
+    for _ts, prices in rows:
+        now = time.time()
+        with feed.lock:
+            feed.samples = {n: [(now, float(p), None)] for n, p in prices.items() if p}
+        if feed.aggregate() is None:
+            failed += 1
+    return failed, len(rows)
+
+
+def cmd_failrate(args):
+    with open(args.csv, newline="") as f:
+        rows = read_log(f)
+    if not rows:
+        sys.stderr.write("%s: no rows\n" % args.csv)
+        return 1
+    settings = {k: v for k, v in (("min_sources", args.min_sources), ("min_venues", args.min_venues),
+                                   ("outlier_bps", args.outlier_bps)) if v is not None}
+    failed, total = fail_closed(rows, **settings)
+    st = dict(yp.FEED_DEFAULTS, **settings)
+    rate = 100.0 * failed / total
+    print("fail-closed on %d of %d rows (%.2f %%) at min_sources %d, min_venues %d, outlier_bps %d"
+          % (failed, total, rate, st["min_sources"], st["min_venues"], st["outlier_bps"]))
+    if args.max_rate is not None and rate > args.max_rate:
+        print("above --max-rate %.2f %%" % args.max_rate)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -284,6 +324,14 @@ def parse_args(argv):
     an.add_argument("--interval", type=float, default=DEFAULT_INTERVAL, help="the interval the log was taken at (default 300)")
     an.add_argument("--gap-factor", type=float, default=3.0, help="a gap is more than this many intervals between rows")
     an.set_defaults(func=cmd_analyze)
+
+    fr = sub.add_parser("failrate", help="how often the agents' aggregate fails closed on the log (hardening F-2)")
+    fr.add_argument("csv")
+    fr.add_argument("--min-sources", type=int, help="default: the agents' (yellowback_price.MIN_SOURCES)")
+    fr.add_argument("--min-venues", type=int, help="default: the agents' (2)")
+    fr.add_argument("--outlier-bps", type=int, help="default: the agents' (1000)")
+    fr.add_argument("--max-rate", type=float, help="exit 1 when the fail-closed rate exceeds this many percent")
+    fr.set_defaults(func=cmd_failrate)
     return p.parse_args(argv)
 
 

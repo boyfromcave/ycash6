@@ -150,6 +150,55 @@ NONKYC = {"lastPriceNumber": 0.412, "bestBidNumber": 0.41, "bestAskNumber": 0.41
           "lastTradeAt": 1_788_673_030_000, "volumeNumber": 500.0}
 
 
+class SpreadsFailRate(unittest.TestCase):
+    """Hardening F-2: the agents' fail-closed rate over a spreads log (spreads.py failrate)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "spreads.csv")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _rows(self):
+        t = 1_700_000_000
+        rows = [(t + i * 3600, 0.40, 0.401, 0.402) for i in range(10)]        # all three agree
+        rows += [(t + (10 + i) * 3600, 0.40, None, 0.402) for i in range(5)]  # SafeTrade stale (max_age)
+        rows += [(t + 15 * 3600, 0.40, 0.60, 0.402)]                          # one outlier among three
+        rows += [(t + 16 * 3600, 0.40, None, None)]                           # one source left
+        return rows
+
+    def test_defaults_follow_the_hardened_agents(self):
+        self.assertEqual((spreads.yp.MIN_SOURCES, spreads.yp.FEED_DEFAULTS["min_venues"]), (2, 2))
+
+    def test_min_sources_three_versus_two(self):
+        spreads_csv(self.path, self._rows())
+        with open(self.path, newline="") as f:
+            rows = spreads.read_log(f)
+        self.assertEqual(spreads.fail_closed(rows, min_sources=3), (7, 17))   # every stale or outlier row
+        self.assertEqual(spreads.fail_closed(rows), (1, 17))                  # only the one-source row
+        self.assertEqual(spreads.fail_closed(rows, min_venues=3), (7, 17))
+
+    def test_cli_failrate_and_max_rate(self):
+        spreads_csv(self.path, self._rows())
+        out = io.StringIO()
+        import contextlib
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(spreads.main(["failrate", self.path]), 0)
+            self.assertEqual(spreads.main(["failrate", self.path, "--max-rate", "5"]), 1)   # 1 of 17 = 5.88 %
+        self.assertIn("fail-closed on 1 of 17 rows (5.88 %) at min_sources 2, min_venues 2, outlier_bps 1000", out.getvalue())
+
+    @unittest.skipUnless(os.environ.get("YB_SPREADS_LOG"), "set YB_SPREADS_LOG to a reconstructed spreads log (yb-calibration data/local)")
+    def test_replay_reconstructed_log(self):
+        """The D-RD-ATT-2 replay on a real log (not shipped here): at most YB_SPREADS_MAX_RATE % (default 0.5)."""
+        with open(os.environ["YB_SPREADS_LOG"], newline="") as f:
+            rows = spreads.read_log(f)
+        failed, total = spreads.fail_closed(rows)
+        rate = 100.0 * failed / total
+        print("replay: fail-closed on %d of %d rows (%.2f %%)" % (failed, total, rate))
+        self.assertLessEqual(rate, float(os.environ.get("YB_SPREADS_MAX_RATE", "0.5")))
+
+
 class SpreadsLog(unittest.TestCase):
     """`log --once` with the HTTP layer replaced: one row, the three columns, errors recorded."""
 

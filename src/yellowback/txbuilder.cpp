@@ -508,6 +508,7 @@ struct Context
                       const CScript* only = nullptr, const std::string& onlyText = "") const
     {
         if (needed <= 0) return 0;
+        yw.SettleYecLocks();   // F-1: hand back the inputs of a spender that failed
         std::vector<COutput> coins;
         wallet.AvailableCoins(coins, std::nullopt, true, nullptr, false, true, false, 1);
         std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() < b.Value(); });
@@ -521,6 +522,10 @@ struct Context
             if (c.tx->vout[c.i].scriptPubKey.IsPayToScriptHash()) continue;
             COutPoint o(c.tx->GetHash(), c.i);
             if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) continue;
+            // F-1: a coin the chainstate has already spent. Its spender is mined but the notifier has
+            // not stamped it yet (wallet depth -1), so IsSpent no longer counts it and AvailableCoins
+            // offers the coin again; choosing it would make the commit fail as a double spend.
+            if (!CoinAvailable(o)) continue;
             mtx.vin.push_back(CTxIn(o));
             prevs.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
             selected += c.Value();
@@ -1119,6 +1124,14 @@ void CheckMaxCollateral(CAmount collateral, CAmount maxCollateralZat)
     }
 }
 
+/** Hardening H-9.3: the claimant's bound on the YED a claim burns (the debt plus any H4 remainder); 0 = unbounded. */
+void CheckMaxBurn(int64_t burnCents, int64_t maxBurnCents)
+{
+    if (maxBurnCents > 0 && burnCents > maxBurnCents) {
+        throw std::runtime_error(strprintf("claim-burn-above-max: the claim would burn %d cents of YED, above the maxBurnCents of %d", burnCents, maxBurnCents));
+    }
+}
+
 /** Audit F-1: the claimant's floor on what reaches `to`; 0 = unbounded. */
 void CheckMinOut(CAmount out, CAmount minOutZat)
 {
@@ -1153,7 +1166,7 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
 }
 
 ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::optional<std::vector<unsigned char>>& bundle,
-                              CAmount minOutZat)
+                              CAmount minOutZat, int64_t maxBurnCents)
 {
     Context ctx(yw);
     const COutPoint vaultOut(vaultTxid, 0);
@@ -1173,6 +1186,7 @@ ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, co
     pf.xClaim = c.xClaim; pf.aClaim = c.aClaim; pf.pClaim = c.pClaim; pf.pEmerg = c.pEmerg; pf.xMint = c.xMint; pf.aMint = c.aMint;
     pf.claimPath = c.claimPath;
     pf.residualZat = c.residualZat;
+    CheckMaxBurn(vault.mintedCents, maxBurnCents);   // the debt alone; BuildClaim checks the exact burn
     if (minOutZat > 0) {
         BuiltTx probe;
         AttestFeeFor(ctx, pf.refHeight, pf.selector, f, vault.collateralZat, probe);
@@ -1509,7 +1523,8 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
     return BuildVaultSpend(ctx, kind, vaultOut, vault, to, ctx.spendRefHeight);
 }
 
-BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat)
+BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat,
+                   int64_t maxBurnCents)
 {
     Context ctx(yw);
     const COutPoint vaultOut(vaultTxid, 0);
@@ -1533,6 +1548,7 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
     extras.attestFeeZat = probe.attestFeeZat;
     BuiltTx out = BuildVaultSpend(ctx, BuiltKind::CLAIM, vaultOut, vault, to, R, &extras);
     CheckMinOut(out.collateralOut, minOutZat);   // unsigned so far: nothing is committed or locked
+    CheckMaxBurn(out.burnCents, maxBurnCents);   // H-9.3: the debt plus the H4 remainder
     out.armed = f.armed;
     out.bundleSeqs = f.seqs;
     out.attestPayee = probe.attestPayee;

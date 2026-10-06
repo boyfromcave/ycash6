@@ -36,7 +36,7 @@ yellowback-quote [run|sources] --conf FILE [--mock-price FILE [--i-know-this-is-
   (`rpc_timeout` optional; a file holding `rpc_password` must be mode 0600 or the agent exits 2,
   `--insecure-config-permissions` overrides; credentials over plain `http://` to a host other than
   loopback need `allow_insecure_rpc = true`); `[quote] poll_seconds (30), fail_polls (2), twap_seconds (900),
-  min_sources (3), min_venues (2), min_btc_sources (2), outlier_bps (1000), silence_seconds (120),
+  min_sources (2), min_venues (2), min_btc_sources (2), outlier_bps (1000), silence_seconds (120),
   fetch_timeout (15)`; `[[sources]]` and `[[btc_usd_sources]]` rows with `name, kind, url, path,
   quote, scale, timestamp_path, timestamp_unit, max_age, spread_path, spread_unit, bid_path, ask_path,
   max_spread_bps, reject_paths, headers, volume_path, mask_bit` plus the preset parameters

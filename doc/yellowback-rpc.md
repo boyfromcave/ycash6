@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 3
+# Yellowback RPC contract (`yed_*`), rpcversion 4
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `3`. Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `4`. Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -25,6 +25,14 @@ refused rather than tolerated. The wallet's `YellowbackRpc::RPC_VERSION` goes to
 first commit; until then a v3 node and a v2 wallet refuse each other (N27), which is intended.
 Everything marked **v3** in this file is Phase A0's contract for Phases A2 (node context) and A3
 (wallet context); the v2 text is unchanged except where a field's meaning changed and is marked.
+
+**`rpcversion` 4 (hardening plan H-9.3, 2026-10-05), by decision as `3` was.** The change is again
+an addition: optional client bounds (`yed_mint`'s `maxCollateralZat` and `yed_claim`'s
+`minOutZat`, both since the 2026-10-01 audit, and `yed_claim`'s new `maxBurnCents`). The bump
+makes a client that does not know the bounds (and so cannot cap what a malicious or mistaken
+server builds for it) refuse the node rather than run unprotected. Clients go to `4` with the
+hardening plan's H5 chunks (YecWallet, YEW through lightwalletd); until then they refuse each other,
+which is intended.
 
 ## Conventions
 
@@ -157,7 +165,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 3,
+  "rpcversion": 4,
   "enabled": true,
   "network": "regtest",
   "height": 331,
@@ -1551,20 +1559,24 @@ Result of `yed_redeem`:
 }
 ```
 
-### `yed_claim <vaultTxid> [to] [bundleHex] [wait] [minOutZat]`
+### `yed_claim <vaultTxid> [to] [bundleHex] [wait] [minOutZat] [maxBurnCents]`
 
 Arguments as `yed_redeem`, plus **v3** `bundleHex` and `wait` as `yed_mint` (`to` may be `""`
 for the default), and `minOutZat` (number, optional, default `0` = no bound: the claimant's floor
 on what reaches `to`; refused `claim-out-below-min` at preflight — the collateral less the
 enforcement fee, the attestor fee and the RED-5 residual — and again at build against the exact
-`collateralOut`, nothing signed either time). The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
+`collateralOut`, nothing signed either time), and `maxBurnCents` (number, optional, default `0` =
+no bound, hardening H-9.3: the claimant's cap on the YED the claim burns; refused
+`claim-burn-above-max` at preflight when the vault's `mintedCents` exceeds it and again at build
+against the exact burn — the debt plus any H4 sub-dollar remainder — nothing signed either time).
+The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
 claim-path scriptSig, `nLockTime = claimHeight`, burns `mintedCents` of the claimant's own YED,
 pays the fee from the collateral, collateral to `to`. The v2 fields of `yed_redeem` (including
 `extraBurnCents`, H4) plus the **v3** fields below. Refusals: `vault-not-found`,
 `vault-not-active`, `claim-not-yet` (tip below `claimHeight`), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
 `mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`,
-`claim-out-below-min`, `carrier-wait-busy`.
+`claim-out-below-min`, `claim-burn-above-max`, `carrier-wait-busy`.
 
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
@@ -2002,6 +2014,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `vault-value-too-small` | `yed_redeem`, `yed_claim`, `yed_sweep` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
 | `collateral-above-max` | `yed_mint` | maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1 |
 | `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the collateral less the enforcement fee, the attestor fee and the RED-5 residual; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
+| `claim-burn-above-max` | `yed_claim` | maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1 |
 | `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
 | `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
 
@@ -2029,7 +2042,7 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
 | `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_sweep`, `yed_listpositions` | none (all strings) |
-| `yed_claim` | 3, 4 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit) |
+| `yed_claim` | 3, 4, 5 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit; `maxBurnCents` since rpcversion 4) |
 | `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
 | `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |
 | `yed_listclaimable` | 0, 1 (`count`, `skip`; 2026-10-01 audit) |

@@ -32,8 +32,14 @@ ref_lag = 2              # citedHeight = tip - ref_lag
 poll_seconds = 15        # yed_getinfo cadence; the sources are polled at the same cadence to fill the window
 # The aggregator's settings, as the quote agent's [quote] table:
 twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
-min_sources = 3          # live sources needed after the outlier filter (fail closed below)
+min_sources = 2          # live sources needed after the outlier filter (fail closed below; see below)
 min_venues = 2           # distinct venues among them
+# min_sources = 2 (hardening plan F-2, D-RD-ATT-2): with 3 the agent failed closed on 53 % of blocks
+# on the real venues (SafeTrade has no trade within an hour in 45 % of hours, so max_age 3600 drops
+# it), every agent at once, so no pool tagged a quote; with 2 (min_venues 2 kept: two distinct
+# venues still have to agree within outlier_bps) it fails closed on 0.2-0.3 % of blocks. The
+# nonkyc-btc cross route below is the fourth source; it shares nonkyc's venue, so it never counts
+# as a second venue on its own.
 min_btc_sources = 2      # live BTC/USD references before a BTC-quoted pair is converted
 outlier_bps = 1000       # sources more than 10 % from the median are dropped
 # silence_seconds = 120  # a source with no sample this long is dropped from the median
@@ -64,12 +70,14 @@ symbol = "YEC_USDT"
 max_age = 3600
 max_spread_bps = 500
 
-# A BTC-quoted pair is converted with the median of the [[btc_usd_sources]] below.
-# [[sources]]
-# name = "nonkyc-btc"
-# kind = "nonkyc_market"
-# symbol = "YEC_BTC"
-# max_age = 3600
+# A BTC-quoted pair is converted with the median of the [[btc_usd_sources]] below (min_btc_sources
+# of them live); the fourth source, enabled since F-2.
+[[sources]]
+name = "nonkyc-btc"
+kind = "nonkyc_market"           # Nonkyc's YEC/BTC, converted to USD; venue nonkyc_io, bit 3
+symbol = "YEC_BTC"
+max_age = 3600
+max_spread_bps = 500
 
 [[btc_usd_sources]]
 name = "kraken"

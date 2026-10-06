@@ -47,7 +47,7 @@ PRICE_MAX = 100_000_000
 OUTLIER_BPS = 1000              # sources more than 10 % from the median are dropped
 TWAP_SECONDS = 900              # the proposal's 15-minute window (§5, §10.1)
 SOURCE_SILENCE_SECONDS = 120
-MIN_SOURCES = 3
+MIN_SOURCES = 2                 # hardening F-2 (D-RD-ATT-2): 3 failed closed on 53 % of blocks; min_venues 2 stays
 MAX_BODY_BYTES = 1 << 20        # a venue (or the node) reply larger than this is refused, not buffered
 RPC_MAX_BODY_BYTES = 64 << 20   # the node is trusted; this only bounds a runaway reply
 

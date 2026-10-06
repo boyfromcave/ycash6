@@ -106,7 +106,8 @@ bool StartsWith(const std::string& s, const char* prefix)
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
                                          "vault-not-owned", "not-a-yellowback-address", "sweep-acknowledgement-missing", "bad-address",
                                          "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
-    // collateral-above-max and claim-out-below-min (audit F-1) are caller bounds, not rules: RPC_WALLET_ERROR below.
+    // collateral-above-max, claim-out-below-min (audit F-1) and claim-burn-above-max (H-9.3) are caller bounds, not rules:
+    // RPC_WALLET_ERROR below.
     for (const char* const* p = RULE; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_VERIFY_REJECTED, msg);
     for (const char* const* p = PARAM; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_INVALID_PARAMETER, msg);
     throw JSONRPCError(RPC_WALLET_ERROR, msg);
@@ -327,6 +328,16 @@ CAmount ParseZatBoundArg(const UniValue& params, size_t idx, const char* name)
     return v;
 }
 
+/** An optional cents bound (hardening H-9.3): absent / null => 0 (none); else an integer in [0, MAX_MONEY]. */
+int64_t ParseCentsBoundArg(const UniValue& params, size_t idx, const char* name)
+{
+    if (params.size() <= idx || params[idx].isNull()) return 0;
+    if (!params[idx].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string(name) + " must be a number (cents)");
+    const int64_t v = params[idx].get_int64();
+    if (v < 0 || v > MAX_MONEY) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be between 0 and %d", name, MAX_MONEY));
+    return v;
+}
+
 Attestation ParseAttestationArg(const UniValue& v, const char* what)
 {
     if (!v.isStr() || !IsHex(v.get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("attest-malformed: ") + what + " is not 74 bytes of hex");
@@ -534,10 +545,11 @@ UniValue ClaimResult(const uint256& txid, const BuiltTx& built, const CarrierRec
 
 BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool ownerPath, bool gate, uint256& txid);
 
-UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat)
+UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier, CAmount minOutZat,
+                       int64_t maxBurnCents)
 {
     uint256 txid;
-    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier, minOutZat); }, false, true, txid);
+    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier, minOutZat, maxBurnCents); }, false, true, txid);
     yw.SpendCarrier(carrier.outpoint);
     return ClaimResult(txid, built, carrier);
 }
@@ -878,9 +890,9 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
 
 UniValue yed_claim(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 5)
+    if (fHelp || params.size() < 1 || params.size() > 6)
         throw std::runtime_error(
-            "yed_claim \"vaultTxid\" ( \"to\" \"bundleHex\" wait minOutZat )\n"
+            "yed_claim \"vaultTxid\" ( \"to\" \"bundleHex\" wait minOutZat maxBurnCents )\n"
             "\nClaim somebody's underwater vault (yed_listclaimable): the claim-path spend at or past claimHeight, burning the\n"
             "vault's debt from this wallet's YED, paying the enforcement fee from the collateral and the rest to \"to\".\n"
             "Refused unless an enforcing miner would accept it (mempool-check-failed:<verdict>). v3: the carrier step first\n"
@@ -888,7 +900,9 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
             "claimPath is the RED-4 clause that opened the claim (\"a\" combined price, \"b\" the emergency notice).\n"
             "\nArguments: as yed_redeem, then \"bundleHex\" and wait as yed_mint, then minOutZat (numeric, optional, default 0 =\n"
             "no bound): refuse (claim-out-below-min) before anything is signed when the collateral reaching \"to\" (the\n"
-            "collateral less the enforcement fee, the attestor fee and the RED-5 residual) would be below this many zatoshi.\n"
+            "collateral less the enforcement fee, the attestor fee and the RED-5 residual) would be below this many zatoshi,\n"
+            "then maxBurnCents (numeric, optional, default 0 = no bound): refuse (claim-burn-above-max) before anything is\n"
+            "signed when the YED the claim burns (the vault's debt plus any sub-dollar remainder) would exceed this many cents.\n"
             "Result: yed_redeem's fields plus { \"carrierTxid\", \"pending\", \"refHeight\", \"xClaim\", \"aClaim\", \"pClaim\", \"pEmerg\", \"claimPath\",\n"
             "        \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\", \"residualZat\" }\n");
     YellowbackWallet& yw = EnsureYW();
@@ -898,6 +912,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
     const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 2);
     const bool wait = ParseWaitArg(params, 3);
     const CAmount minOutZat = ParseZatBoundArg(params, 4, "minOutZat");
+    const int64_t maxBurnCents = ParseCentsBoundArg(params, 5, "maxBurnCents");
     CarrierWaitSlot slot(wait);    // C-2
     ClaimPreflight pf;
     {
@@ -907,14 +922,14 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
-            pf = PreflightClaim(yw, vaultTxid, bundleArg, minOutZat);
+            pf = PreflightClaim(yw, vaultTxid, bundleArg, minOutZat, maxBurnCents);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
     }
     const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, pf.selector, "");
     if (!wait) {
-        SchedulePending(yw, carrier, [=, &yw]() { return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat); }, "claim");
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat, maxBurnCents); }, "claim");
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", "");
         o.pushKV("burnedCents", 0);
@@ -936,7 +951,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
         return o;
     }
     WaitForCarrier(carrier);
-    return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat);
+    return CompleteClaim(yw, vaultTxid, to, carrier, minOutZat, maxBurnCents);
 }
 
 UniValue yed_claimnotice(const UniValue& params, bool fHelp)

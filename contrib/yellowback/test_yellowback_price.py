@@ -282,7 +282,7 @@ class FeedTests(unittest.TestCase):
         old = copy.deepcopy(NONKYC)
         old["lastTradeAt"] = int((NOW - 2 * 3600) * 1000)
         table[NONKYC_URL] = old
-        feed = make_feed(THREE, table)
+        feed = make_feed(THREE, table, min_sources=3)
         feed.poll(force=True)
         r = feed.report()
         self.assertEqual(r["sources"]["nonkyc"]["state"], "stale")

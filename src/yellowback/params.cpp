@@ -147,13 +147,15 @@ const Params& MainParams()
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
         // startHeight and enforceUntilHeight are set per release (§3.1, K10, L8; Phase 10).
-        // Release 6.21.0-rc1 (2026-10-02, mainnet tip 3,052,055): START at least two weeks of
-        // blocks past the release (M14; 1,152 blocks a day at 75 s), here about 20 days, so an
-        // rc1 tagged within the week still clears it. ENFORCE_UNTIL = START + BLOCKS_PER_YEAR
-        // (420,480, L8); Ycash mainnet schedules no network upgrade (NU5 and later unset in
-        // chainparams.cpp), so nothing caps it earlier. A later set starts at or after the sunset.
-        m.startHeight = 3075000;
-        m.enforceUntilHeight = 3495480;
+        // Unset (hardening plan F-5, H-8, 2026-10-05): the 6.21.0-rc1 values (3,075,000 /
+        // 3,495,480) are withdrawn, so -yellowback refuses mainnet ("no start height") exactly as on
+        // testnet, until the release that passes the launch gates sets them again, identically on
+        // both node lines: START at least two weeks of blocks past that release (M14; 1,152 blocks
+        // a day at 75 s), ENFORCE_UNTIL = START + BLOCKS_PER_YEAR (420,480, L8; Ycash mainnet
+        // schedules no network upgrade, NU5 and later unset in chainparams.cpp). The release
+        // workflow refuses to tag while they are unset (qa/yellowback-release-heights.sh).
+        m.startHeight = 0;
+        m.enforceUntilHeight = 0;
         return m;
     }();
     return p;

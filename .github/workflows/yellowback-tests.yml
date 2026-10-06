@@ -396,7 +396,7 @@ jobs:
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
           ! git grep -in roster -- src/yellowback || exit 1
-          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 3' doc/yellowback-rpc.md
+          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 4' doc/yellowback-rpc.md   # 4 since hardening H-9.3
           python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
           # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
           # error identifier present in the generated JSON — the C++ agents implement these names.
@@ -404,7 +404,7 @@ jobs:
           import json, sys
           d = json.load(open("doc/yellowback-rpc-contract.json"))
           missing = []
-          if d.get("rpcversion") != 3: missing.append("rpcversion=3")
+          if d.get("rpcversion") != 4: missing.append("rpcversion=4")   # 3 in v3 (W14); 4 since hardening H-9.3
           if "attest" not in d["yed_getinfo"]["returns"]: missing.append("yed_getinfo.attest")
           for c in ["yed_listattestors", "yed_getattestations", "yed_addattestation", "yed_buildbundle", "yed_getselection",
                     "yed_getnotice", "yed_claimnotice", "yed_sweepcarriers", "yed_registerattestor", "yed_withdrawbond",

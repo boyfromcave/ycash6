@@ -92,7 +92,14 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
         }
     }
     CValidationState state;   // 6.20.0: CommitTransaction reports the mempool rejection here (and logs it)
+    bool known;
+    {
+        LOCK(wallet->cs_wallet);
+        known = wallet->mapWallet.count(wtx.GetHash()) != 0;
+    }
     const bool ok = wallet->CommitTransaction(wtx, reservekey, state);
+    if (ok) LockSpentYec(wtx);
+    else if (!known) RemoveOrphan(wtx.GetHash());   // F-1: no depth -1 entry is left behind
     if (!foreign.empty()) {
         LOCK(wallet->cs_wallet);
         for (const uint256& hash : foreign) {
@@ -102,6 +109,68 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
         }
     }
     return ok;
+}
+
+void YellowbackWallet::RemoveOrphan(const uint256& txid)
+{
+    LOCK(wallet->cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = wallet->mapWallet.find(txid);
+    if (it == wallet->mapWallet.end()) return;
+    LogPrint("yellowback", "removing %s: recorded by CommitTransaction, refused by the mempool\n", txid.ToString());
+    // 6.20.0: wtxOrdered holds a pointer into mapWallet (AddToWallet); drop it before the entry goes.
+    for (CWallet::TxItems::iterator o = wallet->wtxOrdered.begin(); o != wallet->wtxOrdered.end();) {
+        if (o->second == &it->second) o = wallet->wtxOrdered.erase(o);
+        else ++o;
+    }
+    wallet->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
+    wallet->mapWallet.erase(txid);   // and mapWallet when not file-backed; mapTxSpends entries are ignored once it is gone
+}
+
+void YellowbackWallet::LockSpentYec(const CTransaction& tx)
+{
+    LOCK(wallet->cs_wallet);
+    const uint256 txid = tx.GetHash();
+    for (const CTxIn& in : tx.vin) {
+        std::map<uint256, CWalletTx>::const_iterator it = wallet->mapWallet.find(in.prevout.hash);
+        if (it == wallet->mapWallet.end() || in.prevout.n >= it->second.vout.size()) continue;
+        if (!wallet->IsMine(it->second.vout[in.prevout.n])) continue;
+        if (ourLocks.count(in.prevout)) continue;   // a YED input: stage (iii) owns its lock
+        COutPoint o = in.prevout;
+        wallet->LockCoin(o);
+        yecLocks[o] = txid;
+    }
+}
+
+void YellowbackWallet::SettleYecLocks()
+{
+    AssertLockHeld(cs_main);
+    LOCK(wallet->cs_wallet);
+    for (std::map<COutPoint, uint256>::iterator it = yecLocks.begin(); it != yecLocks.end();) {
+        std::map<uint256, CWalletTx>::const_iterator spender = wallet->mapWallet.find(it->second);
+        bool release = true;
+        if (spender != wallet->mapWallet.end()) {
+            const int depth = spender->second.GetDepthInMainChain(std::nullopt);
+            if (depth == 0) {
+                release = false;                               // in the mempool
+            } else if (depth < 0) {
+                const CCoins* c = pcoinsTip->AccessCoins(it->first.hash);
+                release = c && c->IsAvailable(it->first.n);    // still unspent on chain: the spender failed
+            }
+        }
+        if (!release) {
+            ++it;
+            continue;
+        }
+        COutPoint o = it->first;
+        if (!ourLocks.count(o)) wallet->UnlockCoin(o);
+        it = yecLocks.erase(it);
+    }
+}
+
+size_t YellowbackWallet::PendingYecLocks() const
+{
+    LOCK(wallet->cs_wallet);
+    return yecLocks.size();
 }
 
 // ---------------------------------------------------------------- v3: the files under <datadir>/yellowback (W7, S16)
@@ -495,6 +564,10 @@ void YellowbackWallet::ReapplyLocks()
 {
     LOCK(wallet->cs_wallet);
     for (COutPoint o : ourLocks) {
+        if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
+    }
+    for (const auto& e : yecLocks) {   // F-1
+        COutPoint o = e.first;
         if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
     }
 }
