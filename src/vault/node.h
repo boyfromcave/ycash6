@@ -5,6 +5,8 @@
 #ifndef YCASH_VAULT_NODE_H
 #define YCASH_VAULT_NODE_H
 
+#include "coins.h"
+#include "txmempool.h"
 #include "vault/db.h"
 #include "vault/state.h"
 
@@ -69,6 +71,14 @@ bool HasTemplateInput(const CTransaction& tx, const CCoinsViewCache& view);
  *  coin, or an input spending an indexed member bond? Inputs are read from `view`. */
 bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
 
+/** Re-run the script of every template input of `tx` at `height` against `snapshot` (inputs from
+ *  `view`): OP_CHECKSETSIG (current members) and OP_CHECKSETDORMANT (dormancy, wind-down) read set
+ *  state, which a tip change moves. nullopt when every template input verifies. Used by
+ *  RecheckMempool and, on 6.20.0, by the miner, whose template check (CheckAs::BlockTemplate)
+ *  skips scripts. */
+std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
+                                                  const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params);
+
 /** After a tip change (ConnectTip, DisconnectTip): re-run CheckTx for `nextHeight` on every
  *  mempool transaction that touches the primitive, and the scripts of its template inputs
  *  against the new snapshot, and evict failures (set state, I-2 age, membership and dormancy
@@ -76,6 +86,34 @@ bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
  *  just dropped `nextHeight` below activation, evicts every transaction that spends or
  *  creates a template output; otherwise a no-op before activation. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
+
+/**
+ * The miner's view of the vault rules for one block template (plan §15.6 "Miner"; 6.20.0's
+ * BlockAssembler). A running copy of the set state over the database; coins from the tip and
+ * the mempool (a mempool coin is an in-block parent there, read at the template's height). Try()
+ * applies a candidate's acts and template rules on a child overlay of the running state and
+ * re-runs its template inputs' scripts against the tip snapshot (the template check,
+ * CheckAs::BlockTemplate, skips scripts; v4.5.0's miner re-ran them per transaction); Commit()
+ * merges the last successful trial once nothing else can refuse the candidate. Requires cs_main
+ * and pool.cs for its lifetime.
+ */
+class TemplateRun
+{
+public:
+    TemplateRun(const VaultDB& db, CCoinsView* tip, CTxMemPool& pool, int height, const Consensus::Params& params);
+    std::optional<std::string> Try(const CTransaction& tx);
+    void Commit();
+
+private:
+    VaultState running;
+    CCoinsViewMemPool memView;
+    CCoinsViewCache view;
+    ViewCoinAccessor coins;
+    std::shared_ptr<const SetSnapshot> snapshot;
+    int height;
+    const Consensus::Params& params;
+    std::optional<VaultState> trial;
+};
 
 /** Start-up reconciliation (U-18): disconnect the database back to chainActive using its own
  *  undo, then replay chainActive's blocks from disk up to the tip. False with `err` set when

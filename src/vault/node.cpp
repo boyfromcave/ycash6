@@ -150,9 +150,8 @@ bool TouchesTemplate(const CTransaction& tx, const CCoinsViewCache& view)
     return false;
 }
 
-/** Re-run the script of every template input of `tx` at `height` against `snapshot`:
- *  OP_CHECKSETSIG (current members) and OP_CHECKSETDORMANT (dormancy, wind-down) read set
- *  state, which a tip change moves. */
+} // namespace
+
 std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
                                                   const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
 {
@@ -184,8 +183,6 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
     }
     return std::nullopt;
 }
-
-} // namespace
 
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params)
 {
@@ -224,6 +221,31 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
         std::list<CTransaction> removed;
         pool.remove(tx, removed, true);
     }
+}
+
+TemplateRun::TemplateRun(const VaultDB& db, CCoinsView* tip, CTxMemPool& pool, int heightIn, const Consensus::Params& paramsIn)
+    : running(db), memView(tip, pool), view(&memView), coins(view, heightIn),
+      snapshot(std::make_shared<const SetSnapshot>(db)), height(heightIn), params(paramsIn)
+{
+}
+
+std::optional<std::string> TemplateRun::Try(const CTransaction& tx)
+{
+    trial.emplace(running);
+    std::optional<std::string> bad = trial->ApplyTx(tx, height, coins);
+    if (!bad) bad = RecheckTemplateScripts(tx, view, height, snapshot, params);
+    if (bad) trial.reset();
+    return bad;
+}
+
+void TemplateRun::Commit()
+{
+    if (!trial) return;
+    for (const auto& change : trial->Changes()) {
+        if (change.second) running.Put(change.first, *change.second);
+        else running.Erase(change.first);
+    }
+    trial.reset();
 }
 
 bool Reconcile(const CChainParams& chainparams, std::string& err)
