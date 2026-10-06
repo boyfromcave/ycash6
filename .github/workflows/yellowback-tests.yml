@@ -573,7 +573,7 @@ jobs:
         # developers"; an upstream file the fork modifies that has a copyright block carries a
         # Ycash line too; no existing copyright line is ever removed. Naming: the software is
         # Ycash (no "ycash6" in src/), and no DigiDollar/ydollar naming enters the code
-        # (AGENTS.md rule 6; DigiDollar is allowed in comments that cite the upstream file).
+        # (AGENTS.md rule 6; in code DigiDollar is allowed only in comments that cite the upstream file).
         if: ${{ !cancelled() }}
         run: |
           rc=0
@@ -591,7 +591,8 @@ jobs:
           added=$(git diff "$base" HEAD -- src qa contrib doc | grep -E '^\+[^+]' || true)
           hits=$(printf '%s\n' "$added" | grep -E 'ydollar|YDollar|\byd_' || true)
           [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; rc=1; }
-          hits=$(printf '%s\n' "$added" | grep -E -i 'digidollar' | grep -vE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
+          # Code only (doc/ prose may name the retired `feature/digidollar` branch).
+          hits=$(git diff "$base" HEAD -- src qa contrib | grep -E '^\+[^+]' | grep -E -i 'digidollar' | grep -vE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
           [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
           exit $rc
 
