@@ -763,6 +763,11 @@ class Walk:
 
         # the guardians fall silent: the owner recovers every lock
         self.bridge("silence")
+        # a heartbeat the daemon sent before it saw the silence may still be in the mempool: mine it first,
+        # so the last act (and the dormancy height computed from it) is final
+        time.sleep(3)
+        for txid in self.node(USER).getrawmempool(): self.wait_mempool(txid)
+        self.mine(1)
         info = self.node(USER).set_getinfo(sid)
         live_until = max(m["lastact"] for m in info["memberlist"]) + info["livenesswindow"]
         self.note("the daemon stops heartbeating; the set is DORMANT once no current member acted in livenessWindow (%d) -> height %d"
