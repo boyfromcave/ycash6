@@ -96,6 +96,9 @@ class WifTests(unittest.TestCase):
 
 
 class MintLayoutTests(unittest.TestCase):
+    def setUp(self):
+        yu.ATTESTOR_SET[0] = ym.TEST_SET          # what activate() records (U-22)
+
     def build(self, fee_addr):
         node = FakeNode([utxo(b'a', 0, 30), utxo(b'b', 1, 5), utxo(b'tok', 0, 0.0001),
                          utxo(b'vault', 0, 20, ym.p2sh_script(b'\x51'))])
@@ -112,7 +115,8 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual(len(tx.vout), 5)
         lock_height, claim_height = 190 + 48, 190 + 48 + yu.GRACE
         self.assertEqual(tx.vout[0].value, collateral)
-        self.assertEqual(tx.vout[0].script, ym.p2sh_script(ym.vault_script(lock_height, node.pubkey, claim_height)))
+        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), node.pubkey, lock_height))   # U-23: the V
+        self.assertTrue(ym.is_yed_vault(tx.vout[0].script))
         self.assertEqual(tx.vout[1].value, yu.TOKEN_VALUE)
         self.assertEqual(tx.vout[1].script, ym.p2pkh_script(ym.hash160(node.pubkey)))
         self.assertEqual(tx.vout[2].value, 0)
@@ -157,10 +161,11 @@ class MintLayoutTests(unittest.TestCase):
 
 class VaultSpendTests(unittest.TestCase):
     def setUp(self):
+        yu.ATTESTOR_SET[0] = ym.TEST_SET
         self.node = FakeNode([utxo(b'a', 0, 30)], height=300)
         hex_, owner = yu.build_mint_tx(self.node, 10_000, 48, 190, 20 * COIN)
         self.vault = yu.vault_from_mint(hex_, 48, 190, owner)
-        self.script = ym.vault_script(self.vault['lockHeight'], self.node.pubkey, self.vault['claimHeight'])
+        self.script = ym.yed_vault_script(yu.yed_params(), self.node.pubkey, self.vault['lockHeight'])
 
     def _key(self):
         try:
@@ -183,10 +188,9 @@ class VaultSpendTests(unittest.TestCase):
         self.assertEqual(tx.nLockTime, self.vault['lockHeight'])
         self.assertEqual(tx.nExpiryHeight, 298 + yu.REF_WINDOW)
         pushes = ym.parse_pushes(tx.vin[0].scriptSig)
-        self.assertEqual(len(pushes), 3)
-        sig, selector, script = pushes
-        self.assertEqual(script, self.script)
-        self.assertEqual(ym.spend_path(tx.vin[0].scriptSig), 'owner')
+        self.assertEqual(len(pushes), 2)                     # U-23: <sig> OP_2
+        sig, selector = pushes
+        self.assertEqual(ym.selector_of(tx.vin[0].scriptSig), ym.SEL_OWNER)
         self.assertEqual(sig[-1], SIGHASH_ALL)
         sighash = SignatureHash(CScript(self.script), tx, 0, SIGHASH_ALL, 20 * COIN, yu.SIGNING_BRANCH_ID)[0]
         k = CECKey()
@@ -212,7 +216,7 @@ class VaultSpendTests(unittest.TestCase):
                                         owner_wif=yu.secret_to_wif(self.node.secret))
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(tx.expiry_height, 0)
-        self.assertEqual(ym.spend_path(tx.vin[0].script_sig), 'owner')
+        self.assertEqual(ym.selector_of(tx.vin[0].script_sig), ym.SEL_OWNER)
 
     def test_claim_path_is_unsigned_and_uses_claim_height(self):
         # Rule: RED-4
@@ -222,21 +226,25 @@ class VaultSpendTests(unittest.TestCase):
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(tx.lock_time, self.vault['claimHeight'])
         self.assertEqual(tx.expiry_height, 298 + yu.REF_WINDOW)
-        self.assertEqual([i.sequence for i in tx.vin], [0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF])
-        self.assertEqual(tx.vin[0].script_sig, bytes([ym.OP_0]) + ym.push(self.script))
-        self.assertEqual(ym.spend_path(tx.vin[0].script_sig), 'claim')
-        self.assertEqual([(i.prev_txid, i.prev_n) for i in tx.vin[1:]], [(self.vault['txid'], 1), (self.vault['txid'], 5)])
-        self.assertEqual(len(tx.vout), 3)
-        self.assertEqual(tx.vout[0].value, 20 * COIN + 2 * yu.TOKEN_VALUE - yu.YELLOWBACK_FEE - 3 * yu.FEE_MIN)
+        # U-23: OP_4; the whole collateral in the claimant's intent; the fee and the network fee from a wallet input
+        self.assertEqual([i.sequence for i in tx.vin], [0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF])
+        self.assertEqual(tx.vin[0].script_sig, bytes([ym.OP_4]))
+        self.assertEqual(ym.selector_of(tx.vin[0].script_sig), ym.SEL_APP)
+        self.assertEqual([(i.prev_txid, i.prev_n) for i in tx.vin[1:3]], [(self.vault['txid'], 1), (self.vault['txid'], 5)])
+        self.assertEqual(len(tx.vout), 4)
+        self.assertEqual(tx.vout[0].value, 20 * COIN)
+        f = ym.yed_intent_fields(tx.vout[0].script)
+        self.assertIsNotNone(f)
+        self.assertEqual(f[2], ym.sha256(self.script))                                       # vaultHash
         self.assertEqual(tx.vout[1].value, 3 * yu.FEE_MIN)
         self.assertEqual(tx.vout[1].script, ym.p2pkh_script(ym.address_key_hash(yu.address_of(yu.POOL_WIFS[2]))))
         self.assertEqual(ym.script_single_push(tx.vout[2].script), payload)
-        self.assertEqual(len(self.node.signed), 2)   # the mint, then the burn inputs of the spend
+        self.assertEqual(len(self.node.signed), 2)   # the mint, then the burn and fee inputs of the spend
 
     def test_selector_override(self):
-        # Rule: RED-4 (K4: CastToBool selectors)
+        # Rule: RED-1 (U-23: the selector is the exact last op; an override is how a test builds a bad one)
         hex_ = yu.build_vault_spend_raw(self.node, self.vault, 'claim', [], selector=b'\x01\x80', expiry=0)
-        self.assertEqual(ym.spend_path(ym.tx_from_hex(hex_).vin[0].script_sig), 'claim')
+        self.assertIsNone(ym.selector_of(ym.tx_from_hex(hex_).vin[0].script_sig))
 
 
 class RoundRobinTests(unittest.TestCase):
@@ -277,32 +285,32 @@ class RoundRobinTests(unittest.TestCase):
 
 class ArgsTests(unittest.TestCase):
     def test_node_args(self):
+        yu.ATTESTOR_SET[0] = None
         args = yu.yellowback_node_args()
-        self.assertEqual(len([a for a in args if a.startswith('-nuparams=')]), 4)   # + 2 from start_node = 6
+        self.assertEqual(len([a for a in args if a.startswith('-nuparams=')]), 5)   # + 2 from start_node = 7
         self.assertIn('-nuparams=19bd2d2f:1', args)
-        self.assertEqual(args[-4:], ['-experimentalfeatures', '-yellowback', '-yellowbackstartheight=1', '-yellowbacksigmaref=0'])
-        self.assertNotIn('-yellowback', yu.yellowback_node_args(yellowback=False))
-        self.assertNotIn('-yellowbacksigmaref=0', yu.yellowback_node_args(sigma_ref=None))
+        self.assertEqual(args[-1], '-nuparams=6d5b7a31:%d' % yu.VAULT_ACTIVATION)   # the vault upgrade on every node
+        self.assertFalse(any(a.startswith('-yellowbackattestorset') for a in args))  # no set yet: not live
+        args = yu.yellowback_node_args(attestor_set='ab' * 32)
+        self.assertEqual(args[-2:], ['-yellowbackattestorset=' + 'ab' * 32, '-yellowbacksigmaref=0'])
+        self.assertFalse(any(a.startswith('-yellowbackattestorset') for a in yu.yellowback_node_args(yellowback=False, attestor_set='ab' * 32)))
+        self.assertNotIn('-yellowbacksigmaref=0', yu.yellowback_node_args(sigma_ref=None, attestor_set='ab' * 32))
         p = yu.pool_args('smX', ['-debug=yellowback'])
         self.assertIn('-yellowbackpayoutaddress=smX', p)
-        self.assertIn('-yellowbacksignal=1', p)
         self.assertEqual(p[-1], '-debug=yellowback')
-        self.assertIn('-yellowbackenforce=0', yu.observer_args())
+        self.assertFalse(any('enforce' in a or 'signal' in a for a in yu.observer_args() + p))   # retired (U-21)
 
     def test_constants_match_model(self):
         p = ym.Params.regtest(1)
         self.assertEqual((p.p_fast_window, p.p_mid_window, p.p_slow_window), (yu.P_FAST_WINDOW, yu.P_MID_WINDOW, yu.P_SLOW_WINDOW))
         self.assertEqual((p.min_fill_fast, p.min_fill_mid, p.min_fill_slow), yu.MIN_FILL)
-        self.assertEqual((p.signal_window, p.activation_threshold, p.participation_floor, p.activation_delay),
-                         (yu.SIGNAL_WINDOW, yu.ACTIVATION_THRESHOLD, yu.PARTICIPATION_FLOOR, yu.ACTIVATION_DELAY))
-        self.assertEqual((p.enforcement_floor, p.enforcement_resume, p.valve_blocks, p.abandon_blocks),
-                         (yu.ENFORCEMENT_FLOOR, yu.ENFORCEMENT_RESUME, yu.VALVE_BLOCKS, yu.ABANDON_BLOCKS))
+        self.assertEqual(p.claim_delay, yu.CLAIM_DELAY)
         self.assertEqual((p.grace, p.payee_window, p.fee_min, p.fee_bps, p.ref_window, p.ref_lag),
                          (yu.GRACE, yu.PAYEE_WINDOW, yu.FEE_MIN, yu.FEE_BPS, yu.REF_WINDOW, yu.REF_LAG))
         self.assertEqual((p.token_value, p.yellowback_fee, p.min_mint, p.max_mint), (yu.TOKEN_VALUE, yu.YELLOWBACK_FEE, yu.MIN_MINT, yu.MAX_MINT))
         for i, name in enumerate('ABC'):
             self.assertEqual((p.class_min[i], p.class_max[i], p.base_ratio_bps[i]), yu.CLASS_RANGES[name])
-        self.assertEqual(yu.ACTIVATION_BLOCKS, 129)
+        self.assertEqual(yu.ACTIVATION_BLOCKS, 70)
 
     def test_usd_to_micro(self):
         self.assertEqual(yu.usd_to_micro('0.05'), 50_000)

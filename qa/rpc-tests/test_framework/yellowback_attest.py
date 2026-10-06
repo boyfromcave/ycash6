@@ -616,9 +616,9 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
         assert term_class is not None, 'lock_blocks %d is outside every class' % lock_blocks
     class_index = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
     lock_height = ref_height + lock_blocks
-    vault = ym.vault_script(lock_height, owner, lock_height + GRACE)
+    vault = ym.yed_vault_script(yu.yed_params(), owner, lock_height)     # the YED V template (U-23)
     vout = [
-        (collateral_zat, ym.p2sh_script(vault)),
+        (collateral_zat, vault),
         (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner))),
         None,   # the payload, once the vout indices are known
     ]
