@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+    # Ycash (2026-10-06): scoped to upstream zcashd's own branch. This fork has no `master` PRs;
+    # on every other PR this matrix (about 30 jobs over Linux, macOS, Windows) built and uploaded
+    # `zcashd` artifacts, which Ycash does not produce (src/ycashd), so it burned minutes and
+    # failed on naming that is not ours. The node lines' CI is yellowback-tests.yml.
+    branches: master
     # Any update here needs to be done for `push` (see below), and mirrored into
     # `ci-skip.yml`.
     paths-ignore:

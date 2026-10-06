@@ -1,7 +1,15 @@
 name: Lints
 
 # We only run these lints on trial-merges of PRs to reduce noise.
-on: pull_request
+on:
+  pull_request:
+    # Ycash (2026-10-06): scoped to upstream zcashd's own branch. This fork has no `master` PRs;
+    # upstream's lint scripts (scripted diffs, cargo patches, include guards, shellcheck of
+    # upstream's tree) judge upstream conventions this fork deliberately departs from (the Cargo
+    # [patch] to Ycash's librustzcash fork), and its clippy action (actions-rs) no longer runs. The Yellowback
+    # lint is yellowback-tests.yml's `lint` and `python` jobs.
+    branches: master
+
 
 jobs:
   commit-script-check:

@@ -1,0 +1,12 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The Python packages the Yellowback CI installs (.github/workflows/yellowback-tests.yml through
+# .github/actions/yellowback-prereqs). Pinned so a run is reproducible and so setup-python's pip
+# cache is keyed on this file. pyblake2 is not here: it is unmaintained, and the action writes a
+# one-line shim over hashlib.blake2b (same API) instead. The versions are the workspace venv's,
+# which is where the suites are proven.
+simplejson==4.1.2
+pyzmq==27.2.0
+pyflakes==3.4.0

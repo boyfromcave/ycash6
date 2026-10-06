@@ -1,0 +1,26 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# zizmor configuration. The Ycash workflows (yellowback-tests.yml, yellowback-release.yml and the
+# actions under .github/actions/) are kept zizmor-clean with no entry here. The entries below are
+# the upstream zcashd workflows and dependabot file, which this fork keeps byte-for-byte except for
+# a trigger/if scoping (each file's "Ycash (2026-10-06)" note): ci.yml, ci-skip.yml, lints.yml and
+# audits.yml run only for upstream's `master` (no fork branch is ever PR'd into it) and
+# release-docker-hub.yml only in zcash/*; ci-status.yml follows ci.yml and book.yml only pushes to
+# master. Their findings are upstream's, recorded here rather than rewritten.
+rules:
+  unpinned-uses:
+    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
+  dangerous-triggers:
+    ignore: [ci-skip.yml, ci-status.yml]
+  template-injection:
+    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
+  archived-uses:
+    ignore: [lints.yml]
+  artipacked:
+    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
+  excessive-permissions:
+    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
+  dependabot-cooldown:
+    ignore: [dependabot.yml]

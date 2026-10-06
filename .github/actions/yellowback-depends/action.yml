@@ -1,0 +1,88 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The node's build inputs for every Yellowback CI job that compiles ycashd: the depends tree, the
+# cargo home that the offline Rust build reads git dependencies from, and the cargo target/.
+#
+# Why each key is what it is (2026-10-06):
+# - depends: its install step also VENDORS the Rust crates into depends/<host>/vendored-sources
+#   (depends/Makefile, `cargo vendor --locked --manifest-path ../Cargo.toml`), so the tree is a
+#   function of depends/** AND Cargo.lock/Cargo.toml. The key before this action hashed only
+#   depends/; a Cargo.lock change (the librustzcash6 repoint on upgrade/vault) then restored a
+#   vendored set without the new crates and the --offline build could not resolve them.
+# - cargo home: the vendored directory replaces crates-io only (.cargo/config.toml.offline); the
+#   [patch.crates-io] zcash_* crates come from git (Cargo.toml), and an --offline build reads those
+#   from ~/.cargo/git, which `cargo vendor` fills as a side effect. On a depends cache hit nothing
+#   filled it, so the build failed with "can't checkout ... you are in the offline mode" (reproduced
+#   locally with an empty CARGO_HOME). Keyed on Cargo.lock (it pins the git rev); on a miss the
+#   step below fetches with depends' own cargo.
+# - target/: the Rust half is the long pole of a cold ycash6 build. Keyed on the toolchain (the
+#   depends Rust pin and rust-toolchain.toml) and Cargo.lock; restoring an older lock's target under
+#   the same toolchain is safe (cargo fingerprints every unit and rebuilds what changed), a
+#   different toolchain is never restored (it would rebuild everything and only bloat the cache).
+#   Only the push-tier build job saves it (save-target: true); variant builds restore it.
+name: Yellowback node build inputs
+description: depends tree, cargo home and cargo target caches for the ycashd build
+inputs:
+  save-target:
+    description: Save target/ after the job when the key missed (true/false)
+    default: 'false'
+  build-depends:
+    description: Build depends when the cache missed (true/false)
+    default: 'true'
+outputs:
+  depends-hit:
+    description: Whether the depends cache hit
+    value: ${{ steps.depends.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Cache depends
+      id: depends
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          depends/x86_64-pc-linux-gnu
+          depends/built
+          depends/sources
+        key: depends-${{ runner.os }}-${{ hashFiles('depends/**', 'Cargo.lock', 'Cargo.toml') }}
+    - name: Cache the cargo home (git dependencies for the offline build)
+      id: cargo-home
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        # ~/.cargo/git only: crates-io crates come from the vendored directory, so the registry
+        # download that `cargo fetch` also makes is not worth a cache entry.
+        path: ~/.cargo/git
+        key: cargo-home-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+    - name: Cache cargo target/ (saved by the push-tier build)
+      if: inputs.save-target == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: target
+        key: cargo-target-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'depends/packages/native_rust.mk') }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-target-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'depends/packages/native_rust.mk') }}-
+    - name: Restore cargo target/ (read-only)
+      if: inputs.save-target != 'true'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: target
+        key: cargo-target-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'depends/packages/native_rust.mk') }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-target-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'depends/packages/native_rust.mk') }}-
+    - name: Build depends
+      if: steps.depends.outputs.cache-hit != 'true' && inputs.build-depends == 'true'
+      shell: bash
+      run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
+    - name: Fetch the git dependencies into the cargo home
+      # depends' own cargo and rustc, never the runner's rustup (whose proxy would read
+      # rust-toolchain.toml and download a second toolchain). A no-op when depends was built in
+      # this job (cargo vendor fetched them).
+      if: steps.cargo-home.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        native=depends/x86_64-pc-linux-gnu/native/bin
+        test -x "$native/cargo" || { echo "no depends cargo at $native (depends not built)"; exit 1; }
+        RUSTC="$PWD/$native/rustc" "$native/cargo" fetch --locked --manifest-path Cargo.toml
+        ls ~/.cargo/git/checkouts
