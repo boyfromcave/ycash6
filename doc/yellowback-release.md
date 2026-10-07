@@ -27,14 +27,11 @@ fetching: 6.20.0 builds the Sapling parameters and the Sprout verifying key into
 release to be drafted. Tier 2 jobs may fail; their asset is then missing from the release.
 
 Every build runs `qa/yellowback-release-smoke.sh` on the packaged binaries: each binary's version
-banner must be `v<V>`, and a throwaway regtest node must start, answer `getnetworkinfo` and
-`yed_getinfo`, and stop. The Windows `.exe` files are run on windows-latest (version banners only).
-The 18.04 package's smoke test runs inside an `ubuntu:18.04` container, which also proves its glibc
-floor. **Open on this line:** the script still starts its node with the soft-fork line's flags
-(`-experimentalfeatures -yellowback -yellowbackstartheight=1`); here `-yellowbackstartheight` is an
-init error, and `yed_getinfo` exists only once the node runs the vault upgrade with a YED attestor
-set (`doc/yellowback.md`, *Configuration*). The node half of the smoke test has to follow that
-before a 6.22 release can pass it.
+banner must be `v<V>`, and a throwaway regtest node must start on the vault upgrade, create a YED
+attestor set, restart naming it (so Yellowback is live), answer `getnetworkinfo` and `yed_getinfo`
+(`rpcversion` 5, upgrade active), and stop. The Windows `.exe` files are run on windows-latest
+(version banners only). The 18.04 package's smoke test runs inside an `ubuntu:18.04` container,
+which also proves its glibc floor.
 
 There is **no separate mining-pool package** (see "Mining pools" below).
 
