@@ -36,7 +36,8 @@ that does not stops following the chain.
   a vault. Members who cheat lose their bond; a set whose members go silent is treated as gone.
   The upgrade is general-purpose: it knows nothing about dollars or Ethereum.
 - **Ycash Yellowback (YED)**, a dollar token built on vaults. Lock YEC in a vault to mint YED
-  (`1 YED = 1 US dollar`); return the YED to get the YEC back. If a vault's YEC becomes worth less
+  (`1 YED = 1 US dollar`); return the YED to get the YEC back (always, even if the attestors go silent: a
+  YED vault is only ever released by burning its YED). If a vault's YEC becomes worth less
   than the YED it backs, others can claim it; the claim waits as a pending release that
   Yellowback's signer set can cancel if it is wrong. The YEC/USD price comes from mining pools and
   from **attestors** (members of Yellowback's signer set who sign prices). YED moves in ordinary
