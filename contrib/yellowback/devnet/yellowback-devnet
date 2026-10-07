@@ -9,7 +9,7 @@ The plain devnet (`up`, today's behaviour) is eight nodes: node 0 the funded wal
 stock, nodes 2-4 quoting pools with fixed payout addresses, nodes 5-7 attestor nodes that
 register (10 YEC, 200 blocks) and arm the layer, each with a real `yellowback-attest attest`
 beside it and one `subscribe` beside node 0, all on the `dir` transport. `--no-attest` gives
-back the five-node v2 devnet.
+five nodes without attestors, never ARMED.
 
 `up --role {user,attestor,pool}` (docs/plans/role-based-regtest-plan.md) is the same chain
 with **one seat deliberately left unautomated** and the world kept moving around it: eleven
@@ -753,7 +753,7 @@ def up(args):
     if agents_wanted and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
     if attest and not os.access(ATTEST_AGENT, os.X_OK):
         sys.exit("yellowback-attest not found at %s\n  build it with: cd %s && cargo build --release\n"
-                 "  (or point YELLOWBACK_ATTEST_BIN at it, or run `up --no-attest` for the five-node v2 devnet)"
+                 "  (or point YELLOWBACK_ATTEST_BIN at it, or run `up --no-attest` for five nodes without attestors)"
                  % (ATTEST_AGENT, ATTEST_CRATE))
     if role != "none" and not args.no_sim and not os.access(SIM, os.X_OK): sys.exit("simulator not found at %s" % SIM)
     seed = args.seed if args.seed is not None else random.randrange(1, 10 ** 6)
@@ -1853,7 +1853,7 @@ def main():
         command = sub.add_parser(name, **kw); command.add_argument("--dir", default=DEFAULT_DIR); command.set_defaults(fn=fn); return command
     command = add("up", up); command.add_argument("--portseed", type=int, default=_default_portseed()); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
     command.add_argument("--agents", action="store_true", help="run one real yellowback-quote --mock-price per pool instead of yed_setquote from this script (always on under --role)")
-    command.add_argument("--no-attest", action="store_true", help="the five-node v2 devnet: no attestor nodes, no attest agents, never ARMED")
+    command.add_argument("--no-attest", action="store_true", help="five nodes: no attestor nodes, no attest agents, never ARMED")
     command.add_argument("--role", choices=sorted(ROLES), default="none", help="leave one seat empty for you: user (node 0), attestor (node 8) or pool (node 4); default none = the fully automated demo")
     command.add_argument("--seed", type=int, help="the personas' and the walk's random seed (printed; replay with the same value)")
     command.add_argument("--lean", action="store_true", help="a constrained machine: no price walk, heartbeat at half rate")

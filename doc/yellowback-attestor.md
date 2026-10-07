@@ -72,7 +72,7 @@ system; YED is the unit.
   the wallet holds — a few YEC of change is enough. Fees accrue to the bond key, which should be
   cold (below).
 - **No mining, no payout address, no `-yellowbackpayout…` flag**, and no pool membership. An
-  attestor node is a plain `ycashd -yellowback`.
+  attestor node is a plain upgraded `ycashd` on a network where Yellowback is live.
 - **No price of your own.** The agent aggregates public sources; the node never reads a socket
   for Yellowback. You choose sources, you do not type prices (`--mock-price` exists for regtest
   and demos only, and the agent refuses it when the node reports any other network unless
@@ -81,7 +81,7 @@ system; YED is the unit.
 ## What an attestor is
 
 An attestor is a party that has posted a **bond** (a long CLTV time-lock back to its own key,
-never custody, never burned) and runs the **attestor agent** `yellowback-attest`, which polls price
+never custody) as a member of the YED attestor set and runs the **attestor agent** `yellowback-attest`, which polls price
 sources, has the node sign a price every `k` blocks (`10` on mainnet) and gossips the 74-byte
 attestation. Minters and claimants carry those attestations into their transactions; the enforcing
 nodes verify the signatures, take a bond-weighted quantile and combine it with the mining pools'
@@ -89,20 +89,24 @@ medians (`pMint = min`, `pClaim = max`). An attestor is paid for attestations th
 confirmed mint or claim (`ATTEST_FEE_BPS`: half the pool fee on mainnet and testnet, a quarter on
 regtest, to `P2PKH(bondPubKey)`), never for attestations published.
 
-There is no slashing: the penalty for misbehaviour is ejection and a bond that earns nothing until
-it unlocks. That is sufficient because attestors can **grief but not extract** — no direction the
-price is pushed in pays them (proposal §10.3) — and it is why the bond can be your own coin.
+Equivocation is slashed. Two prices signed for one height by one attestor (EQV-1), or two
+conflicting set signatures by one member (`SET_EQUIVOCATION`), eject the member from the YED
+attestor set and **freeze its bond**: the vault primitive refuses every later spend of a frozen
+bond (`bad-vault-bond-frozen`), so the bond is lost even after its time-lock expires. The set can
+also remove a member with a burn (`SET_REMOVE`), which freezes the bond the same way. Every other
+misbehaviour costs ejection or dormancy and a bond that earns nothing until it unlocks; attestors
+can **grief but not extract** — no direction the price is pushed in pays them (proposal §10.3).
 
-What you need: a v3 `ycashd` with `-yellowback` (no payout address, no mining), outbound
-connectivity, a bond of at least `BOND_MIN` (20,000 YEC on mainnet) you can lock for at least
-`BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no domain, no
-funded hot wallet beyond the node's own for the rare `yed_revive`.
+What you need: an upgraded `ycashd` on a network where Yellowback is live (no payout address, no
+mining), outbound connectivity, a bond of at least `BOND_MIN` (20,000 YEC on mainnet) you can lock
+for at least `BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no
+domain, no funded hot wallet beyond the node's own for the rare `yed_revive`.
 
 ## Registration
 
 ```
-ycashd -yellowback                                  # any v3 node; no payout address, no mining
-ycash-cli yed_registerattestor 20000 420480 0       # once; then wait BOND_MATURITY
+ycashd                                              # any upgraded node; no payout address, no mining
+ycash-cli yed_registerattestor 20000 420480         # once (a SET_JOIN); then wait BOND_MATURITY
 yellowback-attest attest --conf attest.toml          # forever: polls, yed_signattestation, gossips
 ```
 

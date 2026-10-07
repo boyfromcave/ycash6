@@ -17,8 +17,8 @@ appetite is the term class):
 
   leveraged     class C (300 %, the longest terms): the first underwater on a downswing; never redeems early
   conservative  class A (500 %, short terms): the happy path; redeems at maturity
-  exiter        redeems the moment lockHeight passes; releases VOID vaults with yed_redeem;
-                runs yed_sweepcarriers as housekeeping
+  exiter        redeems the moment lockHeight passes; runs yed_sweepcarriers as
+                housekeeping
   trader        never mints: moves YED between its addresses (and to the liquidator) with
                 yed_send / yed_sendmany
   absentee      mints, then goes quiet: never redeems, never sweeps
@@ -173,7 +173,7 @@ class Persona(threading.Thread):
         return [row for row in rows if row["txid"] in mine]
 
     def redeem_matured(self):
-        """The owner path: redeem every own vault whose lockHeight has passed (and release VOID ones)."""
+        """The owner path: redeem every own vault whose lockHeight has passed (a VOID row, which this line never produces, is released the same way)."""
         done = 0
         for row in self.my_positions():
             if row["status"] in ("ACTIVE", "VOID") and row.get("canRedeem"):

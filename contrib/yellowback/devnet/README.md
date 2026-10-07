@@ -102,7 +102,7 @@ Six strategies, each with its own cadence and characteristic failure, seeded, on
 |---|---|---|
 | leveraged | class C mints, holds two, never redeems early | the first liquidated on a downswing |
 | conservative | class A mints, one at a time, redeems at maturity | the happy path |
-| exiter | redeems the moment `lockHeight` passes; releases VOID vaults; runs `yed_sweepcarriers` | `vault-locked`, `insufficient-yed` when the trader moved its YED |
+| exiter | redeems the moment `lockHeight` passes; runs `yed_sweepcarriers` | `vault-locked`, `insufficient-yed` when the trader moved its YED |
 | trader | never mints; `yed_send` / `yed_sendmany` between its addresses and to the liquidator | `insufficient-yec` on a wallet whose change is unconfirmed |
 | absentee | mints once, then nothing | an abandoned vault seen from outside |
 | liquidator | mints its own YED inventory; claims whatever `yed_listclaimable` lists; posts `yed_claimnotice` on a foreign vault under the emergency ratio near its claim height and claims after `EMERGENCY_PERSIST` | `claim-not-yet`, `notice-not-underwater`, `bundle-insufficient` |

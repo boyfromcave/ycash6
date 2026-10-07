@@ -375,8 +375,10 @@ v2's paragraph "price honesty rests on the honest-majority-hashpower assumption"
 > depth of the markets it is read from.
 ## Build and test baseline (ycashd 6.20.0)
 
-This is the ycashd 6.20.0 line (`ycash6`, branch `feature/yellowback`). The v4.5.0 line's build notes
-live in `ycash-dd`'s copy of this file. What the 6.20.0 pin needed before Yellowback could be measured
+This is the ycashd 6.20.0 line (`ycash6`), branch `upgrade/vault` (the vault upgrade). The v4.5.0
+line's build notes live in `ycash-dd`'s copy of this file. CI is the record of what passes:
+`.github/workflows/yellowback-tests.yml` runs the unit tests, the Yellowback functional scripts,
+the inherited `STOCK_BASELINE`, the fuzz and devnet jobs and the audit. What the 6.20.0 pin needed before Yellowback could be measured
 against it, and why, is recorded in [`yellowback-baseline.md`](yellowback-baseline.md); the port plan is
 `docs/plans/yellowback-ycash6-plan.md` in the workspace repository.
 
@@ -390,11 +392,11 @@ make -C src -j8 ycashd ycash-cli test/test_bitcoin         # incremental
 #   awk '/^CXXBRIDGE_H = /{f=1;next} f&&/^ *rust\/gen/{gsub(/[ \\]/,"");print;next} f{exit}' src/Makefile.am | xargs make -C src -j8
 
 # unit tests
-src/test/test_bitcoin --run_test='yellowback_*'
+src/test/test_bitcoin --run_test='yellowback_*,vault_*'
 # one functional script (the 6.20.0 harness reads ZCASHD, not BITCOIND)
 ZCASHD="$PWD/src/ycashd" ../.venv/bin/python -u qa/rpc-tests/yellowback_index.py --srcdir="$PWD/src" --tmpdir=/tmp/yb-index --portseed=11
-# the audit gates (frozen set and line budgets vs the tag ycash6-baseline)
-qa/yellowback-audit.sh
+# the audit gates vs the tag ycash6-baseline (report-only on this line: the consensus review gate replaces them)
+qa/yellowback-audit.sh --report-only
 ```
 
 Regtest runs all six Ycash upgrades at height 1, as on the v4.5.0 line: baseline fix 3 keeps regtest's
@@ -421,8 +423,8 @@ upstream-Zcash assumptions in the harness (branch ids, explicit fees above the 0
 addresses, caches, branding) or from intended Ycash policy. Three are defects in the pin (findings
 7–9), and the fee-error message bug is finding 10. None of them is fixed in this port; they are
 reported to miodragpop. The 42 entries that pass twice, including `zmq_test`, `invalidateblock` and
-`getblocktemplate_longpoll`, are the `STOCK_BASELINE` that CI runs against the fork binary without
-`-yellowback`. One operator note follows from finding 7: on 6.20.0, `-lightwalletd` must be run
+`getblocktemplate_longpoll`, are the `STOCK_BASELINE` that CI runs against the fork binary with no YED
+attestor set. One operator note follows from finding 7: on 6.20.0, `-lightwalletd` must be run
 together with `-insightexplorer`.
 
 ## Releases and continuity
