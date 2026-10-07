@@ -4,12 +4,13 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """Phase 5, nightly (plan section 6, Phase 5; N10, section 8.4 item 21): the fork binary without
-``-yellowback`` is v4.5.0.
+``-yellowback`` is stock ycashd 6.20.0.
 
 Two nodes run one scripted scenario -- roughly 300 blocks of mining, ordinary transactions, a
 reorg, ``getblocktemplate`` and ``getblock`` -- against each other:
 
-* node 0 is a **real ``ycash-legacy`` v4.5.0 build**, from ``--ref-ycashd`` or ``$REF_YCASHD``;
+* node 0 is a **real stock ycashd 6.20.0 build** (``ycash6-stock``), from ``--ref-ycashd`` or
+  ``$REF_YCASHD``;
 * node 1 is the fork binary started **without** ``-yellowback``.
 
 At every step the two must agree on ``getbestblockhash``, on
@@ -17,6 +18,14 @@ At every step the two must agree on ``getbestblockhash``, on
 the key set of ``getblocktemplate`` (minus the fields that are a function of the call's own clock
 and of the node's mempool).  Without ``--ref-ycashd`` the script still runs -- both nodes are then
 the fork binary without the flag, which is a weaker but non-empty check -- and says so.
+
+The vault upgrade (``-nuparams=6d5b7a31``) is scheduled here at ``--blocks`` - 30, after the
+transactions and the reorg: a stock 6.20.0 binary knows no such upgrade ("Invalid network upgrade")
+and cannot follow a chain past it (upgrade plan finding (37)), so the stock node runs without the
+parameter, every comparison with it is made below the activation height, and before the tail
+crosses the upgrade node 0 is restarted on the fork binary (same datadir) and the tail is compared
+fork against fork -- which the script says.  Without ``--ref-ycashd`` both nodes carry the upgrade
+from the start.
 
 The unguarded differences the fork does carry are listed in plan section 8.4 item 2: two
 includes, one lock acquisition, and an append of the (empty, without the flag) ``COINBASE_FLAGS``.
@@ -27,9 +36,13 @@ import os
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    VAULT_BRANCH_ID,
     assert_equal,
     connect_nodes_bi,
+    nuparams,
+    start_node,
     start_nodes,
+    stop_node,
     sync_blocks,
     sync_mempools,
 )
@@ -59,22 +72,32 @@ class YellowbackStockParityTest(BitcoinTestFramework):
 
     def add_options(self, parser):
         parser.add_option('--ref-ycashd', dest='ref_ycashd', default=os.getenv('REF_YCASHD') or None,
-                          help='a ycash-legacy v4.5.0 ycashd for node 0 (default: $REF_YCASHD)')
+                          help='a stock 6.20.0 ycashd (ycash6-stock) for node 0 (default: $REF_YCASHD)')
         parser.add_option('--blocks', dest='blocks', default=300, type='int',
                           help='scenario length in blocks (default 300)')
 
-    def setup_network(self, split=False):
-        ref = self.options.ref_ycashd
-        self.have_legacy = bool(ref)
-        if not self.have_legacy:
-            print('*** no --ref-ycashd / $REF_YCASHD: BOTH nodes are the fork binary without')
-            print('*** -yellowback.  The legacy half of this comparison was NOT run.')
+    def node_args(self, legacy):
+        """The fork binary without -yellowback, the vault upgrade at ``vault_at``; the stock binary
+        without the upgrade parameter (6.20.0 refuses an unknown branch id)."""
         # -txexpirydelta keeps a wallet transaction alive across this scenario's fast mining
         # (a transaction that expires and is re-relayed costs the sender Ycash's own tx-expired
         # DoS 10), and -whitelist stops either node scoring the other at all: this script must
         # compare the two binaries, not stock DoS behaviour.
         extra = ['-txexpirydelta=200', '-whitelist=127.0.0.1']
-        args = [yellowback_node_args(list(extra), yellowback=False) for _ in range(2)]
+        args = [a for a in yellowback_node_args(list(extra), yellowback=False)
+                if not a.startswith(nuparams(VAULT_BRANCH_ID, 0)[:-1])]
+        return args if legacy else args + [nuparams(VAULT_BRANCH_ID, self.vault_at)]
+
+    def setup_network(self, split=False):
+        ref = self.options.ref_ycashd
+        self.have_legacy = bool(ref)
+        self.legacy_running = self.have_legacy
+        self.vault_at = int(self.options.blocks) - 30
+        assert self.vault_at > int(self.options.blocks) - 38, 'the reorg must stay below the vault upgrade'
+        if not self.have_legacy:
+            print('*** no --ref-ycashd / $REF_YCASHD: BOTH nodes are the fork binary without')
+            print('*** -yellowback.  The legacy half of this comparison was NOT run.')
+        args = [self.node_args(self.have_legacy), self.node_args(False)]
         self.nodes = start_nodes(2, self.options.tmpdir, extra_args=args, binary=[ref, None])
         connect_nodes_bi(self.nodes, 0, 1)
         self.is_network_split = False
@@ -87,6 +110,10 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         self.steps += 1
         a, b = self.nodes[LEGACY], self.nodes[FORK]
         sync_blocks([a, b])
+        if self.legacy_running:
+            # finding (37): the stock binary is compared below the vault upgrade only (the template
+            # compared is the next block's)
+            assert a.getblockcount() + (1 if template else 0) < self.vault_at, (label, a.getblockcount(), self.vault_at)
         assert_equal((label, a.getbestblockhash()), (label, b.getbestblockhash()))
         ua, ub = a.gettxoutsetinfo(), b.gettxoutsetinfo()
         assert_equal((label, ua['hash_serialized']), (label, ub['hash_serialized']))
@@ -162,15 +189,28 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         sync_blocks([a, b])
         self.compare('after reconsiderblock')
 
-        print('4. the tail, mined by the fork binary alone')
+        if self.legacy_running:
+            print('*** the legacy half ends at %d, below the vault upgrade at %d (a stock 6.20.0 binary cannot follow it,'
+                  % (a.getblockcount(), self.vault_at))
+            print('*** finding 37): node 0 restarts on the fork binary for the tail')
+            stop_node(a, LEGACY)
+            self.nodes[LEGACY] = a = start_node(LEGACY, self.options.tmpdir, self.node_args(False))
+            self.legacy_running = False
+            connect_nodes_bi(self.nodes, 0, 1)
+            sync_blocks([a, b])
+            self.compare('node 0 on the fork binary')
+
+        print('4. the tail across the vault upgrade at %d, mined by the fork binary alone' % self.vault_at)
         while a.getblockcount() < total:
             b.generate(1)
             sync_blocks([a, b])
         self.compare('final')
 
+        assert_equal(a.getblockchaininfo()['upgrades']['6d5b7a31']['status'], 'active')
         print('%d blocks, %d comparison points, all equal%s'
               % (a.getblockcount(), self.steps,
-                 '' if self.have_legacy else ' (fork-vs-fork: the legacy half was NOT run)'))
+                 ' (stock-vs-fork below the vault upgrade, fork-vs-fork across it)' if self.have_legacy
+                 else ' (fork-vs-fork: the legacy half was NOT run)'))
         if not self.have_legacy:
             print('*** REPORT THIS AS "legacy half not run" ***')
 
