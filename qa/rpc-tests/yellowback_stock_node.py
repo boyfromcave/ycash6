@@ -7,10 +7,15 @@
 
 Node 1 of the standard topology runs without the YED attestor set, so Yellowback is not live on it
 (U-22; it does run the vault upgrade, a consensus parameter every node shares) -- and with
-``--stock-binary`` / ``$REF_YCASHD`` it is a real ``ycash-legacy`` v4.5.0 binary (P9; such a binary
-cannot follow a chain past the vault upgrade, so that variant ends at the upgrade height).  This script asserts that such a
-node has no ``yed_*`` command, that its ``getblocktemplate`` is v4.5.0's key for key with no
-``yellowback`` object and the v4.5.0 ``mutable`` list, and that it mines and relays normally
+``--stock-binary`` / ``$REF_YCASHD`` it is a real stock ycashd 6.20.0 binary (P9; the ``ycash6-stock``
+build).  Such a binary knows no vault upgrade (it refuses ``-nuparams=6d5b7a31``: "Invalid network
+upgrade") and cannot follow a chain past it (upgrade plan finding (37)), so with one the reference
+half runs below the upgrade only: the chain stops at ``VAULT_ACTIVATION - 1``, the stock node is
+checked there (no ``yed_*``, the stock template, its own block and a pool's block followed both
+ways), and node 1 is then restarted on the fork binary without ``-yellowback`` for the rest of the
+script, which says so.  This script asserts that such a node has no ``yed_*`` command, that its
+``getblocktemplate`` is the stock key set with no ``yellowback`` object and the stock ``mutable``
+list, and that it mines and relays normally
 through the whole Yellowback lifecycle: before activation, across activation, through a mint, a
 correct redemption of its own making, and a rule-breaking block every Yellowback node rejects as
 invalid (DoS 100 since the vault upgrade, U-21: the peers disconnect it), after which it is brought
@@ -18,7 +23,7 @@ back (invalidateblock, a restart) and follows the valid chain.
 """
 
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import assert_equal, sync_blocks
+from test_framework.util import VAULT_BRANCH_ID, assert_equal, nuparams, sync_blocks
 from test_framework.yellowback_util import (
     ENFORCING,
     OBSERVER,
@@ -26,6 +31,7 @@ from test_framework.yellowback_util import (
     REF_LAG,
     STOCK,
     USER,
+    VAULT_ACTIVATION,
     YellowbackTestFramework,
     assert_banscore_zero,
     assert_best_hash,
@@ -53,10 +59,30 @@ LOCK = 48
 
 class YellowbackStockNodeTest(YellowbackTestFramework):
     initial_blocks = 101
-    reference_binary_opt_in = True     # node 1 may be $REF_YCASHD (the nightly's stock-binary step)
+    legacy_done = False       # the reference half (a REF_YCASHD binary on node 1) has run and node 1 is the fork binary
+    reference_binary_opt_in = True     # node 1 runs $REF_YCASHD below VAULT_ACTIVATION (node_args strips the vault -nuparams)
+
+    def legacy(self):
+        """A reference binary on node 1 that has not yet been swapped for the fork binary."""
+        return bool(super().stock_binary()) and not self.legacy_done
+
+    def stock_binary(self):
+        return None if self.legacy_done else super().stock_binary()
 
     def node_args(self, i, extra=None):
-        return super().node_args(i, ['-debug=yellowback'] + list(extra or []))
+        args = super().node_args(i, ['-debug=yellowback'] + list(extra or []))
+        if i == STOCK and self.legacy():
+            args = [a for a in args if a != nuparams(VAULT_BRANCH_ID, VAULT_ACTIVATION)]     # stock 6.20.0 has no such upgrade
+        return args
+
+    def setup_network(self, split=False):
+        if self.legacy():
+            # the reference half stays below the vault upgrade: no attestor set yet (create_attestor_set
+            # mines to VAULT_ACTIVATION), and the chain starts two blocks lower so node 1 and a pool each
+            # mine one block before VAULT_ACTIVATION - 1
+            self.auto_attestor_set = False
+            self.initial_blocks = VAULT_ACTIVATION - 4
+        super().setup_network(split)
 
 # Rule: BLK-1
 # Rule: BLK-2
@@ -64,6 +90,9 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
     def run_test(self):
         stock = self.nodes[STOCK]
         print('node 1 binary: %s' % (self.stock_binary() or 'the fork binary without -yellowback'))
+        if self.legacy():
+            self.reference_below_the_upgrade()
+            stock = self.nodes[STOCK]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
 
@@ -84,6 +113,30 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         assert_banscore_zero(self.nodes)
 
     # ------------------------------------------------------------------ cases
+
+    def reference_below_the_upgrade(self):
+        """The REF_YCASHD half: the stock 6.20.0 binary up to VAULT_ACTIVATION - 1, then node 1 on the
+        fork binary and the attestor set (the rest of the script runs as without a reference binary)."""
+        stock = self.nodes[STOCK]
+        print('reference binary below the vault upgrade (tip %d, the upgrade at %d)' % (stock.getblockcount(), VAULT_ACTIVATION))
+        assert '6d5b7a31' not in stock.getblockchaininfo().get('upgrades', {})
+        self.no_yed_commands(stock)
+        self.gbt_is_v450(stock)
+        for miner in (STOCK, POOLS[0], STOCK):
+            h = self.nodes[miner].generate(1)[0]
+            self.sync_all(blocks_only=True)
+            assert_best_hash(self.nodes, 'reference half, node %d mined' % miner)
+            for node in self.nodes:
+                assert_equal(node.getblock(h)['confirmations'], 1)
+        assert_equal(stock.getblockcount(), VAULT_ACTIVATION - 1)
+        self.gbt_is_v450(stock)
+        assert_banscore_zero(self.nodes)
+        print('*** the reference half ends at %d: a stock 6.20.0 binary cannot follow the vault upgrade (finding 37); '
+              'node 1 is the fork binary without -yellowback from here' % (VAULT_ACTIVATION - 1))
+        self.legacy_done = True
+        self.restart(STOCK)
+        self.sync_all(blocks_only=True)
+        self.create_attestor_set()
 
     def no_yed_commands(self, stock):
         """``help`` lists no ``yed_`` command and calling one is a plain 'Method not found'."""
