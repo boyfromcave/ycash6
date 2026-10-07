@@ -109,9 +109,13 @@ env:
   CHAINVIZ_REPO: boyfromcave/chain-viz
   CHAINVIZ_COMMIT: 4b010df9785a8bc181bd45e10087704cc2b121fd
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
-  # and the Go toolchain it builds with, verified against go.dev's published sha256.
+  # and the Go toolchain it builds with, verified against go.dev's published sha256. The pin must
+  # know this node line's yed rpcversion (common/yellowback.go KnownRPCVersion): the hardening line
+  # speaks 4 (H3-c), so the pin is lightwalletd's harden/yellowback (KnownRPCVersion = 4). At the
+  # v3 pin f84ed92 (KnownRPCVersion = 3) the server's probe refused the node and never registered
+  # YellowbackStreamer, and the devnet suite failed with "unknown service" (nightly 2026-10-07).
   LWD_REPO: boyfromcave/lightwalletd
-  LWD_COMMIT: f84ed92eab522a466bc0b85df7f1abdf493c872c
+  LWD_COMMIT: d1736b487118a768d15c2bf3d0743df32d3d5740
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
