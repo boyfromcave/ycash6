@@ -28,7 +28,7 @@ coverage floors, fuzz). *Refreshed 2026-10-01 (audit B-7/I-11):* every CI job is
 (`8185cba3a`), the repository default branch is `feature/yellowback` so the scheduled jobs fire
 from the branch that carries them, and the plan records the last seven `yellowback-tests.yml`
 runs on `boyfromcave/ycash6` green (push-triggered jobs; §4.4). The §4 demonstration has a
-transcript-producing script (`yellowback_demo_v6.py`); its run of record is in §8. Phase 7 compatibility has been verified for lightwalletd-dd, yolo, chain-viz
+transcript-producing script (`yellowback_demo_v6.py`); its run of record (re-run on the vault upgrade line, 2026-10-07) is in §8. Phase 7 compatibility has been verified for lightwalletd-dd, yolo, chain-viz
 and YEW against 6.20.0 on their own branches (§4.5); none of those branches is merged. §7 lists what
 this document does **not** claim.
 
@@ -696,7 +696,7 @@ this revision.
 | `attest`, `attest_wallet`, `claim`, `framework_smoke`, `hardening`, `lifecycle`, `mining`, `pricefeed`, `quote`, `rpc_contract`, `sapling`, `stock_node`, `stockparity`, `void_mint`, `wallet_lifecycle`, `wallet_restore` | green |
 | `fee` (P-2) | green unarmed and `--armed` |
 | `--armed` runs | `lifecycle`, `void_mint`, `claim`, `sapling`, `wallet_restore`, `fee` green (`308bb3fbe` fixed the one armed failure) |
-| `demo_v6` | green on the integration tree (plan Phase 4 note); the run of record is §8 |
+| `demo_v6` | green on the vault upgrade line, items 0–10 (two runs, 2026-10-07); the run of record is §8 |
 | `attest_agent`, `devnet_roles` (all three presets, ~39 min) | green (Phase 5, `d1d1ac9e5`) |
 | `chainviz` | green on ycash6 with `CHAINVIZ_BIN` from chain-viz `feature/ycash6` (seeds 480, 481) |
 | `stratum` | green with the real yolo `4a28eef` (plan §4, 2026-10-01, **recorded**); CI's `main` job runs it with `YOLO_BIN` built at that commit |
@@ -935,8 +935,9 @@ the `lockorder`, `sanitizers` and `coverage` jobs, now enabled and firing from t
 
 ## 7. What this document does **not** claim
 
-- **That the §4 demonstration was re-run for this revision.** Its run of record (2026-10-01,
-  portseed 161, 1229 s, items 1–7 and 9 PASS) and transcript are in §8; nothing here re-ran it.
+- **That the §4 demonstration was re-run for every revision.** Its run of record (2026-10-07 on the
+  vault upgrade line, portseed 841, 515 s, items 0–7 and 9 PASS) and transcript are in §8; the rest
+  of this document was not re-measured at that commit.
 - **That any scheduled CI job has run.** Every job is switched on and the default branch is set
   (§4.4), and the push-triggered jobs (`main`, `audit`, `agent`, `python`) are recorded green on
   the last seven runs; the `nightly`, `lockorder`, `sanitizers`, `coverage` and `weekly-fuzz` jobs
@@ -962,24 +963,38 @@ the `lockorder`, `sanitizers` and `coverage` jobs, now enabled and firing from t
 
 ## 8. Demonstration of record
 
-**PLACEHOLDER — to be completed by the coordinator.** This is the exit criterion of the node scope
-(plan §4, Phase 6): `qa/rpc-tests/yellowback_demo_v6.py`, run end to end on one eight-node regtest
-chain, with node 1 as the `ycash6-stock` binary. It produces one transcript line per step and a PASS
-line per plan §4 checkbox.
+The exit criterion of the node scope (plan §4, Phase 6), re-run on the **vault upgrade line**
+(upgrade plan §5, §6, §15.10): `qa/rpc-tests/yellowback_demo_v6.py`, end to end on one eight-node
+regtest chain, node 1 the `ycash6-stock` binary below the vault upgrade (item 0) and the fork binary
+without the attestor set above it. One transcript line per step, a PASS line per plan §4 checkbox.
 
-- binary under test: <commit, `ycashd --version`>
-- stock binary: <`wt/ycash6-stock/src/ycashd`, commit>
-- command: <exact invocation, portseed, tmpdir>
-- result: <PASS lines, duration>
+- binary under test: `upgrade/vault` @ f36028ee0 (`Ycash Daemon version v6.22.0-rc1-f36028ee0`)
+- stock binary: `wt/ycash6-stock/src/ycashd`, `ycash6-stock` e98128239 (`/YcashCpp:6.20.0/`), via `REF_YCASHD`
+- command: `ZCASHD=src/ycashd REF_YCASHD=<ycash6-stock>/src/ycashd python -u qa/rpc-tests/yellowback_demo_v6.py --srcdir=src --tmpdir=<dir> --portseed=841`
+- result: 2026-10-07, 418 blocks, 515 s, **Tests successful**: items 0-7 and 9 PASS; items 8 and 10 are pointers.
+  A second run at portseed 842 the same day passed identically (same items, ~9 min): the transcript is stable.
 
-transcript: [`yellowback-demo-transcript.txt`](yellowback-demo-transcript.txt) — `qa/rpc-tests/yellowback_demo_v6.py` run of record, 2026-10-01, on `feature/yellowback` @ df409ade8 with node 1 the real stock binary (`ycash6-stock` e98128239, `REF_YCASHD`), portseed 161, 1229 s, **Tests successful**: items 1-7 and 9 PASS; item 8 points to `yellowback_devnet_roles.py` (green on all three presets, d1d1ac9e5); item 10 points to the CI gates.
+transcript: [`yellowback-demo-transcript.txt`](yellowback-demo-transcript.txt).
+
+What the upgrade line changed in the walk (each retired v3 item and its replacement; upgrade plan §6):
+
+| item | v3 (`feature/yellowback`, 2026-10-01) | upgrade line (this run) |
+|---|---|---|
+| 1 | `rpcversion 3`, `enforcing` per node | `rpcversion 5`, `upgrade.status active`, `startHeight` = the activation height; node 1 has no `yed_*` command |
+| 3 | signalling → `locked_in` → `active`; the `-yellowbackenforceuntil` sunset | `UPGRADE_VAULT` at one height on all 8 nodes (`getblockchaininfo.upgrades`, `vault_getinfo`) plus the attestor set (`set_getinfo`, `yed_getactivation`); the retired keys absent from `yed_getinfo`; `-yellowbacksignal` / `-yellowbackenforce` logged as retired and ignored |
+| 4 | VOID mint and its release; `yed_sweep` under abandonment | an under-collateralised mint is an invalid transaction (every mempool refuses, its block is rejected); the claim is a claimant intent (`OP_4`, CLAIMING) released with `vault_release` after `CLAIM_DELAY` (CLAIMED); `yed_sweep` is `Method not found` |
+| 5 | `ATTESTOR_REGISTER`; a stale-bundle mint mined VOID; a bundle-less claim block rejected at DoS 0 | `SET_JOIN` (the set is the registry, P4-b); both bad bundles are invalid transactions: refused by every mempool, their blocks rejected by `submitblock` |
+| 6 | an unburned vault spend rejected at DoS 0, BLK-2 descendants, the valve | the same spend mined by node 1 is rejected at **DoS 100** by every Yellowback node (U-21), the chain continues without node 1, which is brought back with `invalidateblock` + restart; a wrong-price claim is cancelled by one attestor (`vault_buildcancel` + `set_signcancel` + `signrawtransaction`), the collateral back in a byte-identical vault, the burn kept (U-24) |
+| 8 | `yellowback_devnet_roles.py` | plus `yellowback_devnet_upgrade.py` (the devnet upgrade walk) |
+| 10 | the frozen set and the §2 budgets among the CI gates | the audit's frozen-file and budget legs are report-only on the upgrade line; the DoS gate, the rpcversion 5 contract, the byte-identical vectors and the consensus-diff report are the gates |
+
+Items 0, 2, 7 and 9 are unchanged in substance.
 
 The plan §4 checkboxes that the script covers by pointer rather than in its own run:
 
-- item 8, the 30-minute economy, is `yellowback_devnet_roles.py`: all three presets green, ~39 min
-  (Phase 5);
-- item 10 is the CI gates (§4.4): push-triggered jobs recorded green, scheduled jobs enabled and
-  awaiting their first runs.
+- item 8, the 30-minute economy, is `yellowback_devnet_roles.py` (all three presets), and the devnet
+  on the vault upgrade is `yellowback_devnet_upgrade.py` (both nightly);
+- item 10 is the CI gates (§4.4).
 
 ---
 

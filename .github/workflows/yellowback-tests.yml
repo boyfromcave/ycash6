@@ -1175,7 +1175,7 @@ jobs:
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
-        # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from
+        # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from
         # the step above (REF_YCASHD) below the vault upgrade only -- a stock binary refuses the
         # vault -nuparams and cannot follow the chain past it (finding 37) -- so the script's item 0
         # is the fork-vs-stock parity check and node 1 is the fork binary for items 1-10.
