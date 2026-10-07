@@ -578,6 +578,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(wa.gettxout(reg[0]['txid'], 0)['value'], Decimal(10))
+        print('  tip %d, bondLocktime %d (LOCK_BLOCKS %d)' % (user.getblockcount(), reg[0]['bondLocktime'], LOCK_BLOCKS))
+        assert reg[0]['bondLocktime'] > user.getblockcount() + 1, 'LOCK_BLOCKS leaves no headroom before the withdrawal refusals: raise it'
         assert_rpc_error('bond-locked', wa.yed_withdrawbond, 0)
         assert_rpc_error('attest-key-not-held', wb.yed_withdrawbond, 0)
         assert_rpc_error('attest-unknown-seq', wa.yed_withdrawbond, 77)
