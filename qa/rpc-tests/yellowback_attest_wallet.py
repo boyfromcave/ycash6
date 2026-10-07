@@ -43,6 +43,14 @@ from test_framework.yellowback_attest import (
 )
 
 
+# The bond lock of the wallet registrations: BOND_MIN_LOCK plus headroom for the blocks the script
+# mines before its withdrawal refusals. The dormancy case mines until the block-hash-seeded selection
+# names seq 1 twice in one window (up to 24 tries, then up to DORMANCY_CHECK - 1 alignment blocks),
+# so the tip at that step varies from run to run; with the minimum lock a long draw put the tip past
+# bondLocktime and yed_withdrawbond succeeded where 'bond-locked' was expected (coverage, 2026-10-07).
+LOCK_BLOCKS = BOND_MIN_LOCK + 60
+
+
 def feed_pool(test, node, ref_height, selector, prices):
     """The offline bundle's attestations (wallet-signed for the wallet-registered seqs) fed one by
     one into ``node``'s pool through ``yed_addattestation``."""
@@ -106,7 +114,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_rpc_error('lock-below-min', wa.yed_registerattestor, 10, BOND_MIN_LOCK - 1)
         reg = {}
         for node, name in ((wa, 'A'), (wb, 'B')):
-            res, seq = register_wallet_attestor(self, node, 10, BOND_MIN_LOCK, 0)
+            res, seq = register_wallet_attestor(self, node, 10, LOCK_BLOCKS, 0)
             reg[seq] = res
             assert_equal(res['seq'], None)
             assert_equal(res['bondZat'], 10 * COIN)
@@ -123,7 +131,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
             assert_equal(payload['register']['bondAddress'], res['bondAddress'])
             assert_equal(payload['register']['flags'], res['flags'])
             assert_equal(pubkey_to_address(hex_str_to_bytes(payload['register']['bondPubKey'])), res['bondKeyAddress'])
-            assert_equal(res['bondLocktime'], node.getblockcount() + BOND_MIN_LOCK)     # tip + 1 + lockBlocks at build time
+            assert_equal(res['bondLocktime'], node.getblockcount() + LOCK_BLOCKS)       # tip + 1 + lockBlocks at build time
             # the same record the raw path would produce: the bond key address is the P2PKH of the payload's bondPubKey
             assert_equal(node.validateaddress(res['bondKeyAddress'])['ismine'], True)
             assert_equal(node.validateaddress(res['bondAddress'])['ismine'], False)      # the bond is not IsMine (R6)
@@ -550,6 +558,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(wa.gettxout(reg[0]['txid'], 0)['value'], Decimal(10))
+        print('  tip %d, bondLocktime %d (LOCK_BLOCKS %d)' % (user.getblockcount(), reg[0]['bondLocktime'], LOCK_BLOCKS))
+        assert reg[0]['bondLocktime'] > user.getblockcount() + 1, 'LOCK_BLOCKS leaves no headroom before the withdrawal refusals: raise it'
         assert_rpc_error('bond-locked', wa.yed_withdrawbond, 0)
         assert_rpc_error('attest-key-not-held', wb.yed_withdrawbond, 0)
         assert_rpc_error('attest-unknown-seq', wa.yed_withdrawbond, 77)
