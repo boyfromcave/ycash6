@@ -28,6 +28,7 @@
 #include "script/standard.h"
 #include "test/data/yellowback_golden.json.h"
 #include "test/test_bitcoin.h"
+#include "test/yellowback_bench.h"
 #include "util/strencodings.h"
 #include "util/time.h"
 
@@ -2133,7 +2134,7 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
     BOOST_TEST_MESSAGE(strprintf("EvaluateBlock over %d transactions (%d bytes): %d us", (int)block.vtx.size(), (int)bytes, (int)elapsed));
     BOOST_CHECK(!ev.blockInvalid);
     BOOST_CHECK(ev.txlogs.empty());                    // nothing created or spent: no TxLog entry (N7)
-    BOOST_CHECK_MESSAGE(elapsed < 200000, strprintf("EvaluateBlock took %d us", (int)elapsed));
+    BOOST_CHECK_MESSAGE(elapsed < 200000 * BenchBudgetScale(), strprintf("EvaluateBlock took %d us (budget %d us)", (int)elapsed, (int)(200000 * BenchBudgetScale())));
 }
 
 // ===========================================================================

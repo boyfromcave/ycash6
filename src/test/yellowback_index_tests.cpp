@@ -39,6 +39,7 @@
 #include "primitives/block.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
+#include "test/yellowback_bench.h"
 #include "txdb.h"
 #include "txmempool.h"
 #include "util/time.h"
@@ -897,7 +898,7 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
     for (const CTransaction& tx : plain) BOOST_CHECK(live.index->MempoolCheck(tx));
     const int64_t elapsed = GetTimeMicros() - t0;
     BOOST_TEST_MESSAGE(strprintf("MempoolCheck over 10000 plain transactions: %d us", (int)elapsed));
-    BOOST_CHECK(elapsed < 1000000);
+    BOOST_CHECK_MESSAGE(elapsed < 1000000 * BenchBudgetScale(), strprintf("MempoolCheck took %d us (budget %d us)", (int)elapsed, (int)(1000000 * BenchBudgetScale())));
 
     const int ref = live.Tip() - 1;
     CMutableTransaction good = live.b->SpendTx(live.vault, ref, true, { COutPoint(live.vault, 1) }, (uint32_t)(ref + live.P.refWindow));
