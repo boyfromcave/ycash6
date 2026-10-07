@@ -1013,18 +1013,62 @@ jobs:
       - uses: ./.github/actions/yellowback-depends
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
-      - name: Build the stock 6.20.0 binary (branch ycash6-stock) for the stock-parity scripts
+      - name: Check out the stock 6.20.0 tree (branch ycash6-stock)
         # Plan P-5: the reference node is ycash6-stock (= tag ycash6-baseline + baseline fix 3, the
-        # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. Same
-        # depends tree and Cargo.lock as this branch, so the worktree links this checkout's built
-        # triple and shares its cargo target (no second depends or Rust build), as the workspace's
-        # wt/ worktrees do. Exported as STOCK_YCASHD, NOT REF_YCASHD: the framework hands
-        # REF_YCASHD to node 1 of every standard-topology script, so it is set per step below.
+        # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. It is
+        # built from this checkout's depends tree and cargo target (no second depends build), so
+        # its Cargo.lock must draw the same crates-io set: the --offline build reads crates-io from
+        # the vendored directory `cargo vendor` filled for THIS branch's lock, and nothing is
+        # re-vendored for the stock tree. Only the git dependencies ([patch.crates-io] zcash_*) may
+        # differ, and those the two steps below fetch into the cargo home.
+        id: stock
         run: |
           set -e
           git fetch --no-tags --depth 1 origin ycash6-stock
           stock="$RUNNER_TEMP/ycash6-stock"
           git worktree add --detach "$stock" FETCH_HEAD
+          # The stock lock's blob id keys its cargo-home cache: hashFiles() reads the workspace only,
+          # and the stock tree lives under RUNNER_TEMP.
+          echo "lock=$(git rev-parse FETCH_HEAD:Cargo.lock)" >> "$GITHUB_OUTPUT"
+          crates() { awk '/^name = /{n=$3} /^version = /{v=$3} /^source = / && $3 ~ /crates\.io/ {print n, v}' "$1" | sort; }
+          if ! diff <(crates "$stock/Cargo.lock") <(crates Cargo.lock); then
+            echo "ycash6-stock's crates-io set differs from this branch's: the vendored directory would not serve its --offline build"
+            exit 1
+          fi
+          echo "stock Cargo.lock $(git rev-parse --short FETCH_HEAD:Cargo.lock): same crates-io set as $(git rev-parse --short HEAD:Cargo.lock); git dependencies:"
+          git show FETCH_HEAD:Cargo.lock | sed -n 's/^source = "\(git+[^#]*\)#.*/\1/p' | sort -u
+      - name: Cache the stock tree's cargo home (its git dependencies)
+        # The depends action keys ~/.cargo/git on THIS branch's Cargo.lock, whose [patch.crates-io]
+        # zcash_* crates pin this line's librustzcash rev (boyfromcave/librustzcash6 on the upgrade
+        # line); the stock lock pins miodragpop/librustzcash ec525fae, and an --offline build of
+        # the stock tree needs that checkout in the cargo home as well. Without it the first
+        # upgrade-line nightly (2026-10-07) died at `cargo build --offline`: "failed to load source
+        # for dependency f4jumble ... can't checkout ... you are in the offline mode". Same path as
+        # the depends action's entry: a restore merges into what is there, a save carries both.
+        id: stock-cargo-home
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/git
+          key: cargo-home-stock-${{ runner.os }}-${{ steps.stock.outputs.lock }}
+      - name: Fetch the stock tree's git dependencies into the cargo home
+        # depends' own cargo and rustc (never the runner's rustup), run FROM the stock tree so no
+        # .cargo/config.toml of this checkout (the offline one build.sh wrote) applies. On the
+        # hardening line the stock and fork locks pin the same rev, and this is a no-op.
+        if: steps.stock-cargo-home.outputs.cache-hit != 'true'
+        run: |
+          native="$PWD/depends/x86_64-pc-linux-gnu/native/bin"
+          test -x "$native/cargo" || { echo "no depends cargo at $native (depends not built)"; exit 1; }
+          (cd "$RUNNER_TEMP/ycash6-stock" && RUSTC="$native/rustc" "$native/cargo" fetch --locked --manifest-path Cargo.toml)
+          ls ~/.cargo/git/checkouts
+      - name: Build the stock 6.20.0 binary for the stock-parity scripts
+        # The worktree links this checkout's built triple and shares its cargo target (cargo
+        # fingerprints every unit, so the stock's own librustzcash rev is built beside the fork's),
+        # as the workspace's wt/ worktrees do. Exported as STOCK_YCASHD, NOT REF_YCASHD: the
+        # framework hands REF_YCASHD to node 1 of every standard-topology script, so it is set per
+        # step below.
+        run: |
+          set -e
+          stock="$RUNNER_TEMP/ycash6-stock"
           ln -s "$PWD/depends/x86_64-pc-linux-gnu" "$stock/depends/x86_64-pc-linux-gnu"
           # src/Makefile.am links librustzcash.a from $(top_builddir)/target, whatever CARGO_TARGET_DIR
           # says, so the stock tree needs the shared target linked in as well (the local wt/ recipe
