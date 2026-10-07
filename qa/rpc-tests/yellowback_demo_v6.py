@@ -9,13 +9,18 @@ The Phase 6 demonstration of the ycashd 6.20.0 port (docs/plans/yellowback-ycash
 line per checkbox with its evidence (heights, txids, verdicts, state hashes).
 
 It does not use the devnet launcher: it is the YellowbackTestFramework's standard eight-node
-topology -- 0 user (enforcing wallet), 1 STOCK (the stock 6.20.0 binary from --stock-binary /
-$REF_YCASHD, no -yellowback; without it the fork binary without the flag), 2-4 pools, 5 observer
-(-yellowbackenforce=0), 6-7 attestor wallets -- and every step is one the per-rule scripts
-already prove (yellowback_activation, _pricefeed, _lifecycle, _claim, _void_mint, _attest,
+topology -- 0 user (enforcing wallet), 1 STOCK (the fork binary without -yellowback; below the
+vault upgrade the stock 6.20.0 binary from --stock-binary / $REF_YCASHD, see item 0), 2-4 pools,
+5 observer (-yellowbackenforce=0), 6-7 attestor wallets -- and every step is one the per-rule
+scripts already prove (yellowback_activation, _pricefeed, _lifecycle, _claim, _void_mint, _attest,
 _attest_enforcement, _enforcement, _index, _stockparity); this script strings them together
 on one chain.
 
+  0  (with $REF_YCASHD only) the reference half: a stock 6.20.0 binary knows no vault upgrade
+     (it refuses -nuparams=6d5b7a31) and cannot follow a chain past it (upgrade plan finding (37)),
+     so node 1 runs it below VAULT_ACTIVATION only -- compared fork-vs-stock against node 5 as the
+     fork binary without the overlay (yellowback_stockparity's comparison), its block and a pool's
+     block followed both ways -- and is then restarted on the fork binary for items 1-10
   1  every node starts with -yellowback, index synced, yed_getinfo rpcversion 3 healthy
   2  pools tag quotes; yed_getprice median; forged tags from a non-pool change nothing
   3  signalling -> locked_in -> active at the plan's heights; the sunset (-yellowbackenforceuntil)
@@ -24,7 +29,8 @@ on one chain.
   6  the stock node mines an unburned vault spend: rejected at DoS 0, BLK-2 descendants, no ban
   7  a 2-block and a 10-block reorg with equal state hashes; restart and -reindex
   8  (pointer) the 30-minute persona economy is yellowback_devnet_roles.py
-  9  stock parity spot check (the full 300 blocks is yellowback_stockparity.py)
+  9  parity spot check, node 1 vs node 5 as the fork without the overlay (the full 300 blocks is
+     yellowback_stockparity.py; the fork-vs-stock half is item 0)
  10  (pointer) the CI gates
 
 Runtime: about 15-25 minutes.
@@ -34,10 +40,12 @@ import time
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import (
+    VAULT_BRANCH_ID,
     assert_equal,
     assert_greater_than,
     connect_nodes_bi,
     hex_str_to_bytes,
+    nuparams,
     p2p_port,
     sync_blocks,
     sync_mempools,
@@ -71,6 +79,7 @@ from test_framework.yellowback_util import (
     STOCK,
     USER,
     VALVE_BLOCKS,
+    VAULT_ACTIVATION,
     YellowbackTestFramework,
     _statehash,
     assert_banscore_zero,
@@ -126,15 +135,19 @@ def overlay_off(node):
 class _ParityPair(object):
     """The two nodes ``YellowbackStockParityTest.compare`` reads (``nodes[0]`` the stock binary,
     ``nodes[1]`` the fork without -yellowback) -- so the spot check uses that script's comparison
-    verbatim instead of a copy."""
+    verbatim instead of a copy.  ``legacy_running`` / ``vault_at`` are that comparison's guard: a
+    stock 6.20.0 binary is compared below the vault upgrade only (finding (37))."""
 
-    def __init__(self, stock, fork):
+    def __init__(self, stock, fork, legacy_running=False, vault_at=VAULT_ACTIVATION):
         self.nodes = [stock, fork]
         self.steps = 0
+        self.legacy_running = legacy_running
+        self.vault_at = vault_at
 
 
 class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
-    reference_binary_opt_in = True     # node 1 is $REF_YCASHD in the nightly's demonstration step
+    reference_binary_opt_in = True     # node 1 is $REF_YCASHD below VAULT_ACTIVATION in the nightly's demonstration step (item 0)
+    legacy_done = False                # the reference half has run and node 1 is the fork binary
     # The attestor wallets join the enforcing half directly, and {0, 2, 3, 4} is a complete graph
     # (yellowback_enforcement.py): pool restarts and an isolated stock branch never cut the
     # enforcing nodes off from each other.
@@ -157,8 +170,27 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         parser.add_option('--items', dest='items', default=None,
                           help='comma-separated item numbers to run (development; 5-6 need 4, 9 runs alone)')
 
+    def legacy(self):
+        """A reference binary on node 1 that has not yet been swapped for the fork binary."""
+        return bool(super().stock_binary()) and not self.legacy_done
+
+    def stock_binary(self):
+        return None if self.legacy_done else super().stock_binary()
+
     def node_args(self, i, extra=None):
-        return super().node_args(i, ['-debug=yellowback'] + list(extra or []))
+        args = super().node_args(i, ['-debug=yellowback'] + list(extra or []))
+        if i == STOCK and self.legacy():
+            args = [a for a in args if a != nuparams(VAULT_BRANCH_ID, VAULT_ACTIVATION)]     # stock 6.20.0 has no such upgrade
+        return args
+
+    def setup_network(self, split=False):
+        if self.legacy():
+            # item 0 stays below the vault upgrade: no attestor set yet (create_attestor_set mines to
+            # VAULT_ACTIVATION), and the chain starts two blocks lower so node 1 and a pool each mine
+            # one block before VAULT_ACTIVATION - 1
+            self.auto_attestor_set = False
+            self.initial_blocks = VAULT_ACTIVATION - 4
+        super().setup_network(split)
 
     # ------------------------------------------------------------------ transcript
 
@@ -285,6 +317,8 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         print('Yellowback on ycashd 6.20.0 -- the plan section 4 demonstration (yellowback_demo_v6.py)')
         print('node 1 binary: %s' % (stock_bin or 'the fork binary WITHOUT -yellowback (no --stock-binary / REF_YCASHD given)'))
         print('=' * 100)
+        if self.legacy():
+            self.item0_reference_half()
         steps = [self.item1_startup, self.item2_tags_and_price, self.item3_activation, self.item4_wallet_lifecycle,
                  self.item5_attestation, self.item6_stock_miner, self.item7_reorgs_and_rebuilds, self.item8_pointer,
                  self.item9_parity_spot_check, self.item10_pointer]
@@ -297,6 +331,51 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         for item, status, title, evidence in self.results:
             print('  [%s] %-8s %s' % (item, status, title))
         print('=' * 100)
+
+    # ------------------------------------------------------------------ 0
+
+    def item0_reference_half(self):
+        """The $REF_YCASHD half (finding (37)): the stock 6.20.0 binary on node 1 below the vault
+        upgrade, compared against node 5 as the fork binary without the overlay, then node 1 on the
+        fork binary, node 5 the observer again, and the attestor set for items 1-10."""
+        item = '0'
+        from yellowback_stockparity import YellowbackStockParityTest
+        nodes = self.nodes
+        stock = nodes[STOCK]
+        sub = stock.getnetworkinfo()['subversion']
+        assert '6d5b7a31' not in stock.getblockchaininfo().get('upgrades', {})
+        self.say(item, 'node 1 (stock 6.20.0 binary %s): height %d, %s; the vault upgrade at %d is unknown to it'
+                 % (sub, stock.getblockcount(), overlay_off(stock), VAULT_ACTIVATION))
+        # node 5 as the fork binary without the overlay (its datadir holds no index yet: nothing to acknowledge)
+        restart_with_yellowback(self, [OBSERVER], extra=['-yellowback=0'], yellowback_indices=[])
+        fork = nodes[OBSERVER]
+        sync_blocks([stock, fork])
+        pair = _ParityPair(stock, fork, legacy_running=True)
+        cmp = YellowbackStockParityTest.compare
+        cmp(pair, 'reference start')
+        for miner in (STOCK, POOLS[0], STOCK):
+            h = nodes[miner].generate(1)[0]
+            self.sync_all(blocks_only=True)
+            assert_best_hash([n for n in nodes if n is not None], 'reference half, node %d mined' % miner)
+            for n in nodes:
+                assert_equal(n.getblock(h)['confirmations'], 1)
+            cmp(pair, 'block %d' % stock.getblockcount(), template=stock.getblockcount() + 1 < VAULT_ACTIVATION)
+        assert_equal(stock.getblockcount(), VAULT_ACTIVATION - 1)
+        assert_banscore_zero([n for n in nodes if n is not None])
+        utxo = stock.gettxoutsetinfo()['hash_serialized']
+        self.say(item, 'node 1 (%s) vs node 5 (fork binary, no -yellowback): %d comparison points equal below the upgrade '
+                 '(best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); its block and a pool\'s block followed '
+                 'by every node both ways; utxo hash %s at %d' % (sub, pair.steps, short(utxo), stock.getblockcount()))
+        self.say(item, '*** the reference half ends at %d: a stock 6.20.0 binary cannot follow the vault upgrade (finding 37); '
+                 'node 1 is the fork binary without -yellowback from here' % (VAULT_ACTIVATION - 1))
+        self.legacy_done = True
+        self.restart(STOCK)
+        restart_with_yellowback(self, [OBSERVER])
+        self.sync_all(blocks_only=True)
+        self.create_attestor_set()
+        self.passed(item, 'the reference half: stock 6.20.0 on node 1 below the vault upgrade, fork-vs-stock parity',
+                    '%s, %d comparison points equal, chain at %d; node 1 now the fork binary without -yellowback'
+                    % (sub, pair.steps, VAULT_ACTIVATION - 1))
 
     # ------------------------------------------------------------------ 1
 
@@ -843,7 +922,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         self.say(item, 'node 1 (%s) vs node 5 (fork binary, no -yellowback): %d blocks alternating miners with transactions, '
                  '%d comparison points equal (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); utxo hash %s at %d'
                  % (stock.getnetworkinfo()['subversion'], span, pair.steps, short(utxo), stock.getblockcount()))
-        self.passed(item, 'stock-parity spot check (the full 300 blocks: yellowback_stockparity.py)',
+        self.passed(item, 'parity spot check, node 1 vs node 5 as the fork without the overlay (the full 300 blocks: yellowback_stockparity.py)',
                     '%d blocks, %d comparison points equal; the enforcing nodes followed, statehash %s'
                     % (span, pair.steps, short(h)))
 

@@ -1084,6 +1084,8 @@ jobs:
         # yellowback_stockparity: a ycash6-stock node and this fork without -yellowback are
         # byte-identical over 300 blocks, transactions and a reorg (plan section 4 item, F-24).
         # yellowback_stock_node: node 1 is the stock binary (the main job runs it fork-vs-fork).
+        # Both scripts run the stock binary below the vault upgrade only, then swap it for the fork
+        # binary (finding 37: a stock 6.20.0 binary refuses -nuparams=6d5b7a31).
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -1174,8 +1176,9 @@ jobs:
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~25 minutes). Node 1 is the ycash6-stock build from
-        # the step above (REF_YCASHD), so the item 9 spot check is fork-vs-stock, as in the
-        # demonstration of record.
+        # the step above (REF_YCASHD) below the vault upgrade only -- a stock binary refuses the
+        # vault -nuparams and cannot follow the chain past it (finding 37) -- so the script's item 0
+        # is the fork-vs-stock parity check and node 1 is the fork binary for items 1-10.
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
