@@ -3530,7 +3530,10 @@ BOOST_AUTO_TEST_CASE(undo_identity_v3)
     hashes.push_back(Hash(f.view));
     { const int cited = f.tip; f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
       BOOST_REQUIRE_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 11500, cited), f.Att(0, 11600, cited))), verdict::OK); }
-    // dormancy for L, then a revival
+    // dormancy for L (S15), then the retired REV-1 payload is refused and a SET_HEARTBEAT revives (P4-b).
+    // The notice's and the claim's bundle rows carry every selected signature, L's included, and a signed row
+    // inside the window (H - DORMANCY_BLOCKS, H] is evidence of life: age them out before building the evidence.
+    for (int i = 0; i < f.P.dormancyBlocks; i++) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
     int L = -1, rows = 0;
     while (rows < f.P.dormancyMinBundles) {
         const int R = f.tip - 1;
@@ -3547,11 +3550,14 @@ BOOST_AUTO_TEST_CASE(undo_identity_v3)
             f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
         }
     }
-    while (f.tip % f.P.dormancyCheck != 0) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
-    if (f.Attestor(L)->status == (uint8_t)AttestorStatus::DORMANT) {
-        f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
-        BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, g.poolPrice, f.tip - 1))), verdict::OK);
-    }
+    // S15 fires at a check height once L's seatedSince is outside the window; nothing but a heartbeat moves a
+    // DORMANT record, so the wait cannot overshoot, and the REQUIRE makes an attestor that never went dormant fail.
+    while (f.tip % f.P.dormancyCheck != 0 || f.tip - f.P.dormancyBlocks < (int)f.Attestor(L)->seatedSince) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, g.poolPrice, f.tip))), verdict::ATTESTOR_REVIVE_RETIRED);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
+    BOOST_REQUIRE_EQUAL(VerdictOf(f, f.HeartbeatTx(L)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
     hashes.push_back(Hash(f.view));
     while (f.tip < (int)f.Attestor(2)->bondLocktime) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
     BOOST_REQUIRE_EQUAL(VerdictOf(f, f.BondSpendTx(2)), verdict::OK);
