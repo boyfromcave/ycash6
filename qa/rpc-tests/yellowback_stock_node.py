@@ -53,6 +53,7 @@ LOCK = 48
 
 class YellowbackStockNodeTest(YellowbackTestFramework):
     initial_blocks = 101
+    reference_binary_opt_in = True     # node 1 may be $REF_YCASHD (the nightly's stock-binary step)
 
     def node_args(self, i, extra=None):
         return super().node_args(i, ['-debug=yellowback'] + list(extra or []))

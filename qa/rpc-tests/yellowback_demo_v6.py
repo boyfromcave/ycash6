@@ -134,6 +134,7 @@ class _ParityPair(object):
 
 
 class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
+    reference_binary_opt_in = True     # node 1 is $REF_YCASHD in the nightly's demonstration step
     # The attestor wallets join the enforcing half directly, and {0, 2, 3, 4} is a complete graph
     # (yellowback_enforcement.py): pool restarts and an isolated stock branch never cut the
     # enforcing nodes off from each other.

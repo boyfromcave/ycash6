@@ -522,12 +522,22 @@ class YellowbackTestFramework(BitcoinTestFramework):
 
     # --- options ---------------------------------------------------------
 
+    # A script that can run a stock ycashd on node 1 sets this True: the default --stock-binary is then
+    # $REF_YCASHD. Every node gets the vault -nuparams (a consensus parameter), which a stock 6.20.0
+    # binary refuses ("Invalid network upgrade (6d5b7a31)"), so only a script written for a reference
+    # binary (yellowback_stock_node, yellowback_demo_v6; yellowback_stockparity has its own
+    # --ref-ycashd) takes one from the environment. A step that exports REF_YCASHD for every later
+    # script (ycash-dd's nightly, 2026-10-07) then no longer hands it to the generic scripts.
+    reference_binary_opt_in = False
+
     def add_options(self, parser):
-        parser.add_option('--stock-binary', dest='stock_binary', default=os.getenv('REF_YCASHD') or None,
-                          help='ycashd binary for node 1, the stock node (default: $REF_YCASHD, else ZCASHD)')
+        default = (os.getenv('REF_YCASHD') or None) if self.reference_binary_opt_in else None
+        parser.add_option('--stock-binary', dest='stock_binary', default=default,
+                          help='ycashd binary for node 1, the stock node (default: $REF_YCASHD where the script '
+                               'supports a reference binary, else ZCASHD)')
 
     def stock_binary(self):
-        """The path from --stock-binary / REF_YCASHD, or None for the fork binary (P9)."""
+        """The path from --stock-binary (or REF_YCASHD, where the script opts in), or None for the fork binary (P9)."""
         return getattr(self.options, 'stock_binary', None) or None
 
     # --- node arguments and start --------------------------------------------
