@@ -10,7 +10,7 @@
 #
 # Usage: qa/yellowback-release-smoke.sh <dir> <version> [--version-only]
 #   <dir>      holds ycashd, ycash-cli (and ycash-tx), with .exe on Windows
-#   <version>  e.g. 6.21.0-rc1, as rendered by configure.ac
+#   <version>  e.g. 6.22.0-rc1, as rendered by configure.ac
 set -euo pipefail
 dir=$1; version=$2; mode=${3:-}
 ext=''; [ -f "$dir/ycashd.exe" ] && ext='.exe'
