@@ -34,12 +34,12 @@ directory does **not** work on its own — the shebang then picks the system Pyt
 You also need `src/ycashd` built and `contrib/yellowback/attest` built (`cargo build --release`;
 `YELLOWBACK_ATTEST_BIN` names the binary if the search does not find it).
 
-## 1. The plain devnet (v2 demo and v3 arming)
+## 1. The plain devnet (activated and ARMED)
 
 ```bash
 yellowback-devnet up                # ~6 min on 6.20.0: 8 nodes, node 0 funded, 3 pools quoting, 3 attestors registered, ARMED
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
-yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
+yellowback-devnet up --no-attest    # five nodes, no attestors: never ARMED
 yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
 yellowback-devnet status | check | mine N [node] [--untagged] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
@@ -66,7 +66,7 @@ yellowback-devnet up --role pool        # you: a pool on node 4, a plain miner a
 | Node | `user` | `attestor` | `pool` |
 |---|---|---|---|
 | 0 | **you** (minter) | funding + subscriber | funding + subscriber |
-| 1 | stock (no `-yellowback`) | stock | stock |
+| 1 | stock: the vault upgrade without the YED attestor set | stock | stock |
 | 2–3 | pools, automated | pools, automated | pools, automated |
 | 4 | pool, automated | pool, automated | **you**: no payout, no quote |
 | 5–7 | attestors, automated | attestors, automated | attestors, automated |
@@ -120,10 +120,10 @@ yellowback-devnet mine 3 4               # your blocks are yours to mine
 `mine N` with no node mines round-robin on the automated pools, exactly as the heartbeat does, so
 every block carries a quote tag. `mine N <node>` refuses a node whose blocks would carry no tag —
 the user seat (node 0), the stock node (node 1), a pool without a payout key — because 50 tagless
-blocks in the 64-block window empty the price windows (`NO_PRICE`), halt minting
-(`PARTICIPATION`) and suspend block rejection (`ENFORCEMENT`, ACT-6): one command impersonating a
-hashpower majority walking away (chain-viz plan C-F34). `--untagged` does it on purpose, which is
-how to rehearse that outage.
+blocks in the 64-block window empty the price windows (`NO_PRICE`) and halt minting: one command
+impersonating a hashpower majority walking away (chain-viz plan C-F34). The rules stay consensus
+throughout; only the price goes undefined. `--untagged` does it on purpose, which is how to
+rehearse that outage.
 
 ```bash
 ```
@@ -167,7 +167,7 @@ Node 8 is funded (13 YEC) and unregistered; `<dir>/attest-8.toml` is your agent'
 
 ## 3. The regression suite
 
-`qa/rpc-tests/yellowback_devnet_roles.py` (nightly, `EXTENDED_SCRIPTS`) drives this script as a subprocess — `up --role` for each preset — and asserts, per preset: the seat is empty and the node map is the one above; the heartbeat advances the chain on the automated pools only, with no help from the test; every persona performs its characteristic action, a vault is redeemed at maturity, and after a −70 % shock **the liquidator claims a leveraged vault**; the walk keeps the pools' and attestors' prices byte-equal and nothing ends pinned; `check` passes before the shock, and the state hash agrees across every enforcing node after. Fixed seed; SKIPs without the Rust binary; about 40 minutes for the three presets on 6.20.0 (`--presets user` for one).
+`qa/rpc-tests/yellowback_devnet_roles.py` (nightly, `EXTENDED_SCRIPTS`) drives this script as a subprocess — `up --role` for each preset — and asserts, per preset: the seat is empty and the node map is the one above; the heartbeat advances the chain on the automated pools only, with no help from the test; every persona performs its characteristic action, a vault is redeemed at maturity, and after a −70 % shock **the liquidator claims a leveraged vault**; the walk keeps the pools' and attestors' prices byte-equal and nothing ends pinned; `check` passes before the shock, and the state hash agrees across every Yellowback node after. Fixed seed; SKIPs without the Rust binary; about 40 minutes for the three presets on 6.20.0 (`--presets user` for one).
 
 ## 4. Two devnets at once
 

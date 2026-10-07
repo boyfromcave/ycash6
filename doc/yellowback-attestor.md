@@ -86,8 +86,8 @@ sources, has the node sign a price every `k` blocks (`10` on mainnet) and gossip
 attestation. Minters and claimants carry those attestations into their transactions; the enforcing
 nodes verify the signatures, take a bond-weighted quantile and combine it with the mining pools'
 medians (`pMint = min`, `pClaim = max`). An attestor is paid for attestations that are **used** in a
-confirmed mint or claim (`ATTEST_FEE_BPS` = 25 % of the pool enforcement fee, to `P2PKH(bondPubKey)`),
-never for attestations published.
+confirmed mint or claim (`ATTEST_FEE_BPS`: half the pool fee on mainnet and testnet, a quarter on
+regtest, to `P2PKH(bondPubKey)`), never for attestations published.
 
 There is no slashing: the penalty for misbehaviour is ejection and a bond that earns nothing until
 it unlocks. That is sufficient because attestors can **grief but not extract** — no direction the
