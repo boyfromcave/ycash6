@@ -1,8 +1,11 @@
 # Releasing ycashd with Ycash Yellowback (YED)
 
-How a tagged version of this fork (`boyfromcave/ycash6`, branch `feature/yellowback`) becomes a
-GitHub release with one binary package per platform, in the layout of upstream Ycash's releases
-(<https://github.com/ycashfoundation/ycash/releases>). The automation is
+How a tagged version of this fork (`boyfromcave/ycash6`) becomes a GitHub release with one binary
+package per platform, in the layout of upstream Ycash's releases
+(<https://github.com/ycashfoundation/ycash/releases>). This branch, `upgrade/vault`, carries the
+vault upgrade (a network upgrade, `UPGRADE_VAULT`, branch ID `0x6d5b7a31`) and releases the
+**6.22.x** series; the `harden/yellowback` branch, which needs no network upgrade, releases
+**6.21.x**. The automation is
 [`.github/workflows/yellowback-release.yml`](../.github/workflows/yellowback-release.yml); this file
 is the procedure around it.
 
@@ -24,8 +27,9 @@ fetching: 6.20.0 builds the Sapling parameters and the Sprout verifying key into
 release to be drafted. Tier 2 jobs may fail; their asset is then missing from the release.
 
 Every build runs `qa/yellowback-release-smoke.sh` on the packaged binaries: each binary's version
-banner must be `v<V>`, and a throwaway regtest node with `-yellowback` must start, answer
-`getnetworkinfo` and `yed_getinfo`, and stop. The Windows `.exe` files are run on windows-latest
+banner must be `v<V>`, and a throwaway regtest node must start on the vault upgrade, create a YED
+attestor set, restart naming it (so Yellowback is live), answer `getnetworkinfo` and `yed_getinfo`
+(`rpcversion` 5, upgrade active), and stop. The Windows `.exe` files are run on windows-latest
 (version banners only). The 18.04 package's smoke test runs inside an `ubuntu:18.04` container,
 which also proves its glibc floor.
 
@@ -38,35 +42,42 @@ descriptors are not maintained).
 
 `configure.ac` encodes the stage in `_CLIENT_VERSION_BUILD`: 0–24 is `-beta<BUILD+1>`, 25–49 is
 `-rc<BUILD−24>`, 50 is the final release, above 50 is `-<BUILD−50>`. `src/clientversion.h` carries
-the same four numbers. The release line is **6.21.x**: Yellowback is a feature addition on 6.20.0,
-and 6.20.x patch numbers belong to the upstream 6.20 line (miodragpop/ycash).
+the same four numbers. There is one release series per node line, and the release workflow refuses
+a tag from the wrong one (it tells them apart by `src/vault/`):
+
+- **6.22.x** — this line, `upgrade/vault`: the vault upgrade and YED as its rule module.
+- **6.21.x** — the `harden/yellowback` line, the fallback that needs no network upgrade.
+
+Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upstream 6.20 line
+(miodragpop/ycash).
 
 | Release | MINOR | REVISION | BUILD | Tag |
 |---|---|---|---|---|
-| 6.21.0-rc1 | 21 | 0 | 25 | `v6.21.0-rc1` |
-| 6.21.0-rc2 | 21 | 0 | 26 | `v6.21.0-rc2` |
-| 6.21.0 | 21 | 0 | 50 | `v6.21.0` |
-| 6.21.1 | 21 | 1 | 50 | `v6.21.1` |
+| 6.22.0-rc1 | 22 | 0 | 25 | `v6.22.0-rc1` |
+| 6.22.0-rc2 | 22 | 0 | 26 | `v6.22.0-rc2` |
+| 6.22.0 | 22 | 0 | 50 | `v6.22.0` |
+| 6.22.1 | 22 | 1 | 50 | `v6.22.1` |
 
 `configure.ac` is in the frozen set. `qa/yellowback-audit.sh` allows exactly the four
 `_CLIENT_VERSION_*` defines to change there and fails on any other line.
 
 ## Procedure
 
-1. **Bump the version** on a branch off `feature/yellowback`: the four numbers in `configure.ac`
+1. **Bump the version** on a branch off `upgrade/vault`: the four numbers in `configure.ac`
    and `src/clientversion.h`, plus the title line of `README.md`. Run `qa/yellowback-audit.sh`.
 2. **Write the notes** at `doc/release-notes/release-notes-<V>.md`. The release job refuses to run
    without them. Start from the previous one.
-3. **Proving run.** Push the branch and merge it to `feature/yellowback` once `yellowback tests`
+3. **Proving run.** Push the branch and merge it to `upgrade/vault` once `yellowback tests`
    is green. Then run the workflow by hand: Actions → *yellowback release* → *Run workflow* on
-   `feature/yellowback`. It builds, smoke-tests and uploads every package as a workflow artifact,
+   `upgrade/vault`. It builds, smoke-tests and uploads every package as a workflow artifact,
    but creates no release. Download and spot-check at least one package.
 4. **Tag and push.**
    ```
    git tag -a v<V> -m "ycashd v<V> (Yellowback)" <commit>
    git push origin v<V>
    ```
-   The `version` job fails if the tag differs from what `configure.ac` renders.
+   The `version` job fails if the tag differs from what `configure.ac` renders, or if it is not a
+   6.22 version.
 5. **Review the draft.** The workflow creates a **draft** release (marked pre-release for
    `-rc`/`-beta`) with every asset, `SHA256SUMS`, and the notes from step 2. Check the asset list
    and checksums, then publish it by hand.
@@ -113,101 +124,37 @@ other addresses with `-consolidatesaplingaddress`.
 Pools reach the node only through the stock mining RPCs (`getblocktemplate`, `submitblock`), which
 none of these options affect.
 
-## Network parameters (START_HEIGHT, ENFORCE_UNTIL_HEIGHT)
+## Network parameters (the UPGRADE_VAULT height and the YED attestor set)
 
-`src/yellowback/params.cpp` carries one start height and one sunset per public network. They are
-consensus parameters (K10): hashed into the state hash, and they decide which tags, registrations
-and vault references exist. So they ship only in a release, never as an operator flag. A network
-whose `startHeight` is 0 refuses `-yellowback` at init.
+Yellowback is live on a network from its `UPGRADE_VAULT` activation height (`src/chainparams.cpp`)
+once that network names its YED attestor set (`attestorSetId` in `src/yellowback/params.cpp`). Both
+are consensus parameters, so they ship only in a release, never as an operator flag. Neither is set
+on mainnet or testnet yet: they are set by the release that passes the launch gates, and testnet
+had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering).
 
 When setting them in a release:
-- `startHeight` at least two weeks of blocks (16,128 at 75 s) past the release date (M14). Take the
-  tip from a live node or <https://explorer.ycash.xyz/api/v1/network/info>, and leave slack for the
-  time between the commit and the tag.
-- `enforceUntilHeight` = `startHeight` + 420,480 (one year, L8), and never past the next scheduled
-  Ycash network upgrade (`chainparams.cpp`).
-- A set that replaces a released one starts at or after that set's `enforceUntilHeight` (L8), and
-  above every height a released node has validated (M12).
+- The activation height leaves time for every node to upgrade: a node that has not upgraded by
+  then stops following the chain. Take the tip from a live node or
+  <https://explorer.ycash.xyz/api/v1/network/info>, and leave slack for the time between the
+  commit and the tag.
+- The attestor set must exist on chain before the release can name it.
 - Make the same change on the other node line (`ycash-dd`): both lines must agree.
-- The release workflow refuses a tag while the mainnet `startHeight` is 0 or `enforceUntilHeight`
-  is not above it (`qa/yellowback-release-heights.sh`; a `workflow_dispatch` run only warns).
+- The release workflow refuses a tag while the mainnet `UPGRADE_VAULT` height or the mainnet
+  `attestorSetId` is unset (`qa/yellowback-release-heights.sh`; a `workflow_dispatch` run only
+  warns).
 
-| Network | startHeight | enforceUntilHeight | abandonBlocks | Set in |
-|---|---|---|---|---|
-| main | 0 (unset) | 0 | 34,560 (= `grace`, W21) | not yet: the 6.21.0-rc1 set (3,075,000 / 3,495,480) was withdrawn on 2026-10-05 (hardening plan F-5, H-8); the release that passes the launch gates sets it |
-| test | 0 (unset) | 0 | 34,560 (= `grace`, W21) | not yet: testnet had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering) |
+| Network | `UPGRADE_VAULT` height | `attestorSetId` | Set in |
+|---|---|---|---|
+| main | unset | unset | not yet: the release that passes the launch gates |
+| test | unset | unset | not yet |
 
-`abandonBlocks` (`ABANDON_BLOCKS`, W21) is compiled in with the other §3.1 values and is not set
-per release: it equals `grace` (thirty days) on mainnet and testnet, 128 on regtest, and the unit
-tests hold `abandonBlocks >= grace` on every network. It is the floor on how long the module waits
-for its developers after any halt before pools stop filtering vault spends and wallets offer
-`yed_sweep` — the time budget of the "Freeze, then fix" runbook below.
+## Parameter changes
 
-## Renewal releases (W18)
-
-`ENFORCE_UNTIL_HEIGHT` is a sunset, not a deadline for new values. A release that carries **the
-same parameter set with only a later `enforceUntilHeight`** is a *renewal*: it cannot make two
-enforcing releases disagree at one height (a node left on the old release stops rejecting at the
-old sunset and becomes permissive, and a permissive node follows whatever the stricter majority
-builds), so it is exempt from the "start at or after the previous sunset" rule above and may ship
-at any time before the sunset. `ParamsHash` sees it as a different set only in `enforceUntilHeight`.
-
-**Obligation:** the renewal for each year ships **no later than six months before the sunset**
-(for the 6.21.0-rc1 set, before height ≈ 3,285,000, 2027-04), so a missed date costs a warning,
-not an enforcement gap. Put the next renewal's due height in the release notes of every release
-that sets or renews a sunset. A release that changes any other value is a *parameter change* and
-follows the rule above or the runbook below.
-
-## Freeze, then fix (W19)
-
-Roughly seventy consensus-shaped values go to mainnet for the first time with 6.21.0. If one is
-wrong, the rule "a replacement set starts at or after the previous sunset" would leave it in force
-for up to a year. The sanctioned shortcut is to make the chain itself show that no node is
-enforcing the old set: a replacement set may start at height `X` when either `X ≥` the previous
-set's `enforceUntilHeight`, **or** `Snapshots[h].haltMask` has had `ENFORCEMENT` set for every
-`h` in `[X − SIGNAL_WINDOW, X − 1]` — enforcement has been off for a full window (2,016 blocks,
-≈ 1.75 days), so no node validated a vault spend under the old set in that stretch. The predicate
-is `yellowback::ParamSetStartAdmissible` (`src/yellowback/params.cpp`, `// Rule: ACT-5`), a
-release-time check with a unit case over a synthetic halt; `SelectParams` itself does not change,
-sets are chosen by height as before.
-
-The runbook:
-
-1. **Freeze.** Ask the pools to restart with `-yellowbackenforce=0` (the existing kill switch;
-   signalling stops with it). Within one signal window the share of signalling blocks falls under
-   `ENFORCEMENT_FLOOR` (50 %) and `Snapshots[h].haltMask` gains `ENFORCEMENT`; `PARTICIPATION`
-   sets first, at 60 %, and minting stops (`yed_getstats.mintableClasses` empty,
-   `yed_getactivation.mintHalted`). Confirm the bit on a node of record with
-   `yed_gethistory <h> <h>` for the first halted height; call it `F`.
-2. **Wait one signal window** after `F` so the earliest admissible start is `F + SIGNAL_WINDOW`.
-   Meanwhile ship the corrected set with `startHeight = X ≥ F + SIGNAL_WINDOW` and a new sunset
-   (`X + 420,480`), on both node lines, with the `ACT-5` unit case extended for the real `F` and
-   the usual release procedure above. Lead time M14 still applies to `X` from the release date.
-3. **Upgrade and re-signal.** Pools install the release and restart with enforcement on. The signal
-   count climbs over a window, enforcement resumes at `ENFORCEMENT_RESUME` (60 %); from `X` the
-   index applies the corrected set. Activation (ACT-1..3) does not run again: the module stays
-   ACTIVE throughout, only its halts move.
-
-What is and is not at risk during the freeze:
-
-- **No YED can be created.** Evaluation never stops; every MINT in the stretch is VOID
-  (`mint-halted-participation`) and its collateral comes back by `yed_redeem` at its lock height.
-- **Existing vaults stay script-locked** until their own `lockHeight` (owner) and `claimHeight`
-  (anyone). The claim branch is open to anyone past `claimHeight`, and with enforcement off nobody
-  refuses a claim without its burn — but the pools on the release still *filter* rule-breaking
-  vault spends from their own templates and mempools (TPL-1, MP-1) until abandonment, so leakage
-  is bounded by stock hashpower and by the vaults whose `claimHeight` falls inside the freeze.
-  Owners redeem before the freeze if they can; a wallet should warn on any vault within `GRACE`
-  of its claim height.
-- **YED transfers and redemptions continue** as ordinary transactions; the index records them.
-- **Abandonment is the clock.** `ABANDON_BLOCKS` = `GRACE` = 34,560 blocks (≈ 30 days, W21) of
-  the `ENFORCEMENT` halt is where the pools' filtering stands down and wallets offer `yed_sweep`.
-  Thirty days is the floor on how long the module waits for its developers; a freeze that takes
-  longer than that has become abandonment, and what leaks meanwhile is the cost. Abandonment is a
-  rolling predicate: enforcement resuming ends it.
-
-Rejected for now: set-version signalling in the coinbase tag (a live switch with no freeze, a real
-design addition) and miner-voted parameters (a different design).
+A YED parameter set is consensus from the activation height and has no end height: there is no
+sunset, no renewal release and no freeze. Changing a consensus value is a network upgrade like any
+other, coordinated through a new consensus branch ID. Until one ships, a defect is contained by the
+rules themselves: a claim at a wrong price is cancelled by the YED attestor set within
+`CLAIM_DELAY`, and an owner can always redeem by the owner branch.
 
 ## Wallet (YecWallet) releases
 

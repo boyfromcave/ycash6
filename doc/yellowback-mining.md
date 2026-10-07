@@ -153,7 +153,7 @@ now differ in order and, near a full block, in content — expected, not a fault
 `-yellowbackfee` ≥ 1000 zat), computed from the built transaction with the Sapling padding counted.
 So Yellowback mints, transfers, redemptions and carriers land in the **conventional-fee tier** and
 survive `-blockunpaidactionlimit=0` / `-txunpaidactionlimit=0` (proven by
-`qa/rpc-tests/yellowback_fee.py`). This is the base-layer fee only; the protocol's enforcement fee
+`qa/rpc-tests/yellowback_fee.py`). This is the base-layer fee only; the protocol's pool fee
 to the payee pool (FEE_MIN 0.5 YEC) is unchanged. A zero-fee transaction is refused at admission
 (`min relay fee not met`, `src/main.cpp:1955`).
 

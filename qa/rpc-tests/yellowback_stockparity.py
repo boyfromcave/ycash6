@@ -41,8 +41,11 @@ GBT_VOLATILE = {'curtime', 'longpollid', 'mintime', 'transactions', 'coinbasetxn
 # getinfo fields that are per-node by definition.
 GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'errorstimestamp', 'balance', 'walletversion',
                     'keypoololdest', 'keypoolsize', 'paytxfee', 'relayfee', 'unlocked_until',
-                    # the git describe string of the build itself: v4.5.0-<commit> either way
-                    'build', 'subversion'}
+                    # the build's own identity, not the chain's: 'build' and 'subversion' carry the
+                    # git describe string, 'version' the release number from configure.ac -- the
+                    # fork is a 6.21.x/6.22.x release, the ycash6-stock reference is 6.20.0 (6200050).
+                    # Every other getinfo field, the key set included, must agree.
+                    'build', 'subversion', 'version'}
 
 LEGACY, FORK = 0, 1
 
