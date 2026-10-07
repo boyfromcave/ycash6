@@ -410,7 +410,20 @@ class YellowbackIndexTest(YellowbackTestFramework):
         self.restart(3)
         wait_yed_healthy(nodes[3], timeout=120)
         t0 = time.time()
-        nodes[3].generate(UNDO_KEEP + 10)
+        # in chunks: one generate of UNDO_KEEP + 10 blocks is a 400 s+ RPC on a -O0 DEBUG_LOCKORDER build
+        # on the CI runner (96 s here); the lockorder job of 2026-10-07 lost node 3 inside it (its socket
+        # reset, then connection refused) with nothing on stderr. Bounded calls keep the connection
+        # short-lived and, on a recurrence, name the chunk and the node's last log lines.
+        remaining = UNDO_KEEP + 10
+        while remaining > 0:
+            try:
+                nodes[3].generate(min(500, remaining))
+            except Exception:
+                print('  node 3 lost after %d of %d blocks; node3 debug.log tail:' % (UNDO_KEEP + 10 - remaining, UNDO_KEEP + 10))
+                with open(os.path.join(tmpdir, 'node3', 'regtest', 'debug.log')) as f:
+                    print(''.join(f.readlines()[-30:]))
+                raise
+            remaining -= min(500, remaining)
         print('  mined %d blocks in %.0fs' % (UNDO_KEEP + 10, time.time() - t0))
         sync_blocks([nodes[2], nodes[3]], timeout=600)
         assert_equal(nodes[3].yed_getinfo()['height'], nodes[3].getblockcount())
