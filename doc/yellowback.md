@@ -292,87 +292,21 @@ design in which mining pools enforce the vault rules as a soft fork; the branch
 branch keeps that soft-fork version, which needs no network upgrade. The design history is in the
 project workspace's plans.
 
-> **Note on the trust statement below.** It is the CI-checked, byte-identical copy of
-> `doc/yellowback-spec.md` §8.1 and describes the soft-fork design of `harden/yellowback`
-> (pool enforcement, signalling, the sunset, abandonment and `yed_sweep`), **not** this line. This
-> line's trust statement is §10 of the workspace's `docs/plans/yellowback-upgrade-plan.md`; the
-> copy below changes when the spec generator takes its text from there.
-
 ## Trust statement
 
-Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Ycash.
+- **Every Yellowback and every bridge rule is a Ycash consensus rule, checked by every full node.**
+  There is no pool that enforces, no pause, no abandonment.
+- YED is created only when both a hashpower majority and a bonded attestor majority agree on the
+  price. Neither alone can mint against a price it sets. A single signer is never a price.
+- Collateral behind YED is locked for 30 to 90 days and returned to the owner who redeems before
+  `lockHeight + 30 days`; after that, anyone may close the vault by paying its debt in YED, after
+  a delay during which any honest attestor can stop a claim at a wrong price.
+- **Wrapped Ycash is a federated bridge.** YEC behind wYEC is released only by its bonded signer
+  set, after a delay, within a per-window cap, and only while no bonded watcher has cancelled.
+  Ycash never reads Ethereum. If the signers go silent or wind down, every depositor recovers
+  their own YEC with no counterparty. Bonds are burned for signing conflicting releases.
+- Nothing in either application touches the shielded pool.
 
-- Consensus-enforced (by every Ycash node, upgraded or not): collateral cannot leave a vault
-  before its lock height; before the claim height only the minter's key can spend it.
-- Enforced by every Yellowback-aware node deterministically: Yellowback accounting (conservation,
-  supply, collateral totals, vault status, prices, activation, halts).
-- Enforced by the mining pools that run the Yellowback module, and effective for the whole
-  network once a supermajority of blocks signal: collateral is released only against the burn of
-  the vault's debt; an underwater, abandoned vault can be claimed only by burning that debt; both
-  pay a fee to a pool that published a price quote in the 100 blocks up to the transaction's
-  reference height.
-- Prices are the medians of the quotes pools publish in their own blocks; moving them needs a
-  majority of *quote-tagged* blocks over a window, which is a majority of hashpower only when
-  most blocks carry quotes — so the windows that decide claims are undefined until two-thirds of
-  their blocks carry quotes, and the mint window until half do. A pool whose quotes stray from
-  its peers' loses the fee income that wallets' default payee choice would otherwise send it.
-- **Therefore:** a majority of hashpower that runs the module and follows it makes the rules
-  hold; a majority that does not — or a minority that the trailing signal count mistakes for a
-  majority, since the count is self-reported — could release collateral without burns or, with
-  enough quote-tagged blocks, move the price; the same majority could already reorganise the
-  chain. No operator, committee or key other than the minter's can move collateral before the
-  claim height; after it, only a burn of the vault's debt can. No pool can move a user's YED or
-  take collateral before the grace period; a pool can create YED only by first moving the mint
-  price with a majority of quote-tagged blocks.
-- An enforcing node that finds itself on the minority side of a split — a rejected chain that
-  outruns its own by six blocks — stops enforcing for the session, rejoins the network's chain,
-  raises an alert and waits for its operator; it is never stranded for more than six blocks, and
-  it never bans the peers that relayed the other chain, neither for the rejected block nor for
-  its descendants. A node that catches up after an outage *usually* does not reject a block the
-  network has already built six blocks on: when the network's headers reach it before the block
-  does — the ordinary case, since headers lead blocks — it accepts the block, records that it
-  did, and keeps enforcing. When the block arrives first it can still reject it, and the work
-  valve above is then what bounds the consequence: the node rejoins within six blocks. The valve,
-  not catch-up suppression, is the guarantee. Enforcement means "majority in fact", not "majority
-  by count".
-- Every release enforces only until a sunset height about a year past its start; past it the
-  node keeps publishing quotes and accounting but rejects nothing until upgraded, so two
-  releases with different rules can never both be enforcing.
-- As with any soft fork, every pool — participating or not — should run the module at least in
-  filter-only mode, or its blocks can be orphaned by rule-breaking transactions it cannot see.
-- Signalling is announced only once the pools running the module are diverse enough that no one
-  of them decides alone (at least three independent pools, none above 40 % of quoting blocks,
-  measured and published before the announcement).
-- If pools stop participating: below 60 % of blocks signalling, minting pauses; below 50 %, block
-  rejection pauses as well, and while it is paused neither the owner path nor the claim path is
-  policed — collateral can leave a vault without its burn and YED so unbacked stays in
-  circulation; vaults untouched during the pause are protected again when it ends. Minting resumes
-  at 75 % and rejection at 60 %. Existing YED always remains redeemable by a minter who holds it.
-- If the module is abandoned — rejection paused continuously for `ABANDON_BLOCKS` (about 30
-  days on mainnet, v3 W21), which is also where a sunset with no successor release ends up —
-  every vault's claim path becomes spendable by
-  anyone at its claim height: owners must sweep their collateral before that height
-  (`yed_sweep`, which every node of every release offers under that one same condition, and
-  whose transaction every node then relays and mines like any other) or lose it to whoever
-  claims first; the claim path stays open to everyone, so the race is fair, but the YED minted
-  against a swept or claimed vault is unbacked from then on. A failed mint's collateral (a VOID
-  vault, which never carried a debt) is released by its owner with `yed_redeem` at its lock
-  height at any time, abandonment or not.
-
-
-v2's paragraph "price honesty rests on the honest-majority-hashpower assumption" becomes:
-
-> Prices come from two populations that cannot forge each other: mining pools, weighted by
-> blocks, and bonded attestors, weighted by bond and age. A mint is sized at the lower of the
-> two; a claim opens at the higher. Moving a price in the direction that pays therefore needs a
-> majority of hashpower and a bond-weighted majority of the selected attestors at once. A
-> hashpower majority alone keeps exactly the powers it has today — it can halt minting, delay or
-> censor transactions, and reorganise the chain — and gains none. A captured attestor set alone
-> can halt minting or force an early liquidation at an honest price with the remainder returned
-> to the owner; it cannot take collateral. Attestors are not slashed: their penalty is ejection
-> and a bond that earns nothing until it unlocks. Attestations travel outside the chain; if that
-> transport fails, minting pauses and nothing else changes. Every YEC/USD price is bounded by the
-> depth of the markets it is read from.
 ## Build and test baseline (ycashd 6.20.0)
 
 This is the ycashd 6.20.0 line (`ycash6`), branch `upgrade/vault` (the vault upgrade). The v4.5.0

@@ -770,8 +770,9 @@ jobs:
               if e not in d["errors"]: missing.append("errors." + e)
           if missing: print("contract missing:", missing); sys.exit(1)
           PY
-          # The spec copy carries the v3 delta (make spec appends the v3 plan's section 3).
-          grep -q '^## v3 delta' doc/yellowback-spec.md
+          # The spec copy is the vault upgrade's (make spec-upgrade: the upgrade plan's section 10 trust
+          # statement as 8.1 and its section 15); the harden line's v3 delta is not in it.
+          grep -q '^## Vault upgrade specification' doc/yellowback-spec.md
           test -f doc/yellowback-attestor.md && test -f qa/yellowback-frozen-files.txt
           # U-21: the vault primitive's consensus checks (its block verdict, its timelock and the
           # final-transaction check it extends) and the YED module's block verdict are consensus
