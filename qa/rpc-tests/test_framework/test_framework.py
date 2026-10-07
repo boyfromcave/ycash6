@@ -161,7 +161,8 @@ class BitcoinTestFramework(object):
 
         if not self.options.noshutdown:
             print("Stopping nodes")
-            stop_nodes(self.nodes)
+            if self.nodes:          # None when setup_network itself failed: the real error is above
+                stop_nodes(self.nodes)
             wait_bitcoinds()
         else:
             print("Note: bitcoinds were not stopped and may still be running")
