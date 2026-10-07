@@ -6,14 +6,17 @@ Two ways to run Yellowback on one machine.
 |---|---|---|
 | **devnet** | `yellowback-devnet up` — eight regtest nodes, funded, activated and **ARMED** (three attestors with real agents) | GUI demos, a wallet to click at, a chain that already works |
 | **devnet, one seat empty** | `yellowback-devnet up --role {user,attestor,pool}` — eleven nodes, a heartbeat, a price walk, six simulated personas, and *you* in one seat | walking a participant's shoes for feedback (`docs/plans/role-based-regtest-plan.md`); the four checklists are in `contrib/yellowback/devnet/scenarios/` |
-| **by hand** | one `ycashd -regtest` node you drive with `ycash-cli` | understanding the v3 price-attestation path one RPC at a time |
+| **by hand** | one `ycashd -regtest` node you drive with `ycash-cli` | understanding the vault upgrade's YED attestor set and the price-attestation path one RPC at a time |
 
 The devnet's full command set, the role presets, the personas and the regression suite are
 documented in `contrib/yellowback/devnet/README.md`; this page is the crash course.
 
 Every command below was first run on 2026-09-20 against v4.5.0 (`ycash-dd`,
 `feature/yellowback-price-attest`) and re-run on 2026-09-30 against ycashd 6.20.0 (`ycash6`,
-`feature/yellowback`). Section 6 lists what is different on 6.20.0.
+`feature/yellowback`). Section 6 lists what is different on 6.20.0. Section 2 was rewritten for
+the vault upgrade (`upgrade/vault`) and re-run by hand on 2026-10-06 against the v4.5.0 line's
+build of that branch; `up` and the upgrade walk are exercised on both lines by
+`qa/rpc-tests/yellowback_devnet_upgrade.py`.
 
 ---
 
@@ -49,13 +52,13 @@ Python is always the workspace venv (`../.venv/bin/python`), never the system in
 Node 0 is the funded wallet, node 1 is a stock (unpatched) node, nodes 2–4 are quoting pools,
 nodes 5–7 attestor nodes. `up` mines past the vault upgrade height, creates the YED attestor set,
 sets a $50 quote on each pool, mines quote-tagged blocks round-robin so the price windows fill
-(there is no signalling or lock-in since the vault upgrade), registers the three attestors
-(`yed_registerattestor 10 200`: since P4-b a `SET_JOIN` to the YED attestor set, which `up` creates
-with `bondmin` 10, `bondlockmin` 200 and `livenesswindow` 1,000; each agent sends a
+(Yellowback is live from the vault upgrade height; nothing else needs activating), registers the
+three attestors (`yed_registerattestor 10 200`: a `SET_JOIN` to the YED attestor set, which `up`
+creates with `bondmin` 10, `bondlockmin` 200 and `livenesswindow` 1,000; each agent sends a
 `SET_HEARTBEAT` every 100 blocks), mines through `BOND_MATURITY` and `ATTEST_ARM_DELAY` so the
 layer is **ARMED**, and starts one real `yellowback-attest attest` per attestor plus a
 `subscribe` beside node 0 on the `dir` transport. The first mint builds its bundle from that
-pool. `up --no-attest` is the five-node v2 devnet.
+pool. `up --no-attest` is a five-node devnet without attestors, never ARMED.
 
 ```bash
 yellowback-devnet status          # activation, prices, each pool's eligibility
@@ -84,12 +87,15 @@ with `-yellowbackquotemaxage=120` so a stopped agent becomes visible within two 
 
 ---
 
-## 2. The v3 attestation path, by hand
+## 2. The YED attestor set and the attestation path, by hand
 
 One node is enough. The regtest constants are small on purpose: bond floor 10 YEC, bond maturity
 8 blocks, 3 attestors trigger arming, then 8 more blocks.
 
-**Start a node.** The six `-nuparams` are required — regtest activates no upgrade by itself.
+**Start a node with the vault upgrade.** Regtest activates no upgrade by itself: the six Ycash
+`-nuparams` go at height 1 and the vault upgrade (`6d5b7a31`) at 103, as the functional tests do.
+Yellowback is not live yet — that needs the YED attestor set, which does not exist until you
+create it.
 
 ```bash
 D=~/yb-rt && mkdir -p $D && cat > $D/ycash.conf <<'EOF'
@@ -97,29 +103,39 @@ regtest=1
 server=1
 rpcuser=rt
 rpcpassword=rt
-experimentalfeatures=1
-yellowback=1
-yellowbackstartheight=1
 yellowbacksigmaref=0
-yellowbackattestarmmin=3
 nuparams=5ba81b19:1
 nuparams=76b809bb:1
 nuparams=374d694f:1
 nuparams=8e471bd6:1
 nuparams=66314da3:1
 nuparams=19bd2d2f:1
+nuparams=6d5b7a31:103
 EOF
 src/ycashd -datadir=$D -daemon
 alias C="src/ycash-cli -datadir=$D"
 C -rpcwait getblockcount   # 6.20.0 takes ~12 s to answer RPC (Orchard parameters); earlier calls get -28
-C yed_getinfo          # rpcversion 3; attest.status "UNARMED"
 ```
 
-**Fund, then register three attestors.** Mine past coinbase maturity first.
+**Create the YED attestor set, then make Yellowback live.** Mine past the upgrade height and
+coinbase maturity, create an open set whose bond floor matches YED's (`bondmin` 10, `bondlockmin`
+200 on regtest), mine it, and restart the node naming it.
 
 ```bash
-C generate 141                       # ~260 YEC mature
-C yed_registerattestor 10 200 0      # bond 10 YEC, CLTV 200 blocks, flags 0
+C generate 104                       # past height 103; a few coinbases mature
+C set_create '{"seats":15,"unlockthreshold":1,"cancelthreshold":1,"slashthreshold":1,"open":true,"maturity":1,"bondmin":10,"bondlockmin":200}'
+C generate 1                         # the set exists from the next block
+C stop
+echo "yellowbackattestorset=<setid from set_create>" >> $D/ycash.conf
+src/ycashd -datadir=$D -daemon
+C -rpcwait yed_getinfo          # rpcversion 5; upgrade.status "active"; attest.status "UNARMED"
+```
+
+**Fund, then register three attestors.** Each registration is a `SET_JOIN` to the attestor set.
+
+```bash
+C generate 141                       # more mature coinbases for the bonds
+C yed_registerattestor 10 200        # bond 10 YEC, locked 200 blocks
 C generate 1 && sleep 2              # see the gotcha below: let the wallet settle
 # repeat twice more
 C yed_listattestors                  # seq 0,1,2 — PENDING until registerHeight + 8
@@ -159,7 +175,7 @@ C stop                               # done
 
 Both are optional for a devnet and both read a **mock price file in dollars** (`0.50`, not µUSD).
 
-**Pool quote agent (v2, Python).** What a mining pool runs:
+**Pool quote agent (Python).** What a mining pool runs:
 
 ```bash
 contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
@@ -168,7 +184,7 @@ contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-qu
 `--dry-run` aggregates and prints without touching the node; `--once` publishes one quote and
 exits; `sources` shows what each configured source resolves to.
 
-**Attestor agent (v3, Rust).** Never holds a key: it asks its own node to sign and publishes the
+**Attestor agent (Rust).** Never holds a key: it asks its own node to sign and publishes the
 74 bytes. Build and run it from its own directory so the pinned toolchain is selected:
 
 ```toml
@@ -259,8 +275,8 @@ ZCASHD=$PWD/../../src/ycashd ../../../.venv/bin/python -u yellowback_attest.py \
 ```
 
 `yellowback_attest.py` (the node path), `yellowback_attest_wallet.py` (the wallet RPCs) and
-`yellowback_attest_enforcement.py` (rejection against a stock miner) are the three that cover v3
-in the merge gate; `yellowback_attest_agent.py` (the real Rust agent) and
+`yellowback_attest_enforcement.py` (rejection against a stock miner) are the three that cover price
+attestation in the merge gate; `yellowback_attest_agent.py` (the real Rust agent) and
 `yellowback_devnet_roles.py` (the devnet's role presets) run nightly. Give each run a unique
 `--portseed`.
 

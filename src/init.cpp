@@ -411,9 +411,9 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
-    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for enforcement fees (default: -mineraddress when that is a transparent P2PKH address)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for pool fees (default: -mineraddress when that is a transparent P2PKH address)"));
     strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
-    strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays enforcement fees to when it is eligible"));
+    strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays pool fees to when it is eligible"));
     strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
     strUsage += HelpMessageOpt("-yellowbackpayeeaccuracywindow=<n>", _("Wallet payee policy: accuracy window in blocks (default: the network's ACCURACY_WINDOW)"));
     strUsage += HelpMessageOpt("-yellowbackpayeetiltbps=<bps>", _("Wallet payee policy: accuracy weighting tilt in bps (default: the network's PAYEE_TILT_BPS)"));

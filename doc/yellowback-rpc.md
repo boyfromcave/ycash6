@@ -184,7 +184,7 @@ next template's tag would be (`"quote"` or `"none"`; the signal-only tag left wi
 when the node has no payout key (then `quoteKind` is `"none"`). `params` reports every value the
 Mint page derives from; on regtest `startHeight`, `sigmaRefBps`, `supplyCapBps` and
 `attestorSetId` are the four hashed values (§3.1, M13); `claimDelay` is `CLAIM_DELAY` (U-23).
-`params.feeZat` is the network fee floor `YELLOWBACK_FEE` (`-yellowbackfee`), distinct from the enforcement fee
+`params.feeZat` is the network fee floor `YELLOWBACK_FEE` (`-yellowbackfee`), distinct from the pool fee
 (`feeMinZat`/`feeBps`); every transaction the wallet builds pays max(`feeZat`, its ZIP-317 conventional fee),
 so it has no unpaid actions under `-txunpaidactionlimit`/`-blockunpaidactionlimit` (ycash6 plan P-2). `params.policy.preferredPayee` is `null` unless `-yellowbackpreferredpayee`
 is set. `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
