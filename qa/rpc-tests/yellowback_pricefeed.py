@@ -394,7 +394,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         p = self.price()
         assert p['pClaim'] in (None, 50 * USD), p
         assert_equal(p['pSlow'], 50 * USD)
-        assert_equal(user.yed_listclaimable(), [])
+        assert_equal([r for r in user.yed_listclaimable() if r['claimable']], [])      # IT-7: open vaults are listed, claimable false
         assert_equal(user.yed_gettag(str(user.getblockcount()))['found'], True)
         assert_equal(user.yed_getactivation()['status'], 'active')
         print('  34 % forged, pools at 33 %: a quote-tag majority moves pSlow and pClaim, and the mint gate reflects it')

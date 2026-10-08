@@ -20,7 +20,8 @@ summary that every step passed:
             state hashes equal), the release after CLAIM_DELAY (CLAIMED)
   cancel    a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
   interm    an in-term claim (in-term claims plan): a class-A vault crosses theta in term, a claim
-            above theta refused, the claim at theta accepted and released, an owner redeem; SKIPs
+            above theta refused, the claim at theta accepted and released, the owner's in-term
+            redeems (D-IT-15) paying the early-redeem fee, 5 % of the collateral (IT-9); SKIPs
             (and passes) on a node whose yed_getinfo.params.inTermClaims is not true
   invalid   an invalid mint refused by every Yellowback mempool, its block rejected by every node
   bridge    the WYEC bridge persona (bridge-sim), both shapes: lock -> mock burn -> intent ->
@@ -129,8 +130,10 @@ def main():
         if isinstance(interm, str) and interm.startswith('SKIP'):
             say('interm: %s' % interm)
         else:
-            assert evidence.get('interm', {}).get('claim') and evidence['interm'].get('release') and evidence['interm'].get('redeem'), interm
+            ev = evidence.get('interm', {})
+            assert ev.get('claim') and ev.get('release') and ev.get('redeemAboveTheta') and ev.get('redeemUnderTheta'), interm
             assert interm['claimedAt'] < interm['claimHeightWouldHaveBeen'], interm
+            assert all(fee > 0 for fee in ev.get('earlyRedeemFeeZat', [])) and len(ev['earlyRedeemFeeZat']) == 2, ev   # IT-9 (the walk checks 5 %)
         for shape in options.bridge_shapes.split(','):
             assert evidence.get('bridge_%s_release' % shape, {}).get('release'), shape
             assert evidence.get('bridge_%s_rogue' % shape, {}).get('cancelled'), shape

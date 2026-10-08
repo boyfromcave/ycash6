@@ -4,7 +4,7 @@
 
 /**
  * Yellowback node-context RPCs (plan §4.5; the contract is doc/yellowback-rpc.md,
- * rpcversion 3, whose fenced json blocks define every return shape and error
+ * rpcversion 6, whose fenced json blocks define every return shape and error
  * identifier). They work without a wallet and answer -32601 unless Yellowback is
  * live (UPGRADE_VAULT and the YED attestor set configured, U-22). The index is synchronous with chainActive
  * (V2), so every reply is for the tip.
@@ -57,7 +57,8 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 5;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents
+static const int YELLOWBACK_RPC_VERSION = 6;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+                                               // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee
 
 namespace {
 
@@ -1236,8 +1237,10 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 2)
         throw std::runtime_error(
             "yed_listclaimable ( count skip )\n"
-            "\nACTIVE vaults past claimHeight that are underwater at the tip snapshot (RED-4 would pass), in vault\n"
-            "outpoint order; paged by count (default 1000) and skip (default 0) over the claimable rows.\n");
+            "\nEvery ACTIVE vault whose claim branch is open (in term since the in-term claims rule, IT-7), in vault\n"
+            "outpoint order, each with claimable (RED-4 would pass at the tip: underwater by clause (a) or (b)) and\n"
+            "underwaterAt (the claim price below which it becomes claimable); paged by count (default 1000) and\n"
+            "skip (default 0) over the listed rows.\n");
 
     YellowbackIndex& index = EnsureIndex();
     const int count = params.size() > 0 && !params[0].isNull() ? params[0].get_int() : DEFAULT_LIST_COUNT;   // C-6
@@ -1267,7 +1270,9 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         const COutPoint& out = c.first;
         const VaultRecord& v = c.second;
         yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, tip);
-        if (!est.claimable || !est.pClaim.has_value()) continue;
+        // IT-7: a vault above the threshold is listed too, `claimable: false`, with the price that opens it
+        // (underwaterAt); a claimable row always has a pClaim (an undefined pClaim makes RED-4 false).
+        const bool claimable = est.claimable && est.pClaim.has_value();
         if (seen++ < skip) continue;
         const CPubKey owner = v.OwnerKey();
         UniValue o(UniValue::VOBJ);
@@ -1277,9 +1282,11 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         o.pushKV("mintedCents", v.mintedCents);
         o.pushKV("feeZat", FeeZat(v.collateralZat, p.feeMin, p.feeBps));
         o.pushKV("claimHeight", (int64_t)v.claimHeight);
+        o.pushKV("lockHeight", (int64_t)v.lockHeight);
+        o.pushKV("claimable", claimable);
         o.pushKV("underwaterAt", UnderwaterAt(v, p));
-        o.pushKV("pClaim", est.pClaim.value());
-        o.pushKV("claimPath", est.claimPath);
+        o.pushKV("pClaim", PriceOrNull(est.pClaim));
+        o.pushKV("claimPath", claimable ? est.claimPath : "");
         yellowback::rpc::PushNoticeFields(o, st, p, out, v);
         o.pushKV("residualZat", est.residualZat);
         o.pushKV("attestFeeZat", est.attestFeeZat);

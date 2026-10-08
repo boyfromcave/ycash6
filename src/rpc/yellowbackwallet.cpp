@@ -311,6 +311,20 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
     return o;
 }
 
+/**
+ * IT-9: what an owner redeem of `v` confirming at tip + 1 (the earliest block it can reach, the builder's
+ * reading) pays on top of FEE-1, and the FEE-1 payee it would pay it to. 0 for a vault that is not ACTIVE, at
+ * or past lockHeight, for a class without a fee, and under FEE-0 (no eligible payee: the rule charges neither).
+ */
+CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, const VaultRecord& v, int tip, std::optional<CKeyID>& payee)
+{
+    const yellowback::Params& p = index.GetParams();
+    payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), index.GetPayeePolicy());
+    if (v.Status() != VaultStatus::ACTIVE || !payee.has_value() || !p.IsValidClass(v.termClass)) return 0;
+    if ((int64_t)tip + 1 >= (int64_t)v.lockHeight) return 0;
+    return EarlyRedeemFeeZat(v.collateralZat, p.earlyRedeemFeeBps[v.termClass]);
+}
+
 // ---------------------------------------------------------------- v3: the two-step flow (W7), shared pieces
 
 UniValue PriceOrNull(const std::optional<MicroUsd>& p) { return p.has_value() ? UniValue(p.value()) : NullUniValue; }
@@ -895,12 +909,15 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             "\nRedeem an own vault in one step (V24). ACTIVE: burns exactly the vault's debt from this wallet's YED, pays the\n"
             "enforcement fee to an eligible pool and sends the rest of the collateral to \"to\"; refused unless an enforcing\n"
             "miner would accept it (mempool-check-failed:<verdict>). VOID: releases the collateral with no burn, no fee and\n"
-            "no payload (L14). Both need the tip at or past lockHeight (vault-locked).\n"
+            "no payload (L14). An ACTIVE vault redeems at any height after its mint (IT-1); before lockHeight the\n"
+            "early-redeem fee earlyRedeemFeeBps[class] of the collateral is added to the pool fee (IT-9) -- quote it\n"
+            "first with yed_estimateredeem. A VOID release needs the tip at its owner height (vault-locked).\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "2. \"to\"         (string, optional) where the collateral goes: an s1... address, or a ys1... address\n"
             "                  (paid as a Sapling output). Default: a fresh transparent address of this wallet.\n"
-            "\nResult: { \"txid\", \"burnedCents\", \"feeZat\", \"payee\", \"collateralOut\", \"to\" }\n");
+            "\nResult: { \"txid\", \"burnedCents\", \"feeZat\", \"earlyRedeemFeeZat\", \"payee\", \"collateralOut\", \"to\",\n"
+            "          \"extraBurnCents\" }  (feeZat includes earlyRedeemFeeZat)\n");
     YellowbackWallet& yw = EnsureYW();
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
     const std::string to = params.size() > 1 ? params[1].get_str() : "";
@@ -908,6 +925,60 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
     // The VOID release spends no ACTIVE vault, so the K7 gate is a no-op for it; gate both alike.
     BuiltTx built = RunVaultSpend(yw, [&]() { return BuildRedeem(yw, vaultTxid, to); }, true, true, txid);
     return SpendResult(txid, built);
+}
+
+UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "yed_estimateredeem \"vaultTxid\"\n"
+            "\nQuote of yed_redeem for an own vault (IT-9): the burn, the pool fee and, before lockHeight, the early-redeem\n"
+            "fee a redeem confirming in the next block pays, and whether yed_redeem would go ahead now. Signs nothing,\n"
+            "locks nothing, commits nothing; never refuses for the vault's state (error says why a redeem would).\n"
+            "\nArguments:\n"
+            "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
+            "\nResult: { \"vault\", \"status\", \"termClass\", \"lockHeight\", \"height\", \"early\", \"burnedCents\",\n"
+            "          \"collateralZat\", \"feeZat\", \"earlyRedeemFeeBps\", \"earlyRedeemFeeZat\", \"payee\", \"canRedeem\", \"error\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
+    const COutPoint out(vaultTxid, 0);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const yellowback::Params& p = index.GetParams();
+    std::optional<VaultRecord> rec = st.GetVault(out);
+    if (!rec.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault-not-found: no vault at " + out.ToString());
+    const VaultRecord& v = rec.value();
+    const int tip = IndexHeight(index);
+    const bool active = v.Status() == VaultStatus::ACTIVE;
+    std::optional<CKeyID> payee;
+    const CAmount early = EarlyRedeemFeeAt(index, out, v, tip, payee);
+    // FEE-1 on the ACTIVE redeem (FEE-0 without an eligible payee); a VOID release pays nothing (L14).
+    const CAmount fee1 = active && payee.has_value() ? FeeZat(v.collateralZat, p.feeMin, p.feeBps) : 0;
+    std::string error;
+    if (!v.IsOpen()) error = strprintf("vault-not-active: the vault is %s", VaultStatusName(v.Status()));
+    else if (!yw.IsMineVault(v)) error = "vault-not-owned: the vault owner key is not in this wallet";
+    else if ((int64_t)tip < (int64_t)v.ownerHeight) error = strprintf("vault-locked: the vault is locked until height %d (tip %d)", v.ownerHeight, tip);   // BuildRedeem's test
+    else if (active && yw.ConfirmedCents() < v.mintedCents) error = strprintf("insufficient-yed: the redeem burns %d cents; the wallet holds %d", v.mintedCents, yw.ConfirmedCents());
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));
+    o.pushKV("status", VaultStatusName(v.Status()));
+    o.pushKV("termClass", ClassName(v.termClass));
+    o.pushKV("lockHeight", (int64_t)v.lockHeight);
+    o.pushKV("height", (int64_t)tip + 1);                       // the block the quote is for
+    o.pushKV("early", active && (int64_t)tip + 1 < (int64_t)v.lockHeight);
+    o.pushKV("burnedCents", active ? v.mintedCents : (int64_t)0);
+    o.pushKV("collateralZat", v.collateralZat);
+    o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1 plus the early-redeem fee
+    o.pushKV("earlyRedeemFeeBps", p.IsValidClass(v.termClass) ? p.earlyRedeemFeeBps[v.termClass] : 0);
+    o.pushKV("earlyRedeemFeeZat", early);
+    o.pushKV("payee", active ? PayeeToJSON(payee) : NullUniValue);
+    o.pushKV("canRedeem", error.empty());
+    o.pushKV("error", error);
+    return o;
 }
 
 UniValue yed_claim(const UniValue& params, bool fHelp)
@@ -1344,7 +1415,8 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_listpositions ( \"status\" )\n"
             "\nThis wallet's vaults (owner key held): every yed_getvault field plus canRedeem (ACTIVE or VOID at or past\n"
-            "lockHeight; for VOID the release) and canClaim (claimable and the wallet holds the debt).\n");
+            "the owner height: from the block after the mint, IT-1; for VOID the release), canClaim (claimable and the\n"
+            "wallet holds the debt) and earlyRedeemFeeZat (what a redeem now adds to the pool fee before lockHeight, IT-9).\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
@@ -1375,6 +1447,8 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
         o.pushKV("canRedeem", v.IsOpen() && h >= v.ownerHeight);     // IT-1 (extended): in term too
+        std::optional<CKeyID> payee;
+        o.pushKV("earlyRedeemFeeZat", EarlyRedeemFeeAt(index, out, v, h, payee));   // IT-9: what a redeem now adds to the fee
         o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
         o.pushKV("canNotice", est.canNotice);
         arr.push_back(o);
@@ -1675,6 +1749,7 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_listtransactions", &yed_listtransactions,  false },
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
+    { "yellowback", "yed_estimateredeem",   &yed_estimateredeem,    false },   // IT-9
     { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
     // v3 (plan §4.5)
     { "yellowback", "yed_claimnotice",      &yed_claimnotice,       false },

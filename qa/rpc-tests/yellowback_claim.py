@@ -149,7 +149,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_greater_than(user.yed_getvault(mints['U']['txid'])['lockHeight'], user.getblockcount())   # in term
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['U']['txid']))
         self.mine_round_robin(POOLS, claim_height - user.getblockcount())
-        assert_equal(user.yed_listclaimable(), [])
+        assert_equal([r for r in user.yed_listclaimable() if r['claimable']], [])      # IT-7: open vaults are listed, claimable false
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['U']['txid']))
         assert_rpc_error('vault-not-found', claimant.yed_claim, z_txid)
         assert_rpc_error('vault-not-found', claimant.yed_claim, '11' * 32)
@@ -187,7 +187,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(price['pSlow'], 10000)
         assert_equal(price['pClaim'], 10000)
         assert_greater_than(before['pClaim'], price['pClaim'])
-        claimable = {c['vault']: c for c in user.yed_listclaimable()}
+        claimable = {c['vault']: c for c in user.yed_listclaimable() if c['claimable']}   # IT-7
         for name, m in mints.items():
             assert m['txid'] + ':0' in claimable, name
         assert mint_v3['txid'] + ':0' in claimable              # IT-2: V3 is in term and under theta: claimable now
@@ -307,7 +307,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, 30)
         assert_equal(user.yed_getprice()['pClaim'], 50000000)         # pMid recovered
         assert_equal(user.yed_getvault(mints['V']['txid'])['claimable'], False)
-        assert mints['V']['txid'] + ':0' not in {c['vault'] for c in user.yed_listclaimable()}
+        assert mints['V']['txid'] + ':0' not in {c['vault'] for c in user.yed_listclaimable() if c['claimable']}
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['V']['txid']))
         v = nodes[2].yed_validaterawtransaction(hex_v)
         assert_equal((v['verdict'], v['blockValid'], v['wouldBeRejected'], v['mempoolExpiryOk']), ('ok', True, False, True))

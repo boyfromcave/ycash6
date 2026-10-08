@@ -288,7 +288,7 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 5)
+        assert_equal(user.yed_getinfo()['rpcversion'], 6)   # in-term claims (IT-7)
 
         print('activation at $%s, then three attestors registered and armed' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)

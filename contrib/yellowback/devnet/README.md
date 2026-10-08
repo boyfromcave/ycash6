@@ -96,12 +96,12 @@ The walk writes the pools' mock price and every **automated** attestor's mock pr
 
 ### The personas (`sim`, `yellowback-sim`)
 
-Six strategies, each with its own cadence and characteristic failure, seeded, on two wallets: the **population** (node 9) hosts the five minter/holder personas, the **liquidator** (node 10) owns none of their vaults — because claiming someone else's underwater vault is a different path (RED-4, a third party) from an owner redeeming, and it is the one the attested price governs. Risk appetite is the term class: `yed_mint` always locks exactly the class minimum, so "leveraged" means class C (300 %, the longest terms) and "conservative" means class A (500 %, the shortest).
+Six strategies, each with its own cadence and characteristic failure, seeded, on two wallets: the **population** (node 9) hosts the five minter/holder personas, the **liquidator** (node 10) owns none of their vaults — because claiming someone else's underwater vault is a different path (RED-4, a third party) from an owner redeeming, and it is the one the attested price governs. Risk appetite is the term class: `yed_mint` always locks exactly the class's base ratio (the volatility multiplier is pinned at 1, D-IT-5), so with the in-term parameter set (D-IT-4) "leveraged" means class A (300 %, the shortest terms) and "conservative" means class C (500 %, the longest).
 
 | Persona | Does | Characteristic failure |
 |---|---|---|
-| leveraged | class C mints, holds two, never redeems early | the first liquidated on a downswing |
-| conservative | class A mints, one at a time, redeems at maturity | the happy path |
+| leveraged | class A mints (300 %), one at a time, redeems at maturity | the first liquidated on a downswing (under θ at −58 %) |
+| conservative | class C mints (500 %), holds two, never redeems early | the last to go under (−75 %); a vault held through the term |
 | exiter | redeems the moment `lockHeight` passes; runs `yed_sweepcarriers` | `vault-locked`, `insufficient-yed` when the trader moved its YED |
 | trader | never mints; `yed_send` / `yed_sendmany` between its addresses and to the liquidator | `insufficient-yec` on a wallet whose change is unconfirmed |
 | absentee | mints once, then nothing | an abandoned vault seen from outside |
@@ -237,20 +237,29 @@ worth less than θ = 125 % of its debt at the attested claim price, at any heigh
   prints each vault's claimable price;
 - `upgrade-walk` has a step `interm` (a class-A vault crosses θ in term; a claim above θ refused
   on every Yellowback node; the claim at θ accepted with the H-9.3 bounds; the release after
-  `claimDelay`; the residual to the owner, or why there is none; an owner redeem; one state
-  hash) that prints `SKIP` with the reason on a node without the feature, so the walk and
+  `claimDelay`; the residual to the owner, or why there is none; the owner redeeming in term
+  (D-IT-15), above θ and under it ahead of a claimant, each paying the early-redeem fee quoted by
+  `yed_estimateredeem` (IT-9: 5 % of the collateral for class A); one state hash) that prints
+  `SKIP` with the reason on a node without the feature, so the walk and
   `yellowback_devnet_upgrade.py` pass on both;
 - `yellowback_devnet_roles.py` shocks mid-term when the feature is on and asserts the liquidator
   claims a persona's vault **before** its `claimHeight`;
 - `scenarios/in-term-claim.md` is the explainer's example, clicked through with YecWallet.
 
-**Disclosure (IT-8).** Every wallet, document and demo that offers a mint on this rule set carries
-the trust statement's added sentence, verbatim:
+**Disclosure (IT-8, D-IT-17).** Every wallet, document and demo that offers a mint on this rule set
+carries the trust statement's collateral promise, verbatim (`doc/yellowback.md`, *Trust statement*;
+generated from the plan by the workspace's `make spec-in-term`):
 
-> A vault whose collateral falls below 125 % of its debt at the attested price may be closed by
-> anyone at once, by paying its debt; the owner receives any collateral above 125 % of the debt.
-> Redeem before that point to avoid it.
+> Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED you
+> minted. If your collateral falls below 125 % of your debt at the attested price, anyone may close
+> your vault by paying your debt; you then receive whatever collateral is worth more than 125 % of
+> the debt — which, at the threshold, is usually nothing. Before that happens, your wallet will warn
+> you, and redeeming stops it.
 
-and shows the claimable price per vault (`yed_getvault.underwaterAt`). Note the owner's redeem
-is unchanged: it opens at `lockHeight`, so "before that point" is actionable only once the lock
-has passed — the devnet scenario makes that visible on purpose.
+and, beside it, the early-redeem fee (D-IT-16, IT-9): a redeem before the term's `lockHeight` pays
+5 % (class A), 2.5 % (B) or 1 % (C) of the collateral on top of the pool fee
+(`yed_getinfo.params.earlyRedeemFeeBps`; `yed_estimateredeem` quotes it before the owner confirms,
+`yed_redeem` reports it as `earlyRedeemFeeZat`). Wallets show the claimable price per vault
+(`yed_getvault.underwaterAt`, `yed_listclaimable` rows with `claimable: false` until it is reached).
+The owner's redeem is open from the block after the mint (D-IT-15), so "redeeming stops it" is
+actionable at any height — at the fee's cost before the term ends.

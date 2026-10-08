@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 5
+# Yellowback RPC contract (`yed_*`), rpcversion 6
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `5` (the vault upgrade, above; it was `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `6` (in-term claims, below; the vault upgrade took `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -61,6 +61,23 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
 - A failing mint or vault spend is an invalid transaction: no VOID vault is produced
   (`voidReason` stays `""`), the mempool refuses it with `bad-yellowback-<verdict>` and a block
   carrying it is rejected (DoS 100). `mempool-check-failed:<verdict>` keeps its meaning.
+
+**In-term claims (`rpcversion` 6; docs/plans/yellowback-in-term-claims-plan.md §4, IT-1..IT-9; its §4.1
+is the contract delta this file implements).** A vault is claimable at any height after its mint
+once its collateral is worth less than θ × debt (`claimThresholdBps`, 125 %) at the attested claim
+price, and its owner may redeem at any height (the V template's `ownerHeight` and `appHeight` are
+both `refHeight + 1`); a redeem before `lockHeight` pays the early-redeem fee
+`earlyRedeemFeeBps[class]` of the collateral on top of the pool fee. For a client: `yed_getinfo.params`
+gains `claimThresholdBps`, `sigmaMultMaxBps`, `earlyRedeemFeeBps` (per class, also on each `classes`
+row) and `inTermClaims: true`; `yed_listclaimable` lists every ACTIVE vault whose claim branch is
+open, each with `claimable` and `lockHeight` — rows with `claimable: false` are vaults above the
+threshold, with `underwaterAt` the claim price at which they become claimable (a shape change: a
+client that claimed every row must now read `claimable`, hence the bump); `yed_redeem` and
+`yed_claim` results gain `earlyRedeemFeeZat` (the part of `feeZat` the early-redeem fee is, `0` on a
+claim); `yed_listpositions` rows gain `earlyRedeemFeeZat`; `yed_estimateredeem` is new (the quote a
+wallet shows before the owner confirms a redeem); `vault-locked` no longer refuses an ACTIVE redeem
+in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
+`claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
 
 **P4-b: the attestor registry is the attestor set** (upgrade plan §15.10; additions only, so
 `rpcversion` stays 5). An attestor is a member of the vault primitive's set `attestorSetId`: it
@@ -174,8 +191,8 @@ holds (V2; `height` is `-1` and `blockhash` `""` while the index is empty). `upg
 `supplyCapReached` (**v3, W20**) is `true`
 when the next mint of any class would exceed the supply cap at the tip snapshot (`supplyCents +
 MIN_MINT > supplyCapCents`) and `false` when the cap is undefined (no cap, no price, empty index);
-above the cap only class A, when its minimum ratio reaches `params.recapRatioBps`, mints
-(H-10; `yed_getstats.mintableClasses`). `mintRequiresArmed` (**hardening, H-1**) is
+above the cap only a class whose base ratio reaches `params.recapRatioBps` mints (IT-5: class C
+with the in-term parameter set; `yed_getstats.mintableClasses`). `mintRequiresArmed` (**hardening, H-1**) is
 `MINT_REQUIRES_ARMED` of the set in force: when `true` a mint whose reference height is not
 ARMED (`attest.armed`) is VOID with `mint-halted-unarmed` (MINT-4) and `yed_mint` refuses it with
 `mintpol-unarmed`; `true` on mainnet and testnet, `false` on regtest unless
@@ -187,7 +204,13 @@ Mint page derives from; on regtest `startHeight`, `sigmaRefBps`, `supplyCapBps` 
 `params.feeZat` is the network fee floor `YELLOWBACK_FEE` (`-yellowbackfee`), distinct from the pool fee
 (`feeMinZat`/`feeBps`); every transaction the wallet builds pays max(`feeZat`, its ZIP-317 conventional fee),
 so it has no unpaid actions under `-txunpaidactionlimit`/`-blockunpaidactionlimit` (ycash6 plan P-2). `params.policy.preferredPayee` is `null` unless `-yellowbackpreferredpayee`
-is set. `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
+is set. **In-term claims.** `params.claimThresholdBps` is θ (`CLAIM_THRESHOLD_BPS`, 12,500: a vault
+is claimable at any height after its mint while `collateralZat · pClaim < mintedCents · θ · COIN`,
+IT-2); `params.inTermClaims` is `true` on a node with that rule (a client tells the line by it);
+`params.earlyRedeemFeeBps` is the per-class early-redeem fee (IT-9: 500 / 250 / 100, of the
+collateral, on an owner redeem confirming below `lockHeight`), repeated on each `classes` row;
+`params.sigmaMultMaxBps` is the volatility multiplier's cap (`10000` with `sigmaRefBps` `0`: the
+multiplier is pinned at 1, so a class's required ratio is its `baseRatioBps`, IT-4). `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
 (stage (i)–(iii) of §4.6; `0` when the node runs without a wallet) and `protectedByIndex` is
 `true` whenever that layer is attached: the GUI treats a mismatch between `lockedOutputs` and the
 length of `yed_listunspent` as the trigger for `yed_lockcoins`.
@@ -210,7 +233,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 5,
+  "rpcversion": 6,
   "enabled": true,
   "network": "regtest",
   "height": 331,
@@ -268,10 +291,14 @@ Result of `yed_getinfo`:
     "windows": { "fast": 8, "mid": 24, "slow": 64 },
     "minFill": { "fast": 4, "mid": 16, "slow": 43 },
     "classes": [
-      { "class": "A", "minBlocks": 48, "maxBlocks": 96, "baseRatioBps": 50000 }
+      { "class": "A", "minBlocks": 48, "maxBlocks": 96, "baseRatioBps": 30000, "earlyRedeemFeeBps": 500 }
     ],
+    "earlyRedeemFeeBps": [ 500, 250, 100 ],
     "globalRatioHaltBps": 25000,
     "recapRatioBps": 50000,
+    "claimThresholdBps": 12500,
+    "sigmaMultMaxBps": 10000,
+    "inTermClaims": true,
     "policy": {
       "penaltyBlocks": 12,
       "accuracyWindow": 24,
@@ -317,8 +344,8 @@ Result of `yed_getinfo`:
 ```
 
 `classes` always has three rows (A, B, C) in class order; the example shows one. A row with
-`minBlocks > maxBlocks` is a disabled class (H-5: B and C on mainnet and testnet), which no mint
-can use. Every value in `params` other than the four hashed regtest values (six with **v3**'s
+`minBlocks > maxBlocks` is a disabled class (H-5; none is since the in-term plan's D-IT-9 re-enabled
+B and C), which no mint can use. Every value in `params` other than the four hashed regtest values (six with **v3**'s
 `attest.armMin` and `attest.carrierMode`, seven with the top-level `mintRequiresArmed`) is
 compiled into the network's parameter set (§3.1) — a wallet may display
 them but must not treat them as configurable. `params.attest` names are the v3 §3.1 rows in
@@ -572,16 +599,17 @@ Arguments: `txid` (string; vault outpoints are always `vout 0`). The `Vaults` re
 derived fields. `collateral` is the decimal-YEC twin of `collateralZat`. `voidReason` is the
 verdict of the MINT rule that failed, `""` for a vault that was ever ACTIVE. `closeHeight`,
 `closingTxid`, `burnedCents` are `null`/`""`/`0` until the vault is CLOSED or CLAIMED
-(`closingTxid` `""`, `closeHeight` `null`). `claimable` is true for an ACTIVE vault at or past
-`claimHeight` that is underwater at the tip snapshot (RED-4 would pass; **v3**, while armed: by
+(`closingTxid` `""`, `closeHeight` `null`). `claimable` is true for an ACTIVE vault whose claim
+branch is open (from the block after its mint, IT-1/IT-2: in term, in grace and past it alike) that
+is underwater at the tip snapshot (RED-4 would pass; **v3**, while armed: by
 clause (a) or (b), exactly `yed_listclaimable`'s test, so a vault listed there with `claimPath`
 `"b"` reads `claimable: true` here); `underwaterAt` is the `pClaim` (µUSD) below which
 `collateralZat · pClaim < mintedCents · CLAIM_THRESHOLD_BPS`, i.e. the price at which the vault
 becomes claimable (`null` for a VOID vault, which has no debt). `unbacked`
 is true for a vault closed without its burn (IN-2; no rule produces one since the sweep was
 retired, upgrade plan §6). `scriptPubKey` is the vault's V template in hex (tag `YED\0`, both
-sets the YED attestor set, delay `CLAIM_DELAY`, ownerHeight `lockHeight`, appHeight `lockHeight +
-GRACE`; U-23) — what an external builder needs to spend it. A vault that is **`CLAIMING`** (a
+sets the YED attestor set, delay `CLAIM_DELAY`, ownerHeight and appHeight `refHeight + 1` (IT-1;
+a vault minted before the in-term rule keeps `lockHeight` / `lockHeight + GRACE`); U-23) — what an external builder needs to spend it. A vault that is **`CLAIMING`** (a
 claim moved its collateral into a claimant intent, and the RED-5 residual into an owner residual
 intent) carries **`intents`** (**optional**, absent otherwise): `[{txid, vout, role, height,
 releaseHeight}]`, `role` `"claimant"` or `"residual"`, `releaseHeight` = `height + CLAIM_DELAY`,
@@ -708,11 +736,16 @@ Result of `yed_listtokens`:
 ### `yed_listclaimable [count] [skip]`
 
 Arguments: `count` (number, default `1000`) and `skip` (number, default `0`), a page over the
-claimable rows in vault outpoint order (the per-vault estimate stops once the page is full).
-ACTIVE vaults past `claimHeight` that are underwater at the tip snapshot — the
-source of the wallet's Claim page. `mintedCents` is the burn a claim must carry (RED-2), `feeZat`
-the FEE-1 fee it pays from the collateral, `pClaim` the tip's claim price (never `null` here: an
-undefined `pClaim` makes RED-4 false, so nothing is claimable). Empty list when nothing is.
+listed rows in vault outpoint order (the per-vault estimate stops once the page is full).
+**In-term claims (IT-7):** every ACTIVE vault whose claim branch is open — from the block after its
+mint, so in term too — each with `claimable` (RED-4 would pass at the tip snapshot) — the source of
+the wallet's Claim page and of its threshold warning. A row with `claimable: false` is a vault above
+the threshold: `underwaterAt` is the claim price (µUSD) below which it becomes claimable, and its
+`claimPath` is `""`, `residualZat` `0`. `lockHeight` tells a claim in term (`tip < lockHeight`) from
+one past it. `mintedCents` is the burn a claim must carry (RED-2), `feeZat`
+the FEE-1 fee it pays from the collateral, `pClaim` the tip's claim price (never `null` on a
+`claimable` row: an undefined `pClaim` makes RED-4 false; `null` on another row when the tip has no
+claim price). Empty list when no vault is open.
 
 **v3.** While armed, "claimable" means RED-4 by clause (a) under the tip's combined `pClaim`
 computed with the bundle this node **would build** from its pool for that vault (selector = the
@@ -721,8 +754,8 @@ REF_LAG` and the emergency inequality holds under `pEmerg`). `pClaim` is then th
 price; `claimPath` says which clause opened it. Rows gain `noticed`, `noticeHeight`,
 `emergencyOpenAt` (as `yed_getvault`), `residualZat` (RED-5's amount the claim must return to
 the owner; `0` for a clause-(a) claim at the threshold) and `attestFeeZat` (AFEE-1). A vault
-that is under `EMERGENCY_RATIO_BPS` but not yet claimable is **not** listed here; the wallet
-finds it through `yed_listpositions`/`yed_getvault.underwaterAt` and offers `yed_claimnotice`.
+that is under `EMERGENCY_RATIO_BPS` but not yet claimable is listed with `claimable: false`; the
+wallet offers `yed_claimnotice` for it (`yed_listpositions.canNotice` for its own).
 When no bundle can be built (`bundle-insufficient` would be raised) the list is computed from
 the cross-section alone and every row carries `claimPath: ""` — the wallet must expect
 `yed_claim` to refuse until the pool refills.
@@ -738,6 +771,8 @@ Result of `yed_listclaimable`:
     "mintedCents": 100000,
     "feeZat": 629722922,
     "claimHeight": 401,
+    "lockHeight": 377,
+    "claimable": true,
     "underwaterAt": 436700,
     "pClaim": 400000,
     "claimPath": "a",
@@ -1553,13 +1588,18 @@ Result of `yed_unlockcoin`:
 Arguments: `vaultTxid` (string), `to` (string, optional; a transparent or `ys1…` destination for
 the collateral; default a fresh own transparent address). One step (V24):
 
-- On an **ACTIVE** vault at or past `lockHeight`: the §3.5 owner-path REDEEM (the V template's
-  owner path, selector 2: scriptSig `<sig> OP_2`, `nLockTime ≥ lockHeight`, U-23) — burns
+- On an **ACTIVE** vault at any height after its mint (IT-1: the V template's `ownerHeight` is
+  `refHeight + 1`): the §3.5 owner-path REDEEM (the V template's
+  owner path, selector 2: scriptSig `<sig> OP_2`, `nLockTime ≥ ownerHeight`, U-23) — burns
   `mintedCents` of the wallet's YED, pays the FEE-1 fee to `payee(R, vaultOutpoint)`, sends the
-  rest of the collateral to `to`. Runs `MempoolCheck` first and refuses (`mempool-check-failed:
+  rest of the collateral to `to`. **Before `lockHeight`** (the redeem confirming at `tip + 1 <
+  lockHeight`) the fee output also carries the early-redeem fee, `earlyRedeemFeeBps[class]` of the
+  collateral (IT-9: 5 % class A, 2.5 % B, 1 % C; `bad-redeem-early-fee` when a transaction does not
+  carry it); `earlyRedeemFeeZat` is that part of `feeZat` (`0` at or past `lockHeight` and under
+  FEE-0). A wallet quotes it with `yed_estimateredeem` before the owner confirms. Runs `MempoolCheck` first and refuses (`mempool-check-failed:
   <verdict>`) rather than commit anything MP-1 would refuse (K7); on success `CommitTransaction`
   puts it in the node's own mempool.
-- On a **VOID** vault at or past `lockHeight` (L14): the §3.5 VOID RELEASE — owner path, no
+- On a **VOID** vault at or past its owner height (`lockHeight` for every VOID vault, L14): the §3.5 VOID RELEASE — owner path, no
   burn, no fee, no payload. Returns `burnedCents: 0`, `feeZat: 0`, `payee: null`. The GUI calls
   this **Release**. Since the vault upgrade no VOID vault is produced (a failing mint is invalid),
   so this branch only serves a chain indexed before it.
@@ -1569,8 +1609,8 @@ selector burned rather than refuse: it is `0` whenever a selection with change o
 `≥ MIN_OUTPUT` exists (those are always preferred) and otherwise lies in `[1, MIN_OUTPUT − 1]`,
 i.e. at most $0.99. `burnedCents` stays the vault's debt; `extraBurnCents` is burned on top of it.
 Refusals: `vault-not-found`, `vault-not-owned`,
-`vault-not-active` (CLOSED or CLAIMED only), `vault-locked` (tip below `lockHeight`, ACTIVE and
-VOID alike), `insufficient-yed`, `change-floor`, `mempool-check-failed:<verdict>`,
+`vault-not-active` (CLOSED or CLAIMED only), `vault-locked` (tip below the vault's `ownerHeight`:
+in practice a VOID vault before `lockHeight`, or a vault minted before the in-term rule), `insufficient-yed`, `change-floor`, `mempool-check-failed:<verdict>`,
 `RPC_WALLET_ERROR` for a locked wallet.
 
 Result of `yed_redeem`:
@@ -1579,11 +1619,47 @@ Result of `yed_redeem`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 629722922,
+  "feeZat": 13224181372,
+  "earlyRedeemFeeZat": 12594458450,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 251259436078,
+  "collateralOut": 238664977628,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0
+}
+```
+
+### `yed_estimateredeem <vaultTxid>`
+
+Arguments: `vaultTxid` (string; the vault is its output 0). **In-term claims (IT-9).** The quote of
+`yed_redeem` for a vault, which a wallet shows before the owner confirms: what a redeem
+confirming in the next block (`height` = tip + 1) burns and pays. `early` is `height < lockHeight`
+on an ACTIVE vault; `earlyRedeemFeeZat` is then `earlyRedeemFeeBps[class]` (`earlyRedeemFeeBps`) of
+`collateralZat` and `feeZat` the whole fee output, FEE-1 plus it, exactly `yed_redeem`'s `feeZat`
+(both `0` under FEE-0; `payee` is *null when* no pool is eligible or the vault is not ACTIVE; a VOID
+release pays nothing and burns nothing). Signs
+nothing, locks nothing, commits nothing. It refuses only `vault-not-found`; for every other reason
+`yed_redeem` would refuse now, `canRedeem` is `false` and `error` carries that identifier
+(`vault-not-active`, `vault-not-owned`, `vault-locked`, `insufficient-yed`; `""` otherwise). The
+network fee and any H4 sub-dollar remainder are not part of the quote (`yed_redeem` reports them).
+
+Result of `yed_estimateredeem`:
+
+```json
+{
+  "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
+  "status": "ACTIVE",
+  "termClass": "A",
+  "lockHeight": 377,
+  "height": 360,
+  "early": true,
+  "burnedCents": 100000,
+  "collateralZat": 251889169000,
+  "feeZat": 13224181372,
+  "earlyRedeemFeeBps": 500,
+  "earlyRedeemFeeZat": 12594458450,
+  "payee": "smQvTmAz2ExamplePayoutAddress1111111",
+  "canRedeem": true,
+  "error": ""
 }
 ```
 
@@ -1597,7 +1673,8 @@ RED-5 residual, the claimant intent's value (U-23: the fees come from the claima
 no bound, hardening H-9.3: the claimant's cap on the YED the claim burns; refused
 `claim-burn-above-max` at preflight when the vault's `mintedCents` exceeds it and again at build
 against the exact burn — the debt plus any H4 sub-dollar remainder — nothing signed either time).
-The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
+The §3.5 CLAIM of somebody else's underwater vault (a `claimable` row of `yed_listclaimable`; in
+term as well as past it, IT-2):
 the V template's claim path (selector 4: scriptSig `OP_4`, U-23), `nLockTime = claimHeight`,
 burns `mintedCents` of the claimant's own YED and moves the collateral into a **claimant intent**
 (the primitive's I template, output 0, paying `to`, delay `CLAIM_DELAY`) of the
@@ -1609,8 +1686,9 @@ intent to `to` and the vault becomes `CLAIMED`. Until then any `cancelThreshold`
 YED attestor set may cancel it (`vault_buildcancel` + `set_signcancel` + `vault_send`), which
 re-creates the vault as `ACTIVE` at the cancel's output 0 and does not refund the burn (U-24).
 `collateralOut` is the claimant intent's value. The v2 fields of `yed_redeem` (including
-`extraBurnCents`, H4) plus the **v3** fields below. Refusals: `vault-not-found`,
-`vault-not-active`, `claim-not-yet` (tip below `claimHeight`), `claim-not-underwater` (RED-4
+`extraBurnCents`, H4, and `earlyRedeemFeeZat`, always `0` on a claim) plus the **v3** fields below. Refusals: `vault-not-found`,
+`vault-not-active`, `claim-not-yet` (tip below the vault's `appHeight`: only a vault minted before
+the in-term rule, in term), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
 `mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`,
 `claim-out-below-min`, `claim-burn-above-max`, `carrier-wait-busy`.
@@ -1634,6 +1712,7 @@ Result of `yed_claim`:
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
   "feeZat": 629722922,
+  "earlyRedeemFeeZat": 0,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "collateralOut": 251889169000,
   "to": "smExampleTransparentTwin111111111111",
@@ -1866,8 +1945,11 @@ Result of `yed_signattestation`:
 
 Arguments: `status` (string, optional; as `yed_listvaults`). The wallet's own vaults (a vault is
 mine iff `HaveKey(ownerPubKey)`): every `yed_getvault` field plus `canRedeem` (true for an
-ACTIVE or VOID vault at or past `lockHeight` — for VOID it is the Release, L14), `canClaim`
-(true when `claimable` and the wallet holds `≥ mintedCents`). `scriptPubKey` and, while
+ACTIVE or VOID vault at or past its `ownerHeight` — in term too since IT-1; for VOID it is the
+Release, L14), `canClaim` (true when `claimable` and the wallet holds `≥ mintedCents`) and
+`earlyRedeemFeeZat` (IT-9: what a redeem confirming in the next block adds to the pool fee, `0` at
+or past `lockHeight`, for a vault that is not ACTIVE, and under FEE-0 — the Positions page shows it
+beside `underwaterAt`). `scriptPubKey` and, while
 `CLAIMING`, `intents` as `yed_getvault` (`canSweep` and `sweepBefore` left with the sweep, upgrade
 plan §6).
 
@@ -1909,6 +1991,7 @@ Result of `yed_listpositions`:
     "noticeHeight": null,
     "emergencyOpenAt": null,
     "canRedeem": false,
+    "earlyRedeemFeeZat": 0,
     "canClaim": false,
     "canNotice": false
   }
@@ -1976,8 +2059,8 @@ what `yellowback_rpc_contract.py` uses.
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |
 | `invalid-address` | `yed_listtokens` | a string that is neither a YED nor a transparent P2PKH address of this network |
 | `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
-| `vault-locked` | `yed_redeem` | tip below `lockHeight` (ACTIVE and VOID alike) |
-| `claim-not-yet` | `yed_claim` | tip below `claimHeight` |
+| `vault-locked` | `yed_redeem` | tip below the vault's `ownerHeight` (`refHeight + 1` since IT-1; `lockHeight` for a VOID vault and a vault minted before the in-term rule) |
+| `claim-not-yet` | `yed_claim` | tip below the vault's `appHeight` (`refHeight + 1` since IT-1; `claimHeight` for a vault minted before the in-term rule) |
 | `claim-not-underwater` | `yed_claim` | RED-4 would fail at the reference snapshot (the price did not fall) |
 | `change-floor` | `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim` | no selection leaves YED change of `0` or `≥ MIN_OUTPUT` (H2; a REDEEM or CLAIM burns a sub-dollar remainder instead, H4, so it reaches this only when even that is impossible): send `cents − 50` from a single `cents` output. The message is structured and always has this shape: `change-floor: <requested> cents cannot be sent from these coins without change below the $1.00 minimum output; nearest workable amounts: below <n\|none>, above <n\|none>` — the GUI reads the two numbers with that grammar and `yed_estimatesend.alternatives` returns them as fields |
 | `unlock-acknowledgement-missing` | `yed_unlockcoin` | the third argument is not exactly `I understand this burns YED` |
@@ -2060,7 +2143,7 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_sendmany` | 0 (unchanged; the object) |
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
-| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions` | none (all strings) |
+| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions`, `yed_estimateredeem` | none (all strings) |
 | `yed_claim` | 3, 4, 5 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit; `maxBurnCents` since rpcversion 4) |
 | `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
 | `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |

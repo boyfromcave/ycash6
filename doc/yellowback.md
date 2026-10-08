@@ -31,20 +31,23 @@ rules do not apply here. This file is the user-facing guide to the node and its 
 ## How it works
 
 - **A Yellowback is a vault.** `yed_mint` locks YEC in the vault primitive's **V template**, with
-  the YED attestor set as its signer set, `CLAIM_DELAY` as its delay, the lock height as its owner
-  height and the claim height (lock height + `GRACE`) as its application height. It issues the
+  the YED attestor set as its signer set, `CLAIM_DELAY` as its delay, and the block after the mint
+  as both its owner height and its application height (in-term claims, IT-1: the owner may redeem
+  and a claim may open at any height; the module's rules decide). It issues the
   minted YED to the minter as a transparent output carrying a small `OP_RETURN` payload. The
   attestor set never spends a YED vault: its only power over one is to cancel a pending claim.
 - **YED moves like YEC.** `yed_send` builds an ordinary transparent transaction whose payload
   assigns cents to outputs; every Yellowback node keeps the same ledger of who holds what
   (`yed_getbalance`, `yed_listunspent`). Spending a YED output with a plain YEC command **burns**
   the YED it carries; the wallet locks its YED outputs so that cannot happen by accident.
-- **Redemption burns the debt.** `yed_redeem` at or after the lock height spends the vault on its
-  owner branch, burns the vault's minted cents, pays the pool fee and returns the collateral. A
-  vault spend without that burn is an invalid transaction.
-- **Underwater vaults can be claimed, after a delay.** From the claim height anyone holding enough
-  YED can `yed_claim` a vault whose collateral is worth less than its debt at the claim price
-  (`yed_listclaimable` lists them). The claim burns the debt and moves the collateral into a
+- **Redemption burns the debt.** `yed_redeem` at any height after the mint spends the vault on its
+  owner branch, burns the vault's minted cents, pays the pool fee and returns the collateral; before
+  the lock height it also pays the early-redeem fee, 5 % (class A), 2.5 % (B) or 1 % (C) of the
+  collateral (IT-9), which `yed_estimateredeem` quotes first. A vault spend without that burn is an
+  invalid transaction.
+- **Underwater vaults can be claimed, after a delay.** At any height after the mint anyone holding
+  enough YED can `yed_claim` a vault whose collateral is worth less than 125 % of its debt at the
+  claim price (`yed_listclaimable` lists every open vault, `claimable` true for those). The claim burns the debt and moves the collateral into a
   **pending release** (an intent) paying the claimant; any remainder above the claimant's share
   goes into a second one paying the owner. The vault is `CLAIMING` for `CLAIM_DELAY` blocks
   (576, twelve hours, on mainnet; 10 on regtest), during which the YED attestor set can cancel the
@@ -159,8 +162,9 @@ ycash-cli yed_mint 10000 48                 # mint; back up wallet.dat afterward
 ycash-cli yed_mint 10000 48 ys1…            # the same, funded from that Sapling address in one transaction
 ycash-cli yed_listpositions                 # your vaults: status, lockHeight, claimHeight, canRedeem, intents
 ycash-cli yed_send ye… 2500                 # send $25.00
+ycash-cli yed_estimateredeem <vaultTxid>    # quote a redeem: the burn, the pool fee and, before lockHeight, the early fee
 ycash-cli yed_redeem <vaultTxid>            # burn the debt, pay the pool fee, take the collateral back
-ycash-cli yed_listclaimable                 # vaults under the claim threshold (in term or past it)
+ycash-cli yed_listclaimable                 # open vaults: claimable (under the threshold) or the price that makes them so
 ycash-cli yed_claim <vaultTxid>             # claim one with your own YED (a pending release for CLAIM_DELAY)
 ycash-cli vault_release <intentTxid> 0      # after CLAIM_DELAY: pay the claimant's intent out
 ycash-cli yed_listtransactions
@@ -188,9 +192,10 @@ block after its mint; a claim is valid at any height at which the collateral is 
 term, in grace and past it alike. Anyone may claim by burning the full debt; the claimant receives
 collateral worth 125 % of the debt at that price, capped at the collateral, and whatever is left
 returns to the owner; the attestor set may cancel a wrong-price claim within `CLAIM_DELAY`. The
-owner's redeem is open from the block after the mint as well (the term's `lockHeight` is record-keeping; an
-early-redeem fee is a separate decision), always for the full debt; `yed_getinfo.params`
-says `inTermClaims: true`.
+owner's redeem is open from the block after the mint as well, always for the full debt; before the
+term's `lockHeight` it pays the early-redeem fee `earlyRedeemFeeBps[class]` of the collateral (500 /
+250 / 100 bps, through the pool fee output; `yed_estimateredeem` quotes it, `yed_redeem` reports it
+as `earlyRedeemFeeZat`); `yed_getinfo.params` says `inTermClaims: true`.
 
 **Launch parameters.** Three flat tiers, the longer the term the higher the collateral ratio:
 class A 30–90 days at 300 %, B 91–180 days at 400 %, C 181–365 days at 500 %
@@ -309,12 +314,12 @@ project workspace's plans.
   There is no pool that enforces, no pause, no abandonment.
 - YED is created only when both a hashpower majority and a bonded attestor majority agree on the
   price. Neither alone can mint against a price it sets. A single signer is never a price.
-- Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED
-  you minted. If your collateral falls below 125 % of your debt at the attested price, anyone may
-  close your vault by paying your debt; you then receive whatever collateral is worth more than
-  125 % of the debt. Before that happens, your wallet will warn you, and redeeming stops it. A
-  claim completes only after a delay during which any honest attestor can stop one at a wrong
-  price.
+- Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED you
+  minted; redeeming before the term ends also costs an early-redeem fee of 5 %, 2.5 % or 1 % of your
+  collateral for a short, medium or long term. If your collateral falls below 125 % of your debt at
+  the attested price, anyone may close your vault by paying your debt; you then receive whatever
+  collateral is worth more than 125 % of the debt — which, at the threshold, is usually nothing.
+  Before that happens, your wallet will warn you, and redeeming stops it.
 - **Wrapped Ycash is a federated bridge.** YEC behind wYEC is released only by its bonded signer
   set, after a delay, within a per-window cap, and only while no bonded watcher has cancelled.
   Ycash never reads Ethereum. If the signers go silent or wind down, every depositor recovers

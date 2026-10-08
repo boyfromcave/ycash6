@@ -226,6 +226,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_decodepayload",           {{s}, {}} },
     { "yed_estimatecollateral",      {{o, o}, {o}} },
     { "yed_estimatefee",             {{o}, {}} },
+    { "yed_estimateredeem",          {{s}, {}} },
     { "yed_estimatesend",            {{o}, {}} },
     { "yed_getactivation",           {{}, {}} },
     { "yed_getattestations",         {{}, {}} },

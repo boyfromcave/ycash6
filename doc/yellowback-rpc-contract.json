@@ -151,7 +151,7 @@
       "raisedBy": [
         "yed_claim"
       ],
-      "when": "tip below claimHeight"
+      "when": "tip below the vault's appHeight (refHeight + 1 since IT-1; claimHeight for a vault minted before the in-term rule)"
     },
     "claim-out-below-min": {
       "raisedBy": [
@@ -368,7 +368,7 @@
       "raisedBy": [
         "yed_redeem"
       ],
-      "when": "tip below lockHeight (ACTIVE and VOID alike)"
+      "when": "tip below the vault's ownerHeight (refHeight + 1 since IT-1; lockHeight for a VOID vault and a vault minted before the in-term rule)"
     },
     "vault-not-active": {
       "raisedBy": [
@@ -432,15 +432,18 @@
       "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command. Also the storage boundary of yed_addattestation and yed_buildbundle (audit A-3): a storage exception under either marks the index unhealthy and the call fails with yellowback-unhealthy: storage failure in AddAttestation: … / … in BuildBundle: …"
     }
   },
-  "rpcversion": 5,
+  "rpcversion": 6,
   "source": {
     "plan": "docs/plans/yellowback-v2-development-plan.md",
+    "planInTerm": "docs/plans/yellowback-in-term-claims-plan.md",
     "planUpgrade": "docs/plans/yellowback-upgrade-plan.md",
     "planV3": "docs/plans/yellowback-v3-development-plan.md",
     "revision": 6,
+    "revisionInTerm": 1,
     "revisionV3": 4,
     "rpcdoc": "ycash6/doc/yellowback-rpc.md",
     "section": "4.5",
+    "sectionInTerm": "4.1",
     "sectionUpgrade": "15.10"
   },
   "yed_addattestation": {
@@ -492,6 +495,7 @@
       "carrierTxid": "5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c",
       "claimPath": "a",
       "collateralOut": 251889169000,
+      "earlyRedeemFeeZat": 0,
       "extraBurnCents": 0,
       "feeZat": 629722922,
       "pClaim": 400000,
@@ -567,6 +571,25 @@
     "args": "<collateralZat>",
     "returns": {
       "feeZat": 629722922
+    }
+  },
+  "yed_estimateredeem": {
+    "args": "<vaultTxid>",
+    "returns": {
+      "burnedCents": 100000,
+      "canRedeem": true,
+      "collateralZat": 251889169000,
+      "early": true,
+      "earlyRedeemFeeBps": 500,
+      "earlyRedeemFeeZat": 12594458450,
+      "error": "",
+      "feeZat": 13224181372,
+      "height": 360,
+      "lockHeight": 377,
+      "payee": "smQvTmAz2ExamplePayoutAddress1111111",
+      "status": "ACTIVE",
+      "termClass": "A",
+      "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0"
     }
   },
   "yed_estimatesend": {
@@ -756,19 +779,27 @@
         },
         "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
         "claimDelay": 10,
+        "claimThresholdBps": 12500,
         "classes": [
           {
-            "baseRatioBps": 50000,
+            "baseRatioBps": 30000,
             "class": "A",
+            "earlyRedeemFeeBps": 500,
             "maxBlocks": 96,
             "minBlocks": 48
           }
+        ],
+        "earlyRedeemFeeBps": [
+          500,
+          250,
+          100
         ],
         "feeBps": 25,
         "feeMinZat": 50000000,
         "feeZat": 1000,
         "globalRatioHaltBps": 25000,
         "grace": 24,
+        "inTermClaims": true,
         "minFill": {
           "fast": 4,
           "mid": 16,
@@ -785,6 +816,7 @@
         "recapRatioBps": 50000,
         "refLag": 2,
         "refWindow": 40,
+        "sigmaMultMaxBps": 10000,
         "sigmaRefBps": 0,
         "startHeight": 103,
         "supplyCapBps": 0,
@@ -797,7 +829,7 @@
       },
       "protectedByIndex": true,
       "rebuilt": false,
-      "rpcversion": 5,
+      "rpcversion": 6,
       "startHeight": 103,
       "supplyCapReached": false,
       "unhealthyReason": "",
@@ -1079,9 +1111,11 @@
         "attestFeeZat": 157430730,
         "claimHeight": 401,
         "claimPath": "a",
+        "claimable": true,
         "collateralZat": 251889169000,
         "emergencyOpenAt": null,
         "feeZat": 629722922,
+        "lockHeight": 377,
         "mintedCents": 100000,
         "noticeHeight": null,
         "noticed": false,
@@ -1125,6 +1159,7 @@
         "closingTxid": "",
         "collateral": 2518.89169,
         "collateralZat": 251889169000,
+        "earlyRedeemFeeZat": 0,
         "emergencyOpenAt": null,
         "feePaidZat": 629722922,
         "lockHeight": 377,
@@ -1272,9 +1307,10 @@
     "args": "<vaultTxid> [to]",
     "returns": {
       "burnedCents": 100000,
-      "collateralOut": 251259436078,
+      "collateralOut": 238664977628,
+      "earlyRedeemFeeZat": 12594458450,
       "extraBurnCents": 0,
-      "feeZat": 629722922,
+      "feeZat": 13224181372,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
       "to": "smExampleTransparentTwin111111111111",
       "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d"
