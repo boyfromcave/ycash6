@@ -259,11 +259,11 @@ class Preset:
             self.wait_until(lambda: acted(name, action), 60, '%s: %s' % (name, action))
         self.say('personas: every minter has minted and the trader has moved YED')
 
-        # the leveraged minter's first vault: class C, so the claim opens 169 blocks after the mint
-        def leveraged_vault():
-            vaults = self.stats()['personas'].get('leveraged', {}).get('vaults') or []
+        # the conservative minter's first vault: class C, so the claim opens 169 blocks after the mint
+        def conservative_vault():
+            vaults = self.stats()['personas'].get('conservative', {}).get('vaults') or []
             return vaults[0] if vaults else None
-        vault = self.wait_until(leveraged_vault, 20, 'leveraged vault')
+        vault = self.wait_until(conservative_vault, 20, 'conservative vault')
 
         def indexed():
             # the persona's wait=true returns once the MINT is broadcast; node 0 indexes it a block later
@@ -271,13 +271,13 @@ class Preset:
                 return self.node(0).yed_getvault(vault)
             except Exception:
                 return None
-        row = self.wait_until(indexed, 10, 'the leveraged vault reaching node 0')
-        check(row['termClass'] == 'C', 'the leveraged minter minted class %s' % row['termClass'])
+        row = self.wait_until(indexed, 10, 'the conservative vault reaching node 0')
+        check(row['termClass'] == 'C', 'the conservative minter minted class %s' % row['termClass'])
         claim_at = row['claimHeight']
-        self.say('leveraged vault %s: class C, %s YED, claim opens at %d (tip %d)' % (vault[:16], Decimal(row['mintedCents']) / 100, claim_at, self.tip()))
+        self.say('conservative vault %s: class C, %s YED, claim opens at %d (tip %d)' % (vault[:16], Decimal(row['mintedCents']) / 100, claim_at, self.tip()))
 
         # the exiter's redeem: its class A vault unlocks 48 blocks after the mint
-        self.wait_until(lambda: acted('exiter', 'redeem') or acted('conservative', 'redeem'), 90, 'a redeem at maturity')
+        self.wait_until(lambda: acted('exiter', 'redeem') or acted('leveraged', 'redeem'), 90, 'a redeem at maturity')
         self.say('personas: a vault was redeemed at maturity')
 
         # the shock. Pre-plan rule set: timed so the emergency path is what opens the claim (a
@@ -287,7 +287,7 @@ class Preset:
         # claim a persona's in-term vault without waiting for any claim height.
         in_term = self.node(0).yed_getinfo()['params'].get('inTermClaims') is True
         if in_term:
-            self.say('in-term claims are on: shocking mid-term (tip %d, the leveraged vault\'s term ends at %d)' % (self.tip(), row['lockHeight']))
+            self.say('in-term claims are on: shocking mid-term (tip %d, the conservative vault\'s term ends at %d)' % (self.tip(), row['lockHeight']))
         else:
             self.wait_until(lambda: self.tip() >= claim_at - 12, claim_at, 'approach to the claim height')
         before = self.node(0).yed_getprice()['pClaim']

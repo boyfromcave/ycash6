@@ -243,7 +243,8 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_greater_than(x_lock, user.getblockcount())
         vx = user.yed_getvault(x_txid)
         assert_equal(vx['claimable'], False)
-        assert x_txid + ':0' not in {c['vault'] for c in user.yed_listclaimable()}
+        listed = {c['vault']: c for c in user.yed_listclaimable()}
+        assert_equal((listed[x_txid + ':0']['claimable'], listed[x_txid + ':0']['underwaterAt']), (False, vx['underwaterAt']))   # IT-7: listed above theta, with its price
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, x_txid))
         hex_above = self.raw_claim(claimant, vx, 10000, user.getblockcount())
         assert_equal(ym.tx_from_hex(hex_above).lock_time, vx['refHeight'] + 1)          # the APP branch's CLTV (IT-1)
@@ -268,6 +269,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(vx['claimable'], True)
         listed = {c['vault']: c for c in claimant.yed_listclaimable()}
         assert x_txid + ':0' in listed
+        assert_equal(listed[x_txid + ':0']['claimable'], True)
         assert_equal(listed[x_txid + ':0']['residualZat'], 0)   # clause (a): the claimant's cap (theta x debt) exceeds the collateral
         stats_before = nodes[2].yed_getstats()
         claimed = self.claim(claimant, x_txid)
@@ -339,7 +341,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: RED-4 IT-2
         print('the class vaults minted at $%s: A (300 %%) and B (400 %%) are under theta at $%s, C (500 %%) is not' % (PRICE, AT))
-        claimable = {c['vault'] for c in user.yed_listclaimable()}
+        claimable = {c['vault'] for c in user.yed_listclaimable() if c['claimable']}   # IT-7
         for cls, m in mints.items():
             vault = user.yed_getvault(m['txid'])
             under = ym.is_underwater(vault['collateralZat'], usd_to_micro(AT), 10000, 12500)

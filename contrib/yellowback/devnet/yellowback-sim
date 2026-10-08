@@ -15,8 +15,10 @@ an owner redeeming and is the one the attested price actually governs.
 Personas (docs/plans/role-based-regtest-plan.md section 3.4; revision 3 item I-3 on why risk
 appetite is the term class):
 
-  leveraged     class C (300 %, the longest terms): the first underwater on a downswing; never redeems early
-  conservative  class A (500 %, short terms): the happy path; redeems at maturity
+  leveraged     class A (300 %, the shortest terms): the most leveraged tier, the first underwater
+                on a downswing; one vault at a time, redeems at maturity
+  conservative  class C (500 %, the longest terms): the most collateralised tier; holds two, never
+                redeems early (the in-term early-redeem fee is 1 % for C)
   exiter        redeems the moment lockHeight passes; runs yed_sweepcarriers as
                 housekeeping
   trader        never mints: moves YED between its addresses (and to the liquidator) with
@@ -64,8 +66,8 @@ RPC_TIMEOUT = 700                # wait=true blocks until the carrier confirms (
 PROFILES = {
     # cadences in blocks; the demo profile paces a half-hour walk-through at 15 s blocks, the
     # fast profile the regression suite at 2 s blocks
-    "demo": {"leveraged": 10, "conservative": 14, "exiter": 12, "trader": 6, "absentee": 40, "liquidator": 1, "first": (3, 12)},
-    "fast": {"leveraged": 6, "conservative": 8, "exiter": 7, "trader": 4, "absentee": 20, "liquidator": 1, "first": (1, 6)},
+    "demo": {"conservative": 10, "leveraged": 14, "exiter": 12, "trader": 6, "absentee": 40, "liquidator": 1, "first": (3, 12)},
+    "fast": {"conservative": 6, "leveraged": 8, "exiter": 7, "trader": 4, "absentee": 20, "liquidator": 1, "first": (1, 6)},
 }
 
 
@@ -222,8 +224,8 @@ class Persona(threading.Thread):
         raise NotImplementedError
 
 
-class Leveraged(Persona):
-    cadence_key = "leveraged"
+class Conservative(Persona):
+    cadence_key = "conservative"
     max_open = 2
 
     def act(self, tip):
@@ -231,12 +233,12 @@ class Leveraged(Persona):
             self.tally.note(self.name, "holding %d vaults, rides them out (a vault cannot be topped up)" % self.max_open)
             return
         cents = self.rng.choice([MIN_MINT, MIN_MINT * 3 // 2, MIN_MINT * 2])
-        lock = CLASS_C[0] + self.rng.randint(0, 8)          # class C: the lowest ratio, the longest term
+        lock = CLASS_C[0] + self.rng.randint(0, 8)          # class C: the highest ratio (500 %), the longest term
         self.mint(cents, lock)
 
 
-class Conservative(Persona):
-    cadence_key = "conservative"
+class Leveraged(Persona):
+    cadence_key = "leveraged"
 
     def act(self, tip):
         if self.redeem_matured():
@@ -244,7 +246,7 @@ class Conservative(Persona):
         if len(self.my_positions("ACTIVE")) >= 1:
             return
         cents = self.rng.choice([MIN_MINT, MIN_MINT * 2])
-        lock = CLASS_A[0] + self.rng.randint(0, 8)          # class A: the highest ratio, the shortest term
+        lock = CLASS_A[0] + self.rng.randint(0, 8)          # class A: the lowest ratio (300 %), the shortest term
         self.mint(cents, lock)
 
 
@@ -540,8 +542,8 @@ class Simulator:
             sys.exit("this devnet has no population/liquidator nodes (it was not brought up with --role)")
         self.log("simulator up: seed %d, profile %s, population node%d, liquidator node%d" % (self.seed, self.profile_name, population, liquidator))
         personas = [Liquidator(self, "liquidator", liquidator, self.url(liquidator)),
-                    Leveraged(self, "leveraged", population, self.url(population)),
                     Conservative(self, "conservative", population, self.url(population)),
+                    Leveraged(self, "leveraged", population, self.url(population)),
                     Exiter(self, "exiter", population, self.url(population)),
                     Trader(self, "trader", population, self.url(population)),
                     Absentee(self, "absentee", population, self.url(population))]

@@ -2,7 +2,7 @@
 
 <!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
 
-`docs/plans/yellowback-in-term-claims-plan.md` (IT-1, IT-2, IT-7, IT-8), clicked through on the
+`docs/plans/yellowback-in-term-claims-plan.md` (IT-1, IT-2, IT-7, IT-8, IT-9), clicked through on the
 devnet: the explainer's example — a vault minted at 300 % that falls under 125 % on day 10 of a
 90-day term and is closed by a third party that day, not on day 90. You are the minter in the
 wallet; the simulated liquidator (node 10) is the third party; the attestors and the price are
@@ -23,15 +23,20 @@ yellowback-devnet cli -- yed_getinfo | grep -E 'inTermClaims|claimThresholdBps|c
 ```
 
 Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"claimDelay": 10`
-(the regtest cancel window; one day, 1,152 blocks, on mainnet). The price starts at `$50`.
+(the regtest cancel window; twelve hours, 576 blocks, on mainnet, D-IT-13), and
+`"earlyRedeemFeeBps": [500, 250, 100]` (the early-redeem fee per class, IT-9). The price starts at `$50`.
 
 ## Walk-through
 
-1. **Read the disclosure.** Before minting, find in the wallet the sentence that says a vault
-   can be closed early: *"A vault whose collateral falls below 125 % of its debt at the attested
-   price may be closed by anyone at once, by paying its debt; the owner receives any collateral
-   above 125 % of the debt. Redeem before that point to avoid it."* Is it where you would look
-   before locking YEC? Is "at once" understood as *in term*?
+1. **Read the disclosure.** Before minting, find in the wallet the promise (IT-8, D-IT-17): *"Your
+   YEC is locked for the term you choose. You can redeem at any time by paying back the YED you
+   minted. If your collateral falls below 125 % of your debt at the attested price, anyone may
+   close your vault by paying your debt; you then receive whatever collateral is worth more than
+   125 % of the debt — which, at the threshold, is usually nothing. Before that happens, your
+   wallet will warn you, and redeeming stops it."* — and, beside it, the early-redeem fee: a redeem
+   before the term ends pays 5 % (class A), 2.5 % (B) or 1 % (C) of the collateral on top of the
+   pool fee (D-IT-16). Is it where you would look before locking YEC? Is "usually nothing" read
+   as *you lose the collateral*? Is the fee read as the price of "redeem at any time"?
    - notes:
 
 2. **Mint 100 YED, class A, the longest lock (96 blocks).** Class A is 300 % under this plan
@@ -50,17 +55,21 @@ Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"c
 
 4. **A claim above θ is refused.** Nothing is underwater at $50. From the liquidator's side,
    `yellowback-devnet cli --node 10 -- yed_listclaimable` lists your vault with
-   `"claimable": false` (or not at all), and `cli --node 10 -- yed_claim <txid> "" "" false`
+   `"claimable": false` and its `underwaterAt` (IT-7), and `cli --node 10 -- yed_claim <txid> "" "" false`
    is refused with `claim-not-underwater`. Watch the simulator too: `tail -f ~/yb-devnet/sim.log`
    shows the liquidator's line `vault <id> (class A, 100 YED, 6 YEC): claimable at $20.8333
    (theta 125 %, now)`. Is the wallet's own warning as clear as that line?
    - notes:
 
-5. **Look at an early redeem.** The owner path is open from the mint too (IT-1 extended:
-   ownerHeight = appHeight = refHeight + 1), so the wallet would let you redeem now; before
-   lockHeight the redeem pays the early-redeem fee on top of the pool fee (IT-9: 5 / 2.5 / 1 % of
-   the collateral for class A / B / C; `yed_redeem` reports it as `earlyRedeemFeeZat`). Does the
-   wallet show that fee before you confirm? (Do not redeem this vault: the next steps need it.)
+5. **Redeem in term, and pay the early fee.** Mint a second vault (class A, lock 96) and redeem
+   it from the wallet now, well before its `lockHeight`. It goes through (D-IT-15: the owner path
+   is open from the block after the mint), and it costs the early-redeem fee: first
+   `cli -- yed_estimateredeem <txid>` quotes `"early": true`, `"earlyRedeemFeeBps": 500` and
+   `"earlyRedeemFeeZat"` = 5 % of the collateral (`0.3 YEC` of 6 YEC), and `yed_redeem` then
+   reports the same `earlyRedeemFeeZat` inside its `feeZat` (paid to the pool, IT-9). Does the
+   wallet show the fee before you confirm, and is it clear that waiting for `lockHeight` avoids
+   it? For class A the fee (15 % of the debt at 300 %) is close to what a claim would cost you
+   (up to 25 %): is redeeming still the obvious choice when the warning comes?
    - notes:
 
 6. **Let the price fall under the threshold.** `yellowback-devnet price 18.75` (your collateral is
@@ -85,10 +94,10 @@ Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"c
    at a price other than the one the vault crossed at. Did you expect to get something back?
    - notes:
 
-9. **Pre-empt the next one.** Mint again (class A, lock 48), `yellowback-devnet mine 50`, then
-   `price 18.75` again — and redeem from the wallet as soon as `lockHeight` passes, before the
-   slow window fills. The redeem has no price test; it closes the vault under the liquidator's
-   nose. Is that race legible in the wallet?
+9. **Pre-empt the next one.** Mint again (class A, lock 96), then `price 18.75` again — and redeem
+   from the wallet as soon as the warning appears, in term, before the liquidator's claim lands.
+   The redeem has no price test; it closes the vault under the liquidator's nose, for the debt
+   plus the 5 % early-redeem fee ("redeeming stops it"). Is that race legible in the wallet?
    - notes:
 
 10. **Everyone agrees.** `cli -- yed_getstatehash` on nodes 0, 5 and 10 return one hash; the stock
@@ -104,12 +113,17 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
 ```
 
 The step prints `SKIP` with the reason on a node whose `inTermClaims` is not true, and otherwise
-the computed threshold price, the refusals above θ on every Yellowback node, the claim at θ, the
-release, the residual (or why there is none), the owner redeem and the state hashes.
+the computed threshold price, the refusals above θ on every Yellowback node, the owner's in-term
+redeem of G above θ (quoted by `yed_estimateredeem`, paying `earlyRedeemFeeZat` = 5 % of the
+collateral), the claim of F at θ and the owner's in-term redeem of H at the same moment (under θ,
+ahead of any claimant, the same fee), the release, the residual (or why there is none) and the
+state hashes.
 
 ## What we want to know
 
 - Does a minter understand, before minting, that the lock is conditional on the price?
 - Is the claimable price per vault visible and understood, or is it one more number?
-- Does the owner learn about the claim while there is still something to do (redeem at
-  lockHeight), or only afterwards?
+- Does the owner learn about the claim while there is still something to do (redeem, paying the
+  early-redeem fee in term), or only afterwards?
+- Is the early-redeem fee shown before the owner confirms, and weighed against the cost of being
+  claimed?
