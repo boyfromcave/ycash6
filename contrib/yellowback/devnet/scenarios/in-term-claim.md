@@ -56,9 +56,11 @@ Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"c
    (theta 125 %, now)`. Is the wallet's own warning as clear as that line?
    - notes:
 
-5. **Try to redeem in term.** Redeem the vault from the wallet now: expect `vault-locked`. The
-   owner path is unchanged (ownerHeight = lockHeight), so *"redeem before that point"* is only
-   possible once your lock has passed. Does the wallet say so, or does it look like a bug?
+5. **Look at an early redeem.** The owner path is open from the mint too (IT-1 extended:
+   ownerHeight = appHeight = refHeight + 1), so the wallet would let you redeem now; before
+   lockHeight the redeem pays the early-redeem fee on top of the pool fee (IT-9: 5 / 2.5 / 1 % of
+   the collateral for class A / B / C; `yed_redeem` reports it as `earlyRedeemFeeZat`). Does the
+   wallet show that fee before you confirm? (Do not redeem this vault: the next steps need it.)
    - notes:
 
 6. **Let the price fall under the threshold.** `yellowback-devnet price 18.75` (your collateral is
