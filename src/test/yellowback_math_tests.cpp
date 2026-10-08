@@ -68,9 +68,16 @@ BOOST_AUTO_TEST_CASE(sigma1_isqrt_is_the_floor_root)
 }
 
 // Rule: SIGMA-1
+// D-IT-5 pins the live multiplier at 1 (MainParams().sigmaRefBps == 0); the formula itself is checked at
+// the v2 reference SIGMA_REF_V2 / cap SIGMA_MAX_V2 so a later update that re-enables it still has its vectors.
+static const int SIGMA_REF_V2 = 10000;
+static const int SIGMA_MAX_V2 = 30000;
+
 BOOST_AUTO_TEST_CASE(sigma1_flat_series_and_worked_example)
 {
-    const Params& m = MainParams();
+    Params m = MainParams();
+    m.sigmaRefBps = SIGMA_REF_V2;
+    m.sigmaMultMaxBps = SIGMA_MAX_V2;
     // Flat: every return is zero, multiplier 1x.
     BOOST_CHECK_EQUAL(SigmaMultBps(Series(43, 50000), m.sigmaRefBps, m.volPeriodsPerYear, m.sigmaMultMaxBps), 10000);
     // One 10 % move among 42 returns: var = 1e6/42 = 23,809; isqrt(23,809 * 8,760) = 14,441 bps => 1.4441x.
@@ -87,9 +94,14 @@ BOOST_AUTO_TEST_CASE(sigma1_flat_series_and_worked_example)
     BOOST_CHECK_EQUAL(SigmaMultBps(wild, m.sigmaRefBps, m.volPeriodsPerYear, m.sigmaMultMaxBps), m.sigmaMultMaxBps);
     // Below 1x is floored to 1x: a tiny move at a high reference.
     BOOST_CHECK_EQUAL(SigmaMultBps(s, 1000000, m.volPeriodsPerYear, m.sigmaMultMaxBps), 10000);
-    // SIGMA_REF_BPS == 0 (regtest default) fixes the multiplier whatever the series.
+    // SIGMA_REF_BPS == 0 (regtest default; the live set since D-IT-5) fixes the multiplier whatever the series.
     BOOST_CHECK_EQUAL(SigmaMultBps(wild, 0, m.volPeriodsPerYear, m.sigmaMultMaxBps), 10000);
     BOOST_CHECK_EQUAL(SigmaMultBps({}, 0, m.volPeriodsPerYear, m.sigmaMultMaxBps), 10000);
+    // IT-4: with the live set every series, the wild one included, gives 1x; MINT-5's ratio is the class base.
+    const Params& live = MainParams();
+    BOOST_CHECK_EQUAL(live.sigmaRefBps, 0);
+    BOOST_CHECK_EQUAL(SigmaMultBps(wild, live.sigmaRefBps, live.volPeriodsPerYear, live.sigmaMultMaxBps), 10000);
+    for (int c = 0; c < NUM_CLASSES; c++) BOOST_CHECK_EQUAL(MinRatioBps(live.baseRatioBps[c], SigmaMultBps(wild, live.sigmaRefBps, live.volPeriodsPerYear, live.sigmaMultMaxBps)), live.baseRatioBps[c]);
 }
 
 // Rule: SIGMA-1
@@ -99,7 +111,9 @@ BOOST_AUTO_TEST_CASE(sigma1_flat_series_and_worked_example)
 // it is exactly 1x, which is why V17 samples P_fast.
 BOOST_AUTO_TEST_CASE(sigma1_cross_pool_noise_is_not_volatility)
 {
-    const Params& m = MainParams();
+    Params m = MainParams();
+    m.sigmaRefBps = SIGMA_REF_V2;
+    m.sigmaMultMaxBps = SIGMA_MAX_V2;
     // 2,016 + 96 raw quotes alternating 49,000 / 51,000 uUSD.
     std::vector<MicroUsd> raw;
     for (int i = 0; i < 2016 + 96; i++) raw.push_back(i % 2 ? 51000 : 49000);
@@ -123,7 +137,9 @@ BOOST_AUTO_TEST_CASE(sigma1_cross_pool_noise_is_not_volatility)
 // START_HEIGHT (undefined) => the cap (K12).
 BOOST_AUTO_TEST_CASE(sigma1_first_sample_at_start_height)
 {
-    const Params& m = MainParams();
+    Params m = MainParams();
+    m.sigmaRefBps = SIGMA_REF_V2;
+    m.sigmaMultMaxBps = SIGMA_MAX_V2;
     std::vector<std::optional<MicroUsd>> s = Series(43, 50000);
     BOOST_CHECK_EQUAL(SigmaMultBps(s, m.sigmaRefBps, m.volPeriodsPerYear, m.sigmaMultMaxBps), 10000);
     s[42] = std::nullopt;
@@ -178,8 +194,9 @@ BOOST_AUTO_TEST_CASE(mint5_required_collateral_overflow_at_max_mint_and_price_mi
     const Params& m = MainParams();
     const Cents bigMint = RegtestParams(1, 0, 0, TestSet()).maxMint;
     BOOST_CHECK_EQUAL(bigMint, 1000000);
-    const int worst = MinRatioBps(m.baseRatioBps[0], m.sigmaMultMaxBps);
+    const int worst = MinRatioBps(50000, SIGMA_MAX_V2);     // the v2 worst case (500 % x 3x); the live set's worst is class C's 500 % (D-IT-5)
     BOOST_CHECK_EQUAL(worst, 150000);
+    BOOST_CHECK_EQUAL(MinRatioBps(m.baseRatioBps[2], m.sigmaMultMaxBps), 50000);
     BOOST_CHECK(!RequiredCollateral(bigMint, worst, PRICE_MIN).has_value());
     BOOST_CHECK(!RequiredCollateralRounded(bigMint, worst, PRICE_MIN).has_value());
     BOOST_CHECK(!RequiredCollateral(m.maxMint, worst, PRICE_MIN).has_value());   // H-12's $2,500: 3.75e16 zat, still > MAX_MONEY
@@ -298,27 +315,30 @@ bool ClassesContiguousOrEmpty(const Params& p)
 // Rule: MINT-2
 BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
 {
-    // H-5: mainnet and testnet enable class A only; B and C carry an empty range at A's upper end.
+    // D-IT-9/D-IT-10 (owner, 2026-10-07): mainnet and testnet enable A 30-90 d, B 91-180 d, C 181-365 d
+    // (H-5's disabling of B and C is reversed; A's bounds are unchanged).
     for (const Params* n : { &MainParams(), &TestParams() }) {
         const Params& m = *n;
         BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34559), -1);
         BOOST_CHECK_EQUAL(m.ClassForLockBlocks(34560), 0);
         BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103680), 0);
-        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103681), -1);    // was class B
-        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420480), -1);
-        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420481), -1);    // was class C
-        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102400), -1);
-        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102401), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(103681), 1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(207360), 1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(207361), 2);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420480), 2);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(420481), -1);
+        BOOST_CHECK_EQUAL(m.ClassForLockBlocks(2102400), -1);    // the v2 class C bound is outside every class
+        // MINT-2: lock + GRACE stays far below LOCKTIME_THRESHOLD for the longest term at any reachable height
+        BOOST_CHECK((int64_t)m.classMax[2] + m.grace + 10000000 < (int64_t)LOCKTIME_THRESHOLD);
         BOOST_CHECK_EQUAL(m.ClassForLockBlocks(0), -1);
         BOOST_CHECK_EQUAL(m.ClassForLockBlocks(-5), -1);
-        BOOST_CHECK(m.IsClassEnabled(0));
-        BOOST_CHECK(!m.IsClassEnabled(1));
-        BOOST_CHECK(!m.IsClassEnabled(2));
-        BOOST_CHECK(m.classMin[1] > m.classMax[1] && m.classMin[2] > m.classMax[2]);
+        for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(m.IsClassEnabled(i));
         BOOST_CHECK(ClassesContiguousOrEmpty(m));
-        BOOST_CHECK_EQUAL(m.baseRatioBps[0], 50000);
+        // D-IT-4: the longer the term, the higher the flat ratio
+        BOOST_CHECK_EQUAL(m.baseRatioBps[0], 30000);
         BOOST_CHECK_EQUAL(m.baseRatioBps[1], 40000);
-        BOOST_CHECK_EQUAL(m.baseRatioBps[2], 30000);
+        BOOST_CHECK_EQUAL(m.baseRatioBps[2], 50000);
+        BOOST_CHECK(m.baseRatioBps[0] < m.baseRatioBps[1] && m.baseRatioBps[1] < m.baseRatioBps[2]);
     }
     Params r = RegtestParams(10, 0, 0, TestSet());
     BOOST_CHECK(ClassesContiguousOrEmpty(r));
@@ -366,22 +386,23 @@ BOOST_AUTO_TEST_CASE(params_class_ranges_contiguous_or_empty)
 }
 
 // Rule: HALT-2
-// W16 / H-11: the global-ratio halt sits below the base ratio of every *enabled* class, and the
-// recapitalisation floor is twice the halt; class C (300 %) is not below a 300 % halt, but it is off.
+// W16 / H-11 / D-IT-11 / D-IT-12: the global-ratio halt sits below the base ratio of every enabled
+// class (the hardening plan's §1.4 invariant), and the recapitalisation floor equals class C's base, so
+// under a halt or above the cap only the 500 % tier mints (IT-5). W16's "recap = 2 x halt" is given up.
 BOOST_AUTO_TEST_CASE(halt2_floor_below_every_enabled_class_ratio)
 {
     for (const Params* n : { &MainParams(), &TestParams() }) {
         const Params& m = *n;
-        BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 30000);
-        BOOST_CHECK_EQUAL(m.recapRatioBps, 60000);
-        BOOST_CHECK_EQUAL(m.recapRatioBps, 2 * m.globalRatioHaltBps);
+        BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 20000);
+        BOOST_CHECK_EQUAL(m.recapRatioBps, 50000);
+        BOOST_CHECK_EQUAL(m.recapRatioBps, m.baseRatioBps[2]);
         for (int i = 0; i < NUM_CLASSES; i++) {
             if (m.IsClassEnabled(i)) BOOST_CHECK(m.globalRatioHaltBps < m.baseRatioBps[i]);
         }
-        BOOST_CHECK(!(m.globalRatioHaltBps < m.baseRatioBps[2]));   // would fail were C enabled
+        BOOST_CHECK(m.baseRatioBps[0] < m.recapRatioBps && m.baseRatioBps[1] < m.recapRatioBps && m.baseRatioBps[2] >= m.recapRatioBps);
     }
     const Params r = RegtestParams(10, 0, 0, TestSet());
-    BOOST_CHECK_EQUAL(r.recapRatioBps, 2 * r.globalRatioHaltBps);
+    BOOST_CHECK_EQUAL(r.recapRatioBps, r.baseRatioBps[2]);
     for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(r.globalRatioHaltBps < r.baseRatioBps[i]);
 }
 
@@ -394,7 +415,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK(!m.IsConfigured());
     BOOST_CHECK_EQUAL(m.startHeight, 0);
     BOOST_CHECK(m.attestorSetId.IsNull());
-    BOOST_CHECK_EQUAL(m.claimDelay, 1152);                    // CLAIM_DELAY: one day (U-23)
+    BOOST_CHECK_EQUAL(m.claimDelay, 576);                     // CLAIM_DELAY: 12 hours (U-23; owner 2026-10-07)
     BOOST_CHECK_EQUAL(m.pFastWindow, 96);   BOOST_CHECK_EQUAL(m.pFastMinFill, 48);
     BOOST_CHECK_EQUAL(m.pMidWindow, 576);   BOOST_CHECK_EQUAL(m.pMidMinFill, 384);
     BOOST_CHECK_EQUAL(m.pSlowWindow, 2016); BOOST_CHECK_EQUAL(m.pSlowMinFill, 1344);
@@ -410,16 +431,16 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.feeMin, 50000000);
     BOOST_CHECK_EQUAL(m.feeBps, 15);                          // H-4
     BOOST_CHECK_EQUAL(m.grace, 34560);
-    BOOST_CHECK_EQUAL(m.claimThresholdBps, 11000);
+    BOOST_CHECK_EQUAL(m.claimThresholdBps, 12500);            // D-IT-2
     BOOST_CHECK_EQUAL(m.supplyCapBps, 1500);
-    BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 30000);           // H-11
-    BOOST_CHECK_EQUAL(m.recapRatioBps, 60000);
+    BOOST_CHECK_EQUAL(m.globalRatioHaltBps, 20000);           // D-IT-11
+    BOOST_CHECK_EQUAL(m.recapRatioBps, 50000);                // D-IT-12
     BOOST_CHECK_EQUAL(m.divergenceBps, 2000);
     BOOST_CHECK_EQUAL(m.volWindow, 2016);
     BOOST_CHECK_EQUAL(m.volStep, 48);
     BOOST_CHECK_EQUAL(m.volPeriodsPerYear, 8760);
-    BOOST_CHECK_EQUAL(m.sigmaRefBps, 10000);
-    BOOST_CHECK_EQUAL(m.sigmaMultMaxBps, 30000);
+    BOOST_CHECK_EQUAL(m.sigmaRefBps, 0);                      // D-IT-5: multiplier pinned at 1
+    BOOST_CHECK_EQUAL(m.sigmaMultMaxBps, 10000);
     BOOST_CHECK_EQUAL(m.minMint, 10000);
     BOOST_CHECK_EQUAL(m.maxMint, 250000);                     // H-12: $2,500
     BOOST_CHECK_EQUAL(m.minOutput, 100);
@@ -672,18 +693,21 @@ BOOST_AUTO_TEST_CASE(price2_weighted_quantile_thresholds)
 BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
 {
     const Params& m = MainParams();
-    // §3.7 check: $100 at 110 % and 18,333 uUSD => 1.1e16 / 18,333 = 600,010,909,289.6.. => 600,010,909,290 zat ~ 6,000 YEC.
+    // §3.7 check at theta 125 % (D-IT-2): $100 and 18,333 uUSD => 1.25e16 / 18,333 = 681,830,578,737.8.. => 681,830,578,738 zat ~ 6,818 YEC.
+    BOOST_CHECK_EQUAL(m.claimThresholdBps, 12500);
     auto c = ClaimantMaxZat(10000, m.claimThresholdBps, 18333);
     BOOST_REQUIRE(c.has_value());
-    BOOST_CHECK_EQUAL(c.value(), 600010909290LL);
-    BOOST_CHECK_EQUAL(c.value() / COIN, 6000);
+    BOOST_CHECK_EQUAL(c.value(), 681830578738LL);
+    BOOST_CHECK_EQUAL(c.value() / COIN, 6818);
+    // The v2 worked example at 110 %: 1.1e16 / 18,333 = 600,010,909,289.6.. => 600,010,909,290 zat ~ 6,000 YEC.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(10000, 11000, 18333).value(), 600010909290LL);
     // Clause (b): margin 10^4, exactly the debt at the adverse price (R1).
     c = ClaimantMaxZat(10000, 10000, 18333);
     BOOST_REQUIRE(c.has_value());
     BOOST_CHECK_EQUAL(c.value(), 545464462991LL);
-    // A vault at exactly the 110 % threshold: collateral * pClaim == minted * 11,000 * COIN, so the claimant takes it all, residual 0.
-    // $100 minted, pClaim 20,000 uUSD: threshold collateral = 1e4 * 11,000 * 1e8 / 20,000 = 5.5e11 zat (5,500 YEC) exactly.
-    const CAmount atThreshold = 550000000000LL;
+    // A vault at exactly the 125 % threshold: collateral * pClaim == minted * 12,500 * COIN, so the claimant takes it all, residual 0.
+    // $100 minted, pClaim 20,000 uUSD: threshold collateral = 1e4 * 12,500 * 1e8 / 20,000 = 6.25e11 zat (6,250 YEC) exactly.
+    const CAmount atThreshold = 625000000000LL;
     BOOST_CHECK(!IsUnderwater(atThreshold, 20000, 10000, m.claimThresholdBps));   // RED-4(a): strictly below, so not (yet) claimable
     BOOST_CHECK(IsUnderwater(atThreshold - 1, 20000, 10000, m.claimThresholdBps));
     c = ClaimantMaxZat(10000, m.claimThresholdBps, 20000);
@@ -693,7 +717,7 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
     BOOST_CHECK_EQUAL(ResidualZat(atThreshold - 1, c), 0);          // underwater by a zat: still nothing back
     BOOST_CHECK_EQUAL(ResidualZat(atThreshold + 1, c), 1);
     BOOST_CHECK_EQUAL(ResidualZat(atThreshold + m.residualMinZat, c), m.residualMinZat);
-    // The worked vault (6,000 YEC) claimed at 18,333: the 110 % share (6,000.1 YEC) exceeds the collateral => 0.
+    // The worked vault (6,000 YEC) claimed at 18,333: the 125 % share (6,818 YEC) exceeds the collateral => 0.
     BOOST_CHECK_EQUAL(ResidualZat(600000000000LL, ClaimantMaxZat(10000, m.claimThresholdBps, 18333)), 0);
     // Claimed at a price above the threshold price (say 30,000 uUSD, a forced early liquidation under (b) only, margin 10^4):
     // claimant max = 1e4 * 1e4 * 1e8 / 30,000 = 333,333,333,334 zat; residual = 6e11 - that.
@@ -715,22 +739,22 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
 }
 
 // Rule: RED-5
-// Overflow at PRICE_MIN: MAX_MINT ($2,500, H-12) * 11,000 * COIN / 100 = 2.75e15 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
+// Overflow at PRICE_MIN: MAX_MINT ($2,500, H-12) * 12,500 * COIN / 100 = 3.125e15 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
 BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
 {
     const Params& m = MainParams();
     BOOST_CHECK(!ClaimantMaxZat(m.maxMint, m.claimThresholdBps, PRICE_MIN).has_value());
     BOOST_CHECK(!ClaimantMaxZat(m.maxMint, 10000, PRICE_MIN).has_value());
     BOOST_CHECK_EQUAL(ResidualZat(MAX_MONEY, ClaimantMaxZat(m.maxMint, m.claimThresholdBps, PRICE_MIN)), 0);
-    // The minimum mint at PRICE_MIN still fits: 1e4 * 11,000 * 1e8 / 100 = 1.1e14 zat = 1,100,000 YEC < MAX_MONEY.
+    // The minimum mint at PRICE_MIN still fits: 1e4 * 12,500 * 1e8 / 100 = 1.25e14 zat = 1,250,000 YEC < MAX_MONEY.
     auto c = ClaimantMaxZat(m.minMint, m.claimThresholdBps, PRICE_MIN);
     BOOST_REQUIRE(c.has_value());
-    BOOST_CHECK_EQUAL(c.value(), 110000000000000LL);
+    BOOST_CHECK_EQUAL(c.value(), 125000000000000LL);
     // Exactly MAX_MONEY is representable; one zat more is not. margin 10^4 at PRICE_MAX: cents * 1e4 zat => MAX_MONEY at 2.1e11 cents.
     BOOST_CHECK_EQUAL(ClaimantMaxZat(210000000000LL, 10000, PRICE_MAX).value(), MAX_MONEY);
     BOOST_CHECK(!ClaimantMaxZat(210000000001LL, 10000, PRICE_MAX).has_value());
     // The product itself passes int64 before the division (1e6 * 11,000 * 1e8 = 1.1e18 fits; 1e7 cents would not): still exact.
-    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 110000000000LL);   // $100,000 at 110 % / $100 per YEC = 1,100 YEC
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 125000000000LL);   // $100,000 at 125 % / $100 per YEC = 1,250 YEC
 }
 
 // Rule: AFEE-1

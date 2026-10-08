@@ -261,7 +261,7 @@ struct Builder
     {
         CPubKey owner = ownerKey.GetPubKey();
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = YedVaultScript(P, owner, lock);           // U-23: the V template
+        CScript vs = YedVaultScript(P, owner, refHeight);           // U-23, IT-1: the V template
         CAmount collateral = Required(cents, 0, refHeight);
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
@@ -397,7 +397,7 @@ struct Builder
         CAmount collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[0], s.sigmaMultBps), pMint).value();
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(collateral, YedVaultScript(P, owner, lock)));           // U-23: the V template
+        m.vout.push_back(CTxOut(collateral, YedVaultScript(P, owner, refHeight)));           // U-23, IT-1: the V template
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         const int payee = FirstSeq(bundle);
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, owner, 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
@@ -415,10 +415,10 @@ struct Builder
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        const CScript vs = YedVaultScript(P, v->OwnerKey(), v->lockHeight);
-        const vault::VaultParams vp = YedVaultParams(P, v->OwnerKey(), v->lockHeight);
+        const CScript vs = YedVaultScriptAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        const vault::VaultParams vp = YedVaultParamsAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
         CMutableTransaction m;
-        m.nLockTime = v->claimHeight;
+        m.nLockTime = v->appHeight;
         m.nExpiryHeight = (uint32_t)(refHeight + P.refWindow);
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << OP_4, 0xFFFFFFFE));
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 1)));

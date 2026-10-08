@@ -88,15 +88,27 @@ std::optional<VaultSpendPath> ParseVaultSpendPath(const CScript& scriptSig);
  * Since UPGRADE_VAULT the collateral of a mint is the primitive's vault template V
  * (vault/template.h, docs/plans/yellowback-upgrade-plan.md §15.3, §15.10) with
  *     tag = YED_TAG, setId = cancelSetId = attestorSetId, delay = CLAIM_DELAY,
- *     ownerHeight = lockHeight, appHeight = lockHeight + GRACE, ownerKey = the payload's owner.
+ *     ownerHeight = appHeight = refHeight + 1, ownerKey = the payload's owner.
  * The owner redeems with selector 2 (or 3 once the attestor set is released), the claim is
  * selector 4 into intents, and the v2 P2SH VaultScript above is refused for new mints (MINT-3).
+ *
+ * In-term claims (docs/plans/yellowback-in-term-claims-plan.md IT-1): the APP branch is open from
+ * the first block after the mint and RED-4's threshold test decides a claim's validity at every
+ * height. A V built before the plan carries appHeight = lockHeight + GRACE; its spends are still
+ * YED spends (the record remembers its appHeight), new mints with that shape are refused.
  */
 extern const vault::Tag YED_TAG;
-/** The V parameters of a mint's vault (U-23). */
-vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t lockHeight);
+/**
+ * The V parameters of a mint's vault (U-23, IT-1 as extended 2026-10-07): ownerHeight = appHeight = refHeight + 1,
+ * so the owner's redeem (selector 2) and the claim (selector 4) are both open from the block after the mint; the
+ * payload's lockHeight is record-keeping (the term, for the class and the fee) and no longer a CLTV.
+ */
+vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t refHeight);
 /** BuildVault(YedVaultParams(...)); empty when a field is out of range (the caller's MINT-2/3 then fails). */
-CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t lockHeight);
+CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t refHeight);
+/** The V of an existing vault record, whatever its heights (a pre-plan vault has ownerHeight = lockHeight, appHeight = lockHeight + GRACE). */
+vault::VaultParams YedVaultParamsAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight);
+CScript YedVaultScriptAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight);
 
 // ---------------------------------------------------------------- v3 (§3.4): carrier and bond
 

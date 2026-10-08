@@ -11,10 +11,12 @@ Claims (plan §3.5 CLAIM, §3.8 RED-4, §4.6) on the vault upgrade (upgrade plan
     without touching claims (HALT-3 is MINT-4 only);
   - an under-collateralised mint (Z) is an invalid transaction: refused by every Yellowback
     mempool and rejected in a block, no vault;
-  - before claimHeight a claim fails CLTV (sendrawtransaction: non-final); after it node 5's
-    wallet claims with yed_claim: the vault moves into a claimant intent (CLAIMING), supply down
-    by the debt; after CLAIM_DELAY vault_release pays the claimant (CLAIMED);
-  - a claim on a healthy vault is refused by the wallet (claim-not-yet, claim-not-underwater) and,
+  - in-term claims (IT-1/IT-2): the V's APP branch is open from the block after the mint, so a
+    vault that goes under theta inside its term is claimable at once; node 5's wallet claims V3 in
+    term with yed_claim: the vault moves into a claimant intent (CLAIMING), supply down by the
+    debt; after CLAIM_DELAY vault_release pays the claimant (CLAIMED);
+  - a claim on a healthy vault is refused by the wallet (claim-not-underwater, in term and past
+    claimHeight alike) and,
     as a raw transaction, refused by every Yellowback mempool and rejected in a block (RED-4,
     DoS 100: bad-yellowback-vault-claim-not-underwater);
   - the owner still redeems an underwater vault via the owner path (selector 2);
@@ -138,13 +140,14 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 30000)
         claim_height = user.yed_getvault(mints['U']['txid'])['claimHeight']
 
-        print('the claimant receives 100.50 YED; the vaults stay healthy until claimHeight')
+        print('the claimant receives 100.50 YED; the vaults stay healthy in term and past claimHeight')
         user.yed_send(claimant.yed_getnewaddress(), 10050)
         self.sync_all()
         self.mine(POOLS[2])
         assert_equal(claimant.yed_getbalance()['confirmedCents'], 10050)
-# Rule: RED-4
-        assert_rpc_error('claim-not-yet', claimant.yed_claim, mints['U']['txid'])
+# Rule: RED-4 IT-2
+        assert_greater_than(user.yed_getvault(mints['U']['txid'])['lockHeight'], user.getblockcount())   # in term
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['U']['txid']))
         self.mine_round_robin(POOLS, claim_height - user.getblockcount())
         assert_equal(user.yed_listclaimable(), [])
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['U']['txid']))
@@ -167,8 +170,8 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(nodes[3].yed_getvault(mints['U']['txid'])['status'], 'ACTIVE')
 
 # Rule: PRICE-1 PRICE-2 HALT-3 RED-4
-        print('mint V3 just before the crash, then every pool quotes $0.01 for 64 blocks')
-        mint_v3 = self.mint(user, 10000, 48)
+        print('mint V3 (class C, 145 blocks: it stays in term through the crash) just before the crash, then every pool quotes $0.01 for 64 blocks')
+        mint_v3 = self.mint(user, 10000, 145)
         self.sync_all()
         self.mine(POOLS[0])
         v3_claim_height = user.yed_getvault(mint_v3['txid'])['claimHeight']
@@ -187,21 +190,22 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         claimable = {c['vault']: c for c in user.yed_listclaimable()}
         for name, m in mints.items():
             assert m['txid'] + ':0' in claimable, name
-        assert mint_v3['txid'] + ':0' not in claimable          # V3 is not past claimHeight yet
+        assert mint_v3['txid'] + ':0' in claimable              # IT-2: V3 is in term and under theta: claimable now
         row = claimable[mints['V']['txid'] + ':0']
         assert_equal((row['mintedCents'], row['pClaim'], row['feeZat']), (10000, 10000, fee_zat(row['collateralZat'])))
         assert_equal(user.yed_getvault(mints['V']['txid'])['claimable'], True)
         assert_equal(nodes[2].yed_getstats()['mintingAllowed'], False)
 
-# Rule: RED-4
-        print('before claimHeight the claim of V3 fails CLTV: non-final')
-        assert_greater_than(v3_claim_height, user.getblockcount())
+# Rule: RED-4 IT-1 IT-2
+        print('in term (before lockHeight, long before claimHeight) the raw claim of V3 is valid: the APP branch opened at the mint')
         vault_v3 = user.yed_getvault(mint_v3['txid'])
+        assert_greater_than(vault_v3['lockHeight'], user.getblockcount())
+        assert_greater_than(v3_claim_height, user.getblockcount())
         hex_early = self.raw_claim(claimant, vault_v3, 10050, user.getblockcount())
-        assert_rpc_error('non-final', stock.sendrawtransaction, hex_early)
-        assert_rpc_error('non-final', claimant.sendrawtransaction, hex_early)
-        assert_rpc_error('claim-not-yet', claimant.yed_claim, mint_v3['txid'])
-        self.mine_round_robin(POOLS, v3_claim_height - user.getblockcount())
+        early = ym.tx_from_hex(hex_early)
+        assert_equal(early.lock_time, vault_v3['refHeight'] + 1)                       # nLockTime = the V's appHeight
+        v = nodes[2].yed_validaterawtransaction(hex_early)
+        assert_equal((v['valid'], v['verdict'], v['path'], v['blockValid']), (True, 'ok', 'claim', True))
 
 # Rule: XFER-1 RED-2
         print('the floor bites a plain send of the 100.50 YED coin; the claim path burns instead (H2/H4)')
@@ -236,7 +240,8 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] - claimed['residualZat'])
         assert_equal((claimed['claimPath'], claimed['residualZat'], claimed['pending']), ('a', 0, False))
         raw = claimant.getrawtransaction(claimed['txid'], 1)
-        assert_equal(raw['locktime'], v3_claim_height)
+        assert_equal(raw['locktime'], vault_v3['refHeight'] + 1)          # IT-1: the APP branch's CLTV, not claimHeight
+        assert_greater_than(v3_claim_height, user.getblockcount())        # still in term: an in-term claim
         assert_equal(raw['vin'][0]['txid'], mint_v3['txid'])
         assert_equal(raw['vin'][0]['scriptSig']['hex'], '54')            # OP_4: the V's claim selector
         assert_equal(raw['vin'][-1]['txid'], claimed['carrierTxid'])      # the carrier last (never vin[0])

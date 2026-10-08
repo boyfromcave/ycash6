@@ -177,7 +177,9 @@ struct VaultSpendShape
     CAmount vaultValue;
     uint32_t lockHeight;
     uint32_t claimHeight;
-    bool ownerPath;                         //!< owner scriptSig + nLockTime = lockHeight; else claim scriptSig + claimHeight
+    uint32_t appHeight;                     //!< the V's appHeight (IT-1: refHeight + 1; a pre-plan vault's lockHeight + GRACE)
+    uint32_t ownerHeight;                   //!< the V's ownerHeight (IT-1 extended: refHeight + 1; a pre-plan vault's lockHeight)
+    bool ownerPath;                         //!< owner scriptSig + nLockTime = ownerHeight; else claim scriptSig + appHeight
     bool withPayload;                       //!< REDEEM/CLAIM: burn + payload + fee; false = release/sweep (no burn, no fee, no payload)
     int refHeight;                          //!< REDEEM payload refHeight
     std::optional<CKeyID> payee;            //!< nullopt under FEE-0 (and always for a release/sweep)
@@ -200,7 +202,7 @@ struct VaultSpendShape
     std::vector<std::pair<COutPoint, CAmount>> funding;
     CScript fundingChange;
 
-    VaultSpendShape() : vaultValue(0), lockHeight(0), claimHeight(0), ownerPath(true), withPayload(true), refHeight(0), feeZat(0),
+    VaultSpendShape() : vaultValue(0), lockHeight(0), claimHeight(0), appHeight(0), ownerHeight(0), ownerPath(true), withPayload(true), refHeight(0), feeZat(0),
                         changeCents(0), networkFee(0), attestFeeZat(0), residualZat(0), carrierValue(0) {}
 };
 
@@ -224,7 +226,7 @@ struct VaultSpendPlan
 /**
  * U-23 claim (transparent destination only): vout[0] the claimant's intent of vaultValue - residualZat,
  * [fee], [YED change], [attestor fee], [the owner's residual intent], payload, [the fee inputs' YEC change];
- * nLockTime = claimHeight (the V's appHeight). The fee outputs and the network fee come from the carrier,
+ * nLockTime = appHeight (the V's APP branch CLTV; IT-1: open from the block after the mint). The fee outputs and the network fee come from the carrier,
  * YED and funding inputs; throws `insufficient-yec` when they do not cover them.
  *
  * Owner path, transparent destination: vout[0] collateral, [fee], [YED change], [attestor fee], [residual],

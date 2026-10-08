@@ -59,7 +59,7 @@ std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFee
 VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
 {
     VaultSpendPlan plan;
-    plan.nLockTime = s.ownerPath ? s.lockHeight : s.claimHeight;
+    plan.nLockTime = s.ownerPath ? s.ownerHeight : s.appHeight;
     plan.vin.push_back(CTxIn(s.vaultOut, CScript(), 0xFFFFFFFE));
     CAmount yedValue = 0;
     Cents yedIn = 0;
@@ -756,12 +756,14 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     const CPubKey owner = vault.OwnerKey();
     VaultSpendShape shape;
     shape.vaultOut = vaultOut;
-    shape.vaultScript = YedVaultScript(ctx.params, owner, vault.lockHeight);       // U-23: the V template
+    shape.vaultScript = YedVaultScriptAt(ctx.params, owner, vault.ownerHeight, vault.appHeight);   // U-23: the V template, as minted
     if (shape.vaultScript.empty()) throw std::runtime_error("vault-not-found: cannot reconstruct the vault script");
-    shape.vaultParams = YedVaultParams(ctx.params, owner, vault.lockHeight);
+    shape.vaultParams = YedVaultParamsAt(ctx.params, owner, vault.ownerHeight, vault.appHeight);
     shape.vaultValue = vault.collateralZat;
     shape.lockHeight = (uint32_t)vault.lockHeight;
     shape.claimHeight = (uint32_t)vault.claimHeight;
+    shape.appHeight = (uint32_t)vault.appHeight;
+    shape.ownerHeight = (uint32_t)vault.ownerHeight;
     shape.ownerPath = ownerPath;
     shape.withPayload = withPayload;
     shape.refHeight = R;
@@ -1025,15 +1027,12 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     std::optional<Snapshot> S = SnapshotAt(ctx.st, p, R);
     if (!S.has_value() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
     if (S->haltMask & HALT_NO_PRICE) throw std::runtime_error("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
-    // W16 / W20: the classes whose minimum ratio reaches the recapitalisation floor -- they mint through a
-    // global-ratio halt and above the supply cap; the refusals below name them.
-    const bool recap = MinRatioBps(ctx.params.baseRatioBps[g.termClass], S->sigmaMultBps) >= ctx.params.recapRatioBps;
-    std::string open;
-    for (int c = 0; c < NUM_CLASSES; c++) if (ctx.params.IsClassEnabled(c) && MinRatioBps(ctx.params.baseRatioBps[c], S->sigmaMultBps) >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
-    const std::string openClasses = open.empty() ? "" : " (class " + open + ")";
-    if ((S->haltMask & HALT_GLOBAL_RATIO) && !recap) {
-        throw std::runtime_error(strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose minimum ratio is at least %d %% can mint until it recovers%s",
-                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, openClasses));
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && ctx.params.baseRatioBps[g.termClass] < ctx.params.recapRatioBps) {
+        // W16, IT-5: only a class whose base ratio reaches the recapitalisation floor mints through a global-ratio halt
+        std::string open;
+        for (int c = 0; c < NUM_CLASSES; c++) if (ctx.params.IsClassEnabled(c) && ctx.params.baseRatioBps[c] >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+        throw std::runtime_error(strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose base ratio is at least %d %% can mint until it recovers%s",
+                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")"));
     }
     if (S->haltMask & HALT_DIVERGENCE) throw std::runtime_error("mintpol-divergence: minting is halted while the price windows diverge (HALT-3)");
     if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) throw std::runtime_error("mintpol-not-active: an unknown halt bit is set at the reference height");
@@ -1043,22 +1042,24 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     g.xMint = S->PMint();
     if (!g.xMint.has_value()) throw std::runtime_error("mintpol-no-price: pMint is undefined at the reference height");
     const Totals totals = ctx.st.GetTotals();
-    // MINT-6 (W20, H-10): above the cap only class A at or over the recapitalisation floor mints; the
-    // message says whether it would go through.
-    const bool capOpen = g.termClass == 0 && recap;
-    const std::string capClasses = MinRatioBps(p.baseRatioBps[0], S->sigmaMultBps) >= p.recapRatioBps ? " (class A)" : "";
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, g.xMint, p.supplyCapBps);
-    if (cap.has_value() && !capOpen && totals.supplyCents + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents; above the cap only class A, at a minimum ratio of at least %d %%, can mint (H-10)%s",
-                                           std::max<Cents>(0, cap.value() - totals.supplyCents), p.recapRatioBps / 100, capClasses));
+    // W20, IT-5: the cap is soft above the recapitalisation floor -- a mint over it is refused unless its
+    // class base ratio reaches RECAP_RATIO_BPS (MINT-6, amended; class C with the in-term parameter set).
+    const bool belowFloor = p.baseRatioBps[g.termClass] < p.recapRatioBps;
+    std::string openAbove;
+    for (int c = 0; c < NUM_CLASSES; c++) if (p.IsClassEnabled(c) && p.baseRatioBps[c] >= p.recapRatioBps) openAbove += (openAbove.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+    const std::string above = strprintf("; above the cap only a term class with a base ratio of at least %d %% can mint (W20, IT-5)%s",
+                                        p.recapRatioBps / 100, openAbove.empty() ? "" : " (class " + openAbove + ")");
+    if (cap.has_value() && totals.supplyCents + cents > cap.value() && belowFloor) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents%s", std::max<Cents>(0, cap.value() - totals.supplyCents), above));
     }
     // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
     // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
     // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
     const Cents pending = MempoolMintCents();
-    if (cap.has_value() && !capOpen && pending > 0 && totals.supplyCents + pending + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool; above the cap only class A, at a minimum ratio of at least %d %%, can mint (H-10)%s",
-                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending, p.recapRatioBps / 100, capClasses));
+    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value() && belowFloor) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool%s",
+                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending, above));
     }
     return g;
 }
@@ -1265,8 +1266,8 @@ ClaimPreflight PreflightClaim(YellowbackWallet& yw, const uint256& vaultTxid, co
     const COutPoint vaultOut(vaultTxid, 0);
     const VaultRecord vault = ctx.GetVault(vaultOut);
     if (vault.Status() != VaultStatus::ACTIVE) throw std::runtime_error(strprintf("vault-not-active: the vault is %s", VaultStatusName(vault.Status())));
-    if ((int64_t)ctx.indexHeight < (int64_t)vault.claimHeight) {
-        throw std::runtime_error(strprintf("claim-not-yet: the claim path opens at height %d (tip %d)", vault.claimHeight, ctx.indexHeight));
+    if ((int64_t)ctx.indexHeight < (int64_t)vault.appHeight) {     // IT-2: in term the threshold decides, not the height
+        throw std::runtime_error(strprintf("claim-not-yet: the claim path opens at height %d (tip %d)", vault.appHeight, ctx.indexHeight));
     }
     ClaimPreflight pf;
     pf.refHeight = ctx.spendRefHeight;
@@ -1413,7 +1414,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;
-    shape.vaultScript = YedVaultScript(p, owner, g.lockHeight);       // U-23
+    shape.vaultScript = YedVaultScript(p, owner, R);    // U-23, IT-1: ownerHeight = appHeight = R + 1
     int feeVout = -1, attestFeeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(shape, feeVout, &attestFeeVout);
     CAmount outputs = 0;
@@ -1607,8 +1608,8 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
     const VaultRecord vault = ctx.GetVault(vaultOut);
     if (!vault.IsOpen()) throw std::runtime_error(strprintf("vault-not-active: the vault is %s", VaultStatusName(vault.Status())));
     if (!yw.IsMineVault(vault)) throw std::runtime_error("vault-not-owned: the vault owner key is not in this wallet");
-    if ((int64_t)ctx.indexHeight < (int64_t)vault.lockHeight) {
-        throw std::runtime_error(strprintf("vault-locked: the vault is locked until height %d (tip %d)", vault.lockHeight, ctx.indexHeight));
+    if ((int64_t)ctx.indexHeight < (int64_t)vault.ownerHeight) {     // IT-1 (extended): the owner's branch opens the block after the mint
+        throw std::runtime_error(strprintf("vault-locked: the vault is locked until height %d (tip %d)", vault.ownerHeight, ctx.indexHeight));
     }
     // ACTIVE: the owner-path REDEEM; VOID: the release (L14, K3): an ordinary spend no rule polices.
     const BuiltKind kind = vault.Status() == VaultStatus::ACTIVE ? BuiltKind::REDEEM : BuiltKind::RELEASE;
@@ -1622,8 +1623,8 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
     const COutPoint vaultOut(vaultTxid, 0);
     const VaultRecord vault = ctx.GetVault(vaultOut);
     if (vault.Status() != VaultStatus::ACTIVE) throw std::runtime_error(strprintf("vault-not-active: the vault is %s", VaultStatusName(vault.Status())));
-    if ((int64_t)ctx.indexHeight < (int64_t)vault.claimHeight) {
-        throw std::runtime_error(strprintf("claim-not-yet: the claim path opens at height %d (tip %d)", vault.claimHeight, ctx.indexHeight));
+    if ((int64_t)ctx.indexHeight < (int64_t)vault.appHeight) {     // IT-2: in term the threshold decides, not the height
+        throw std::runtime_error(strprintf("claim-not-yet: the claim path opens at height %d (tip %d)", vault.appHeight, ctx.indexHeight));
     }
     ctx.CheckCarrier(carrier);
     const int R = carrier.refHeight;

@@ -65,6 +65,8 @@ from test_framework.yellowback_attest import (
 from test_framework.yellowback_model import assert_model_matches
 from test_framework.yellowback_util import (
     ATTESTOR_A,
+    vault_app_height,
+    vault_owner_height,
     ATTESTOR_B,
     ATTEST_ARM_DELAY,
     ATTEST_FEE_BPS,
@@ -93,8 +95,8 @@ from test_framework.yellowback_util import (
     yed_params,
 )
 
-PRICE = Decimal('20.00')      # a high YEC price keeps the class-A collateral of a $100 mint at 25 YEC
-EMERG_X = Decimal('12.00')    # pools at 60 % of the mint price: a 500 %-covered vault becomes 300 %-covered
+PRICE = Decimal('20.00')      # a high YEC price keeps the class-A collateral of a $100 mint at 15 YEC (300 %, D-IT-4)
+EMERG_X = Decimal('12.00')    # pools at 60 % of the mint price: a 300 %-covered vault becomes 180 %-covered (above theta 125 %)
 EMERG_A = Decimal('4.00')     # attestors at a fifth: pEmerg under EMERGENCY_RATIO_BPS, pClaim = xClaim above CLAIM_THRESHOLD
 CRASH = Decimal('1.00')       # the clause-(a) claim
 CENTS = 10_000                # $100, the class-A minimum mint
@@ -288,7 +290,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         owner = hex_str_to_bytes(live['ownerPubKey'])
         residual_addr = residual_to or pubkey_to_address(owner)
         if residual > 0:
-            extra.append((residual, ym.yed_intent_script(yed_params(), owner, int(live['lockHeight']), spk(residual_addr))))
+            extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), spk(residual_addr))))
         hex_ = build_vault_spend_raw(node, live, 'claim', [token],
                                      payload=ym.encode_redeem(ref, 1, [], attest_fee_vout=2),
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
@@ -628,7 +630,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(p['xMint'], usd_to_micro(PRICE))
 
         # ---------------------------------------------------------------- RED-5 through a notice
-        print('RED-5: pools to $%s (the vault is 300 %%-covered), attestors at $%s (pEmerg under EMERGENCY_RATIO)' % (EMERG_X, EMERG_A))
+        print('RED-5: pools to $%s (the vault is 180 %%-covered), attestors at $%s (pEmerg under EMERGENCY_RATIO)' % (EMERG_X, EMERG_A))
         self.set_prices(EMERG_X)
         self.pools_step(36, 'pools at $%s' % EMERG_X)
         live = user.yed_getvault(v3['txid'])

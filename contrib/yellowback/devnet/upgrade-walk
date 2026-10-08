@@ -75,7 +75,7 @@ STRATUM_POOL = 4
 DORMANT_AGENT = 6
 CANCELLER = 5                     # the attestor that cancels the wrong-price claim
 MINT_CENTS, LOCK_BLOCKS = 10_000, 48
-PRICE, CRASH = "50", "5"          # $100 at 500 % locks 10 YEC; at $5 those 10 YEC back $50 < $110: underwater
+PRICE, CRASH = "50", "5"          # $100 at 300 % (class A) locks 6 YEC; at $5 those 6 YEC back $30 < $125: underwater
 
 
 class WalkFailure(Exception):
@@ -641,7 +641,7 @@ class Walk:
         ref = n.getblockcount() - REF_LAG
         lock = ref + 48
         coin = [u for u in n.listunspent() if u["amount"] > 2][0]
-        vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, lock)),
+        vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, ref)),
                  (10_000, ym.p2pkh_script(ym.hash160(owner))),
                  (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_mint(0, 5_000, lock, ref, owner, ym.FEE_VOUT_NONE))),
                  (int(coin["amount"] * ym.COIN) - 1 * ym.COIN - 10_000 - 10_000, ym.p2pkh_script(ym.hash160(owner)))]

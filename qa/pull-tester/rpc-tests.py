@@ -64,6 +64,7 @@ BASE_SCRIPTS= [
     'yellowback_claim.py',
     'yellowback_fee.py',
     'yellowback_mempool_limits.py',
+    'yellowback_interm.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
     'yellowback_stock_node.py',

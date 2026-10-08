@@ -38,7 +38,6 @@ from test_framework.yellowback_util import (
     P_SLOW_WINDOW,
     REF_LAG,
     SIGMA_MULT_MAX_BPS,
-    SIGMA_REF_BPS,
     STOCK,
     YellowbackTestFramework,
     build_vault_spend_raw,
@@ -70,7 +69,7 @@ def outpoint_selector(txid, n=0):
 
 class YellowbackPricefeedTest(YellowbackTestFramework):
 
-    sigma_ref = SIGMA_REF_BPS      # the mainnet SIGMA_REF; regtest's default fixes the multiplier at 1
+    sigma_ref = 10_000             # the v2 SIGMA_REF: the formula runs, and IT-4's cap (SIGMA_MULT_MAX_BPS 10,000) still pins the multiplier at 1
 
     def quote(self, usd, pools=POOLS):
         for i in pools:
@@ -137,15 +136,17 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         print('activate; the sigma multiplier is 1 once every sample is defined')
         self.activate(POOLS)
         self.mine_round_robin(POOLS, REF_LAG + 1)
-        assert_equal(user.yed_getinfo()['params']['sigmaRefBps'], SIGMA_REF_BPS)
+        assert_equal(user.yed_getinfo()['params']['sigmaRefBps'], self.sigma_ref)
+        assert_equal(user.yed_getinfo()['params']['sigmaMultMaxBps'], SIGMA_MULT_MAX_BPS)
+        assert_equal(user.yed_getinfo()['params']['inTermClaims'], True)
         assert_equal(user.yed_getstats()['sigmaMultBps'], 10000)
 # Rule: MINT-5 SIGMA-1
         mint = wallet_mint(self, user, 10000, 48)     # v3: the carrier step (W7)
-        assert_equal(mint['collateralZat'], 10 * COIN)        # 500 % of $100 at $50, multiplier 1
+        assert_equal(mint['collateralZat'], 6 * COIN)         # 300 % of $100 at $50 (class A, D-IT-4), multiplier 1
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint['txid'])['status'], 'ACTIVE')
-        assert_equal(nodes[2].yed_getstats()['collateralZat'], 10 * COIN)
+        assert_equal(nodes[2].yed_getstats()['collateralZat'], 6 * COIN)
 
 # Rule: SIGMA-1 PRICE-1 REG-2
         print('sigma1_one_pool_cannot_inflate: node 2 alternates +-20 % while 3 and 4 hold $50')
@@ -162,16 +163,18 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         set_quote(nodes[POOLS[0]], 50)
 
 # Rule: SIGMA-1
-        print('the sigma multiplier rises after a 5 % move and is capped after a 20 % move')
+        print('IT-4: the sigma multiplier stays at 1 after a 5 % move (the cap is 1x), so the minimum ratio is the class base')
         self.quote('52.5')
         self.mine_round_robin(POOLS, 10)
         assert_equal(self.price()['pFast'], 52_500_000)
         sigma = user.yed_getstats()['sigmaMultBps']
-        assert_greater_than(sigma, 10000)
-        assert_greater_than(SIGMA_MULT_MAX_BPS, sigma)
+        assert_equal(sigma, 10000)
+        assert_equal(SIGMA_MULT_MAX_BPS, sigma)
         est = user.yed_estimatecollateral(10000, 48)
         assert_equal(est['sigmaMultBps'], sigma)
-        assert_equal(est['minRatioBps'], 50000 * sigma // 10000)
+        assert_equal(est['minRatioBps'], 30000)
+        assert_equal(user.yed_estimatecollateral(10000, 97)['minRatioBps'], 40000)
+        assert_equal(user.yed_estimatecollateral(10000, 145)['minRatioBps'], 50000)
 # Rule: PRICE-2
         print('P_mint = min in a rising market (pFast $63 above pMid and pSlow)')
         self.quote(63)
@@ -204,7 +207,10 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(fired_at, MIN_FILL[0])
         assert_equal(user.yed_getstats()['mintingAllowed'], False)
         self.mine_round_robin(POOLS, REF_LAG)              # the wallet reads Snapshots[tip - REF_LAG]
-        assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 48)
+        # the crash also sets HALT-2 (one 300 % vault at 60 % of its mint price): class A meets the ratio gate first
+        # (IT-5), class C (500 %, the recapitalisation floor) passes it and meets DIVERGENCE
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 48)
+        assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 145)
         print('halt3_fires_on_mid_vs_slow: pFast == pMid == $30 while pSlow holds; the second disjunct alone')
         self.mine_round_robin(POOLS, 12)                    # 18 of the last 24 quotes are $30
         p = self.price()
@@ -226,38 +232,38 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(user.yed_getstats()['mintingAllowed'], True)   # a capped multiplier is not a halt
 
 # Rule: HALT-2
-        print('halt2_fires_at_exact_threshold: 10 YEC against $100 is exactly 250 % at $25 and 249.99 % at $24.999999')
-        self.quote(25)
+        print('halt2_fires_at_exact_threshold: 6 YEC against $100 is 250.000002 % at $41.666667 and 249.999996 % at $41.666666')
+        self.quote('41.666667')
         self.mine_round_robin(POOLS, MIN_FILL[0] + REF_LAG)
         st = user.yed_getstats()
-        assert_equal(st['pMint'], 25 * USD)
+        assert_equal(st['pMint'], 41_666_667)
         assert_equal(st['globalRatioBps'], 25000)
         assert 'GLOBAL_RATIO' not in st['haltMask']
-        self.quote('24.999999')
+        self.quote('41.666666')
         self.mine_round_robin(POOLS, MIN_FILL[0])
         st = user.yed_getstats()
-        assert_equal(st['pMint'], 24_999_999)
+        assert_equal(st['pMint'], 41_666_666)
         assert_equal(st['globalRatioBps'], 24999)
         assert 'GLOBAL_RATIO' in st['haltMask']
         for node in self.enforcing_nodes():
             assert 'GLOBAL_RATIO' in node.yed_getstats()['haltMask']
 
 # Rule: HALT-2 MINT-4 MINTPOL-1
-        print('W16: under the halt only class A (500 %) can mint; one such mint raises the ratio and clears the halt')
+        print('W16 / IT-5: under the halt only class C (500 %, the recapitalisation floor) can mint; one such mint raises the ratio and clears the halt')
         # the slow window still remembers the crash-and-recovery above, so DIVERGENCE is set beside
         # GLOBAL_RATIO; every other halt stops every class, so let the windows agree at $24.999999 first
         self.mine_round_robin(POOLS, P_SLOW_WINDOW)
         st = user.yed_getstats()
         assert_equal(st['haltMask'], ['GLOBAL_RATIO'])
-        assert_equal((st['mintingAllowed'], st['mintableClasses']), (False, ['A']))
-        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C, 300 %: below the recapitalisation floor
+        assert_equal((st['mintingAllowed'], st['mintableClasses']), (False, ['C']))
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 48)      # class A, 300 %: below the recapitalisation floor
         assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 97)      # class B, 400 %
-        recap = wallet_mint(self, user, 10000, 48)                              # class A: 20 YEC at $25 against $100
+        recap = wallet_mint(self, user, 10000, 145)                             # class C: 12 YEC at $41.67 against $100
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(recap['txid'])['status'], 'ACTIVE')
         self.mine_round_robin(POOLS, REF_LAG)
         st = user.yed_getstats()
-        assert_greater_than(st['globalRatioBps'], 25000)                        # (10 + 20) YEC * $25 against $200 = 375 %
+        assert_greater_than(st['globalRatioBps'], 25000)                        # (6 + 12) YEC * $41.67 against $200 = 375 %
         assert 'GLOBAL_RATIO' not in st['haltMask']
         assert_equal(sorted(st['mintableClasses']), ['A', 'B', 'C'])
         self.quote(50)

@@ -80,7 +80,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 7;   //!< 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 8;   //!< 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -216,7 +216,7 @@ struct VaultRecord
     std::vector<unsigned char> ownerPubKey;   //!< the 33 payload bytes verbatim (valid or not; a VOID vault may carry an invalid key)
     uint8_t termClass;                        //!< the payload byte (0/1/2 = A/B/C; a VOID vault may carry any value)
     int32_t lockHeight;
-    int32_t claimHeight;                      //!< lockHeight + GRACE (the V's appHeight)
+    int32_t claimHeight;                      //!< lockHeight + GRACE: the end of the owner's post-term window (RED-4 (c))
     CAmount collateralZat;                    //!< the V output's value (vout[0] of the mint, or the cancel's re-lock)
     int64_t mintedCents;
     int32_t mintHeight;
@@ -228,9 +228,11 @@ struct VaultRecord
     int64_t burnedCents;                      //!< IN-3's burn of the closing transaction
     CAmount feePaidZat;                       //!< the mint's fee, rewritten by a passing redeem/claim (0 under FEE-0)
     bool unbacked;                            //!< always false since the vault upgrade (a failing spend is invalid)
+    int32_t appHeight;                        //!< the V's appHeight: refHeight + 1 (IT-1); lockHeight + GRACE for a vault minted before the in-term plan
+    int32_t ownerHeight;                      //!< the V's ownerHeight: refHeight + 1 (IT-1 extended: the owner redeems in term); lockHeight for a pre-plan vault
 
     VaultRecord() : termClass(0), lockHeight(0), claimHeight(0), collateralZat(0), mintedCents(0), mintHeight(0), refHeight(0),
-                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false) {}
+                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false), appHeight(0), ownerHeight(0) {}
 
     VaultStatus Status() const { return (VaultStatus)status; }
     bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
@@ -255,6 +257,8 @@ struct VaultRecord
         READWRITE(burnedCents);
         READWRITE(feePaidZat);
         READWRITE(unbacked);
+        READWRITE(appHeight);
+        READWRITE(ownerHeight);
     }
 };
 

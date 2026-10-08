@@ -221,7 +221,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     std::optional<int64_t> at = UnderwaterAt(v, p);
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
     o.pushKV("voidReason", v.voidReason);
-    const CScript spk = YedVaultScript(p, owner, v.lockHeight);       // U-23: the V template
+    const CScript spk = YedVaultScriptAt(p, owner, v.ownerHeight, v.appHeight);       // U-23: the V template, as minted
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     return o;
 }
@@ -1373,7 +1373,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("noticed", noticed);
         o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
-        o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
+        o.pushKV("canRedeem", v.IsOpen() && h >= v.ownerHeight);     // IT-1 (extended): in term too
         o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
         o.pushKV("canNotice", est.canNotice);
         arr.push_back(o);

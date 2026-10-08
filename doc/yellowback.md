@@ -47,7 +47,7 @@ rules do not apply here. This file is the user-facing guide to the node and its 
   (`yed_listclaimable` lists them). The claim burns the debt and moves the collateral into a
   **pending release** (an intent) paying the claimant; any remainder above the claimant's share
   goes into a second one paying the owner. The vault is `CLAIMING` for `CLAIM_DELAY` blocks
-  (1,152, one day, on mainnet; 10 on regtest), during which the YED attestor set can cancel the
+  (576, twelve hours, on mainnet; 10 on regtest), during which the YED attestor set can cancel the
   claimant's intent; then anyone releases it (`vault_release`) and the vault is `CLAIMED`.
 - **Prices come from pools and attestors.** Every pool running the module tags its coinbase with a
   YEC/USD quote; bonded attestors sign prices off-chain. A mint is sized at the lower of the two
@@ -160,7 +160,7 @@ ycash-cli yed_mint 10000 48 ys1…            # the same, funded from that Sapli
 ycash-cli yed_listpositions                 # your vaults: status, lockHeight, claimHeight, canRedeem, intents
 ycash-cli yed_send ye… 2500                 # send $25.00
 ycash-cli yed_redeem <vaultTxid>            # burn the debt, pay the pool fee, take the collateral back
-ycash-cli yed_listclaimable                 # underwater vaults past their claim height
+ycash-cli yed_listclaimable                 # vaults under the claim threshold (in term or past it)
 ycash-cli yed_claim <vaultTxid>             # claim one with your own YED (a pending release for CLAIM_DELAY)
 ycash-cli vault_release <intentTxid> 0      # after CLAIM_DELAY: pay the claimant's intent out
 ycash-cli yed_listtransactions
@@ -174,20 +174,31 @@ the first place (`mintpol-*` identifiers in `doc/yellowback-rpc.md`).
 
 **The supply cap is soft.** YED supply is capped at `SUPPLY_CAP_BPS` (15 %) of YEC's issued market
 cap, but reaching the cap is read as a sign that demand for YED is strong relative to YEC, not as
-a stop: above it a mint is accepted iff it is class A and the ratio it locks — the class minimum
-times the volatility multiplier — is at least `RECAP_RATIO_BPS` (600 % on mainnet; 500 % on
-regtest, where class A always qualifies). Every YED minted above the cap locks at least that
-multiple of its value in YEC, the buffer wanted if the market cap corrects.
-`yed_getinfo.supplyCapReached` says the cap is reached, `yed_getstats.mintableClasses` whether
-class A still mints, and the wallet's `mintpol-cap` refusal says so.
+a stop: above it a mint is accepted iff its term class's base ratio is at least `RECAP_RATIO_BPS`
+(500 %: class C, the long tier, on every network). Every YED minted above the cap locks at least
+that multiple of its value in YEC, the buffer wanted if the market cap corrects.
+`yed_getinfo.supplyCapReached` says the cap is reached, `yed_getstats.mintableClasses` which
+classes still mint, and the wallet's `mintpol-cap` refusal says so. The same gate opens a mint
+under the global-ratio halt (`HALT-2`).
 
-**Launch parameters.** On mainnet and testnet only class A (30–90 days) is enabled: classes B and
-C carry an empty term range (`minBlocks > maxBlocks` in `yed_getinfo.params.classes`) and every
-lock length in them is refused (`mint-bad-lock`; invalid if hand-built). The largest single mint
-is $2,500 (`MAX_MINT`), the pool fee 15 bps of the collateral (`FEE_BPS`, minimum 0.5 YEC) with
-half of it again to the attestor (`ATTEST_FEE_BPS` 5,000), the global-ratio halt 300 % and the
-recapitalisation floor 600 %. Regtest uses 25 bps, 2,500 bps, $10,000 and 250 % / 500 %, with all
-three classes.
+**Claims open at the threshold, not at the term end** (in-term claims,
+`docs/plans/yellowback-in-term-claims-plan.md`). A vault's claim branch is spendable from the
+block after its mint; a claim is valid at any height at which the collateral is worth less than
+`CLAIM_THRESHOLD_BPS` (125 %) of the debt at the attested claim price, and invalid otherwise, in
+term, in grace and past it alike. Anyone may claim by burning the full debt; the claimant receives
+collateral worth 125 % of the debt at that price, capped at the collateral, and whatever is left
+returns to the owner; the attestor set may cancel a wrong-price claim within `CLAIM_DELAY`. The
+owner's redeem is open from the block after the mint as well (the term's `lockHeight` is record-keeping; an
+early-redeem fee is a separate decision), always for the full debt; `yed_getinfo.params`
+says `inTermClaims: true`.
+
+**Launch parameters.** Three flat tiers, the longer the term the higher the collateral ratio:
+class A 30–90 days at 300 %, B 91–180 days at 400 %, C 181–365 days at 500 %
+(`yed_getinfo.params.classes`); the volatility multiplier is pinned at 1 (`SIGMA_REF_BPS` 0). The
+largest single mint is $2,500 (`MAX_MINT`), the pool fee 15 bps of the collateral (`FEE_BPS`,
+minimum 0.5 YEC) with half of it again to the attestor (`ATTEST_FEE_BPS` 5,000), the global-ratio
+halt 200 % and the recapitalisation floor 500 %. Regtest uses 25 bps, 2,500 bps, $10,000,
+48–96 / 97–144 / 145–240 blocks and 250 % / 500 %.
 
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
@@ -298,9 +309,12 @@ project workspace's plans.
   There is no pool that enforces, no pause, no abandonment.
 - YED is created only when both a hashpower majority and a bonded attestor majority agree on the
   price. Neither alone can mint against a price it sets. A single signer is never a price.
-- Collateral behind YED is locked for 30 to 90 days and returned to the owner who redeems before
-  `lockHeight + 30 days`; after that, anyone may close the vault by paying its debt in YED, after
-  a delay during which any honest attestor can stop a claim at a wrong price.
+- Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED
+  you minted. If your collateral falls below 125 % of your debt at the attested price, anyone may
+  close your vault by paying your debt; you then receive whatever collateral is worth more than
+  125 % of the debt. Before that happens, your wallet will warn you, and redeeming stops it. A
+  claim completes only after a delay during which any honest attestor can stop one at a wrong
+  price.
 - **Wrapped Ycash is a federated bridge.** YEC behind wYEC is released only by its bonded signer
   set, after a delay, within a per-window cap, and only while no bonded watcher has cancelled.
   Ycash never reads Ethereum. If the signers go silent or wind down, every depositor recovers

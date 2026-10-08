@@ -159,6 +159,8 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         v.collateralZat = r.I64();
         v.mintedCents = r.I64();
         v.refHeight = (int32_t)r.U32();
+        v.appHeight = (int32_t)((int64_t)v.refHeight + 1);
+        v.ownerHeight = v.appHeight;
         v.ownerPubKey = FixedKey();
         v.mintHeight = P.startHeight;
         st.Put(keys::Vault(COutPoint(Fill((uint8_t)(i + 1)), 0)), v);

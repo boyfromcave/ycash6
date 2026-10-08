@@ -245,13 +245,12 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         self.checkpoint('transfers')
 
 # Rule: RED-1
-        print('redeem_before_lock_refused')
-        assert_rpc_error('vault-locked', user.yed_redeem, mint_b['txid'])
+        print('redeem_before_lock: refusals (IT-1 extended: the owner branch is open from the mint, so no vault-locked)')
         assert_rpc_error('vault-not-owned', observer.yed_redeem, mint_b['txid'])
         assert_rpc_error('vault-not-found', user.yed_redeem, '00' * 32)
         positions = {p['txid']: p for p in user.yed_listpositions()}
         assert_equal(len(positions), 3)
-        assert_equal(positions[mint_b['txid']]['canRedeem'], False)
+        assert_equal(positions[mint_b['txid']]['canRedeem'], True)     # IT-1 (extended): redeemable in term
         assert 'sweepBefore' not in positions[mint_b['txid']]
 
         print('wait for the locks')

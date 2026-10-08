@@ -301,6 +301,8 @@ void SetVault(VaultRecord& v, const Payload& p, const Params& params, const CTra
     v.mintedCents = p.cents;
     v.mintHeight = height;
     v.refHeight = (int32_t)p.refHeight;
+    v.appHeight = (int32_t)((int64_t)p.refHeight + 1);     // IT-1: MINT-3 passed exactly this V
+    v.ownerHeight = v.appHeight;                           // IT-1 (extended): the owner redeems in term too
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +336,9 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (tx.vout.size() < 3) return verdict::BAD_MINT_OUTPUTS;
     if (!p.ownerPubKey.IsValid() || !p.ownerPubKey.IsCompressed() || !p.ownerPubKey.IsFullyValid()) return verdict::BAD_MINT_OWNER_KEY;
     // U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight = lockHeight,
-    // appHeight = lockHeight + GRACE); v2's P2SH VaultScript is refused for new mints.
-    const CScript expected = YedVaultScript(P, p.ownerPubKey, lock);
+    // ownerHeight = appHeight = refHeight + 1, IT-1); v2's P2SH VaultScript and the pre-IT-1 shape (ownerHeight =
+    // lockHeight, appHeight = lockHeight + GRACE) are refused for new mints.
+    const CScript expected = YedVaultScript(P, p.ownerPubKey, ref);
     if (expected.empty() || tx.vout[0].scriptPubKey != expected) return verdict::BAD_MINT_VAULT_SCRIPT;
     // MINT-4 (ACT-5's activation and the PARTICIPATION/ENFORCEMENT halts left with the upgrade, §6: the
     // module is active from START_HEIGHT; NOT_ACTIVE is the virtual snapshot below it)
@@ -343,10 +346,11 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (!S.has_value()) return verdict::MINT_NOT_ACTIVE;
     if (S->haltMask & HALT_NOT_ACTIVE) return verdict::MINT_NOT_ACTIVE;
     if (S->haltMask & HALT_NO_PRICE) return verdict::MINT_HALTED_NO_PRICE;
-    // HALT-2 (amended, W16): the global-ratio halt stops a mint only when the mint's own minimum
-    // ratio is below the recapitalisation floor. Every class minimum exceeds the halt floor, so a
-    // mint can only raise the global ratio; the floor keeps the best-backed class open to do so.
-    if ((S->haltMask & HALT_GLOBAL_RATIO) && MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps) return verdict::MINT_HALTED_GLOBAL_RATIO;
+    // HALT-2 (amended, W16; IT-5): the global-ratio halt stops a mint only when the mint's class base
+    // ratio is below the recapitalisation floor (with the in-term parameter set that is class C only).
+    // Every class base exceeds the halt floor, so a mint can only raise the global ratio; the floor
+    // keeps the best-backed class open to do so.
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_HALTED_GLOBAL_RATIO;
     if (S->haltMask & HALT_DIVERGENCE) return verdict::MINT_HALTED_DIVERGENCE;
     if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) return verdict::MINT_NOT_ACTIVE; // an unknown bit: MINT-4 needs every other bit clear
     const bool armed = ctx.Armed(ref);
@@ -365,13 +369,13 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (!armed) {
         if (const char* v = mint5()) return v;
     }
-    // MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9, R15). W20: the cap is soft
-    // above RECAP_RATIO_BPS -- a mint that would exceed it is refused only when its class minimum,
-    // after the volatility multiplier, is below the recapitalisation floor (the W16 gate).
+    // MINT-6 (amended, W20: the cap is soft above the recapitalisation floor; IT-5). A mint that would
+    // take supply over the cap is refused only when its class base ratio is below RECAP_RATIO_BPS (class
+    // C only with the in-term parameter set; H-10's termClass != 0 proxy is replaced by the ratio test).
+    // The cap reads the cross-section xMint: it precedes MINT-9 (R15).
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
-    // H-10: above the cap only class A (termClass 0) at or over the floor mints, so re-enabling a class cannot re-open the cap.
     if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()
-        && (p.termClass != 0 || MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps)) return verdict::MINT_SUPPLY_CAP;
+        && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
     // MINT-8 (FEE-0 when E(R) is empty, K11)
@@ -542,7 +546,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // residual intent (RED-5 decides which is due) and no re-lock.
     std::vector<unsigned int> intents;
     if (claim) {
-        const CScript vaultSpk = YedVaultScript(P, vault.OwnerKey(), vault.lockHeight);
+        const CScript vaultSpk = YedVaultScriptAt(P, vault.OwnerKey(), vault.ownerHeight, vault.appHeight);
         const uint256 vaultHash = vault::ScriptHash256(vaultSpk);
         for (unsigned int j = 0; j < tx.vout.size(); j++) {
             if (tx.vout[j].scriptPubKey == vaultSpk) return verdict::VAULT_CLAIM_INTENTS;
@@ -561,7 +565,8 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // RED-2
     const int64_t burn = yedIn - p.AssignedCents();
     if (burn < vault.mintedCents) return burn <= 0 ? verdict::VAULT_SPEND_MISSING_BURN : verdict::VAULT_SPEND_SHORT_BURN;
-    // RED-3 (FEE-0 when E(R) is empty, K11)
+    // RED-3 (FEE-0 when E(R) is empty, K11). D-IT-16 hook: an early-redeem fee for an owner path spent before
+    // lockHeight would be charged here, on top of FEE-1's pool fee; not decided yet (in-term claims plan).
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     std::set<unsigned int> assignedVouts;
     for (const Assignment& a : p.assignments) assignedVouts.insert(a.vout);
@@ -583,7 +588,10 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         facts.attestPayee = AttestFeeOk(ctx, tx, p.attestFeeVout, facts.bundle.seqs, excluded, facts.attestFeeZat);
         if (!facts.attestPayee.has_value()) return verdict::AFEE1_FEE;
     }
-    // RED-4 (amended): (a) underwater under pClaim of PRICE-2 (revised), or (b) a standing notice and pEmerg
+    // RED-4 (amended; IT-2): at every height the V's APP branch admits -- from the block after the mint
+    // since IT-1 -- a claim is valid iff (a) the vault is underwater under pClaim of PRICE-2 (revised) at
+    // CLAIM_THRESHOLD_BPS, or (b) a standing notice persists and it is underwater under pEmerg. There is
+    // no "after the term" clause: in term, in grace and past it the same test decides.
     if (claim) {
         const std::optional<Snapshot>& S = ctx.Snap(ref);
         std::optional<MicroUsd> xClaim = S.has_value() ? S->PClaim() : std::nullopt;
@@ -683,7 +691,9 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
         log.hasAttestPayee = true;
         log.attestPayee = facts.attestPayee.value();
     }
-    totals.collateralZat -= vault.collateralZat;
+    // IT-6 (D-IT-14): a claimed vault's collateral stays in the system ratio until its claimant intent is
+    // released (the debt left supply with this spend's burn); the owner's redeem removes it at once.
+    if (ownerPath) totals.collateralZat -= vault.collateralZat;
     if (totals.activeVaults > 0) totals.activeVaults--;
     if (ownerPath) {
         totals.closedVaults++;
@@ -735,11 +745,12 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     if (!cancel) {
         vault->status = (uint8_t)VaultStatus::CLAIMED;
         ctx.st.Put(keys::Vault(in.record.vault), vault.value());
+        totals.collateralZat -= vault->collateralZat;      // IT-6: the collateral leaves the system ratio at release
         totals.claimedVaults++;
         log.closedVaults.push_back(in.record.vault);
         return verdict::OK;
     }
-    const CScript vaultSpk = YedVaultScript(P, vault->OwnerKey(), vault->lockHeight);
+    const CScript vaultSpk = YedVaultScriptAt(P, vault->OwnerKey(), vault->ownerHeight, vault->appHeight);
     int relock = -1;
     for (unsigned int j = 0; j < tx.vout.size(); j++) {
         if (tx.vout[j].scriptPubKey != vaultSpk) continue;
@@ -759,7 +770,7 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     ctx.st.EraseKey(keys::Vault(in.record.vault));
     ctx.st.Put(keys::Vault(reopened), v);
     if (ctx.st.Has(keys::Notice(in.record.vault))) ctx.st.EraseKey(keys::Notice(in.record.vault));
-    totals.collateralZat += v.collateralZat;
+    totals.collateralZat += v.collateralZat - vault->collateralZat;    // IT-6: the CLAIMING collateral was still counted
     totals.activeVaults++;
     log.closedVaults.push_back(in.record.vault);
     log.reopenedVaults.push_back(reopened);

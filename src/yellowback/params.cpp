@@ -35,25 +35,25 @@ void SetCommon(Params& p)
     p.feeBps = 15;                  // H-4 (was 25)
 
     p.grace              = 34560;   // 30 d
-    p.claimDelay         = 1152;    // CLAIM_DELAY 1 d (U-23): the window in which one attestor can cancel a claim
-    p.claimThresholdBps  = 11000;
+    p.claimDelay         = 576;     // CLAIM_DELAY 12 h (U-23; owner 2026-10-07, was 1,152): the window in which one attestor can cancel a claim
+    // In-term claims (docs/plans/yellowback-in-term-claims-plan.md §3, D-IT-2, D-IT-11, D-IT-12)
+    p.claimThresholdBps  = 12500;   // θ 125 % (was 11,000)
     p.supplyCapBps       = 1500;    // 15 % of market cap (V21)
-    p.globalRatioHaltBps = 30000;       // H-11 (was 25,000)
-    p.recapRatioBps      = 60000;       // W16: twice the halt floor (H-11, was 50,000)
+    p.globalRatioHaltBps = 20000;   // D-IT-11: below every class base (H-11 had 30,000)
+    p.recapRatioBps      = 50000;   // D-IT-12: class C's base; only the 500 % tier recapitalises (W16's 2 x halt is given up)
     p.divergenceBps      = 2000;
-    p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 50000;   // A: 30-90 d
-    // H-5: classes B and C are disabled by an empty term range [classMax[0] + 1, classMax[0]]
-    // (classMin > classMax): MINT-2 refuses every term in them, no code path changes and the ranges
-    // stay contiguous. The enabled bounds were B 103,681-420,480 (90-365 d) and C 420,481-2,102,400
-    // (1-5 y, MAX_LOCK, V19).
-    p.classMin[1] = 103681; p.classMax[1] = 103680;  p.baseRatioBps[1] = 40000;   // B: disabled (H-5)
-    p.classMin[2] = 103681; p.classMax[2] = 103680;  p.baseRatioBps[2] = 30000;   // C: disabled (H-5)
+    // D-IT-4, D-IT-9, D-IT-10 (owner, 2026-10-07): three flat tiers, the longer the term the higher the
+    // ratio (H-5's disabling of B and C is reversed; A's bounds are unchanged, its ratio was 500 %).
+    // MINT-2's lock + GRACE < LOCKTIME_THRESHOLD holds trivially at 420,480 + 34,560 blocks past any ref.
+    p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 30000;   // A: 30-90 d, 300 %
+    p.classMin[1] = 103681; p.classMax[1] = 207360;  p.baseRatioBps[1] = 40000;   // B: 91-180 d, 400 %
+    p.classMin[2] = 207361; p.classMax[2] = 420480;  p.baseRatioBps[2] = 50000;   // C: 181-365 d, 500 %
 
     p.volWindow         = 2016;
     p.volStep           = 48;
     p.volPeriodsPerYear = 8760;     // K13: equal on every network
-    p.sigmaRefBps       = 10000;
-    p.sigmaMultMaxBps   = 30000;
+    p.sigmaRefBps       = 0;        // D-IT-5: the volatility multiplier is pinned at 1 (SigmaMultBps's 0 convention); the sampling code stays
+    p.sigmaMultMaxBps   = 10000;
 
     p.nPenalty       = 288;         // L6 wallet defaults
     p.accuracyWindow = 576;
@@ -197,7 +197,7 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.feeBps             = 25;
     r.attestFeeBps       = 2500;
     r.maxMint            = 1000000;
-    r.globalRatioHaltBps = 25000;
+    r.globalRatioHaltBps = 25000;   // (below class A's 300 % base, the §1.4 invariant; the in-term plan's §3 brackets leave it)
     r.recapRatioBps      = 50000;
     r.classMin[0] = 48;  r.classMax[0] = 96;
     r.classMin[1] = 97;  r.classMax[1] = 144;

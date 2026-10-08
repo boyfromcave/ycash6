@@ -57,7 +57,7 @@ from test_framework.authproxy import AuthServiceProxy   # noqa: E402
 
 HEARTBEAT_RATE = 2          # seconds per block: the budget below is measured in blocks
 WALK_TICK = 3
-SHOCK = '-70%'              # class C (300 %) goes under CLAIM_THRESHOLD (110 %) at -63 %; class A (500 %) does not
+SHOCK = '-70%'              # D-IT-4 tiers: class A (300 %) goes under theta (125 %) at -58 %, B (400 %) at -69 %; class C (500 %) does not until -75 %
 EMERGENCY_PERSIST = 4
 CLAIM_DELAY = 10              # regtest CLAIM_DELAY (U-23): the liquidator releases its claim after it
 STOCK, POOLS, ATTESTOR4, POPULATION, LIQUIDATOR = 1, (2, 3, 4), 8, 9, 10

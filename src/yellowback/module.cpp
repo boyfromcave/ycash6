@@ -46,7 +46,9 @@ std::optional<std::string> Module::ValidateCreate(const CTransaction& tx, size_t
     // U-23: the only shape a YED vault has (whether a mint or a cancel created it is EvaluateBlock's YED_TEMPLATE_OUTPUT).
     if (v.setId != p->attestorSetId || v.cancelSetId != p->attestorSetId) return std::string("bad-yellowback-vault-set");
     if (v.delay != p->claimDelay) return std::string("bad-yellowback-vault-delay");
-    if (v.appHeight != v.ownerHeight + p->grace) return std::string("bad-yellowback-vault-height");
+    // IT-1: the APP branch is open (appHeight >= 1) and no later than the pre-plan lockHeight + GRACE; MINT-3 pins
+    // a new mint's exact value (refHeight + 1) and a cancel re-creates the byte-identical V, so this is a bound only.
+    if (v.appHeight < 1 || v.appHeight > v.ownerHeight + p->grace) return std::string("bad-yellowback-vault-height");
     return std::nullopt;
 }
 

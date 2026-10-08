@@ -99,7 +99,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
     mock_clock = True   # 6.20.0: advance_clock needs nodes started on a fixed mock clock
     """# Rule: MINER-1 MINER-2 MINER-3 TPL-1 TPL-2 MP-1 TAG-1 TAG-2 TAG-4 TX-0 UNDO RED-2 RED-3 FEE-2 XFER-2"""
 
-    initial_blocks = 220     # node 0 funds four hand-built mints of ~250 YEC each (2 YEC/USD, class A 500 %)
+    initial_blocks = 220     # node 0 funds four hand-built mints of ~150 YEC each (2 YEC/USD, class A 300 %)
 
     def setup_helpers(self):
         self.pool_key = [ym.address_key_hash(a) for a in self.pool_addresses]
