@@ -321,7 +321,7 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         closed_b = user.yed_getvault(mint_b['txid'])
         assert_equal((closed_b['status'], closed_b['burnedCents'], closed_b['feePaidZat']), ('CLOSED', 10000, redeemed['feeZat']))
         assert_equal(user.yed_getbalance()['confirmedCents'], 10100)
-        assert_greater_than(user.getbalance(), yec_before + 9)
+        assert_greater_than(user.getbalance(), yec_before + 5)      # the 6 YEC collateral (300 %) less fees
         rows = {r_['txid']: r_ for r_ in user.yed_listtransactions()}
         assert_equal(rows[redeemed['txid']]['type'], 'redeem')
         assert_equal(rows[redeemed['txid']]['payee'], redeemed['payee'])

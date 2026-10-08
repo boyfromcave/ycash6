@@ -182,6 +182,14 @@ inline bool IsUnderwater(CAmount collateralZat, std::optional<MicroUsd> pClaim, 
 }
 
 /** FEE-1: feeZat(collateralZat) = max(feeMin, collateralZat * feeBps / 10^4). Never overflows: collateral <= MAX_MONEY. */
+/** IT-9: the early-redeem fee, collateral * earlyRedeemFeeBps / 10^4 (floor, no minimum); 0 at or after lockHeight. */
+inline CAmount EarlyRedeemFeeZat(CAmount collateralZat, int earlyRedeemFeeBps)
+{
+    if (collateralZat < 0 || earlyRedeemFeeBps <= 0) return 0;
+    arith_uint256 f = arith_uint256(collateralZat) * arith_uint256(earlyRedeemFeeBps) / arith_uint256(BPS);
+    return FitsInt64(f) ? (CAmount)f.GetLow64() : MAX_MONEY;
+}
+
 inline CAmount FeeZat(CAmount collateralZat, CAmount feeMin, int feeBps)
 {
     if (collateralZat < 0) collateralZat = 0;

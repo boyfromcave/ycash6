@@ -50,6 +50,7 @@ const char* const VAULT_SPEND_MISSING_BURN = "vault-spend-missing-burn";
 const char* const VAULT_SPEND_SHORT_BURN = "vault-spend-short-burn";
 const char* const VAULT_SPEND_BAD_FEE = "vault-spend-bad-fee";
 const char* const VAULT_SPEND_BAD_PAYEE = "vault-spend-bad-payee";
+const char* const BAD_REDEEM_EARLY_FEE = "bad-redeem-early-fee";
 const char* const VAULT_CLAIM_NOT_UNDERWATER = "vault-claim-not-underwater";
 const char* const MINT9_NO_BUNDLE = "mint9-no-bundle";
 const char* const MINT9_BUNDLE_PREFIX = "mint9-bundle-";
@@ -565,8 +566,9 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // RED-2
     const int64_t burn = yedIn - p.AssignedCents();
     if (burn < vault.mintedCents) return burn <= 0 ? verdict::VAULT_SPEND_MISSING_BURN : verdict::VAULT_SPEND_SHORT_BURN;
-    // RED-3 (FEE-0 when E(R) is empty, K11). D-IT-16 hook: an early-redeem fee for an owner path spent before
-    // lockHeight would be charged here, on top of FEE-1's pool fee; not decided yet (in-term claims plan).
+    // RED-3 (FEE-0 when E(R) is empty, K11). IT-9 (the D-IT-16 hook, decided 2026-10-07): an owner redeem at a
+    // height below lockHeight pays earlyRedeemFeeBps[class] of the collateral on top of FEE-1, through the same
+    // payee output (AFEE-1's rule gives the owner path no attestor share); at or after lockHeight FEE-1 only.
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     std::set<unsigned int> assignedVouts;
     for (const Assignment& a : p.assignments) assignedVouts.insert(a.vout);
@@ -576,6 +578,10 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         std::optional<CKeyID> key = P2PKHKey(tx.vout[fv].scriptPubKey);
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::VAULT_SPEND_BAD_PAYEE;
         if (tx.vout[fv].nValue < FeeZat(vault.collateralZat, P.feeMin, P.feeBps)) return verdict::VAULT_SPEND_BAD_FEE;
+        if (!claim && H < (int64_t)vault.lockHeight && P.IsValidClass(vault.termClass)
+            && tx.vout[fv].nValue < FeeZat(vault.collateralZat, P.feeMin, P.feeBps) + EarlyRedeemFeeZat(vault.collateralZat, P.earlyRedeemFeeBps[vault.termClass])) {
+            return verdict::BAD_REDEEM_EARLY_FEE;     // IT-9
+        }
     }
     // AFEE-1 (RED-3's attestor-fee clause; AFEE-0 when not ARMED or on the owner path)
     if (armed) {

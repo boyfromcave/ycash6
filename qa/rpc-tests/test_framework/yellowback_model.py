@@ -184,7 +184,7 @@ class Params(object):
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
                  price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
-                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576):
+                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100)):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -214,6 +214,7 @@ class Params(object):
         self.class_min = list(class_min)
         self.class_max = list(class_max)
         self.base_ratio_bps = list(base_ratio_bps)
+        self.early_redeem_fee_bps = list(early_redeem_fee_bps)    # IT-9: bps of the collateral on an owner redeem before lockHeight
         self.vol_window = vol_window
         self.vol_step = vol_step
         self.vol_periods_per_year = vol_periods_per_year
@@ -465,6 +466,11 @@ def residual_zat(collateral_zat, claimant_max):
 
 def fee_zat(collateral_zat, fee_min, fee_bps):
     return max(fee_min, (collateral_zat * fee_bps) // BPS)
+
+
+def early_redeem_fee_zat(collateral_zat, early_redeem_fee_bps):
+    """IT-9: collateral * earlyRedeemFeeBps / 10^4 (floor, no minimum)."""
+    return (collateral_zat * early_redeem_fee_bps) // BPS if early_redeem_fee_bps > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -2902,6 +2908,11 @@ class YellowbackModel(object):
                 return 'vault-spend-bad-payee'
             if tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps):
                 return 'vault-spend-bad-fee'
+            # IT-9: an owner redeem before lockHeight pays the class's early-redeem fee on top, through the same output
+            if (not claim and height < vault.lock_height and vault.term_class in (0, 1, 2)
+                    and tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps)
+                    + early_redeem_fee_zat(vault.collateral_zat, p.early_redeem_fee_bps[vault.term_class])):
+                return 'bad-redeem-early-fee'
         # AFEE-1 (RED-3's attestor-fee clause)
         if armed:
             attest_fee = attest_fee_zat(fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps), p.attest_fee_bps)

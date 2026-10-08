@@ -288,7 +288,9 @@ struct Builder
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << valtype(71, 0x30) << OP_2, 0xFFFFFFFE));   // U-23: the V's owner selector
         for (const COutPoint& o : yed) m.vin.push_back(CTxIn(o));
         m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
-        m.vout.push_back(CTxOut(FeeZat(v->collateralZat, P.feeMin, P.feeBps), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
+        CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
+        if ((int64_t)refHeight + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: an owner redeem mined before lockHeight
+        m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         if (wellFormed) {
             m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {})))));
         } else {

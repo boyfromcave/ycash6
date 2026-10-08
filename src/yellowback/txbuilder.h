@@ -80,7 +80,8 @@ struct BuiltTx
 
     // Common (§4.2a: refHeight, feeZat, payee, termClass, claimHeight, path)
     int refHeight;                          //!< R = indexTip - REF_LAG
-    CAmount feeZat;                         //!< the enforcement fee paid (0 under FEE-0, for a release and a sweep)
+    CAmount feeZat;                         //!< the enforcement fee paid (0 under FEE-0, for a release and a sweep); a redeem before lockHeight includes earlyRedeemFeeZat (IT-9)
+    CAmount earlyRedeemFeeZat;              //!< IT-9: the early-redeem part of feeZat (0 at or after lockHeight, on the claim path, under FEE-0)
     std::optional<CKeyID> payee;            //!< the fee output's key hash (nullopt = no fee output)
     int feeVout;                            //!< index of the fee output, -1 if none
     int termClass;                          //!< 0/1/2 = A/B/C
@@ -132,7 +133,7 @@ struct BuiltTx
     std::vector<CarrierRecord> sweptRecords;    //!< SWEEP_CARRIERS: the carriers spent
     std::vector<CarrierRecord> staleRecords;    //!< SWEEP_CARRIERS: lapsed records whose outpoint is already spent (to forget)
 
-    BuiltTx() : kind(BuiltKind::TRANSFER), refHeight(0), feeZat(0), feeVout(-1), termClass(0), lockHeight(0), claimHeight(0),
+    BuiltTx() : kind(BuiltKind::TRANSFER), refHeight(0), feeZat(0), earlyRedeemFeeZat(0), feeVout(-1), termClass(0), lockHeight(0), claimHeight(0),
                 collateralZat(0), collateralOut(0), burnCents(0), changeCents(0), extraBurnCents(0), changeVout(-1), vaultValue(0),
                 carrierVin(-1), armed(false), attestFeeZat(0), attestFeeVout(-1), residualZat(0), residualVout(-1), emergencyOpenAt(0),
                 seq(0), bondVin(-1), bondZat(0), bondLocktime(0), flags(0), sweptCarriers(0) {}

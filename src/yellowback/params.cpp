@@ -48,6 +48,8 @@ void SetCommon(Params& p)
     p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 30000;   // A: 30-90 d, 300 %
     p.classMin[1] = 103681; p.classMax[1] = 207360;  p.baseRatioBps[1] = 40000;   // B: 91-180 d, 400 %
     p.classMin[2] = 207361; p.classMax[2] = 420480;  p.baseRatioBps[2] = 50000;   // C: 181-365 d, 500 %
+    // IT-9 (owner, 2026-10-07): an owner redeem before lockHeight pays, on top of FEE-1, this share of the collateral
+    p.earlyRedeemFeeBps[0] = 500; p.earlyRedeemFeeBps[1] = 250; p.earlyRedeemFeeBps[2] = 100;
 
     p.volWindow         = 2016;
     p.volStep           = 48;
@@ -115,7 +117,7 @@ Params::Params()
       mintRequiresArmed(false)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
-        classMin[i] = classMax[i] = baseRatioBps[i] = 0;
+        classMin[i] = classMax[i] = baseRatioBps[i] = earlyRedeemFeeBps[i] = 0;
     }
 }
 

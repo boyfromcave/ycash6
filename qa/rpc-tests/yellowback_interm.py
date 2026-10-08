@@ -18,6 +18,9 @@ explainer's example (yb-calibration docs/reports/2026-10-zec/in-term-claims.html
       * at $1.20 the vault is at 120 %, under theta: the claim is valid in term, the vault moves into the
         claimant intent (CLAIMING), the debt leaves supply at once while the collateral stays in the system
         ratio until release (IT-6); after CLAIM_DELAY vault_release pays the claimant (CLAIMED);
+      * IT-9: the owner's redeem before lockHeight pays the class's early-redeem fee (500 / 250 / 100 bps) on top of
+        FEE-1 (Y, class A, and Y2, class B); an early redeem paying FEE-1 alone is refused by every mempool and its
+        block rejected; yellowback_lifecycle's redeems at or after lockHeight pay FEE-1 only;
       * the residual to the owner under clause (a) is zero by construction (the claimant's cap theta x debt
         exceeds the collateral whenever the vault is under theta); the clause-(b) residual is
         yellowback_attest_wallet's V2 and the unit test in_term_emergency_claim_pays_the_residual_to_the_owner;
@@ -52,6 +55,8 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
+    early_redeem_fee_zat,
+    fee_zat,
     mine_block_raw,
     set_quote,
     usd_to_micro,
@@ -158,7 +163,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
             assert_equal(vault['status'], 'ACTIVE')
             assert_equal(vault['collateralZat'], est['requiredZat'])
             dec = user.vault_decodescript(vault['scriptPubKey'])
-            assert_equal((dec['type'], dec['ownerheight'], dec['appheight']), ('vault', vault['lockHeight'], vault['refHeight'] + 1))
+            assert_equal((dec['type'], dec['ownerheight'], dec['appheight']), ('vault', vault['refHeight'] + 1, vault['refHeight'] + 1))   # IT-1: both branches open at the mint
             assert_equal(vault['claimHeight'], vault['lockHeight'] + yed_params().grace)
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 30000)
 
@@ -170,7 +175,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         old_shape = ym.yed_vault_script_at(yed_params(), owner, lock, lock + yed_params().grace)
         old_hex, _ = build_mint_tx(user, 10000, 48, r, self.estimate(user, 10000, 48)['requiredZat'], owner_pubkey=bytes_to_hex_str(owner))
         old_tx = ym.tx_from_hex(old_hex)
-        assert_equal(old_tx.vout[0].script, ym.yed_vault_script(yed_params(), owner, lock, r))
+        assert_equal(old_tx.vout[0].script, ym.yed_vault_script(yed_params(), owner, r))
         vin = [(i.prev_txid, i.prev_n, b'', 0xFFFFFFFF) for i in old_tx.vin]
         vout = [(o.value, old_shape if j == 0 else o.script) for j, o in enumerate(old_tx.vout)]
         bad_hex = user.signrawtransaction(bytes_to_hex_str(ym.serialize_tx_v4(vin, vout, 0, old_tx.expiry_height)))['hex']
@@ -217,12 +222,17 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         vy = user.yed_getvault(y['txid'])
         assert_greater_than(vy['lockHeight'], user.getblockcount())
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, y['txid']))
+        # IT-9: a redeem before lockHeight pays the class's early-redeem fee (A: 500 bps of the collateral) on top of FEE-1
+        early = early_redeem_fee_zat(vy['collateralZat'], 'A')
+        assert_equal(params['earlyRedeemFeeBps'], [500, 250, 100])
         redeemed = user.yed_redeem(y['txid'])
-        assert_equal(redeemed['burnedCents'], 10000)
+        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat'], redeemed['feeZat']),
+                     (10000, early, fee_zat(vy['collateralZat']) + early))
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(nodes[2].yed_getvault(y['txid'])['status'], 'CLOSED')
-        y2 = self.mint(user, 10000, TERMS['A'])                                        # Y2: redeemed in term while under theta, below
+        assert_equal(nodes[2].yed_getvault(y['txid'])['feePaidZat'], fee_zat(vy['collateralZat']) + early)
+        y2 = self.mint(user, 10000, TERMS['B'])                                        # Y2 (class B, 400 %: under theta at AT, a 97-block term): redeemed in term while under theta, below
         self.sync_all()
         self.mine(POOLS[2])
 
@@ -283,12 +293,35 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_rpc_error('vault-not-active', user.yed_redeem, x_txid)
         self.checkpoint('claim at theta')
 
+# Rule: RED-1 RED-2 RED-3 IT-1 IT-2
+        print("Y2 in term and under theta, before anyone claims it: the owner redeems, paying the full debt (D-IT-16 is a later decision)")
+        vy2 = user.yed_getvault(y2['txid'])
+        assert_greater_than(vy2['lockHeight'], user.getblockcount())
+        assert_equal(vy2['claimable'], True)
+        # IT-9: an early redeem paying FEE-1 alone is refused by every Yellowback mempool (bad-redeem-early-fee)
+        r = user.getblockcount()
+        payee = user.yed_getfeepayee(r, vy2['collateralZat'])['default']['payoutAddress']
+        coin = coin_of(user, 10000)
+        short_hex = build_vault_spend_raw(user, vy2, 'owner', [(coin['txid'], coin['vout'])],
+                                          payload=ym.encode_redeem(r, 1, []), fee=(payee, fee_zat(vy2['collateralZat'])), ref_height=r)
+        for i in OVERLAY:
+            assert_rpc_error('bad-yellowback-bad-redeem-early-fee', nodes[i].sendrawtransaction, short_hex)
+        result, _ = mine_block_raw(nodes[POOLS[2]], [short_hex])
+        assert_equal(result, 'bad-yellowback-bad-redeem-early-fee')
+        redeemed = user.yed_redeem(y2['txid'])
+        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, early_redeem_fee_zat(vy2['collateralZat'], 'B')))
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(nodes[2].yed_getvault(y2['txid'])['status'], 'CLOSED')
+        assert_rpc_error('vault-not-active', claimant.yed_claim, y2['txid'])
+
 # Rule: RED-1 IT-6
         print('the release waits CLAIM_DELAY, then vault_release pays the claimant: CLAIMED; the collateral leaves the ratio')
         intent = '%s:0' % claimed['txid']
         assert_rpc_error('matures at height', claimant.vault_release, intent)
         self.mine_round_robin(POOLS, claim_block + CLAIM_DELAY - 1 - user.getblockcount())
         yec_before = claimant.getbalance()
+        before_release = nodes[2].yed_getstats()                          # Y2's redeem sits between the claim and this release
         released = claimant.vault_release(intent)
         self.sync_all()
         self.mine(POOLS[0])
@@ -297,24 +330,12 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
             assert_equal(c['status'], 'CLAIMED')
             assert 'intents' not in c
         stats = nodes[2].yed_getstats()
-        assert_equal(stats['collateralZat'], stats_before['collateralZat'] - vx['collateralZat'])
+        assert_equal(stats['collateralZat'], before_release['collateralZat'] - vx['collateralZat'])   # IT-6: the claimed collateral leaves at release
         assert_equal(stats['claimedVaults'], 1)
         assert_greater_than(claimant.getbalance(), yec_before + Decimal(vx['collateralZat']) / COIN - 1)
         assert_equal(nodes[2].yed_gettxinfo(released)['type'], 'claim_release')
         assert_greater_than(x_lock, user.getblockcount())                 # the whole claim completed inside X's term
         self.checkpoint('release')
-
-# Rule: RED-1 RED-2 RED-3 IT-1 IT-2
-        print("Y2 in term and under theta, before anyone claims it: the owner redeems, paying the full debt (D-IT-16 is a later decision)")
-        vy2 = user.yed_getvault(y2['txid'])
-        assert_greater_than(vy2['lockHeight'], user.getblockcount())
-        assert_equal(vy2['claimable'], True)
-        redeemed = user.yed_redeem(y2['txid'])
-        assert_equal(redeemed['burnedCents'], 10000)
-        self.sync_all()
-        self.mine(POOLS[1])
-        assert_equal(nodes[2].yed_getvault(y2['txid'])['status'], 'CLOSED')
-        assert_rpc_error('vault-not-active', claimant.yed_claim, y2['txid'])
 
 # Rule: RED-4 IT-2
         print('the class vaults minted at $%s: A (300 %%) and B (400 %%) are under theta at $%s, C (500 %%) is not' % (PRICE, AT))

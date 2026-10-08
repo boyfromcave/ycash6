@@ -430,6 +430,11 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.payeeWindow, 100);
     BOOST_CHECK_EQUAL(m.feeMin, 50000000);
     BOOST_CHECK_EQUAL(m.feeBps, 15);                          // H-4
+    BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[0], 500);           // IT-9
+    BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[1], 250);
+    BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[2], 100);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(600000000000LL, 500), 30000000000LL);   // 5 % of 6,000 YEC = 300 YEC
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(600000000000LL, 0), 0);
     BOOST_CHECK_EQUAL(m.grace, 34560);
     BOOST_CHECK_EQUAL(m.claimThresholdBps, 12500);            // D-IT-2
     BOOST_CHECK_EQUAL(m.supplyCapBps, 1500);

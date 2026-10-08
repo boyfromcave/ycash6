@@ -131,7 +131,7 @@ struct Fixture
         s.withPayload = withPayload;
         s.refHeight = 250;
         if (withPayee) s.payee = payeeKey.GetPubKey().GetID();
-        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps);
+        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps) + (ownerPath ? EarlyRedeemFeeZat(vaultValue, params.earlyRedeemFeeBps[0]) : 0);   // IT-9: judged at H = R + 3 < lockHeight 300
         s.yedInputs = yed;
         s.changeCents = change;
         s.changeScript = GetScriptForDestination(NewKey().GetPubKey().GetID());

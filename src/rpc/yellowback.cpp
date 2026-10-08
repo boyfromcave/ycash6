@@ -698,9 +698,13 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         t.pushKV("minBlocks", p.classMin[i]);
         t.pushKV("maxBlocks", p.classMax[i]);
         t.pushKV("baseRatioBps", p.baseRatioBps[i]);
+        t.pushKV("earlyRedeemFeeBps", p.earlyRedeemFeeBps[i]);    // IT-9
         classes.push_back(t);
     }
     prm.pushKV("classes", classes);
+    UniValue early(UniValue::VARR);
+    for (int i = 0; i < NUM_CLASSES; i++) early.push_back(p.earlyRedeemFeeBps[i]);
+    prm.pushKV("earlyRedeemFeeBps", early);                    // IT-9: per class, bps of the collateral on a redeem before lockHeight
     prm.pushKV("globalRatioHaltBps", p.globalRatioHaltBps);
     prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16, IT-5: the class base ratio a mint needs to pass a global-ratio halt or the cap
     prm.pushKV("claimThresholdBps", p.claimThresholdBps);  // θ (D-IT-2)

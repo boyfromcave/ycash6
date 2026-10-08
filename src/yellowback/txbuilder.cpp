@@ -808,6 +808,12 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         }
         shape.payee = ctx.Payee(R, OutPointSelector(vaultOut));
         shape.feeZat = shape.payee.has_value() ? FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) : 0;
+        // IT-9: a redeem that confirms before lockHeight pays the early-redeem fee too; the spend confirms at
+        // indexHeight + 1 at the earliest, and a later confirmation at or past lockHeight only overpays.
+        if (ownerPath && shape.payee.has_value() && (int64_t)ctx.indexHeight + 1 < (int64_t)vault.lockHeight && ctx.params.IsValidClass(vault.termClass)) {
+            out.earlyRedeemFeeZat = EarlyRedeemFeeZat(vault.collateralZat, ctx.params.earlyRedeemFeeBps[vault.termClass]);
+            shape.feeZat += out.earlyRedeemFeeZat;
+        }
         for (const YedCoin& c : sel) {
             out.yedInputs.insert(c.outpoint);
             out.yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));

@@ -433,6 +433,7 @@ struct Fixture
         }
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
         CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(v->collateralZat, P.feeMin, P.feeBps);
+        if (o.feeValue < 0 && o.ownerPath && tip + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: mined at tip + 1
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
         size_t nOut = 3;
         for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
@@ -1618,7 +1619,7 @@ BOOST_AUTO_TEST_CASE(red_owner_redeem_passes_and_closes)
     BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);
     BOOST_CHECK(!r.vault.unbacked);
     BOOST_CHECK_EQUAL(r.vault.closeHeight, f.tip);
-    BOOST_CHECK_EQUAL(r.vault.feePaidZat, FeeZat(r.vault.collateralZat, f.P.feeMin, f.P.feeBps));   // rewritten by the close
+    BOOST_CHECK_EQUAL(r.vault.feePaidZat, FeeZat(r.vault.collateralZat, f.P.feeMin, f.P.feeBps) + EarlyRedeemFeeZat(r.vault.collateralZat, f.P.earlyRedeemFeeBps[0]));   // rewritten by the close; IT-9: redeemed in term
     BOOST_CHECK_EQUAL(r.log.type, (uint8_t)TxLogType::REDEEM);
     BOOST_CHECK_EQUAL(r.log.path, "owner");
     BOOST_CHECK_EQUAL(r.log.burned, 10000);
@@ -3796,6 +3797,50 @@ BOOST_AUTO_TEST_CASE(in_term_owner_redeem_below_theta_before_any_claim)
     BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 0);
     // and a claim of the closed vault no longer exists to be made
     BOOST_CHECK(!f.Vault(v)->IsOpen());
+}
+
+// Rule: IT-9
+// Rule: RED-3
+BOOST_AUTO_TEST_CASE(in_term_early_redeem_fee_per_class_and_boundary)
+{
+    Fixture f;
+    f.Activate();
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[0], 500);
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[1], 250);
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[2], 100);
+    for (int cls = 0; cls < NUM_CLASSES; cls++) {
+        const uint256 v = f.MintActive(10000, f.P.classMin[cls], cls);
+        const VaultRecord r = f.Vault(v).value();
+        const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
+        const CAmount early = EarlyRedeemFeeZat(r.collateralZat, f.P.earlyRedeemFeeBps[cls]);
+        BOOST_CHECK_EQUAL(early, r.collateralZat * f.P.earlyRedeemFeeBps[cls] / BPS);
+        BOOST_REQUIRE(f.tip + 1 < r.lockHeight);
+        // FEE-1 alone, and one zat short of FEE-1 + the early fee: bad-redeem-early-fee; the vault stays ACTIVE
+        { SpendOpts o; o.feeValue = fee1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::BAD_REDEEM_EARLY_FEE); BOOST_CHECK(x.invalid); BOOST_CHECK_EQUAL(x.vault.status, (uint8_t)VaultStatus::ACTIVE); }
+        { SpendOpts o; o.feeValue = fee1 + early - 1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::BAD_REDEEM_EARLY_FEE); BOOST_CHECK(x.invalid); }
+        // short of FEE-1 itself is still RED-3's vault-spend-bad-fee
+        { SpendOpts o; o.feeValue = fee1 - 1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::VAULT_SPEND_BAD_FEE); }
+        // exact: valid, the fee logged in full
+        { SpendOpts o; o.feeValue = fee1 + early; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::OK); BOOST_CHECK_EQUAL(x.vault.status, (uint8_t)VaultStatus::CLOSED);
+          BOOST_CHECK_EQUAL(x.vault.feePaidZat, fee1 + early); }
+    }
+    // The boundary: a redeem mined at lockHeight - 1 pays the early fee, one mined at lockHeight pays FEE-1 only.
+    const uint256 w = f.MintActive(10000);
+    const VaultRecord r = f.Vault(w).value();
+    const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
+    while (f.tip + 1 < r.lockHeight - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.tip + 1, r.lockHeight - 1);
+    { SpendOpts o; o.feeValue = fee1;
+      BlockEvaluation ev = f.Evaluate(Fixture::Quote(50000, (f.tip + 1) % 3), { f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o) });
+      BOOST_CHECK(ev.blockInvalid); BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::BAD_REDEEM_EARLY_FEE); }
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.tip + 1, r.lockHeight);
+    { SpendOpts o; o.feeValue = fee1; RedResult x = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(x.verdict, verdict::OK); BOOST_CHECK_EQUAL(x.vault.feePaidZat, fee1); }
 }
 
 // Rule: IT-2

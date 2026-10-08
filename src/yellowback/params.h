@@ -149,6 +149,7 @@ struct Params
     int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive;
     int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5; none is since D-IT-9)
     int baseRatioBps[NUM_CLASSES];       //!< 30,000 / 40,000 / 50,000 (D-IT-4)
+    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9: 500 / 250 / 100 bps of the collateral, charged on an owner redeem before lockHeight on top of FEE-1
 
     // Volatility (SIGMA-1, V17)
     int volWindow;                       //!< 2,016

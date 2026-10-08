@@ -182,6 +182,7 @@ PAYEE_TILT_BPS = 10_000
 PAYEE_WINDOW = 10
 FEE_MIN = 50_000_000           # enforcement fee floor, zat (0.5 YEC)
 FEE_BPS = 25
+EARLY_REDEEM_FEE_BPS = (500, 250, 100)   # IT-9: per class, on an owner redeem before lockHeight (on top of FEE-1)
 GRACE = 24
 CLAIM_THRESHOLD_BPS = 12_500   # theta (D-IT-2)
 GLOBAL_RATIO_HALT_BPS = 25_000
@@ -439,6 +440,12 @@ def term_class_of(lock_blocks):
 def fee_zat(collateral_zat):
     """FEE-1: the enforcement fee for a collateral (max(FEE_MIN, collateral * FEE_BPS / BPS))."""
     return ym.fee_zat(collateral_zat, FEE_MIN, FEE_BPS)
+
+
+def early_redeem_fee_zat(collateral_zat, term_class):
+    """IT-9: the early-redeem fee of a redeem before lockHeight (``term_class`` 'A'/'B'/'C' or 0..2)."""
+    i = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
+    return ym.early_redeem_fee_zat(collateral_zat, EARLY_REDEEM_FEE_BPS[i])
 
 
 def usd_to_micro(usd):

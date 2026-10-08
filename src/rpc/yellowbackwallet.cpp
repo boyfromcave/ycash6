@@ -303,6 +303,7 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
     // (the transaction burns burnedCents + extraBurnCents, which RED-2 allows: burn >= debt).
     o.pushKV("burnedCents", built.burnCents - built.extraBurnCents);
     o.pushKV("feeZat", built.feeZat);
+    o.pushKV("earlyRedeemFeeZat", built.earlyRedeemFeeZat);   // IT-9: the part of feeZat a redeem before lockHeight adds
     o.pushKV("payee", PayeeToJSON(built.payee));
     o.pushKV("collateralOut", built.collateralOut);
     o.pushKV("to", built.collateralTo);
