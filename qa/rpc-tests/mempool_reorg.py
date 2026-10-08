@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2014-2016 The Bitcoin Core developers
 # Copyright (c) 2019-2024 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -13,7 +14,7 @@ from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import assert_equal, assert_raises, start_node, connect_nodes
+from test_framework.util import assert_equal, assert_raises, start_node, connect_nodes, sync_blocks
 from test_framework.zip317 import conventional_fee
 
 
@@ -89,6 +90,12 @@ class MempoolCoinbaseTest(BitcoinTestFramework):
         # Broadcast and mine 103_1:
         spend_103_1_id = self.nodes[0].sendrawtransaction(spend_103_1_raw)
         last_block = self.nodes[0].generate(1)
+        # Ycash: node 1 must hold this block before the transactions below reach it. Transactions
+        # are announced on a trickle and blocks through getheaders first, so on a slow runner the
+        # trickle can overtake the block: node 1 then sees timelock_tx as non-final (and
+        # spend_102_1 as an orphan), rejects it, and node 0 never announces it again, so the
+        # mempools never converge ("Mempool sync failed", ycash6 CI from 2026-10-07).
+        sync_blocks(self.nodes)
         timelock_tx_id = self.nodes[0].sendrawtransaction(timelock_tx)
 
         # ... now put spend_101 and spend_102_1 in memory pools:
