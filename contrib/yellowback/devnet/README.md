@@ -11,7 +11,7 @@ Two scripts and four checklists:
 | `stratum-perl-check` | proves `stratum-miner` against the Perl reference pools in `ref/yolo` on a two-node regtest and records `fixtures/stratum-perl-*.jsonl`; `YCASHD`/`YCASH_CLI` name the binaries |
 | `upgrade-walk` | the whole ecosystem on the vault upgrade, walked end to end on a running `up --role attestor --no-heartbeat --no-walk --no-sim` devnet; writes a transcript (section 6, `scenarios/upgrade-walk.md`; recorded run: `upgrade-walk-transcript.txt`) |
 | `bridge-sim` | the WYEC bridge persona (upgrade plan §4, P3): a guardian or relayer set, a mock burn feed, the daemon that posts, releases and cancels; `yellowback-devnet bridge …` drives it (section 6) |
-| `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists; `up --role` copies the role's into the session's `NOTES.md` |
+| `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists (`up --role` copies the role's into the session's `NOTES.md`), the upgrade walk's, and `in-term-claim.md`: the in-term claims plan's example clicked through with YecWallet (section 7) |
 
 ## 0. Before you start
 
@@ -92,7 +92,7 @@ yellowback-devnet price --shock=-40%             # a step change; the walk, if r
 yellowback-devnet attestor 6 price 60            # ONE attestor diverges: an attack, not weather (stop the walk first to hold it)
 ```
 
-The walk writes the pools' mock price and every **automated** attestor's mock price together, so the two populations move honestly in agreement; your own attestor's price file (`attestor` preset) is never touched. Liquidation needs a real fall: class C vaults (300 %) go under the 110 % claim threshold at about −64 %, class A (500 %) at about −78 %. A crash also halts minting for a while: `DIVERGENCE` between the price windows stops every mint until they agree again, and `GLOBAL_RATIO` then *limits* minting to the classes whose minimum ratio reaches the recapitalisation floor — class A (500 %) — so the book can be rebuilt rather than left to the price (v3 plan W16). `status` says "limited to class A" and `yed_getstats.mintableClasses` lists what can mint; `check` still treats a limited state as not-allowed.
+The walk writes the pools' mock price and every **automated** attestor's mock price together, so the two populations move honestly in agreement; your own attestor's price file (`attestor` preset) is never touched. Liquidation needs a real fall. Pre-plan parameters: class C vaults (300 %) go under the 110 % claim threshold at about −64 %, class A (500 %) at about −78 %, and only after the term. In-term parameters (`yed_getinfo.params.inTermClaims`, section 7): class A (300 %) goes under θ = 125 % at about −58 %, B (400 %) at −69 %, C (500 %) at −75 %, at any height. A crash also halts minting for a while: `DIVERGENCE` between the price windows stops every mint until they agree again, and `GLOBAL_RATIO` then *limits* minting to the classes whose minimum ratio reaches the recapitalisation floor — class A (500 %) — so the book can be rebuilt rather than left to the price (v3 plan W16). `status` says "limited to class A" and `yed_getstats.mintableClasses` lists what can mint; `check` still treats a limited state as not-allowed.
 
 ### The personas (`sim`, `yellowback-sim`)
 
@@ -105,7 +105,7 @@ Six strategies, each with its own cadence and characteristic failure, seeded, on
 | exiter | redeems the moment `lockHeight` passes; runs `yed_sweepcarriers` | `vault-locked`, `insufficient-yed` when the trader moved its YED |
 | trader | never mints; `yed_send` / `yed_sendmany` between its addresses and to the liquidator | `insufficient-yec` on a wallet whose change is unconfirmed |
 | absentee | mints once, then nothing | an abandoned vault seen from outside |
-| liquidator | mints its own YED inventory; claims whatever `yed_listclaimable` lists; posts `yed_claimnotice` on a foreign vault under the emergency ratio near its claim height and claims after `EMERGENCY_PERSIST` | `claim-not-yet`, `notice-not-underwater`, `bundle-insufficient` |
+| liquidator | mints its own YED inventory; watches every foreign ACTIVE vault each block and prints the price at which it becomes claimable (`mintedCents × θ × COIN / collateralZat`, the node's `underwaterAt`); claims at once whatever `yed_listclaimable` says is claimable — the node decides, so the same persona is right post-term (pre-plan) and in term (`inTermClaims`) — with the H-9.3 bounds (`minOutZat` 95 % of collateral − residual, `maxBurnCents` debt + 99), releases after `claimDelay` and logs the margin earned; posts `yed_claimnotice` on a foreign vault under the emergency ratio and claims after `EMERGENCY_PERSIST` | `claim-not-yet`, `claim-not-underwater`, `notice-not-underwater`, `bundle-insufficient` |
 
 Every bundle-carrying call is two-step and made with `wait=true`, so the personas rely on the heartbeat to mine their carriers; without it they block. A refusal is logged (`<dir>/sim.log`) and tallied by its stable identifier, never retried blindly: `sim stats` prints the tally per persona and shouts when a persona's every action is failing. Cadences: `--sim-profile demo` (a half-hour walk-through at 15 s blocks) or `fast` (the regression suite at 2 s blocks).
 
@@ -225,3 +225,32 @@ values: delay 6, rate limit 50 % per 20-block epoch, livenessWindow 30, heartbea
 `BRIDGE_MAX_AGE` 400. The daemon only ever calls stock RPCs and `set_*` / `vault_*`.
 
 `qa/rpc-tests/yellowback_devnet_upgrade.py` runs `up` and the walk's core (no clients) in CI time.
+
+## 7. In-term claims (`docs/plans/yellowback-in-term-claims-plan.md`)
+
+On a node built from `upgrade/vault-in-term` the claim path opens when a vault's collateral is
+worth less than θ = 125 % of its debt at the attested claim price, at any height from the mint
+(IT-1, IT-2); `yed_getinfo.params.inTermClaims` is `true` there and `claimThresholdBps` is
+`12500`. The tooling reads those two values and behaves on both rule sets:
+
+- the liquidator persona claims whatever the node lists as claimable, post-term or in term, and
+  prints each vault's claimable price;
+- `upgrade-walk` has a step `interm` (a class-A vault crosses θ in term; a claim above θ refused
+  on every Yellowback node; the claim at θ accepted with the H-9.3 bounds; the release after
+  `claimDelay`; the residual to the owner, or why there is none; an owner redeem; one state
+  hash) that prints `SKIP` with the reason on a node without the feature, so the walk and
+  `yellowback_devnet_upgrade.py` pass on both;
+- `yellowback_devnet_roles.py` shocks mid-term when the feature is on and asserts the liquidator
+  claims a persona's vault **before** its `claimHeight`;
+- `scenarios/in-term-claim.md` is the explainer's example, clicked through with YecWallet.
+
+**Disclosure (IT-8).** Every wallet, document and demo that offers a mint on this rule set carries
+the trust statement's added sentence, verbatim:
+
+> A vault whose collateral falls below 125 % of its debt at the attested price may be closed by
+> anyone at once, by paying its debt; the owner receives any collateral above 125 % of the debt.
+> Redeem before that point to avoid it.
+
+and shows the claimable price per vault (`yed_getvault.underwaterAt`). Note the owner's redeem
+is unchanged: it opens at `lockHeight`, so "before that point" is actionable only once the lock
+has passed — the devnet scenario makes that visible on purpose.

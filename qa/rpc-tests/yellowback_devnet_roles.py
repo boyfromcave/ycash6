@@ -280,9 +280,16 @@ class Preset:
         self.wait_until(lambda: acted('exiter', 'redeem') or acted('conservative', 'redeem'), 90, 'a redeem at maturity')
         self.say('personas: a vault was redeemed at maturity')
 
-        # the shock, timed so the emergency path is what opens the claim (a notice needs the
-        # vault ACTIVE and within EMERGENCY_PERSIST of its claim height to be worth posting)
-        self.wait_until(lambda: self.tip() >= claim_at - 12, claim_at, 'approach to the claim height')
+        # the shock. Pre-plan rule set: timed so the emergency path is what opens the claim (a
+        # notice needs the vault ACTIVE and within EMERGENCY_PERSIST of its claim height to be
+        # worth posting). In-term rule set (yed_getinfo.params.inTermClaims): the claim opens the
+        # moment a vault is under theta, so the shock lands now, mid-term, and the liquidator must
+        # claim a persona's in-term vault without waiting for any claim height.
+        in_term = self.node(0).yed_getinfo()['params'].get('inTermClaims') is True
+        if in_term:
+            self.say('in-term claims are on: shocking mid-term (tip %d, the leveraged vault\'s term ends at %d)' % (self.tip(), row['lockHeight']))
+        else:
+            self.wait_until(lambda: self.tip() >= claim_at - 12, claim_at, 'approach to the claim height')
         before = self.node(0).yed_getprice()['pClaim']
         self.assert_nothing_pinned('before the shock')
         rc = self.devnet('price', '--shock=' + SHOCK)
@@ -299,6 +306,17 @@ class Preset:
                     return r
             return None
         row = self.wait_until(claimed, 60 + EMERGENCY_PERSIST + 30 + 2 * CLAIM_DELAY, 'the liquidator claiming a persona\'s vault (and releasing it, U-23)')
+        if in_term:
+            # the claim that proves the rule: a persona's vault CLAIMED whose claim (closeHeight -
+            # CLAIM_DELAY, the release is the close) landed before its claimHeight, i.e. in term or grace
+            def claimed_in_term():
+                for r in self.node(0).yed_listvaults('CLAIMED', 200, 0):
+                    if r['txid'] in population_vaults() and r['closeHeight'] is not None and r['closeHeight'] - CLAIM_DELAY < r['claimHeight']:
+                        return r
+                return None
+            row = self.wait_until(claimed_in_term, 40 + 2 * CLAIM_DELAY, 'an in-term claim of a persona\'s vault')
+            self.say('in-term: vault %s (class %s) claimed at ~%d, before its claimHeight %d (lockHeight %d)'
+                     % (row['txid'][:16], row['termClass'], row['closeHeight'] - CLAIM_DELAY, row['claimHeight'], row['lockHeight']))
         closing = self.node(0).yed_gettxinfo(row['closingTxid'])
         check(closing['path'] == 'claim', 'the closing transaction is a %s, not a claim' % closing['path'])
         check(closing['claimPath'] in ('a', 'b'), 'claimPath %r' % closing['claimPath'])

@@ -30,6 +30,10 @@ Steps (each can be skipped with --skip NAME[,NAME]):
   claim      $5 crash: an underwater claim -> claimant intent (CLAIMING); a reorg across it; release
              after CLAIM_DELAY (CLAIMED)
   cancel     a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
+  interm     an in-term claim (in-term claims plan IT-1/IT-2/IT-7): the price falls until a class-A
+             vault crosses theta in term; a claim above theta is refused everywhere, the claim at
+             theta accepted, released after the delay, the residual to the owner, one state hash;
+             an owner redeem in term. SKIPs unless yed_getinfo.params.inTermClaims is true
   invalid    an invalid mint refused by every Yellowback mempool, the block carrying it rejected by
              every Yellowback node
   bridge     the WYEC bridge persona (bridge-sim) in both shapes: lock -> mock burn -> intent ->
@@ -69,12 +73,13 @@ from test_framework.util import bytes_to_hex_str, hex_str_to_bytes, sync_blocks 
 from test_framework.yellowback_util import CLAIM_DELAY, REF_LAG, VAULT_ACTIVATION, template_coinbase   # noqa: E402
 from test_framework import yellowback_model as ym                  # noqa: E402
 
-STEPS = ("clients", "members", "mint", "transfer", "redeem", "claim", "cancel", "invalid", "bridge", "final")
+STEPS = ("clients", "members", "mint", "transfer", "redeem", "claim", "cancel", "interm", "invalid", "bridge", "final")
 USER, STOCK, POOLS, ATTESTORS, SEAT, HOLDER, CLAIMANT = 0, 1, (2, 3, 4), (5, 6, 7), 8, 9, 10
 STRATUM_POOL = 4
 DORMANT_AGENT = 6
 CANCELLER = 5                     # the attestor that cancels the wrong-price claim
 MINT_CENTS, LOCK_BLOCKS = 10_000, 48
+IN_TERM_LOCK = 96                 # class A's longest regtest lock: the in-term vaults must still be in term after a slow window
 PRICE, CRASH = "50", "5"          # $100 at 300 % (class A) locks 6 YEC; at $5 those 6 YEC back $30 < $125: underwater
 
 
@@ -242,13 +247,14 @@ class Walk:
             if k % 2 == 1: self.mine(1, quiet=True)
         raise WalkFailure("node%d: poolFresh %d < %d running agents after %d tries" % (i, info["poolFresh"], want, tries))
 
-    def two_step(self, i, method, *args, keys=None):
-        """yed_mint / yed_claim with wait=false: the carrier, one block, then the main transaction."""
+    def two_step(self, i, method, *args, keys=None, after_wait=()):
+        """yed_mint / yed_claim with wait=false: the carrier, one block, then the main transaction.
+        `after_wait` are the arguments that follow `wait` (yed_claim's minOutZat, maxBurnCents)."""
         keys = keys or ["pending", "carrierTxid", "refHeight", "xMint", "aMint", "pMint", "xClaim", "aClaim", "pClaim", "bundleSeqs"]
         for attempt in range(4):
             self.fresh(i)
             try:
-                res = self.call(i, method, *args, False, keys=keys)
+                res = self.call(i, method, *args, False, *after_wait, keys=keys)
                 break
             except Exception as error:
                 message = str(getattr(error, "error", {}).get("message", error))
@@ -273,6 +279,13 @@ class Walk:
         self.ok(len(set(yed.values())) == 1, "%s: one YED state hash on all %d Yellowback nodes" % (label, len(yed)))
         self.ok(len(set(vault.values())) == 1, "%s: one vault state hash on all %d nodes, the stock node included" % (label, len(vault)))
         return yed[USER], vault[USER]
+
+    def yed_params(self):
+        return self.node(USER).yed_getinfo()["params"]
+
+    def in_term_claims(self):
+        """IT-7: yed_getinfo.params.inTermClaims is true on a node whose claim path opens at theta in term."""
+        return self.yed_params().get("inTermClaims") is True
 
     def attestor_row(self, pubkey, node=USER):
         for row in self.node(node).yed_listattestors():
@@ -494,12 +507,17 @@ class Walk:
         mints = dict(zip(("A", "B", "C", "D", "E"), made))
         self.note("vaults A..E: %s" % ", ".join("%s %s" % (k, v[:16]) for k, v in mints.items()))
         self.vaults.update(mints)
-        va = self.call(USER, "yed_getvault", mints["A"], keys=["status", "mintedCents", "collateralZat", "lockHeight", "claimHeight", "scriptPubKey", "termClass"])
+        va = self.call(USER, "yed_getvault", mints["A"], keys=["status", "mintedCents", "collateralZat", "lockHeight", "claimHeight", "refHeight", "scriptPubKey", "termClass"])
         dec = self.call(USER, "vault_decodescript", va["scriptPubKey"])
         self.ok(dec["type"] == "vault" and dec["tag"] == "59454400" and dec["setid"] == self.set_id and dec["cancelsetid"] == self.set_id,
                 "vault A's output is the primitive's V: tag YED\\0, set = cancel set = the attestor set")
-        self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["claimHeight"],
-                "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = claimHeight (%d) (U-23)" % (CLAIM_DELAY, va["lockHeight"], va["claimHeight"]))
+        if self.in_term_claims():
+            self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["refHeight"] + 1,
+                    "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = refHeight + 1 (%d): the APP branch is open from the mint (IT-1)"
+                    % (CLAIM_DELAY, va["lockHeight"], va["refHeight"] + 1))
+        else:
+            self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["claimHeight"],
+                    "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = claimHeight (%d) (U-23)" % (CLAIM_DELAY, va["lockHeight"], va["claimHeight"]))
         listed = self.call(USER, "vault_list", {"tag": "YED"}, show=False)
         self.out("    = vault_list {tag: YED}: %d V outputs: %s" % (len(listed), ", ".join(r["outpoint"][:16] + ".." for r in listed)))
         self.ok(all(m + ":0" in {r["outpoint"] for r in listed} for m in mints.values()), "vault_list sees the YED vaults")
@@ -613,8 +631,9 @@ class Walk:
         mid = self.call(USER, "yed_getstats", keys=["supplyCents"])
         self.ok(mid["supplyCents"] == stats0["supplyCents"] - MINT_CENTS, "the claim burned its %d cents" % MINT_CENTS)
         self.devnet("price", PRICE)
+        base = [c for c in self.yed_params()["classes"] if c["class"] == "A"][0]["baseRatioBps"] // 100
         self.note("the attestors' reference is back at $%s: at their price vault D is %d %% collateralised, so the claim is wrong "
-                  "and one attestor (node %d) cancels it; consensus never learns why (§3.4)" % (int(PRICE), 500, CANCELLER))
+                  "and one attestor (node %d) cancels it; consensus never learns why (§3.4)" % (int(PRICE), base, CANCELLER))
         built = self.call(CANCELLER, "vault_buildcancel", claim + ":0", keys=["required", "cancelsetid", "deadline"])
         signed = self.call(CANCELLER, "set_signcancel", built["hex"], keys=["complete", "signatures", "required", "sighash"])
         self.ok(signed["complete"] and signed["signatures"] == 1, "one attestor signature completes the cancel (cancelThreshold 1)")
@@ -631,6 +650,114 @@ class Walk:
         self.vaults["D2"] = cancel
         self.evidence("cancel", {"claim": claim, "cancel": cancel})
         self.chainviz("after the cancel", cancelled=claim + ":0")
+
+    # ------------------------------------------------------------------ interm (in-term claims plan)
+    def s_interm(self):
+        self.step("interm", "an in-term claim: the claim path opens at theta, not at the term end (in-term claims plan IT-2, IT-7)")
+        params = self.call(USER, "yed_getinfo", keys=["rpcversion", "params"])["params"]
+        if params.get("inTermClaims") is not True:
+            self.note("SKIP: yed_getinfo.params.inTermClaims is %r on this node: a vault is claimable post-term only (the pre-plan rule set), "
+                      "so there is no in-term claim to walk" % params.get("inTermClaims"))
+            self.summary["steps"]["interm"] = "SKIP: inTermClaims is not true on this node"
+            return
+        theta, delay = params["claimThresholdBps"], params["claimDelay"]
+        base = [c for c in params["classes"] if c["class"] == "A"][0]["baseRatioBps"]
+        self.note("theta %d %%, claimDelay %d, class A %d %% (D-IT-2, D-IT-4, D-IT-13)" % (theta // 100, delay, base // 100))
+        p0 = self.node(USER).yed_getprice()["pClaim"]
+        if p0 is None or abs(p0 - int(PRICE) * 1_000_000) > int(PRICE) * 50_000:
+            self.devnet("price", PRICE)
+            self.mine(66, quiet=True)
+            p0 = self.call(USER, "yed_getprice", keys=["pClaim"])["pClaim"]
+        self.fund_user()
+        res, f = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
+        res, g = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
+        self.mine(1)
+        # the claimant burned its 200 YED on C and D (a cancelled claim's burn is not refunded, U-24): fund it for the claim of F
+        bal = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])
+        if bal["confirmedCents"] < MINT_CENTS + 100:
+            fund = self.call(USER, "yed_send", self.node(CLAIMANT).yed_getnewaddress(), 2 * MINT_CENTS, keys=["txid"])
+            self.wait_mempool(fund["txid"]); self.mine(1)
+            self.note("the claimant (node 10) now holds %s YED for the in-term claim" % (Decimal(self.node(CLAIMANT).yed_getbalance()["confirmedCents"]) / 100))
+        self.vaults["F"], self.vaults["G"] = f, g
+        vf = self.call(USER, "yed_getvault", f, keys=["status", "termClass", "mintedCents", "collateralZat", "lockHeight", "claimHeight", "refHeight", "claimable", "underwaterAt"])
+        self.ok(vf["status"] == "ACTIVE" and vf["termClass"] == "A" and self.tip() < vf["lockHeight"], "vault F is ACTIVE, class A, in term (lockHeight %d, tip %d)" % (vf["lockHeight"], self.tip()))
+        dec = self.call(USER, "vault_decodescript", self.node(USER).yed_getvault(f)["scriptPubKey"], keys=["appheight", "ownerheight", "delay"])
+        self.ok(dec["appheight"] == vf["refHeight"] + 1, "F's V has appHeight = refHeight + 1 = %d: the APP branch is open from the mint, RED-4 governs (IT-1)" % (vf["refHeight"] + 1))
+        at = (vf["mintedCents"] * theta * 100_000_000 + vf["collateralZat"] - 1) // vf["collateralZat"]     # ceil, as the node's UnderwaterAt
+        self.out("    computed: F becomes claimable at pClaim < $%s (%d cents x %d bps x COIN / %d zat); the node's underwaterAt is $%s"
+                 % (Decimal(at) / 1_000_000, vf["mintedCents"], theta, vf["collateralZat"], Decimal(vf["underwaterAt"] or 0) / 1_000_000))
+        self.ok(vf["underwaterAt"] == at, "yed_getvault.underwaterAt equals the computed threshold price (theta %d %%)" % (theta // 100))
+
+        # above theta: refused everywhere
+        self.ok(vf["claimable"] is False, "above theta (pClaim $%s): yed_getvault says claimable: false" % (Decimal(p0) / 1_000_000))
+        for i in self.yed_nodes:
+            rows = [r for r in self.node(i).yed_listclaimable() if r["vault"] == f + ":0"]
+            if rows:
+                self.out("    node%d yed_listclaimable row for F: %s" % (i, jdump(pick(rows[0], ["claimable", "underwaterAt", "pClaim", "claimPath"]))))
+            self.ok(not rows or rows[0].get("claimable") is False, "node%d: F is not claimable above theta (yed_listclaimable)" % i)
+            self.ok(self.node(i).yed_getvault(f)["claimable"] is False, "node%d: yed_getvault F claimable: false" % i)
+        self.fresh(CLAIMANT)
+        self.fails(CLAIMANT, "yed_claim", f, "", "", False, 0, 0, expect="claim-not-underwater")
+        self.note("the wallet refuses before anything is signed; a claim transaction above theta would fail RED-4 in every Yellowback mempool and block (IT-2)")
+        # the owner path in term is unchanged: ownerHeight = lockHeight
+        self.fails(USER, "yed_redeem", g, expect="vault-locked")
+        self.note("the owner's redeem is unchanged: locked until lockHeight (%d) even while the claim path is open to others (finding)" % vf["lockHeight"])
+
+        # the price falls until F crosses theta in term
+        crash = (Decimal(at) * 9 / 10 / 1_000_000).quantize(Decimal("0.01"))
+        self.devnet("price", str(crash))
+        self.note("$%s puts F's collateral at %d %% of its debt, under theta (%d %%); the slow window fills over the next blocks" % (crash, theta * 9 // 1000, theta // 100))
+        self.mine(66, quiet=True)
+        self.mine(2)
+        price = self.call(USER, "yed_getprice", keys=["pClaim", "pMid", "pSlow", "aClaim", "xClaim"])
+        self.ok(price["pClaim"] is not None and price["pClaim"] < at, "pClaim $%s is under F's threshold price $%s" % (Decimal(price["pClaim"] or 0) / 1_000_000, Decimal(at) / 1_000_000))
+        self.ok(self.tip() < vf["lockHeight"], "still in term: tip %d < lockHeight %d (claimHeight would have been %d)" % (self.tip(), vf["lockHeight"], vf["claimHeight"]))
+        rows = []
+        for attempt in range(8):
+            # after a burst of blocks the agents lag and the row carries claimPath "" (no bundle yet): wait for fresh attestations
+            self.fresh(USER)
+            rows = [r for r in self.call(USER, "yed_listclaimable", show=False, quiet=attempt > 0) if r["vault"] == f + ":0"]
+            if rows and rows[0].get("claimPath"): break
+            time.sleep(1.5); self.mine(1, quiet=True)
+        self.out("    = yed_listclaimable row for F: %s" % jdump(rows and pick(rows[0], ["claimable", "claimPath", "pClaim", "underwaterAt", "residualZat", "mintedCents", "collateralZat"])))
+        self.ok(rows and rows[0].get("claimable", True) is True and rows[0].get("claimPath") == "a", "F is claimable in term by clause (a)")
+        min_out = (rows[0]["collateralZat"] - int(rows[0].get("residualZat") or 0)) * 95 // 100
+        max_burn = rows[0]["mintedCents"] + 99
+        res, claim = self.two_step(CLAIMANT, "yed_claim", f, "", "", after_wait=(min_out, max_burn),
+                                   keys=["pending", "carrierTxid", "refHeight", "xClaim", "aClaim", "pClaim", "bundleSeqs"])
+        self.note("H-9.3 bounds: minOutZat %d (95 %% of collateral - residual), maxBurnCents %d (the debt + a sub-dollar remainder)" % (min_out, max_burn))
+        claim_h = self.mine(1)
+        v = self.call(USER, "yed_getvault", f, keys=["status", "intents", "burnedCents"])
+        raw = self.node(USER).getrawtransaction(claim, 1)
+        self.ok(v["status"] == "CLAIMING" and raw["vin"][0]["scriptSig"]["hex"] == "54", "claim %s at height %d (in term): selector 4, F is CLAIMING" % (claim[:16], claim_h))
+        info = self.call(USER, "yed_gettxinfo", claim, keys=["path", "claimPath", "burned", "pClaim", "residualZat", "collateralOut"])
+        residual = [x for x in v.get("intents") or [] if x.get("role") == "residual"]
+        self.statehashes("in-term claim")
+        self.fails(CLAIMANT, "vault_release", claim + ":0", expect="matures at height")
+        self.mine_to(claim_h + delay - 1)
+        rel = self.call(CLAIMANT, "vault_release", claim + ":0")
+        self.wait_mempool(rel); self.mine(1)
+        v = self.call(USER, "yed_getvault", f, keys=["status", "burnedCents", "closingTxid"])
+        self.ok(v["status"] == "CLAIMED", "release %s after claimDelay (%d): F CLAIMED" % (rel[:16], delay))
+        if residual:
+            r = residual[0]
+            rr = self.call(USER, "vault_release", "%s:%d" % (r["txid"], r["vout"]))
+            self.wait_mempool(rr); self.mine(1)
+            paid = self.node(USER).getrawtransaction(rr, 1)["vout"][0]
+            self.ok(paid["valueZat"] > 0, "the residual intent released to the owner: %s zat (RED-5)" % paid["valueZat"])
+        else:
+            self.note("no residual intent: at the claim price the collateral was worth less than theta x debt, so nothing lies above %d %% of the debt "
+                      "(RED-5's residual is 0 for a clause-(a) claim at the threshold; the explainer's 'owner receives the rest' case needs a claim judged above it)" % (theta // 100))
+        self.statehashes("in-term claim released")
+
+        # the owner redeems G in term? no: the owner path opens at lockHeight; the owner gets ahead of a claimant there
+        self.mine_to(self.node(USER).yed_getvault(g)["lockHeight"])
+        red = self.call(USER, "yed_redeem", g, keys=["txid", "burnedCents", "collateralZat"])
+        self.wait_mempool(red["txid"]); self.mine(1)
+        self.ok(self.node(USER).yed_getvault(g)["status"] == "CLOSED", "the owner redeemed G at lockHeight while it was underwater: a redeem has no price test, so redeeming pre-empts a claim (IT-8)")
+        self.devnet("price", PRICE)
+        self.evidence("interm", {"mint": f, "claim": claim, "release": rel, "redeem": red["txid"], "thresholdMicroUsd": at, "crashPrice": str(crash)})
+        self.summary["steps"]["interm"] = {"theta": theta, "claimHeightWouldHaveBeen": vf["claimHeight"], "claimedAt": claim_h, "residual": bool(residual)}
 
     # ------------------------------------------------------------------ invalid
     def bad_mint(self, node):
