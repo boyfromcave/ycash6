@@ -13,7 +13,7 @@ still needs the federation genesis arguments — and no ``yed_*`` call is made.
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_framework_smoke.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
-from test_framework.util import assert_equal, assert_greater_than
+from test_framework.util import assert_equal
 from test_framework.yellowback_util import (
     OBSERVER,
     POOLS,
@@ -81,9 +81,14 @@ class FrameworkSmokeTest(YellowbackTestFramework):
         assert_equal(len(nodes[3].getpeerinfo()), 6)             # 1, 2, 4 both ways
 
         print('advance_clock: a mined block carries the mock time')
-        t = self.advance_clock(3 * 3600)
+        # The miner stamps max(MTP + 1, clock), capped at MTP + MAX_FUTURE_BLOCK_TIME_MTP (3 h,
+        # chain.h; miner.cpp UpdateTime).  A 3 h step met that cap exactly, so the stamp was
+        # MTP + 3 h, one second short of the mock time whenever the median block was a second
+        # older than the clock's start (CI, 2026-10-07).  One hour stays clear of both bounds,
+        # so the stamp is the mock time itself.
+        t = self.advance_clock(3600)
         h = self.mine(4, 1)[0]
-        assert_greater_than(nodes[0].getblock(h)['time'] + 1, t)
+        assert_equal(nodes[0].getblock(h)['time'], t)
         assert_best_hash(nodes, 'after mock time')
 
         print('checkpoint on stock nodes: best hash only (no yed_* on this binary)')

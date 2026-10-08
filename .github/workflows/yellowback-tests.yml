@@ -151,7 +151,10 @@ env:
   # scripts/extract_spec.py's upgrade mode (382d1dc, findings (39)/(44); bump by PR).
   OTHER_LINE_REPO: boyfromcave/ycash-dd
   YB_WORKSPACE_REPO: boyfromcave/yellowback
-  YB_WORKSPACE_COMMIT: 3fc32a2cc8c3826e312f56c6ad05a32fe21e7cd5
+  # A plan edit in the workspace that changes a generated copy (doc/yellowback-spec.md,
+  # doc/yellowback-rpc-contract.json) needs this pin bumped, to a pushed workspace commit,
+  # in the same push as the regenerated copy: otherwise the audit compares against the old plan.
+  YB_WORKSPACE_COMMIT: 9657d9cfdb5e4370fae04b01993e981329a8f6cb
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
