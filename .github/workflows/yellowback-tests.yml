@@ -52,9 +52,11 @@ name: yellowback tests
 # Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
 on:
   push:
+    # upgrade/vault-in-term (in-term claims plan §7, T6) is the in-term line, cut from upgrade/vault.
     branches: &node-line-branches
       - harden/yellowback
       - upgrade/vault
+      - upgrade/vault-in-term
       - feature/yellowback
   pull_request:
     branches: *node-line-branches
@@ -117,7 +119,9 @@ env:
   LWD_REPO: boyfromcave/lightwalletd
   # On the upgrade line: lightwalletd-dd's upgrade/vault build (rpcversion 5, the vault read RPCs;
   # upgrade plan P6), as ycash-dd's CI pins it; it must be pushed before this resolves.
-  LWD_COMMIT: ce5f40eda84f4b4c880debb01ff1588d0fea3413
+  # On upgrade/vault-in-term: lightwalletd-dd's upgrade/vault-in-term (3244976, rpcversion 6: the upgrade
+  # line's build refuses a node reporting 6). It must be pushed before the nightly resolves it.
+  LWD_COMMIT: 3244976ef686a628a9e3185196a40501df65bbd9
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
@@ -154,7 +158,9 @@ env:
   # A plan edit in the workspace that changes a generated copy (doc/yellowback-spec.md,
   # doc/yellowback-rpc-contract.json) needs this pin bumped, to a pushed workspace commit,
   # in the same push as the regenerated copy: otherwise the audit compares against the old plan.
-  YB_WORKSPACE_COMMIT: 9657d9cfdb5e4370fae04b01993e981329a8f6cb
+  # On upgrade/vault-in-term: e37a7b0, the first pushed workspace commit with the generator's in-term mode
+  # (scripts/extract_spec.py --check-in-term, `make spec-check-in-term`).
+  YB_WORKSPACE_COMMIT: e37a7b058b61750725e94f9cea13939cd3173ab4
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -617,14 +623,18 @@ jobs:
       - name: Cross-line vectors (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
-        # PR's base for a pull request; upgrade/vault when ycash-dd has no such branch).
+        # PR's base for a pull request; upgrade/vault when ycash-dd has no such branch). A tree on the
+        # in-term line (interm=1) compares with ycash-dd's upgrade/vault-in-term and nothing else: the
+        # upgrade line's vectors are not this line's, so a missing in-term branch there is an error.
         if: steps.line.outputs.line == 'upgrade' && !cancelled()
         env:
           REF: ${{ github.base_ref || github.ref_name }}
+          INTERM: ${{ steps.line.outputs.interm }}
         run: |
           url="https://github.com/$OTHER_LINE_REPO.git"
           other=upgrade/vault
           if git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then other=$REF; fi
+          if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
           rc=0
@@ -842,6 +852,20 @@ jobs:
           for id in ARM-1 ARM-2 REG-A1 BUNDLE-1 MINT-9 MINT-10 NOT-1 EQV-1 REV-1 PIN-1 PIN-2 AFEE-0 AFEE-1 RED-5; do
             git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (v3): $id"; rc=1; }
           done
+          exit $rc
+
+      - name: Rule -> test tags, in-term identifiers (blocking on the in-term line, in-term claims plan section 4)
+        # IT-1..IT-7 and IT-9 are each carried by a tagged test, as ycash-dd's qa/yellowback-audit.sh checks them.
+        # IT-8 is the disclosure text, not node behaviour: the spec copy's 8.1 collateral bullet (the workspace
+        # generator's in-term mode writes it from the plan); here the copy must carry its opening sentence.
+        if: ${{ !cancelled() && steps.line.outputs.interm == '1' }}
+        run: |
+          set -e
+          rc=0
+          for id in IT-1 IT-2 IT-3 IT-4 IT-5 IT-6 IT-7 IT-9; do
+            git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (in-term): $id"; rc=1; }
+          done
+          grep -q '^- Your YEC is locked for the term you choose\.' doc/yellowback-spec.md || { echo "IT-8: doc/yellowback-spec.md carries no in-term promise"; rc=1; }
           exit $rc
 
   # The Rust attestor agent of v3 plan §5 (contrib/yellowback/attest/, Phase A4): built with the
