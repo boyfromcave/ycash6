@@ -12,7 +12,9 @@ marks **optional**. The wallet context is exercised in full (Phase 6): `yed_mint
 `yed_sendmany`, `yed_redeem`, `yed_claim` (CLAIMING, then the release through `vault_release`,
 U-23), an invalid mint refused by the mempool and in a block, plus every wallet error identifier
 of the *Error identifiers* table by its documented provocation. rpcversion 5 (the vault upgrade):
-the VOID release, `yed_sweep` and the abandonment predicate are gone. The node context is checked the
+the VOID release, `yed_sweep` and the abandonment predicate are gone. rpcversion 6 (in-term claims,
+IT-7, IT-9): `yed_listclaimable` lists in-term vaults above the threshold with `claimable: false`,
+`yed_estimateredeem` quotes the early-redeem fee and an in-term redeem pays it. The node context is checked the
 same way wherever the scenario passes it; the node-context error provocations that need a
 storage fault or a rejected block belong to the Phase 3 script.
 
@@ -87,8 +89,9 @@ OPTIONAL = {
 NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor'},
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
             'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
-            'yed_listclaimable': {'underwaterAt'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
+            'yed_listclaimable': {'underwaterAt', 'pClaim'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
             'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
+            'yed_estimateredeem': {'payee'},
             'yed_estimatecollateral': {'requiredZat', 'pMint'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
@@ -183,7 +186,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 5)
+        assert_equal(c.doc['rpcversion'], 6)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
@@ -345,22 +348,57 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal({x['txid'] for x in rows} >= {mint_a['txid'], sent['txid'], many['txid']}, True)
         c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
 
-        print('yed_redeem refusals, then the ACTIVE redemption (selector 2); yed_sweep is gone')
+# Rule: IT-7
+        print('yed_listclaimable in term (IT-7): every open vault, claimable false above the threshold')
+        rows = {x['vault']: x for x in c.check('yed_listclaimable', user.yed_listclaimable())}
+        for m in (mint_a, mint_b):
+            row, vault = rows[m['txid'] + ':0'], user.yed_getvault(m['txid'])
+            assert_equal((row['claimable'], row['claimPath'], row['residualZat']), (False, '', 0))
+            assert_equal((row['underwaterAt'], row['lockHeight']), (vault['underwaterAt'], vault['lockHeight']))
+            assert_greater_than(vault['lockHeight'], user.getblockcount())                 # in term
+            assert_greater_than(row['pClaim'], row['underwaterAt'])                         # above theta: the price must fall to underwaterAt
+        assert_equal(user.yed_getinfo()['params']['inTermClaims'], True)
+
+        print('yed_redeem refusals, then the in-term ACTIVE redemption (selector 2) with the early fee; yed_sweep is gone')
         assert_rpc_error('vault-not-owned', claimant.yed_redeem, mint_a['txid'])      # IT-1 (extended): no vault-locked in term
         assert_rpc_error('vault-not-found', user.yed_redeem, '33' * 32)
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, mint_a['txid'])     # IT-2: in term the threshold decides
         assert_rpc_error('Method not found', user.yed_sweep, mint_a['txid'], 'I understand this leaves YED unbacked')
-        lock = user.yed_getvault(mint_b['txid'])['lockHeight']
-        self.mine_round_robin(POOLS, lock - user.getblockcount())
+# Rule: IT-9
+        vault_b = user.yed_getvault(mint_b['txid'])
+        fee_bps = user.yed_getinfo()['params']['classes'][0]['earlyRedeemFeeBps']
+        assert_equal(fee_bps, user.yed_getinfo()['params']['earlyRedeemFeeBps'][0])
+        early_fee = vault_b['collateralZat'] * fee_bps // 10000
+        quote = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_b['txid']))
+        assert_equal((quote['early'], quote['earlyRedeemFeeBps'], quote['earlyRedeemFeeZat'], quote['canRedeem'], quote['error']),
+                     (True, 500, early_fee, True, ''))
+        assert_equal((quote['burnedCents'], quote['collateralZat'], quote['height']), (10000, vault_b['collateralZat'], user.getblockcount() + 1))
+        pos_b = [x for x in c.check('yed_listpositions', user.yed_listpositions()) if x['txid'] == mint_b['txid']][0]
+        assert_equal((pos_b['canRedeem'], pos_b['earlyRedeemFeeZat']), (True, early_fee))
+        other = c.check('yed_estimateredeem', claimant.yed_estimateredeem(mint_b['txid']))
+        assert_equal(other['canRedeem'], False)
+        assert other['error'].startswith('vault-not-owned'), other
+        assert_rpc_error('vault-not-found', user.yed_estimateredeem, '33' * 32)
         redeemed = c.check('yed_redeem', user.yed_redeem(mint_b['txid']))
         assert_equal(redeemed['burnedCents'], 10000)
+        assert_equal((redeemed['earlyRedeemFeeZat'], redeemed['feeZat'], redeemed['payee']), (early_fee, quote['feeZat'], quote['payee']))
+        assert_greater_than(redeemed['feeZat'], early_fee)                                 # FEE-1 on top of it
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'CLOSED')
         assert_rpc_error('vault-not-active', user.yed_redeem, mint_b['txid'])
         assert_rpc_error('vault-not-active', claimant.yed_claim, mint_b['txid'])
         assert_rpc_error('insufficient-yed', user.yed_redeem, mint_a['txid'])      # the user's YED went to the claimant
+        short = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_a['txid']))
+        assert_equal(short['canRedeem'], False)
+        assert short['error'].startswith('insufficient-yed'), short
+        assert_equal(c.check('yed_estimateredeem', user.yed_estimateredeem(mint_b['txid']))['error'][:16], 'vault-not-active')
         c.check('yed_gettxinfo', user.yed_gettxinfo(redeemed['txid']))
+        lock = user.yed_getvault(mint_a['txid'])['lockHeight']
+        self.mine_round_robin(POOLS, lock - 1 - user.getblockcount())                      # the next block is lockHeight
+        late = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_a['txid']))
+        assert_equal((late['early'], late['earlyRedeemFeeZat'], late['height']), (False, 0, lock))
+        assert_equal([x['earlyRedeemFeeZat'] for x in user.yed_listpositions('ACTIVE') if x['txid'] == mint_a['txid']], [0])
 
         print('yed_claim: a price crash, then the claimant claims vault A')
         claim_height = user.yed_getvault(mint_a['txid'])['claimHeight']
@@ -370,7 +408,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
             set_quote(nodes[i], '0.01')
         self.mine_round_robin(POOLS, 64)
         claimable = c.check('yed_listclaimable', user.yed_listclaimable())
-        assert mint_a['txid'] + ':0' in [x['vault'] for x in claimable]
+        assert mint_a['txid'] + ':0' in [x['vault'] for x in claimable if x['claimable']]
         assert_equal(user.yed_listclaimable(1), claimable[:1])                             # audit C-6: count / skip paging
         assert_equal(user.yed_listclaimable(0), [])
         assert_equal(user.yed_listclaimable(100, len(claimable)), [])
@@ -617,10 +655,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, max(64, claim_height - user.getblockcount()) + REF_LAG)
         assert_equal(user.yed_getprice()['pClaim'], usd_to_micro('10.20'))
         for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
-            feed_all(node, {seq: 11 for seq in live})
+            feed_all(node, {seq: 22 for seq in live})   # IT-2: pClaim = max(x, a) $22 keeps a 300 % vault above theta; pEmerg $10.20 under EMERGENCY_RATIO
         pos = {p['txid']: p for p in c.check('yed_listpositions', user.yed_listpositions('ACTIVE'))}
         assert_equal((pos[victim]['noticed'], pos[victim]['canNotice'], pos[victim]['canClaim']), (False, True, False))
-        assert_equal([x['vault'] for x in user.yed_listclaimable() if x['vault'] == victim + ':0'], [])
+        assert_equal([x['vault'] for x in user.yed_listclaimable() if x['vault'] == victim + ':0' and x['claimable']], [])
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, victim)
         notice = c.check('yed_claimnotice', wallet_notice(self, claimant, victim, bundle_hex=''))
         assert_equal((notice['vault'], notice['xClaim'], notice['pEmerg'], sorted(notice['bundleSeqs'])), (victim + ':0', usd_to_micro('10.20'), usd_to_micro('10.20'), sorted(live)))
@@ -632,9 +670,9 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('notice-standing', claimant.yed_claimnotice, victim)
         self.mine_round_robin(POOLS, notice['emergencyOpenAt'] - user.getblockcount())
         for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
-            feed_all(node, {seq: 11 for seq in live})
+            feed_all(node, {seq: 22 for seq in live})   # IT-2: pClaim = max(x, a) $22 keeps a 300 % vault above theta; pEmerg $10.20 under EMERGENCY_RATIO
         claimable = {x['vault']: x for x in c.check('yed_listclaimable', user.yed_listclaimable())}
-        assert_equal((claimable[victim + ':0']['claimPath'], claimable[victim + ':0']['noticed']), ('b', True))
+        assert_equal((claimable[victim + ':0']['claimPath'], claimable[victim + ':0']['noticed'], claimable[victim + ':0']['claimable']), ('b', True, True))
         pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
         assert_equal((pos[victim]['canClaim'], pos[victim]['canNotice']), (True, False))    # the owner holds >= mintedCents
         claimed = c.check('yed_claim', wallet_claim(self, claimant, victim, bundle_hex=''))
