@@ -586,8 +586,9 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
             "\nYellowback index status, the vault upgrade, miner state and parameters (doc/yellowback-rpc.md).\n"
             "Never refuses while the index is unhealthy.\n"
             "supplyCapReached (W20): true when the next mint of any class would exceed the supply cap at the tip\n"
-            "snapshot (supplyCents + MIN_MINT > supplyCapCents); false when the cap is undefined. Above the cap\n"
-            "only class A, when its minimum ratio reaches params.recapRatioBps, mints (H-10; yed_getstats.mintableClasses).\n"
+            "snapshot (supplyCents + MIN_MINT > supplyCapCents); false when the cap is undefined. Above the cap only a\n"
+            "class whose base ratio reaches params.recapRatioBps mints (IT-5: class C with the in-term parameter set;\n"
+            "yed_getstats.mintableClasses).\n"
             "mintRequiresArmed (H-1): true when a mint whose reference height is not ARMED is invalid (mint-halted-unarmed).\n"
             "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
@@ -787,8 +788,8 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
             "yed_getstats\n"
             "\nTotals plus the tip snapshot: supply, collateral, vault counts, prices, sigma, global ratio, cap, halts.\n"
             "mintableClasses: the term classes a mint can use now -- every enabled class when nothing halts and the cap has room;\n"
-            "under a GLOBAL_RATIO halt alone (W16), those whose minimum ratio reaches params.recapRatioBps; once the cap is\n"
-            "reached (W20, H-10), class A alone if its minimum ratio reaches it; none under any other halt, and none while\n"
+            "under a GLOBAL_RATIO halt alone (W16) and once the cap is reached (W20), those whose base ratio reaches\n"
+            "params.recapRatioBps (IT-5: class C with the in-term parameter set); none under any other halt, and none while\n"
             "mintRequiresArmed and the tip is not ARMED (H-1). A class with an empty term range is never listed (H-5).\n");
 
     YellowbackIndex& index = EnsureIndex();
