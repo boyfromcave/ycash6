@@ -179,7 +179,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - wallet_network_fee(rraw) - red1['feeZat'] - TOKEN_VALUE
         assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
-        assert_equal(rraw['locktime'], mint1['lockHeight'])
+        assert_equal(rraw['locktime'], user.yed_getvault(vault1)['refHeight'] + 1)     # IT-1 (extended): the owner branch's CLTV
         assert_equal(nodes[2].yed_validaterawtransaction(rraw['hex'])['verdict'], 'ok')
         self.sync_all()
         self.mine(POOLS[1])
