@@ -19,6 +19,9 @@ summary that every step passed:
   claim     an underwater claim into a claimant intent, a reorg across it (ACTIVE, then CLAIMING,
             state hashes equal), the release after CLAIM_DELAY (CLAIMED)
   cancel    a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
+  interm    an in-term claim (in-term claims plan): a class-A vault crosses theta in term, a claim
+            above theta refused, the claim at theta accepted and released, an owner redeem; SKIPs
+            (and passes) on a node whose yed_getinfo.params.inTermClaims is not true
   invalid   an invalid mint refused by every Yellowback mempool, its block rejected by every node
   bridge    the WYEC bridge persona (bridge-sim), both shapes: lock -> mock burn -> intent ->
             release; a rogue intent cancelled by the watcher; owner recovery on a dormant set
@@ -45,7 +48,7 @@ REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 DEVNET = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'yellowback-devnet')
 WALK = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'upgrade-walk')
 CRATE = os.path.join(REPO, 'contrib', 'yellowback', 'attest')
-STEPS = ('members', 'mint', 'transfer', 'redeem', 'claim', 'cancel', 'invalid', 'bridge', 'final')
+STEPS = ('members', 'mint', 'transfer', 'redeem', 'claim', 'cancel', 'interm', 'invalid', 'bridge', 'final')
 
 
 def find_agent():
@@ -111,7 +114,7 @@ def main():
         summary = json.load(open(summary_path)) if os.path.exists(summary_path) else {}
         with open(transcript) as f:
             for line in f:
-                if line.startswith(('[', '  PASS', '  FAIL', 'WALK')):
+                if line.startswith(('[', '  PASS', '  FAIL', '  # SKIP', 'WALK')):
                     print('    ' + line.rstrip()[:200])
         failed = [s for s in STEPS if summary.get('steps', {}).get(s) is None]
         if rc != 0 or failed or summary.get('failed'):
@@ -122,6 +125,12 @@ def main():
         evidence = summary.get('evidence', {})
         for key in ('join_txid', 'heartbeat_txid', 'claim', 'cancel', 'invalid', 'statehash'):
             assert key in evidence, key
+        interm = summary['steps']['interm']
+        if isinstance(interm, str) and interm.startswith('SKIP'):
+            say('interm: %s' % interm)
+        else:
+            assert evidence.get('interm', {}).get('claim') and evidence['interm'].get('release') and evidence['interm'].get('redeem'), interm
+            assert interm['claimedAt'] < interm['claimHeightWouldHaveBeen'], interm
         for shape in options.bridge_shapes.split(','):
             assert evidence.get('bridge_%s_release' % shape, {}).get('release'), shape
             assert evidence.get('bridge_%s_rogue' % shape, {}).get('cancelled'), shape

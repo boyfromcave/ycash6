@@ -57,8 +57,8 @@ ACTIVATION = 130
 CLAIM_DELAY = 10
 GRACE = 24
 REF_LAG = 2
-PRICE = 50_000_000        # $50 / YEC: a $100 mint at 500 % locks 10 YEC
-CRASH = 5_000_000         # $5 / YEC: 10 YEC back $50 < $110 (underwater)
+PRICE = 50_000_000        # $50 / YEC: a $100 mint at 300 % (class A, D-IT-4) locks 6 YEC
+CRASH = 5_000_000         # $5 / YEC: 6 YEC back $30 < $125 (underwater)
 
 
 def assert_raises_rpc(substr, fn, *args):
@@ -192,16 +192,15 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_equal(dec['setid'], self.set_id)
         assert_equal(dec['cancelsetid'], self.set_id)
         assert_equal(dec['delay'], CLAIM_DELAY)
-        assert_equal(dec['ownerheight'], va['lockHeight'])
-        assert_equal(dec['appheight'], va['lockHeight'] + GRACE)
+        assert_equal(dec['ownerheight'], va['refHeight'] + 1)               # IT-1 (extended): the owner redeems from the block after the mint
+        assert_equal(dec['appheight'], va['refHeight'] + 1)                 # IT-1: the APP branch opens the block after the mint
         assert_equal(va['claimHeight'], va['lockHeight'] + GRACE)
         supply = n0.yed_getstats()['supplyCents']
         assert_equal(supply, 10_000)
         self.assert_one_state('mint A')
 
-        print('the owner redeems after lockHeight (selector 2): CLOSED')
-        assert_raises_rpc('vault-locked', n0.yed_redeem, mint_a)
-        self.mine(va['lockHeight'] - n0.getblockcount())
+        print('the owner redeems in term (selector 2, IT-1 extended: no vault-locked before lockHeight): CLOSED')
+        assert va['lockHeight'] > n0.getblockcount()
         red = n0.yed_redeem(mint_a)
         self.mine()
         assert_equal(n0.yed_getvault(mint_a)['status'], 'CLOSED')
@@ -390,7 +389,7 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         ref = node.getblockcount() - REF_LAG
         lock = ref + 48
         coin = [u for u in node.listunspent() if u['amount'] > 2][0]
-        vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, lock)),
+        vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, ref)),
                  (10_000, ym.p2pkh_script(ym.hash160(owner))),
                  (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_mint(0, 5_000, lock, ref, owner, ym.FEE_VOUT_NONE))),
                  (int(coin['amount'] * ym.COIN) - 1 * ym.COIN - 10_000 - 10_000, ym.p2pkh_script(ym.hash160(owner)))]

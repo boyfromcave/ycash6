@@ -1093,7 +1093,7 @@ BOOST_AUTO_TEST_CASE(module_table_registers_yed)
     const uint256 set = uint256S("0x5e7");
     const yellowback::Params p = yellowback::RegtestParams(10, 0, 0, set);
     CKey owner = CKey::TestOnlyRandomKey(true);
-    VaultParams good = yellowback::YedVaultParams(p, owner.GetPubKey(), 100);
+    VaultParams good = yellowback::YedVaultParams(p, owner.GetPubKey(), 50);
     VaultParams other = good;
     other.setId = uint256S("0x99");
     CMutableTransaction mtx;
@@ -1116,8 +1116,12 @@ BOOST_AUTO_TEST_CASE(module_table_registers_yed)
     delay.delay = p.claimDelay + 1;
     BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, delay, ctx).value_or(""), "bad-yellowback-vault-delay");
     VaultParams app = good;
-    app.appHeight = good.ownerHeight;
+    app.appHeight = good.ownerHeight + p.grace + 1;                 // IT-1: later than the pre-plan term end
     BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, app, ctx).value_or(""), "bad-yellowback-vault-height");
+    app.appHeight = 0;                                              // a disabled APP branch is no YED vault
+    BOOST_CHECK_EQUAL(yed->ValidateCreate(tx, 0, app, ctx).value_or(""), "bad-yellowback-vault-height");
+    app.appHeight = good.ownerHeight + p.grace;                     // the pre-plan shape is still a YED vault (spends)
+    BOOST_CHECK(!yed->ValidateCreate(tx, 0, app, ctx).has_value());
     BOOST_CHECK_EQUAL(yed->ValidateSpend(tx, 0, unlock, ctx).value_or(""), "bad-yellowback-vault-unlock");
     for (uint8_t sel : { SEL_OWNER, SEL_RELEASED, SEL_APP }) {
         TemplateSpend s;

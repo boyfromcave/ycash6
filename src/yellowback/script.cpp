@@ -78,23 +78,33 @@ valtype StackElementFor(opcodetype opcode, const valtype& data)
 
 const vault::Tag YED_TAG = { { 'Y', 'E', 'D', 0x00 } };
 
-vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t lockHeight)
+vault::VaultParams YedVaultParamsAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight)
 {
     vault::VaultParams v;
     v.tag = YED_TAG;
     v.setId = p.attestorSetId;
     v.cancelSetId = p.attestorSetId;
     v.delay = p.claimDelay;
-    v.ownerHeight = lockHeight;
-    v.appHeight = lockHeight + p.grace;
+    v.ownerHeight = ownerHeight;
+    v.appHeight = appHeight;
     v.ownerKey = owner;
     return v;
 }
 
-CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t lockHeight)
+CScript YedVaultScriptAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight)
 {
     if (p.attestorSetId.IsNull()) return CScript();
-    return vault::BuildVault(YedVaultParams(p, owner, lockHeight));
+    return vault::BuildVault(YedVaultParamsAt(p, owner, ownerHeight, appHeight));
+}
+
+vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t refHeight)
+{
+    return YedVaultParamsAt(p, owner, refHeight + 1, refHeight + 1);     // IT-1: both branches open the block after the mint
+}
+
+CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t refHeight)
+{
+    return YedVaultScriptAt(p, owner, refHeight + 1, refHeight + 1);
 }
 
 // ---------------------------------------------------------------- v2 (§3.4)

@@ -346,10 +346,9 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
 
         print('yed_redeem refusals, then the ACTIVE redemption (selector 2); yed_sweep is gone')
-        assert_rpc_error('vault-locked', user.yed_redeem, mint_a['txid'])
-        assert_rpc_error('vault-not-owned', claimant.yed_redeem, mint_a['txid'])
+        assert_rpc_error('vault-not-owned', claimant.yed_redeem, mint_a['txid'])      # IT-1 (extended): no vault-locked in term
         assert_rpc_error('vault-not-found', user.yed_redeem, '33' * 32)
-        assert_rpc_error('claim-not-yet', claimant.yed_claim, mint_a['txid'])
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, mint_a['txid'])     # IT-2: in term the threshold decides
         assert_rpc_error('Method not found', user.yed_sweep, mint_a['txid'], 'I understand this leaves YED unbacked')
         lock = user.yed_getvault(mint_b['txid'])['lockHeight']
         self.mine_round_robin(POOLS, lock - user.getblockcount())

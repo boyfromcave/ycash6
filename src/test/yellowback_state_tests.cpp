@@ -45,7 +45,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc";
+const std::string GOLDEN_HASH = "b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87";   // in-term claims (SCHEMA_VERSION 8)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -362,7 +362,7 @@ struct Fixture
     {
         CPubKey owner = o.owner.value_or(ownerKey.GetPubKey());
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, owner, lock));     // U-23: the V template
+        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, owner, refHeight));     // U-23, IT-1: the V template
         CAmount collateral = o.collateral;
         // An invalid class is a payload the verdict rejects (bad-mint-class). Collateral is
         // computed from a real class so the helper does not index baseRatioBps out of range;
@@ -415,11 +415,11 @@ struct Fixture
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = YedVaultScript(P, v->OwnerKey(), v->lockHeight);
+        CScript vs = YedVaultScriptAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
         CScript sig = o.scriptSig.value_or(o.ownerPath ? (CScript() << valtype(71, 0x30) << OP_2) : (CScript() << OP_4));
-        const vault::VaultParams vp = YedVaultParams(P, v->OwnerKey(), v->lockHeight);
+        const vault::VaultParams vp = YedVaultParamsAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
         CMutableTransaction m;
-        m.nLockTime = o.ownerPath ? v->lockHeight : v->claimHeight;
+        m.nLockTime = o.ownerPath ? v->ownerHeight : v->appHeight;
         if (!o.vaultFirst) m.vin.push_back(CTxIn(yed.front()));
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), sig, 0xFFFFFFFE));
         for (const COutPoint& e : o.extraVaults) m.vin.push_back(CTxIn(e, sig, 0xFFFFFFFE));
@@ -433,6 +433,7 @@ struct Fixture
         }
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
         CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(v->collateralZat, P.feeMin, P.feeBps);
+        if (o.feeValue < 0 && o.ownerPath && tip + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: mined at tip + 1
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
         size_t nOut = 3;
         for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
@@ -601,7 +602,7 @@ struct Fixture
     }
 
     /** An ARMED mint at tip + 1 with refHeight = tip - 1: the bundle at `price` from the selected set, fee to a pool, attestor fee to the first signer. */
-    CMutableTransaction MintV3(Cents cents, MicroUsd price, MintOpts o = MintOpts(), std::set<int> skip = {})
+    CMutableTransaction MintV3(Cents cents, MicroUsd price, MintOpts o = MintOpts(), std::set<int> skip = {}, int lockBlocks = 48)
     {
         const int ref = tip - 1;
         o.bundle = BundleFor(ref, valtype(), price, skip);
@@ -617,14 +618,15 @@ struct Fixture
             const int cls = P.IsValidClass(o.termClass) ? o.termClass : 0;
             o.collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[cls], s.sigmaMultBps), pMint).value();
         }
-        return MintTx(cents, 48, ref, o);
+        return MintTx(cents, lockBlocks, ref, o);
     }
 
     /** A ready ACTIVE vault of `cents` (mint at tip + 1, refHeight = tip - 1); returns the mint txid. */
-    uint256 MintActive(Cents cents = 10000, int lockBlocks = 48)
+    uint256 MintActive(Cents cents = 10000, int lockBlocks = 48, int termClass = 0)
     {
         const int ref = tip - 1;
-        CMutableTransaction m = MintTx(cents, lockBlocks, ref);
+        MintOpts mo; mo.termClass = termClass;
+        CMutableTransaction m = MintTx(cents, lockBlocks, ref, mo);
         Mine(Quote(50000, (tip + 1) % 3), { m });
         const uint256 txid = CTransaction(m).GetHash();
         Snapshot rs = Snap(ref);
@@ -826,7 +828,7 @@ BOOST_AUTO_TEST_CASE(halt2_halt3_clear_with_undefined_price)
     // HALT-2 at the exact threshold: ratio 250% => not below => clear; 249.99% => set.
     Snapshot s = f.Snap(f.tip);
     BOOST_CHECK(s.GlobalRatioBps().has_value());
-    BOOST_CHECK(s.GlobalRatioBps().value() >= 50000 - 1);        // 500% at pMint 50,000
+    BOOST_CHECK(s.GlobalRatioBps().value() >= 30000 - 1);        // 300% (class A, D-IT-4) at pMint 50,000
     // Crash the fast median to 1/3: divergence and, once pMint follows, the global ratio halt.
     for (int i = 0; i < 8; i++) f.Mine(Fixture::Quote(15000, (f.tip + 1) % 3));
     s = f.Snap(f.tip);
@@ -862,11 +864,13 @@ BOOST_AUTO_TEST_CASE(halt3_fires_on_mid_vs_slow)
 BOOST_AUTO_TEST_CASE(sigma1_undefined_sample_gives_cap)
 {
     // Non-zero SIGMA_REF: below START + VOL_WINDOW a sample is virtual => the cap (K12); after, 1x on a flat series.
+    // D-IT-5 (IT-4) sets the cap itself to 1x (sigmaMultMaxBps 10,000), so the multiplier is 1x throughout.
     Fixture f(1, 10000, 0, 0);
+    BOOST_CHECK_EQUAL(f.P.sigmaMultMaxBps, 10000);
     f.MineQuotesTo(64);
-    BOOST_CHECK_EQUAL(f.Snap(64).sigmaMultBps, 30000);           // s_8 = Snapshots[0] is virtual
+    BOOST_CHECK_EQUAL(f.Snap(64).sigmaMultBps, f.P.sigmaMultMaxBps);   // s_8 = Snapshots[0] is virtual => the cap
     f.MineQuotesTo(67);
-    BOOST_CHECK_EQUAL(f.Snap(67).sigmaMultBps, 30000);           // s_8 = Snapshots[3].pFast is undefined (3 quotes < 4)
+    BOOST_CHECK_EQUAL(f.Snap(67).sigmaMultBps, f.P.sigmaMultMaxBps);   // s_8 = Snapshots[3].pFast is undefined (3 quotes < 4)
     f.MineQuotesTo(68);
     BOOST_CHECK_EQUAL(f.Snap(68).sigmaMultBps, 10000);           // every sample defined and equal
     // With SIGMA_REF 0 the multiplier is fixed at 1 before the sample check.
@@ -1113,9 +1117,11 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     const VaultRecord v = f.Vault(txid).value();
     BOOST_CHECK_EQUAL(v.status, (uint8_t)VaultStatus::ACTIVE);
     BOOST_CHECK_EQUAL(v.mintedCents, 10000);
-    BOOST_CHECK_EQUAL(v.collateralZat, 1000000000000LL);            // $100 at 500% and $0.05
+    BOOST_CHECK_EQUAL(v.collateralZat, 600000000000LL);             // $100 at 300% (class A, D-IT-4) and $0.05
     BOOST_CHECK_EQUAL(v.lockHeight, ref + 48);
     BOOST_CHECK_EQUAL(v.claimHeight, ref + 48 + 24);
+    BOOST_CHECK_EQUAL(v.appHeight, ref + 1);                        // IT-1: the APP branch opens the block after the mint
+    BOOST_CHECK_EQUAL(v.ownerHeight, ref + 1);                      // IT-1 (extended): and the owner's
     BOOST_CHECK_EQUAL(v.refHeight, ref);
     BOOST_CHECK_EQUAL(v.feePaidZat, FeeZat(v.collateralZat, f.P.feeMin, f.P.feeBps));
     const CPubKey ownerPub = f.ownerKey.GetPubKey();
@@ -1269,7 +1275,7 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     // A V under another set or delay is not the YED vault either.
     { const int64_t lock = f.tip - 1 + 48;
-      vault::VaultParams vp = YedVaultParams(f.P, f.ownerKey.GetPubKey(), lock);
+      vault::VaultParams vp = YedVaultParams(f.P, f.ownerKey.GetPubKey(), f.tip - 1);
       vp.delay += 1;
       MintOpts o; o.vaultScriptOverride = vault::BuildVault(vp);
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
@@ -1312,16 +1318,16 @@ BOOST_AUTO_TEST_CASE(mint4_divergence_and_global_ratio)
     BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_GLOBAL_RATIO);
     MintOpts a; a.collateral = 10000000000000LL;                 // class A (termClass 0), lock 48
     MintOpts c = a; c.termClass = 2;                             // class C, lock 145
-    // W16: class C (300 %) is below the recapitalisation floor: GLOBAL_RATIO stops it, and takes precedence over DIVERGENCE
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-halted-global-ratio");
-    // class A (500 %) reaches the floor: the global-ratio clause lets it through to the next halt, DIVERGENCE
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-halted-divergence");
-    // Once the windows agree again the ratio is still low (same supply, same price): class A mints, class C does not
+    // W16 / IT-5: class A (300 %) is below the recapitalisation floor: GLOBAL_RATIO stops it, and takes precedence over DIVERGENCE
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-halted-global-ratio");
+    // class C (500 %) reaches the floor: the global-ratio clause lets it through to the next halt, DIVERGENCE
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-halted-divergence");
+    // Once the windows agree again the ratio is still low (same supply, same price): class C mints, class A does not
     for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(15000, (f.tip + 1) % 3));
     BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_DIVERGENCE));
     BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_GLOBAL_RATIO);
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-halted-global-ratio");
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-halted-global-ratio");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "");
 }
 
 // Rule: MINT-4
@@ -1392,8 +1398,8 @@ BOOST_AUTO_TEST_CASE(mint5_collateral_and_unsatisfiable)
 {
     Fixture f;
     f.Activate();
-    { MintOpts o; o.collateral = 1000000000000LL - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-collateral"); }
-    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+    { MintOpts o; o.collateral = 600000000000LL - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-collateral"); }   // 300 %, D-IT-4
+    { MintOpts o; o.collateral = 600000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
     // At PRICE_MIN the maximum mint needs 5 * 10^16 zat > MAX_MONEY: unsatisfiable (K14).
     Fixture g;
     g.Activate(PRICE_MIN);
@@ -1408,33 +1414,57 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     Fixture f(1, 0, 1, 0);                                  // cap = 0.01% of market cap: below $100 on a young regtest chain
     f.Activate();
     BOOST_CHECK(SupplyCapCents(f.Snap(f.tip).issuedZat, 50000, 1).value() < 10000);
-    // W20 / H-10: supply sits at the cap (zero headroom). Class C (300 %) and class B (400 %) are
-    // refused; class A (500 %, at RECAP_RATIO_BPS) mints through and takes supply above the cap.
-    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, o)), "mint-supply-cap"); }
-    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1, o)), "mint-supply-cap"); }
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
-    BOOST_CHECK(f.GetTotals().supplyCents > SupplyCapCents(f.Snap(f.tip).issuedZat, f.Snap(f.tip).PMint(), 1).value());
-    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, o)), "mint-supply-cap"); }   // still refused above it
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");                                                   // class A always
+    MintOpts a;                                             // class A (300 %): below the W20/IT-5 floor, so the cap is hard for it
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-supply-cap");
     Fixture g(1, 0, 10000, 0);                              // cap = 100% of market cap: ~$818 at 131 blocks and $1/YEC
     g.Activate(1000000);
-    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
-    // W20 with the volatility multiplier at or above 1.25x: class B's minimum (400 % x mult) reaches the
-    // floor, but H-10 admits only class A above the cap, so B and C are both refused. SIGMA_REF 1 and the price
-    // alternating between $0.05 and $0.05075 every VOL_STEP (8) blocks: every sample step is a
-    // +-1.49 % return, sigma ~ 1.39 x SIGMA_REF.
-    Fixture h(1, 10000, 1, 0);
-    while (h.tip < h.P.startHeight + Fixture::ACTIVATE_BLOCKS) h.Mine(Fixture::Quote(((h.tip + 1) / 8) % 2 ? 50750 : 50000, (h.tip + 1) % 3));
-    BOOST_REQUIRE_EQUAL(h.Snap(h.tip).haltMask, 0u);
-    const int mult = h.Snap(h.tip - 1).sigmaMultBps;
-    BOOST_CHECK(mult >= 12500 && mult < 16667);
-    BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[1], mult) >= h.P.recapRatioBps);
-    BOOST_CHECK(MinRatioBps(h.P.baseRatioBps[2], mult) < h.P.recapRatioBps);
-    // class B first, at the ref just measured (H-10: refused although it reaches the floor); the block
-    // that carries it quotes $0.05 and can only lower the next ref's multiplier, which keeps class C refused
-    { MintOpts o; o.termClass = 1; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 97, h.tip - 1, o)), "mint-supply-cap"); }
-    { MintOpts o; o.termClass = 2; BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 145, h.tip - 1, o)), "mint-supply-cap"); }
-    BOOST_CHECK_EQUAL(MintVerdictOf(h, h.MintTx(10000, 48, h.tip - 1)), "");                                                   // class A mints
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1, a)), "");
+}
+
+// Rule: MINT-6
+BOOST_AUTO_TEST_CASE(mint6_cap_is_soft_above_the_recap_floor)
+{
+    // W20 / IT-5: a mint that would take supply over the cap is refused unless its class base ratio
+    // reaches RECAP_RATIO_BPS (500 %): class A (300 %) and class B (400 %) are mint-supply-cap,
+    // class C (500 %) goes through and takes supply above the cap (H-10's class-A proxy is replaced).
+    Fixture f(1, 0, 100000, 0);                             // cap = 10x market cap: ~ $409 on a young regtest chain at $0.05 (a test knob; the rule's arithmetic has no range)
+    f.Activate();                                           // $0.05/YEC, the price MintVerdictOf's blocks quote
+    auto capAt = [](const Fixture& x, int ref) { Snapshot s = x.Snap(ref); return SupplyCapCents(s.issuedZat, s.PMint(), x.P.supplyCapBps).value(); };
+    const Cents cap0 = capAt(f, f.tip - 1);
+    BOOST_REQUIRE(cap0 > 2 * f.P.minMint && cap0 - 5000 <= f.P.maxMint);
+    f.MintActive(cap0 - 5000);                              // supply sits at the cap: less than MIN_MINT of headroom
+    int ref = f.tip - 1;
+    BOOST_REQUIRE(f.GetTotals().supplyCents <= capAt(f, ref));
+    BOOST_REQUIRE(f.GetTotals().supplyCents + f.P.minMint > capAt(f, ref));
+    MintOpts a; a.collateral = 10000000000000LL;
+    MintOpts b = a; b.termClass = 1;                        // class B, lock 100
+    MintOpts c = a; c.termClass = 2;                        // class C, lock 145
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, ref, a)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 100, ref, b)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, ref, c)), "");
+    f.MintActive(10000, 145, 2);                            // class C, lock 145: accepted above the cap
+    ref = f.tip - 1;
+    BOOST_CHECK(f.GetTotals().supplyCents > capAt(f, ref));
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, ref, a)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, ref, c)), "");
+    // IT-5 judges the class base, not the sigma-scaled minimum: with SIGMA_REF set and an undefined fast-window
+    // sample inside VOL_WINDOW (eight untagged blocks) the multiplier sits at its cap, which IT-4 pins at 1x, so
+    // class B stays below the floor and the cap stays hard for it (W20's 1.25x reading is replaced).
+    Fixture g(1, 10000, 100000, 0);
+    g.Activate();
+    for (int i = 0; i < 8; i++) g.Mine();
+    g.MineQuotesTo(g.tip + 8);
+    BOOST_REQUIRE_EQUAL(g.Snap(g.tip - 1).haltMask, 0u);
+    BOOST_CHECK_EQUAL(g.Snap(g.tip - 1).sigmaMultBps, g.P.sigmaMultMaxBps);
+    BOOST_CHECK_EQUAL(g.Snap(g.tip - 1).sigmaMultBps, 10000);
+    const Cents capG = capAt(g, g.tip - 1);
+    g.MintActive(capG - 5000);
+    ref = g.tip - 1;
+    BOOST_REQUIRE(g.GetTotals().supplyCents + g.P.minMint > capAt(g, ref));
+    BOOST_CHECK(MinRatioBps(g.P.baseRatioBps[1], g.Snap(ref).sigmaMultBps) < g.P.recapRatioBps);
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 100, ref, b)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, ref, a)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 145, ref, c)), "");
 }
 
 // Rule: MINT-7
@@ -1458,7 +1488,7 @@ BOOST_AUTO_TEST_CASE(mint8_fee_edges)
     f.Activate();
     { MintOpts o; o.feeKey = -1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }   // 0xFF with a non-empty E(R)
     { MintOpts o; o.feeKey = 7; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }    // not in E(R)
-    { MintOpts o; o.feeValue = FeeZat(1000000000000LL, f.P.feeMin, f.P.feeBps) - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
+    { MintOpts o; o.feeValue = FeeZat(600000000000LL, f.P.feeMin, f.P.feeBps) - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
     for (int fv : { 0, 1, 2, 4 }) {                         // the vault, the token, the OP_RETURN, out of range
         MintOpts o; o.feeVout = (uint8_t)fv;
         BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee");
@@ -1589,7 +1619,7 @@ BOOST_AUTO_TEST_CASE(red_owner_redeem_passes_and_closes)
     BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);
     BOOST_CHECK(!r.vault.unbacked);
     BOOST_CHECK_EQUAL(r.vault.closeHeight, f.tip);
-    BOOST_CHECK_EQUAL(r.vault.feePaidZat, FeeZat(r.vault.collateralZat, f.P.feeMin, f.P.feeBps));   // rewritten by the close
+    BOOST_CHECK_EQUAL(r.vault.feePaidZat, FeeZat(r.vault.collateralZat, f.P.feeMin, f.P.feeBps) + EarlyRedeemFeeZat(r.vault.collateralZat, f.P.earlyRedeemFeeBps[0]));   // rewritten by the close; IT-9: redeemed in term
     BOOST_CHECK_EQUAL(r.log.type, (uint8_t)TxLogType::REDEEM);
     BOOST_CHECK_EQUAL(r.log.path, "owner");
     BOOST_CHECK_EQUAL(r.log.burned, 10000);
@@ -1655,7 +1685,7 @@ BOOST_AUTO_TEST_CASE(in3_burn_recorded_on_closed_vault)
     BOOST_CHECK(!r.vault.unbacked);
     BOOST_CHECK_EQUAL(f.GetTotals().unbackedCents, 0);
     BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
-    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 1000000000000LL);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 600000000000LL);
 }
 
 // Rule: RED-3
@@ -1668,7 +1698,7 @@ BOOST_AUTO_TEST_CASE(red3_fee_and_payee_edges)
     auto vault = [&] { return f.MintActive(10000); };
     { uint256 v = vault(); SpendOpts o; o.feeKey = 7;
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-payee"); }
-    { uint256 v = vault(); SpendOpts o; o.feeValue = FeeZat(1000000000000LL, f.P.feeMin, f.P.feeBps) - 1;
+    { uint256 v = vault(); SpendOpts o; o.feeValue = FeeZat(600000000000LL, f.P.feeMin, f.P.feeBps) - 1;
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-fee"); }
     { uint256 v = vault(); SpendOpts o; o.feeKey = -1;                                   // 0xFF with E(R) non-empty
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-fee"); }
@@ -1707,11 +1737,11 @@ BOOST_AUTO_TEST_CASE(red4_claim_path_underwater_at_r)
       BOOST_CHECK(r.invalid);
       BOOST_CHECK_EQUAL(r.log.path, "claim");
       BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE); }
-    // Crash to $0.009 for a whole slow window: pClaim 9,000 => 10,000 YEC backs $100 at 90% < 110%.
+    // Crash to $0.009 for a whole slow window: pClaim 9,000 => 6,000 YEC backs $100 at 54% < 125%.
     const uint256 w = f.MintActive(10000);
     for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
-    BOOST_CHECK(IsUnderwater(1000000000000LL, 9000, 10000, f.P.claimThresholdBps));
+    BOOST_CHECK(IsUnderwater(600000000000LL, 9000, 10000, f.P.claimThresholdBps));
     { SpendOpts o; o.ownerPath = false;
       CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
       RedResult r = Spend(f, w, claim);
@@ -1726,7 +1756,7 @@ BOOST_AUTO_TEST_CASE(red4_claim_path_underwater_at_r)
       CMutableTransaction rel;
       rel.vin.push_back(CTxIn(intent, CScript() << OP_1, (uint32_t)f.P.claimDelay));
       rel.vin.push_back(CTxIn(f.FakeInput()));
-      rel.vout.push_back(CTxOut(1000000000000LL, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
+      rel.vout.push_back(CTxOut(600000000000LL, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
       f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { rel });
       BOOST_CHECK_EQUAL(f.Refused(CTransaction(rel).GetHash()), "");
       BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMED);
@@ -1735,9 +1765,9 @@ BOOST_AUTO_TEST_CASE(red4_claim_path_underwater_at_r)
       BOOST_CHECK_EQUAL(f.GetTotals().claimedVaults, 1u);
       BOOST_CHECK_EQUAL(f.GetTotals().closedVaults, 0u); }
     // A vault minted at $0.009 is fully backed at that price, so the same claim fails (RED-4 reads R, M13).
-    // One more block first: the snapshot at the claim block has supply 0, so HALT-2 is clear for the new mint.
+    // v (the first mint) is still ACTIVE at 54 %, so HALT-2 is set: only class C (500 %, the floor) mints (IT-5).
     f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
-    const uint256 x = f.MintActive(10000);          // 55,555 YEC at $0.009 backs $100 at 500%
+    const uint256 x = f.MintActive(10000, 145, 2);  // 55,555 YEC at $0.009 backs $100 at 500%
     { SpendOpts o; o.ownerPath = false;
       RedResult r = Spend(f, x, f.SpendTx(x, { COutPoint(x, 1) }, f.tip, o));
       BOOST_CHECK_EQUAL(r.verdict, "vault-claim-not-underwater"); }
@@ -1960,7 +1990,7 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     block.vtx.push_back(CTransaction(Fixture::Coinbase(1, std::nullopt)));
     CMutableTransaction mint;
     mint.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
-    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, k.GetPubKey(), 49)));
+    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, k.GetPubKey(), 1)));
     mint.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(k.GetPubKey().GetID())));
     mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, k.GetPubKey(), FEE_VOUT_NONE)))));
     block.vtx.push_back(CTransaction(mint));
@@ -2086,9 +2116,10 @@ BOOST_AUTO_TEST_CASE(params_selected_by_height)
     BOOST_CHECK_EQUAL(SelectParams(sets, 5000).startHeight, 100);
     BOOST_CHECK_EQUAL(SelectParams(sets, 0).startHeight, 1);          // none qualifies: the first set
     f.Activate();
-    // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap.
-    MintOpts capped; capped.termClass = 2;                         // W20: above the cap class A still mints; class C shows the cap
-    CMutableTransaction m = f.MintTx(10000, 145, f.tip - 1, capped);
+    // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap
+    // (class A, lock 48: below the W20/IT-5 recapitalisation floor, so the cap is hard for it).
+    MintOpts c;
+    CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1, c);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
     block.vtx.push_back(CTransaction(m));
@@ -2156,15 +2187,17 @@ struct EmergencyFixture
 {
     Fixture f;
     uint256 w;
-    MicroUsd poolPrice = 11500;   //!< 10,000 YEC back $100 at 115 % (not (a) under pClaim = max(x, a))
-    MicroUsd attPrice = 10400;    //!< under pEmerg = min(x, a): 104 % < 105 % (EMERGENCY_RATIO_BPS)
-    EmergencyFixture()
+    MicroUsd poolPrice = 21000;   //!< 6,000 YEC (300 %, D-IT-4) back $100 at 126 % (not (a) under pClaim = max(x, a), theta 125 %)
+    MicroUsd attPrice = 17000;    //!< under pEmerg = min(x, a): 102 % < 105 % (EMERGENCY_RATIO_BPS)
+    static const CAmount COLLATERAL = 600000000000LL;   //!< the fixture vault's collateral: $100 at 300 % and $0.05
+    /** `settle` blocks at poolPrice after the mint: 64 refills the slow window past the term; 35 (IT-2) leaves the claim in term. */
+    explicit EmergencyFixture(int settle = 64)
     {
         f.Arm(4);                     // four seated, three drawn: a selector matters and a signer can be spared
         CMutableTransaction m = f.MintV3(10000, 50000);
         BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
         w = CTransaction(m).GetHash();
-        for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3));
+        for (int i = 0; i < settle; i++) f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3));
         BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PClaim().value(), poolPrice);
     }
     valtype Selector() const { return OutPointSelector(COutPoint(w, 0)); }
@@ -2187,7 +2220,7 @@ struct EmergencyFixture
     CAmount Residual(int R) const
     {
         const MicroUsd pClaim = std::max(f.Snap(R).PClaim().value(), attPrice);
-        return ResidualZat(1000000000000LL, ClaimantMaxZat(10000, (int)BPS, pClaim));
+        return ResidualZat(COLLATERAL, ClaimantMaxZat(10000, (int)BPS, pClaim));
     }
     RedResult Mine(const CMutableTransaction& tx)
     {
@@ -2711,14 +2744,15 @@ BOOST_AUTO_TEST_CASE(price2_min_max)
     // Attestors above the pools: pMint stays at xMint (the min)
     { MintOpts o; o.collateral = RequiredCollateralRounded(10000, MinRatioBps(f.P.baseRatioBps[0], f.Snap(f.tip - 1).sigmaMultBps), 50000).value();
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 55000, o)), ""); }
-    // pClaim = max(x, a): a vault backing $100 with 10,000 YEC is underwater under pools at 9,000 but not when attestors say 12,000.
+    // pClaim = max(x, a): a vault backing $100 with 6,000 YEC (300 %) is underwater under pools at 9,000 (54 %) but not
+    // when attestors say 21,000 (126 % >= theta 125 %).
     const uint256 w = CTransaction(f.MintV3(10000, 50000)).GetHash();
     { CMutableTransaction m = f.MintV3(10000, 50000); BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), ""); (void)w; }
     const uint256 v = f.evals[f.tip].txlogs[0].first;
     for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
     const valtype sel = OutPointSelector(COutPoint(v, 0));
-    { SpendOpts o; o.ownerPath = false; o.bundle = f.BundleFor(f.tip - 1, sel, 12000); o.attestPayee = Selected(f.view, f.P, f.tip - 1, sel).front();
+    { SpendOpts o; o.ownerPath = false; o.bundle = f.BundleFor(f.tip - 1, sel, 21000); o.attestPayee = Selected(f.view, f.P, f.tip - 1, sel).front();
       RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
       BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
       BOOST_CHECK(r.invalid); }
@@ -2842,20 +2876,20 @@ BOOST_AUTO_TEST_CASE(red4b_before_arming_false)
     Fixture f;
     f.Activate();
     const uint256 v = f.MintActive(10000);
-    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3));
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(21000, (f.tip + 1) % 3));     // 6,000 YEC back $100 at 126 %: not (a)
     // Unarmed: a notice registers nothing (NOT-1 needs ARMED at R) and a claim is judged by (a) alone.
-    f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3), { f.NoticeTx(v, f.tip - 1, valtype(4, 0x59)) });
+    f.Mine(Fixture::Quote(21000, (f.tip + 1) % 3), { f.NoticeTx(v, f.tip - 1, valtype(4, 0x59)) });
     BOOST_CHECK(!f.Notice(v).has_value());
     BOOST_CHECK(f.evals[f.tip].txlogs.empty());
     // Force a notice record in and see (b) still false before arming.
     NoticeRecord n;
     n.height = f.tip - 6;
     n.refHeight = f.tip - 8;
-    n.pEmerg = 10400;
+    n.pEmerg = 17000;
     State(f.view).Put(keys::Notice(COutPoint(v, 0)), n);
     SpendOpts o;
     o.ownerPath = false;
-    BlockEvaluation ev = f.Evaluate(Fixture::Quote(11500, (f.tip + 1) % 3), { f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o) });
+    BlockEvaluation ev = f.Evaluate(Fixture::Quote(21000, (f.tip + 1) % 3), { f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o) });
     BOOST_CHECK(ev.blockInvalid);
     BOOST_REQUIRE(!ev.txlogs.empty());
     BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
@@ -2870,7 +2904,7 @@ BOOST_AUTO_TEST_CASE(red5_residual_paid)
     for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
     const CAmount residual = g.Residual(g.f.tip - 1);
     BOOST_CHECK(residual >= g.f.P.residualMinZat);
-    BOOST_CHECK_EQUAL(residual, 1000000000000LL - ClaimantMaxZat(10000, (int)BPS, g.poolPrice).value());
+    BOOST_CHECK_EQUAL(residual, EmergencyFixture::COLLATERAL - ClaimantMaxZat(10000, (int)BPS, g.poolPrice).value());
     // Missing residual output: invalid. One zat short: invalid. Exact: ok.
     {
         CBlock block;
@@ -2898,7 +2932,7 @@ BOOST_AUTO_TEST_CASE(red5_residual_paid)
     BOOST_CHECK_EQUAL(r.log.residualZat, residual);
     BOOST_CHECK_EQUAL(r.log.claimPath, "b");
     BOOST_CHECK(r.log.hasAttestPayee);
-    BOOST_CHECK(r.log.attestFeeZat >= AttestFeeZat(FeeZat(1000000000000LL, g.f.P.feeMin, g.f.P.feeBps), g.f.P.attestFeeBps));
+    BOOST_CHECK(r.log.attestFeeZat >= AttestFeeZat(FeeZat(EmergencyFixture::COLLATERAL, g.f.P.feeMin, g.f.P.feeBps), g.f.P.attestFeeBps));
 }
 
 // Rule: RED-5
@@ -3319,7 +3353,7 @@ BOOST_AUTO_TEST_CASE(afee1_fee_to_contributor)
 {
     Fixture f;
     f.Arm(4);
-    const CAmount collateral = 1000000000000LL;
+    const CAmount collateral = 600000000000LL;             // MintV3's $100 at 300 % and $0.05
     const CAmount afee = AttestFeeZat(FeeZat(collateral, f.P.feeMin, f.P.feeBps), f.P.attestFeeBps);
     BOOST_CHECK_EQUAL(afee, FeeZat(collateral, f.P.feeMin, f.P.feeBps) / 4);
     // to a seated attestor that did not contribute: afee1-fee; one zat short: afee1-fee; missing: afee1-fee; at 0xFF: afee1-fee
@@ -3593,7 +3627,7 @@ BOOST_AUTO_TEST_CASE(overlay_equivalence_v3)
     block.vtx.push_back(CTransaction(f.RegisterTx(5)));
     block.vtx.push_back(CTransaction(g.Claim(o)));
     block.vtx.push_back(CTransaction(f.EquivocationTx(f.Att(1, 11500, cited), f.Att(1, 11600, cited))));
-    block.vtx.push_back(CTransaction(f.MintV3(10000, g.poolPrice)));
+    { MintOpts mo; mo.termClass = 2; block.vtx.push_back(CTransaction(f.MintV3(10000, g.poolPrice, mo, {}, 145))); }   // IT-5: HALT-2 is set (126 %), class C mints
     OverlayStateView outer(f.view);
     StateView& outerBase = outer;
     OverlayStateView inner(outerBase);
@@ -3638,6 +3672,300 @@ BOOST_AUTO_TEST_CASE(default_attest_payee_in_A)
     policy.preferred = 99;
     BOOST_CHECK(std::find(A.begin(), A.end(), DefaultAttestPayee(f.view, f.P, R, valtype(), A, policy).value()) != A.end());
     BOOST_CHECK(!DefaultAttestPayee(f.view, f.P, R, valtype(), {}, policy).has_value());
+}
+
+// ===========================================================================
+// In-term claims (docs/plans/yellowback-in-term-claims-plan.md, IT-1..IT-6)
+
+// Rule: IT-1
+// Rule: MINT-3
+BOOST_AUTO_TEST_CASE(in_term_vault_app_height_is_mint_height)
+{
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);
+    const VaultRecord r = f.Vault(v).value();
+    BOOST_CHECK_EQUAL(r.appHeight, r.refHeight + 1);
+    BOOST_CHECK_EQUAL(r.ownerHeight, r.refHeight + 1);
+    BOOST_CHECK_EQUAL(r.claimHeight, r.lockHeight + f.P.grace);
+    vault::VaultParams vp;
+    BOOST_REQUIRE(vault::ParseVault(YedVaultScriptAt(f.P, r.OwnerKey(), r.ownerHeight, r.appHeight), vp));
+    BOOST_CHECK_EQUAL(vp.appHeight, r.refHeight + 1);
+    BOOST_CHECK_EQUAL(vp.ownerHeight, r.refHeight + 1);
+    BOOST_CHECK(YedVaultScript(f.P, r.OwnerKey(), r.refHeight) == YedVaultScriptAt(f.P, r.OwnerKey(), r.refHeight + 1, r.refHeight + 1));
+}
+
+// Rule: IT-1
+// Rule: MINT-3
+BOOST_AUTO_TEST_CASE(in_term_old_shape_vault_spendable_but_not_mintable)
+{
+    Fixture f;
+    f.Activate();
+    // A new mint carrying the pre-plan V (appHeight = lockHeight + GRACE) is refused.
+    const int64_t lock = f.tip - 1 + 48;
+    { MintOpts o; o.vaultScriptOverride = YedVaultScriptAt(f.P, f.ownerKey.GetPubKey(), lock, lock + f.P.grace);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
+    // A vault minted before the plan (its record remembers appHeight = lockHeight + GRACE) still spends: owner path ...
+    const uint256 v = f.MintActive(10000);
+    { VaultRecord r = f.Vault(v).value(); r.appHeight = r.claimHeight; r.ownerHeight = r.lockHeight; State(f.view).Put(keys::Vault(COutPoint(v, 0)), r); }
+    BOOST_CHECK_EQUAL(f.Vault(v)->appHeight, f.Vault(v)->claimHeight);
+    BOOST_CHECK_EQUAL(f.SpendTx(v, { COutPoint(v, 1) }, f.tip).nLockTime, (uint32_t)f.Vault(v)->lockHeight);   // the pre-plan owner CLTV
+    { RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+    // ... and the claim path, whose intents commit to the V as minted.
+    const uint256 w = f.MintActive(10000);
+    { VaultRecord r = f.Vault(w).value(); r.appHeight = r.claimHeight; r.ownerHeight = r.lockHeight; State(f.view).Put(keys::Vault(COutPoint(w, 0)), r); }
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    { SpendOpts o; o.ownerPath = false;
+      CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
+      BOOST_CHECK_EQUAL(claim.nLockTime, (uint32_t)f.Vault(w)->claimHeight);
+      RedResult r = Spend(f, w, claim);
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING); }
+}
+
+// Rule: IT-2
+// Rule: RED-4
+BOOST_AUTO_TEST_CASE(in_term_claim_valid_at_theta_invalid_above)
+{
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);                 // 6,000 YEC back $100 at 300 %; lock = ref + 48
+    const VaultRecord rec = f.Vault(v).value();
+    // In term at the mint price: 300 % >= theta, so the claim is invalid and the vault stays ACTIVE.
+    BOOST_REQUIRE(f.tip < rec.lockHeight);
+    { SpendOpts o; o.ownerPath = false;
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+      BOOST_CHECK(r.invalid);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE); }
+    // Still in term, just above theta: 6,000 YEC at 21,000 uUSD = $126 >= $125: invalid.
+    for (int i = 0; i < 34; i++) f.Mine(Fixture::Quote(21000, (f.tip + 1) % 3));
+    BOOST_REQUIRE(f.tip < rec.lockHeight);
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PClaim().value(), 21000);
+    BOOST_CHECK(!IsUnderwater(rec.collateralZat, 21000, rec.mintedCents, f.P.claimThresholdBps));
+    { SpendOpts o; o.ownerPath = false;
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+      BOOST_CHECK(r.invalid); }
+    // One tick under theta in term: 6,000 YEC at 20,800 uUSD = $124.8 < $125: the claim is valid (path (a)).
+    // HALT-2 is set (v sits at 126 %), so the second vault is class C, the one tier the recap gate admits (IT-5).
+    const uint256 w = f.MintActive(10000, 145, 2);         // minted at 21,000 (500 %: 23,810 YEC)
+    for (int i = 0; i < 34; i++) f.Mine(Fixture::Quote(20800, (f.tip + 1) % 3));
+    BOOST_REQUIRE(f.tip < rec.lockHeight + 48);
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PClaim().value(), 20800);
+    BOOST_CHECK(IsUnderwater(rec.collateralZat, 20800, rec.mintedCents, f.P.claimThresholdBps));
+    { SpendOpts o; o.ownerPath = false;
+      CMutableTransaction claim = f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o);
+      BOOST_CHECK_EQUAL(claim.nLockTime, (uint32_t)rec.appHeight);            // the APP branch's CLTV: the block after the mint
+      RedResult r = Spend(f, v, claim);
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK(!r.invalid);
+      BOOST_CHECK_EQUAL(r.log.claimPath, "a");
+      BOOST_CHECK_EQUAL(r.log.residualZat, 0);                                 // under theta the claimant's cap exceeds the collateral
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING); }
+    // The vault minted at 21,000 is at 495 % under 20,800: its in-term claim is invalid, its owner's redeem (before lockHeight, IT-1 extended) valid.
+    { SpendOpts o; o.ownerPath = false;
+      RedResult r = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER); }
+    BOOST_REQUIRE(f.tip < f.Vault(w)->lockHeight);
+    { CMutableTransaction redeem = f.SpendTx(w, { COutPoint(w, 1) }, f.tip);
+      BOOST_CHECK_EQUAL(redeem.nLockTime, (uint32_t)f.Vault(w)->ownerHeight);           // the owner branch's CLTV: the block after the mint
+      RedResult r = Spend(f, w, redeem);
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+}
+
+// Rule: IT-1
+// Rule: RED-1
+// Rule: RED-2
+BOOST_AUTO_TEST_CASE(in_term_owner_redeem_below_theta_before_any_claim)
+{
+    // The owner redeems in term while under theta, before anyone claims: valid, the full debt burned (D-IT-16's
+    // early-redeem fee is a later decision; RED-3 marks the hook).
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);
+    for (int i = 0; i < 34; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    BOOST_REQUIRE(f.tip < f.Vault(v)->lockHeight);
+    BOOST_REQUIRE(IsUnderwater(f.Vault(v)->collateralZat, f.Snap(f.tip).PClaim().value(), 10000, f.P.claimThresholdBps));
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
+    BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);
+    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 0);
+    // and a claim of the closed vault no longer exists to be made
+    BOOST_CHECK(!f.Vault(v)->IsOpen());
+}
+
+// Rule: IT-9
+// Rule: RED-3
+BOOST_AUTO_TEST_CASE(in_term_early_redeem_fee_per_class_and_boundary)
+{
+    Fixture f;
+    f.Activate();
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[0], 500);
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[1], 250);
+    BOOST_CHECK_EQUAL(f.P.earlyRedeemFeeBps[2], 100);
+    for (int cls = 0; cls < NUM_CLASSES; cls++) {
+        const uint256 v = f.MintActive(10000, f.P.classMin[cls], cls);
+        const VaultRecord r = f.Vault(v).value();
+        const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
+        const CAmount early = EarlyRedeemFeeZat(r.collateralZat, f.P.earlyRedeemFeeBps[cls]);
+        BOOST_CHECK_EQUAL(early, r.collateralZat * f.P.earlyRedeemFeeBps[cls] / BPS);
+        BOOST_REQUIRE(f.tip + 1 < r.lockHeight);
+        // FEE-1 alone, and one zat short of FEE-1 + the early fee: bad-redeem-early-fee; the vault stays ACTIVE
+        { SpendOpts o; o.feeValue = fee1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::BAD_REDEEM_EARLY_FEE); BOOST_CHECK(x.invalid); BOOST_CHECK_EQUAL(x.vault.status, (uint8_t)VaultStatus::ACTIVE); }
+        { SpendOpts o; o.feeValue = fee1 + early - 1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::BAD_REDEEM_EARLY_FEE); BOOST_CHECK(x.invalid); }
+        // short of FEE-1 itself is still RED-3's vault-spend-bad-fee
+        { SpendOpts o; o.feeValue = fee1 - 1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::VAULT_SPEND_BAD_FEE); }
+        // exact: valid, the fee logged in full
+        { SpendOpts o; o.feeValue = fee1 + early; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+          BOOST_CHECK_EQUAL(x.verdict, verdict::OK); BOOST_CHECK_EQUAL(x.vault.status, (uint8_t)VaultStatus::CLOSED);
+          BOOST_CHECK_EQUAL(x.vault.feePaidZat, fee1 + early); }
+    }
+    // The boundary: a redeem mined at lockHeight - 1 pays the early fee, one mined at lockHeight pays FEE-1 only.
+    const uint256 w = f.MintActive(10000);
+    const VaultRecord r = f.Vault(w).value();
+    const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
+    while (f.tip + 1 < r.lockHeight - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.tip + 1, r.lockHeight - 1);
+    { SpendOpts o; o.feeValue = fee1;
+      BlockEvaluation ev = f.Evaluate(Fixture::Quote(50000, (f.tip + 1) % 3), { f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o) });
+      BOOST_CHECK(ev.blockInvalid); BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::BAD_REDEEM_EARLY_FEE); }
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.tip + 1, r.lockHeight);
+    { SpendOpts o; o.feeValue = fee1; RedResult x = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o));
+      BOOST_CHECK_EQUAL(x.verdict, verdict::OK); BOOST_CHECK_EQUAL(x.vault.feePaidZat, fee1); }
+}
+
+// Rule: IT-2
+// Rule: RED-4
+BOOST_AUTO_TEST_CASE(in_term_claim_valid_post_term_as_before)
+{
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);
+    const VaultRecord rec = f.Vault(v).value();
+    while (f.tip <= rec.claimHeight) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));     // past lockHeight + GRACE
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
+    SpendOpts o; o.ownerPath = false;
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "a");
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: IT-2
+// Rule: IT-3
+// Rule: RED-5
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(in_term_emergency_claim_pays_the_residual_to_the_owner)
+{
+    // Path (b) in term: pools at 21,000 (126 %, not (a)), a persisted notice at the attestors' 17,000 (102 %).
+    EmergencyFixture g(35);
+    const VaultRecord rec = g.f.Vault(g.w).value();
+    BOOST_REQUIRE(g.f.tip < rec.lockHeight);
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    BOOST_REQUIRE(g.f.tip + 1 < rec.lockHeight);                                 // the claim block is still in term
+    const CAmount residual = g.Residual(g.f.tip - 1);
+    BOOST_CHECK(residual >= g.f.P.residualMinZat);
+    { RedResult r = g.Mine(g.Claim()); BOOST_CHECK_EQUAL(r.verdict, verdict::RED5_RESIDUAL); BOOST_CHECK(r.invalid); }   // no residual intent
+    SpendOpts o; o.residualValue = residual;
+    RedResult r = g.Mine(g.Claim(o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "b");
+    BOOST_CHECK_EQUAL(r.log.residualZat, residual);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(g.f.tip < rec.lockHeight);
+}
+
+// Rule: IT-5
+// Rule: MINT-4
+// Rule: MINT-6
+BOOST_AUTO_TEST_CASE(in_term_recap_gate_is_class_c_only)
+{
+    BOOST_CHECK(MainParams().baseRatioBps[0] < MainParams().recapRatioBps);
+    BOOST_CHECK(MainParams().baseRatioBps[1] < MainParams().recapRatioBps);
+    BOOST_CHECK_EQUAL(MainParams().baseRatioBps[2], MainParams().recapRatioBps);
+    // Under HALT-2 (one 300 % vault, price / 5.5): classes A and B are halted, C mints.
+    Fixture f;
+    f.Activate();
+    f.MintActive(10000);
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    BOOST_REQUIRE(f.Snap(f.tip).haltMask & HALT_GLOBAL_RATIO);
+    BOOST_REQUIRE(!(f.Snap(f.tip).haltMask & HALT_DIVERGENCE));
+    MintOpts a; a.collateral = 10000000000000LL;
+    MintOpts b = a; b.termClass = 1;
+    MintOpts c = a; c.termClass = 2;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-halted-global-ratio");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 100, f.tip - 1, b)), "mint-halted-global-ratio");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "");
+    // Above the soft cap: the same gate (H-10's class-A clause is gone: class A is refused).
+    Fixture g(1, 0, 1, 0);
+    g.Activate();
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1, a)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 100, g.tip - 1, b)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 145, g.tip - 1, c)), "");
+}
+
+// Rule: IT-4
+// Rule: SIGMA-1
+// Rule: MINT-5
+BOOST_AUTO_TEST_CASE(in_term_sigma_multiplier_fixed_at_one)
+{
+    // Even at a non-zero SIGMA_REF the cap (sigmaMultMaxBps 10,000) pins the multiplier; the live set has SIGMA_REF 0.
+    BOOST_CHECK_EQUAL(MainParams().sigmaRefBps, 0);
+    BOOST_CHECK_EQUAL(MainParams().sigmaMultMaxBps, 10000);
+    Fixture f(1, 10000, 0, 0);
+    f.Activate();
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(i % 2 ? 46000 : 54000, (f.tip + 1) % 3));   // +-8 %: noisy, not divergent
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).sigmaMultBps, 10000);
+    const Snapshot s = f.Snap(f.tip - 1);
+    BOOST_REQUIRE(!(s.haltMask & ~HALT_GLOBAL_RATIO));
+    BOOST_CHECK_EQUAL(MinRatioBps(f.P.baseRatioBps[0], s.sigmaMultBps), f.P.baseRatioBps[0]);
+    const CAmount required = RequiredCollateral(10000, f.P.baseRatioBps[0], s.PMint().value()).value();     // the exact MINT-5 floor
+    { MintOpts o; o.collateral = required - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-collateral"); }
+    { MintOpts o; o.collateral = required; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+}
+
+// Rule: IT-6
+// Rule: HALT-2
+BOOST_AUTO_TEST_CASE(in_term_halt_ratio_counts_claiming_vault)
+{
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);
+    const uint256 w = f.MintActive(10000);
+    const CAmount each = f.Vault(v)->collateralZat;
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 2 * each);
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    SpendOpts o; o.ownerPath = false;
+    CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
+    BOOST_REQUIRE_EQUAL(Spend(f, w, claim).verdict, verdict::OK);
+    // D-IT-14: the debt left supply with the burn, the collateral stays until release; the snapshot reads post-claim state.
+    BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 2 * each);
+    BOOST_CHECK_EQUAL(f.GetTotals().activeVaults, 1u);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, 2 * each);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).GlobalRatioBps().value(), GlobalRatioBps(2 * each, 9000, 10000).value());
+    // Release after CLAIM_DELAY: the collateral leaves.
+    const COutPoint intent(CTransaction(claim).GetHash(), 0);
+    CMutableTransaction rel;
+    rel.vin.push_back(CTxIn(intent, CScript() << OP_1, (uint32_t)f.P.claimDelay));
+    rel.vin.push_back(CTxIn(f.FakeInput()));
+    rel.vout.push_back(CTxOut(each, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
+    f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { rel });
+    BOOST_REQUIRE_EQUAL(f.Refused(CTransaction(rel).GetHash()), "");
+    BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMED);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, each);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, each);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

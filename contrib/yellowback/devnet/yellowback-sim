@@ -22,9 +22,13 @@ appetite is the term class):
   trader        never mints: moves YED between its addresses (and to the liquidator) with
                 yed_send / yed_sendmany
   absentee      mints, then goes quiet: never redeems, never sweeps
-  liquidator    (its own node) watches every vault it does not own, posts yed_claimnotice when
-                one is under the emergency ratio, claims after EMERGENCY_PERSIST -- and claims
-                by clause (a) whenever yed_listclaimable lists one
+  liquidator    (its own node) watches every vault it does not own against theta x debt at the
+                attested claim price each block, printing the price at which each becomes
+                claimable; claims at once whatever yed_listclaimable says is claimable (the node
+                decides: post-term under the pre-plan rules, at any height under the in-term
+                claims plan), with the H-9.3 bounds, releases after claimDelay and logs the
+                margin; posts yed_claimnotice when a vault is under the emergency ratio and
+                claims after EMERGENCY_PERSIST
 
 Every bundle-carrying command (yed_mint, yed_claim, yed_claimnotice) is two-step; each persona
 calls it with wait=true and relies on the heartbeat to mine the carrier, so without a heartbeat
@@ -52,7 +56,7 @@ from test_framework.authproxy import AuthServiceProxy, JSONRPCException   # noqa
 
 REF_LAG = 2
 EMERGENCY_PERSIST = 4            # regtest (v3 plan section 3.1)
-EMERGENCY_RATIO_BPS, CLAIM_THRESHOLD_BPS = 10_500, 11_000
+EMERGENCY_RATIO_BPS, CLAIM_THRESHOLD_BPS = 10_500, 11_000   # fallbacks only: the liquidator reads yed_getinfo.params
 CLASS_A, CLASS_B, CLASS_C = (48, 96), (97, 144), (145, 240)
 MIN_MINT = 10_000                # cents
 RPC_TIMEOUT = 700                # wait=true blocks until the carrier confirms (-yellowbackcarriertimeout 600)
@@ -60,7 +64,7 @@ RPC_TIMEOUT = 700                # wait=true blocks until the carrier confirms (
 PROFILES = {
     # cadences in blocks; the demo profile paces a half-hour walk-through at 15 s blocks, the
     # fast profile the regression suite at 2 s blocks
-    "demo": {"leveraged": 10, "conservative": 14, "exiter": 12, "trader": 6, "absentee": 40, "liquidator": 2, "first": (3, 12)},
+    "demo": {"leveraged": 10, "conservative": 14, "exiter": 12, "trader": 6, "absentee": 40, "liquidator": 1, "first": (3, 12)},
     "fast": {"leveraged": 6, "conservative": 8, "exiter": 7, "trader": 4, "absentee": 20, "liquidator": 1, "first": (1, 6)},
 }
 
@@ -300,40 +304,123 @@ class Absentee(Persona):
 
 
 class Liquidator(Persona):
-    """A third party with YED inventory of its own. Clause (a) claims come from yed_listclaimable;
-    the emergency path is a notice once a foreign vault is under EMERGENCY_RATIO_BPS (judged from
-    `underwaterAt`, the clause-(a) price, scaled to the emergency ratio) and a claim once
-    emergencyOpenAt <= tip - REF_LAG."""
+    """A third party with YED inventory of its own. The node decides claimability: every
+    foreign vault `yed_listclaimable` lists as claimable (post-term by the pre-plan rule set;
+    at any height once collateral < theta x debt under the in-term rule set, the in-term claims
+    plan IT-2/IT-7) is claimed at once, with the H-9.3 bounds (`minOutZat`, `maxBurnCents`),
+    and its claimant intent released after `claimDelay` (U-23); the margin earned is logged at
+    the release. Beside that it prints, per ACTIVE vault, the price at which the vault becomes
+    claimable -- `mintedCents x theta x COIN / collateralZat`, the node's `underwaterAt` -- so a
+    watcher can see a vault approach the threshold. The emergency path is a notice once a
+    foreign vault is under the emergency ratio and a claim once `emergencyOpenAt <= tip - REF_LAG`."""
     cadence_key = "liquidator"
     inventory_cents = 100_000     # the owner's first walk-through ran the 400 YED inventory dry: `insufficient-yed x6`
     top_up_below = 30_000         # mint more once the spendable YED could not cover a MIN_MINT*3 vault
+    min_out_slack_bps = 9_500     # minOutZat: 95 % of collateral - residual (fees come from the claimant's YEC)
+    max_burn_slack_cents = 99     # maxBurnCents: the debt plus any H4 sub-dollar remainder
 
     def setup(self):
         self.sim.liquidator_address = self.address
         self.noticed = {}         # vault txid -> height of the last notice attempt
-        self.claims = {}          # vault txid -> the claim's txid, until its claimant intent is released
+        self.claims = {}          # vault txid -> {"txid", "burnedCents", "collateralOut", "pClaim", "claimPath"} until released
+        self.watched = {}         # vault txid -> the claimable-at price last printed (muUSD)
         self.inventory_tried = False
+        self.rules = self.read_rules()
+        self.log("%-12s rules: theta %d bps, emergency %d bps, claimDelay %d, in-term claims %s"
+                 % (self.name, self.rules["theta"], self.rules["emergency"], self.rules["claimDelay"], self.rules["inTerm"]))
+
+    def read_rules(self):
+        """theta, the emergency ratio, the claim delay and whether claims open in term, from the
+        node (yed_getinfo.params; IT-7 adds claimThresholdBps and inTermClaims) -- never hard-coded,
+        so one persona is right under both rule sets."""
+        params = self.rpc.yed_getinfo()["params"]
+        attest = params.get("attest") or {}
+        return {"theta": int(params.get("claimThresholdBps", CLAIM_THRESHOLD_BPS)),
+                "emergency": int(attest.get("emergencyRatioBps", EMERGENCY_RATIO_BPS)),
+                "persist": int(attest.get("emergencyPersist", EMERGENCY_PERSIST)),
+                "claimDelay": int(params.get("claimDelay", 10)),
+                "inTerm": bool(params.get("inTermClaims", False))}
+
+    def claimable_at(self, row):
+        """The pClaim (muUSD per YEC) below which collateralZat x pClaim < mintedCents x theta x COIN."""
+        if not row.get("collateralZat") or not row.get("mintedCents"):
+            return None
+        rhs = row["mintedCents"] * self.rules["theta"] * 100_000_000
+        return (rhs + row["collateralZat"] - 1) // row["collateralZat"]          # ceil, as the node's UnderwaterAt
+
+    @staticmethod
+    def usd(micro):
+        return "$%s" % (Decimal(micro) / 1_000_000).quantize(Decimal("0.0001")) if micro is not None else "n/a"
+
+    def watch(self, active, own, tip, p_claim):
+        """Print 'claimable at price $X' per foreign ACTIVE vault: once when first seen, then
+        whenever it is within 10 % of the threshold (approaching) or past it."""
+        for row in active:
+            vault = row["txid"]
+            if vault in own:
+                continue
+            at = self.claimable_at(row)
+            node_at = row.get("underwaterAt")
+            ratio = None
+            if p_claim and row.get("mintedCents"):
+                ratio = Decimal(row["collateralZat"]) * p_claim / Decimal(100_000_000) / (Decimal(row["mintedCents"]) * 10_000)   # collateral muUSD / debt muUSD
+            near = ratio is not None and at and p_claim <= at * 11 // 10
+            if self.watched.get(vault) == at and not near:
+                continue
+            self.watched[vault] = at
+            when = "now" if self.rules["inTerm"] or tip >= row["claimHeight"] else "from height %d" % row["claimHeight"]
+            self.log("%-12s vault %s (class %s, %s YED, %s YEC): claimable at %s%s (theta %d %%, %s); pClaim %s%s"
+                     % (self.name, vault[:16], row.get("termClass"), Decimal(row["mintedCents"]) / 100, Decimal(row["collateralZat"]) / 100_000_000,
+                        self.usd(at), "" if node_at in (None, at) else " [node says %s]" % self.usd(node_at), self.rules["theta"] // 100, when,
+                        self.usd(p_claim), ", ratio %d %%" % int(ratio * 100) if ratio is not None else ""))
 
     def release_matured(self, tip):
         """The vault upgrade (U-23): a claim leaves the vault CLAIMING; vault_release pays the
         claimant intent once the next block reaches its releaseHeight (CLAIM_DELAY), and the vault
-        is then CLAIMED."""
-        for vault, claim_txid in list(self.claims.items()):
+        is then CLAIMED. The margin earned is what the collateral received is worth at the claim
+        price, less the debt burned."""
+        for vault, claim in list(self.claims.items()):
             try:
                 row = self.rpc.yed_getvault(vault)
             except Exception as error:
                 self.tally.refused(self.name, "getvault", error)
                 continue
             if row.get("status") != "CLAIMING":
+                if row.get("status") == "ACTIVE":
+                    self.log("%-12s claim %s of vault %s was CANCELLED by the attestor set: %s YED burned for nothing (U-24)"
+                             % (self.name, claim["txid"][:16], vault[:16], Decimal(claim["burnedCents"]) / 100))
                 del self.claims[vault]
                 continue
             for intent in row.get("intents") or []:
-                if intent.get("role") != "claimant" or intent.get("txid") != claim_txid or tip + 1 < intent["releaseHeight"]:
+                if intent.get("role") != "claimant" or intent.get("txid") != claim["txid"] or tip + 1 < intent["releaseHeight"]:
                     continue
                 released = self.call("release", "vault_release", "%s:%d" % (intent["txid"], intent["vout"]))
                 if released:
-                    self.log("%-12s RELEASED claim %s of vault %s" % (self.name, claim_txid[:16], vault[:16]))
+                    worth = Decimal(claim["collateralOut"] or 0) * Decimal(claim["pClaim"] or 0) / Decimal(100_000_000) / Decimal(10_000)   # cents
+                    margin = worth - Decimal(claim["burnedCents"])
+                    self.tally.note(self.name, "released claim of %s: margin %s%s YED" % (vault[:16], "+" if margin >= 0 else "", (margin / 100).quantize(Decimal("0.01"))))
+                    self.log("%-12s RELEASED claim %s of vault %s after %d blocks: %s YEC worth $%s at the claim price %s, debt %s YED burned -> margin %s$%s"
+                             % (self.name, claim["txid"][:16], vault[:16], self.rules["claimDelay"], Decimal(claim["collateralOut"] or 0) / 100_000_000,
+                                (worth / 100).quantize(Decimal("0.01")), self.usd(claim["pClaim"]), Decimal(claim["burnedCents"]) / 100,
+                                "+" if margin >= 0 else "-", (abs(margin) / 100).quantize(Decimal("0.01"))))
                     del self.claims[vault]
+
+    def claim(self, row):
+        """yed_claim with the H-9.3 bounds: at most the debt plus a sub-dollar remainder burned, at
+        least 95 % of collateral - residual received (U-23: the fees come from the claimant's YEC)."""
+        vault = row["vault"].split(":")[0]
+        max_burn = int(row["mintedCents"]) + self.max_burn_slack_cents
+        min_out = max(0, (int(row["collateralZat"]) - int(row.get("residualZat") or 0)) * self.min_out_slack_bps // 10_000)
+        result = self.call("claim", "yed_claim", vault, "", "", True, min_out, max_burn)
+        if result:
+            if result.get("txid"):
+                self.claims[vault] = {"txid": result["txid"], "burnedCents": int(result.get("burnedCents") or row["mintedCents"]),
+                                      "collateralOut": result.get("collateralOut"), "pClaim": result.get("pClaim") or row.get("pClaim"),
+                                      "claimPath": result.get("claimPath")}
+            self.log("%-12s CLAIMED vault %s by clause (%s) at pClaim %s: burned %s YED (max %s), collateral out %s zat (min %d), residual to owner %s zat"
+                     % (self.name, vault[:16], result.get("claimPath"), self.usd(result.get("pClaim")), Decimal(result.get("burnedCents", 0)) / 100,
+                        Decimal(max_burn) / 100, result.get("collateralOut"), min_out, row.get("residualZat")))
+        return result
 
     def act(self, tip):
         self.release_matured(tip)
@@ -354,38 +441,41 @@ class Liquidator(Persona):
                 self.mint(self.inventory_cents // 2, CLASS_A[0])
         own = set(self.vaults)
         try:
-            claimable = [row for row in self.rpc.yed_listclaimable() if row["vault"].split(":")[0] not in own]
-        except Exception as error:
-            self.tally.refused(self.name, "listclaimable", error)
-            claimable = []
-        for row in claimable:
-            vault = row["vault"].split(":")[0]
-            if not row.get("claimPath"):
-                self.tally.note(self.name, "vault %s is claimable but no bundle can be built yet" % vault[:16])
-                continue
-            result = self.call("claim", "yed_claim", vault, "", "", True)
-            if result:
-                if result.get("txid"):
-                    self.claims[vault] = result["txid"]
-                self.log("%-12s CLAIMED vault %s by clause (%s): burned %s YED, collateral out %s zat"
-                         % (self.name, vault[:16], result.get("claimPath"), Decimal(result.get("burnedCents", 0)) / 100, result.get("collateralOut")))
-        # the emergency path: a notice on any foreign vault under the emergency ratio
-        try:
             price = self.rpc.yed_getprice()
             active = self.rpc.yed_listvaults("ACTIVE", 500, 0)
         except Exception as error:
             self.tally.refused(self.name, "listvaults", error)
             return
-        x_claim = price.get("xClaim")
+        x_claim, p_claim = price.get("xClaim"), price.get("pClaim")
+        self.watch(active, own, tip, p_claim)
+        # the node decides claimability (RED-4 under either rule set); an in-term row (IT-7) says
+        # `claimable: false` while the vault is above theta, with the price at which it opens
+        try:
+            rows = [row for row in self.rpc.yed_listclaimable() if row["vault"].split(":")[0] not in own]
+        except Exception as error:
+            self.tally.refused(self.name, "listclaimable", error)
+            rows = []
+        for row in rows:
+            vault = row["vault"].split(":")[0]
+            if row.get("claimable") is False:
+                self.tally.note(self.name, "vault %s listed, not yet claimable: opens at %s" % (vault[:16], self.usd(row.get("underwaterAt"))))
+                continue
+            if vault in self.claims:
+                continue
+            if not row.get("claimPath"):
+                self.tally.note(self.name, "vault %s is claimable but no bundle can be built yet" % vault[:16])
+                continue
+            self.claim(row)
+        # the emergency path: a notice on any foreign vault under the emergency ratio
         for row in active:
             vault = row["txid"]
-            if vault in own or row.get("underwaterAt") is None:
+            if vault in own or row.get("underwaterAt") is None or vault in self.claims:
                 continue
             if row.get("noticed"):
                 continue
-            if tip < row["claimHeight"] - EMERGENCY_PERSIST:
-                continue                                              # a notice before the claim can open would only expire
-            emergency_at = row["underwaterAt"] * EMERGENCY_RATIO_BPS // CLAIM_THRESHOLD_BPS
+            if not self.rules["inTerm"] and tip < row["claimHeight"] - self.rules["persist"]:
+                continue                                              # post-term rule set: a notice before the claim can open would only expire
+            emergency_at = row["underwaterAt"] * self.rules["emergency"] // self.rules["theta"]
             judged = [p for p in (x_claim, self.attested_claim(tip)) if p]
             if not judged or min(judged) >= emergency_at:
                 continue

@@ -97,6 +97,7 @@ extern const char* const VAULT_SPEND_SHORT_BURN;
 // RED-3
 extern const char* const VAULT_SPEND_BAD_FEE;
 extern const char* const VAULT_SPEND_BAD_PAYEE;
+extern const char* const BAD_REDEEM_EARLY_FEE;      //!< IT-9: an owner redeem before lockHeight short of the early-redeem fee
 // RED-4
 extern const char* const VAULT_CLAIM_NOT_UNDERWATER;
 // v3 (v3 plan §4.2a). The bundle failures carry BUNDLE-1's reason: "mint9-bundle-<reason>", "red1-bundle-<reason>".

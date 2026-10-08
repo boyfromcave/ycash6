@@ -76,7 +76,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         owner_hex = node_pubkey(node)
         owner = hex_str_to_bytes(owner_hex)
         lock_height = ref + lock_blocks
-        script = vault_script if vault_script is not None else ym.yed_vault_script(yed_params(), owner, lock_height)
+        script = vault_script if vault_script is not None else ym.yed_vault_script(yed_params(), owner, ref)
         fee_vout = 3 if fee_addr else FEE_VOUT_NONE
         if payload is None:
             payload = ym.encode_mint('ABC'.index(term_class_of(lock_blocks) or 'A'), cents, lock_height, ref, owner, fee_vout)
@@ -199,9 +199,9 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.expect_invalid(user, self.raw_mint(user, 10000, 48, old, 10 * COIN, expiry=user.getblockcount() + 10), 'bad-mint-ref-height', POOLS[0])
 
 # Rule: MINT-3
-        print('mint3_bad_vault_script: vout[0] commits to a vault script with another lockHeight')
+        print('mint3_bad_vault_script: vout[0] commits to a vault script with another refHeight (IT-1: the V carries no lockHeight)')
         r = self.ref()
-        wrong = ym.yed_vault_script(yed_params(), hex_str_to_bytes(node_pubkey(user)), r + 49)
+        wrong = ym.yed_vault_script(yed_params(), hex_str_to_bytes(node_pubkey(user)), r - 1)
         self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, 10 * COIN, vault_script=wrong), 'bad-mint-vault-script', POOLS[1])
 
 # Rule: MINT-5 K14
@@ -250,11 +250,11 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         m = (headroom * 6 // 10) // 100 * 100
         assert_greater_than(m, 10000)
         self.split_network()
-        mint_x = self.mint(user, m, 145)                   # class C (300 %): the cap stays hard for it (W20); the carrier's block, then the mint's
+        mint_x = self.mint(user, m, 48)                    # class A (300 %): the cap stays hard for it (W20, IT-5); the carrier's block, then the mint's
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_x['txid'])['status'], 'ACTIVE')
-        mint_y = self.mint(observer, m, 145, miner=STOCK)  # the observer sits on the stock half
+        mint_y = self.mint(observer, m, 48, miner=STOCK)   # the observer sits on the stock half
         sync_mempools([nodes[1], nodes[5]])
         stock.generate(2)                                  # three stock blocks against the enforcing half's two
         self.join_network()
@@ -275,20 +275,20 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.checkpoint('cap race')
 
 # Rule: MINT-6 MINTPOL-1
-        print('mint6_cap_is_soft (W20): at the cap class C is refused and the message names class A; class A mints through and the cap is reached')
-        msg = assert_rpc_error('mintpol-cap', user.yed_mint, over, 145)
-        assert 'class A' in msg, msg
+        print('mint6_cap_is_soft (W20, IT-5): at the cap class A is refused and the message names class C; class C mints through and the cap is reached')
+        msg = assert_rpc_error('mintpol-cap', user.yed_mint, over, 48)
+        assert 'class C' in msg, msg
         assert_equal(user.yed_getinfo()['supplyCapReached'], False)
         assert_equal(stats['mintableClasses'], ['A', 'B', 'C'])
-        mint_a = self.mint(user, over, 48)
+        mint_a = self.mint(user, over, 145)
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
         stats = user.yed_getstats()
         assert_greater_than(stats['supplyCents'], stats['supplyCapCents'])
-        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['A']))
-        msg = assert_rpc_error('mintpol-cap', user.yed_mint, 10000, 145)
-        assert 'class A' in msg, msg
+        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['C']))
+        msg = assert_rpc_error('mintpol-cap', user.yed_mint, 10000, 48)
+        assert 'class C' in msg, msg
         self.model_check(nodes[2])
         self.checkpoint('soft cap')
 
@@ -299,12 +299,12 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, 8 + REF_LAG)
         assert 'GLOBAL_RATIO' in user.yed_gethistory(self.ref(), self.ref())[0]['haltMask']
         assert_greater_than(25000, user.yed_getstats()['globalRatioBps'])
-        # W16: the halt stops the classes below the recapitalisation floor (500 %): C here; a class A
-        # mint passes the global-ratio clause and meets the next halt, DIVERGENCE, for now
-        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)
-        assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 48)
+        # W16 / IT-5: the halt stops the classes whose base ratio is below the recapitalisation floor (500 %):
+        # A here; a class C mint passes the global-ratio clause and meets the next halt, DIVERGENCE, for now
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 48)
+        assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 145)
         assert_equal(user.yed_getstats()['mintableClasses'], [])
-        self.expect_invalid(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[2])
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[2])
 
 # Rule: HALT-2 MINTPOL-1
         print('W16 under this script\'s supply cap: the windows agree at $20, the halt persists, and the cap -- proportional to the price -- binds first')
@@ -313,12 +313,12 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(stats['haltMask'], ['GLOBAL_RATIO'])
         # SUPPLY_CAP_BPS is tiny here (the cap-race case above): the price drop shrank the cap under the
         # supply, so the halt and the cap both hold; each lets through only the classes at the
-        # recapitalisation floor (W16, W20), class A here
+        # recapitalisation floor (W16, W20, IT-5), class C here
         assert_greater_than(stats['supplyCents'] + 10000, stats['supplyCapCents'])
-        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['A']))
-        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C: the halt, before the cap
-        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 100)     # class B (400 % at 1x): the halt too
-        self.expect_invalid(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[1])
+        assert_equal((user.yed_getinfo()['supplyCapReached'], stats['mintingAllowed'], stats['mintableClasses']), (True, False, ['C']))
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 48)      # class A: the halt, before the cap
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 100)     # class B (400 %): the halt too
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 30 * COIN), 'mint-halted-global-ratio', POOLS[1])
         self.model_check(nodes[2])
         self.checkpoint('end')
 

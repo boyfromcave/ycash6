@@ -182,18 +182,20 @@ PAYEE_TILT_BPS = 10_000
 PAYEE_WINDOW = 10
 FEE_MIN = 50_000_000           # enforcement fee floor, zat (0.5 YEC)
 FEE_BPS = 25
+EARLY_REDEEM_FEE_BPS = (500, 250, 100)   # IT-9: per class, on an owner redeem before lockHeight (on top of FEE-1)
 GRACE = 24
-CLAIM_THRESHOLD_BPS = 11_000
+CLAIM_THRESHOLD_BPS = 12_500   # theta (D-IT-2)
 GLOBAL_RATIO_HALT_BPS = 25_000
+RECAP_RATIO_BPS = 50_000       # = class C's base: only the 500 % tier mints under a halt or above the cap (IT-5)
 DIVERGENCE_BPS = 2_000
-# term classes: (minBlocks, maxBlocks, baseRatioBps); the class follows from lockBlocks (V19)
-CLASS_RANGES = {'A': (48, 96, 50_000), 'B': (97, 144, 40_000), 'C': (145, 240, 30_000)}
+# term classes: (minBlocks, maxBlocks, baseRatioBps); the class follows from lockBlocks (V19); flat 300/400/500 % (D-IT-4)
+CLASS_RANGES = {'A': (48, 96, 30_000), 'B': (97, 144, 40_000), 'C': (145, 240, 50_000)}
 MAX_LOCK = 240
 VOL_WINDOW = 64
 VOL_STEP = 8
 VOL_PERIODS_PER_YEAR = 8_760
-SIGMA_REF_BPS = 10_000         # mainnet; regtest takes -yellowbacksigmaref (0 = multiplier 1)
-SIGMA_MULT_MAX_BPS = 30_000
+SIGMA_REF_BPS = 0              # D-IT-5: the multiplier is pinned at 1 on every network (regtest -yellowbacksigmaref)
+SIGMA_MULT_MAX_BPS = 10_000
 MIN_MINT = 10_000
 MAX_MINT = 1_000_000
 MIN_OUTPUT = 100
@@ -438,6 +440,12 @@ def term_class_of(lock_blocks):
 def fee_zat(collateral_zat):
     """FEE-1: the enforcement fee for a collateral (max(FEE_MIN, collateral * FEE_BPS / BPS))."""
     return ym.fee_zat(collateral_zat, FEE_MIN, FEE_BPS)
+
+
+def early_redeem_fee_zat(collateral_zat, term_class):
+    """IT-9: the early-redeem fee of a redeem before lockHeight (``term_class`` 'A'/'B'/'C' or 0..2)."""
+    i = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
+    return ym.early_redeem_fee_zat(collateral_zat, EARLY_REDEEM_FEE_BPS[i])
 
 
 def usd_to_micro(usd):
@@ -1077,7 +1085,8 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
     ``yed_getfeepayee`` — else ``0xFF``), fee ``vout[3]`` (``fee_zat(collateral)`` unless
     ``fee_zat_override``; absent without ``fee_addr``), then YEC change (``vout[4]`` with a fee
     output, ``vout[3]`` without).  ``lockHeight = ref_height + lock_blocks``, ``claimHeight =
-    lockHeight + GRACE``, ``nExpiryHeight = ref_height + REF_WINDOW`` unless ``expiry``.
+    lockHeight + GRACE``, the V's ``ownerHeight = appHeight = ref_height + 1`` (IT-1), ``nExpiryHeight = ref_height +
+    REF_WINDOW`` unless ``expiry``.
     ``term_class`` follows from ``lock_blocks`` unless given (adversarial payloads).
     Returns ``(hex, owner_pubkey_hex)``."""
     if owner_pubkey is None:
@@ -1089,7 +1098,7 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
         assert term_class is not None, 'lock_blocks %d is outside every class (pass term_class= to build it anyway)' % lock_blocks
     class_index = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
     lock_height = ref_height + lock_blocks
-    vault = ym.yed_vault_script(yed_params(), owner, lock_height)
+    vault = ym.yed_vault_script(yed_params(), owner, ref_height)
     fee_vout = 3 if fee_addr else FEE_VOUT_NONE
     payload = ym.encode_mint(class_index, cents, lock_height, ref_height, owner, fee_vout)
     vout = [
@@ -1115,13 +1124,28 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
 def vault_from_mint(mint_hex, lock_blocks, ref_height, owner_pubkey):
     """The ``vault`` dict ``build_vault_spend_raw`` takes (the ``yed_getvault`` shape), derived
     from a ``build_mint_tx`` result without the index: ``{txid, vout, collateralZat, lockHeight,
-    claimHeight, ownerPubKey, ownerAddress, refHeight}``."""
+    claimHeight, appHeight, ownerPubKey, ownerAddress, refHeight}``."""
     tx = ym.tx_from_hex(mint_hex)
     owner = hex_str_to_bytes(owner_pubkey)
     lock_height = ref_height + lock_blocks
     return {'txid': tx.txid, 'vout': 0, 'collateralZat': tx.vout[0].value, 'lockHeight': lock_height,
-            'claimHeight': lock_height + GRACE, 'ownerPubKey': owner_pubkey,
+            'claimHeight': lock_height + GRACE, 'appHeight': ref_height + 1, 'ownerHeight': ref_height + 1, 'ownerPubKey': owner_pubkey,
             'ownerAddress': pubkey_to_address(owner), 'refHeight': ref_height}
+
+
+def vault_app_height(vault):
+    """A vault dict's ``appHeight`` (IT-1: ``refHeight + 1``; a ``yed_getvault`` row carries it once the RPC does,
+    and ``refHeight`` always)."""
+    if vault.get('appHeight') is not None:
+        return int(vault['appHeight'])
+    return int(vault['refHeight']) + 1
+
+
+def vault_owner_height(vault):
+    """A vault dict's V ``ownerHeight`` (IT-1 extended: ``refHeight + 1``; a pre-plan row's ``lockHeight``)."""
+    if vault.get('ownerHeight') is not None:
+        return int(vault['ownerHeight'])
+    return int(vault['refHeight']) + 1
 
 
 def _outpoint(o):
@@ -1164,10 +1188,10 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     burns and ``value_adjust`` is added to ``vout[0]`` verbatim.  Returns the hex."""
     assert path in ('owner', 'claim')
     owner = hex_str_to_bytes(vault['ownerPubKey'])
-    lock_height, claim_height = int(vault['lockHeight']), int(vault['claimHeight'])
+    owner_height, app_height = vault_owner_height(vault), vault_app_height(vault)
     collateral = int(vault['collateralZat'])
     params = yed_params()
-    script = ym.yed_vault_script(params, owner, lock_height)
+    script = ym.yed_vault_script_at(params, owner, owner_height, app_height)
     burns = [_outpoint(o) for o in burn_inputs]
     enforcement_fee = int(fee[1]) if fee else 0
     value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee + int(value_adjust)
@@ -1186,7 +1210,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         if spare < 0:
             funding, total = _select_funding(node, -spare + 1000)
             spare += total
-        vout = [(claimed, ym.yed_intent_script(params, owner, lock_height, _spk_of_address(dest)))]
+        vout = [(claimed, ym.yed_intent_script(params, owner, owner_height, app_height, _spk_of_address(dest)))]
     else:
         vout = [(value, _spk_of_address(dest))]
     if fee:
@@ -1203,7 +1227,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
             if ref_height is None:
                 ref_height = node.getblockcount() - REF_LAG
         expiry = int(ref_height) + REF_WINDOW
-    lock_time = lock_height if path == 'owner' else claim_height
+    lock_time = owner_height if path == "owner" else app_height         # IT-1: the V's own CLTVs (both refHeight + 1 since the plan)
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
     carrier_vin = None
     if carrier is not None:

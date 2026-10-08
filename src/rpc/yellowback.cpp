@@ -247,13 +247,13 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
     // RED-4 by either clause, exactly yed_listclaimable's test (unarmed: v2's tip-snapshot clause (a)).
-    const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.claimHeight && tipSnap.has_value() &&
+    const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.appHeight && tipSnap.has_value() &&
                            yellowback::rpc::EstimateClaim(index, out, v, tip).claimable;
     o.pushKV("claimable", claimable);
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOIDED ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
     // U-23: the vault's V scriptPubKey (the primitive's template, tag YED) and, while CLAIMING, its claim intents.
-    const CScript spk = YedVaultScript(p, owner, v.lockHeight);
+    const CScript spk = YedVaultScriptAt(p, owner, v.ownerHeight, v.appHeight);
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     if (v.Status() == VaultStatus::CLAIMING) {
         UniValue intents(UniValue::VARR);
@@ -698,11 +698,18 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         t.pushKV("minBlocks", p.classMin[i]);
         t.pushKV("maxBlocks", p.classMax[i]);
         t.pushKV("baseRatioBps", p.baseRatioBps[i]);
+        t.pushKV("earlyRedeemFeeBps", p.earlyRedeemFeeBps[i]);    // IT-9
         classes.push_back(t);
     }
     prm.pushKV("classes", classes);
+    UniValue early(UniValue::VARR);
+    for (int i = 0; i < NUM_CLASSES; i++) early.push_back(p.earlyRedeemFeeBps[i]);
+    prm.pushKV("earlyRedeemFeeBps", early);                    // IT-9: per class, bps of the collateral on a redeem before lockHeight
     prm.pushKV("globalRatioHaltBps", p.globalRatioHaltBps);
-    prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16: the class minimum a mint needs to pass a global-ratio halt
+    prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16, IT-5: the class base ratio a mint needs to pass a global-ratio halt or the cap
+    prm.pushKV("claimThresholdBps", p.claimThresholdBps);  // θ (D-IT-2)
+    prm.pushKV("sigmaMultMaxBps", p.sigmaMultMaxBps);
+    prm.pushKV("inTermClaims", true);                      // IT-7: RED-4 decides a claim at every height from the mint
     UniValue policy(UniValue::VOBJ);
     policy.pushKV("penaltyBlocks", pp.penaltyBlocks);
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
@@ -817,15 +824,15 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     // H-1: with MINT_REQUIRES_ARMED nothing mints while the tip is not ARMED (MINT-4, mint-halted-unarmed)
     const bool unarmedHalt = P.mintRequiresArmed && !P.IsArmed(s.attest.IsArmed());
     o.pushKV("mintingAllowed", s.haltMask == 0 && !capReached && !unarmedHalt);
-    // W16/W20: the classes a mint can use now. Every enabled class when nothing halts and the cap has
-    // room; under a global-ratio halt alone those whose minimum ratio reaches the recapitalisation
-    // floor; once the cap is reached class A alone, at that floor (H-10); none under any other halt.
+    // W16/W20, IT-5: the classes a mint can use now. Every enabled class when nothing halts and the cap
+    // has room; under a global-ratio halt alone, or once the cap is reached, those whose base ratio
+    // reaches the recapitalisation floor (class C with the in-term set); none under any other halt.
     UniValue mintable(UniValue::VARR);
     if ((s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && !unarmedHalt) {
         for (int i = 0; i < NUM_CLASSES; i++) {
             if (!P.IsClassEnabled(i)) continue;                                    // H-5
-            const bool atFloor = MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps;
-            if (capReached ? (i == 0 && atFloor) : (!(s.haltMask & HALT_GLOBAL_RATIO) || atFloor)) mintable.push_back(ClassLetter((uint8_t)i));
+            const bool atFloor = P.baseRatioBps[i] >= P.recapRatioBps;
+            if (capReached ? atFloor : (!(s.haltMask & HALT_GLOBAL_RATIO) || atFloor)) mintable.push_back(ClassLetter((uint8_t)i));
         }
     }
     o.pushKV("mintableClasses", mintable);
@@ -1250,7 +1257,7 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
         if (!DeserializeRecord(raw, v)) return true;
-        if (v.Status() != VaultStatus::ACTIVE || tip < v.claimHeight) return true;
+        if (v.Status() != VaultStatus::ACTIVE || tip < v.appHeight) return true;     // IT-2: in term too
         candidates.push_back(std::make_pair(COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k)), v));
         return true;
     });
@@ -1977,7 +1984,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     const Params& p = index.ParamsAt(std::max(r, 0));
     e.refHeight = r;
     e.armed = r >= p.startHeight && ArmedAt(index.View(), p, r);
-    const bool mature = tip >= v.claimHeight && v.Status() == VaultStatus::ACTIVE;
+    const bool mature = tip >= v.appHeight && v.Status() == VaultStatus::ACTIVE;     // IT-2: the APP branch is open; the threshold decides
     if (!e.armed) {
         // v2 exactly: RED-4 (a) under the tip snapshot's pClaim.
         std::optional<Snapshot> snap = tip >= p.startHeight ? st.GetSnapshot((uint32_t)tip) : std::nullopt;

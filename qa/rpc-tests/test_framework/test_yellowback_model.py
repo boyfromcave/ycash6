@@ -40,9 +40,9 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 7).  The C++ unit test
+# The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc'
+GOLDEN_STATE_HASH = 'b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -169,7 +169,7 @@ class Chain(object):
         attest_fee_vout = 4 if attest_fee is not None else ym.FEE_VOUT_NONE
         payload = ym.encode_mint(term_class, cents, lock, ref_height, owner, fee_vout, attest_fee_vout)
         if vout0_script is None:                                   # U-23: the V template (a P2PKH placeholder if it cannot be built)
-            vout0_script = ym.yed_vault_script(self.params, owner, lock) or ym.p2pkh_script(OWNER_KEYHASH)
+            vout0_script = ym.yed_vault_script(self.params, owner, ref_height) or ym.p2pkh_script(OWNER_KEYHASH)
         vout0 = vout0_script
         vouts = [(collateral, vout0), (self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH))]
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
@@ -224,7 +224,7 @@ class Chain(object):
             vin.append(self.carrier_input(carrier))
         if claim and v is not None:
             res = residual[1] if residual is not None else 0
-            vouts = [(v.collateral_zat - res, ym.yed_intent_script(self.params, v.owner_pubkey, v.lock_height, ym.p2pkh_script(OWNER_KEYHASH)))]
+            vouts = [(v.collateral_zat - res, ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, ym.p2pkh_script(OWNER_KEYHASH)))]
         else:
             vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
         vouts.append((fee_value, ym.p2pkh_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
@@ -240,7 +240,7 @@ class Chain(object):
         if residual is not None:
             spk = ym.p2pkh_script(residual[0])
             if claim and v is not None:
-                spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.lock_height, spk)
+                spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, spk)
             vouts.append((residual[1], spk))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
 
@@ -253,7 +253,7 @@ class Chain(object):
         """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
         does not verify) re-creating the byte-identical vault at vout[0]; a fee input."""
         v = self.model.vaults[vault_op_of_record]
-        spk = ym.yed_vault_script(self.params, v.owner_pubkey, v.lock_height)
+        spk = ym.yed_vault_script_at(self.params, v.owner_pubkey, v.owner_height, v.app_height)
         vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), self.fund_input()]
         return ym.serialize_tx_v4(vin, [(value, spk)]).hex()
 
@@ -784,7 +784,7 @@ class MintTests(unittest.TestCase):
         s = m.snapshots[c.height]
         self.assertEqual(s.supply_cents, 10_000)
         self.assertEqual(s.global_ratio_bps, ym.global_ratio_bps(coll, s.p_mint, 10_000))
-        self.assertGreaterEqual(s.global_ratio_bps, 50_000)
+        self.assertGreaterEqual(s.global_ratio_bps, 30_000)      # class A's 300 % (D-IT-4)
 
     # Rule: IN-3
     def test_mint_with_yed_inputs_burns_them(self):
@@ -834,7 +834,7 @@ class MintTests(unittest.TestCase):
         # fewer than three outputs: the V at vout[0] and the OP_RETURN only
         lock = ref + 48
         pl = ym.encode_mint(0, 10_000, lock, ref, G_PUBKEY, 0xFF)
-        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_PUBKEY, lock)),
+        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_PUBKEY, ref)),
                                                     (0, bytes([ym.OP_RETURN]) + ym.push(pl))]).hex()
         c.mine((1, 50_000, 0, KEY2), [raw])
         self.assertVoid(txid_of(raw), 'bad-mint-outputs')
@@ -846,7 +846,10 @@ class MintTests(unittest.TestCase):
         self.assertVoid(self.mint(vout0_script=ym.p2pkh_script(KEY1)), 'bad-mint-vault-script')
         # a V under another set is not the YED vault
         other = ym.Params.regtest(1, attestor_set='77' * 32)
-        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_PUBKEY, c.height - 1 + 48)), 'bad-mint-vault-script')
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_PUBKEY, c.height - 1)), 'bad-mint-vault-script')
+        # IT-1: the pre-plan shape (ownerHeight = lockHeight, appHeight = lockHeight + GRACE) is refused for a new mint
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script_at(c.params, G_PUBKEY, c.height - 1 + 48, c.height - 1 + 48 + c.params.grace)),
+                        'bad-mint-vault-script')
 
     # Rule: MINT-4
     def test_mint4_not_active(self):
@@ -876,18 +879,21 @@ class MintTests(unittest.TestCase):
     # Rule: HALT-2
     def test_mint4_global_ratio(self):
         c = self.c
-        self.mint()                                    # 10,000 cents backed at 500 %
-        c.mine_n(64, price_fn=lambda h: 9_000)         # price / 5.5: ratio ~ 9,000 bps < 25,000; slow window fully refilled
+        self.mint()                                    # 10,000 cents backed at 300 % (class A)
+        c.mine_n(64, price_fn=lambda h: 9_000)         # price / 5.5: ratio ~ 5,400 bps < 25,000; slow window fully refilled
         s = c.model.snapshots[c.height]
         self.assertTrue(s.halt_mask & ym.HALT_GLOBAL_RATIO)
         self.assertEqual(s.halt_mask & ym.HALT_DIVERGENCE, 0)
-        # W16: the halt stops the classes below the recapitalisation floor (class C, 300 %) ...
-        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 13, fee_key=KEY1, term_class=2)
+        # W16 / IT-5: the halt stops the classes whose base ratio is below the recapitalisation floor (A 300 %, B 400 %) ...
+        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 13, fee_key=KEY1)
         c.mine((1, 9_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-halted-global-ratio')
-        # ... and lets class A (500 %) through, which is what repairs the ratio
+        raw = c.mint_tx(10_000, 97, c.height - 1, 10 ** 13, fee_key=KEY1, term_class=1)
+        c.mine((1, 9_000, 0, KEY1), [raw])
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-halted-global-ratio')
+        # ... and lets class C (500 %, the floor) through, which is what repairs the ratio
         self.assertTrue(c.model.snapshots[c.height].halt_mask & ym.HALT_GLOBAL_RATIO)
-        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 13, fee_key=KEY1)
+        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 13, fee_key=KEY1, term_class=2)
         c.mine((1, 9_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), '')
 
@@ -896,7 +902,7 @@ class MintTests(unittest.TestCase):
         c = self.c
         ref = c.height - 1
         coll = collateral_for(c, 10_000, ref)
-        req = ym.required_zat(10_000, 50_000, c.model.snapshot(ref).p_mint)
+        req = ym.required_zat(10_000, c.params.base_ratio_bps[0], c.model.snapshot(ref).p_mint)
         self.assertVoid(self.mint(collateral=req - 1), 'bad-mint-collateral')
         t = self.mint(collateral=req)
         self.assertEqual(c.model.vaults[(t, 0)].status, ym.V_ACTIVE)
@@ -907,10 +913,11 @@ class MintTests(unittest.TestCase):
 
     # Rule: MINT-5
     def test_mint5_unsatisfiable(self):
-        c = activated_chain(ym.Params.regtest(1, sigma_ref_bps=10_000))   # sigma at the cap (undefined samples)
+        # D-IT-5 pins the multiplier at 1 (sigma_mult_max_bps 10,000) even at a 10,000 reference with undefined samples
+        c = activated_chain(ym.Params.regtest(1, sigma_ref_bps=10_000))
         c.mine_n(64, price_fn=lambda h: 100)           # PRICE_MIN
         s = c.model.snapshot(c.height - 1)
-        self.assertEqual(s.sigma_mult_bps, 30_000)
+        self.assertEqual(s.sigma_mult_bps, 10_000)
         raw = c.mint_tx(1_000_000, 48, c.height - 1, ym.MAX_MONEY, fee_key=KEY1)
         c.mine((1, 100, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-unsatisfiable')
@@ -923,13 +930,13 @@ class MintTests(unittest.TestCase):
         self.assertIsNotNone(cap)
         # issued ~ 135 blocks * 6.25 YEC ~ 843 YEC * $0.05 = $42 -> cap = 15 % of that ~ 632 cents < MIN_MINT
         self.assertLess(cap, 10_000)
-        # W20: over the cap only a mint whose ratio reaches RECAP_RATIO_BPS (500 %) is accepted.
-        # Class C (300 %, lock 145) is refused; class A (500 %, lock 48) goes through and supply
+        # W20 / IT-5: over the cap only a mint whose class base ratio reaches RECAP_RATIO_BPS (500 %) is
+        # accepted. Class A (300 %, lock 48) is refused; class C (500 %, lock 145) goes through and supply
         # ends above the cap.
-        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 12, fee_key=KEY1, term_class=2)
+        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-supply-cap')
-        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 12, fee_key=KEY1)
+        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 12, fee_key=KEY1, term_class=2)
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), '')
         self.assertGreater(c.model.totals.supply_cents, cap)
@@ -1249,7 +1256,9 @@ def build_golden():
     with no payload) and 251 (an armed mint without a bundle)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
     c = Chain(params)
-    price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (2_000 + (h % 3) * 5)  # noqa: E731
+    # IT-2 keeps the v3 tail on RED-4's path (b): at 300 % collateral minted at $0.009 the vault sits at ~127 %
+    # when the pools quote $0.0038 (not under theta 125 %) and at 100 % at the attestors' $0.003 (under 105 %).
+    price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (3_800 + (h % 3) * 5)  # noqa: E731
     key = lambda h: MINERS[h % 3]  # noqa: E731
     txs_at = {}
     v3 = {}     # heights and choices the v3 tail makes as it goes (deterministic; recorded for the tests)
@@ -1330,12 +1339,12 @@ def build_golden():
             ref = 249
             txs_at['mint6'] = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY2)
             txs.append(txs_at['mint6'])
-        elif h == 290:                                          # NOT-1 at R = 288: attestors at 1,850, pools at ~2,000
+        elif h == 290:                                          # NOT-1 at R = 288: attestors at 3,000, pools at ~3,800
             ref = 288
             vault = (txid_of(txs_at['mint5']), 0)
             sel = c.model.selected(ref, ya.outpoint_selector(*vault))
             v3['lazy'] = sel[0]                                 # the attestor that stops signing (dormancy)
-            bundle, _ = c.bundle_for(ref, ya.outpoint_selector(*vault), {'*': 1_850}, skip=(v3['lazy'],))
+            bundle, _ = c.bundle_for(ref, ya.outpoint_selector(*vault), {'*': 3_000}, skip=(v3['lazy'],))
             txs_at['notice5'] = c.notice_tx(vault, ref, bundle)
             txs.append(txs_at['notice5'])
         elif h >= 298 and 'claim5' not in txs_at:               # RED-4(b) + RED-5 at the first R >= 296 that selects the lazy attestor
@@ -1346,9 +1355,9 @@ def build_golden():
             if v3['lazy'] in sel:
                 v = c.model.vaults[vault]
                 script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
-                bundle, _ = c.bundle_for(ref, selector, {'*': 1_850}, skip=(v3['lazy'],))
+                bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
                 fee = ym.fee_zat(v.collateral_zat, params.fee_min, params.fee_bps)
-                p_claim = max(c.model.snapshot(ref).p_claim, 1_850)
+                p_claim = max(c.model.snapshot(ref).p_claim, 3_000)
                 residual = ym.residual_zat(v.collateral_zat, ym.claimant_max_zat(v.minted_cents, ym.BPS, p_claim))
                 payee = [q for q in sel if q != v3['lazy']][0]
                 txs_at['claim5'] = c.spend_tx(vault, script, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
@@ -1416,7 +1425,7 @@ def golden_document(c):
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
                        'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 7; payload version 3; '
+                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3; '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
@@ -1447,7 +1456,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x07\x00\x00\x00')        # SCHEMA_VERSION 7 (P4-b)
+        self.assertEqual(pre[37:41], b'\x08\x00\x00\x00')        # SCHEMA_VERSION 8 (in-term claims)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))
@@ -1521,7 +1530,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 5_971_140_315_110, 'activeVaults': 2,
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_222_281_478_011, 'activeVaults': 2,   # 300 % collateral (D-IT-4)
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -1546,7 +1555,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual((mint5.verdict, mint5.a_mint, sorted(mint5.bundle_seqs), mint5.attest_payee), ('ok', 9_000, sorted(v3['mint5_selected']), v3['mint5_selected'][0]))
         self.assertEqual(c.refused[txid_of(txs_at['mint6'])], 'mint9-no-bundle')
         self.assertEqual(m.txlog[txid_of(txs_at['notice5'])].notice, True)
-        self.assertEqual(m.bundle_log[290].a_claim, 1_850)
+        self.assertEqual(m.bundle_log[290].a_claim, 3_000)
         claim5 = m.txlog[txid_of(txs_at['claim5'])]
         self.assertEqual((claim5.verdict, claim5.claim_path, claim5.residual_zat), ('ok', 'b', v3['residual']))
         self.assertTrue(claim5.residual_zat >= ym.Params.REGTEST_ATTEST['residual_min_zat'])

@@ -55,10 +55,10 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         nodes = self.nodes
         user, other = nodes[0], nodes[5]
 
-        print('activate at $50: $100 at 500 % is 10 YEC of collateral')
+        print('activate at $50: $100 at 300 % (class A, D-IT-4) is 6 YEC of collateral')
         self.activate(POOLS, quote_usd=50)
         self.mine_round_robin(POOLS, REF_LAG + 1)
-        assert_equal(user.yed_estimatecollateral(10000, 48)['requiredZat'], 10 * COIN)
+        assert_equal(user.yed_estimatecollateral(10000, 48)['requiredZat'], 6 * COIN)
         self.arm()
 
         print('shield 30 YEC into a ys1... address of node 0')
@@ -84,7 +84,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         mint1 = self.mint(user, 10000, 48, ys)
         vault1 = mint1['txid']
         assert_equal(mint1['fundedFrom'], 'sapling')
-        assert_equal(mint1['collateralZat'], 10 * COIN)                    # armed too: the attestors track xMint, pMint = $50
+        assert_equal(mint1['collateralZat'], 6 * COIN)                     # armed too: the attestors track xMint, pMint = $50
         assert_equal(mint1['feeZat'], fee_zat(mint1['collateralZat']))
         raw = user.getrawtransaction(vault1, 1)
         assert_equal([v['txid'] for v in raw['vin']], [mint1['carrierTxid']])    # v3: the carrier is the one transparent input
@@ -179,7 +179,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - wallet_network_fee(rraw) - red1['feeZat'] - TOKEN_VALUE
         assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
-        assert_equal(rraw['locktime'], mint1['lockHeight'])
+        assert_equal(rraw['locktime'], user.yed_getvault(vault1)['refHeight'] + 1)     # IT-1 (extended): the owner branch's CLTV
         assert_equal(nodes[2].yed_validaterawtransaction(rraw['hex'])['verdict'], 'ok')
         self.sync_all()
         self.mine(POOLS[1])

@@ -98,17 +98,17 @@ struct Fixture
     CKey yedKey;
     CKey payeeKey;
     CKey fundKey;                           //!< U-23: a claim's fee input
-    uint32_t lockHeight, claimHeight;
+    uint32_t lockHeight, claimHeight, appHeight;
     CAmount vaultValue;
     COutPoint vaultOut;
     CScript vaultScript;
     uint32_t branchId;
 
     Fixture() : params(RegtestParams(1, 0, 0, TestSet())), owner(NewKey()), yedKey(NewKey()), payeeKey(NewKey()), fundKey(NewKey()),
-                lockHeight(300), claimHeight(300 + params.grace), vaultValue(5 * COIN), vaultOut(uint256S("aa"), 0),
+                lockHeight(300), claimHeight(300 + params.grace), appHeight(198), vaultValue(5 * COIN), vaultOut(uint256S("aa"), 0),
                 branchId(NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId)
     {
-        vaultScript = YedVaultScript(params, owner.GetPubKey(), lockHeight);    // U-23: the V template
+        vaultScript = YedVaultScriptAt(params, owner.GetPubKey(), appHeight, appHeight);    // U-23, IT-1: the V template (minted at ref 197: ownerHeight = appHeight = 198)
         BOOST_REQUIRE(!vaultScript.empty());
     }
 
@@ -121,15 +121,17 @@ struct Fixture
         VaultSpendShape s;
         s.vaultOut = vaultOut;
         s.vaultScript = vaultScript;
-        s.vaultParams = YedVaultParams(params, owner.GetPubKey(), lockHeight);
+        s.vaultParams = YedVaultParamsAt(params, owner.GetPubKey(), appHeight, appHeight);
         s.vaultValue = vaultValue;
         s.lockHeight = lockHeight;
         s.claimHeight = claimHeight;
+        s.appHeight = appHeight;
+        s.ownerHeight = appHeight;
         s.ownerPath = ownerPath;
         s.withPayload = withPayload;
         s.refHeight = 250;
         if (withPayee) s.payee = payeeKey.GetPubKey().GetID();
-        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps);
+        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps) + (ownerPath ? EarlyRedeemFeeZat(vaultValue, params.earlyRedeemFeeBps[0]) : 0);   // IT-9: judged at H = R + 3 < lockHeight 300
         s.yedInputs = yed;
         s.changeCents = change;
         s.changeScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
@@ -304,7 +306,7 @@ CMutableTransaction ArmedMint(const Armed& a, Cents cents, const std::vector<uns
     s.claimHeight = s.lockHeight + a.P.grace;
     s.refHeight = a.R;
     s.owner = owner.GetPubKey();
-    s.vaultScript = YedVaultScript(a.P, s.owner, s.lockHeight);     // U-23
+    s.vaultScript = YedVaultScript(a.P, s.owner, a.R);     // U-23, IT-1
     const MicroUsd pMint = aMint.has_value() ? std::min(a.x, aMint.value()) : a.x;
     CAmount collateral = std::max(RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value(), 4 * a.P.feeMin);
     if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
@@ -394,7 +396,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     fp = PayloadOf(mtx);
     BOOST_REQUIRE(fp.has_value());
     BOOST_CHECK_EQUAL((int)fp->payload.feeVout, (int)FEE_VOUT_NONE);
-    // A lock that cannot be scripted (YedVaultScript empty) is refused with the mint-bad-lock identifier.
+    // A V that cannot be scripted (YedVaultScript empty: a height past the CLTV range) is refused with the mint-bad-lock identifier.
     s.vaultScript = YedVaultScript(f.params, f.owner.GetPubKey(), LOCKTIME_THRESHOLD);
     BOOST_CHECK(s.vaultScript.empty());
     BOOST_CHECK_THROW(MintOutputs(s, feeVout), std::runtime_error);
@@ -430,7 +432,7 @@ BOOST_AUTO_TEST_CASE(mint_shape_passes_the_state_machine)
     s.claimHeight = s.lockHeight + f.params.grace;
     s.refHeight = R;
     s.owner = f.owner.GetPubKey();
-    s.vaultScript = YedVaultScript(f.params, s.owner, s.lockHeight);
+    s.vaultScript = YedVaultScript(f.params, s.owner, R);
     std::optional<CAmount> required = RequiredCollateralRounded(s.cents, MinRatioBps(f.params.baseRatioBps[0], S.sigmaMultBps), pMint);
     BOOST_REQUIRE(required.has_value());
     s.collateralZat = std::max(required.value(), 4 * f.params.feeMin);
@@ -468,7 +470,7 @@ BOOST_AUTO_TEST_CASE(redeem_layout_transparent_destination)
     BOOST_REQUIRE_EQUAL(plan.vin.size(), 3u);
     BOOST_CHECK(plan.vin[0].prevout == f.vaultOut);
     BOOST_CHECK_EQUAL(plan.vin[0].nSequence, 0xFFFFFFFEu);
-    BOOST_CHECK_EQUAL(plan.nLockTime, f.lockHeight);
+    BOOST_CHECK_EQUAL(plan.nLockTime, f.appHeight);          // IT-1 (extended): the owner branch's CLTV is the V's ownerHeight
     BOOST_REQUIRE_EQUAL(plan.vout.size(), 4u);           // collateral, fee, change, payload
     BOOST_CHECK_EQUAL(plan.feeVout, 1);
     BOOST_CHECK_EQUAL(plan.changeVout, 2);
@@ -556,7 +558,7 @@ BOOST_AUTO_TEST_CASE(claim_layout)
     std::vector<YedCoin> yed = { Coin(uint256S("c1"), 1, 100000, f.yedKey) };
     VaultSpendShape s = f.Shape(false, true, true, true, yed);
     VaultSpendPlan plan = PlanVaultSpend(s);
-    BOOST_CHECK_EQUAL(plan.nLockTime, f.claimHeight);
+    BOOST_CHECK_EQUAL(plan.nLockTime, f.appHeight);          // IT-1: the APP branch's CLTV
     BOOST_REQUIRE_EQUAL(plan.vin.size(), 3u);            // the vault, the YED coin, the fee input
     BOOST_REQUIRE_EQUAL(plan.vout.size(), 4u);           // intent, fee, payload, fee change
     BOOST_CHECK_EQUAL(plan.feeVout, 1);
@@ -578,7 +580,7 @@ BOOST_AUTO_TEST_CASE(claim_layout)
     BOOST_CHECK_EQUAL(b.path, "claim");
     BOOST_CHECK(b.tx.vin[0].scriptSig == (CScript() << OP_4));
     BOOST_CHECK_EQUAL(vault::ParseSelector(b.tx.vin[0].scriptSig).value_or(0), vault::SEL_APP);
-    // The APP branch verifies at claimHeight with no signature; the YED and fee inputs are signed.
+    // The APP branch verifies at appHeight with no signature; the YED and fee inputs are signed.
     ScriptError err;
     BOOST_CHECK_MESSAGE(Verify(b.tx, 0, f.vaultScript, f.vaultValue, f.branchId, &err), ScriptErrorString(err));
     BOOST_CHECK(Verify(b.tx, 1, yed[0].token.scriptPubKey, TOKEN_VALUE, f.branchId, &err));
@@ -654,6 +656,8 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         v.termClass = 0;
         v.lockHeight = f.lockHeight;
         v.claimHeight = f.claimHeight;
+        v.appHeight = f.appHeight;
+        v.ownerHeight = f.appHeight;
         v.collateralZat = f.vaultValue;
         v.mintedCents = 10000;   // $100 against 5 YEC
         v.mintHeight = 200;
@@ -769,7 +773,7 @@ BOOST_AUTO_TEST_CASE(void_release_has_no_payload_and_no_fee)
     VaultSpendPlan plan = PlanVaultSpend(s);
     BOOST_REQUIRE_EQUAL(plan.vin.size(), 1u);
     BOOST_CHECK_EQUAL(plan.vin[0].nSequence, 0xFFFFFFFEu);
-    BOOST_CHECK_EQUAL(plan.nLockTime, f.lockHeight);
+    BOOST_CHECK_EQUAL(plan.nLockTime, f.appHeight);          // IT-1 (extended): the owner branch's CLTV is the V's ownerHeight
     BOOST_REQUIRE_EQUAL(plan.vout.size(), 1u);
     BOOST_CHECK_EQUAL(plan.feeVout, -1);
     BOOST_CHECK_EQUAL(plan.changeVout, -1);
@@ -1043,9 +1047,9 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
 // Rule: RED-1 RED-3 RED-4 RED-5 AFEE-1 MP-1
 BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause)
 {
-    // Pools at $2.20 (not underwater at 110 %), attestors at $2.00: pClaim = 2.20 (clause (a) false),
-    // pEmerg = 2.00 and a persisted notice open clause (b) (R1: margin 100 %, a residual is due).
-    Armed a(3, 2200000);
+    // Pools at $2.60 (50 YEC back $100 at 130 %: not underwater at theta 125 %), attestors at $2.00 (100 %): pClaim =
+    // 2.60 (clause (a) false), pEmerg = 2.00 and a persisted notice open clause (b) (R1: margin 100 %, a residual is due).
+    Armed a(3, 2600000);
     CBasicKeyStore ks;
     a.AddKeys(ks);
     const CKey owner = NewKey();
@@ -1060,6 +1064,8 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     vault.termClass = 0;
     vault.lockHeight = a.R - 30;
     vault.claimHeight = a.R - 6;
+    vault.appHeight = a.R - 81;      // IT-1: refHeight + 1
+    vault.ownerHeight = a.R - 81;
     vault.collateralZat = 50 * COIN;
     vault.mintedCents = 10000;
     vault.mintHeight = a.R - 80;
@@ -1090,11 +1096,13 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     const uint16_t attestPayee = DefaultAttestPayee(a.view, a.P, a.R, selector, A, AttestPolicy()).value();
     VaultSpendShape s;
     s.vaultOut = vaultOut;
-    s.vaultScript = YedVaultScript(a.P, ownerPk, vault.lockHeight);            // U-23: the V template
-    s.vaultParams = YedVaultParams(a.P, ownerPk, vault.lockHeight);
+    s.vaultScript = YedVaultScriptAt(a.P, ownerPk, vault.ownerHeight, vault.appHeight);            // U-23: the V template
+    s.vaultParams = YedVaultParamsAt(a.P, ownerPk, vault.ownerHeight, vault.appHeight);
     s.vaultValue = vault.collateralZat;
     s.lockHeight = vault.lockHeight;
     s.claimHeight = vault.claimHeight;
+    s.appHeight = vault.appHeight;
+    s.ownerHeight = vault.ownerHeight;
     s.ownerPath = false;
     s.withPayload = true;
     s.refHeight = a.R;
@@ -1284,7 +1292,7 @@ BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
         m.claimHeight = m.lockHeight + a.P.grace;
         m.refHeight = a.R;
         m.owner = NewKey().GetPubKey();
-        m.vaultScript = YedVaultScript(a.P, m.owner, m.lockHeight);     // U-23
+        m.vaultScript = YedVaultScript(a.P, m.owner, m.refHeight);     // U-23, IT-1
         m.collateralZat = 251 * COIN;
         m.payee = NewKey().GetPubKey().GetID();
         m.feeZat = FeeZat(m.collateralZat, a.P.feeMin, a.P.feeBps);

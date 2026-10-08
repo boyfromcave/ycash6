@@ -115,7 +115,7 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual(len(tx.vout), 5)
         lock_height = 190 + 48
         self.assertEqual(tx.vout[0].value, collateral)
-        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), node.pubkey, lock_height))   # U-23: the V
+        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), node.pubkey, 190))   # U-23, IT-1: the V
         self.assertTrue(ym.is_yed_vault(tx.vout[0].script))
         self.assertEqual(tx.vout[1].value, yu.TOKEN_VALUE)
         self.assertEqual(tx.vout[1].script, ym.p2pkh_script(ym.hash160(node.pubkey)))
@@ -165,7 +165,7 @@ class VaultSpendTests(unittest.TestCase):
         self.node = FakeNode([utxo(b'a', 0, 30)], height=300)
         hex_, owner = yu.build_mint_tx(self.node, 10_000, 48, 190, 20 * COIN)
         self.vault = yu.vault_from_mint(hex_, 48, 190, owner)
-        self.script = ym.yed_vault_script(yu.yed_params(), self.node.pubkey, self.vault['lockHeight'])
+        self.script = ym.yed_vault_script(yu.yed_params(), self.node.pubkey, 190)
 
     def _key(self):
         try:
@@ -185,7 +185,7 @@ class VaultSpendTests(unittest.TestCase):
         tx.deserialize(BytesIO(bytes.fromhex(hex_)))
         self.assertEqual(len(tx.vin), 1)
         self.assertEqual(tx.vin[0].nSequence, 0xFFFFFFFE)
-        self.assertEqual(tx.nLockTime, self.vault['lockHeight'])
+        self.assertEqual(tx.nLockTime, self.vault['ownerHeight'])      # IT-1 (extended): the owner branch's CLTV, refHeight + 1
         self.assertEqual(tx.nExpiryHeight, 298 + yu.REF_WINDOW)
         pushes = ym.parse_pushes(tx.vin[0].scriptSig)
         self.assertEqual(len(pushes), 2)                     # U-23: <sig> OP_2
@@ -218,13 +218,13 @@ class VaultSpendTests(unittest.TestCase):
         self.assertEqual(tx.expiry_height, 0)
         self.assertEqual(ym.selector_of(tx.vin[0].script_sig), ym.SEL_OWNER)
 
-    def test_claim_path_is_unsigned_and_uses_claim_height(self):
+    def test_claim_path_is_unsigned_and_uses_app_height(self):
         # Rule: RED-4
         payload = ym.encode_redeem(298, 1, [])
         hex_ = yu.build_vault_spend_raw(self.node, self.vault, 'claim', ['%s:1' % self.vault['txid'], (self.vault['txid'], 5)],
                                         payload=payload, fee=(yu.address_of(yu.POOL_WIFS[2]), 3 * yu.FEE_MIN), ref_height=298)
         tx = ym.tx_from_hex(hex_)
-        self.assertEqual(tx.lock_time, self.vault['claimHeight'])
+        self.assertEqual(tx.lock_time, self.vault["appHeight"])          # IT-1: the APP branch CLTV, refHeight + 1
         self.assertEqual(tx.expiry_height, 298 + yu.REF_WINDOW)
         # U-23: OP_4; the whole collateral in the claimant's intent; the fee and the network fee from a wallet input
         self.assertEqual([i.sequence for i in tx.vin], [0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF])

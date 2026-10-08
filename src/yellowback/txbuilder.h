@@ -80,7 +80,8 @@ struct BuiltTx
 
     // Common (§4.2a: refHeight, feeZat, payee, termClass, claimHeight, path)
     int refHeight;                          //!< R = indexTip - REF_LAG
-    CAmount feeZat;                         //!< the enforcement fee paid (0 under FEE-0, for a release and a sweep)
+    CAmount feeZat;                         //!< the enforcement fee paid (0 under FEE-0, for a release and a sweep); a redeem before lockHeight includes earlyRedeemFeeZat (IT-9)
+    CAmount earlyRedeemFeeZat;              //!< IT-9: the early-redeem part of feeZat (0 at or after lockHeight, on the claim path, under FEE-0)
     std::optional<CKeyID> payee;            //!< the fee output's key hash (nullopt = no fee output)
     int feeVout;                            //!< index of the fee output, -1 if none
     int termClass;                          //!< 0/1/2 = A/B/C
@@ -132,7 +133,7 @@ struct BuiltTx
     std::vector<CarrierRecord> sweptRecords;    //!< SWEEP_CARRIERS: the carriers spent
     std::vector<CarrierRecord> staleRecords;    //!< SWEEP_CARRIERS: lapsed records whose outpoint is already spent (to forget)
 
-    BuiltTx() : kind(BuiltKind::TRANSFER), refHeight(0), feeZat(0), feeVout(-1), termClass(0), lockHeight(0), claimHeight(0),
+    BuiltTx() : kind(BuiltKind::TRANSFER), refHeight(0), feeZat(0), earlyRedeemFeeZat(0), feeVout(-1), termClass(0), lockHeight(0), claimHeight(0),
                 collateralZat(0), collateralOut(0), burnCents(0), changeCents(0), extraBurnCents(0), changeVout(-1), vaultValue(0),
                 carrierVin(-1), armed(false), attestFeeZat(0), attestFeeVout(-1), residualZat(0), residualVout(-1), emergencyOpenAt(0),
                 seq(0), bondVin(-1), bondZat(0), bondLocktime(0), flags(0), sweptCarriers(0) {}
@@ -177,7 +178,9 @@ struct VaultSpendShape
     CAmount vaultValue;
     uint32_t lockHeight;
     uint32_t claimHeight;
-    bool ownerPath;                         //!< owner scriptSig + nLockTime = lockHeight; else claim scriptSig + claimHeight
+    uint32_t appHeight;                     //!< the V's appHeight (IT-1: refHeight + 1; a pre-plan vault's lockHeight + GRACE)
+    uint32_t ownerHeight;                   //!< the V's ownerHeight (IT-1 extended: refHeight + 1; a pre-plan vault's lockHeight)
+    bool ownerPath;                         //!< owner scriptSig + nLockTime = ownerHeight; else claim scriptSig + appHeight
     bool withPayload;                       //!< REDEEM/CLAIM: burn + payload + fee; false = release/sweep (no burn, no fee, no payload)
     int refHeight;                          //!< REDEEM payload refHeight
     std::optional<CKeyID> payee;            //!< nullopt under FEE-0 (and always for a release/sweep)
@@ -200,7 +203,7 @@ struct VaultSpendShape
     std::vector<std::pair<COutPoint, CAmount>> funding;
     CScript fundingChange;
 
-    VaultSpendShape() : vaultValue(0), lockHeight(0), claimHeight(0), ownerPath(true), withPayload(true), refHeight(0), feeZat(0),
+    VaultSpendShape() : vaultValue(0), lockHeight(0), claimHeight(0), appHeight(0), ownerHeight(0), ownerPath(true), withPayload(true), refHeight(0), feeZat(0),
                         changeCents(0), networkFee(0), attestFeeZat(0), residualZat(0), carrierValue(0) {}
 };
 
@@ -224,7 +227,7 @@ struct VaultSpendPlan
 /**
  * U-23 claim (transparent destination only): vout[0] the claimant's intent of vaultValue - residualZat,
  * [fee], [YED change], [attestor fee], [the owner's residual intent], payload, [the fee inputs' YEC change];
- * nLockTime = claimHeight (the V's appHeight). The fee outputs and the network fee come from the carrier,
+ * nLockTime = appHeight (the V's APP branch CLTV; IT-1: open from the block after the mint). The fee outputs and the network fee come from the carrier,
  * YED and funding inputs; throws `insufficient-yec` when they do not cover them.
  *
  * Owner path, transparent destination: vout[0] collateral, [fee], [YED change], [attestor fee], [residual],

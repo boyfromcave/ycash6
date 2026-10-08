@@ -184,14 +184,14 @@ class Params(object):
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
                  price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
-                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=1_152):
+                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100)):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
         self.supply_cap_bps = supply_cap_bps
         # the YED attestor set (U-22): its display hex ('' = none); the V template pushes its internal bytes
         self.attestor_set = attestor_set or ''
-        self.claim_delay = claim_delay                  # CLAIM_DELAY (U-23): mainnet 1,152, regtest 10
+        self.claim_delay = claim_delay                  # CLAIM_DELAY (U-23): mainnet 576 (12 h), regtest 10
         self.p_fast_window = p_fast_window
         self.p_mid_window = p_mid_window
         self.p_slow_window = p_slow_window
@@ -214,6 +214,7 @@ class Params(object):
         self.class_min = list(class_min)
         self.class_max = list(class_max)
         self.base_ratio_bps = list(base_ratio_bps)
+        self.early_redeem_fee_bps = list(early_redeem_fee_bps)    # IT-9: bps of the collateral on an owner redeem before lockHeight
         self.vol_window = vol_window
         self.vol_step = vol_step
         self.vol_periods_per_year = vol_periods_per_year
@@ -296,28 +297,30 @@ class Params(object):
             p_fast_window=8, p_mid_window=24, p_slow_window=64,
             n_reg=24, n_penalty=12, peer_lag=4, peer_min=3, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=24, payee_tilt_bps=10_000, payee_window=10,
-            fee_min=50_000_000, fee_bps=25, grace=24, claim_threshold_bps=11_000,
+            fee_min=50_000_000, fee_bps=25, grace=24, claim_threshold_bps=12_500,          # D-IT-2
             global_ratio_halt_bps=25_000, divergence_bps=2_000,
-            # class A [48, 96], B (96, 144], C (144, 240]  (section 3.1 regtest column)
-            class_min=[48, 97, 145], class_max=[96, 144, 240], base_ratio_bps=[50_000, 40_000, 30_000],
-            vol_window=64, vol_step=8, vol_periods_per_year=8_760, sigma_mult_max_bps=30_000,
+            # class A [48, 96], B (96, 144], C (144, 240]  (section 3.1 regtest column); flat ratios 300/400/500 % (D-IT-4)
+            class_min=[48, 97, 145], class_max=[96, 144, 240], base_ratio_bps=[30_000, 40_000, 50_000],
+            vol_window=64, vol_step=8, vol_periods_per_year=8_760, sigma_mult_max_bps=10_000,
             min_mint=10_000, max_mint=1_000_000, min_output=100, max_output=10_000_000,
             token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2, attest=cls.REGTEST_ATTEST)
 
     @classmethod
     def mainnet(cls, start_height, attestor_set='', network='main'):
+        # In-term claims (docs/plans/yellowback-in-term-claims-plan.md section 3): theta 125 %, sigma pinned at 1
+        # (sigma_ref_bps 0, D-IT-5), halt 200 % (D-IT-11), recap = class C's base (D-IT-12), three flat tiers
+        # A 30-90 d 300 %, B 91-180 d 400 %, C 181-365 d 500 % (D-IT-4, D-IT-9, D-IT-10 as decided 2026-10-07).
         return cls(
-            network=network, start_height=start_height, sigma_ref_bps=10_000,
-            supply_cap_bps=1_500, attestor_set=attestor_set, claim_delay=1_152,
+            network=network, start_height=start_height, sigma_ref_bps=0,
+            supply_cap_bps=1_500, attestor_set=attestor_set, claim_delay=576,
             p_fast_window=96, p_mid_window=576, p_slow_window=2_016,
             n_reg=576, n_penalty=288, peer_lag=10, peer_min=5, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=576, payee_tilt_bps=10_000, payee_window=100,
-            fee_min=50_000_000, fee_bps=15, grace=34_560, claim_threshold_bps=11_000,     # H-4
-            global_ratio_halt_bps=30_000, recap_ratio_bps=60_000, divergence_bps=2_000,   # H-11
-            # class A [34,560, 103,680]; B and C disabled by an empty range at A's upper end (H-5)
-            class_min=[34_560, 103_681, 103_681], class_max=[103_680, 103_680, 103_680],
-            base_ratio_bps=[50_000, 40_000, 30_000],
-            vol_window=2_016, vol_step=48, vol_periods_per_year=8_760, sigma_mult_max_bps=30_000,
+            fee_min=50_000_000, fee_bps=15, grace=34_560, claim_threshold_bps=12_500,     # H-4, D-IT-2
+            global_ratio_halt_bps=20_000, recap_ratio_bps=50_000, divergence_bps=2_000,   # D-IT-11, D-IT-12
+            class_min=[34_560, 103_681, 207_361], class_max=[103_680, 207_360, 420_480],
+            base_ratio_bps=[30_000, 40_000, 50_000],
+            vol_window=2_016, vol_step=48, vol_periods_per_year=8_760, sigma_mult_max_bps=10_000,
             min_mint=10_000, max_mint=250_000, min_output=100, max_output=10_000_000,   # H-12
             token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2,
             attest_arm_min=7, attest={'attest_fee_bps': 5_000}, mint_requires_armed=True)   # H-2, H-4, H-1
@@ -463,6 +466,11 @@ def residual_zat(collateral_zat, claimant_max):
 
 def fee_zat(collateral_zat, fee_min, fee_bps):
     return max(fee_min, (collateral_zat * fee_bps) // BPS)
+
+
+def early_redeem_fee_zat(collateral_zat, early_redeem_fee_bps):
+    """IT-9: collateral * earlyRedeemFeeBps / 10^4 (floor, no minimum)."""
+    return (collateral_zat * early_redeem_fee_bps) // BPS if early_redeem_fee_bps > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -885,19 +893,26 @@ def parse_intent_template(spk):
     return (tag, rh, vh, delay, cancel, set_id, key)
 
 
-def yed_vault_script(params, owner_key33, lock_height):
-    """The V of a mint (U-23): tag YED, setId = cancelSetId = the attestor set, delay CLAIM_DELAY,
-    ownerHeight = lockHeight, appHeight = lockHeight + GRACE; None when it cannot be built."""
+def yed_vault_script_at(params, owner_key33, owner_height, app_height):
+    """The V of an existing vault whatever its heights (a pre-plan vault has ownerHeight = lockHeight and
+    appHeight = lockHeight + GRACE); None when it cannot be built."""
     s = params.attestor_set_internal
     if s is None:
         return None
-    return vault_template(YED_TAG, s, s, params.claim_delay, lock_height, bytes(owner_key33), lock_height + params.grace)
+    return vault_template(YED_TAG, s, s, params.claim_delay, owner_height, bytes(owner_key33), app_height)
 
 
-def yed_intent_script(params, owner_key33, lock_height, recipient_spk):
+def yed_vault_script(params, owner_key33, ref_height):
+    """The V of a mint (U-23, IT-1 as extended 2026-10-07): tag YED, setId = cancelSetId = the attestor set, delay
+    CLAIM_DELAY, ownerHeight = appHeight = refHeight + 1 (the owner's redeem and the claim are both open from the
+    block after the mint; RED-4 decides a claim at every height); None when it cannot be built."""
+    return yed_vault_script_at(params, owner_key33, ref_height + 1, ref_height + 1)
+
+
+def yed_intent_script(params, owner_key33, owner_height, app_height, recipient_spk):
     """The I a claim of that vault creates paying ``recipient_spk`` (S-2: the V's fields; vaultHash = SHA256(V))."""
     s = params.attestor_set_internal
-    v = yed_vault_script(params, owner_key33, lock_height)
+    v = yed_vault_script_at(params, owner_key33, owner_height, app_height)
     return intent_template(YED_TAG, sha256(bytes(recipient_spk)), sha256(v), params.claim_delay, s, s, bytes(owner_key33))
 
 
@@ -1356,7 +1371,7 @@ class Judgement(object):
 class Vault(object):
     __slots__ = ('owner_pubkey', 'term_class', 'lock_height', 'claim_height', 'collateral_zat',
                  'minted_cents', 'mint_height', 'ref_height', 'status', 'void_reason',
-                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked')
+                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked', 'app_height', 'owner_height')
 
     def __init__(self):
         self.owner_pubkey = b''
@@ -1374,11 +1389,13 @@ class Vault(object):
         self.burned_cents = 0
         self.fee_paid_zat = 0
         self.unbacked = False
+        self.app_height = 0           # the V's appHeight: ref_height + 1 (IT-1); lock_height + grace before the in-term plan
+        self.owner_height = 0         # the V's ownerHeight: ref_height + 1 (IT-1 extended); lock_height before the in-term plan
 
     def as_dict(self, outpoint):
         return {'txid': outpoint[0], 'vout': outpoint[1], 'status': VAULT_STATUS_NAMES[self.status],
                 'ownerPubKey': self.owner_pubkey.hex(), 'termClass': 'ABC'[self.term_class] if self.term_class < 3 else self.term_class,
-                'lockHeight': self.lock_height, 'claimHeight': self.claim_height,
+                'lockHeight': self.lock_height, 'claimHeight': self.claim_height, 'appHeight': self.app_height, 'ownerHeight': self.owner_height,
                 'collateralZat': self.collateral_zat, 'mintedCents': self.minted_cents,
                 'mintHeight': self.mint_height, 'refHeight': self.ref_height,
                 'feePaidZat': self.fee_paid_zat, 'closeHeight': self.close_height,
@@ -1723,7 +1740,7 @@ def _ser_vault(v):
     return (_bytes(v.owner_pubkey) + _u8(v.term_class) + _i32(v.lock_height) + _i32(v.claim_height)
             + _i64(v.collateral_zat) + _i64(v.minted_cents) + _i32(v.mint_height) + _i32(v.ref_height)
             + _u8(v.status) + _str(v.void_reason) + _i32(v.close_height) + _hash(v.closing_txid)
-            + _i64(v.burned_cents) + _i64(v.fee_paid_zat) + _bool(v.unbacked))
+            + _i64(v.burned_cents) + _i64(v.fee_paid_zat) + _bool(v.unbacked) + _i32(v.app_height) + _i32(v.owner_height))
 
 
 def _ser_intent(r):
@@ -1749,7 +1766,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 7        # P4-b: the attestor registry on the primitive set (view.h)
+    SCHEMA_VERSION = 8        # in-term claims: VaultRecord.appHeight (IT-1); 7 was P4-b (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2399,22 +2416,24 @@ class YellowbackModel(object):
             return None
         if not cancel:
             v.status = V_CLAIMED
+            self.totals.collateral_zat -= v.collateral_zat      # IT-6: the collateral leaves the system ratio at release
             self.totals.claimed_vaults += 1
             rec.closed_vaults.append(ir.vault)
             return None
-        spk = yed_vault_script(p, v.owner_pubkey, v.lock_height)
+        spk = yed_vault_script_at(p, v.owner_pubkey, v.owner_height, v.app_height)
         relock = [j for j, o in enumerate(tx.vout) if o.script == spk]
         if relock != [0]:
             return 'intent-cancel-no-vault'
         del self.vaults[ir.vault]
         v.status = V_ACTIVE
+        claiming_collateral = v.collateral_zat
         v.collateral_zat = tx.vout[0].value
         v.close_height = 0
         v.closing_txid = None
         v.burned_cents = 0
         self.vaults[(tx.txid, 0)] = v
         self.notices.pop(ir.vault, None)
-        self.totals.collateral_zat += v.collateral_zat
+        self.totals.collateral_zat += v.collateral_zat - claiming_collateral    # IT-6: the CLAIMING collateral was still counted
         self.totals.active_vaults += 1
         rec.closed_vaults.append(ir.vault)
         rec.reopened_vaults.append((tx.txid, 0))
@@ -2610,6 +2629,8 @@ class YellowbackModel(object):
             v.term_class = pl.term_class
             v.lock_height = pl.lock_height
             v.claim_height = pl.lock_height + p.grace
+            v.app_height = pl.ref_height + 1                 # IT-1: MINT-3 passed exactly this V
+            v.owner_height = v.app_height                    # IT-1 (extended): the owner redeems in term too
             v.collateral_zat = vout0.value
             v.minted_cents = pl.cents
             v.mint_height = height
@@ -2657,9 +2678,10 @@ class YellowbackModel(object):
             return 'bad-mint-outputs'
         if not is_valid_compressed_pubkey(pl.owner_pubkey):
             return 'bad-mint-owner-key'
-        # U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight =
-        # lockHeight, appHeight = lockHeight + GRACE); v2's P2SH vault script is refused for new mints
-        expected = yed_vault_script(p, pl.owner_pubkey, pl.lock_height)
+        # U-23, IT-1: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight =
+        # lockHeight is record-keeping, ownerHeight = appHeight = refHeight + 1); v2's P2SH vault script and the pre-IT-1
+        # shape are refused for new mints
+        expected = yed_vault_script(p, pl.owner_pubkey, pl.ref_height)
         if expected is None or tx.vout[0].script != expected:
             return 'bad-mint-vault-script'
         # MINT-4 (the activation state machine and the PARTICIPATION/ENFORCEMENT halts left with the upgrade)
@@ -2670,9 +2692,9 @@ class YellowbackModel(object):
             return 'mint-not-active'
         if s.halt_mask & HALT_NO_PRICE:
             return 'mint-halted-no-price'
-        # HALT-2 (amended, W16): the global-ratio halt stops only a mint whose own minimum
-        # ratio is below the recapitalisation floor
-        if (s.halt_mask & HALT_GLOBAL_RATIO) and min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps:
+        # HALT-2 (amended, W16; IT-5): the global-ratio halt stops only a mint whose class base ratio
+        # is below the recapitalisation floor (class C alone with the in-term parameter set)
+        if (s.halt_mask & HALT_GLOBAL_RATIO) and p.base_ratio_bps[pl.term_class] < p.recap_ratio_bps:
             return 'mint-halted-global-ratio'
         if s.halt_mask & HALT_DIVERGENCE:
             return 'mint-halted-divergence'
@@ -2700,12 +2722,11 @@ class YellowbackModel(object):
             if v is not None:
                 return v
         # MINT-6 (amended, W20: soft above the recapitalisation floor; the cap reads the cross-section
-        # xMint and precedes MINT-9)
-        # H-10: above the cap only class A (term_class 0) at or over the floor mints
+        # xMint and precedes MINT-9). IT-5: above the cap a class whose base ratio reaches the floor
+        # mints (H-10's term_class != 0 proxy is replaced by the ratio test)
         cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
         if (cap is not None and self.totals.supply_cents + pl.cents > cap
-                and (pl.term_class != 0
-                     or min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps)):
+                and p.base_ratio_bps[pl.term_class] < p.recap_ratio_bps):
             return 'mint-supply-cap'
         # MINT-7
         if opret == 1:
@@ -2814,7 +2835,10 @@ class YellowbackModel(object):
         if facts.get('attest_payee') is not None:
             rec.attest_fee_zat = tx.vout[pl.attest_fee_vout].value
             rec.attest_payee = facts['attest_payee']
-        self.totals.collateral_zat -= v.collateral_zat
+        # IT-6 (D-IT-14): a claimed vault's collateral stays in the system ratio until its claimant intent is
+        # released (the debt left supply with this spend's burn); the owner's redeem removes it at once
+        if path == 'owner':
+            self.totals.collateral_zat -= v.collateral_zat
         self.totals.active_vaults -= 1
         if path == 'owner':
             self.totals.closed_vaults += 1
@@ -2847,7 +2871,7 @@ class YellowbackModel(object):
         # intent (RED-5 decides which is due), no re-lock
         intents = []
         if claim:
-            vspk = yed_vault_script(p, vault.owner_pubkey, vault.lock_height)
+            vspk = yed_vault_script_at(p, vault.owner_pubkey, vault.owner_height, vault.app_height)
             vhash = sha256(vspk)
             for j, o in enumerate(tx.vout):
                 if o.script == vspk:
@@ -2884,6 +2908,11 @@ class YellowbackModel(object):
                 return 'vault-spend-bad-payee'
             if tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps):
                 return 'vault-spend-bad-fee'
+            # IT-9: an owner redeem before lockHeight pays the class's early-redeem fee on top, through the same output
+            if (not claim and height < vault.lock_height and vault.term_class in (0, 1, 2)
+                    and tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps)
+                    + early_redeem_fee_zat(vault.collateral_zat, p.early_redeem_fee_bps[vault.term_class])):
+                return 'bad-redeem-early-fee'
         # AFEE-1 (RED-3's attestor-fee clause)
         if armed:
             attest_fee = attest_fee_zat(fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps), p.attest_fee_bps)
@@ -2892,7 +2921,8 @@ class YellowbackModel(object):
             if payee is None:
                 return 'afee1-fee'
             facts['attest_payee'] = payee
-        # RED-4 (amended) and RED-5
+        # RED-4 (amended; IT-2: the same threshold test at every height the V's APP branch admits, in term,
+        # in grace and past it -- there is no "after the term" clause) and RED-5
         if claim:
             s = self.snapshot(pl.ref_height)
             x_claim = None if (s is None or s.virtual) else s.p_claim
@@ -3226,7 +3256,7 @@ def compare_vaults(model, node):
         _check(str(r['ownerPubKey']).lower() == v.owner_pubkey.hex(), 'vault.ownerPubKey', v.mint_height, '%s:%d' % op)
         tc = r.get('termClass')
         _check(tc in (v.term_class, 'ABC'[v.term_class] if v.term_class < 3 else None), 'vault.termClass', v.mint_height, '%s:%d' % op)
-        for name, val in (('lockHeight', v.lock_height), ('claimHeight', v.claim_height), ('collateralZat', v.collateral_zat),
+        for name, val in (('lockHeight', v.lock_height), ('claimHeight', v.claim_height), ('appHeight', v.app_height), ('ownerHeight', v.owner_height), ('collateralZat', v.collateral_zat),
                           ('mintedCents', v.minted_cents), ('mintHeight', v.mint_height), ('refHeight', v.ref_height),
                           ('feePaidZat', v.fee_paid_zat), ('closeHeight', v.close_height), ('burnedCents', v.burned_cents)):
             if name in r and r[name] is not None:

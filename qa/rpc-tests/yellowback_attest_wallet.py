@@ -476,12 +476,14 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         self.price('10.20')
         self.mine_round_robin(POOLS, max(64, claim_height - user.getblockcount()) + REF_LAG)
         assert_equal(user.yed_getprice()['pClaim'], usd_to_micro('10.20'))
-        assert_equal(user.yed_getvault(v1['txid'])['claimable'], True)         # 5 x 100 / 49 YEC at $10.20 < 110 %
+        assert_equal(user.yed_getvault(v1['txid'])['claimable'], True)         # 3 x 100 / 49 YEC at $10.20 (62 %) < theta 125 %
 
-        # attested prices within one BundleLog window stay within PIN_DELTA_BPS of each other ($10.50 here, $11 for V2):
-        # a wider spread arms PIN-1 and pins every pool key quoting one constant price, leaving no xClaim
-        print('  V1: the normal claim (clause a) with attestors at $10.50: attestor fee, no residual, carrier never vin[0]')
-        c1 = wallet_claim(self, claimant, v1['txid'], prices='10.50')
+        # attested prices within one BundleLog window stay within PIN_DELTA_BPS of each other ($20 here, $20.80 for V2):
+        # a wider spread arms PIN-1 and pins every pool key quoting one constant price, leaving no xClaim. At 300 %
+        # (6.12 YEC) the vault is under theta 125 % up to $20.41, so V1's attestors say $20 (122 %, clause (a)) and
+        # V2's $20.80 (127 %: not (a); pEmerg = the pools' $10.20, 62 %, opens clause (b) after a notice).
+        print('  V1: the normal claim (clause a) with attestors at $20: attestor fee, no residual, carrier never vin[0]')
+        c1 = wallet_claim(self, claimant, v1['txid'], prices='20')
         assert_equal((c1['pending'], c1['claimPath'], c1['residualZat'], c1['burnedCents']), (False, 'a', 0, 10000))
         assert_equal((c1['xClaim'], c1['pClaim'], c1['pEmerg']), (usd_to_micro('10.20'), c1['aClaim'], None))   # pClaim = max(x, a)
         assert_greater_than(c1['aClaim'], c1['xClaim'])
@@ -504,16 +506,16 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         info1 = user.yed_gettxinfo(c1['txid'])
         assert_equal((info1['verdict'], info1['path']), ('ok', 'claim'))
 
-        print('  V2: not claimable under the combined pClaim with attestors at $11, but under EMERGENCY_RATIO at pEmerg')
+        print('  V2: not claimable under the combined pClaim with attestors at $20.80, but under EMERGENCY_RATIO at pEmerg')
         # canNotice is judged with the bundle this node would build (EstimateClaim): with an empty
-        # pool the cross-section alone reads clause (a) at $10.20, so feed the user's pool at $11 first
-        feed_pool(self, user, user.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11)
+        # pool the cross-section alone reads clause (a) at $10.20, so feed the user's pool at $20.80 first
+        feed_pool(self, user, user.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80')
         pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
         assert_equal((pos[v2['txid']]['noticed'], pos[v2['txid']]['noticeHeight'], pos[v2['txid']]['emergencyOpenAt']), (False, None, None))
         assert_equal((pos[v2['txid']]['canNotice'], pos[v2['txid']]['canClaim']), (True, False))
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, v2['txid'], '',
-                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11))
-        notice = wallet_notice(self, claimant, v2['txid'], prices=11)
+                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
+        notice = wallet_notice(self, claimant, v2['txid'], prices='20.80')
         assert_equal((notice['pending'], notice['vault'], notice['emergencyOpenAt']), (False, v2['txid'] + ':0', notice['refHeight'] + EMERGENCY_PERSIST))
         assert_equal(notice['xClaim'], usd_to_micro('10.20'))
         assert_equal(notice['pEmerg'], usd_to_micro('10.20'))                   # min(xClaim, aClaim)
@@ -527,17 +529,17 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal((pos[v2['txid']]['noticed'], pos[v2['txid']]['noticeHeight'], pos[v2['txid']]['emergencyOpenAt'], pos[v2['txid']]['canNotice']),
                      (True, notice_height, notice['refHeight'] + EMERGENCY_PERSIST, False))
         assert_rpc_error('notice-standing', claimant.yed_claimnotice, v2['txid'],
-                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11))
+                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
         print('  before EMERGENCY_PERSIST the claim is refused; after it clause (b) opens with the residual to the owner')
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, v2['txid'], '',
-                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11))
+                         offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
         self.mine_round_robin(POOLS, notice['refHeight'] + EMERGENCY_PERSIST - user.getblockcount())
         assert_equal([p['canClaim'] for p in claimant.yed_listpositions()], [])   # not the claimant's vault
         owner_addr = user.yed_getvault(v2['txid'])['ownerAddress']
         owner_t = user.validateaddress(user.yed_validateaddress(owner_addr)['transparentAddress'])['address']
         yec_owner_before = user.getbalance()
         to2 = claimant.getnewaddress()                       # U-23: a claim pays an intent, whose recipient is transparent
-        c2 = wallet_claim(self, claimant, v2['txid'], to2, prices=11)
+        c2 = wallet_claim(self, claimant, v2['txid'], to2, prices='20.80')
         assert_equal((c2['claimPath'], c2['to'], c2['burnedCents']), ('b', to2, 10000))
         # F-7 (regtest plan section 8.1; v3 plan 6.2 D-R-1): the claim spends a vault this wallet never
         # held. The inherited CommitTransaction indexes mapWallet by every input's txid and used to leave a
@@ -607,7 +609,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         pr = user.yed_getprice()
         assert abs(pr['pFast'] - usd_to_micro(90)) < usd_to_micro(1), pr        # the pools' quotes carry a small per-pool jitter
         assert_greater_than(usd_to_micro(80), pr['pMint'])                      # the slow window still remembers the old price
-        rally = wallet_mint(self, user, 10000, 48, prices=90)                   # the offline bundle at $90: agreeing with pFast, not with xMint
+        rally = wallet_mint(self, user, 10000, 145, prices=90)                  # the offline bundle at $90: agreeing with pFast, not with xMint (class C: the claims above left HALT-2 set, IT-5)
         assert_equal((rally['pending'], rally['source']), (False, 'x'))
         assert abs(rally['aMint'] - usd_to_micro(90)) < usd_to_micro(1), rally   # the offline bundle follows the jittered quotes
         assert_equal(rally['pMint'], rally['xMint'])                            # MINT-5 at the conservative minimum
@@ -656,11 +658,11 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
             miner = pool                     # one miner: tight mining never races another pool into a fork
             try:
                 if i % 2 == 0:
-                    m = wallet_mint(self, user, 10000, 48, prices=90, miner=miner)
+                    m = wallet_mint(self, user, 10000, 145, prices=90, miner=miner)     # class C: HALT-2 stands after the claims (IT-5)
                     txids += [m['carrierTxid'], m['txid']]
                 else:
                     ref = user.yed_getinfo()['height'] - REF_LAG
-                    res, txid = two_step_pending(self, user, 'yed_mint', 10000, 48, '', offline_bundle_hex(self, user, ref, b'', 90), miner=miner)
+                    res, txid = two_step_pending(self, user, 'yed_mint', 10000, 145, '', offline_bundle_hex(self, user, ref, b'', 90), miner=miner)
                     txids += [res['carrierTxid'], txid]
                 mine_tight(miner)
                 txids.append(user.yed_send(to, 100)['txid'])      # selects YEC right after the block

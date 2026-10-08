@@ -12,7 +12,10 @@ rules are consensus at `UPGRADE_VAULT`: the vault is the primitive's V template,
 into intents, a failing mint or vault spend makes the block invalid, and the activation state
 machine, the enforcement halts and the VOID vault are gone. The entries below are updated in place;
 what the upgrade changed is marked **(U-2x)**. P4-b (`SCHEMA_VERSION` 7: the attestor registry is the
-primitive's set `attestorSetId`) is marked **(P4-b)**.
+primitive's set `attestorSetId`) is marked **(P4-b)**. In-term claims
+(`docs/plans/yellowback-in-term-claims-plan.md`, `SCHEMA_VERSION` 8: the V's `appHeight` is `refHeight + 1`
+and the vault record remembers it; RED-4 decides a claim at every height; CLAIMING collateral stays in the
+system ratio until release) are marked **(IT-n)**.
 
 The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
@@ -30,11 +33,11 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 7`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 8`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
-| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked` |
+| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan; appended last so every earlier field keeps its offset) |
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |
@@ -228,9 +231,18 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   v2's OP_IF path detection (`spend_path`, K4) is no longer read by any rule.
 - **The YED V (U-23).** The vault output is byte-compared against the primitive's V with `tag =
   YED\0`, `setId = cancelSetId` = the attestor set's 32 internal bytes, `delay = CLAIM_DELAY`
-  (regtest 10, mainnet 1,152), `ownerHeight = lockHeight`, `ownerKey` = the payload's, `appHeight
-  = lockHeight + GRACE` (numbers as minimal `CScriptNum` pushes); a YED intent is the I of that V
-  (`yed_intent_script`). Both are parsed only in their exact shape with in-range fields
+  (regtest 10, mainnet 576), `ownerHeight = appHeight = refHeight + 1` **(IT-1, extended 2026-10-07: the owner
+  redeems in term)**, `ownerKey` = the payload's (numbers as minimal `CScriptNum` pushes; a V with the pre-plan
+  `ownerHeight = lockHeight`, `appHeight = lockHeight + GRACE` fails MINT-3 for a new mint but its record, both
+  heights remembered, still spends); a YED intent is the I of that V (`yed_intent_script`, built from the
+  record's heights). The payload's `lockHeight` is record-keeping (the term class, `claimHeight`).
+- **In-term claims (IT-2, IT-6).** RED-4 has no height clause: at every height the APP branch's CLTV admits
+  (`appHeight`, i.e. from the block after the mint) the claim is valid iff clause (a) or (b) holds, in term, in
+  grace and past it alike. `Totals.collateralZat` keeps a CLAIMING vault's collateral until its claimant
+  intent is released (D-IT-14): the claim spend leaves it, the release subtracts it, a cancel adds only the
+  re-lock's difference; the debt leaves `supplyCents` with the claim's burn as before. MINT-4/MINT-6's
+  recapitalisation gate is `baseRatioBps[class] >= recapRatioBps` **(IT-5)**, the sigma multiplier being
+  pinned at 1 by `sigmaRefBps = 0` **(IT-4)**. Both are parsed only in their exact shape with in-range fields
   (`parse_vault_template` / `parse_intent_template`: rebuild and compare); the model implements
   the two templates itself (it imports `vault.py` only for the `YV` act codec, P4-b).
 - Compressed-key validity is `CPubKey::IsFullyValid` for 33 bytes: prefix `02`/`03`, `x < p`,

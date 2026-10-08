@@ -82,7 +82,7 @@ static const CAmount TOKEN_VALUE = 10000;
 /** The network fee floor (-yellowbackfee may not go below it); a wallet-built transaction pays max(-yellowbackfee, its ZIP-317 conventional fee) (P-2, txbuilder.h NetworkFee). */
 static const CAmount DEFAULT_YELLOWBACK_FEE = 1000;
 
-/** Term classes (V19): A = 30-90 d, B = 90-365 d, C = 1-5 y. */
+/** Term classes (V19, D-IT-10): A = 30-90 d, B = 91-180 d, C = 181-365 d. */
 static const int NUM_CLASSES = 3;
 /** A signal-only tag carries this price (V9). */
 static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
@@ -118,7 +118,7 @@ struct Params
     int startHeight;                     //!< first height whose tags count = the UPGRADE_VAULT activation height (U-22); 0 = YED off
     std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of Yellowback addresses (D10)
     uint256 attestorSetId;               //!< the vault primitive set whose members cancel claims (U-22, U-23); null = YED off
-    int claimDelay;                      //!< CLAIM_DELAY: the YED vault's (and its claim intents') delay, blocks (U-23); 1,152 (1 d), regtest 10
+    int claimDelay;                      //!< CLAIM_DELAY: the YED vault's (and its claim intents') delay, blocks (U-23); 576 (12 h), regtest 10
 
     // Prices (PRICE-1..2, V16, L9)
     int pFastWindow, pMidWindow, pSlowWindow;          //!< 96 / 576 / 2,016
@@ -141,21 +141,22 @@ struct Params
 
     // Vaults
     int grace;                           //!< claimHeight = lockHeight + grace
-    int claimThresholdBps;               //!< 11,000
+    int claimThresholdBps;               //!< 12,500 (θ, D-IT-2)
     int supplyCapBps;                    //!< 1,500; 0 = no cap
-    int globalRatioHaltBps;              //!< 30,000 (H-11; regtest 25,000)
-    int recapRatioBps;                   //!< 60,000 (H-11; regtest 50,000): under HALT-2 a MINT is accepted iff minRatioBps(class, S) >= this (W16)
+    int globalRatioHaltBps;              //!< 20,000 (D-IT-11; regtest 25,000)
+    int recapRatioBps;                   //!< 50,000 (D-IT-12): under HALT-2 and above the cap a MINT is accepted iff baseRatioBps[class] >= this (IT-5)
     int divergenceBps;                   //!< 2,000
     int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive;
-    int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5: B and C on mainnet/testnet)
-    int baseRatioBps[NUM_CLASSES];       //!< 50,000 / 40,000 / 30,000
+    int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5; none is since D-IT-9)
+    int baseRatioBps[NUM_CLASSES];       //!< 30,000 / 40,000 / 50,000 (D-IT-4)
+    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9: 500 / 250 / 100 bps of the collateral, charged on an owner redeem before lockHeight on top of FEE-1
 
     // Volatility (SIGMA-1, V17)
     int volWindow;                       //!< 2,016
     int volStep;                         //!< 48
     int volPeriodsPerYear;               //!< 8,760 on every network (K13)
-    int sigmaRefBps;                     //!< 10,000; 0 = multiplier fixed at 1
-    int sigmaMultMaxBps;                 //!< 30,000
+    int sigmaRefBps;                     //!< 0 = multiplier fixed at 1 (D-IT-5; the v2 value was 10,000)
+    int sigmaMultMaxBps;                 //!< 10,000 (was 30,000)
 
     // Amounts
     Cents minMint;                       //!< MINT-2
