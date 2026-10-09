@@ -21,10 +21,10 @@ WORKDIR /src
 COPY . .
 ARG JOBS=4
 ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/src/depends/built \
-    --mount=type=cache,target=/src/depends/sources \
-    --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cargo/registry \
+RUN --mount=type=cache,id=ycash6-depends-built,target=/src/depends/built \
+    --mount=type=cache,id=ycash6-depends-sources,target=/src/depends/sources \
+    --mount=type=cache,id=ycash6-ccache,target=/root/.cache/ccache \
+    --mount=type=cache,id=ycash6-cargo,target=/root/.cargo/registry \
     ./zcutil/build.sh -j${JOBS} \
  && mkdir -p /out && cp src/ycashd src/ycash-cli src/ycash-tx /out/ && strip /out/*
 
