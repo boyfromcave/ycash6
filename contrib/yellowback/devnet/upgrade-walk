@@ -452,29 +452,14 @@ class Walk:
         self.ok(info["attest"]["seatedCount"] == 4 and info["attest"]["status"] == "ARMED", "four attestors seated, still ARMED")
         self.vaults["seat_pub"] = pub
 
-        # dormancy (S15): node 6's agent stops; bundles keep selecting it; it goes DORMANT
+        # dormancy (S15): node 6's agent stops; mints select it without its signature; it goes DORMANT
         pub6 = None
         for row in self.node(USER).yed_listattestors():
             if row["seq"] == self.state["attest_seqs"][str(DORMANT_AGENT)]: pub6 = row["attestorPubKey"]
         self.devnet("attestor", str(DORMANT_AGENT), "stop")
-        self.note("S15 on regtest: an ELIGIBLE attestor selected in >= DORMANCY_MIN_BUNDLES (2) bundles of the last DORMANCY_BLOCKS (16) "
-                  "without signing any is DORMANT at the next H %% DORMANCY_CHECK (4) == 0")
-        self.fund_user()
-        dormant_at = None
-        for k in range(6):
-            res, txid = self.two_step(USER, "yed_mint", MINT_CENTS, LOCK_BLOCKS, "", "")
-            self.mine(1, quiet=True)
-            v = self.node(USER).yed_getvault(txid)
-            self.vaults.setdefault("mints", []).append(txid)
-            self.out("    mint %d: %s bundleSeqs %s status %s" % (k, txid[:16], res.get("bundleSeqs"), v["status"]))
-            for _ in range(4):
-                if self.attestor_row(pub6)["status"] == "DORMANT": break
-                self.mine(1, quiet=True)
-            row = self.attestor_row(pub6)
-            if row["status"] == "DORMANT":
-                dormant_at = row["statusHeight"]; break
-        self.out("    node 6's record: " + jdump(pick(self.attestor_row(pub6), ["seq", "status", "statusHeight", "lastAct", "seated"])))
-        self.ok(dormant_at is not None, "node 6 (agent stopped) went DORMANT at %s while its bond stayed live" % dormant_at)
+        dormant_at, n6, since6, signed6 = self.s15_dormancy(pub6)
+        self.ok(dormant_at is not None, "node 6 (agent stopped) went DORMANT at %s, bond live: selected unsigned in %d bundle(s) of its window "
+                "(%d selected it since the stop, %d with its pooled attestation)" % (dormant_at, n6, since6, signed6))
         info = self.call(USER, "yed_getinfo", keys=["attest"])
         self.ok(info["attest"]["status"] == "ARMED", "the layer stays ARMED with one attestor dormant (seated %d)" % info["attest"]["seatedCount"])
         self.devnet("attestor", str(DORMANT_AGENT), "start")
@@ -488,7 +473,96 @@ class Walk:
         self.out("    node 6's record: " + jdump(pick(self.attestor_row(pub6), ["seq", "status", "statusHeight", "lastAct", "seated"])))
         self.ok(revived is not None and revived["lastAct"] > dormant_at, "node 6 revived (ELIGIBLE again at %s, lastAct %s) after its heartbeat"
                 % (revived and revived["statusHeight"], revived and revived["lastAct"]))
-        self.summary["steps"]["members"] = {"seat_seq": seq, "dormant_at": dormant_at, "revived_at": revived["statusHeight"]}
+        self.summary["steps"]["members"] = {"seat_seq": seq, "dormant_at": dormant_at, "revived_at": revived["statusHeight"],
+                                            "dormancy_bundles": n6, "bundles_selecting_since_stop": since6}
+
+    def bundle_row(self, h):
+        """BundleLog[h] as the node builds it (R12): the union over block h's verified bundles of selected(R, selector) and of
+        the signers. Read from the node's own facts: each transaction's TxLog (yed_gettxinfo.bundleSeqs, the signers) and the
+        consensus selection at its refHeight (yed_getselection; selected() reads Snapshots[R] and bond/registerHeight only, so
+        it is the same after the fact). None when no transaction of block h carried a bundle."""
+        node = self.node(USER)
+        selected, signers, found = set(), set(), False
+        for txid in node.getblock(node.getblockhash(h))["tx"][1:]:
+            try: log = node.yed_gettxinfo(txid)
+            except Exception: continue                       # not a Yellowback transaction
+            if not log.get("bundleSeqs"): continue
+            if log.get("type") != "mint":
+                raise WalkFailure("block %d carries a %s bundle (%s): this step models MINT bundles (selector \"\") only" % (h, log.get("type"), txid[:16]))
+            ref = node.yed_getvault(txid)["refHeight"]
+            sel = {e["seq"] for e in node.yed_getselection(ref, "")["selected"]}
+            if not set(log["bundleSeqs"]) <= sel:
+                raise WalkFailure("mint %s at %d: signers %s are not within selected(%d, \"\") = %s" % (txid[:16], h, log["bundleSeqs"], ref, sorted(sel)))
+            selected |= sel; signers |= set(log["bundleSeqs"]); found = True
+        return (selected, signers) if found else None
+
+    def s15_dormancy(self, pub6, max_mints=8, max_steer=40):
+        """S15, driven from the node's facts: mint (bounded) only at reference heights whose selection holds node 6 with no fresh
+        attestation of it in the pool, keep BundleLog's rows as the node builds them, and at every H % DORMANCY_CHECK == 0
+        compare the node's verdict with the rule: DORMANT at H iff node 6 was ELIGIBLE and seated by H - DORMANCY_BLOCKS and
+        sits in >= DORMANCY_MIN_BUNDLES rows of (H - DORMANCY_BLOCKS, H] while signing none of them. Returns (H, rows in the
+        window, rows selecting node 6 since the stop, of which signed)."""
+        ap = self.yed_params()["attest"]
+        blocks, min_bundles, check = ap["dormancyBlocks"], max(1, ap["dormancyMinBundles"]), ap["dormancyCheck"]
+        self.note("S15 on regtest: an ELIGIBLE attestor selected in >= DORMANCY_MIN_BUNDLES (%d) bundles of the last DORMANCY_BLOCKS (%d) "
+                  "without signing any is DORMANT at the next H %% DORMANCY_CHECK (%d) == 0; the pool keeps its last attestation for "
+                  "attestMaxAge (%d), so a bundle may still carry it" % (min_bundles, blocks, check, ap["attestMaxAge"]))
+        row6 = self.attestor_row(pub6)
+        seq6 = row6["seq"]
+        stop_h = self.tip()
+        self.ok(row6["status"] == "ELIGIBLE" and row6["seatedSince"] is not None, "node 6 (seq %d) is ELIGIBLE and seated since %s when its agent stops at %d"
+                % (seq6, row6["seatedSince"], stop_h))
+        rows, seen = {}, [stop_h - blocks]                    # every row a window after the stop can reach
+
+        def observe():
+            for h in range(seen[0] + 1, self.tip() + 1):
+                rows[h] = self.bundle_row(h)
+                seen[0] = h
+
+        def verdict(H):
+            win = [rows[h] for h in range(H - blocks + 1, H + 1) if rows.get(h)]
+            picked = sum(1 for r in win if seq6 in r[0])
+            signed = any(seq6 in r[1] for r in win)
+            return picked, signed, row6["seatedSince"] <= H - blocks and picked >= min_bundles and not signed
+
+        observe()
+        expect, next_check = None, [stop_h + 1]
+        for k in range(max_mints):
+            self.fund_user()
+            for _ in range(max_steer):                        # a reference height whose selection holds node 6, unsigned
+                ref = self.tip() - REF_LAG
+                e6 = [e for e in self.node(USER).yed_getselection(ref, "")["selected"] if e["seq"] == seq6]
+                if e6 and not e6[0]["poolFresh"]: break
+                self.mine(1, quiet=True)
+            else:
+                raise WalkFailure("no reference height in %d blocks selected node 6 without a fresh attestation of it" % max_steer)
+            res, txid = self.two_step(USER, "yed_mint", MINT_CENTS, LOCK_BLOCKS, "", "")
+            self.mine(1, quiet=True)
+            self.vaults.setdefault("mints", []).append(txid)
+            mined = self.node(USER).yed_gettxinfo(txid)["height"]
+            self.mine_to(-(-mined // check) * check, quiet=True)      # through the first check height that sees this row
+            observe()
+            r = rows[mined] or (set(), set())
+            self.out("    mint %d: %s refHeight %s at %d: selected %s, signed %s" % (k, txid[:16], res.get("refHeight"), mined, sorted(r[0]), sorted(r[1])))
+            for H in range(next_check[0], self.tip() + 1):       # each check height once: its window is all observed
+                next_check[0] = H + 1
+                if H % check: continue
+                picked, signed, fires = verdict(H)
+                self.out("      H %d: node 6 in %d row(s) of (%d, %d], signed %s -> %s" % (H, picked, H - blocks, H, signed, "DORMANT" if fires else "stays"))
+                if fires:
+                    since = [rows[h] for h in range(stop_h + 1, H + 1) if rows.get(h) and seq6 in rows[h][0]]
+                    expect = (H, picked, len(since), sum(1 for r in since if seq6 in r[1])); break
+            row = self.attestor_row(pub6)
+            got = row["statusHeight"] if row["status"] == "DORMANT" else None
+            if (expect and expect[0]) != got:
+                raise WalkFailure("S15 mismatch: the rule over the node's BundleLog rows says %s, the node's record says %s (%s)"
+                                  % ("DORMANT at %d" % expect[0] if expect else "not yet DORMANT", "DORMANT at %d" % got if got else row["status"],
+                                     jdump(pick(row, ["seq", "status", "statusHeight", "lastAct", "seatedSince"]))))
+            if expect:
+                self.out("    node 6's record: " + jdump(pick(row, ["seq", "status", "statusHeight", "lastAct", "seated", "seatedSince"])))
+                return expect
+        raise WalkFailure("node 6 was not selected without signing in %d rows of one %d-block window after %d mints (rows: %s)"
+                          % (min_bundles, blocks, max_mints, {h: [sorted(r[0]), sorted(r[1])] for h, r in rows.items() if r}))
 
     def fund_user(self):
         """Node 0 spent most of its coinbase funding the personas: top it up from the pools."""
