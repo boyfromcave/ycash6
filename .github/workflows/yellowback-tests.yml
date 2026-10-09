@@ -43,8 +43,9 @@ name: yellowback tests
 #   schedule: ONLY the `schedule-fanout` job. GitHub runs a scheduled workflow from the DEFAULT
 #     branch's copy of this file and checks out the default branch (feature/yellowback here), so
 #     a nightly defined on harden/yellowback or upgrade/vault never ran on those branches. The
-#     dispatcher instead starts this workflow by workflow_dispatch on every branch of the anchor
-#     (tier nightly at 03:00, weekly on Sunday 04:00), so each branch runs ITS OWN nightly. It
+#     dispatcher instead starts this workflow by workflow_dispatch on upgrade/vault only (owner,
+#     2026-10-09; tier nightly at 03:00, weekly on Sunday 04:00); other branches' nightlies are
+#     dispatched by hand when needed. It
 #     takes effect once the default branch carries this file (or the default branch is switched
 #     to harden/yellowback for the duration of the hardening plan).
 #   workflow_dispatch, input `tier`: all (push + nightly; the default, as a dispatch ran before),
@@ -178,7 +179,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: *node-line-branches
+        # upgrade/vault only (owner, 2026-10-09), not the whole *node-line-branches anchor.
+        branch: [upgrade/vault]
     steps:
       - name: Dispatch this workflow on the branch
         env:
