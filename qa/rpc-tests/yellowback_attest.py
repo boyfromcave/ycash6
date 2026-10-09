@@ -75,6 +75,7 @@ from test_framework.yellowback_util import (
     BPS,
     CLAIM_DELAY,
     COIN,
+    DORMANCY_BLOCKS,
     DORMANCY_CHECK,
     DORMANCY_MIN_BUNDLES,
     EMERGENCY_PERSIST,
@@ -729,19 +730,36 @@ class YellowbackAttestTest(YellowbackTestFramework):
         rpc_error('bundle-insufficient', user.yed_estimatecollateral, CENTS, LOCK)
         print('dormancy: seq %d seated, selected in %d rows, absent from every bundle => DORMANT at the next check' % (dormant, DORMANCY_MIN_BUNDLES))
         active = {seq: PRICE for seq in live_seqs if seq != dormant}
-        start = user.getblockcount()
-        rows = 0
-        k = 0
-        while rows < DORMANCY_MIN_BUNDLES:
+        # selected(R, '') is a weighted draw of mSelect + kSlack of the seated from Snapshots[R].blockHash: a mint at a given R
+        # may not select the dormant seq at all. So mint only at an R whose consensus selection holds it (yed_getselection;
+        # mint_fresh checks yed_buildbundle's selection against the Python one), each mint's row at its mined height.
+        rows = []
+        k = skipped = 0
+        while len(rows) < DORMANCY_MIN_BUNDLES:
+            for _ in range(40):
+                if dormant in [e['seq'] for e in user.yed_getselection(user.getblockcount() - REF_LAG, '')['selected']]: break
+                self.pools_step(1, 'until selected(R) holds seq %d' % dormant)
+                skipped += 1
+            else:
+                raise AssertionError('no R in 40 blocks selected seq %d' % dormant)
             m = self.mint_fresh(USER, active, POOLS[k % 3], price_step=Decimal('0.01') * (k + 1))
             k += 1
-            if dormant in m['selected']:
-                rows += 1
-                assert dormant not in m['seqs']
-            assert user.getblockcount() - start < 12, 'seq %d was not selected twice inside the dormancy window' % dormant
-        while user.getblockcount() % DORMANCY_CHECK != 0:
+            assert dormant in m['selected'] and dormant not in m['seqs'], (dormant, m['selected'], m['seqs'])
+            rows.append(user.yed_gettxinfo(m['txid'])['height'])
+            while rows[-1] - rows[0] >= DORMANCY_BLOCKS - DORMANCY_CHECK:
+                rows.pop(0)                       # an older row may leave the window before the next check: keep the newer ones
+        check = -(-rows[-1] // DORMANCY_CHECK) * DORMANCY_CHECK
+        assert check - DORMANCY_BLOCKS < rows[0], (rows, check)
+        print('dormancy: seq %d selected without signing in the rows at %s (%d mints, %d blocks at an R not selecting it); S15 fires at the check height %d'
+              % (dormant, rows, k, skipped, check))
+        if user.getblockcount() < check:
+            while user.getblockcount() < check - 1:
+                self.pools_step(1, 'to the dormancy check')
+            self.assert_status_everywhere(dormant, 'ELIGIBLE')                  # not before the check height
             self.pools_step(1, 'to the dormancy check')
+        assert_equal(user.getblockcount(), check)
         self.assert_status_everywhere(dormant, 'DORMANT')
+        assert_equal(self.attestors()[dormant]['statusHeight'], check)
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 1)   # SNAP seats before the dormancy pass (v3 §3.8 order)
         self.pools_step(1, 'after the dormancy check')
         assert_equal(user.yed_getinfo()['attest']['seatedCount'], N_ATTESTORS - 2)   # it leaves the seats at the next SNAP

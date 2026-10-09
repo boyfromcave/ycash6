@@ -50,6 +50,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -249,6 +250,20 @@ class Walk:
             time.sleep(1.5)
             if k % 2 == 1: self.mine(1, quiet=True)
         raise WalkFailure("node%d: poolFresh %d < %d running agents after %d tries" % (i, info["poolFresh"], want, tries))
+
+    def fresh_spend(self, i, txid, vout=0, tries=20):
+        """Before a spend of a vault that must reach the wallet's own verdict: fresh(), then selected(tip, outpoint) on node i
+        has mSelect fresh attestations. A REDEEM / CLAIM cites R = tip, while fresh() (yed_getinfo.poolFresh) reads a mint's
+        R = tip - REF_LAG, so an attestation REF_LAG blocks from aging out passes fresh() and is stale for the spend."""
+        self.fresh(i)
+        selector = bytes_to_hex_str(hex_str_to_bytes(txid)[::-1]) + bytes_to_hex_str(struct.pack("<I", vout))
+        for k in range(tries):
+            sel = self.node(i).yed_getselection(self.node(i).getblockcount(), selector)
+            if sel["reachable"] >= sel["mSelect"]: return sel
+            time.sleep(1.5)
+            if k % 2 == 1: self.mine(1, quiet=True)
+        raise WalkFailure("node%d: %d of mSelect %d selected attestors fresh for a spend of %s at the tip after %d tries"
+                          % (i, sel["reachable"], sel["mSelect"], txid[:16], tries))
 
     def two_step(self, i, method, *args, keys=None, after_wait=()):
         """yed_mint / yed_claim with wait=false: the carrier, one block, then the main transaction.
@@ -785,7 +800,7 @@ class Walk:
                 self.out("    node%d yed_listclaimable row for F: %s" % (i, jdump(pick(rows[0], ["claimable", "underwaterAt", "pClaim", "claimPath"]))))
             self.ok(not rows or rows[0].get("claimable") is False, "node%d: F is not claimable above theta (yed_listclaimable)" % i)
             self.ok(self.node(i).yed_getvault(f)["claimable"] is False, "node%d: yed_getvault F claimable: false" % i)
-        self.fresh(CLAIMANT)
+        self.fresh_spend(CLAIMANT, f)
         self.fails(CLAIMANT, "yed_claim", f, "", "", False, 0, 0, expect="claim-not-underwater")
         self.note("the wallet refuses before anything is signed; a claim transaction above theta would fail RED-4 in every Yellowback mempool and block (IT-2)")
         # D-IT-15: the owner redeems G in term, above theta; IT-9: it pays the early-redeem fee
