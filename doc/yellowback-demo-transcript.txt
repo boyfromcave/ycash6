@@ -1,83 +1,83 @@
-Initializing test directory <tmpdir>/841
+Initializing test directory <tmpdir>/864
 ====================================================================================================
 Yellowback on ycashd 6.20.0, the vault upgrade line -- the plan section 4 demonstration (yellowback_demo_v6.py)
 node 1 binary: wt/ycash6-stock/src/ycashd (ycash6-stock e98128239)
 ====================================================================================================
-[    30s] [0] node 1 (stock 6.20.0 binary /YcashCpp:6.20.0/): height 99, no yed_* RPCs (help yed_getinfo: unknown command); the vault upgrade at 103 is unknown to it
-[    40s] [0] node 1 (/YcashCpp:6.20.0/) vs node 5 (fork binary, no -yellowback): 4 comparison points equal below the upgrade (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); its block and a pool's block followed by every node both ways; utxo hash 5f2022b14039dd61 at 102
-[    40s] [0] *** the reference half ends at 102: a stock 6.20.0 binary cannot follow the vault upgrade (finding 37); node 1 is the fork binary without the attestor set from here
-[    87s] [0] PASS -- the reference half: stock 6.20.0 on node 1 below the vault upgrade, fork-vs-stock parity :: /YcashCpp:6.20.0/, 4 comparison points equal, chain at 102; node 1 now the fork binary without the attestor set
-[    87s] [1] every node starts from genesis; node 0 mined 99 blocks before the run; the YED attestor set c015c9a9bbdff767 was created at 103 (U-22)
-[    87s] [1] node 0 (user): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 2 (pool): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 3 (pool): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 4 (pool): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 5 (observer): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 6 (attestor wallet): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 7 (attestor wallet): rpcversion 5 healthy True index height 104 upgrade active startHeight 103 statehash 2de01f981d111afd
-[    87s] [1] node 1 (stock, no attestor set): /YcashCpp:6.22.0-rc1/, height 104, no yed_* RPCs (help yed_getinfo: unknown command)
-[    87s] [1] PASS -- every Yellowback node starts with the attestor set, syncs the index, rpcversion 5 healthy; node 1 has no yed_* command :: 7 Yellowback nodes at height 104, one state hash 2de01f981d111afd; node 1 stock (/YcashCpp:6.22.0-rc1/)
-[    87s] [2] pools 2-4 quote $50 (yed_setquote) and mine 12 blocks round robin
-[    99s] [2] height 114: tag kind=quote price=50000000 payout=smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk
-[    99s] [2] height 115: tag kind=quote price=50000000 payout=smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn
-[    99s] [2] height 116: tag kind=quote price=50000000 payout=smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4
-[    99s] [2] yed_getprice at 116: pFast=50000000 pMid=None pSlow=None (mid/slow fill later)
-[   100s] [2] node 1 mined 0e81452773e4003a at 117 with a forged quote tag $100 for smDsefutiToVmTZX2YDNFmNhBi5fV9BSD52: decoded, pFast still 50000000 (lower median of 8)
-[   101s] [2] node 1 mined 047c5dcc59316c4a at 118 with a malformed tag (flags 0x02): yed_gettag found=false, block valid everywhere
-[   107s] [2] PASS -- pools tag quotes; yed_getprice median; a forged tag from a non-pool is outvoted :: pFast 50000000 at 124; forged $100 tag at 117 penalised until 133 (REG-4), price unmoved; malformed tag ignored; statehash e48a386f6b3f1a7d
-[   107s] [3] UPGRADE_VAULT (branch 6d5b7a31) active since 103 on all 8 nodes (getblockchaininfo.upgrades, vault_getinfo), node 1 included: activation is a height in chainparams, not a signalling count
-[   107s] [3] the YED attestor set c015c9a9bbdff767: seats 15, cancel threshold 1, members 0 (set_getinfo); every Yellowback node runs -yellowbackattestorset=c015c9a9bbdff767
-[   107s] [3] yed_getactivation on 7 Yellowback nodes: status active, activationHeight 103, attestorSetId c015c9a9bbdff767, claimDelay 10; yed_getinfo carries none of enforcing, valveTripped, sunset, rejectedBlocks, abandoned, activation (upgrade plan section 6); node 1: Method not found
-[   131s] [3] minting open at 148 after 24 more pool blocks: pFast 50000000 pMid 50000000 pSlow 50000000 (WINDOW_MIN_FILL), haltMask []
-[   137s] [3] node 4 restarted with -yellowbacksignal=0 -yellowbackenforce=0: both logged "retired with the vault upgrade and ignored"; it validates (statehash 06b30e2de5d3ef6c), its block 149 tags a quote as before
-[   146s] [3] PASS -- activation is UPGRADE_VAULT at a height plus the attestor set, one parameter on every node; the retired machinery is gone :: branch 6d5b7a31 active since 103 on 8 nodes; attestor set c015c9a9bbdff767; minting open at 149; retired options ignored on node 4; statehash 06b30e2de5d3ef6c
-[   146s] [4] wallet mints (yed_mint, two steps: carrier then mint): A redeem, B claim, C/E/F kept for items 5-6
-[   151s] [4] yed_mint A: txid 4a82b7c531e06d899c4bf7b2fb93eb68ac48d5bc14469ee352eb65d3fb46b05b class A collateral 1000000000 zat fee 50000000 to smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn lock 196 claim 220
-[   154s] [4] yed_mint B: txid d63910e6bc10eac7d27e075d84189cfdb34316ca91c521cd03885d5a0e688b5e class A collateral 1000000000 zat fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4 lock 197 claim 221
-[   159s] [4] yed_mint C: txid 46d983a58f7b7d65ab8067ef05cf032dc894831d6d36f5abfce6f546c3b67277 class A collateral 1000000000 zat fee 50000000 to smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn lock 198 claim 222
-[   164s] [4] yed_mint E: txid 9b2ea13d0564b3705b3571b23e6c0051e9bc75c52528e52cdc43b898e96b5470 class A collateral 1000000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 199 claim 223
-[   169s] [4] yed_mint F: txid efc1795148225408a57124342bc94834c1b375ca769f5c657918f8cc918c7679 class A collateral 1000000000 zat fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4 lock 200 claim 224
-[   170s] [4] A's vout 0 is the V template (vault_decodescript): tag YED, set = cancel set = c015c9a9bbdff767, delay 10, ownerHeight 196 = lockHeight, appHeight 220 = claimHeight
-[   175s] [4] raw build_mint_tx D: 1858360b9071832d9ddfb3b2eb4874bb2c9b516472ce1ad207ee0bbd1ee1dc6c ACTIVE; raw Z (1000 zat short): verdict bad-mint-collateral, refused by all 7 mempools (bad-yellowback-bad-mint-collateral), its hand-built block 0402b3e3c846cb73 rejected by submitblock on pool 2 (bad-yellowback-bad-mint-collateral): no vault, no VOID, nothing mined
-[   179s] [4] yed_send 10100 cents user -> observer: 7d294123a4b75f1b08cdd44a621eaa1c73191f0a85efc092f28567c8a91298ce (change 9900)
-[   226s] [4] yed_redeem A (refused as vault-locked before 202): 675c94747dc8d84fba81424d9b497fb8c72fb7365f781316cfe3b1c5be1fa26b, owner selector OP_2, burned 10000, fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk, collateral 950008500 back; yed_sweep: Method not found (retired with abandonment, upgrade plan section 6)
-[   230s] [4] raw owner-path redemption of D (build_vault_spend_raw, REDEEM payload, FEE-W payee): d23d1bbea97e84525f0c7e74f816c85c8197837fabf121ebc8afc3c3e07827cb CLOSED
-[   230s] [4] crash: every pool quotes $1 until d63910e6bc10eac7 is claimable (pClaim = max(pMid, pSlow))
-[   262s] [4] 32 crash blocks: pClaim 1000000 at 236, d63910e6bc10eac7 claimable
-[   269s] [4] yed_claim B by the observer: 471758f0c82a6d1ddcf7bea547f9da1b09997c801f268f03b5bebabb618fb431, claim selector OP_4 into a claimant intent (vault_decodescript: intent), burned 10000, collateral 1000000000 in the intent, fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4; CLAIMING on every node, supply 40000 -> 30000
-[   285s] [4] vault_release 471758f0c82a6d1ddcf7bea547f9da1b09997c801f268f03b5bebabb618fb431:0: refused before the delay (the intent matures at height 248); released at 248 (releaseHeight 248 = claim + 10): b39a5151a30ce30240cae21e8674e531f2dbc45d44b5438ad4c92c6da120227e, CLAIMED everywhere, 9.99990000 YEC to the claimant
-[   318s] [4] pools back at $50: 33 blocks to re-open minting (nothing claimable)
-[   319s] [4] yellowback_model full=True on nodes 0, 2, 5: every tx, vault, stat and the state hash agree; wallet balances sum 30000 = supplyCents 30000; active 3 void 0 closed 2 claimed 1 unbacked 0
-[   319s] [4] PASS -- mint, send, redeem, claim into an intent and its release from the wallet RPCs and the raw builders; an invalid mint is invalid; the model agrees :: redeem 675c94747dc8d84f, raw redeem d23d1bbea97e8452, claim 471758f0c82a6d1d, release b39a5151a30ce302; Z rejected (bad-yellowback-bad-mint-collateral); model statehash 0ffff9faf48cd385
-[   322s] [5] UNARMED at 282; five attestors join the set (raw SET_JOIN acts, P4-b: the set is the registry; 10 YEC bonds, member keys on nodes 6-7)
-[   332s] [5] seqs [0, 1, 2, 3, 4] ELIGIBLE; set members 0 -> 5, current 5 (set_getinfo); TRIGGERED at 291, ARMED at 299 (+8) on every Yellowback node; seated 5
-[   339s] [5] armed yed_mint 6b222046d4ebbf0af4ec3433f59440daf2c8b2e5c646ff06b025e32c1c08fe67: carrier 2a583da8ab844669eec92c78d246bb6963f971abcfd0f7e757dae0862887222b, bundle seqs [2, 3, 4], aMint 50000500 xMint 50000000 pMint 50000000, attestor fee 12500000 to smUnz9w7uCy7SEfraaE7QUAn4ivTchmg3QR: ACTIVE everywhere
-[   341s] [5] stale-bundle mint 5fe11fc7b5f9abb480d432924bb29b55ee3602dd8c8580e4bfa97cf7391dca25: verdict mint9-bundle-stale; refused by all 7 mempools, its hand-built block 0d847db81d2cd7b5 rejected on pool 3 (bad-yellowback-mint9-bundle-stale): no vault, no YED issued -- a failing mint is an invalid transaction, not a VOID vault
-[   342s] [5] bundle-less claim of E: verdict red1-bundle-shape; refused by all 7 mempools, its hand-built block 03f2eda0a5abe904 rejected on pool 4 (bad-yellowback-red1-bundle-shape); E ACTIVE
-[   342s] [5] PASS -- attestors join the set, bundles carried; a bad bundle is an invalid transaction: refused by every mempool, its block rejected :: ARMED at 299, set current 5; good mint 6b222046d4ebbf0a; stale-bundle mint block 0d847db81d2cd7b5 and bundle-less claim block 03f2eda0a5abe904 rejected; statehash f5165cf5b1494f7e
+[    32s] [0] node 1 (stock 6.20.0 binary /YcashCpp:6.20.0/): height 99, no yed_* RPCs (help yed_getinfo: unknown command); the vault upgrade at 103 is unknown to it
+[    42s] [0] node 1 (/YcashCpp:6.20.0/) vs node 5 (fork binary, no -yellowback): 4 comparison points equal below the upgrade (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); its block and a pool's block followed by every node both ways; utxo hash e1bc32c30197a467 at 102
+[    42s] [0] *** the reference half ends at 102: a stock 6.20.0 binary cannot follow the vault upgrade (finding 37); node 1 is the fork binary without the attestor set from here
+[    91s] [0] PASS -- the reference half: stock 6.20.0 on node 1 below the vault upgrade, fork-vs-stock parity :: /YcashCpp:6.20.0/, 4 comparison points equal, chain at 102; node 1 now the fork binary without the attestor set
+[    91s] [1] every node starts from genesis; node 0 mined 99 blocks before the run; the YED attestor set 27cc695ab65a0861 was created at 103 (U-22)
+[    91s] [1] node 0 (user): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 2 (pool): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 3 (pool): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 4 (pool): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 5 (observer): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 6 (attestor wallet): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 7 (attestor wallet): rpcversion 6 healthy True index height 104 upgrade active startHeight 103 statehash 4f2bfab5f8d8f8db
+[    91s] [1] node 1 (stock, no attestor set): /YcashCpp:6.22.0-rc1/, height 104, no yed_* RPCs (help yed_getinfo: unknown command)
+[    91s] [1] PASS -- every Yellowback node starts with the attestor set, syncs the index, rpcversion 6 healthy; node 1 has no yed_* command :: 7 Yellowback nodes at height 104, one state hash 4f2bfab5f8d8f8db; node 1 stock (/YcashCpp:6.22.0-rc1/)
+[    91s] [2] pools 2-4 quote $50 (yed_setquote) and mine 12 blocks round robin
+[   102s] [2] height 114: tag kind=quote price=50000000 payout=smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk
+[   102s] [2] height 115: tag kind=quote price=50000000 payout=smDxF4b6h9ZMwP2ZcPBzHQcuxU6WYSvdSSn
+[   102s] [2] height 116: tag kind=quote price=50000000 payout=smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4
+[   102s] [2] yed_getprice at 116: pFast=50000000 pMid=None pSlow=None (mid/slow fill later)
+[   103s] [2] node 1 mined 0e6bce8c734ff1b7 at 117 with a forged quote tag $100 for smbfM4iAybqHGLQ48mn4wBCcAnLr6UPb8ZE: decoded, pFast still 50000000 (lower median of 8)
+[   104s] [2] node 1 mined 0cb86b430bb83d13 at 118 with a malformed tag (flags 0x02): yed_gettag found=false, block valid everywhere
+[   110s] [2] PASS -- pools tag quotes; yed_getprice median; a forged tag from a non-pool is outvoted :: pFast 50000000 at 124; forged $100 tag at 117 penalised until 133 (REG-4), price unmoved; malformed tag ignored; statehash 59b647940733e935
+[   110s] [3] UPGRADE_VAULT (branch 6d5b7a31) active since 103 on all 8 nodes (getblockchaininfo.upgrades, vault_getinfo), node 1 included: activation is a height in chainparams, not a signalling count
+[   110s] [3] the YED attestor set 27cc695ab65a0861: seats 15, cancel threshold 1, members 0 (set_getinfo); every Yellowback node runs -yellowbackattestorset=27cc695ab65a0861
+[   110s] [3] yed_getactivation on 7 Yellowback nodes: status active, activationHeight 103, attestorSetId 27cc695ab65a0861, claimDelay 10; yed_getinfo carries none of enforcing, valveTripped, sunset, rejectedBlocks, abandoned, activation (upgrade plan section 6); node 1: Method not found
+[   134s] [3] minting open at 148 after 24 more pool blocks: pFast 50000000 pMid 50000000 pSlow 50000000 (WINDOW_MIN_FILL), haltMask []
+[   141s] [3] node 4 restarted with -yellowbacksignal=0 -yellowbackenforce=0: both logged "retired with the vault upgrade and ignored"; it validates (statehash af3cfd41fa48254b), its block 149 tags a quote as before
+[   149s] [3] PASS -- activation is UPGRADE_VAULT at a height plus the attestor set, one parameter on every node; the retired machinery is gone :: branch 6d5b7a31 active since 103 on 8 nodes; attestor set 27cc695ab65a0861; minting open at 149; retired options ignored on node 4; statehash af3cfd41fa48254b
+[   149s] [4] wallet mints (yed_mint, two steps: carrier then mint): A redeem, B claim, C/E/F kept for items 5-6
+[   152s] [4] yed_mint A: txid 5a051e21c04d4d8345fa3eb5ab76fbaba9cde815e7641fe7661aab63d84d5121 class A collateral 600000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 196 claim 220
+[   157s] [4] yed_mint B: txid fc90140ef93eaf683a44cc3cd19e48a7fe62260d7b3bf67531967e0c1b71b0e0 class A collateral 600000000 zat fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4 lock 197 claim 221
+[   161s] [4] yed_mint C: txid 9c29640408bddcb74882306702d9e4c34e11cca907b54b82d2ab3629fd608c10 class A collateral 600000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 198 claim 222
+[   167s] [4] yed_mint E: txid 4759bbb5768f7150058e3b0d347830fce075fc5a9d8ecd681bbf4380420588b7 class A collateral 600000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 199 claim 223
+[   173s] [4] yed_mint F: txid 80e90ef993bb2f7a388c1efa1898e833bc972b9f3f3c71ba380e24cf601503d8 class A collateral 600000000 zat fee 50000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk lock 200 claim 224
+[   174s] [4] A's vout 0 is the V template (vault_decodescript): tag YED, set = cancel set = 27cc695ab65a0861, delay 10, ownerHeight 149 = appHeight 149 = refHeight + 1 (IT-1: owner and claim branches open from the mint; lockHeight 196, claimHeight 220 are module rules)
+[   178s] [4] raw build_mint_tx D: 9ac10382e565a2929e20c170ab2accdf9b6e5e24f5a17ced8cf1b57beae680b0 ACTIVE; raw Z (1000 zat short): verdict bad-mint-collateral, refused by all 7 mempools (bad-yellowback-bad-mint-collateral), its hand-built block 075667033d4a6c8b rejected by submitblock on pool 2 (bad-yellowback-bad-mint-collateral): no vault, no VOID, nothing mined
+[   184s] [4] yed_send 10100 cents user -> observer: 88b5f5cce256a14ac47244329b6e08e8b92389d811be66d41381f22b4a70cc81 (change 9900)
+[   234s] [4] yed_redeem A in term (37 blocks before its lockHeight 196): 710b3a0406dc09d086a598f4202a41495a8c2322735403c89d9f93f50584a923, owner selector OP_2, burned 10000, fee 80000000 to smDK4LmsVj4dxVMqXbpvuYv9tkAgvKNiCUk (FEE-1 + the class A early-redeem fee 30000000, IT-9), collateral 520008500 back; yed_sweep: Method not found (retired with abandonment, upgrade plan section 6)
+[   238s] [4] raw owner-path redemption of D (build_vault_spend_raw, REDEEM payload, FEE-W payee): 54340d94182dfb76a7e64a3a277cb582671a7b1ced04e652128896acc703f8d4 CLOSED
+[   238s] [4] crash: every pool quotes $1 until fc90140ef93eaf68 is claimable (pClaim = max(pMid, pSlow))
+[   270s] [4] 32 crash blocks: pClaim 1000000 at 235, fc90140ef93eaf68 claimable (past its term: lockHeight 197, claimHeight 221)
+[   275s] [4] yed_claim B by the observer: 13cb18755d8c09d2c4da9f0cbfa49bf29d2039ee7dbd0f5deafd94e9fbc0b371, claim selector OP_4 into a claimant intent (vault_decodescript: intent), burned 10000, collateral 600000000 in the intent, fee 50000000 to smJQihTy3t6QqGdNimrrWhN1aF8SbwrWmT4; CLAIMING on every node, supply 40000 -> 30000
+[   289s] [4] vault_release 13cb18755d8c09d2c4da9f0cbfa49bf29d2039ee7dbd0f5deafd94e9fbc0b371:0: refused before the delay (the intent matures at height 247); released at 247 (releaseHeight 247 = claim + 10): 4a078602154bb30f6e6e07e0c64319ca4e5956d43345a2edb6d87f88f3236e13, CLAIMED everywhere, 5.99990000 YEC to the claimant
+[   322s] [4] pools back at $50: 33 blocks to re-open minting (nothing claimable)
+[   323s] [4] yellowback_model full=True on nodes 0, 2, 5: every tx, vault, stat and the state hash agree; wallet balances sum 30000 = supplyCents 30000; active 3 void 0 closed 2 claimed 1 unbacked 0
+[   323s] [4] PASS -- mint, send, redeem, claim into an intent and its release from the wallet RPCs and the raw builders; an invalid mint is invalid; the model agrees :: redeem 710b3a0406dc09d0, raw redeem 54340d94182dfb76, claim 13cb18755d8c09d2, release 4a078602154bb30f; Z rejected (bad-yellowback-bad-mint-collateral); model statehash 77d19b7271cdc17c
+[   325s] [5] UNARMED at 281; five attestors join the set (raw SET_JOIN acts, P4-b: the set is the registry; 10 YEC bonds, member keys on nodes 6-7)
+[   333s] [5] seqs [0, 1, 2, 3, 4] ELIGIBLE; set members 0 -> 5, current 5 (set_getinfo); TRIGGERED at 290, ARMED at 298 (+8) on every Yellowback node; seated 5
+[   337s] [5] armed yed_mint bf593a8533d9a7f286b875d5bb531e1e1bd95a4a76f7dbcf944548e1d9ec4d30: carrier 9404fa44f365d7306648d2bd3286ee888af4522bc0a861466330305320da43bd, bundle seqs [0, 1, 3], aMint 50000700 xMint 50000000 pMint 50000000, attestor fee 12500000 to smMU4V5w6CfFoHHHHoQTJ1aWKucC78t42x2: ACTIVE everywhere
+[   342s] [5] stale-bundle mint 542ee3ebee92190339cee49bf8bea040a379dc77925333e3c90604f5f5773ad6: verdict mint9-bundle-stale; refused by all 7 mempools, its hand-built block 01564799c603063c rejected on pool 3 (bad-yellowback-mint9-bundle-stale): no vault, no YED issued -- a failing mint is an invalid transaction, not a VOID vault
+[   342s] [5] bundle-less claim of E: verdict red1-bundle-shape; refused by all 7 mempools, its hand-built block 03e553f8878151ae rejected on pool 4 (bad-yellowback-red1-bundle-shape); E ACTIVE
+[   342s] [5] PASS -- attestors join the set, bundles carried; a bad bundle is an invalid transaction: refused by every mempool, its block rejected :: ARMED at 298, set current 5; good mint bf593a8533d9a7f2; stale-bundle mint block 01564799c603063c and bundle-less claim block 03e553f8878151ae rejected; statehash 47786c59ba0e8df1
 [   342s] [6] owner-path spend of F with no burn: verdict vault-spend-malformed; all 7 Yellowback mempools refuse it (bad-yellowback-vault-spend-malformed); node 1 (no attestor set, the module inert) accepts it
-[   342s] [6] node 1 mined 0a42d6193b85ce5d (tx b1bae73320be2b26) at 305: INVALID on all 7 Yellowback nodes (yed_getblockverdict: vault-spend-malformed:b1bae73320be2b26df36ddeef144d0a53d6cfbe1992c2253937e0a194aae6bf5), DoS 100 -- "BAN THRESHOLD EXCEEDED" logged on nodes 0 and 2 (the connection the block came over is dropped; a local peer is not banned); node 1 alone sits on its block
-[   349s] [6] pools mined 2 blocks without node 1; node 1 invalidateblock + restart: back on the valid chain at 306 with every node, F ACTIVE, banscore 0 on every connection, statehash b1e495c617d34eae
-[   349s] [6] crash: every pool quotes $1 until 46d983a58f7b7d65 is claimable (pClaim = max(pMid, pSlow))
-[   380s] [6] 32 crash blocks: pClaim 1000000 at 338, 46d983a58f7b7d65 claimable
-[   391s] [6] yed_claim C by the observer at pClaim 1000000: efef711cba006da0acf0637cb894f2dbb3370b03b9d4d8802b01d589113c6b90 burned 10000, CLAIMING (intent efef711cba006da0:0, release at +10)
-[   395s] [6] attestor cancel (vault_buildcancel on the claimant, set_signcancel on node 6 = one current member, cancel threshold 1): ea620a183554c139a9e5abb939b31d174bee7a44b6439483cce8629d346a91df; the collateral is back in a byte-identical V at ea620a183554c139:0, ACTIVE as the same position on every node; supply stays 30000: the claimant's 10000-cent burn is not refunded (U-24)
-[   428s] [6] pools back at $50: 33 blocks to re-open minting (nothing claimable)
-[   429s] [6] PASS -- the module is consensus: an unburned vault spend mined by node 1 is rejected at DoS 100 by every Yellowback node, which disconnect it and carry on; a wrong-price claim is cancelled by one attestor, the burn kept :: block 0a42d6193b85ce5d rejected (vault-spend-malformed) by 7 nodes, node 1 back at b1e495c617d34eae; claim efef711cba006da0 cancelled by ea620a183554c139, vault ACTIVE at ea620a183554c139; statehash d7981799c5fc1471
-[   438s] [7] 2-block reorg: fork at 375, the Yellowback branch (2 blocks, yed_send b9074360963b62bf) replaced by node 1's 3; state hash 062b2d637d357b73 on every Yellowback node after the join (was 08051006ff754a25 on the losing branch); the send re-mined at 379, statehash 44ca2397216d94ae
-[   453s] [7] 10-block reorg: fork at 379, the Yellowback branch (10 blocks, yed_send 2df38f5b5eb9fb24) replaced by node 1's 11; state hash 90a2c57e6b350b3c on every Yellowback node after the join (was 8ca5b74ce6c0095c on the losing branch); the send re-mined at 391, statehash c4c09811f89bd595
-[   462s] [7] node 3 restarted: index tip 395, statehash 6062907b1e7909d8
-[   468s] [7] node 4 restarted with -reindex: blocks and index rebuilt from disk, statehash 6062907b1e7909d8
-[   476s] [7] PASS -- a 2-block and a 10-block reorg leave every state hash equal; restart and -reindex rebuild the same index :: 2-block 44ca2397216d94ae, 10-block c4c09811f89bd595; restart (node 3, node 5) and -reindex (node 4) = 6062907b1e7909d8; then ec9c4bb076d9039b at 397
-[   476s] [8] POINTER -- the price walk and six yellowback-sim personas for 30 minutes on all three presets is qa/rpc-tests/yellowback_devnet_roles.py, and the devnet on the vault upgrade end to end (members, mint, claim, cancel, invalid, bridge) is qa/rpc-tests/yellowback_devnet_upgrade.py (devnet launcher, nightly) -- not run here
-[   484s] [9] node 5 restarted as the fork binary without the attestor set, -yellowback=0 (a plain start refuses: the datadir holds an index): no yed_* RPCs (help yed_getinfo: unknown command)
-[   515s] [9] node 1 (/YcashCpp:6.22.0-rc1/) vs node 5 (fork binary, no attestor set): 20 blocks alternating miners with transactions, 5 comparison points equal (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); utxo hash 39f7161e1e5251fa at 418
-[   515s] [9] PASS -- parity spot check, node 1 vs node 5 as the fork without the overlay (the full 300 blocks: yellowback_stockparity.py) :: 20 blocks, 5 comparison points equal; the Yellowback nodes followed, statehash ecf29b4d5077cee1
-[   515s] [10] POINTER -- every vault_*.py and yellowback_*.py (unarmed and --armed), the full test_bitcoin, the audit script (registration, attribution, naming, the DoS gate, determinism, the rpcversion 5 contract, vault_vectors.json and yellowback_golden.json byte-identical to ycash-dd, the consensus-diff report for the two-reviewer gate; the frozen-file and budget legs report-only on the upgrade line) and the lockorder / sanitizer / coverage jobs are the CI gates (.github/workflows/yellowback-tests.yml, qa/yellowback-audit.sh) -- not run here
+[   342s] [6] node 1 mined 00740b5d8da68206 (tx 02352508a35fec93) at 304: INVALID on all 7 Yellowback nodes (yed_getblockverdict: vault-spend-malformed:02352508a35fec938ddee748a537ab085e257f83a4a88d94476bf05f2b40669c), DoS 100 -- "BAN THRESHOLD EXCEEDED" logged on nodes 0 and 2 (the connection the block came over is dropped; a local peer is not banned); node 1 alone sits on its block
+[   350s] [6] pools mined 2 blocks without node 1; node 1 invalidateblock + restart: back on the valid chain at 305 with every node, F ACTIVE, banscore 0 on every connection, statehash 491e910db2d33f7d
+[   350s] [6] crash: every pool quotes $1 until 9c29640408bddcb7 is claimable (pClaim = max(pMid, pSlow))
+[   381s] [6] 32 crash blocks: pClaim 1000000 at 337, 9c29640408bddcb7 claimable (past its term: lockHeight 198, claimHeight 222)
+[   398s] [6] yed_claim C by the observer at pClaim 1000000: fe31284f713ae87b9ba5aeb223318ee40dc711b719d8059f81e69ef90d1db5d9 burned 10000, CLAIMING (intent fe31284f713ae87b:0, release at +10)
+[   402s] [6] attestor cancel (vault_buildcancel on the claimant, set_signcancel on node 6 = one current member, cancel threshold 1): 5e3cc26305fbffae8793075cbc1498825d4543fa5538b2253034c7720afc228b; the collateral is back in a byte-identical V at 5e3cc26305fbffae:0, ACTIVE as the same position on every node; supply stays 30000: the claimant's 10000-cent burn is not refunded (U-24)
+[   435s] [6] pools back at $50: 33 blocks to re-open minting (nothing claimable)
+[   436s] [6] PASS -- the module is consensus: an unburned vault spend mined by node 1 is rejected at DoS 100 by every Yellowback node, which disconnect it and carry on; a wrong-price claim is cancelled by one attestor, the burn kept :: block 00740b5d8da68206 rejected (vault-spend-malformed) by 7 nodes, node 1 back at 491e910db2d33f7d; claim fe31284f713ae87b cancelled by 5e3cc26305fbffae, vault ACTIVE at 5e3cc26305fbffae; statehash 9555c3bdbdd42fd9
+[   445s] [7] 2-block reorg: fork at 374, the Yellowback branch (2 blocks, yed_send adbeb04d224ad8e0) replaced by node 1's 3; state hash 432c66c2ba8cccc8 on every Yellowback node after the join (was ad694a420800a01c on the losing branch); the send re-mined at 378, statehash 83815cb9f8057885
+[   461s] [7] 10-block reorg: fork at 378, the Yellowback branch (10 blocks, yed_send 36dec6e169e1e34f) replaced by node 1's 11; state hash bd486318333e1e9b on every Yellowback node after the join (was c19fab1a9cfa5c7d on the losing branch); the send re-mined at 390, statehash e7a5cf0a4f71a1cf
+[   470s] [7] node 3 restarted: index tip 394, statehash 07414c12d09c9cb4
+[   475s] [7] node 4 restarted with -reindex: blocks and index rebuilt from disk, statehash 07414c12d09c9cb4
+[   483s] [7] PASS -- a 2-block and a 10-block reorg leave every state hash equal; restart and -reindex rebuild the same index :: 2-block 83815cb9f8057885, 10-block e7a5cf0a4f71a1cf; restart (node 3, node 5) and -reindex (node 4) = 07414c12d09c9cb4; then 9308239f44c59490 at 396
+[   483s] [8] POINTER -- the price walk and six yellowback-sim personas for 30 minutes on all three presets is qa/rpc-tests/yellowback_devnet_roles.py, and the devnet on the vault upgrade end to end (members, mint, claim, cancel, invalid, bridge) is qa/rpc-tests/yellowback_devnet_upgrade.py (devnet launcher, nightly) -- not run here
+[   493s] [9] node 5 restarted as the fork binary without the attestor set, -yellowback=0 (a plain start refuses: the datadir holds an index): no yed_* RPCs (help yed_getinfo: unknown command)
+[   529s] [9] node 1 (/YcashCpp:6.22.0-rc1/) vs node 5 (fork binary, no attestor set): 20 blocks alternating miners with transactions, 5 comparison points equal (best hash, gettxoutsetinfo, getinfo, getblocktemplate, getblock); utxo hash 9334bf330579d4c5 at 417
+[   529s] [9] PASS -- parity spot check, node 1 vs node 5 as the fork without the overlay (the full 300 blocks: yellowback_stockparity.py) :: 20 blocks, 5 comparison points equal; the Yellowback nodes followed, statehash d6c5f5e51b0fe649
+[   529s] [10] POINTER -- every vault_*.py and yellowback_*.py (unarmed and --armed), the full test_bitcoin, the audit script (registration, attribution, naming, the DoS gate, determinism, the rpcversion 6 contract, vault_vectors.json and yellowback_golden.json byte-identical to ycash-dd, the consensus-diff report for the two-reviewer gate; the frozen-file and budget legs report-only on the upgrade line) and the lockorder / sanitizer / coverage jobs are the CI gates (.github/workflows/yellowback-tests.yml, qa/yellowback-audit.sh) -- not run here
 ====================================================================================================
-SUMMARY (418 blocks, 515 s)
+SUMMARY (417 blocks, 529 s)
   [0] PASS     the reference half: stock 6.20.0 on node 1 below the vault upgrade, fork-vs-stock parity
-  [1] PASS     every Yellowback node starts with the attestor set, syncs the index, rpcversion 5 healthy; node 1 has no yed_* command
+  [1] PASS     every Yellowback node starts with the attestor set, syncs the index, rpcversion 6 healthy; node 1 has no yed_* command
   [2] PASS     pools tag quotes; yed_getprice median; a forged tag from a non-pool is outvoted
   [3] PASS     activation is UPGRADE_VAULT at a height plus the attestor set, one parameter on every node; the retired machinery is gone
   [4] PASS     mint, send, redeem, claim into an intent and its release from the wallet RPCs and the raw builders; an invalid mint is invalid; the model agrees
@@ -89,6 +89,5 @@ SUMMARY (418 blocks, 515 s)
   [10] POINTER  the CI gates
 ====================================================================================================
 Stopping nodes
-Cleaning up
 Tests successful
 EXIT=0
