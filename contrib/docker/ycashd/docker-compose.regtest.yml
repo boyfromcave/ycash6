@@ -10,7 +10,7 @@ services:
       YCASHD_VAULT_HEIGHT: "1"
       YCASHD_LISTEN: "0"
     ports:
-      - "127.0.0.1:18832:18832"
+      - "127.0.0.1:${YCASHD_HOST_PORT:-18832}:18832"
     volumes:
       - ycashd_regtest:/var/lib/ycash
     healthcheck:
