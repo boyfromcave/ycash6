@@ -124,6 +124,9 @@ env:
   LWD_COMMIT: 3244976ef686a628a9e3185196a40501df65bbd9
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
+  # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
+  # checked at v4.5.0 (ref/ycash zcutil/fetch-params.sh:225).
+  SPROUT_GROTH16_SHA256: b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
   CARGO_AUDIT_VERSION: 0.22.2
   CARGO_DENY_VERSION: 0.20.2   # 0.18.3 cannot parse the CVSS 4.0 advisories in the RustSec DB (2026-10-02)
@@ -220,7 +223,9 @@ jobs:
             ccache-${{ runner.os }}-build-
       # No zk parameters: 6.20.0 bundles the Sapling parameters and the Sprout verifying key in the
       # binary, and zcutil/fetch-params.sh only prints a deprecation notice and exits 0 (the
-      # params cache and fetch steps of the v4.5.0 copy are gone with it).
+      # params cache and fetch steps of the v4.5.0 copy are gone with it). ycashd, test_bitcoin and the
+      # functional tests need none; ycash-gtest's Sprout JoinSplit test does, so the nightly's make
+      # check fetches sprout-groth16.params itself.
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
       - name: ccache statistics
@@ -1141,6 +1146,27 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$REF_YCASHD" || { echo "the ycash6-stock binary was not built; the scripts would fall back to fork-vs-fork"; exit 1; }
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_stockparity yellowback_stock_node
+      - name: Cache the Sprout Groth16 parameters (ycash-gtest)
+        # ycashd 6.20.0 bundles the Sapling parameters and needs no download, but ycash-gtest does:
+        # Joinsplit.FullApiTest proves and verifies a Sprout JoinSplit and loads sprout-groth16.params
+        # from ~/.zcash-params; missing, src/rust/src/sprout.rs panics across the FFI and the whole
+        # binary aborts (the first nightly make check on this line, 2026-10-08: "Aborted (core dumped)",
+        # FAIL: ycash-gtest). Upstream's ci.yml fetches the same file for its gtest jobs. Baseline
+        # behaviour at the pin: no Yellowback file is involved.
+        id: sprout-params
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.zcash-params/sprout-groth16.params
+          key: sprout-groth16-${{ env.SPROUT_GROTH16_SHA256 }}
+      - name: Fetch the Sprout Groth16 parameters
+        if: steps.sprout-params.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.zcash-params
+          curl -sSfL --retry 3 -o ~/.zcash-params/sprout-groth16.params https://download.z.cash/downloads/sprout-groth16.params
+      - name: Verify the Sprout Groth16 parameters
+        # The hash ref/ycash's zcutil/fetch-params.sh checks (audit E-6: a download is checked against its
+        # published hash), on a cache hit as well.
+        run: echo "$SPROUT_GROTH16_SHA256  $HOME/.zcash-params/sprout-groth16.params" | sha256sum -c -
       - name: Full make check (minus the pin's broken ycash-tx vectors)
         # `make check` is check-TESTS (test_bitcoin and ycash-gtest, every suite) then check-local:
         # test/bitcoin-util-test.py, secp256k1 check, univalue check. The util script cannot pass
@@ -1148,8 +1174,9 @@ jobs:
         # with that name linked, ten cases still expect Zcash t1... addresses where Ycash prints
         # s1... (chainparams.cpp PUBKEY_ADDRESS 0x1C,0x28). Both files are frozen at the pin, so
         # the step runs the other three parts by hand. Recorded in doc/yellowback.md (baseline).
+        # On a failure the test-driver logs are printed: they are the only record of which test failed.
         run: |
-          make -C src check-TESTS
+          make -C src check-TESTS || { tail -n 150 src/ycash-gtest.log src/test/test_bitcoin.log 2>/dev/null; exit 1; }
           make -C src/secp256k1 check
           make -C src/univalue check
       - name: Inherited functional tests recorded as passing at the 6.20.0 pin
