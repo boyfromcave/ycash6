@@ -88,6 +88,9 @@ BASE_SCRIPTS= [
     'vault_bridge.py',
     # A reorg below Falcon's height evicts Falcon (OP_CHECKPQSIG scheme 0x02) spends (quantum review F-1).
     'vault_pq_reorg.py',
+    # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
+    # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
+    'vault_pq_wallet.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',
