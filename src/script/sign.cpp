@@ -227,7 +227,8 @@ CScript PQScriptSig(const valtype& vchSig, const valtype& vchPubKey)
 
 bool SignPQOwnerSpend(const CKeyStore& keystore, const CPQKeyID& owner, const CScript& templateScript,
                       CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int selector,
-                      uint32_t consensusBranchId, unsigned int verifyFlags, ScriptError* serror)
+                      uint32_t consensusBranchId, unsigned int verifyFlags, ScriptError* serror,
+                      const BaseSignatureChecker* checker)
 {
     assert(nIn < txTo.vin.size());
     if (selector != 2 && selector != 3)
@@ -244,7 +245,7 @@ bool SignPQOwnerSpend(const CKeyStore& keystore, const CPQKeyID& owner, const CS
     CScript scriptSig = PQScriptSig(vchSig, vchPubKey);
     scriptSig << CScript::EncodeOP_N(selector);
     txTo.vin[nIn].scriptSig = scriptSig;
-    return VerifyScript(scriptSig, templateScript, verifyFlags, creator.Checker(), consensusBranchId, serror);
+    return VerifyScript(scriptSig, templateScript, verifyFlags, checker ? *checker : creator.Checker(), consensusBranchId, serror);
 }
 
 SignatureData DataFromTransaction(const CMutableTransaction& tx, unsigned int nIn)

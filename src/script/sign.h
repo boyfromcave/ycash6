@@ -105,10 +105,14 @@ CScript PQScriptSig(const std::vector<unsigned char>& vchSig, const std::vector<
  * GetVaultScriptFlags(tip + 1)). The caller sets nLockTime / nSequence first (selector 2 needs
  * nLockTime >= ownerHeight and a non-final sequence). False, with serror set when the script
  * fails, if the key is missing (or locked) or the signature does not verify.
+ * checker: the checker the result is verified with; null = a TransactionSignatureChecker, which
+ * answers no set state, so selector 3 (OP_CHECKSETDORMANT) needs the caller's vault::SetSigChecker
+ * (built over txTo as it stands: scriptSigs do not enter the sighash).
  */
 bool SignPQOwnerSpend(const CKeyStore& keystore, const CPQKeyID& owner, const CScript& templateScript,
                       CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int selector,
-                      uint32_t consensusBranchId, unsigned int verifyFlags, ScriptError* serror = nullptr);
+                      uint32_t consensusBranchId, unsigned int verifyFlags, ScriptError* serror = nullptr,
+                      const BaseSignatureChecker* checker = nullptr);
 
 /** Produce a script signature for a transaction. */
 bool SignSignature(

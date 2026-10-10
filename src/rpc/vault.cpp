@@ -28,6 +28,7 @@
 #include "util/moneystr.h"
 #include "util/strencodings.h"
 #include "vault/act.h"
+#include "vault/checker.h"
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
@@ -1735,7 +1736,10 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
         if (coin.nValue <= fee) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the output does not cover the fee %s", FormatMoney(fee)));
         mtx.vout[0].nValue = coin.nValue - fee;
         ScriptError serror = SCRIPT_ERR_OK;
-        if (!SignPQOwnerSpend(*pwalletMain, owner, coin.scriptPubKey, mtx, 0, coin.nValue, selector, branch, flags, &serror))
+        const CTransaction txc(mtx);
+        PrecomputedTransactionData txdata = TxData(txc);
+        const SetSigChecker checker(&txc, 0, coin.nValue, false, txdata, snap, next);   // selector 3 reads the set state
+        if (!SignPQOwnerSpend(*pwalletMain, owner, coin.scriptPubKey, mtx, 0, coin.nValue, selector, branch, flags, &serror, &checker))
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("cannot sign the owner spend (selector %d): %s", selector, ScriptErrorString(serror)));
         const CAmount sized = PQSizeFee(VAULT_RPC_FEE, ::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION));
         if (sized <= fee) break;
