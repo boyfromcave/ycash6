@@ -160,6 +160,36 @@ bool TouchesTemplate(const CTransaction& tx, const CCoinsViewCache& view)
     return false;
 }
 
+/** Re-run every input script of `tx` at `height`'s flags when `tx` carries an OP_CHECKPQSIG
+ *  (GetPQSigOpCount). Falcon (scheme 0x02) activates at pqFalconHeight with no branch-ID change
+ *  (quantum spec R-A2), so the branch-ID eviction of a reorg does not reach a Falcon spend
+ *  accepted for the block at pqFalconHeight (review F-1). */
+std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
+                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
+{
+    if (tx.IsCoinBase() || GetPQSigOpCount(tx, view) == 0) return std::nullopt;
+    // 6.20.0: the precomputed data takes every input's coin (a v4 sighash ignores them).
+    std::vector<CTxOut> allPrevOutputs;
+    for (const CTxIn& in : tx.vin) {
+        const CCoins* c = view.AccessCoins(in.prevout.hash);
+        allPrevOutputs.push_back(c && c->IsAvailable(in.prevout.n) ? c->vout[in.prevout.n] : CTxOut());
+    }
+    PrecomputedTransactionData txdata(tx, allPrevOutputs);
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(height, params);
+    const uint32_t branch = CurrentEpochBranchId(height, params);
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
+        if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n)) continue;
+        const CTxOut& prev = coins->vout[tx.vin[i].prevout.n];
+        ScriptError err = SCRIPT_ERR_OK;
+        if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, flags,
+                          SetSigChecker(&tx, i, prev.nValue, false, txdata, snapshot, height), branch, &err)) {
+            return strprintf("input %u: %s", i, ScriptErrorString(err));
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
@@ -199,6 +229,25 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
     AssertLockHeld(cs_main);
     LOCK(pool.cs);
     const bool active = params.NetworkUpgradeActive(nextHeight, Consensus::UPGRADE_VAULT);
+    // A reorg has just dropped `nextHeight` below Falcon's height: evict every transaction whose
+    // inputs fail at `nextHeight`'s flags (a scheme-0x02 OP_CHECKPQSIG now SCRIPT_ERR_PQ_SCHEME),
+    // with its descendants, so neither the mempool nor a block template keeps it (review F-1).
+    if (!IsPQFalconActive(params, nextHeight) && IsPQFalconActive(params, nextHeight + 1)) {
+        CCoinsViewMemPool viewMemPool(pcoinsTip, pool);
+        CCoinsViewCache view(&viewMemPool);
+        std::shared_ptr<const SetSnapshot> snapshot = active && g_vaultdb ? TipSnapshot() : nullptr;
+        std::vector<CTransaction> failing;
+        for (CTxMemPool::indexed_transaction_set::const_iterator it = pool.mapTx.begin(); it != pool.mapTx.end(); ++it) {
+            if (std::optional<std::string> why = RecheckPQScripts(it->GetTx(), view, nextHeight, snapshot, params)) {
+                LogPrint("vault", "vault: dropping %s from the mempool: Falcon is not active at %d (%s)\n", it->GetTx().GetHash().ToString(), nextHeight, *why);
+                failing.push_back(it->GetTx());
+            }
+        }
+        for (const CTransaction& tx : failing) {
+            std::list<CTransaction> removed;
+            pool.remove(tx, removed, true);
+        }
+    }
     if (active && !g_vaultdb) return;
     // Below activation there is only something to do right after a reorg dropped the next
     // block below it (the mempool may still hold template spends accepted before).

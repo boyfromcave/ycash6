@@ -89,7 +89,9 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
  *  against the new snapshot, and evict failures (set state, I-2 age, membership and dormancy
  *  change with height and with the acts just connected or disconnected). When a reorg has
  *  just dropped `nextHeight` below activation, evicts every transaction that spends or
- *  creates a template output; otherwise a no-op before activation. */
+ *  creates a template output; otherwise a no-op before activation. When a reorg has just
+ *  dropped `nextHeight` below Falcon (IsPQFalconActive, no branch-ID change), also re-runs the
+ *  inputs of every transaction with an OP_CHECKPQSIG at `nextHeight`'s flags and evicts failures. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
 
 /**
