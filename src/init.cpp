@@ -1386,8 +1386,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (chainparams.NetworkIDString() != "regtest") {
             return InitError("-pqfalcon and -pqfalconheight may only be used on regtest.");
         }
+        // A decimal integer in [0, INT_MAX]: GetArg would read "abc" as 0, Falcon from genesis (review F-4).
+        int32_t pqFalconHeight = 0;
         if (mapArgs.count("-pqfalconheight") &&
-            (GetArg("-pqfalconheight", 0) < 0 || GetArg("-pqfalconheight", 0) > std::numeric_limits<int>::max())) {
+            (!ParseInt32(mapArgs["-pqfalconheight"], &pqFalconHeight) || pqFalconHeight < 0)) {
             return InitError("-pqfalconheight must be a block height (>= 0).");
         }
     }
