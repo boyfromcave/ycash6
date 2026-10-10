@@ -2025,6 +2025,9 @@ bool AcceptToMemoryPool(
         } catch (const std::runtime_error& e) {
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-input-value-out-of-range");
         }
+        // policy: 20 per OP_CHECKPQSIG (quantum plan D-Q-7); the mempool entry carries nSigOps, and
+        // the 6.20.0 miner takes each transaction's sigops from its entry.
+        nSigOps += GetPQSigOpCount(tx, view);
         if (nSigOps > MAX_STANDARD_TX_SIGOPS)
             return state.DoS(0, false, REJECT_NONSTANDARD, "bad-txns-too-many-sigops", BodyCorruption::Possible,
                 strprintf("%d > %d", nSigOps, MAX_STANDARD_TX_SIGOPS));
