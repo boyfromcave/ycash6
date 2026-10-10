@@ -113,6 +113,8 @@ class VaultRpcContractTest(BitcoinTestFramework):
         c.error('unknown post-quantum scheme', n, 'vault_getnewowner', 3)
         own = c.call(n, 'vault_getnewowner')
         assert_equal(own['owner'], '01' + own['keyhash'])
+        c.error('a scheme-2 (FN-DSA-512) owner before Falcon is active', n, 'vault_lock',
+                {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5, 'owner': '02' + '11' * 32})
         c.error('unregistered post-quantum scheme', n, 'vault_lock',
                 {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5, 'owner': '03' + '11' * 32})
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,

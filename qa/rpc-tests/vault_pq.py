@@ -172,6 +172,10 @@ class VaultPQTest(VaultTestBase):
         falcon_owner = bytes([pq.SCHEME_FN_DSA_512]) + OWNER_KEY[1:]
         vp = self.vparams(self.sid, owner=falcon_owner)
         hex_ = self.lock_hex(vp, COIN)
+        # vault_lock follows the relay policy: no scheme-2 owner before Falcon (review A F3)
+        assert_rpc_error('a scheme-2 (FN-DSA-512) owner before Falcon is active', self.node.vault_lock,
+                         {'tag': 'TEST', 'setid': self.sid[::-1].hex(),
+                          'delay': 5, 'ownerheight': self.tip() + 500, 'amount': 1, 'owner': falcon_owner.hex()})
         assert_rpc_error('unregistered post-quantum scheme', self.node.vault_list, {'owner': '03' + '00' * 32})
         txid = self.nodes[1].sendrawtransaction(hex_)
         print('    ok   a scheme-2 V relayed by node 1 (-pqfalcon=1)')

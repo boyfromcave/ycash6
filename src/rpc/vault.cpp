@@ -1281,6 +1281,10 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     // key of this wallet (quantum spec §6.2).
     const bool newOwner = find_value(o, "owner").isNull();
     vp.owner = newOwner ? CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256()) : ParsePQOwner(find_value(o, "owner"), "owner");
+    // As relay policy (IsStandardTx): no scheme-2 (FN-DSA-512) owner before Falcon is active at the
+    // next block; the owner could not spend it (review A F3).
+    if (vp.owner.scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "a scheme-2 (FN-DSA-512) owner before Falcon is active");
     const CAmount amount = AmountFromValue(find_value(o, "amount"));
     if (!VaultParamsValid(vp)) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault parameters out of range (plan §15.3)");
     if (!snap->GetSet(vp.setId) || !snap->GetSet(vp.cancelSetId)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "setid and cancelsetid must be confirmed sets");

@@ -334,6 +334,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `ownerkey-removed` | `vault_lock` | the former `ownerkey` parameter |
 | -8 | `unknown post-quantum scheme` | `vault_getnewowner` | `scheme` 3 |
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
+| -8 | `a scheme-2 (FN-DSA-512) owner before Falcon is active` | `vault_lock` | an `owner` with scheme `02` while Falcon is inactive at the next block |
 | -4 | `not a post-quantum key of this wallet` | `vault_ownerspend` | a vault with an external owner |
 | -8 | `not an unspent vault output` | `vault_buildunlock`, `vault_app` | a spent vault outpoint |
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
