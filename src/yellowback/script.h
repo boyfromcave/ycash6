@@ -113,6 +113,20 @@ CScript YedVaultScriptAt(const Params& p, const CPQKeyID& owner, int64_t ownerHe
  *  scheme 0 (no owner) when the size is not 33. */
 CPQKeyID OwnerFromBytes(const std::vector<unsigned char>& bytes);
 
+/**
+ * HolderKey (quantum plan §4.4, spec §3.5): the destination of a YED holder script, the 25-byte P2PKH
+ * (a CKeyID) or the 35-byte TX_PQPKH `20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG` (a CPQKeyID, exact match as
+ * Solver's, spec §2.1); nullopt for any other script. The wallet and the index read it (balances,
+ * yed_listtokens); the fee payees stay P2PKH (D-Q-5) and the rules read HolderKey only through TOK-PQ.
+ */
+std::optional<CTxDestination> HolderKey(const CScript& script);
+
+/**
+ * TOK-PQ (quantum spec F-7): below the Falcon height (Params::IsPQFalconActive, the A-5 mirror) any script
+ * may hold YED, as before; from it, a YED token output must be a TX_PQPKH of scheme 0x02 (FN-DSA-512).
+ */
+bool HolderAllowed(const Params& p, int64_t height, const CScript& script);
+
 // ---------------------------------------------------------------- v3 (§3.4): carrier and bond
 
 /**

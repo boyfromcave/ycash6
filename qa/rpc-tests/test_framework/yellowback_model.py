@@ -69,6 +69,7 @@ TAG_PATTERN = b'\x24' + TAG_MAGIC      # direct-push opcode 0x24 (36) followed b
 
 PAYLOAD_MAGIC = b'YB'
 PAYLOAD_VERSION = 3
+MINT_PAYLOAD_VERSION = 4       # quantum spec header C-1: the MINT alone is version 4 (owner = scheme || keyHash)
 PAYLOAD_MINT = 0x01
 PAYLOAD_TRANSFER = 0x02
 PAYLOAD_REDEEM = 0x03
@@ -152,6 +153,9 @@ OP_CHECKLOCKTIMEVERIFY = 0xb1
 OP_CHECKSEQUENCEVERIFY = 0xb2
 OP_CHECKSETSIG = 0xc0
 OP_CHECKSETDORMANT = 0xc1
+OP_CHECKPQSIG = 0xc2           # quantum plan section 4.2: the post-quantum owner's signature check
+PQ_SCHEMES = (0x01, 0x02)      # 0x01 SLH-DSA-SHA2-128s, 0x02 FN-DSA-512 (crypto/pq/scheme.h)
+PQ_SCHEME_FALCON = 0x02
 OP_2 = 0x52
 OP_3 = 0x53
 OP_4 = 0x54
@@ -232,6 +236,9 @@ class Params(object):
         self.attest_arm_min = attest_arm_min
         self.bundle_carrier = bundle_carrier
         self.mint_requires_armed = bool(mint_requires_armed)   # H-1: MINT-4 refuses a mint whose R is not ARMED
+        # The Falcon activation height (quantum spec R-A2, A-5): a mirror of the consensus pqFalconHeight
+        # (regtest -pqfalconheight / -pqfalcon=1 = 0); None = never (mainnet/testnet). Not hashed (spec section 3.4).
+        self.pq_falcon_height = None
         # v3 plan section 3.1 (the mainnet column unless `attest` overrides; regtest() passes its column)
         a = dict(attest_arm_delay=1_152, attest_required=True, n_slots=9, m_select=4, k_slack=2, bundle_max=6,
                  q_low_bps=3_333, q_high_bps=6_667, attest_max_age=20, pin_window=288, pin_delta_bps=500,
@@ -250,6 +257,10 @@ class Params(object):
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
                           bond_min=10 * COIN, bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4)
+
+    def pq_falcon_active(self, height):
+        """IsPQFalconActive(params, height): scheme 0x02 owners mint and TOK-PQ binds from this height."""
+        return self.pq_falcon_height is not None and height >= self.pq_falcon_height
 
     def is_armed(self, snapshot_status):
         """"ARMED" as every v3 rule reads it: the snapshot's Attest.status and ATTEST_REQUIRED (W15)."""
@@ -773,35 +784,57 @@ def script_single_push(script):
 TEST_SET = '5e75' * 16
 
 
-def _is_compressed_key_bytes(b):
-    return len(b) == 33 and b[0] in (2, 3)
+def is_pq_owner(b):
+    """A post-quantum owner id: 33 bytes, a registered scheme || a 32-byte key hash (C++ CPQKeyID)."""
+    return b is not None and len(b) == 33 and b[0] in PQ_SCHEMES
 
 
-def vault_template(tag, set_id32, cancel_set_id32, delay, owner_height, owner_key33, app_height):
-    """The V scriptPubKey bytes (bare), or None when a field is out of range (section 15.3)."""
+def pq_owner_slot(owner33):
+    """The V/I owner slot (quantum spec section 1.1): <ownerHash:32> OP_1|OP_2 OP_CHECKPQSIG, 35 bytes."""
+    owner33 = bytes(owner33)
+    return push(owner33[1:]) + push_int(owner33[0]) + bytes([OP_CHECKPQSIG])
+
+
+def pqpkh_script(owner33):
+    """TX_PQPKH (quantum spec section 2.1): 20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG, 35 bytes; the same
+    bytes as the owner slot. The residual intent pays it (F-3) and a holder after Falcon is one (TOK-PQ)."""
+    return pq_owner_slot(owner33)
+
+
+def pqpkh_owner(spk):
+    """The 33-byte scheme || keyHash of a TX_PQPKH script (Solver's exact match), else None."""
+    spk = bytes(spk)
+    if len(spk) == 35 and spk[0] == 0x20 and spk[33] in (OP_1, OP_2) and spk[34] == OP_CHECKPQSIG:
+        return bytes([spk[33] - OP_1 + 1]) + spk[1:33]
+    return None
+
+
+def vault_template(tag, set_id32, cancel_set_id32, delay, owner_height, owner33, app_height):
+    """The V scriptPubKey bytes (bare), or None when a field is out of range (section 15.3); the owner is
+    a post-quantum key id (quantum spec section 1: the only owner shape)."""
     if not (1 <= delay <= 65535 and 1 <= owner_height <= 499_999_999 and 0 <= app_height <= 499_999_999):
         return None
-    if not _is_compressed_key_bytes(owner_key33):
+    if not is_pq_owner(owner33):
         return None
     return (push(tag) + push(cancel_set_id32) + push_int(delay) + bytes([OP_2DROP, OP_DROP])
             + bytes([OP_DUP, OP_1, OP_EQUAL, OP_IF, OP_DROP]) + push(set_id32) + bytes([OP_1, OP_CHECKSETSIG])
             + bytes([OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF, OP_DROP]) + push_int(owner_height)
-            + bytes([OP_CHECKLOCKTIMEVERIFY, OP_DROP]) + push(owner_key33) + bytes([OP_CHECKSIG])
+            + bytes([OP_CHECKLOCKTIMEVERIFY, OP_DROP]) + pq_owner_slot(owner33)
             + bytes([OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF, OP_DROP]) + push(set_id32)
-            + bytes([OP_CHECKSETDORMANT, OP_VERIFY]) + push(owner_key33) + bytes([OP_CHECKSIG])
+            + bytes([OP_CHECKSETDORMANT, OP_VERIFY]) + pq_owner_slot(owner33)
             + bytes([OP_ELSE, OP_4, OP_EQUALVERIFY]) + push_int(app_height) + bytes([OP_CHECKLOCKTIMEVERIFY])
             + bytes([OP_ENDIF, OP_ENDIF, OP_ENDIF]))
 
 
-def intent_template(tag, recipient_hash32, vault_hash32, delay, cancel_set_id32, set_id32, owner_key33):
+def intent_template(tag, recipient_hash32, vault_hash32, delay, cancel_set_id32, set_id32, owner33):
     """The I scriptPubKey bytes (bare), or None when a field is out of range."""
-    if not (1 <= delay <= 65535) or not _is_compressed_key_bytes(owner_key33):
+    if not (1 <= delay <= 65535) or not is_pq_owner(owner33):
         return None
     return (push(tag) + push(recipient_hash32) + push(vault_hash32) + bytes([OP_2DROP, OP_DROP])
             + bytes([OP_DUP, OP_1, OP_EQUAL, OP_IF, OP_DROP]) + push_int(delay) + bytes([OP_CHECKSEQUENCEVERIFY])
             + bytes([OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF, OP_DROP]) + push(cancel_set_id32) + bytes([OP_2, OP_CHECKSETSIG])
             + bytes([OP_ELSE, OP_3, OP_EQUALVERIFY]) + push(set_id32) + bytes([OP_CHECKSETDORMANT, OP_VERIFY])
-            + push(owner_key33) + bytes([OP_CHECKSIG])
+            + pq_owner_slot(owner33)
             + bytes([OP_ENDIF, OP_ENDIF]))
 
 
@@ -858,62 +891,66 @@ def _num(op, data):
 
 
 def parse_vault_template(spk):
-    """(tag, setId32, cancelSetId32, delay, ownerHeight, ownerKey33, appHeight) of an exact V, else None."""
+    """(tag, setId32, cancelSetId32, delay, ownerHeight, owner33, appHeight) of an exact V, else None.
+    The PQ owner slot is three tokens (quantum spec section 1.2): hash@22, scheme@23; appHeight@40; 45 tokens."""
     spk = bytes(spk)
     ops = _ops(spk)
-    if ops is None or len(ops) != 43:
+    if ops is None or len(ops) != 45:
         return None
-    tag, cancel, set_id, key = ops[0][1], ops[1][1], ops[10][1], ops[22][1]
-    if None in (tag, cancel, set_id, key) or len(tag) != 4 or len(cancel) != 32 or len(set_id) != 32 or len(key) != 33:
+    tag, cancel, set_id, h = ops[0][1], ops[1][1], ops[10][1], ops[22][1]
+    if None in (tag, cancel, set_id, h) or len(tag) != 4 or len(cancel) != 32 or len(set_id) != 32 or len(h) != 32:
         return None
-    delay, owner_h, app_h = _num(*ops[2]), _num(*ops[19]), _num(*ops[38])
-    if None in (delay, owner_h, app_h):
+    delay, owner_h, app_h, scheme = _num(*ops[2]), _num(*ops[19]), _num(*ops[40]), _num(*ops[23])
+    if None in (delay, owner_h, app_h, scheme) or scheme not in PQ_SCHEMES:
         return None
+    key = bytes([scheme]) + h
     if vault_template(tag, set_id, cancel, delay, owner_h, key, app_h) != spk:
         return None
     return (tag, set_id, cancel, delay, owner_h, key, app_h)
 
 
 def parse_intent_template(spk):
-    """(tag, recipientHash32, vaultHash32, delay, cancelSetId32, setId32, ownerKey33) of an exact I, else None."""
+    """(tag, recipientHash32, vaultHash32, delay, cancelSetId32, setId32, owner33) of an exact I, else None.
+    The PQ owner slot (quantum spec section 1.3): hash@27, scheme@28; 32 tokens."""
     spk = bytes(spk)
     ops = _ops(spk)
-    if ops is None or len(ops) != 31:
+    if ops is None or len(ops) != 32:
         return None
-    tag, rh, vh, cancel, set_id, key = ops[0][1], ops[1][1], ops[2][1], ops[18][1], ops[24][1], ops[27][1]
-    if None in (tag, rh, vh, cancel, set_id, key):
+    tag, rh, vh, cancel, set_id, h = ops[0][1], ops[1][1], ops[2][1], ops[18][1], ops[24][1], ops[27][1]
+    if None in (tag, rh, vh, cancel, set_id, h):
         return None
-    if len(tag) != 4 or len(rh) != 32 or len(vh) != 32 or len(cancel) != 32 or len(set_id) != 32 or len(key) != 33:
+    if len(tag) != 4 or len(rh) != 32 or len(vh) != 32 or len(cancel) != 32 or len(set_id) != 32 or len(h) != 32:
         return None
-    delay = _num(*ops[10])
-    if delay is None:
+    delay, scheme = _num(*ops[10]), _num(*ops[28])
+    if delay is None or scheme not in PQ_SCHEMES:
         return None
+    key = bytes([scheme]) + h
     if intent_template(tag, rh, vh, delay, cancel, set_id, key) != spk:
         return None
     return (tag, rh, vh, delay, cancel, set_id, key)
 
 
-def yed_vault_script_at(params, owner_key33, owner_height, app_height):
+def yed_vault_script_at(params, owner33, owner_height, app_height):
     """The V of an existing vault whatever its heights (a pre-plan vault has ownerHeight = lockHeight and
     appHeight = lockHeight + GRACE); None when it cannot be built."""
     s = params.attestor_set_internal
     if s is None:
         return None
-    return vault_template(YED_TAG, s, s, params.claim_delay, owner_height, bytes(owner_key33), app_height)
+    return vault_template(YED_TAG, s, s, params.claim_delay, owner_height, bytes(owner33), app_height)
 
 
-def yed_vault_script(params, owner_key33, ref_height):
+def yed_vault_script(params, owner33, ref_height):
     """The V of a mint (U-23, IT-1 as extended 2026-10-07): tag YED, setId = cancelSetId = the attestor set, delay
     CLAIM_DELAY, ownerHeight = appHeight = refHeight + 1 (the owner's redeem and the claim are both open from the
     block after the mint; RED-4 decides a claim at every height); None when it cannot be built."""
-    return yed_vault_script_at(params, owner_key33, ref_height + 1, ref_height + 1)
+    return yed_vault_script_at(params, owner33, ref_height + 1, ref_height + 1)
 
 
-def yed_intent_script(params, owner_key33, owner_height, app_height, recipient_spk):
+def yed_intent_script(params, owner33, owner_height, app_height, recipient_spk):
     """The I a claim of that vault creates paying ``recipient_spk`` (S-2: the V's fields; vaultHash = SHA256(V))."""
     s = params.attestor_set_internal
-    v = yed_vault_script_at(params, owner_key33, owner_height, app_height)
-    return intent_template(YED_TAG, sha256(bytes(recipient_spk)), sha256(v), params.claim_delay, s, s, bytes(owner_key33))
+    v = yed_vault_script_at(params, owner33, owner_height, app_height)
+    return intent_template(YED_TAG, sha256(bytes(recipient_spk)), sha256(v), params.claim_delay, s, s, bytes(owner33))
 
 
 def is_yed_vault(spk):
@@ -1062,8 +1099,9 @@ class Payload(object):
 
 
 def encode_mint(term_class, cents, lock_height, ref_height, owner_pubkey, fee_vout, attest_fee_vout=FEE_VOUT_NONE):
+    """The v4 MINT (quantum spec section 3.1); ``owner_pubkey`` is the 33-byte owner id scheme || keyHash."""
     assert len(owner_pubkey) == 33
-    return (PAYLOAD_MAGIC + bytes([PAYLOAD_VERSION, PAYLOAD_MINT, term_class & 0xFF])
+    return (PAYLOAD_MAGIC + bytes([MINT_PAYLOAD_VERSION, PAYLOAD_MINT, term_class & 0xFF])
             + struct.pack('<III', cents, lock_height, ref_height) + owner_pubkey
             + bytes([fee_vout & 0xFF, attest_fee_vout & 0xFF]))
 
@@ -1090,9 +1128,11 @@ def decode_payload(data, n_vout=None, opret_index=None):
     OP_RETURN, cents != 0) are applied too; without them only the byte-level shape is checked."""
     if len(data) < 4 or len(data) > MAX_PAYLOAD:
         return None
-    if data[0:2] != PAYLOAD_MAGIC or data[2] != PAYLOAD_VERSION:
+    if data[0:2] != PAYLOAD_MAGIC:
         return None
     t = data[3]
+    if data[2] != (MINT_PAYLOAD_VERSION if t == PAYLOAD_MINT else PAYLOAD_VERSION):   # C-1
+        return None
     body = data[4:]
     if t == PAYLOAD_MINT:
         if len(body) != 48:
@@ -2332,6 +2372,11 @@ class YellowbackModel(object):
             touched = True
         elif payload is not None and payload.type in (PAYLOAD_TRANSFER, PAYLOAD_REDEEM):
             rec.type = 'TRANSFER' if payload.type == PAYLOAD_TRANSFER else 'REDEEM'
+            # TOK-PQ (quantum spec F-7): from the Falcon height an assignment to any other script makes the
+            # transaction invalid (it is refused, not burned)
+            for vout, _ in payload.assignments:
+                if not self.holder_ok(height, tx.vout[vout].script):
+                    return self._fail(rec, 'bad-yed-holder')
             self._apply_transfer(tx, height, rec, payload, yed_in)
         else:
             # The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog
@@ -2384,6 +2429,14 @@ class YellowbackModel(object):
         if touched:
             self.txlog[tx.txid] = rec
         return None
+
+    def holder_ok(self, height, spk):
+        """TOK-PQ (quantum spec F-7): below the Falcon height any script may hold YED; from it, only a
+        TX_PQPKH of scheme 0x02 (Falcon)."""
+        if not self.params.pq_falcon_active(height):
+            return True
+        owner = pqpkh_owner(spk)
+        return owner is not None and owner[0] == PQ_SCHEME_FALCON
 
     def _fail(self, rec, verdict):
         rec.verdict = verdict
@@ -2676,7 +2729,11 @@ class YellowbackModel(object):
         # MINT-3
         if len(tx.vout) < 3:
             return 'bad-mint-outputs'
-        if not is_valid_compressed_pubkey(pl.owner_pubkey):
+        # The owner is a post-quantum key id, scheme || keyHash (quantum spec section 3.2): a registered scheme,
+        # and Falcon (0x02) only from the Falcon height (A-4, R-A2)
+        if not is_pq_owner(pl.owner_pubkey):
+            return 'bad-mint-owner-key'
+        if pl.owner_pubkey[0] == PQ_SCHEME_FALCON and not p.pq_falcon_active(height):
             return 'bad-mint-owner-key'
         # U-23, IT-1: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight =
         # lockHeight is record-keeping, ownerHeight = appHeight = refHeight + 1); v2's P2SH vault script and the pre-IT-1
@@ -2731,6 +2788,9 @@ class YellowbackModel(object):
         # MINT-7
         if opret == 1:
             return 'bad-mint-token-output'
+        # TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH
+        if not self.holder_ok(height, tx.vout[1].script):
+            return 'bad-yed-holder'
         # MINT-8
         eligible = self.eligible_payees(pl.ref_height)
         if eligible:
@@ -2865,6 +2925,10 @@ class YellowbackModel(object):
         for _, cents in pl.assignments:
             if not (p.min_output <= cents <= p.max_output):
                 return 'vault-spend-malformed'
+        # TOK-PQ (quantum spec F-7): from the Falcon height every assigned output is a Falcon TX_PQPKH
+        for vout, _ in pl.assignments:
+            if not self.holder_ok(height, tx.vout[vout].script):
+                return 'bad-yed-holder'
         vault = self.vaults[outpoints[0]]
         claim = path == 'claim'
         # U-23: a claim moves the whole vault into intents: one claimant intent, at most one owner residual
@@ -2941,16 +3005,16 @@ class YellowbackModel(object):
                 if not persisted or not is_underwater(vault.collateral_zat, p_emerg, vault.minted_cents, p.emergency_ratio_bps):
                     return 'vault-claim-not-underwater'
                 facts['claim_path'] = 'b'
-            # RED-5 (U-23: the owner's residual intent pays P2PKH(owner) at least the residual; the other is the claimant's)
+            # RED-5 (U-23: the owner's residual intent pays the owner's PQPKH (F-3) at least the residual; the other is the claimant's)
             if p_claim is None:
                 return 'red5-residual'
             margin = p.claim_threshold_bps if facts['claim_path'] == 'a' else BPS
             residual = residual_zat(vault.collateral_zat, claimant_max_zat(vault.minted_cents, margin, p_claim))
             facts['residual_zat'] = residual
             if residual >= p.residual_min_zat:
-                if not is_valid_compressed_pubkey(vault.owner_pubkey) or len(intents) != 2:
+                if not is_pq_owner(vault.owner_pubkey) or len(intents) != 2:
                     return 'red5-residual'
-                owner_hash = sha256(p2pkh_script(hash160(vault.owner_pubkey)))
+                owner_hash = sha256(pqpkh_script(vault.owner_pubkey))      # the owner's PQPKH (quantum spec F-3)
                 res = None
                 for j in intents:
                     if yed_intent_fields(tx.vout[j].script)[1] == owner_hash and tx.vout[j].value >= residual:
@@ -3253,7 +3317,9 @@ def compare_vaults(model, node):
     for op, v in model.vaults.items():
         r = by_op[op]
         _check(_norm_status(r['status']) == _norm_status(VAULT_STATUS_NAMES[v.status]), 'vault.status', v.mint_height, '%s:%d' % op)
-        _check(str(r['ownerPubKey']).lower() == v.owner_pubkey.hex(), 'vault.ownerPubKey', v.mint_height, '%s:%d' % op)
+        # rpcversion 7 (quantum spec section 6.2): the owner as ownerScheme + ownerHash (the 33 record bytes scheme || hash)
+        _check(int(r['ownerScheme']) == v.owner_pubkey[0] and str(r['ownerHash']).lower() == v.owner_pubkey[1:].hex(),
+               'vault.owner', v.mint_height, '%s:%d' % op)
         tc = r.get('termClass')
         _check(tc in (v.term_class, 'ABC'[v.term_class] if v.term_class < 3 else None), 'vault.termClass', v.mint_height, '%s:%d' % op)
         for name, val in (('lockHeight', v.lock_height), ('claimHeight', v.claim_height), ('appHeight', v.app_height), ('ownerHeight', v.owner_height), ('collateralZat', v.collateral_zat),

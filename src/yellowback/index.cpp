@@ -938,6 +938,14 @@ std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vec
 
 // ---------------------------------------------------------------------------
 
+namespace {
+/** Quantum spec A-5: the module mirrors the consensus Falcon height, the one source of truth (-1 = never). */
+int PQFalconHeightOf(const Consensus::Params& consensus)
+{
+    return consensus.pqFalconHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || consensus.pqFalconHeight < 0 ? -1 : consensus.pqFalconHeight;
+}
+} // namespace
+
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out)
 {
     // U-22: START_HEIGHT is the UPGRADE_VAULT activation height and the attestor set is per network
@@ -959,6 +967,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
         }
         out = ParamsForNetwork(networkId);
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
+        out.pqFalconHeight = PQFalconHeightOf(consensus);
         return std::nullopt;
     }
     uint256 setId;
@@ -978,6 +987,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
     if (!carrier.has_value()) return std::string("-yellowbackbundlecarrier must be scriptsig, opreturn or either");
     const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
     out = RegtestParams(setId.IsNull() ? 0 : startHeight, (int)sigmaRef, (int)capBps, setId, (int)armMin, carrier.value(), requireArmed);
+    out.pqFalconHeight = PQFalconHeightOf(consensus);
     return std::nullopt;
 }
 

@@ -114,7 +114,7 @@ Params::Params()
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), attestFeeBps(0),
       bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
-      mintRequiresArmed(false)
+      mintRequiresArmed(false), pqFalconHeight(-1)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = earlyRedeemFeeBps[i] = 0;

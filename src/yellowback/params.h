@@ -216,6 +216,10 @@ struct Params
     bool mintRequiresArmed;              //!< MINT_REQUIRES_ARMED (H-1): MINT-4 refuses a mint whose R is not ARMED
                                          //!< (mint-halted-unarmed); mainnet/testnet true, regtest -yellowbackmintrequiresarmed
                                          //!< (default false), hashed in the Params record (M13)
+    int pqFalconHeight;                  //!< the Falcon (scheme 0x02) activation height, a mirror of the consensus
+                                         //!< pqFalconHeight (quantum spec R-A2, A-5) set by ParamsFromArgs; -1 = never
+                                         //!< (NO_ACTIVATION_HEIGHT: mainnet/testnet). MINT-3 admits a Falcon owner and
+                                         //!< TOK-PQ binds from it. Not in the Params record (spec §3.4: no schema change)
 
     Params();
 
@@ -232,6 +236,8 @@ struct Params
      * Snapshot record carries `attest`; until then the status is passed in.
      */
     bool IsArmed(bool snapshotArmed) const { return attestRequired && snapshotArmed; }
+    /** IsPQFalconActive(consensus, height) as the module reads it (quantum spec R-A2, A-5): pqFalconHeight >= 0 and height >= it. */
+    bool IsPQFalconActive(int64_t height) const { return pqFalconHeight >= 0 && height >= pqFalconHeight; }
     /** WINDOW_MIN_FILL of the three price windows (PRICE-1, L9). */
     int MinFill(int window) const
     {

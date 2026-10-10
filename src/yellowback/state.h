@@ -112,6 +112,7 @@ extern const char* const VAULT_CLAIM_INTENTS;    //!< a claim's outputs are not 
 extern const char* const INTENT_SPEND_MALFORMED; //!< a claim intent spent by a selector other than release/cancel, or with a MINT/REDEEM payload
 extern const char* const INTENT_CANCEL_RESIDUAL; //!< an attestor cancel of the owner's residual intent
 extern const char* const INTENT_CANCEL_NO_VAULT; //!< a cancel that does not re-create exactly one byte-identical vault
+extern const char* const BAD_YED_HOLDER;         //!< TOK-PQ: from the Falcon height a token output that is not a Falcon TX_PQPKH
 extern const char* const YED_TEMPLATE_OUTPUT;    //!< a YED-tagged V or I output no mint, claim or cancel created
 extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUNDLE-1 held but the statistic is undefined
 // P4-b (§15.10): the v3 registry acts, invalid since the attestor registry is the primitive set

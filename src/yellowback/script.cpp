@@ -4,6 +4,7 @@
 
 #include "yellowback/script.h"
 
+#include "crypto/pq/scheme.h"
 #include "primitives/transaction.h"
 
 #include <algorithm>
@@ -111,6 +112,25 @@ CPQKeyID OwnerFromBytes(const std::vector<unsigned char>& bytes)
 {
     if (bytes.size() != 33) return CPQKeyID();
     return CPQKeyID(bytes[0], uint256(std::vector<unsigned char>(bytes.begin() + 1, bytes.end())));
+}
+
+std::optional<CTxDestination> HolderKey(const CScript& s)
+{
+    if (s.size() == 25 && s[0] == OP_DUP && s[1] == OP_HASH160 && s[2] == 20 && s[23] == OP_EQUALVERIFY && s[24] == OP_CHECKSIG) {
+        return CTxDestination(CKeyID(uint160(std::vector<unsigned char>(s.begin() + 3, s.begin() + 23))));
+    }
+    if (s.size() == 35 && s[0] == 32 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG) {
+        return CTxDestination(CPQKeyID((uint8_t)(s[33] - OP_1 + 1), uint256(std::vector<unsigned char>(s.begin() + 1, s.begin() + 33))));
+    }
+    return std::nullopt;
+}
+
+bool HolderAllowed(const Params& p, int64_t height, const CScript& script)
+{
+    if (!p.IsPQFalconActive(height)) return true;
+    const std::optional<CTxDestination> d = HolderKey(script);
+    const CPQKeyID* id = d.has_value() ? std::get_if<CPQKeyID>(&d.value()) : nullptr;
+    return id != nullptr && id->scheme == pq::SCHEME_FN_DSA_512;
 }
 
 // ---------------------------------------------------------------- v2 (§3.4)

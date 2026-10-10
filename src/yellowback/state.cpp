@@ -5,6 +5,7 @@
 #include "yellowback/state.h"
 
 #include "arith_uint256.h"
+#include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
 #include "script/script.h"
 #include "vault/act.h"
@@ -63,6 +64,7 @@ const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
+const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
 const char* const ATTESTOR_REGISTER_RETIRED = "attestor-register-retired";
 const char* const ATTESTOR_REVIVE_RETIRED = "attestor-revive-retired";
@@ -338,6 +340,8 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     // The owner is a post-quantum key id, scheme || keyHash in the 33 owner bytes (quantum spec §3.1, §3.2).
     const CPQKeyID owner = OwnerFromBytes(p.ownerKeyBytes);
     if (!vault::IsOwnerValid(owner)) return verdict::BAD_MINT_OWNER_KEY;
+    // A Falcon (scheme 0x02) owner only from the Falcon height (quantum plan §4.4, spec A-4, R-A2; the mirror, A-5).
+    if (owner.scheme == pq::SCHEME_FN_DSA_512 && !P.IsPQFalconActive(H)) return verdict::BAD_MINT_OWNER_KEY;
     // U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight = lockHeight,
     // ownerHeight = appHeight = refHeight + 1, IT-1); v2's P2SH VaultScript and the pre-IT-1 shape (ownerHeight =
     // lockHeight, appHeight = lockHeight + GRACE) are refused for new mints.
@@ -381,6 +385,8 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
+    // TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH.
+    if (!HolderAllowed(P, H, tx.vout[1].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     // MINT-8 (FEE-0 when E(R) is empty, K11)
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     if (!eligible.empty()) {
@@ -541,6 +547,10 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     if (!(H - P.refWindow <= ref && ref <= H - 1) || ref < P.startHeight) return verdict::VAULT_SPEND_MALFORMED;
     for (const Assignment& a : p.assignments) {
         if ((Cents)a.cents < P.minOutput || (Cents)a.cents > P.maxOutput) return verdict::VAULT_SPEND_MALFORMED;
+    }
+    // TOK-PQ (quantum spec F-7): from the Falcon height every assigned output is a Falcon TX_PQPKH.
+    for (const Assignment& a : p.assignments) {
+        if (!HolderAllowed(P, H, tx.vout[a.vout].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     }
     const VaultRecord& vault = active[0].record;
     const bool claim = selector.value() == vault::SEL_APP;
@@ -1061,6 +1071,11 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         touched = true;
     } else if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
         log.type = (uint8_t)(fp->payload.type == PayloadType::TRANSFER ? TxLogType::TRANSFER : TxLogType::REDEEM);
+        // TOK-PQ (quantum spec F-7): from the Falcon height an assignment to any other script makes the
+        // transaction invalid (refused, not burned: a wallet that missed the activation keeps its YED).
+        for (const Assignment& a : fp->payload.assignments) {
+            if (!HolderAllowed(ctx.params, ctx.height, tx.vout[a.vout].scriptPubKey)) return fail(verdict::BAD_YED_HOLDER);
+        }
         ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log);
     } else {
         // The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog entry; a

@@ -42,12 +42,16 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87'
+GOLDEN_STATE_HASH = '17926ca6311ab27d92ea3ecb10eda2924eae72c133b9668b060b141dd13924a1'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
 G2_PUBKEY = bytes.fromhex('02C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5')  # 2G
 BAD_PUBKEY = b'\x02' + b'\x00' * 32   # x = 0: 7 is not a square mod p
+# Post-quantum owner ids (quantum spec section 3.1): scheme 0x01 (SLH-DSA) || a 32-byte key hash; the model checks no signature
+G_OWNER = bytes([0x01]) + ym.sha256(b'yellowback-golden-owner-1')
+G2_OWNER = bytes([0x01]) + ym.sha256(b'yellowback-golden-owner-2')
+BAD_OWNER = bytes([0x03]) + bytes(32)  # an unregistered scheme
 
 KEY1 = ym.hash160(b'yellowback-golden-miner-1')
 KEY2 = ym.hash160(b'yellowback-golden-miner-2')
@@ -156,8 +160,8 @@ class Chain(object):
         return (t, n, ya.carrier_scriptsig(bundle, SIG71, redeem), seq)
 
     def mint_tx(self, cents, lock_blocks, ref_height, collateral, fee_key=None, fee_value=None,
-                owner=G_PUBKEY, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
-                opret_at=2, lock_height=None, carrier=None, attest_fee=None):
+                owner=G_OWNER, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
+                opret_at=2, lock_height=None, carrier=None, attest_fee=None, token_script=None):
         """``carrier`` = a bundle (bytes) carried by an extra input; ``attest_fee`` = (bond key hash, zat)
         paid at vout 4 (after the pool fee) and named by attestFeeVout."""
         lock = ref_height + lock_blocks if lock_height is None else lock_height
@@ -171,7 +175,7 @@ class Chain(object):
         if vout0_script is None:                                   # U-23: the V template (a P2PKH placeholder if it cannot be built)
             vout0_script = ym.yed_vault_script(self.params, owner, ref_height) or ym.p2pkh_script(OWNER_KEYHASH)
         vout0 = vout0_script
-        vouts = [(collateral, vout0), (self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH))]
+        vouts = [(collateral, vout0), (self.params.token_value, token_script or ym.p2pkh_script(OWNER_KEYHASH))]
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
         if opret_at == 2:
             vouts.append(opret)
@@ -238,7 +242,7 @@ class Chain(object):
         if attest_fee is not None:
             vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         if residual is not None:
-            spk = ym.p2pkh_script(residual[0])
+            spk = ym.p2pkh_script(residual[0]) if len(residual[0]) == 20 else residual[0]   # a key hash or a script (PQPKH, F-3)
             if claim and v is not None:
                 spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, spk)
             vouts.append((residual[1], spk))
@@ -413,12 +417,25 @@ class PayloadTests(unittest.TestCase):
 
     # Rule: MINT-1
     def test_mint_roundtrip(self):
-        b = ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3, 4)
+        b = ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3, 4)
         self.assertEqual(len(b), 52)
         p = ym.decode_payload(b)
         self.assertEqual((p.type, p.term_class, p.cents, p.lock_height, p.ref_height, p.owner_pubkey, p.fee_vout, p.attest_fee_vout),
-                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_PUBKEY, 3, 4))
-        self.assertEqual(ym.decode_payload(ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3)).attest_fee_vout, 0xFF)
+                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_OWNER, 3, 4))
+        self.assertEqual(ym.decode_payload(ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3)).attest_fee_vout, 0xFF)
+
+    # Rule: MINT-1
+    def test_mint_is_version_4_other_types_version_3(self):
+        # quantum spec header C-1: the MINT alone is payload version 4; a v3 MINT and a v4 TRANSFER are non-Yellowback
+        b = ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3, 4)
+        self.assertEqual(b[2], 4)
+        self.assertEqual(b[17], 0x01)
+        self.assertEqual(b[18:50], G_OWNER[1:])
+        self.assertIsNone(ym.decode_payload(b[:2] + b'\x03' + b[3:]))
+        t = ym.encode_transfer([(0, 100)])
+        self.assertEqual(t[2], 3)
+        self.assertIsNone(ym.decode_payload(t[:2] + b'\x04' + t[3:]))
+        self.assertEqual(ym.encode_redeem(1, 1, [])[2], 3)
 
     # Rule: XFER-1
     def test_transfer_and_redeem_roundtrip(self):
@@ -449,13 +466,14 @@ class PayloadTests(unittest.TestCase):
 
     # Rule: MINT-1
     def test_malformed(self):
-        good = ym.encode_mint(0, 10_000, 100, 50, G_PUBKEY, 0xFF)
+        good = ym.encode_mint(0, 10_000, 100, 50, G_OWNER, 0xFF)
         self.assertIsNone(ym.decode_payload(good[:-1]))                 # short
         self.assertIsNone(ym.decode_payload(good + b'\x00'))            # trailing
         self.assertIsNone(ym.decode_payload(b'YA' + good[2:]))          # magic
         self.assertIsNone(ym.decode_payload(b'YB\x01' + good[3:]))      # version 1 ignored (V23)
         self.assertIsNone(ym.decode_payload(b'YB\x02' + good[3:]))      # version 2 ignored (V23)
-        self.assertIsNone(ym.decode_payload(b'YB\x04' + good[3:]))      # later version ignored
+        self.assertIsNone(ym.decode_payload(b'YB\x05' + good[3:]))      # later version ignored
+        self.assertIsNone(ym.decode_payload(b'YB\x03' + good[3:]))      # a v3 MINT ignored (quantum spec C-1)
         self.assertIsNone(ym.decode_payload(b'YB\x03\x10' + good[4:]))  # retired type
         self.assertIsNone(ym.decode_payload(b'YB\x03\x20'))             # other family, short
         self.assertIsNone(ym.decode_payload(b'YB\x03'))                 # < 4 bytes
@@ -828,17 +846,38 @@ class MintTests(unittest.TestCase):
         self.assertEqual(c.void_reason(txid_of(raw)), 'bad-mint-ref-height')
 
     # Rule: MINT-3
+    # Rule: TOK-PQ
+    def test_mint3_falcon_owner_and_tokpq(self):
+        # quantum spec R-A2, A-5, F-7: a Falcon owner and the holder rule bind from the Falcon height only
+        c = self.c
+        falcon_owner = bytes([ym.PQ_SCHEME_FALCON]) + ym.sha256(b'falcon-owner')
+        falcon_holder = ym.pqpkh_script(bytes([ym.PQ_SCHEME_FALCON]) + ym.sha256(b'falcon-holder'))
+        self.assertEqual(len(falcon_holder), 35)
+        self.assertEqual(ym.pqpkh_owner(falcon_holder)[0], 2)
+        c.params.pq_falcon_height = c.height + 3
+        self.assertVoid(self.mint(owner=falcon_owner), 'bad-mint-owner-key')          # below the height
+        ok = self.mint(token_script=ym.pqpkh_script(G_OWNER))                            # any holder below it
+        self.assertIn((ok, 0), c.model.vaults)
+        while c.height + 1 < c.params.pq_falcon_height:
+            c.mine((1, 50_000, 0, KEY2), [])
+        bad = self.mint()                                                                # P2PKH token at the height
+        self.assertEqual(c.refused.get(bad), 'bad-yed-holder')
+        good = self.mint(owner=falcon_owner, token_script=falcon_holder)
+        self.assertIn((good, 0), c.model.vaults)
+        self.assertIn((good, 1), c.model.tokens)
+
+    # Rule: MINT-3
     def test_mint3_verdicts(self):
         c = self.c
         ref = c.height - 1
         # fewer than three outputs: the V at vout[0] and the OP_RETURN only
         lock = ref + 48
-        pl = ym.encode_mint(0, 10_000, lock, ref, G_PUBKEY, 0xFF)
-        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_PUBKEY, ref)),
+        pl = ym.encode_mint(0, 10_000, lock, ref, G_OWNER, 0xFF)
+        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_OWNER, ref)),
                                                     (0, bytes([ym.OP_RETURN]) + ym.push(pl))]).hex()
         c.mine((1, 50_000, 0, KEY2), [raw])
         self.assertVoid(txid_of(raw), 'bad-mint-outputs')
-        self.assertVoid(self.mint(owner=BAD_PUBKEY), 'bad-mint-owner-key')
+        self.assertVoid(self.mint(owner=BAD_OWNER), 'bad-mint-owner-key')
         self.assertVoid(self.mint(vout0_script=ym.p2sh_script(b'\x51')), 'bad-mint-vault-script')
         # U-23: v2's P2SH vault is refused for new mints, and so is a P2PKH vout[0]
         self.assertVoid(self.mint(vout0_script=ym.p2sh_script(ym.vault_script(c.height - 1 + 48, G_PUBKEY, c.height - 1 + 72))),
@@ -846,9 +885,9 @@ class MintTests(unittest.TestCase):
         self.assertVoid(self.mint(vout0_script=ym.p2pkh_script(KEY1)), 'bad-mint-vault-script')
         # a V under another set is not the YED vault
         other = ym.Params.regtest(1, attestor_set='77' * 32)
-        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_PUBKEY, c.height - 1)), 'bad-mint-vault-script')
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_OWNER, c.height - 1)), 'bad-mint-vault-script')
         # IT-1: the pre-plan shape (ownerHeight = lockHeight, appHeight = lockHeight + GRACE) is refused for a new mint
-        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script_at(c.params, G_PUBKEY, c.height - 1 + 48, c.height - 1 + 48 + c.params.grace)),
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script_at(c.params, G_OWNER, c.height - 1 + 48, c.height - 1 + 48 + c.params.grace)),
                         'bad-mint-vault-script')
 
     # Rule: MINT-4
@@ -1143,7 +1182,7 @@ class RedeemTests(unittest.TestCase):
     def test_m3_mint_payload_on_vault_spend(self):
         c = self.c
         lock = c.height - 1 + 48
-        pl = ym.encode_mint(0, 10_000, lock, c.height - 1, G2_PUBKEY, 0xFF)
+        pl = ym.encode_mint(0, 10_000, lock, c.height - 1, G2_OWNER, 0xFF)
         txid, verdict = self.spend(payload=pl)
         self.assertFails((txid, verdict), 'vault-spend-malformed')
         self.assertNotIn((txid, 0), c.model.vaults)             # no MINT rule ran
@@ -1363,7 +1402,7 @@ def build_golden():
                 txs_at['claim5'] = c.spend_tx(vault, script, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
                                               carrier=bundle, collateral_out=v.collateral_zat - residual - fee - 10 ** 8,
                                               attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
-                                              residual=(ym.hash160(G_PUBKEY), residual))
+                                              residual=(ym.pqpkh_script(G_OWNER), residual))
                 txs.append(txs_at['claim5'])
                 v3['claim_height'] = h
                 v3['residual'] = residual
@@ -1376,7 +1415,7 @@ def build_golden():
         elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
             claim5 = txid_of(txs_at['claim5'])
             res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL]
-            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.p2pkh_script(ym.hash160(G_PUBKEY)))
+            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.pqpkh_script(G_OWNER))
             txs.append(txs_at['release5r'])
             v3['residual_vout'] = res[0][1]
         elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
@@ -1425,7 +1464,7 @@ def golden_document(c):
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
                        'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3; '
+                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '

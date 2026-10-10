@@ -16,6 +16,7 @@
 
 #include "chainparams.h"
 #include "coins.h"
+#include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
 #include "consensus/upgrades.h"
 #include "key.h"
@@ -1059,6 +1060,60 @@ BOOST_AUTO_TEST_CASE(transaction_builder_extension)
     ScriptError err;
     BOOST_CHECK_MESSAGE(Verify(CMutableTransaction(tx), p2pkh, 2 * COIN, branchId, &err), ScriptErrorString(err));
     RegtestDeactivateSapling();
+}
+
+// Rule: TOK-PQ
+// HolderKey (quantum plan §4.4, spec §3.5): the holder of a YED output is the 25-byte P2PKH (a CKeyID) or the
+// 35-byte TX_PQPKH `20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG` (a CPQKeyID), matched byte for byte as Solver does;
+// every other shape (a scheme pushed as data, an unregistered OP_n, a trailing byte, P2SH, the V) is no holder.
+// HolderAllowed is TOK-PQ: every shape below the Falcon height, only scheme 0x02 from it.
+BOOST_AUTO_TEST_CASE(holderkey_pq_holder_recognition)
+{
+    const CKey k = CKey::TestOnlyRandomKey(true);
+    const CKeyID keyId = k.GetPubKey().GetID();
+    const uint256 h = GetRandHash();
+    const CPQKeyID slh(pq::SCHEME_SLH_DSA_SHA2_128S, h), falcon(pq::SCHEME_FN_DSA_512, h);
+    const CScript p2pkh = GetScriptForDestination(keyId);
+    const CScript slhSpk = GetScriptForDestination(slh), falconSpk = GetScriptForDestination(falcon);
+    BOOST_CHECK_EQUAL(slhSpk.size(), 35u);
+    BOOST_CHECK_EQUAL(HexStr(slhSpk.begin(), slhSpk.end()), "20" + HexStr(h.begin(), h.end()) + "51c2");
+    BOOST_CHECK_EQUAL(HexStr(falconSpk.begin(), falconSpk.end()), "20" + HexStr(h.begin(), h.end()) + "52c2");
+    BOOST_CHECK(HolderKey(p2pkh) == std::optional<CTxDestination>(CTxDestination(keyId)));
+    BOOST_CHECK(HolderKey(slhSpk) == std::optional<CTxDestination>(CTxDestination(slh)));
+    BOOST_CHECK(HolderKey(falconSpk) == std::optional<CTxDestination>(CTxDestination(falcon)));
+    // Solver agrees on the shapes it accepts.
+    for (const CScript& s : { p2pkh, slhSpk, falconSpk }) {
+        CTxDestination d;
+        BOOST_REQUIRE(ExtractDestination(s, d));
+        BOOST_CHECK(HolderKey(s) == std::optional<CTxDestination>(d));
+    }
+    // Not holders.
+    const std::vector<CScript> others = {
+        CScript() << ToByteVector(h) << valtype(1, 0x01) << OP_CHECKPQSIG,          // the scheme pushed as data (36 bytes)
+        CScript() << ToByteVector(h) << OP_3 << OP_CHECKPQSIG,                      // an unregistered scheme
+        CScript() << ToByteVector(h) << OP_1 << OP_CHECKSIG,                        // the wrong opcode
+        CScript(slhSpk) << OP_NOP,                                                  // a trailing byte
+        CScript(slhSpk.begin(), slhSpk.end() - 1),                                  // truncated
+        GetScriptForDestination(CScriptID(p2pkh)),                                  // P2SH
+        CScript() << OP_RETURN << valtype(4, 0),
+        CScript(),
+    };
+    for (const CScript& s : others) BOOST_CHECK(!HolderKey(s).has_value());
+
+    // TOK-PQ: the module's mirror of the consensus Falcon height decides.
+    yellowback::Params p = RegtestParams(1, 0, 0, uint256S("5e75"));
+    BOOST_CHECK_EQUAL(p.pqFalconHeight, -1);                                           // never, by default
+    for (const CScript& s : { p2pkh, slhSpk, falconSpk, others[0], CScript() }) BOOST_CHECK(HolderAllowed(p, 1000000, s));
+    p.pqFalconHeight = 100;
+    for (const CScript& s : { p2pkh, slhSpk, falconSpk, others[0], CScript() }) BOOST_CHECK(HolderAllowed(p, 99, s));
+    BOOST_CHECK(HolderAllowed(p, 100, falconSpk));
+    BOOST_CHECK(HolderAllowed(p, 1000000, falconSpk));
+    for (const CScript& s : { p2pkh, slhSpk, others[0], others[1], others[3], others[5], CScript() }) {
+        BOOST_CHECK(!HolderAllowed(p, 100, s));
+    }
+    p.pqFalconHeight = 0;                                                               // -pqfalcon=1
+    BOOST_CHECK(!HolderAllowed(p, 0, p2pkh));
+    BOOST_CHECK(HolderAllowed(p, 0, falconSpk));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
