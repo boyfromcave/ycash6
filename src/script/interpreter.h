@@ -101,6 +101,11 @@ enum
     // Evaluate OP_CHECKSETSIG (0xc0) and OP_CHECKSETDORMANT (0xc1), the vault primitive's
     // opcodes (UPGRADE_VAULT, plan §15.2). Without it both are SCRIPT_ERR_BAD_OPCODE.
     SCRIPT_VERIFY_VAULT = (1U << 11),
+
+    // Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512). Set only beside SCRIPT_VERIFY_VAULT and only
+    // where the network's pqFalconActive is true (docs/plans/yellowback-quantum-plan.md §4.1, §4.8);
+    // without it scheme 0x02 is SCRIPT_ERR_PQ_SCHEME.
+    SCRIPT_VERIFY_PQ_FALCON = (1U << 12),
 };
 
 bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
@@ -195,6 +200,20 @@ public:
         return false;
     }
 
+    // OP_CHECKPQSIG (docs/plans/yellowback-quantum-plan.md §4.2): true iff `vchSig` (the scheme's
+    // signature followed by one hashtype byte) verifies under `scheme` and `vchPubKey` over
+    // SignatureHash(scriptCode, tx, nIn, hashtype, amount, consensusBranchId). The interpreter has
+    // already checked the scheme, the sizes and the key hash.
+    virtual bool CheckPQSig(
+        uint8_t scheme,
+        const std::vector<unsigned char>& vchSig,
+        const std::vector<unsigned char>& vchPubKey,
+        const CScript& scriptCode,
+        uint32_t consensusBranchId) const
+    {
+        return false;
+    }
+
     virtual ~BaseSignatureChecker() {}
 };
 
@@ -214,6 +233,7 @@ public:
     bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, uint32_t consensusBranchId) const;
     bool CheckLockTime(const CScriptNum& nLockTime) const;
     bool CheckSequence(const CScriptNum& nSequence) const;
+    bool CheckPQSig(uint8_t scheme, const std::vector<unsigned char>& vchSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, uint32_t consensusBranchId) const;
 };
 
 class MutableTransactionSignatureChecker : public TransactionSignatureChecker

@@ -9,6 +9,7 @@
 
 #include "consensus/upgrades.h"
 #include "primitives/transaction.h"
+#include "crypto/pq/scheme.h"
 #include "crypto/ripemd160.h"
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
@@ -1071,6 +1072,88 @@ bool EvalScript(
                 }
                 break;
 
+                case OP_CHECKPQSIG:
+                {
+                    // (sig_1 .. sig_s s pk_1 .. pk_p p keyHash schemeId -- bool), quantum plan §4.2:
+                    // the scriptPubKey pushes <keyHash:32> <schemeId>, the scriptSig the rest.
+                    if (!(flags & SCRIPT_VERIFY_VAULT))
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+
+                    // 1. A registered scheme (0x02 only with SCRIPT_VERIFY_PQ_FALCON) and a 32-byte key hash.
+                    if (stack.size() < 2)
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    const valtype& vchScheme = stacktop(-1);
+                    if (vchScheme.size() != 1 || !pq::IsKnownScheme(vchScheme[0]))
+                        return set_error(serror, SCRIPT_ERR_PQ_SCHEME);
+                    const uint8_t scheme = vchScheme[0];
+                    if (scheme == pq::SCHEME_FN_DSA_512 && !(flags & SCRIPT_VERIFY_PQ_FALCON))
+                        return set_error(serror, SCRIPT_ERR_PQ_SCHEME);
+                    const valtype& vchKeyHash = stacktop(-2);
+                    if (vchKeyHash.size() != pq::KEYHASH_SIZE)
+                        return set_error(serror, SCRIPT_ERR_PQ_SIZE);
+                    const uint256 keyHash(vchKeyHash);
+
+                    // 2. The counts p (the key's chunks) and s (the signature's, which carry the
+                    // hashtype byte): each a minimal number 1..ceil(len/520), so one byte, OP_1..OP_16,
+                    // with that many items under it.
+                    const size_t lens[2] = {pq::PubKeySize(scheme), pq::SigSize(scheme) + 1};
+                    int nChunks[2], iCount[2];
+                    int i = 3;
+                    for (int part = 0; part < 2; part++) {
+                        if ((int)stack.size() < i)
+                            return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                        const valtype& vchCount = stacktop(-i);
+                        const size_t maxChunks = (lens[part] + pq::MAX_CHUNK - 1) / pq::MAX_CHUNK;
+                        if (vchCount.size() != 1 || vchCount[0] < 1 || vchCount[0] > maxChunks)
+                            return set_error(serror, SCRIPT_ERR_PQ_CHUNK);
+                        nChunks[part] = vchCount[0];
+                        iCount[part] = i;
+                        i += nChunks[part] + 1;
+                        if ((int)stack.size() < i - 1)
+                            return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    }
+
+                    // 3. Canonical chunking: every chunk but the last is exactly 520 bytes (a chunk over
+                    // 520 bytes cannot be pushed; checked so the rule stands alone). Chunk k (1 = first,
+                    // pushed first, deepest) is stacktop(-(iCount + nChunks - k + 1)).
+                    for (int part = 0; part < 2; part++) {
+                        for (int k = 1; k <= nChunks[part]; k++) {
+                            const valtype& chunk = stacktop(-(iCount[part] + nChunks[part] - k + 1));
+                            if ((k < nChunks[part] && chunk.size() != pq::MAX_CHUNK) || chunk.size() > pq::MAX_CHUNK)
+                                return set_error(serror, SCRIPT_ERR_PQ_CHUNK);
+                        }
+                    }
+
+                    // 4. Exact sizes: the reassembled key and signature are the registry's lengths.
+                    valtype vchPubKey, vchSig;
+                    for (int part = 0; part < 2; part++) {
+                        valtype& out = part == 0 ? vchPubKey : vchSig;
+                        for (int k = 1; k <= nChunks[part]; k++) {
+                            const valtype& chunk = stacktop(-(iCount[part] + nChunks[part] - k + 1));
+                            out.insert(out.end(), chunk.begin(), chunk.end());
+                        }
+                        if (out.size() != lens[part])
+                            return set_error(serror, SCRIPT_ERR_PQ_SIZE);
+                    }
+
+                    // 5. The hashtype is the signature's last byte; under STRICTENC it must be defined, as
+                    // for OP_CHECKSIG (the DER and LOW_S checks are ECDSA's and do not apply).
+                    if ((flags & SCRIPT_VERIFY_STRICTENC) != 0 && !IsDefinedHashtypeSignature(vchSig))
+                        return set_error(serror, SCRIPT_ERR_SIG_HASHTYPE);
+
+                    // 6, 7. A key that does not hash to keyHash, or a signature that does not verify
+                    // over the ZIP-243 sighash, pushes false (OP_CHECKSIG's failure semantics; Ycash
+                    // has no NULLFAIL flag).
+                    bool fSuccess = pq::KeyHash(scheme, vchPubKey) == keyHash &&
+                                    checker.CheckPQSig(scheme, vchSig, vchPubKey, script, consensusBranchId);
+
+                    // Clean up the stack: the i - 1 arguments.
+                    while (i-- > 1)
+                        popstack(stack);
+                    stack.push_back(fSuccess ? vchTrue : vchFalse);
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1576,6 +1659,30 @@ bool TransactionSignatureChecker::CheckLockTime(const CScriptNum& nLockTime) con
         return false;
 
     return true;
+}
+
+bool TransactionSignatureChecker::CheckPQSig(
+    uint8_t scheme,
+    const vector<unsigned char>& vchSigIn,
+    const vector<unsigned char>& vchPubKey,
+    const CScript& scriptCode,
+    uint32_t consensusBranchId) const
+{
+    // Hash type is one byte tacked on to the end of the signature, as in CheckSig.
+    vector<unsigned char> vchSig(vchSigIn);
+    if (vchSig.empty())
+        return false;
+    int nHashType = vchSig.back();
+    vchSig.pop_back();
+
+    uint256 sighash;
+    try {
+        sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, consensusBranchId, this->txdata);
+    } catch (logic_error ex) {
+        return false;
+    }
+
+    return pq::Verify(scheme, vchPubKey, vchSig, sighash);
 }
 
 bool TransactionSignatureChecker::CheckSequence(const CScriptNum& nSequence) const

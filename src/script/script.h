@@ -178,6 +178,9 @@ enum opcodetype
     // SCRIPT_ERR_BAD_OPCODE unless SCRIPT_VERIFY_VAULT is set. 0xbb-0xbf stay unassigned.
     OP_CHECKSETSIG = 0xc0,
     OP_CHECKSETDORMANT = 0xc1,
+    // Post-quantum signature check (UPGRADE_VAULT, docs/plans/yellowback-quantum-plan.md §4.2);
+    // SCRIPT_ERR_BAD_OPCODE unless SCRIPT_VERIFY_VAULT is set.
+    OP_CHECKPQSIG = 0xc2,
 
     OP_INVALIDOPCODE = 0xff,
 };

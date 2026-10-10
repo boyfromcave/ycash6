@@ -147,6 +147,7 @@ const char* GetOpName(opcodetype opcode)
     // vault primitive
     case OP_CHECKSETSIG            : return "OP_CHECKSETSIG";
     case OP_CHECKSETDORMANT        : return "OP_CHECKSETDORMANT";
+    case OP_CHECKPQSIG             : return "OP_CHECKPQSIG";
 
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
 

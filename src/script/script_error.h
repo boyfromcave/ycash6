@@ -58,6 +58,11 @@ typedef enum ScriptError_t
     SCRIPT_ERR_SETSIG,
     SCRIPT_ERR_SETSIG_COUNT,
 
+    /* OP_CHECKPQSIG (post-quantum signature) */
+    SCRIPT_ERR_PQ_SCHEME,
+    SCRIPT_ERR_PQ_CHUNK,
+    SCRIPT_ERR_PQ_SIZE,
+
     SCRIPT_ERR_ERROR_COUNT
 } ScriptError;
 

@@ -382,7 +382,8 @@ BOOST_AUTO_TEST_CASE(vault_opcodes_without_flag)
     for (int op = 0xba; op <= 0xbf; op++) {
         BOOST_CHECK_EQUAL(Eval(CScript() << (opcodetype)op, SCRIPT_VERIFY_VAULT, checker), SCRIPT_ERR_BAD_OPCODE);
     }
-    BOOST_CHECK_EQUAL(Eval(CScript() << (opcodetype)0xc2, SCRIPT_VERIFY_VAULT, checker), SCRIPT_ERR_BAD_OPCODE);
+    // 0xc2 is OP_CHECKPQSIG (quantum plan §4.2, pq_script_tests); 0xc3 stays BAD_OPCODE.
+    BOOST_CHECK_EQUAL(Eval(CScript() << (opcodetype)0xc3, SCRIPT_VERIFY_VAULT, checker), SCRIPT_ERR_BAD_OPCODE);
     BOOST_CHECK_EQUAL(checker.setSigCalls, 0);
 }
 

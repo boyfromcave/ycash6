@@ -71,6 +71,12 @@ const char* ScriptErrorString(const ScriptError serror)
             return "OP_CHECKSETSIG or OP_CHECKSETDORMANT failed";
         case SCRIPT_ERR_SETSIG_COUNT:
             return "More than one OP_CHECKSETSIG in a script evaluation";
+        case SCRIPT_ERR_PQ_SCHEME:
+            return "OP_CHECKPQSIG scheme unknown or not active";
+        case SCRIPT_ERR_PQ_CHUNK:
+            return "OP_CHECKPQSIG key or signature chunking not canonical";
+        case SCRIPT_ERR_PQ_SIZE:
+            return "OP_CHECKPQSIG key, key hash or signature of the wrong size";
         case SCRIPT_ERR_PUBKEYTYPE:
             return "Public key is neither compressed or uncompressed";
         case SCRIPT_ERR_UNKNOWN_ERROR:
