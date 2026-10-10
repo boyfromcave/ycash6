@@ -64,9 +64,12 @@ isminetype IsMineInner(const CKeyStore& keystore, const CScript& scriptPubKey, I
     {
     case TX_NONSTANDARD:
     case TX_NULL_DATA:
-    case TX_VAULT:        // vault templates are spent through the vault_* / set_* RPCs
-    case TX_VAULT_INTENT:
-    case TX_PQPKH:        // PQ keys join the keystore in the wallet phase (quantum plan Q5)
+    case TX_VAULT:        // vault templates are spent through the vault_* / set_* RPCs, never by coin
+    case TX_VAULT_INTENT: // selection, even when the wallet holds the PQ owner key (vault_list "wallet")
+        break;
+    case TX_PQPKH:
+        if (keystore.HavePQKey(CPQKeyID(vSolutions[0][0], uint256(vSolutions[1]))))
+            return ISMINE_SPENDABLE;
         break;
     case TX_PUBKEY:
         keyID = CPubKey(vSolutions[0]).GetID();

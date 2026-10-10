@@ -333,3 +333,10 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
     }
     return n;
 }
+
+CFeeRate pqFeeRate = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
+
+CAmount PQSizeFee(CAmount floor, size_t nBytes)
+{
+    return std::max(floor, pqFeeRate.GetFee(nBytes));
+}

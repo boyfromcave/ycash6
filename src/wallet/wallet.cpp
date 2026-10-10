@@ -11,6 +11,7 @@
 #include "checkpoints.h"
 #include "coincontrol.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "consensus/consensus.h"
@@ -497,6 +498,108 @@ bool CWallet::AddCryptedSaplingSpendingKey(const libzcash::SaplingExtendedFullVi
         }
     }
     return false;
+}
+
+// ---- post-quantum keys (quantum plan §4.6) ----
+
+static void NotePQIndex(std::map<uint8_t, uint32_t>& next, uint8_t scheme, uint32_t index)
+{
+    if (index == CPQKey::PQ_INDEX_NONE) return;
+    uint32_t& n = next[scheme];
+    if (index + 1 > n) n = index + 1;
+}
+
+bool CWallet::GetNewPQKey(uint8_t scheme, CPQKeyID& idOut)
+{
+    LOCK(cs_wallet);
+    if (!pq::IsKnownScheme(scheme) || IsLocked())
+        return false;
+    // 6.20.0: the wallet's seed is its BIP39 MnemonicSeed; IKM = its raw seed (quantum spec, Q5 as implemented).
+    const std::optional<MnemonicSeed> seed = GetMnemonicSeed();
+    if (!seed.has_value())
+        return false;
+    const RawHDSeed raw = seed.value().RawSeed();
+    uint32_t index = mapPQNextIndex.count(scheme) ? mapPQNextIndex[scheme] : 0;
+    CPQKey key;
+    for (;; index++) {
+        if (index == CPQKey::PQ_INDEX_NONE)
+            return false;
+        if (!key.Set(scheme, DerivePQSeed(raw.data(), raw.size(), scheme, index), index))
+            return false;
+        if (!HavePQKey(key.GetID()))
+            break;
+    }
+    if (!AddPQKeyWithTime(key, GetTime()))
+        return false;
+    idOut = key.GetID();
+    return true;
+}
+
+bool CWallet::AddPQKey(const CPQKey& key)
+{
+    return AddPQKeyWithTime(key, GetTime());
+}
+
+bool CWallet::AddPQKeyWithTime(const CPQKey& key, int64_t nCreateTime)
+{
+    LOCK(cs_wallet);
+    if (!key.IsValid())
+        return false;
+    mapPQKeyCreateTime[key.GetID()] = nCreateTime;
+    if (nCreateTime && (!nTimeFirstKey || nCreateTime < nTimeFirstKey))
+        nTimeFirstKey = nCreateTime;
+    if (!CCryptoKeyStore::AddPQKey(key))     // encrypted: calls AddCryptedPQKey, which writes "cpqkey"
+        return false;
+    NotePQIndex(mapPQNextIndex, key.Scheme(), key.Index());
+    if (!fFileBacked || IsCrypted())
+        return true;
+    CPQKeyRecord rec;
+    rec.index = key.Index();
+    rec.pk = key.PubKey();
+    rec.secret = key.Seed();
+    rec.nCreateTime = nCreateTime;
+    return CWalletDB(strWalletFile).WritePQKey(key.GetID(), rec);
+}
+
+bool CWallet::AddCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted)
+{
+    if (!CCryptoKeyStore::AddCryptedPQKey(id, crypted))
+        return false;
+    if (!fFileBacked)
+        return true;
+    LOCK(cs_wallet);
+    CPQKeyRecord rec;
+    rec.index = crypted.index;
+    rec.pk = crypted.pk;
+    rec.secret.assign(crypted.cryptedSeed.begin(), crypted.cryptedSeed.end());
+    rec.nCreateTime = mapPQKeyCreateTime.count(id) ? mapPQKeyCreateTime[id] : 0;
+    if (pwalletdbEncryption)
+        return pwalletdbEncryption->WriteCryptedPQKey(id, rec);
+    return CWalletDB(strWalletFile).WriteCryptedPQKey(id, rec);
+}
+
+bool CWallet::LoadPQKey(const CPQKey& key, int64_t nCreateTime)
+{
+    AssertLockHeld(cs_wallet);
+    if (!CCryptoKeyStore::AddPQKey(key))
+        return false;
+    mapPQKeyCreateTime[key.GetID()] = nCreateTime;
+    NotePQIndex(mapPQNextIndex, key.Scheme(), key.Index());
+    if (nCreateTime && (!nTimeFirstKey || nCreateTime < nTimeFirstKey))
+        nTimeFirstKey = nCreateTime;
+    return true;
+}
+
+bool CWallet::LoadCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted, int64_t nCreateTime)
+{
+    AssertLockHeld(cs_wallet);
+    if (!CCryptoKeyStore::AddCryptedPQKey(id, crypted))
+        return false;
+    mapPQKeyCreateTime[id] = nCreateTime;
+    NotePQIndex(mapPQNextIndex, id.scheme, crypted.index);
+    if (nCreateTime && (!nTimeFirstKey || nCreateTime < nTimeFirstKey))
+        nTimeFirstKey = nCreateTime;
+    return true;
 }
 
 libzcash::transparent::AccountKey CWallet::GetLegacyAccountKey() const {
@@ -6525,7 +6628,10 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 // Grab the current consensus branch ID
                 auto consensusBranchId = CurrentEpochBranchId(chainActive.Height() + 1, Params().GetConsensus());
 
-                // Sign
+                // Sign. A post-quantum (TX_PQPKH) input verifies only under the vault flags of the next
+                // block (quantum spec §5.2), and prices the transaction by size (quantum plan §4.5).
+                const unsigned int signFlags = STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(chainActive.Height() + 1, Params().GetConsensus());
+                bool fPQInput = false;
                 int nIn = 0;
                 CTransaction txNewConst(txNew);
                 std::vector<CTxOut> allPrevOutputs;
@@ -6537,11 +6643,13 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 {
                     bool signSuccess;
                     const CScript& scriptPubKey = coin.first->vout[coin.second].scriptPubKey;
+                    if (IsPQInputScript(scriptPubKey))
+                        fPQInput = true;
                     SignatureData sigdata;
                     if (sign)
-                        signSuccess = ProduceSignature(TransactionSignatureCreator(this, &txNewConst, txdata, nIn, coin.first->vout[coin.second].nValue, SIGHASH_ALL), scriptPubKey, sigdata, consensusBranchId);
+                        signSuccess = ProduceSignature(TransactionSignatureCreator(this, &txNewConst, txdata, nIn, coin.first->vout[coin.second].nValue, SIGHASH_ALL), scriptPubKey, sigdata, consensusBranchId, signFlags);
                     else
-                        signSuccess = ProduceSignature(DummySignatureCreator(this), scriptPubKey, sigdata, consensusBranchId);
+                        signSuccess = ProduceSignature(DummySignatureCreator(this), scriptPubKey, sigdata, consensusBranchId, signFlags);
 
                     if (!signSuccess)
                     {
@@ -6564,6 +6672,11 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 }
 
                 CAmount nFeeNeeded = GetMinimumFee(txNew, nBytes);
+                // quantum plan §4.5: a transaction with a PQ input pays max(this policy's fee, the flat
+                // LEGACY_DEFAULT_FEE, -pqfeerate x size) (on 6.20.0 the policy fee is the per-output
+                // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee).
+                if (fPQInput)
+                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), maxTxFee);
 
                 // Remove scriptSigs if we used dummy signatures for fee calculation
                 if (!sign) {

@@ -7,8 +7,10 @@
 
 #include "script/sign.h"
 
+#include "crypto/pq/scheme.h"
 #include "key.h"
 #include "keystore.h"
+#include "pqkey.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
 #include "script/standard.h"
@@ -37,6 +39,50 @@ bool TransactionSignatureCreator::CreateSig(std::vector<unsigned char>& vchSig, 
     if (!key.Sign(hash, vchSig))
         return false;
     vchSig.push_back((unsigned char)nHashType);
+    return true;
+}
+
+bool TransactionSignatureCreator::CreatePQSig(std::vector<unsigned char>& vchSig, std::vector<unsigned char>& vchPubKey, const CPQKeyID& id, const CScript& scriptCode, uint32_t consensusBranchId) const
+{
+    CPQKey key;
+    if (!keystore->GetPQKey(id, key))
+        return false;
+
+    uint256 hash;
+    try {
+        hash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, consensusBranchId, txToData);
+    } catch (logic_error ex) {
+        return false;
+    }
+
+    if (!key.Sign(hash, vchSig))
+        return false;
+    vchSig.push_back((unsigned char)nHashType);
+    vchPubKey = key.PubKey();
+    return true;
+}
+
+std::vector<valtype> PQScriptSigPushes(const valtype& vchSig, const valtype& vchPubKey)
+{
+    std::vector<valtype> ret;
+    for (const valtype* part : {&vchSig, &vchPubKey}) {
+        size_t n = 0;
+        for (size_t off = 0; off < part->size(); off += pq::MAX_CHUNK, n++) {
+            const size_t len = std::min(pq::MAX_CHUNK, part->size() - off);
+            ret.push_back(valtype(part->begin() + off, part->begin() + off + len));
+        }
+        ret.push_back(valtype(1, (unsigned char)n));
+    }
+    return ret;
+}
+
+static bool SignPQ(const CPQKeyID& id, const BaseSignatureCreator& creator, const CScript& scriptCode, std::vector<valtype>& ret, uint32_t consensusBranchId)
+{
+    valtype vchSig, vchPubKey;
+    if (!creator.CreatePQSig(vchSig, vchPubKey, id, scriptCode, consensusBranchId))
+        return false;
+    const std::vector<valtype> pushes = PQScriptSigPushes(vchSig, vchPubKey);
+    ret.insert(ret.end(), pushes.begin(), pushes.end());
     return true;
 }
 
@@ -85,10 +131,11 @@ static bool SignStep(const BaseSignatureCreator& creator, const CScript& scriptP
     {
     case TX_NONSTANDARD:
     case TX_NULL_DATA:
-    case TX_VAULT:        // vault templates are signed by the vault_* / set_* RPCs
+    case TX_VAULT:        // vault templates are signed by the vault_* / set_* RPCs (SignPQOwnerSpend)
     case TX_VAULT_INTENT:
-    case TX_PQPKH:        // PQ signing joins in the wallet phase (quantum plan Q5)
         return false;
+    case TX_PQPKH:        // <sig chunks> <s> <pk chunks> <p> (quantum plan §4.2, spec §2.1)
+        return SignPQ(CPQKeyID(vSolutions[0][0], uint256(vSolutions[1])), creator, scriptPubKey, ret, consensusBranchId);
     case TX_PUBKEY:
         keyID = CPubKey(vSolutions[0]).GetID();
         return Sign1(keyID, creator, scriptPubKey, ret, consensusBranchId);
@@ -136,6 +183,11 @@ static CScript PushAll(const vector<valtype>& values)
 
 bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPubKey, SignatureData& sigdata, uint32_t consensusBranchId)
 {
+    return ProduceSignature(creator, fromPubKey, sigdata, consensusBranchId, STANDARD_SCRIPT_VERIFY_FLAGS);
+}
+
+bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPubKey, SignatureData& sigdata, uint32_t consensusBranchId, unsigned int verifyFlags)
+{
     CScript script = fromPubKey;
     bool solved = true;
     std::vector<valtype> result;
@@ -156,7 +208,43 @@ bool ProduceSignature(const BaseSignatureCreator& creator, const CScript& fromPu
     sigdata.scriptSig = PushAll(result);
 
     // Test solution
-    return solved && VerifyScript(sigdata.scriptSig, fromPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, creator.Checker(), consensusBranchId);
+    return solved && VerifyScript(sigdata.scriptSig, fromPubKey, verifyFlags, creator.Checker(), consensusBranchId);
+}
+
+bool IsPQInputScript(const CScript& scriptPubKey)
+{
+    txnouttype type;
+    std::vector<valtype> vSolutions;
+    if (!Solver(scriptPubKey, type, vSolutions))
+        return false;
+    return type == TX_PQPKH || type == TX_VAULT || type == TX_VAULT_INTENT;
+}
+
+CScript PQScriptSig(const valtype& vchSig, const valtype& vchPubKey)
+{
+    return PushAll(PQScriptSigPushes(vchSig, vchPubKey));
+}
+
+bool SignPQOwnerSpend(const CKeyStore& keystore, const CPQKeyID& owner, const CScript& templateScript,
+                      CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int selector,
+                      uint32_t consensusBranchId, unsigned int verifyFlags, ScriptError* serror)
+{
+    assert(nIn < txTo.vin.size());
+    if (selector != 2 && selector != 3)
+        return false;
+    const CTransaction txConst(txTo);
+    // 6.20.0: the creator and checker take precomputed data. A v4 (ZIP-243) digest never reads the
+    // spent outputs, so none are passed (as yellowback/txbuilder.cpp V4TxData); a v5 transaction
+    // (ZIP-244) would need them all, and its owner spend fails the self-verify below.
+    const PrecomputedTransactionData txdata(txConst, std::vector<CTxOut>());
+    TransactionSignatureCreator creator(&keystore, &txConst, txdata, nIn, amount, SIGHASH_ALL);
+    valtype vchSig, vchPubKey;
+    if (!creator.CreatePQSig(vchSig, vchPubKey, owner, templateScript, consensusBranchId))
+        return false;
+    CScript scriptSig = PQScriptSig(vchSig, vchPubKey);
+    scriptSig << CScript::EncodeOP_N(selector);
+    txTo.vin[nIn].scriptSig = scriptSig;
+    return VerifyScript(scriptSig, templateScript, verifyFlags, creator.Checker(), consensusBranchId, serror);
 }
 
 SignatureData DataFromTransaction(const CMutableTransaction& tx, unsigned int nIn)
@@ -183,13 +271,27 @@ bool SignSignature(
     int nHashType,
     uint32_t consensusBranchId)
 {
+    return SignSignature(keystore, fromPubKey, txTo, txToData, nIn, amount, nHashType, consensusBranchId, STANDARD_SCRIPT_VERIFY_FLAGS);
+}
+
+bool SignSignature(
+    const CKeyStore &keystore,
+    const CScript& fromPubKey,
+    CMutableTransaction& txTo,
+    const PrecomputedTransactionData& txToData,
+    unsigned int nIn,
+    const CAmount& amount,
+    int nHashType,
+    uint32_t consensusBranchId,
+    unsigned int verifyFlags)
+{
     assert(nIn < txTo.vin.size());
 
     CTransaction txToConst(txTo);
     TransactionSignatureCreator creator(&keystore, &txToConst, txToData, nIn, amount, nHashType);
 
     SignatureData sigdata;
-    bool ret = ProduceSignature(creator, fromPubKey, sigdata, consensusBranchId);
+    bool ret = ProduceSignature(creator, fromPubKey, sigdata, consensusBranchId, verifyFlags);
     UpdateTransaction(txTo, nIn, sigdata);
     return ret;
 }
@@ -364,6 +466,16 @@ public:
     {
         return true;
     }
+
+    bool CheckPQSig(
+        uint8_t scheme,
+        const std::vector<unsigned char>& vchSig,
+        const std::vector<unsigned char>& vchPubKey,
+        const CScript& scriptCode,
+        uint32_t consensusBranchId) const
+    {
+        return true;
+    }
 };
 const DummySignatureChecker dummyChecker;
 }
@@ -390,5 +502,19 @@ bool DummySignatureCreator::CreateSig(
     vchSig[5 + 33] = 32;
     vchSig[6 + 33] = 0x01;
     vchSig[6 + 33 + 32] = SIGHASH_ALL;
+    return true;
+}
+
+bool DummySignatureCreator::CreatePQSig(
+    std::vector<unsigned char>& vchSig,
+    std::vector<unsigned char>& vchPubKey,
+    const CPQKeyID& id,
+    const CScript& scriptCode,
+    uint32_t consensusBranchId) const
+{
+    if (!pq::IsKnownScheme(id.scheme) || !keystore->GetPQPubKey(id, vchPubKey))
+        return false;
+    vchSig.assign(pq::SigSize(id.scheme) + 1, 0);
+    vchSig.back() = SIGHASH_ALL;
     return true;
 }

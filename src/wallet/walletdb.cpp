@@ -157,6 +157,21 @@ bool CWalletDB::WriteCryptedKey(const CPubKey& vchPubKey,
     return true;
 }
 
+bool CWalletDB::WritePQKey(const CPQKeyID& id, const CPQKeyRecord& rec)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("pqkey"), id), rec, false);
+}
+
+bool CWalletDB::WriteCryptedPQKey(const CPQKeyID& id, const CPQKeyRecord& rec)
+{
+    nWalletDBUpdateCounter++;
+    if (!Write(std::make_pair(std::string("cpqkey"), id), rec, false))
+        return false;
+    Erase(std::make_pair(std::string("pqkey"), id));
+    return true;
+}
+
 bool CWalletDB::WriteCryptedZKey(const libzcash::SproutPaymentAddress & addr,
                                  const libzcash::ReceivingKey &rk,
                                  const std::vector<unsigned char>& vchCryptedSecret,
@@ -861,6 +876,35 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         {
             ssValue >> pwallet->nWitnessCacheSize;
         }
+        else if (strType == "pqkey" || strType == "cpqkey")
+        {
+            CPQKeyID id;
+            ssKey >> id;
+            CPQKeyRecord rec;
+            ssValue >> rec;
+            // PQ keys carry their own creation time (not counted in nKeys/nKeyMeta).
+            if (strType == "pqkey") {
+                CPQKey key;
+                if (!key.Set(id.scheme, rec.secret, rec.index) || key.GetID() != id || key.PubKey() != rec.pk) {
+                    strErr = "Error reading wallet database: post-quantum key corrupt";
+                    return false;
+                }
+                if (!pwallet->LoadPQKey(key, rec.nCreateTime)) {
+                    strErr = "Error reading wallet database: LoadPQKey failed";
+                    return false;
+                }
+            } else {
+                CCryptedPQKey crypted;
+                crypted.index = rec.index;
+                crypted.pk = rec.pk;
+                crypted.cryptedSeed.assign(rec.secret.begin(), rec.secret.end());
+                if (!pwallet->LoadCryptedPQKey(id, crypted, rec.nCreateTime)) {
+                    strErr = "Error reading wallet database: LoadCryptedPQKey failed";
+                    return false;
+                }
+                wss.fIsEncrypted = true;
+            }
+        }
         else if (strType == "mnemonicphrase")
         {
             uint256 seedFp;
@@ -989,7 +1033,8 @@ static bool IsKeyType(string strType)
             strType == "zkey" || strType == "czkey" ||
             strType == "sapzkey" || strType == "csapzkey" ||
             strType == "vkey" || strType == "sapextfvk" ||
-            strType == "mkey" || strType == "ckey");
+            strType == "mkey" || strType == "ckey" ||
+            strType == "pqkey" || strType == "cpqkey");
 }
 
 DBErrors CWalletDB::LoadWallet(CWallet* pwallet)

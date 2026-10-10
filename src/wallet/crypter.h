@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -135,6 +136,7 @@ private:
     std::pair<uint256, std::vector<unsigned char>> cryptedMnemonicSeed;
     std::optional<std::pair<uint256, std::vector<unsigned char>>> cryptedLegacySeed;
     CryptedKeyMap mapCryptedKeys;
+    CryptedPQKeyMap mapCryptedPQKeys;
     CryptedSproutSpendingKeyMap mapCryptedSproutSpendingKeys;
     CryptedSaplingSpendingKeyMap mapCryptedSaplingSpendingKeys;
 
@@ -207,6 +209,34 @@ public:
         }
         return set_address;
     }
+    //! Post-quantum keys (quantum plan §4.6): the keygen seed is the encrypted secret.
+    virtual bool AddCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted);
+    bool AddPQKey(const CPQKey& key);
+    bool HavePQKey(const CPQKeyID& id) const
+    {
+        LOCK(cs_KeyStore);
+        if (!fUseCrypto)
+            return CBasicKeyStore::HavePQKey(id);
+        return mapCryptedPQKeys.count(id) > 0;
+    }
+    bool GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const;
+    std::set<CPQKeyID> GetPQKeys() const
+    {
+        LOCK(cs_KeyStore);
+        if (!fUseCrypto)
+            return CBasicKeyStore::GetPQKeys();
+        std::set<CPQKeyID> ids;
+        for (const auto& mi : mapCryptedPQKeys) ids.insert(mi.first);
+        return ids;
+    }
+    bool GetPQPubKey(const CPQKeyID& id, std::vector<unsigned char>& pkOut) const
+    {
+        uint32_t index;
+        return GetPQKeyInfo(id, pkOut, index);
+    }
+    //! The stored public key and HD index of a PQ key, readable while the wallet is locked.
+    bool GetPQKeyInfo(const CPQKeyID& id, std::vector<unsigned char>& pkOut, uint32_t& indexOut) const;
+
     virtual bool AddCryptedSproutSpendingKey(
         const libzcash::SproutPaymentAddress &address,
         const libzcash::ReceivingKey &rk,

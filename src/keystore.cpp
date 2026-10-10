@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -41,6 +42,46 @@ bool CBasicKeyStore::GetPubKey(const CKeyID &address, CPubKey &vchPubKeyOut) con
     }
     vchPubKeyOut = key.GetPubKey();
     return true;
+}
+
+bool CBasicKeyStore::AddPQKey(const CPQKey& key)
+{
+    if (!key.IsValid()) return false;
+    LOCK(cs_KeyStore);
+    mapPQKeys[key.GetID()] = key;
+    return true;
+}
+
+bool CBasicKeyStore::HavePQKey(const CPQKeyID& id) const
+{
+    LOCK(cs_KeyStore);
+    return mapPQKeys.count(id) > 0;
+}
+
+bool CBasicKeyStore::GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const
+{
+    LOCK(cs_KeyStore);
+    PQKeyMap::const_iterator mi = mapPQKeys.find(id);
+    if (mi == mapPQKeys.end()) return false;
+    keyOut = mi->second;
+    return true;
+}
+
+bool CBasicKeyStore::GetPQPubKey(const CPQKeyID& id, std::vector<unsigned char>& pkOut) const
+{
+    LOCK(cs_KeyStore);
+    PQKeyMap::const_iterator mi = mapPQKeys.find(id);
+    if (mi == mapPQKeys.end()) return false;
+    pkOut = mi->second.PubKey();
+    return true;
+}
+
+std::set<CPQKeyID> CBasicKeyStore::GetPQKeys() const
+{
+    std::set<CPQKeyID> ids;
+    LOCK(cs_KeyStore);
+    for (const auto& mi : mapPQKeys) ids.insert(mi.first);
+    return ids;
 }
 
 bool CBasicKeyStore::SetMnemonicSeed(const MnemonicSeed& seed)

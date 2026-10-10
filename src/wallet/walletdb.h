@@ -398,6 +398,35 @@ class CSerializeRecipientAddress {
         }
 };
 
+/**
+ * The value of a "pqkey" (plain) or "cpqkey" (encrypted) record, keyed by the CPQKeyID
+ * (quantum plan §4.6, quantum spec §2.4): the HD index (DerivePQSeed), the public key, the 48-byte
+ * keygen seed (plain, or encrypted under the master key like a "ckey" secret, IV = the key id's
+ * hash) and the creation time. The secret key is recomputed from the seed on load and checked
+ * against the id and the stored public key.
+ */
+class CPQKeyRecord
+{
+public:
+    static const int CURRENT_VERSION = 1;
+    int nVersion = CURRENT_VERSION;
+    uint32_t index = CPQKey::PQ_INDEX_NONE;
+    std::vector<unsigned char> pk;
+    CPQKey::Secret secret;
+    int64_t nCreateTime = 0;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(nVersion);
+        READWRITE(index);
+        READWRITE(pk);
+        READWRITE(secret);
+        READWRITE(nCreateTime);
+    }
+};
+
 /** Access to the wallet database */
 class CWalletDB : public CDB
 {
@@ -432,6 +461,10 @@ public:
     bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata &keyMeta);
     bool WriteCryptedKey(const CPubKey& vchPubKey, const std::vector<unsigned char>& vchCryptedSecret, const CKeyMetadata &keyMeta);
     bool WriteMasterKey(unsigned int nID, const CMasterKey& kMasterKey);
+
+    //! Post-quantum keys: "pqkey" (plain seed) and "cpqkey" (encrypted seed, which erases "pqkey").
+    bool WritePQKey(const CPQKeyID& id, const CPQKeyRecord& rec);
+    bool WriteCryptedPQKey(const CPQKeyID& id, const CPQKeyRecord& rec);
 
     bool WriteCScript(const uint160& hash, const CScript& redeemScript);
 

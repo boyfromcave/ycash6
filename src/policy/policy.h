@@ -146,4 +146,16 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
 /** The same count over one script: pq::SIGOP_COST per OP_CHECKPQSIG opcode (not inside pushes). */
 unsigned int GetPQSigOpCount(const CScript& script);
 
+/**
+ * The fee rate wallets charge a transaction that spends a post-quantum input (TX_PQPKH, or a V/I
+ * owner path), -pqfeerate (quantum plan §4.5, quantum briefing fee rules): the default is 1x the
+ * per-kB relay floor (-minrelaytxfee); the release multiplier is the owner's decision (Q8). Not a
+ * relay or consensus rule: relay stays minRelayTxFee per byte.
+ */
+extern CFeeRate pqFeeRate;
+
+/** max(floor, pqFeeRate x nBytes): the fee of a transaction of nBytes with a PQ input (ycash-dd:
+ *  floor = DEFAULT_FEE for the wallet, VAULT_RPC_FEE for the vault RPCs). */
+CAmount PQSizeFee(CAmount floor, size_t nBytes);
+
 #endif // BITCOIN_POLICY_POLICY_H

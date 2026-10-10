@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2013 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -190,6 +191,20 @@ static bool DecryptKey(const CKeyingMaterial& vMasterKey, const std::vector<unsi
     return key.VerifyPubKey(vchPubKey);
 }
 
+static bool DecryptPQKey(const CKeyingMaterial& vMasterKey, const CPQKeyID& id, const CCryptedPQKey& crypted, CPQKey& key)
+{
+    CKeyingMaterial vchSecret;
+    if (!DecryptSecret(vMasterKey, crypted.cryptedSeed, id.hash, vchSecret))
+        return false;
+    CPQKey k;
+    if (!k.Set(id.scheme, CPQKey::Secret(vchSecret.begin(), vchSecret.end()), crypted.index))
+        return false;
+    if (k.GetID() != id || k.PubKey() != crypted.pk)
+        return false;
+    key = k;
+    return true;
+}
+
 static bool DecryptSproutSpendingKey(const CKeyingMaterial& vMasterKey,
                                const std::vector<unsigned char>& vchCryptedSecret,
                                const libzcash::SproutPaymentAddress& address,
@@ -229,7 +244,7 @@ bool CCryptoKeyStore::SetCrypted()
 {
     if (fUseCrypto)
         return true;
-    if (!(mapKeys.empty() && mapSproutSpendingKeys.empty() && mapSaplingSpendingKeys.empty()))
+    if (!(mapKeys.empty() && mapPQKeys.empty() && mapSproutSpendingKeys.empty() && mapSaplingSpendingKeys.empty()))
         return false;
     fUseCrypto = true;
     return true;
@@ -284,6 +299,18 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn)
             const std::vector<unsigned char> &vchCryptedSecret = (*mi).second.second;
             CKey key;
             if (!DecryptKey(vMasterKeyIn, vchCryptedSecret, vchPubKey, key))
+            {
+                keyFail = true;
+                break;
+            }
+            keyPass = true;
+            if (fDecryptionThoroughlyChecked)
+                break;
+        }
+        for (const auto& mi : mapCryptedPQKeys)
+        {
+            CPQKey key;
+            if (!DecryptPQKey(vMasterKeyIn, mi.first, mi.second, key))
             {
                 keyFail = true;
                 break;
@@ -528,6 +555,66 @@ bool CCryptoKeyStore::GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) co
     return CBasicKeyStore::GetPubKey(address, vchPubKeyOut);
 }
 
+bool CCryptoKeyStore::AddPQKey(const CPQKey& key)
+{
+    LOCK(cs_KeyStore);
+    if (!fUseCrypto)
+        return CBasicKeyStore::AddPQKey(key);
+
+    if (IsLocked() || !key.IsValid())
+        return false;
+
+    CCryptedPQKey crypted;
+    crypted.index = key.Index();
+    crypted.pk = key.PubKey();
+    CKeyingMaterial vchSecret(key.Seed().begin(), key.Seed().end());
+    if (!EncryptSecret(vMasterKey, vchSecret, key.GetID().hash, crypted.cryptedSeed))
+        return false;
+
+    return AddCryptedPQKey(key.GetID(), crypted);
+}
+
+bool CCryptoKeyStore::AddCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted)
+{
+    LOCK(cs_KeyStore);
+    if (!SetCrypted())
+        return false;
+
+    mapCryptedPQKeys[id] = crypted;
+    return true;
+}
+
+bool CCryptoKeyStore::GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const
+{
+    LOCK(cs_KeyStore);
+    if (!fUseCrypto)
+        return CBasicKeyStore::GetPQKey(id, keyOut);
+
+    CryptedPQKeyMap::const_iterator mi = mapCryptedPQKeys.find(id);
+    if (mi == mapCryptedPQKeys.end())
+        return false;
+    return DecryptPQKey(vMasterKey, id, mi->second, keyOut);
+}
+
+bool CCryptoKeyStore::GetPQKeyInfo(const CPQKeyID& id, std::vector<unsigned char>& pkOut, uint32_t& indexOut) const
+{
+    LOCK(cs_KeyStore);
+    if (!fUseCrypto) {
+        PQKeyMap::const_iterator mi = mapPQKeys.find(id);
+        if (mi == mapPQKeys.end())
+            return false;
+        pkOut = mi->second.PubKey();
+        indexOut = mi->second.Index();
+        return true;
+    }
+    CryptedPQKeyMap::const_iterator mi = mapCryptedPQKeys.find(id);
+    if (mi == mapCryptedPQKeys.end())
+        return false;
+    pkOut = mi->second.pk;
+    indexOut = mi->second.index;
+    return true;
+}
+
 //
 // Sprout & Sapling keys
 //
@@ -695,6 +782,21 @@ bool CCryptoKeyStore::EncryptKeys(CKeyingMaterial& vMasterKeyIn)
             }
         }
         mapKeys.clear();
+        for (const PQKeyMap::value_type& mPQKey : mapPQKeys)
+        {
+            const CPQKey& key = mPQKey.second;
+            CCryptedPQKey crypted;
+            crypted.index = key.Index();
+            crypted.pk = key.PubKey();
+            CKeyingMaterial vchSecret(key.Seed().begin(), key.Seed().end());
+            if (!EncryptSecret(vMasterKeyIn, vchSecret, key.GetID().hash, crypted.cryptedSeed)) {
+                return false;
+            }
+            if (!AddCryptedPQKey(key.GetID(), crypted)) {
+                return false;
+            }
+        }
+        mapPQKeys.clear();
         for (SproutSpendingKeyMap::value_type& mSproutSpendingKey : mapSproutSpendingKeys)
         {
             const libzcash::SproutSpendingKey &sk = mSproutSpendingKey.second;

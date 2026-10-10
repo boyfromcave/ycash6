@@ -536,6 +536,8 @@ std::string HelpMessage(HelpMessageMode mode)
     }
     strUsage += HelpMessageOpt("-minrelaytxfee=<amt>", strprintf(_("Transactions must have at least this fee rate (in %s per 1000 bytes) for relaying, mining and transaction creation (default: %s). This is not the only fee constraint."),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
+    strUsage += HelpMessageOpt("-pqfeerate=<amt>", strprintf(_("Fee rate (in %s/kB) the wallet charges a transaction with a post-quantum input: max(the flat fee, this rate x size) (default: -minrelaytxfee, %s)"),
+        CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
     strUsage += HelpMessageOpt("-maxtxfee=<amt>", strprintf(_("Maximum total fees (in %s) to use in a single wallet transaction or raw transaction; setting this too low may abort large transactions (default: %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_TRANSACTION_MAXFEE)));
     strUsage += HelpMessageOpt("-printtoconsole", _("Send trace/debug info to console instead of the debug log"));
@@ -1302,6 +1304,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             ::minRelayTxFee = CFeeRate(n);
         else
             return InitError(strprintf(_("Invalid amount for -minrelaytxfee=<amount>: '%s'"), mapArgs["-minrelaytxfee"]));
+    }
+
+    // -pqfeerate (quantum plan §4.5): wallets price a transaction with a post-quantum input by size,
+    // max(flat fee, rate x size); the default is 1x the relay floor.
+    ::pqFeeRate = ::minRelayTxFee;
+    if (mapArgs.count("-pqfeerate"))
+    {
+        CAmount n = 0;
+        if (ParseMoney(mapArgs["-pqfeerate"], n) && n > 0)
+            ::pqFeeRate = CFeeRate(n);
+        else
+            return InitError(strprintf(_("Invalid amount for -pqfeerate=<amount>: '%s'"), mapArgs["-pqfeerate"]));
     }
 
 #ifdef ENABLE_WALLET
