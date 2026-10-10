@@ -77,6 +77,8 @@ const char* ScriptErrorString(const ScriptError serror)
             return "OP_CHECKPQSIG key or signature chunking not canonical";
         case SCRIPT_ERR_PQ_SIZE:
             return "OP_CHECKPQSIG key, key hash or signature of the wrong size";
+        case SCRIPT_ERR_PQ_COUNT:
+            return "More than one OP_CHECKPQSIG in a script evaluation";
         case SCRIPT_ERR_PUBKEYTYPE:
             return "Public key is neither compressed or uncompressed";
         case SCRIPT_ERR_UNKNOWN_ERROR:

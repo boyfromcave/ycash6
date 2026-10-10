@@ -286,6 +286,7 @@ bool EvalScript(
         return set_error(serror, SCRIPT_ERR_SCRIPT_SIZE);
     int nOpCount = 0;
     int nSetSigCount = 0; // OP_CHECKSETSIG executions, at most one (plan §15.2)
+    int nPQSigCount = 0;  // OP_CHECKPQSIG executions, at most one (quantum spec R-B1)
     bool fRequireMinimal = (flags & SCRIPT_VERIFY_MINIMALDATA) != 0;
 
     try
@@ -1079,7 +1080,13 @@ bool EvalScript(
                     if (!(flags & SCRIPT_VERIFY_VAULT))
                         return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
 
+                    // At most one executed OP_CHECKPQSIG per script evaluation (quantum spec R-B1): every
+                    // template executes exactly one, and it bounds PQ verifications per input.
+                    if (++nPQSigCount > 1)
+                        return set_error(serror, SCRIPT_ERR_PQ_COUNT);
+
                     // 1. A registered scheme (0x02 only with SCRIPT_VERIFY_PQ_FALCON) and a 32-byte key hash.
+                    // Consensus requires a one-byte element; push minimality (OP_1/OP_2) is MINIMALDATA (policy).
                     if (stack.size() < 2)
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
                     const valtype& vchScheme = stacktop(-1);
@@ -1094,8 +1101,9 @@ bool EvalScript(
                     const uint256 keyHash(vchKeyHash);
 
                     // 2. The counts p (the key's chunks) and s (the signature's, which carry the
-                    // hashtype byte): each a minimal number 1..ceil(len/520), so one byte, OP_1..OP_16,
-                    // with that many items under it.
+                    // hashtype byte): each a one-byte element 1..ceil(len/520), with that many items under
+                    // it. Consensus requires the minimal element; push minimality (OP_1..OP_16) is
+                    // MINIMALDATA (policy).
                     const size_t lens[2] = {pq::PubKeySize(scheme), pq::SigSize(scheme) + 1};
                     int nChunks[2], iCount[2];
                     int i = 3;
