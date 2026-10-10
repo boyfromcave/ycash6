@@ -50,6 +50,7 @@
 #include "core_io.h"
 #include "key.h"
 #include "primitives/transaction.h"
+#include "policy/policy.h"
 #include "script/interpreter.h"
 #include "test/data/vault_vectors.json.h"
 #include "test/test_bitcoin.h"
@@ -106,6 +107,12 @@ COutPoint Prevout(const UniValue& v)
     return COutPoint(uint256(std::vector<unsigned char>(b.begin(), b.begin() + 32)), n);
 }
 
+/** {"scheme": n, "hash": hex32} (quantum plan §4.3: the owner is a post-quantum key id). */
+CPQKeyID OwnerOf(const UniValue& o)
+{
+    return CPQKeyID((uint8_t)o["scheme"].get_int(), U256(o["hash"]));
+}
+
 VaultParams VaultOf(const UniValue& p)
 {
     VaultParams v;
@@ -115,7 +122,7 @@ VaultParams VaultOf(const UniValue& p)
     v.delay = p["delay"].get_int64();
     v.ownerHeight = p["ownerHeight"].get_int64();
     v.appHeight = p["appHeight"].get_int64();
-    v.ownerKey = CPubKey(Bytes(p["ownerKey"]));
+    v.owner = OwnerOf(p["owner"]);
     return v;
 }
 
@@ -128,7 +135,7 @@ IntentParams IntentOf(const UniValue& p)
     i.delay = p["delay"].get_int64();
     i.cancelSetId = U256(p["cancelSetId"]);
     i.setId = U256(p["setId"]);
-    i.ownerKey = CPubKey(Bytes(p["ownerKey"]));
+    i.owner = OwnerOf(p["owner"]);
     return i;
 }
 
@@ -180,7 +187,7 @@ BOOST_AUTO_TEST_CASE(intent_templates)
         BOOST_REQUIRE_MESSAGE(ParseIntent(spk, got), "ParseIntent " + name);
         BOOST_CHECK(got.tag == want.tag && got.recipientHash == want.recipientHash && got.vaultHash == want.vaultHash &&
                     got.delay == want.delay && got.cancelSetId == want.cancelSetId && got.setId == want.setId &&
-                    got.ownerKey == want.ownerKey);
+                    got.owner == want.owner);
         // recipientHash / vaultHash are single SHA256 of the scripts; IntentFor reproduces the I
         CScript vspk = Script(ok[i]["vaultScript"]);
         CScript rspk = Script(ok[i]["recipientScript"]);
@@ -396,6 +403,44 @@ BOOST_AUTO_TEST_CASE(template_spends)
             CPubKey k;
             BOOST_CHECK(RecoverSig(msg, ts->sigs[j], k));
         }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_spends)
+{
+    // The Python SLH-DSA signer (test_framework/pq.py) against the C++ interpreter: the V's OWNER
+    // branch (selector 2) with the vectors' post-quantum owner (quantum plan §4.2, §4.3).
+    UniValue doc = Vectors();
+    const UniValue& sp = doc["ownerSpends"];
+    BOOST_REQUIRE(sp.size() >= 1);
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
+    for (size_t i = 0; i < sp.size(); i++) {
+        const std::string name = sp[i]["name"].get_str();
+        CTransaction tx;
+        BOOST_REQUIRE(DecodeHexTx(tx, sp[i]["tx"].get_str()));
+        const unsigned int nIn = sp[i]["nIn"].get_int();
+        const CScript code = Script(sp[i]["scriptCode"]);
+        const CAmount amount = sp[i]["amount"].get_int64();
+        const uint32_t branch = sp[i]["branchId"].get_int64();
+        BOOST_CHECK_EQUAL(Hex(SignatureHash(code, tx, nIn, SIGHASH_ALL, amount, branch)), sp[i]["sighash"].get_str());
+        VaultParams vp;
+        BOOST_REQUIRE(ParseVault(code, vp));
+        BOOST_CHECK(vp.owner == OwnerOf(doc["pqOwner"]["owner"]));
+        std::optional<TemplateSpend> ts = ParseTemplateSpend(code, tx.vin[nIn].scriptSig);
+        BOOST_REQUIRE(ts.has_value());
+        BOOST_CHECK_EQUAL(ts->selector, sp[i]["selector"].get_int());
+        const PrecomputedTransactionData txdata(tx);
+        TransactionSignatureChecker checker(&tx, nIn, amount, txdata);
+        ScriptError err;
+        BOOST_CHECK_MESSAGE(VerifyScript(tx.vin[nIn].scriptSig, code, flags, checker, branch, &err), name + ": " + ScriptErrorString(err));
+        // another amount breaks the signature; another owner hash breaks the key commitment
+        TransactionSignatureChecker wrongAmount(&tx, nIn, amount + 1, txdata);
+        BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, code, flags, wrongAmount, branch, &err));
+        VaultParams other = vp;
+        other.owner.hash = uint256S("0x01");
+        BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, BuildVault(other), flags, checker, branch, &err));
+        // before the upgrade (no SCRIPT_VERIFY_VAULT) OP_CHECKPQSIG is a bad opcode
+        BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, code, STANDARD_SCRIPT_VERIFY_FLAGS, checker, branch, &err));
     }
 }
 

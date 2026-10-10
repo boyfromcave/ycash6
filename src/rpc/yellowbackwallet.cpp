@@ -203,7 +203,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("ownerPubKey", HexStr(v.ownerPubKey.begin(), v.ownerPubKey.end()));
     const CPubKey owner = v.OwnerKey();
     o.pushKV("ownerKeyId", owner.IsValid() ? owner.GetID().GetHex() : "");
-    o.pushKV("ownerAddress", owner.IsValid() ? EncodeAddress(owner.GetID(), p) : "");
+    o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
     o.pushKV("termClass", ClassName(v.termClass));
     o.pushKV("lockHeight", (int64_t)v.lockHeight);
     o.pushKV("claimHeight", (int64_t)v.claimHeight);
@@ -221,7 +221,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     std::optional<int64_t> at = UnderwaterAt(v, p);
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
     o.pushKV("voidReason", v.voidReason);
-    const CScript spk = YedVaultScriptAt(p, owner, v.ownerHeight, v.appHeight);       // U-23: the V template, as minted
+    const CScript spk = YedVaultScriptAt(p, v.Owner(), v.ownerHeight, v.appHeight);       // U-23: the V template, as minted
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     return o;
 }

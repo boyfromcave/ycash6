@@ -88,7 +88,7 @@ std::optional<VaultSpendPath> ParseVaultSpendPath(const CScript& scriptSig);
  * Since UPGRADE_VAULT the collateral of a mint is the primitive's vault template V
  * (vault/template.h, docs/plans/yellowback-upgrade-plan.md §15.3, §15.10) with
  *     tag = YED_TAG, setId = cancelSetId = attestorSetId, delay = CLAIM_DELAY,
- *     ownerHeight = appHeight = refHeight + 1, ownerKey = the payload's owner.
+ *     ownerHeight = appHeight = refHeight + 1, owner = the payload's owner (a CPQKeyID, quantum plan §4.3).
  * The owner redeems with selector 2 (or 3 once the attestor set is released), the claim is
  * selector 4 into intents, and the v2 P2SH VaultScript above is refused for new mints (MINT-3).
  *
@@ -103,12 +103,15 @@ extern const vault::Tag YED_TAG;
  * so the owner's redeem (selector 2) and the claim (selector 4) are both open from the block after the mint; the
  * payload's lockHeight is record-keeping (the term, for the class and the fee) and no longer a CLTV.
  */
-vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t refHeight);
+vault::VaultParams YedVaultParams(const Params& p, const CPQKeyID& owner, int64_t refHeight);
 /** BuildVault(YedVaultParams(...)); empty when a field is out of range (the caller's MINT-2/3 then fails). */
-CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t refHeight);
+CScript YedVaultScript(const Params& p, const CPQKeyID& owner, int64_t refHeight);
 /** The V of an existing vault record, whatever its heights (a pre-plan vault has ownerHeight = lockHeight, appHeight = lockHeight + GRACE). */
-vault::VaultParams YedVaultParamsAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight);
-CScript YedVaultScriptAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight);
+vault::VaultParams YedVaultParamsAt(const Params& p, const CPQKeyID& owner, int64_t ownerHeight, int64_t appHeight);
+CScript YedVaultScriptAt(const Params& p, const CPQKeyID& owner, int64_t ownerHeight, int64_t appHeight);
+/** The 33 owner bytes of a MINT payload / vault record read as scheme || keyHash (quantum spec §3.1, §3.4);
+ *  scheme 0 (no owner) when the size is not 33. */
+CPQKeyID OwnerFromBytes(const std::vector<unsigned char>& bytes);
 
 // ---------------------------------------------------------------- v3 (§3.4): carrier and bond
 

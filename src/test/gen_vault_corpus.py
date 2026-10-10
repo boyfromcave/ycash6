@@ -39,6 +39,8 @@ FOUND_PREFIX = "fuzz-"
 
 SECRETS = [v.fixed_secret("vault-fuzz-%d" % i) for i in range(3)]
 KEYS = [v.pubkey_of(s) for s in SECRETS]
+# the V / I owner: a post-quantum key id, scheme 1 (SLH-DSA) || 32-byte key hash (quantum plan §4.3)
+OWNER = bytes([1]) + v.sha256(b"vault-fuzz-owner")
 SET_A = bytes(range(32))
 SET_B = bytes(range(32, 64))
 PREVOUT_TXID = "11" * 32
@@ -49,7 +51,7 @@ def seed(spk, script_sig=b""):
     return struct.pack("<H", len(spk)) + bytes(spk) + bytes(script_sig)
 
 
-def vp(tag=b"TEST", delay=10, owner_height=1000, app_height=0, set_id=SET_A, cancel=SET_A, key=KEYS[0]):
+def vp(tag=b"TEST", delay=10, owner_height=1000, app_height=0, set_id=SET_A, cancel=SET_A, key=OWNER):
     return v.VaultParams(tag, set_id, cancel, delay, owner_height, app_height, key)
 
 
@@ -77,7 +79,8 @@ def corpus():
     _, equiv = act(v.act_set_equivocation(SET_A, po, 1, SIGHASH, set_sig(0), 1, bytes([0xA5]) * 32,
                                           v.sign_recoverable(SECRETS[0], v.set_sig_msg(SET_A, 1, PREVOUT_TXID, 0, bytes([0xA5]) * 32))))
     sigs2 = [set_sig(0), set_sig(1)]
-    fake_sig = bytes([0x30]) + bytes(70) + bytes([0x01])
+    # an owner scriptSig's shape: <sig> <1> <pk:32> <1> (one chunk each; the interpreter checks the sizes)
+    fake_sig = [bytes([0x30]) + bytes(70) + bytes([0x01]), bytes([1]), bytes(32), bytes([1])]
     return [
         # templates (V, I) and their range edges
         ("vault", seed(V)),
@@ -88,7 +91,7 @@ def corpus():
         ("vault_two_sets", seed(v.vault_script(vp(cancel=SET_B, app_height=2000)))),
         ("vault_nonminimal_delay", seed(v.nonminimal_delay_vault(vp()))),
         ("vault_delay_zero", seed(v.vault_script_unchecked(vp(delay=0)))),
-        ("vault_uncompressed_key", seed(v.vault_script_unchecked(vp(key=bytes([0x04]) + bytes(32))))),
+        ("vault_unregistered_scheme", seed(v.vault_script_unchecked(vp(key=bytes([0x03]) + bytes(32))))),
         ("vault_trailing", seed(V + bytes([v.OP_DROP]))),
         ("vault_truncated", seed(V[:-1])),
         ("intent", seed(I)),

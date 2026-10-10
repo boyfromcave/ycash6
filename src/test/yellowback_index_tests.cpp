@@ -33,6 +33,8 @@
 #include "chainparams.h"
 #include "consensus/merkle.h"
 #include "consensus/validation.h"
+#include "crypto/pq/scheme.h"
+#include "hash.h"
 #include "key.h"
 #include "main.h"
 #include "pow.h"
@@ -82,6 +84,22 @@ static inline uint256 LiveSet() { return CTransaction(AttestorSetCreate()).GetHa
 using namespace yellowback;
 
 namespace {
+
+/** The vault owner is a post-quantum key id (quantum plan §4.3); these cases keep their EC test keys
+ *  for tokens and payees and name the vault owner by a stand-in SLH-DSA key id derived from them. */
+CPQKeyID TestPQOwner(const CPubKey& k)
+{
+    return CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash(k.begin(), k.end()));
+}
+
+/** The 33 owner bytes (scheme || keyHash) a MINT payload and a VaultRecord carry. */
+std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
+{
+    const CPQKeyID id = TestPQOwner(k);
+    std::vector<unsigned char> b(1, id.scheme);
+    b.insert(b.end(), id.hash.begin(), id.hash.end());
+    return b;
+}
 
 uint160 KeyOf(int i)
 {
@@ -261,13 +279,13 @@ struct Builder
     {
         CPubKey owner = ownerKey.GetPubKey();
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = YedVaultScript(P, owner, refHeight);           // U-23, IT-1: the V template
+        CScript vs = YedVaultScript(P, TestPQOwner(owner), refHeight);           // U-23, IT-1: the V template
         CAmount collateral = Required(cents, 0, refHeight);
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
         m.vout.push_back(CTxOut(collateral, vs));
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
-        Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, owner, 3);
+        Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
         m.vout.push_back(CTxOut(FeeZat(collateral, P.feeMin, P.feeBps), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         return m;
@@ -399,10 +417,10 @@ struct Builder
         CAmount collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[0], s.sigmaMultBps), pMint).value();
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
-        m.vout.push_back(CTxOut(collateral, YedVaultScript(P, owner, refHeight)));           // U-23, IT-1: the V template
+        m.vout.push_back(CTxOut(collateral, YedVaultScript(P, TestPQOwner(owner), refHeight)));           // U-23, IT-1: the V template
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         const int payee = FirstSeq(bundle);
-        Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, owner, 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
+        Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
         const CAmount fee = FeeZat(collateral, P.feeMin, P.feeBps);
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
@@ -417,8 +435,8 @@ struct Builder
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        const CScript vs = YedVaultScriptAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
-        const vault::VaultParams vp = YedVaultParamsAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        const CScript vs = YedVaultScriptAt(P, v->Owner(), v->ownerHeight, v->appHeight);
+        const vault::VaultParams vp = YedVaultParamsAt(P, v->Owner(), v->ownerHeight, v->appHeight);
         CMutableTransaction m;
         m.nLockTime = v->appHeight;
         m.nExpiryHeight = (uint32_t)(refHeight + P.refWindow);
@@ -431,7 +449,7 @@ struct Builder
         const int payee = FirstSeq(bundle);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {}, payee >= 0 ? 3 : FEE_VOUT_NONE)))));
         if (payee >= 0) m.vout.push_back(CTxOut(AttestFeeZat(fee, P.attestFeeBps), GetScriptForDestination(bondKeys[payee].GetPubKey().GetID())));
-        if (residual.has_value()) m.vout.push_back(CTxOut(residual.value(), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(v->OwnerKey().GetID())))));
+        if (residual.has_value()) m.vout.push_back(CTxOut(residual.value(), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(v->Owner())))));   // the owner's PQPKH (F-3)
         m.vin.push_back(CarrierIn(bundle));
         return m;
     }

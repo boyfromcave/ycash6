@@ -335,11 +335,13 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (!(lock > ref) || lock - ref < P.classMin[p.termClass] || lock - ref > P.classMax[p.termClass]) return verdict::BAD_MINT_LOCK_HEIGHT;
     // MINT-3
     if (tx.vout.size() < 3) return verdict::BAD_MINT_OUTPUTS;
-    if (!p.ownerPubKey.IsValid() || !p.ownerPubKey.IsCompressed() || !p.ownerPubKey.IsFullyValid()) return verdict::BAD_MINT_OWNER_KEY;
+    // The owner is a post-quantum key id, scheme || keyHash in the 33 owner bytes (quantum spec §3.1, §3.2).
+    const CPQKeyID owner = OwnerFromBytes(p.ownerKeyBytes);
+    if (!vault::IsOwnerValid(owner)) return verdict::BAD_MINT_OWNER_KEY;
     // U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight = lockHeight,
     // ownerHeight = appHeight = refHeight + 1, IT-1); v2's P2SH VaultScript and the pre-IT-1 shape (ownerHeight =
     // lockHeight, appHeight = lockHeight + GRACE) are refused for new mints.
-    const CScript expected = YedVaultScript(P, p.ownerPubKey, ref);
+    const CScript expected = YedVaultScript(P, owner, ref);
     if (expected.empty() || tx.vout[0].scriptPubKey != expected) return verdict::BAD_MINT_VAULT_SCRIPT;
     // MINT-4 (ACT-5's activation and the PARTICIPATION/ENFORCEMENT halts left with the upgrade, §6: the
     // module is active from START_HEIGHT; NOT_ACTIVE is the virtual snapshot below it)
@@ -547,7 +549,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // residual intent (RED-5 decides which is due) and no re-lock.
     std::vector<unsigned int> intents;
     if (claim) {
-        const CScript vaultSpk = YedVaultScriptAt(P, vault.OwnerKey(), vault.ownerHeight, vault.appHeight);
+        const CScript vaultSpk = YedVaultScriptAt(P, vault.Owner(), vault.ownerHeight, vault.appHeight);
         const uint256 vaultHash = vault::ScriptHash256(vaultSpk);
         for (unsigned int j = 0; j < tx.vout.size(); j++) {
             if (tx.vout[j].scriptPubKey == vaultSpk) return verdict::VAULT_CLAIM_INTENTS;
@@ -617,15 +619,15 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
             facts.claimPath = "b";
         }
         // RED-5: the residual above the claimant's cap goes back to the owner (R1: no margin under (b) alone).
-        // U-23: it is the owner's residual intent, paying P2PKH(owner) at least the residual; the other
+        // U-23: it is the owner's residual intent, paying the owner's PQPKH at least the residual; the other
         // intent is the claimant's. With no residual due the claim has exactly one intent.
         if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
         facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
         if (facts.residualZat >= P.residualMinZat) {
-            const CPubKey owner = vault.OwnerKey();
-            if (!owner.IsValid() || intents.size() != 2) return verdict::RED5_RESIDUAL;
-            const uint256 ownerHash = vault::ScriptHash256(P2PKHOf(owner.GetID()));
+            const CPQKeyID owner = vault.Owner();
+            if (!vault::IsOwnerValid(owner) || intents.size() != 2) return verdict::RED5_RESIDUAL;
+            const uint256 ownerHash = vault::ScriptHash256(GetScriptForDestination(owner));   // the owner's PQPKH (quantum spec F-3)
             for (unsigned int j : intents) {
                 vault::IntentParams ip;
                 IsYedIntentOutput(tx.vout[j].scriptPubKey, &ip);
@@ -756,7 +758,7 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         log.closedVaults.push_back(in.record.vault);
         return verdict::OK;
     }
-    const CScript vaultSpk = YedVaultScriptAt(P, vault->OwnerKey(), vault->ownerHeight, vault->appHeight);
+    const CScript vaultSpk = YedVaultScriptAt(P, vault->Owner(), vault->ownerHeight, vault->appHeight);
     int relock = -1;
     for (unsigned int j = 0; j < tx.vout.size(); j++) {
         if (tx.vout[j].scriptPubKey != vaultSpk) continue;

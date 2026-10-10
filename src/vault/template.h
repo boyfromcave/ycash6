@@ -7,6 +7,7 @@
 
 #include "pubkey.h"
 #include "script/script.h"
+#include "script/standard.h"
 #include "uint256.h"
 
 #include <array>
@@ -31,6 +32,8 @@ typedef std::array<unsigned char, 4> Tag;
  *  interpreter change lands; the template layer only needs their bytes. */
 static const opcodetype VAULT_OP_CHECKSETSIG = (opcodetype)0xc0;
 static const opcodetype VAULT_OP_CHECKSETDORMANT = (opcodetype)0xc1;
+/** The post-quantum signature check (quantum plan §4.2): the owner slot's opcode. */
+static const opcodetype VAULT_OP_CHECKPQSIG = OP_CHECKPQSIG;
 /** BIP112's own byte (OP_NOP3). */
 static const opcodetype VAULT_OP_CHECKSEQUENCEVERIFY = OP_NOP3;
 
@@ -44,7 +47,9 @@ static const uint8_t SEL_OWNER = 2;    // V: owner at height I: CANCEL
 static const uint8_t SEL_RELEASED = 3; // V and I: owner when the set is released
 static const uint8_t SEL_APP = 4;      // V only: APP branch
 
-/** Field ranges (§15.3). */
+/** Field ranges (§15.3). The owner is a post-quantum key id (quantum plan §4.3, the only owner shape):
+ *  the slot is <ownerHash:32> OP_1|OP_2 OP_CHECKPQSIG, a registered scheme (pq::IsKnownScheme;
+ *  scheme 2's activation is the interpreter's flag, quantum spec A-1). */
 static const int64_t MIN_DELAY = 1;
 static const int64_t MAX_DELAY = 65535;
 static const int64_t MAX_TEMPLATE_HEIGHT = 499999999;
@@ -56,13 +61,13 @@ struct VaultParams
     int64_t delay = 0;
     SetId setId;
     int64_t ownerHeight = 0;
-    CPubKey ownerKey;
+    CPQKeyID owner;
     int64_t appHeight = 0;
 
     bool operator==(const VaultParams& o) const
     {
         return tag == o.tag && cancelSetId == o.cancelSetId && delay == o.delay && setId == o.setId &&
-               ownerHeight == o.ownerHeight && ownerKey == o.ownerKey && appHeight == o.appHeight;
+               ownerHeight == o.ownerHeight && owner == o.owner && appHeight == o.appHeight;
     }
 };
 
@@ -74,7 +79,7 @@ struct IntentParams
     int64_t delay = 0;
     SetId cancelSetId;
     SetId setId;
-    CPubKey ownerKey;
+    CPQKeyID owner;
 };
 
 enum class TemplateKind { VAULT, INTENT };
@@ -99,6 +104,9 @@ enum class Shape { NONE, MATCH, MALFORMED };
 /** 33 bytes with a 0x02/0x03 header (no curve check; §15.3 "compressed"). */
 bool IsCompressedKeyBytes(const std::vector<unsigned char>& key);
 inline bool IsCompressedKey(const CPubKey& key) { return IsCompressedKeyBytes(std::vector<unsigned char>(key.begin(), key.end())); }
+
+/** A registered owner scheme (pq::IsKnownScheme). */
+bool IsOwnerValid(const CPQKeyID& owner);
 
 /** Range-checks the fields. */
 bool VaultParamsValid(const VaultParams& p);

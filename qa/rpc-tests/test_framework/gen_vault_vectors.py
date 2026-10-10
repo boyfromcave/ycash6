@@ -20,12 +20,14 @@ hashes are the **internal** byte order = uint256::begin()..end() unless the key 
     branchId                 int, 0x6d5b7a31 (signatures in "spends" use it)
     opcodes                  {"CHECKSEQUENCEVERIFY": 178, "CHECKSETSIG": 192, "CHECKSETDORMANT": 193}
     keys[]                   {label, secret (32), pubkey (33, compressed)}
+    pqOwner                  {label, seed (48), pk (32), owner {scheme, hash}}: the SLH-DSA-SHA2-128s
+                              owner every vault and intent below names (quantum plan §4.3)
     vaults[]                 {name, params {tag, setId, cancelSetId, delay, ownerHeight, appHeight,
-                              ownerKey}, script}               ParseVault(script) == params,
+                              owner {scheme, hash}}, script}   ParseVault(script) == params,
                                                                BuildVault(params) == script
     vaultsInvalid[]          {name, script, reason}           ParseVault(script) fails
     intents[]                {name, params {tag, recipientHash, vaultHash, delay, cancelSetId, setId,
-                              ownerKey}, script, recipientScript?, vaultScript?}
+                              owner {scheme, hash}}, script, recipientScript?, vaultScript?}
     intentsInvalid[]         {name, script, reason}
     bonds[]                  {memberKey, locktime, redeem, spk (P2SH of redeem)}
     selectors[]              {kind "V"|"I", scriptSig, selector, nArgs}
@@ -46,6 +48,9 @@ hashes are the **internal** byte order = uint256::begin()..end() unless the key 
     spends[]                 {name, tx (final hex), nIn, scriptCode, amount, branchId, sighash,
                               setId, role, setSigMsg, signers, sigs, scriptSig}
                               SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branchId) == sighash
+    ownerSpends[]            {name, tx (final hex), nIn, scriptCode, amount, branchId, sighash, selector,
+                              scriptSig}  the pqOwner's SLH-DSA spend of a V's OWNER branch (selector 2):
+                              VerifyScript(scriptSig, scriptCode) under the vault flags passes
 
 "reason" strings are informative (the Python codes); a C++ test asserts only rejection.
 """
@@ -78,9 +83,17 @@ def _txid(label):
     return v.sha256(b'vault-vectors-txid-' + label.encode())[::-1].hex()
 
 
+def _pq_owner():
+    """The vectors' SLH-DSA owner: (seed48, pk, sk, owner33)."""
+    seed = v.sha256(b'vault-vectors-pq-owner') + v.sha256(b'vault-vectors-pq-owner\x01')[:16]
+    pk, sk = v.pq.slh_keygen(seed)
+    return seed, pk, sk, v.pq_owner_id(v.pq.SCHEME_SLH_DSA_SHA2_128S, pk)
+
+
 def build():
     K = _keys()
     P = {lab: v.pubkey_of(s) for lab, s in K.items()}
+    pq_seed, pq_pk, pq_sk, OWNER = _pq_owner()
     set_a = v.txid_internal(_txid('set-a'))
     set_b = v.txid_internal(_txid('set-b'))
     doc = {
@@ -92,12 +105,14 @@ def build():
         'opcodes': {'CHECKSEQUENCEVERIFY': v.OP_CHECKSEQUENCEVERIFY, 'CHECKSETSIG': v.OP_CHECKSETSIG,
                     'CHECKSETDORMANT': v.OP_CHECKSETDORMANT},
         'keys': [{'label': lab, 'secret': _h(K[lab]), 'pubkey': _h(P[lab])} for lab in LABELS],
+        'pqOwner': {'label': 'pq-owner', 'seed': _h(pq_seed), 'pk': _h(pq_pk),
+                    'owner': {'scheme': OWNER[0], 'hash': _h(OWNER[1:])}},
     }
 
     # --- vaults
     def vp(**kw):
         d = dict(tag=b'WYEC', set_id=set_a, cancel_set_id=set_b, delay=144, owner_height=1000, app_height=0,
-                 owner_key=P['owner'])
+                 owner=OWNER)
         d.update(kw)
         return v.VaultParams(**d)
 
@@ -116,7 +131,7 @@ def build():
         ('app-enabled', vp(tag=b'YED\x00', set_id=set_a, cancel_set_id=set_a, app_height=1288)),
         ('app-height-max', vp(app_height=499999999)),
         ('tag-zero', vp(tag=bytes(4))),
-        ('owner-key-off-curve-accepted', vp(owner_key=off_curve)),     # A-2: prefix check only
+        ('owner-falcon-scheme-2', vp(owner=b'\x02' + OWNER[1:])),      # A-1: a template whatever the Falcon flag
     ]
     doc['vaults'] = [{'name': n, 'params': p.to_json(), 'script': _h(v.vault_script(p))} for n, p in vault_cases]
 
@@ -134,7 +149,17 @@ def build():
         ('owner-height-0', v.vault_script_unchecked(vp(owner_height=0)), 'ownerHeight out of range'),
         ('owner-height-500000000', v.vault_script_unchecked(vp(owner_height=500000000)), 'ownerHeight out of range'),
         ('app-height-500000000', v.vault_script_unchecked(vp(app_height=500000000)), 'appHeight out of range'),
-        ('owner-key-uncompressed-prefix', v.vault_script_unchecked(vp(owner_key=b'\x04' + P['owner'][1:])), 'ownerKey'),
+        ('owner-scheme-0', v.vault_script_unchecked(vp(owner=b'\x00' + OWNER[1:])), 'owner scheme'),
+        ('owner-scheme-3', v.vault_script_unchecked(vp(owner=b'\x03' + OWNER[1:])), 'owner scheme'),
+        ('owner-scheme-16', v.vault_script_unchecked(vp(owner=b'\x10' + OWNER[1:])), 'owner scheme'),
+        ('owner-scheme-as-data-push', good.replace(bytes([v.OP_1, v.OP_CHECKPQSIG]), bytes([1, 1, v.OP_CHECKPQSIG])),
+         'non-minimal number'),
+        ('owner-schemes-differ', good[:good.rfind(bytes([v.OP_1, v.OP_CHECKPQSIG]))] + bytes([v.OP_2, v.OP_CHECKPQSIG])
+         + good[good.rfind(bytes([v.OP_1, v.OP_CHECKPQSIG])) + 2:], 'owner copies'),
+        ('owner-hashes-differ', good[:good.rfind(OWNER[1:])] + bytes(32) + good[good.rfind(OWNER[1:]) + 32:],
+         'owner copies'),
+        ('owner-ec-key-checksig', good.replace(v.owner_slot(OWNER), v.push(P['owner']) + bytes([v.OP_CHECKSIG])),
+         'the secp256k1 owner shape is not a template'),
         ('setid-copies-differ', good[:k_set] + set_b + good[k_set + 32:], 'shape'),
         ('pushdata1-for-32-bytes', good[:5] + bytes([v.OP_PUSHDATA1]) + good[5:], 'non-minimal push'),
         ('trailing-op', good + bytes([v.OP_1]), 'shape'),
@@ -158,13 +183,16 @@ def build():
     igood = v.intent_script(ip0)
     ibad = [
         ('delay-0', v.intent_script_unchecked(v.IntentParams(ip0.tag, ip0.recipient_hash, ip0.vault_hash, 0,
-                                                             ip0.cancel_set_id, ip0.set_id, ip0.owner_key)), 'delay'),
+                                                             ip0.cancel_set_id, ip0.set_id, ip0.owner)), 'delay'),
         ('delay-65536', v.intent_script_unchecked(v.IntentParams(ip0.tag, ip0.recipient_hash, ip0.vault_hash, 65536,
-                                                                 ip0.cancel_set_id, ip0.set_id, ip0.owner_key)), 'delay'),
+                                                                 ip0.cancel_set_id, ip0.set_id, ip0.owner)), 'delay'),
         ('trailing-byte', igood + b'\x00', 'shape'),
         ('vault-is-not-intent', v.vault_script(vp()), 'shape'),
         ('role-1-in-cancel-branch', igood.replace(bytes([v.OP_2, v.OP_CHECKSETSIG]), bytes([v.OP_1, v.OP_CHECKSETSIG])),
          'shape'),
+        ('owner-scheme-3', igood.replace(bytes([v.OP_1, v.OP_CHECKPQSIG]), bytes([v.OP_3, v.OP_CHECKPQSIG])), 'owner scheme'),
+        ('owner-ec-key-checksig', igood.replace(v.owner_slot(OWNER), v.push(P['owner']) + bytes([v.OP_CHECKSIG])),
+         'the secp256k1 owner shape is not a template'),
     ]
     for n, s, _r in ibad:
         assert v.parse_intent(s) is None, n
@@ -176,14 +204,16 @@ def build():
 
     # --- selectors
     s65 = bytes([31]) + bytes(64)
+    # an owner scriptSig shape: SLH-DSA chunking, <sig 15x520 + 57> <16> <pk 32> <1> (quantum plan §4.2)
+    pq_args = v.pq.pq_scriptsig_pushes(bytes(32), bytes(v.pq.SIG_SIZE[1]) + b'\x01')
     sel = [
         ('V', v.vault_unlock_scriptsig([s65, s65]), 1, 2),
-        ('V', v.vault_owner_scriptsig(b'\x30\x06' + bytes(6) + b'\x01'), 2, 1),
-        ('V', v.vault_owner_released_scriptsig(b'\x30\x06' + bytes(6) + b'\x01'), 3, 1),
+        ('V', v.vault_owner_scriptsig(pq_args), 2, 19),
+        ('V', v.vault_owner_released_scriptsig(pq_args), 3, 19),
         ('V', v.vault_app_scriptsig(), 4, 0),
         ('I', v.intent_release_scriptsig(), 1, 0),
         ('I', v.intent_cancel_scriptsig([s65]), 2, 1),
-        ('I', v.intent_owner_released_scriptsig(b'\x30\x06' + bytes(6) + b'\x01'), 3, 1),
+        ('I', v.intent_owner_released_scriptsig(pq_args), 3, 19),
     ]
     for kind, ss, s_, n in sel:
         assert v.parse_selector(ss, kind) == (s_, v.push_values(ss)[:-1]) and n == len(v.push_values(ss)) - 1
@@ -371,6 +401,19 @@ def build():
                             fee_vin=fee_in, member_secrets=[K['member-2']])
     spends.append(_spend('cancel', ctx, 0, i_spk, 20 * v.COIN, set_b, v.ROLE_CANCEL, ['member-2'], K, P))
     doc['spends'] = spends
+
+    # --- owner spends: the SLH-DSA owner signs a V's OWNER branch (selector 2), verified by the C++ interpreter
+    owner_spends = []
+    vp_o = vp(delay=10, owner_height=1000)
+    o_spk = v.vault_script(vp_o)
+    otx = v.build_owner_spend_tx((_txid('owner-vault-utxo'), 0), o_spk, value, pq_sk, recipient, v.SEL_OWNER,
+                                 lock_time=1000)
+    sh = v.template_sighash(otx, 0, o_spk, value)
+    assert v.parse_selector(otx.vin[0].scriptSig, 'V')[0] == v.SEL_OWNER
+    owner_spends.append({'name': 'owner-selector-2', 'tx': v.tx_hex(otx), 'nIn': 0, 'scriptCode': _h(o_spk),
+                         'amount': value, 'branchId': v.VAULT_BRANCH_ID, 'sighash': _h(sh), 'selector': v.SEL_OWNER,
+                         'scriptSig': _h(otx.vin[0].scriptSig)})
+    doc['ownerSpends'] = owner_spends
     return doc
 
 

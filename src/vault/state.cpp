@@ -496,7 +496,7 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
                 if (outs[o].kind == OutClass::INTENT) {
                     const IntentParams& ip = outs[o].i;
                     if (ip.tag != v.tag || ip.setId != v.setId || ip.cancelSetId != v.cancelSetId ||
-                        ip.delay != v.delay || ip.ownerKey != v.ownerKey || ip.vaultHash != vaultHash) {
+                        ip.delay != v.delay || ip.owner != v.owner || ip.vaultHash != vaultHash) {
                         return std::string("bad-txns-vault-covenant");
                     }
                     sumI += value;

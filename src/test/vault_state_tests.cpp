@@ -223,7 +223,8 @@ VaultParams VaultFor(const SetId& setId, const CKey& owner, int64_t appHeight = 
     v.cancelSetId = setId;
     v.delay = 5;
     v.ownerHeight = 100000;
-    v.ownerKey = owner.GetPubKey();
+    const CPubKey pk = owner.GetPubKey();
+    v.owner = CPQKeyID(1, Hash(pk.begin(), pk.end()));   // a post-quantum owner id (quantum plan §4.3) per test key
     v.appHeight = appHeight;
     return v;
 }
@@ -1093,7 +1094,8 @@ BOOST_AUTO_TEST_CASE(module_table_registers_yed)
     const uint256 set = uint256S("0x5e7");
     const yellowback::Params p = yellowback::RegtestParams(10, 0, 0, set);
     CKey owner = CKey::TestOnlyRandomKey(true);
-    VaultParams good = yellowback::YedVaultParams(p, owner.GetPubKey(), 50);
+    const CPubKey ownerPub = owner.GetPubKey();
+    VaultParams good = yellowback::YedVaultParams(p, CPQKeyID(1, Hash(ownerPub.begin(), ownerPub.end())), 50);
     VaultParams other = good;
     other.setId = uint256S("0x99");
     CMutableTransaction mtx;

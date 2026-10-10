@@ -3,11 +3,19 @@
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 // The vault primitive's script templates (docs/plans/yellowback-upgrade-plan.md §15.3):
-// exact shapes, minimal pushes, field ranges, the selector, the bond redeem script.
+// exact shapes, minimal pushes, field ranges, the selector, the bond redeem script. Owners are
+// post-quantum key ids (docs/plans/yellowback-quantum-spec.md §1): the slot <ownerHash:32>
+// OP_1|OP_2 OP_CHECKPQSIG is the only owner shape.
 
 #include "vault/template.h"
 
+#include "consensus/upgrades.h"
+#include "crypto/pq/scheme.h"
+#include "crypto/pq/sign.h"
 #include "key.h"
+#include "policy/policy.h"
+#include "primitives/transaction.h"
+#include "script/interpreter.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
@@ -37,6 +45,11 @@ uint256 U(unsigned char b)
     return h;
 }
 
+CPQKeyID TestOwner(unsigned char seed, uint8_t scheme = pq::SCHEME_SLH_DSA_SHA2_128S)
+{
+    return CPQKeyID(scheme, U(seed));
+}
+
 VaultParams SampleVault()
 {
     VaultParams p;
@@ -45,7 +58,7 @@ VaultParams SampleVault()
     p.delay = 5;
     p.setId = U(0x80);
     p.ownerHeight = 1000;
-    p.ownerKey = TestKey(1);
+    p.owner = TestOwner(0xa1);
     p.appHeight = 2000;
     return p;
 }
@@ -59,7 +72,7 @@ IntentParams SampleIntent()
     p.delay = 144;
     p.cancelSetId = U(0x40);
     p.setId = U(0x80);
-    p.ownerKey = TestKey(2);
+    p.owner = TestOwner(0xa2);
     return p;
 }
 
@@ -166,20 +179,171 @@ BOOST_AUTO_TEST_CASE(vault_field_ranges)
     p.appHeight = 500000000;
     BOOST_CHECK(BuildVault(p).empty());
 
-    // Uncompressed / bad-header owner key.
-    p = SampleVault();
-    CKey k = CKey::TestOnlyRandomKey(false);
-    p.ownerKey = k.GetPubKey();
-    BOOST_CHECK(BuildVault(p).empty());
-    // Replace the owner key's header byte inside the script with 0x04: malformed.
+    // Unregistered owner schemes do not build.
+    for (uint8_t scheme : {0, 3, 16, 255}) {
+        p = SampleVault();
+        p.owner.scheme = scheme;
+        BOOST_CHECK(BuildVault(p).empty());
+    }
+    // Replace the owner's scheme opcode (OP_1, both slots) inside the script: OP_3 / OP_0 are
+    // malformed (V-shaped, unregistered scheme), the one-byte push 01 01 is malformed too (rebuild).
     CScript good = BuildVault(SampleVault());
     valtype b(good.begin(), good.end());
-    const CPubKey ownerKey = SampleVault().ownerKey;
-    valtype key(ownerKey.begin(), ownerKey.end());
-    auto it = std::search(b.begin(), b.end(), key.begin(), key.end());
-    BOOST_REQUIRE(it != b.end());
-    *it = 0x04;
-    BOOST_CHECK(MatchVault(CScript(b.begin(), b.end()), q) == Shape::MALFORMED);
+    const uint256 ownerHash = SampleVault().owner.hash;
+    const valtype hash(ownerHash.begin(), ownerHash.end());
+    std::vector<size_t> schemePos;
+    for (auto it = std::search(b.begin(), b.end(), hash.begin(), hash.end()); it != b.end();
+         it = std::search(it + 1, b.end(), hash.begin(), hash.end())) {
+        schemePos.push_back((it - b.begin()) + 32);
+    }
+    BOOST_REQUIRE_EQUAL(schemePos.size(), 2U);
+    for (size_t pos : schemePos) {
+        BOOST_CHECK_EQUAL(b[pos], (unsigned char)OP_1);
+        BOOST_CHECK_EQUAL(b[pos + 1], 0xc2);
+    }
+    for (opcodetype op : {OP_3, OP_0, OP_16}) {
+        valtype c = b;
+        c[schemePos[0]] = op;
+        c[schemePos[1]] = op;
+        BOOST_CHECK(MatchVault(CScript(c.begin(), c.end()), q) == Shape::MALFORMED);
+    }
+    {
+        CScript pushed = Splice(good, schemePos[1], 1, {0x01, 0x01});
+        pushed = Splice(pushed, schemePos[0], 1, {0x01, 0x01});
+        BOOST_CHECK(MatchVault(pushed, q) == Shape::MALFORMED);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(vault_pq_owner_shape)
+{
+    // Both registered schemes build and parse (A-1: scheme 2 is a template whatever the Falcon flag).
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        VaultParams p = SampleVault();
+        p.owner = TestOwner(0x33, scheme);
+        CScript v = BuildVault(p);
+        BOOST_REQUIRE(!v.empty());
+        VaultParams q;
+        BOOST_CHECK(ParseVault(v, q));
+        BOOST_CHECK(q == p);
+        BOOST_CHECK(q.owner == p.owner);
+        IntentParams ip = SampleIntent();
+        ip.owner = p.owner;
+        CScript i = BuildIntent(ip);
+        IntentParams iq;
+        BOOST_REQUIRE(!i.empty());
+        BOOST_CHECK(ParseIntent(i, iq) && iq.owner == p.owner);
+        txnouttype type;
+        std::vector<valtype> sol;
+        BOOST_CHECK(Solver(v, type, sol) && type == TX_VAULT);
+        BOOST_CHECK(Solver(i, type, sol) && type == TX_VAULT_INTENT);
+    }
+
+    // Byte layout (quantum spec §1.1, §1.2): the owner slot is 20 <32> 5n c2 (35 bytes), twice in V,
+    // at token indices 22..24 and 34..36; setId's second copy at 31, appHeight at 40.
+    VaultParams p = SampleVault();
+    CScript v = BuildVault(p);
+    std::vector<std::pair<opcodetype, valtype>> toks;
+    CScript::const_iterator pc = v.begin();
+    opcodetype op;
+    valtype data;
+    while (pc < v.end()) {
+        BOOST_REQUIRE(v.GetOp(pc, op, data));
+        toks.push_back({op, data});
+    }
+    BOOST_REQUIRE_EQUAL(toks.size(), 45U);
+    const valtype hash(p.owner.hash.begin(), p.owner.hash.end());
+    const valtype setId(p.setId.begin(), p.setId.end());
+    BOOST_CHECK(toks[22].second == hash);
+    BOOST_CHECK_EQUAL(toks[23].first, OP_1);
+    BOOST_CHECK_EQUAL(toks[24].first, OP_CHECKPQSIG);
+    BOOST_CHECK(toks[31].second == setId);
+    BOOST_CHECK(toks[34].second == hash);
+    BOOST_CHECK_EQUAL(toks[35].first, OP_1);
+    BOOST_CHECK_EQUAL(toks[36].first, OP_CHECKPQSIG);
+    BOOST_CHECK_EQUAL(toks[39].first, OP_EQUALVERIFY);
+    CScriptNum appHeight(toks[40].second, true, 5);
+    BOOST_CHECK_EQUAL(appHeight.getint(), 2000);
+    // No OP_CHECKSIG (0xac) opcode anywhere in V (pushes aside).
+    for (const auto& t : toks) BOOST_CHECK(t.first != OP_CHECKSIG);
+
+    // Intent: 32 tokens, the owner slot at 27..29.
+    IntentParams ip = SampleIntent();
+    CScript is = BuildIntent(ip);
+    toks.clear();
+    pc = is.begin();
+    while (pc < is.end()) {
+        BOOST_REQUIRE(is.GetOp(pc, op, data));
+        toks.push_back({op, data});
+    }
+    BOOST_REQUIRE_EQUAL(toks.size(), 32U);
+    BOOST_CHECK(toks[27].second == valtype(ip.owner.hash.begin(), ip.owner.hash.end()));
+    BOOST_CHECK_EQUAL(toks[28].first, OP_1);
+    BOOST_CHECK_EQUAL(toks[29].first, OP_CHECKPQSIG);
+
+    // Lengths are unchanged from the EC owner (quantum spec §1.1: V 209..220, I 196..199).
+    BOOST_CHECK(v.size() >= 209 && v.size() <= 220);
+    BOOST_CHECK(is.size() >= 196 && is.size() <= 199);
+
+    // The two owner slots must agree: hash and scheme.
+    valtype b(v.begin(), v.end());
+    auto first = std::search(b.begin(), b.end(), hash.begin(), hash.end());
+    auto second = std::search(first + 1, b.end(), hash.begin(), hash.end());
+    BOOST_REQUIRE(second != b.end());
+    VaultParams q;
+    {
+        valtype c = b;
+        c[(second - b.begin()) + 5] ^= 0x01;
+        BOOST_CHECK(MatchVault(CScript(c.begin(), c.end()), q) == Shape::MALFORMED);
+    }
+    {
+        valtype c = b;
+        c[(second - b.begin()) + 32] = OP_2;
+        BOOST_CHECK(MatchVault(CScript(c.begin(), c.end()), q) == Shape::MALFORMED);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(vault_ec_owner_is_not_a_template)
+{
+    // Today's (upgrade plan §15.3) owner slot <ownerKey:33> OP_CHECKSIG is not V-shaped any more:
+    // the token count differs, so it is Shape::NONE, and Solver leaves it nonstandard.
+    VaultParams p = SampleVault();
+    const valtype tag(p.tag.begin(), p.tag.end()), setId(p.setId.begin(), p.setId.end()),
+        cancel(p.cancelSetId.begin(), p.cancelSetId.end());
+    const valtype key = ToByteVector(TestKey(1));
+    CScript ec;
+    ec << tag << cancel << p.delay << OP_2DROP << OP_DROP;
+    ec << OP_DUP << OP_1 << OP_EQUAL << OP_IF;
+    ec << OP_DROP << setId << OP_1 << OP_CHECKSETSIG;
+    ec << OP_ELSE << OP_DUP << OP_2 << OP_EQUAL << OP_IF;
+    ec << OP_DROP << p.ownerHeight << OP_CHECKLOCKTIMEVERIFY << OP_DROP << key << OP_CHECKSIG;
+    ec << OP_ELSE << OP_DUP << OP_3 << OP_EQUAL << OP_IF;
+    ec << OP_DROP << setId << OP_CHECKSETDORMANT << OP_VERIFY << key << OP_CHECKSIG;
+    ec << OP_ELSE << OP_4 << OP_EQUALVERIFY << p.appHeight << OP_CHECKLOCKTIMEVERIFY;
+    ec << OP_ENDIF << OP_ENDIF << OP_ENDIF;
+    VaultParams q;
+    BOOST_CHECK(MatchVault(ec, q) == Shape::NONE);
+    txnouttype type;
+    std::vector<valtype> sol;
+    BOOST_CHECK(!Solver(ec, type, sol));
+    BOOST_CHECK_EQUAL(type, TX_NONSTANDARD);
+    // A 33-byte "hash" with OP_1 OP_CHECKPQSIG in the slots is V-shaped but malformed.
+    CScript v = BuildVault(p);
+    valtype b(v.begin(), v.end());
+    const valtype hash(p.owner.hash.begin(), p.owner.hash.end());
+    std::vector<size_t> at;
+    for (auto it = std::search(b.begin(), b.end(), hash.begin(), hash.end()); it != b.end();
+         it = std::search(it + 1, b.end(), hash.begin(), hash.end())) {
+        at.push_back((it - b.begin()) - 1);
+    }
+    BOOST_REQUIRE_EQUAL(at.size(), 2U);
+    valtype c = b;
+    valtype push33 = {0x21};
+    push33.insert(push33.end(), key.begin(), key.end());
+    c.erase(c.begin() + at[1], c.begin() + at[1] + 33);
+    c.insert(c.begin() + at[1], push33.begin(), push33.end());
+    c.erase(c.begin() + at[0], c.begin() + at[0] + 33);
+    c.insert(c.begin() + at[0], push33.begin(), push33.end());
+    BOOST_CHECK(MatchVault(CScript(c.begin(), c.end()), q) == Shape::MALFORMED);
 }
 
 BOOST_AUTO_TEST_CASE(vault_inconsistent_fields)
@@ -232,7 +396,7 @@ BOOST_AUTO_TEST_CASE(intent_roundtrip_and_ranges)
     BOOST_CHECK_EQUAL(q.delay, 144);
     BOOST_CHECK(q.cancelSetId == p.cancelSetId);
     BOOST_CHECK(q.setId == p.setId);
-    BOOST_CHECK(q.ownerKey == p.ownerKey);
+    BOOST_CHECK(q.owner == p.owner);
     VaultParams v;
     BOOST_CHECK(MatchVault(s, v) == Shape::NONE);
     // CSV byte 0xb2 follows the delay push.
@@ -258,7 +422,7 @@ BOOST_AUTO_TEST_CASE(intent_for_vault)
     IntentParams i = IntentFor(v, vs, recipient);
     BOOST_CHECK(i.vaultHash == ScriptHash256(vs));
     BOOST_CHECK(i.recipientHash == ScriptHash256(recipient));
-    BOOST_CHECK(i.setId == v.setId && i.cancelSetId == v.cancelSetId && i.delay == v.delay && i.ownerKey == v.ownerKey);
+    BOOST_CHECK(i.setId == v.setId && i.cancelSetId == v.cancelSetId && i.delay == v.delay && i.owner == v.owner);
     // SHA256 single, of the raw script bytes: SHA256("") check.
     const uint256 empty = ScriptHash256(CScript());
     BOOST_CHECK_EQUAL(HexStr(empty.begin(), empty.end()),
@@ -353,6 +517,104 @@ BOOST_AUTO_TEST_CASE(bond_redeem)
     b[0] = 0x07;
     b.insert(b.begin(), 0x01);
     BOOST_CHECK(!ParseBondRedeem(CScript(b.begin(), b.end()), lt, k2));
+}
+
+namespace {
+
+/** <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p> <selector> (quantum plan §4.2): canonical 520-byte chunks. */
+CScript OwnerScriptSig(const valtype& sigWithHashtype, const valtype& pk, int selector)
+{
+    CScript ss;
+    int s = 0, p = 0;
+    for (size_t i = 0; i < sigWithHashtype.size(); i += pq::MAX_CHUNK, s++)
+        ss << valtype(sigWithHashtype.begin() + i, sigWithHashtype.begin() + std::min(sigWithHashtype.size(), i + pq::MAX_CHUNK));
+    ss << CScript::EncodeOP_N(s);
+    for (size_t i = 0; i < pk.size(); i += pq::MAX_CHUNK, p++)
+        ss << valtype(pk.begin() + i, pk.begin() + std::min(pk.size(), i + pq::MAX_CHUNK));
+    ss << CScript::EncodeOP_N(p) << CScript::EncodeOP_N(selector);
+    return ss;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(owner_branch_real_signatures)
+{
+    // The V's OWNER branch (selector 2: CLTV then OP_CHECKPQSIG) with real SLH-DSA and Falcon keys
+    // (crypto/pq/sign.h), through VerifyScript and TransactionSignatureChecker::CheckPQSig.
+    const uint32_t branch = NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId;
+    const unsigned int vaultFlags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
+    const CAmount amount = 5 * COIN;
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        valtype pk, sk;
+        BOOST_REQUIRE(pq::KeyGen(scheme, valtype(pq::SeedSize(scheme), 0x5a + scheme), pk, sk));
+        VaultParams vp = SampleVault();
+        vp.owner = CPQKeyID(scheme, pq::KeyHash(scheme, pk));
+        const CScript spk = BuildVault(vp);
+        BOOST_REQUIRE(!spk.empty());
+
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+        mtx.nVersion = SAPLING_TX_VERSION;
+        mtx.nLockTime = (uint32_t)vp.ownerHeight;
+        mtx.vin.push_back(CTxIn(COutPoint(uint256S("0x77"), 0), CScript(), CTxIn::SEQUENCE_FINAL - 1));
+        mtx.vout.push_back(CTxOut(amount - 10000, GetScriptForDestination(CPQKeyID(scheme, pq::KeyHash(scheme, pk)))));
+        const CTransaction unsigned_(mtx);
+        const uint256 sighash = SignatureHash(spk, unsigned_, 0, SIGHASH_ALL, amount, branch, PrecomputedTransactionData(unsigned_, {CTxOut(amount, spk)}));
+        valtype sig;
+        BOOST_REQUIRE(pq::Sign(scheme, sk, sighash, sig));
+        sig.push_back(SIGHASH_ALL);
+        mtx.vin[0].scriptSig = OwnerScriptSig(sig, pk, SEL_OWNER);
+        const CTransaction tx(mtx);
+        const PrecomputedTransactionData txdata(tx, {CTxOut(amount, spk)});
+        TransactionSignatureChecker checker(&tx, txdata, 0, amount);
+        ScriptError err;
+
+        auto sel = ParseSelector(tx.vin[0].scriptSig);
+        BOOST_CHECK(sel && *sel == SEL_OWNER);
+        if (scheme == pq::SCHEME_SLH_DSA_SHA2_128S) {
+            BOOST_CHECK_EQUAL(tx.vin[0].scriptSig.size(), 7939U);           // quantum spec §1.5
+            BOOST_CHECK(VerifyScript(tx.vin[0].scriptSig, spk, vaultFlags, checker, branch, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        } else {
+            BOOST_CHECK_EQUAL(tx.vin[0].scriptSig.size(), 1578U);
+            // Falcon is SCRIPT_ERR_PQ_SCHEME without SCRIPT_VERIFY_PQ_FALCON, valid with it (A-1)
+            BOOST_CHECK(!VerifyScript(tx.vin[0].scriptSig, spk, vaultFlags, checker, branch, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PQ_SCHEME);
+            BOOST_CHECK(VerifyScript(tx.vin[0].scriptSig, spk, vaultFlags | SCRIPT_VERIFY_PQ_FALCON, checker, branch, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        }
+        const unsigned int okFlags = vaultFlags | SCRIPT_VERIFY_PQ_FALCON;
+        // before the upgrade: OP_CHECKPQSIG is a bad opcode (the V's own 0xc0 is skipped in a false branch)
+        BOOST_CHECK(!VerifyScript(tx.vin[0].scriptSig, spk, STANDARD_SCRIPT_VERIFY_FLAGS, checker, branch, &err));
+        // another owner's V: the key hash does not match, OP_CHECKPQSIG pushes false
+        VaultParams other = vp;
+        other.owner.hash = uint256S("0x1234");
+        BOOST_CHECK(!VerifyScript(tx.vin[0].scriptSig, BuildVault(other), okFlags, checker, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+        // the same key under the other scheme id is another owner
+        other = vp;
+        other.owner.scheme = scheme == pq::SCHEME_SLH_DSA_SHA2_128S ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
+        BOOST_CHECK(!VerifyScript(tx.vin[0].scriptSig, BuildVault(other), okFlags, checker, branch, &err));
+        // CLTV: nLockTime below ownerHeight fails
+        CMutableTransaction early = mtx;
+        early.nLockTime = (uint32_t)vp.ownerHeight - 1;
+        const CTransaction etx(early);
+        const PrecomputedTransactionData etxdata(etx, {CTxOut(amount, spk)});
+        TransactionSignatureChecker echecker(&etx, etxdata, 0, amount);
+        BOOST_CHECK(!VerifyScript(etx.vin[0].scriptSig, spk, okFlags, echecker, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+        // a tampered signature byte
+        valtype bad = sig;
+        bad[7] ^= 0x01;
+        CMutableTransaction tampered = mtx;
+        tampered.vin[0].scriptSig = OwnerScriptSig(bad, pk, SEL_OWNER);
+        const CTransaction ttx(tampered);
+        const PrecomputedTransactionData ttxdata(ttx, {CTxOut(amount, spk)});
+        TransactionSignatureChecker tchecker(&ttx, ttxdata, 0, amount);
+        BOOST_CHECK(!VerifyScript(ttx.vin[0].scriptSig, spk, okFlags, tchecker, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -29,6 +29,7 @@
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
+#include "yellowback/address.h"
 
 #ifdef ENABLE_WALLET
 #include "script/ismine.h"
@@ -107,6 +108,30 @@ CPubKey ParseKey(const UniValue& v, const std::string& name)
     return k;
 }
 
+/** The `pqkeyid` JSON type (quantum spec §6.2): 66 hex digits scheme || keyHash (the hash's
+ *  internal bytes, as pushed in V), scheme registered. */
+std::string PQKeyIdHex(const CPQKeyID& id)
+{
+    std::vector<unsigned char> b(1, id.scheme);
+    b.insert(b.end(), id.hash.begin(), id.hash.end());
+    return HexStr(b.begin(), b.end());
+}
+
+/** A pqkeyid (66 hex) or a PQ Yellowback address of this network ("ye…"/"yt…"/"yr…", 53 characters). */
+CPQKeyID ParsePQKeyId(const UniValue& v, const std::string& name)
+{
+    const std::string s = v.get_str();
+    CPQKeyID id;
+    if (s.size() == 66 && IsHex(s)) {
+        std::vector<unsigned char> b = ParseHex(s);
+        id = CPQKeyID(b[0], uint256(std::vector<unsigned char>(b.begin() + 1, b.end())));
+    } else if (!yellowback::DecodeAddress(s, yellowback::ParamsForNetwork(Params().NetworkIDString()), id)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, name + " must be a pqkeyid (66 hex digits, scheme || keyhash) or a PQ address");
+    }
+    if (!IsOwnerValid(id)) throw JSONRPCError(RPC_INVALID_PARAMETER, name + ": unregistered post-quantum scheme");
+    return id;
+}
+
 COutPoint ParseOutPoint(const UniValue& v, const std::string& name)
 {
     if (v.isObject()) {
@@ -183,7 +208,8 @@ UniValue VaultParamsJSON(const VaultParams& p)
     o.pushKV("delay", p.delay);
     o.pushKV("ownerheight", p.ownerHeight);
     o.pushKV("appheight", p.appHeight);
-    o.pushKV("ownerkey", HexStr(p.ownerKey.begin(), p.ownerKey.end()));
+    o.pushKV("owner", PQKeyIdHex(p.owner));
+    o.pushKV("ownerscheme", (int)p.owner.scheme);
     return o;
 }
 
@@ -195,7 +221,8 @@ UniValue IntentParamsJSON(const IntentParams& p)
     o.pushKV("setid", p.setId.GetHex());
     o.pushKV("cancelsetid", p.cancelSetId.GetHex());
     o.pushKV("delay", p.delay);
-    o.pushKV("ownerkey", HexStr(p.ownerKey.begin(), p.ownerKey.end()));
+    o.pushKV("owner", PQKeyIdHex(p.owner));
+    o.pushKV("ownerscheme", (int)p.owner.scheme);
     o.pushKV("recipienthash", HexStr(p.recipientHash.begin(), p.recipientHash.end()));
     o.pushKV("vaulthash", HexStr(p.vaultHash.begin(), p.vaultHash.end()));
     return o;
@@ -242,6 +269,8 @@ bool WalletHasKey(const CPubKey& k) { return pwalletMain && pwalletMain->HaveKey
 #else
 bool WalletHasKey(const CPubKey&) { return false; }
 #endif
+/** Whether this wallet holds the PQ owner key: never before the wallet's PQ keystore (quantum plan Q5). */
+bool WalletHasPQKey(const CPQKeyID&) { return false; }
 
 UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers)
 {
@@ -317,14 +346,14 @@ UniValue TemplateOutJSON(const COutPoint& op, const TemplateOutRecord& rec, int6
     IntentParams ip;
     if (rec.kind == 0 && ParseVault(rec.scriptPubKey, vp)) {
         o.pushKVs(VaultParamsJSON(vp));
-        o.pushKV("wallet", WalletHasKey(vp.ownerKey));
+        o.pushKV("wallet", WalletHasPQKey(vp.owner));
     } else if (rec.kind == 1 && ParseIntent(rec.scriptPubKey, ip)) {
         o.pushKVs(IntentParamsJSON(ip));
         o.pushKV("matureheight", rec.height + ip.delay);
         o.pushKV("mature", next >= rec.height + ip.delay);
         o.pushKV("cancellable", next - rec.height < ip.delay);
         o.pushKV("origin", HexStr(rec.origin.begin(), rec.origin.end()));
-        o.pushKV("wallet", WalletHasKey(ip.ownerKey));
+        o.pushKV("wallet", WalletHasPQKey(ip.owner));
     }
     return o;
 }
@@ -433,20 +462,20 @@ UniValue vault_list(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "vault_list ( {\"tag\":\"..\",\"setid\":\"..\",\"owner\":\"..\",\"kind\":\"vault|intent\",\"mine\":true} )\n"
             "\nThe unspent vault (V) and intent (I) outputs confirmed since activation, from the vault database's index,\n"
-            "optionally filtered by tag, setid (matches setid or cancelsetid), owner key, kind, or owner key in this wallet.\n"
+            "optionally filtered by tag, setid (matches setid or cancelsetid), owner (pqkeyid or PQ address), kind, or owner key in this wallet.\n"
             + HelpExampleCli("vault_list", "'{\"setid\":\"..\"}'") + HelpExampleRpc("vault_list", "{}"));
     LOCK(cs_main);
     auto snap = Snapshot();
     std::optional<Tag> tag;
     std::optional<SetId> setId;
-    std::optional<CPubKey> owner;
+    std::optional<CPQKeyID> owner;
     std::optional<int> kind;
     bool mine = false;
     if (params.size() > 0 && !params[0].isNull()) {
         const UniValue& f = params[0].get_obj();
         if (!find_value(f, "tag").isNull()) tag = ParseTag(find_value(f, "tag"));
         if (!find_value(f, "setid").isNull()) setId = ParseSetId(find_value(f, "setid"), "setid");
-        if (!find_value(f, "owner").isNull()) owner = ParseKey(find_value(f, "owner"), "owner");
+        if (!find_value(f, "owner").isNull()) owner = ParsePQKeyId(find_value(f, "owner"), "owner");
         if (!find_value(f, "kind").isNull()) {
             const std::string k = find_value(f, "kind").get_str();
             if (k != "vault" && k != "intent") throw JSONRPCError(RPC_INVALID_PARAMETER, "kind must be vault or intent");
@@ -460,11 +489,11 @@ UniValue vault_list(const UniValue& params, bool fHelp)
         IntentParams ip;
         Tag tt{};
         SetId s1, s2;
-        CPubKey ok;
+        CPQKeyID ok;
         if (t.second.kind == 0 && ParseVault(t.second.scriptPubKey, vp)) {
-            tt = vp.tag; s1 = vp.setId; s2 = vp.cancelSetId; ok = vp.ownerKey;
+            tt = vp.tag; s1 = vp.setId; s2 = vp.cancelSetId; ok = vp.owner;
         } else if (t.second.kind == 1 && ParseIntent(t.second.scriptPubKey, ip)) {
-            tt = ip.tag; s1 = ip.setId; s2 = ip.cancelSetId; ok = ip.ownerKey;
+            tt = ip.tag; s1 = ip.setId; s2 = ip.cancelSetId; ok = ip.owner;
         } else {
             continue;
         }
@@ -472,7 +501,7 @@ UniValue vault_list(const UniValue& params, bool fHelp)
         if (tag && *tag != tt) continue;
         if (setId && *setId != s1 && *setId != s2) continue;
         if (owner && *owner != ok) continue;
-        if (mine && !WalletHasKey(ok)) continue;
+        if (mine && !WalletHasPQKey(ok)) continue;
         arr.push_back(TemplateOutJSON(t.first, t.second, NextHeight()));
     }
     return arr;
@@ -1191,8 +1220,8 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
             "\nArguments:\n"
             "1. params (object, required) {\"tag\": \"4 chars or 8 hex\", \"setid\", \"cancelsetid\" (default setid),\n"
             "        \"delay\": 1..65535, \"ownerheight\": n, \"appheight\": n (default 0 = no APP branch), \"amount\",\n"
-            "        \"ownerkey\" (default: a new wallet key)}\n"
-            "\nResult: {\"txid\", \"vout\", \"outpoint\", \"script\", \"ownerkey\"}\n"
+            "        \"owner\": pqkeyid (66 hex, scheme || keyhash) or a PQ address (required until the wallet holds PQ keys)}\n"
+            "\nResult: {\"txid\", \"vout\", \"outpoint\", \"script\", \"owner\"}\n"
             + HelpExampleCli("vault_lock", "'{\"tag\":\"TEST\",\"setid\":\"..\",\"delay\":10,\"ownerheight\":1000,\"amount\":5}'")
             + HelpExampleRpc("vault_lock", "{...}"));
     EnsureWallet(fHelp);
@@ -1207,7 +1236,11 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     vp.delay = find_value(o, "delay").get_int64();
     vp.ownerHeight = find_value(o, "ownerheight").get_int64();
     vp.appHeight = find_value(o, "appheight").isNull() ? 0 : find_value(o, "appheight").get_int64();
-    vp.ownerKey = WalletKeyParam(find_value(o, "ownerkey"), "ownerkey");
+    if (!find_value(o, "ownerkey").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "ownerkey-removed: use owner (pqkeyid)");
+    // Every vault owner is a post-quantum key (quantum plan §4.3). The wallet's PQ keystore (and a
+    // default new SLH-DSA wallet key) arrives with quantum plan Q5; until then the owner is named.
+    if (find_value(o, "owner").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "owner (pqkeyid or PQ address) is required: this wallet holds no post-quantum keys yet");
+    vp.owner = ParsePQKeyId(find_value(o, "owner"), "owner");
     const CAmount amount = AmountFromValue(find_value(o, "amount"));
     if (!VaultParamsValid(vp)) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault parameters out of range (plan §15.3)");
     if (!snap->GetSet(vp.setId) || !snap->GetSet(vp.cancelSetId)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "setid and cancelsetid must be confirmed sets");
@@ -1222,7 +1255,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     r.pushKV("vout", 0);
     r.pushKV("outpoint", OutPointStr(COutPoint(txid, 0)));
     r.pushKV("script", HexStr(spk.begin(), spk.end()));
-    r.pushKV("ownerkey", HexStr(vp.ownerKey.begin(), vp.ownerKey.end()));
+    r.pushKV("owner", PQKeyIdHex(vp.owner));
     return r;
 }
 
@@ -1601,12 +1634,12 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
     const int64_t next = NextHeight();
     VaultParams vp;
     IntentParams ip;
-    CPubKey owner;
+    CPQKeyID owner;
     int selector = 0;
     CMutableTransaction mtx = NewTx();
     uint32_t seq = CTxIn::SEQUENCE_FINAL;
     if (ParseVault(coin.scriptPubKey, vp)) {
-        owner = vp.ownerKey;
+        owner = vp.owner;
         if (next > vp.ownerHeight) {
             selector = SEL_OWNER;
             mtx.nLockTime = (uint32_t)vp.ownerHeight;
@@ -1617,7 +1650,7 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("the owner branch opens at height %d and the set is not released", vp.ownerHeight + 1));
         }
     } else if (ParseIntent(coin.scriptPubKey, ip)) {
-        owner = ip.ownerKey;
+        owner = ip.owner;
         if (!snap->IsReleased(ip.setId, next)) throw JSONRPCError(RPC_MISC_ERROR, "the intent's set is not released");
         selector = SEL_RELEASED;
     } else {
@@ -1626,17 +1659,9 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
     if (coin.nValue <= VAULT_RPC_FEE) throw JSONRPCError(RPC_INVALID_PARAMETER, "the output does not cover the fee");
     mtx.vin.push_back(CTxIn(op, CScript(), seq));
     mtx.vout.push_back(CTxOut(coin.nValue - VAULT_RPC_FEE, GetScriptForDestination(d)));
-    CKey key = WalletPrivKey(owner);
-    const CTransaction txc(mtx);
-    const uint256 sighash = SignatureHash(coin.scriptPubKey, txc, 0, SIGHASH_ALL, coin.nValue, NextBranchId(), TxData(txc));
-    std::vector<unsigned char> sig;
-    if (!key.Sign(sighash, sig)) throw JSONRPCError(RPC_WALLET_ERROR, "signing failed");
-    sig.push_back((unsigned char)SIGHASH_ALL);
-    mtx.vin[0].scriptSig = CScript() << sig << (selector == SEL_OWNER ? OP_2 : OP_3);
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", Broadcast(CTransaction(mtx)).GetHex());
-    o.pushKV("selector", selector);
-    return o;
+    // The owner is a post-quantum key (quantum plan §4.3); the wallet signs with it once it holds
+    // PQ keys (quantum plan Q5). Until then the spend is signed outside the node.
+    throw JSONRPCError(RPC_WALLET_ERROR, strprintf("not yet supported: owner %s is a post-quantum key and this wallet cannot sign with post-quantum keys yet (selector %d)", PQKeyIdHex(owner), selector));
 }
 
 UniValue vault_app(const UniValue& params, bool fHelp)

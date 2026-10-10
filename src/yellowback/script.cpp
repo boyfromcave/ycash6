@@ -78,7 +78,7 @@ valtype StackElementFor(opcodetype opcode, const valtype& data)
 
 const vault::Tag YED_TAG = { { 'Y', 'E', 'D', 0x00 } };
 
-vault::VaultParams YedVaultParamsAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight)
+vault::VaultParams YedVaultParamsAt(const Params& p, const CPQKeyID& owner, int64_t ownerHeight, int64_t appHeight)
 {
     vault::VaultParams v;
     v.tag = YED_TAG;
@@ -87,24 +87,30 @@ vault::VaultParams YedVaultParamsAt(const Params& p, const CPubKey& owner, int64
     v.delay = p.claimDelay;
     v.ownerHeight = ownerHeight;
     v.appHeight = appHeight;
-    v.ownerKey = owner;
+    v.owner = owner;
     return v;
 }
 
-CScript YedVaultScriptAt(const Params& p, const CPubKey& owner, int64_t ownerHeight, int64_t appHeight)
+CScript YedVaultScriptAt(const Params& p, const CPQKeyID& owner, int64_t ownerHeight, int64_t appHeight)
 {
     if (p.attestorSetId.IsNull()) return CScript();
     return vault::BuildVault(YedVaultParamsAt(p, owner, ownerHeight, appHeight));
 }
 
-vault::VaultParams YedVaultParams(const Params& p, const CPubKey& owner, int64_t refHeight)
+vault::VaultParams YedVaultParams(const Params& p, const CPQKeyID& owner, int64_t refHeight)
 {
     return YedVaultParamsAt(p, owner, refHeight + 1, refHeight + 1);     // IT-1: both branches open the block after the mint
 }
 
-CScript YedVaultScript(const Params& p, const CPubKey& owner, int64_t refHeight)
+CScript YedVaultScript(const Params& p, const CPQKeyID& owner, int64_t refHeight)
 {
     return YedVaultScriptAt(p, owner, refHeight + 1, refHeight + 1);
+}
+
+CPQKeyID OwnerFromBytes(const std::vector<unsigned char>& bytes)
+{
+    if (bytes.size() != 33) return CPQKeyID();
+    return CPQKeyID(bytes[0], uint256(std::vector<unsigned char>(bytes.begin() + 1, bytes.end())));
 }
 
 // ---------------------------------------------------------------- v2 (§3.4)

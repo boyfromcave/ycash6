@@ -26,6 +26,9 @@
 
 #include "chainparams.h"
 #include "consensus/upgrades.h"
+#include "crypto/pq/scheme.h"
+#include "hash.h"
+#include "crypto/pq/sign.h"
 #include "key.h"
 #include "keystore.h"
 #include "main.h"
@@ -50,6 +53,60 @@ static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e
 using namespace yellowback;
 
 namespace {
+
+/** The vault owner is a post-quantum key (quantum plan §4.3); these cases keep their EC test keys for
+ *  tokens and payees and derive a real SLH-DSA owner key from each (seed = SHA256(pubkey) || 16 zero
+ *  bytes), so owner-path spends verify. The wallet's own PQ keys and signing arrive with Q5. */
+void TestPQOwnerKey(const CPubKey& k, std::vector<unsigned char>& pk, std::vector<unsigned char>& sk)
+{
+    const uint256 h = Hash(k.begin(), k.end());
+    std::vector<unsigned char> seed(h.begin(), h.end());
+    seed.resize(pq::SeedSize(pq::SCHEME_SLH_DSA_SHA2_128S), 0);
+    BOOST_REQUIRE(pq::KeyGen(pq::SCHEME_SLH_DSA_SHA2_128S, seed, pk, sk));
+}
+
+CPQKeyID TestPQOwner(const CPubKey& k)
+{
+    std::vector<unsigned char> pk, sk;
+    TestPQOwnerKey(k, pk, sk);
+    return CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, pq::KeyHash(pq::SCHEME_SLH_DSA_SHA2_128S, pk));
+}
+
+/** The flags an owner-path input verifies under: OP_CHECKPQSIG needs SCRIPT_VERIFY_VAULT. */
+const unsigned int OWNER_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
+
+/** What SignVaultSpend(.., ownerPath = true) did before the owner became a post-quantum key, done by the
+ *  test until the wallet signs (Q5): sign every other input (as the claim path does), then the vault
+ *  input with the SLH-DSA owner key: <sig_1>..<sig_16> <16> <pk> <1> OP_2. */
+void SignOwnerPath(BuiltTx& b, const CKeyStore& ks, uint32_t branchId, const CPubKey& ownerEc)
+{
+    BOOST_CHECK_THROW(SignVaultSpend(b, ks, branchId, true), std::runtime_error);   // the wallet refuses (Q5)
+    SignVaultSpend(b, ks, branchId, false);
+    std::vector<unsigned char> pk, sk, sig;
+    TestPQOwnerKey(ownerEc, pk, sk);
+    const CTransaction txc(b.tx);
+    const uint256 hash = SignatureHash(b.vaultScript, txc, 0, SIGHASH_ALL, b.vaultValue, branchId, PrecomputedTransactionData(txc, std::vector<CTxOut>()));
+    BOOST_REQUIRE(pq::Sign(pq::SCHEME_SLH_DSA_SHA2_128S, sk, hash, sig));
+    sig.push_back((unsigned char)SIGHASH_ALL);
+    CScript ss;
+    int n = 0;
+    for (size_t i = 0; i < sig.size(); i += pq::MAX_CHUNK, n++)
+        ss << std::vector<unsigned char>(sig.begin() + i, sig.begin() + std::min(sig.size(), i + pq::MAX_CHUNK));
+    ss << CScript::EncodeOP_N(n) << pk << OP_1 << OP_2;
+    b.tx.vin[0].scriptSig = ss;
+    b.path = "owner";
+    b.ownYedOutputs.clear();
+    if (b.changeVout >= 0) b.ownYedOutputs.push_back(COutPoint(CTransaction(b.tx).GetHash(), b.changeVout));
+}
+
+/** The 33 owner bytes (scheme || keyHash) a MINT payload and a VaultRecord carry. */
+std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
+{
+    const CPQKeyID id = TestPQOwner(k);
+    std::vector<unsigned char> b(1, id.scheme);
+    b.insert(b.end(), id.hash.begin(), id.hash.end());
+    return b;
+}
 
 const unsigned int CONSENSUS_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;   // main.cpp:3412 (v4.5.0 :2931)
 
@@ -108,7 +165,7 @@ struct Fixture
                 lockHeight(300), claimHeight(300 + params.grace), appHeight(198), vaultValue(5 * COIN), vaultOut(uint256S("aa"), 0),
                 branchId(NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId)
     {
-        vaultScript = YedVaultScriptAt(params, owner.GetPubKey(), appHeight, appHeight);    // U-23, IT-1: the V template (minted at ref 197: ownerHeight = appHeight = 198)
+        vaultScript = YedVaultScriptAt(params, TestPQOwner(owner.GetPubKey()), appHeight, appHeight);    // U-23, IT-1: the V template (minted at ref 197: ownerHeight = appHeight = 198)
         BOOST_REQUIRE(!vaultScript.empty());
     }
 
@@ -121,7 +178,7 @@ struct Fixture
         VaultSpendShape s;
         s.vaultOut = vaultOut;
         s.vaultScript = vaultScript;
-        s.vaultParams = YedVaultParamsAt(params, owner.GetPubKey(), appHeight, appHeight);
+        s.vaultParams = YedVaultParamsAt(params, TestPQOwner(owner.GetPubKey()), appHeight, appHeight);
         s.vaultValue = vaultValue;
         s.lockHeight = lockHeight;
         s.claimHeight = claimHeight;
@@ -153,7 +210,7 @@ struct Fixture
         out.tx.vout = plan.vout;
         out.vaultScript = s.vaultScript;
         out.vaultValue = s.vaultValue;
-        out.ownerPubKey = owner.GetPubKey();
+        out.owner = TestPQOwner(owner.GetPubKey());
         out.changeVout = plan.changeVout;
         for (const YedCoin& c : s.yedInputs) out.yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));
         for (const auto& fu : s.funding) out.fundPrevs.push_back(std::make_pair(FundScript(), fu.second));
@@ -306,7 +363,8 @@ CMutableTransaction ArmedMint(const Armed& a, Cents cents, const std::vector<uns
     s.claimHeight = s.lockHeight + a.P.grace;
     s.refHeight = a.R;
     s.owner = owner.GetPubKey();
-    s.vaultScript = YedVaultScript(a.P, s.owner, a.R);     // U-23, IT-1
+    s.vaultOwner = TestPQOwner(s.owner);
+    s.vaultScript = YedVaultScript(a.P, s.vaultOwner, a.R);     // U-23, IT-1
     const MicroUsd pMint = aMint.has_value() ? std::min(a.x, aMint.value()) : a.x;
     CAmount collateral = std::max(RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value(), 4 * a.P.feeMin);
     if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
@@ -359,6 +417,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     s.claimHeight = f.claimHeight;
     s.refHeight = 250;
     s.owner = f.owner.GetPubKey();
+    s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
     s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
@@ -386,7 +445,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     BOOST_CHECK_EQUAL(fp->payload.lockHeight, f.lockHeight);
     BOOST_CHECK_EQUAL(fp->payload.refHeight, 250u);
     BOOST_CHECK_EQUAL((int)fp->payload.feeVout, 3);
-    BOOST_CHECK(fp->payload.ownerPubKey == f.owner.GetPubKey());
+    BOOST_CHECK(fp->payload.ownerKeyBytes == TestPQOwnerBytes(f.owner.GetPubKey()));
     // FEE-0: no payee => three outputs and feeVout = 0xFF.
     s.payee = std::nullopt;
     vout = MintOutputs(s, feeVout);
@@ -397,7 +456,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     BOOST_REQUIRE(fp.has_value());
     BOOST_CHECK_EQUAL((int)fp->payload.feeVout, (int)FEE_VOUT_NONE);
     // A V that cannot be scripted (YedVaultScript empty: a height past the CLTV range) is refused with the mint-bad-lock identifier.
-    s.vaultScript = YedVaultScript(f.params, f.owner.GetPubKey(), LOCKTIME_THRESHOLD);
+    s.vaultScript = YedVaultScript(f.params, TestPQOwner(f.owner.GetPubKey()), LOCKTIME_THRESHOLD);
     BOOST_CHECK(s.vaultScript.empty());
     BOOST_CHECK_THROW(MintOutputs(s, feeVout), std::runtime_error);
 }
@@ -432,7 +491,8 @@ BOOST_AUTO_TEST_CASE(mint_shape_passes_the_state_machine)
     s.claimHeight = s.lockHeight + f.params.grace;
     s.refHeight = R;
     s.owner = f.owner.GetPubKey();
-    s.vaultScript = YedVaultScript(f.params, s.owner, R);
+    s.vaultOwner = TestPQOwner(s.owner);
+    s.vaultScript = YedVaultScript(f.params, s.vaultOwner, R);
     std::optional<CAmount> required = RequiredCollateralRounded(s.cents, MinRatioBps(f.params.baseRatioBps[0], S.sigmaMultBps), pMint);
     BOOST_REQUIRE(required.has_value());
     s.collateralZat = std::max(required.value(), 4 * f.params.feeMin);
@@ -602,39 +662,37 @@ BOOST_AUTO_TEST_CASE(sign_vault_spend_owner_path)
     BuiltTx b = f.Built(s, PlanVaultSpend(s));
     CBasicKeyStore ks;
     f.AddKeys(ks);
-    SignVaultSpend(b, ks, f.branchId, true);
+    // The wallet does not sign with a post-quantum owner key yet (Q5): SignVaultSpend refuses the owner
+    // path whatever the keystore holds; SignOwnerPath signs it as the wallet will.
+    BuiltTx refused = f.Built(s, PlanVaultSpend(s));
+    BOOST_CHECK_THROW(SignVaultSpend(refused, ks, f.branchId, true), std::runtime_error);
+    SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());
     BOOST_CHECK_EQUAL(b.path, "owner");
-    // Exactly `<sig> OP_2`: the V's owner selector (U-23).
+    // `<sig_1>..<sig_16> <16> <pk> <1> OP_2`: the V's owner selector (U-23) with the PQ owner (quantum plan §4.2).
     std::vector<std::vector<unsigned char>> pushes;
     BOOST_CHECK_EQUAL(vault::ParseSelector(b.tx.vin[0].scriptSig, &pushes).value_or(0), vault::SEL_OWNER);
-    BOOST_CHECK_EQUAL(pushes.size(), 1u);
+    BOOST_CHECK_EQUAL(pushes.size(), 19u);
     BOOST_CHECK(b.tx.vin[0].scriptSig.IsPushOnly());
-    // Verifies under the standard and the consensus flags with the right amount and branch id.
+    // Verifies under the standard and the consensus flags (with the vault upgrade's) with the right amount
+    // and branch id.
     ScriptError err;
     const CScript spk = f.vaultScript;
-    BOOST_CHECK_MESSAGE(Verify(b.tx, 0, spk, f.vaultValue, f.branchId, &err), ScriptErrorString(err));
-    BOOST_CHECK(Verify(b.tx, 0, spk, f.vaultValue, f.branchId, &err, CONSENSUS_FLAGS));
+    BOOST_CHECK_MESSAGE(Verify(b.tx, 0, spk, f.vaultValue, f.branchId, &err, OWNER_FLAGS), ScriptErrorString(err));
+    BOOST_CHECK(Verify(b.tx, 0, spk, f.vaultValue, f.branchId, &err, CONSENSUS_FLAGS | SCRIPT_VERIFY_VAULT));
+    BOOST_CHECK(!Verify(b.tx, 0, spk, f.vaultValue, f.branchId, &err));                  // OP_CHECKPQSIG without the upgrade
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
     BOOST_CHECK(Verify(b.tx, 1, yed[0].token.scriptPubKey, TOKEN_VALUE, f.branchId, &err));
     // ZIP-243 binds the amount and the branch id (mapping §13.1): either wrong => the signature fails.
-    BOOST_CHECK(!Verify(b.tx, 0, spk, f.vaultValue + 1, f.branchId, &err));
+    BOOST_CHECK(!Verify(b.tx, 0, spk, f.vaultValue + 1, f.branchId, &err, OWNER_FLAGS));
     BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
     const uint32_t overwinter = NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId;
-    BOOST_CHECK(!Verify(b.tx, 0, spk, f.vaultValue, overwinter, &err));
+    BOOST_CHECK(!Verify(b.tx, 0, spk, f.vaultValue, overwinter, &err, OWNER_FLAGS));
     BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
-    // Signed under Overwinter's id it verifies there and not under Sapling's.
-    BuiltTx b2 = f.Built(s, PlanVaultSpend(s));
-    SignVaultSpend(b2, ks, overwinter, true);
-    BOOST_CHECK(Verify(b2.tx, 0, spk, f.vaultValue, overwinter));
-    BOOST_CHECK(!Verify(b2.tx, 0, spk, f.vaultValue, f.branchId));
-    // The owner key must be in the keystore; the YED keys too.
-    CBasicKeyStore onlyYed;
-    onlyYed.AddKey(f.yedKey);
-    BuiltTx b3 = f.Built(s, PlanVaultSpend(s));
-    BOOST_CHECK_THROW(SignVaultSpend(b3, onlyYed, f.branchId, true), std::runtime_error);
+    // The YED keys must be in the keystore.
     CBasicKeyStore onlyOwner;
     onlyOwner.AddKey(f.owner);
     BuiltTx b4 = f.Built(s, PlanVaultSpend(s));
-    BOOST_CHECK_THROW(SignVaultSpend(b4, onlyOwner, f.branchId, true), std::runtime_error);
+    BOOST_CHECK_THROW(SignVaultSpend(b4, onlyOwner, f.branchId, false), std::runtime_error);
 }
 
 // Rule: RED-1 RED-2 RED-3 RED-4 MP-1
@@ -651,8 +709,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         VaultRecord v;
         // One CPubKey: begin() and end() from two GetPubKey() calls are iterators into
         // different temporaries, and the copy walks off the first key (ASan, 65-byte stack object).
-        const CPubKey ownerPub = f.owner.GetPubKey();
-        v.ownerPubKey.assign(ownerPub.begin(), ownerPub.end());
+        v.ownerPubKey = TestPQOwnerBytes(f.owner.GetPubKey());
         v.termClass = 0;
         v.lockHeight = f.lockHeight;
         v.claimHeight = f.claimHeight;
@@ -694,7 +751,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         State st(view);
         VaultSpendShape s = f.Shape(true, true, true, true, yed);
         BuiltTx b = f.Built(s, PlanVaultSpend(s));
-        SignVaultSpend(b, ks, f.branchId, true);
+        SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());
         TxOutcome o = ProcessTx(st, f.params, CTransaction(b.tx), H);
         BOOST_CHECK(o.vaultSpend);
         BOOST_CHECK(!o.invalid);
@@ -741,7 +798,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         State st(view);
         VaultSpendShape s = f.Shape(true, false, true, false, {});
         BuiltTx b = f.Built(s, PlanVaultSpend(s));
-        SignVaultSpend(b, ks, f.branchId, true);
+        SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());
         TxOutcome o = ProcessTx(st, f.params, CTransaction(b.tx), H);
         BOOST_CHECK(o.invalid);
         BOOST_CHECK_EQUAL(o.log.verdict, verdict::VAULT_SPEND_MALFORMED);
@@ -753,7 +810,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         State st(view);
         VaultSpendShape s = f.Shape(true, false, true, false, {});
         BuiltTx b = f.Built(s, PlanVaultSpend(s));
-        SignVaultSpend(b, ks, f.branchId, true);
+        SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());
         TxOutcome o = ProcessTx(st, f.params, CTransaction(b.tx), H);
         BOOST_CHECK(!o.vaultSpend);
         BOOST_CHECK(!o.invalid);
@@ -784,10 +841,10 @@ BOOST_AUTO_TEST_CASE(void_release_has_no_payload_and_no_fee)
     BOOST_CHECK(!PayloadOf(b.tx).has_value());
     CBasicKeyStore ks;
     f.AddKeys(ks);
-    SignVaultSpend(b, ks, f.branchId, true);
+    SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());
     BOOST_CHECK(b.ownYedOutputs.empty());
     ScriptError err;
-    BOOST_CHECK_MESSAGE(Verify(b.tx, 0, f.vaultScript, f.vaultValue, f.branchId, &err), ScriptErrorString(err));
+    BOOST_CHECK_MESSAGE(Verify(b.tx, 0, f.vaultScript, f.vaultValue, f.branchId, &err, OWNER_FLAGS), ScriptErrorString(err));
 }
 
 // ---------------------------------------------------------------- v3 (plan §3.4, §3.5, §4.6)
@@ -803,6 +860,7 @@ BOOST_AUTO_TEST_CASE(v3_mint_layout_places_the_attestor_fee_after_the_pool_fee)
     s.claimHeight = f.claimHeight;
     s.refHeight = 250;
     s.owner = f.owner.GetPubKey();
+    s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
     s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
@@ -854,7 +912,7 @@ BOOST_AUTO_TEST_CASE(v3_claim_layout_attestor_fee_and_residual)
     s.attestPayee = bondKey.GetPubKey().GetID();
     s.attestFeeZat = AttestFeeZat(s.feeZat, f.params.attestFeeBps);
     s.residualZat = 2 * COIN;
-    s.ownerPubKey = f.owner.GetPubKey();
+    s.owner = TestPQOwner(f.owner.GetPubKey());
     s.carrierValue = CARRIER_VALUE;
     VaultSpendPlan plan = PlanVaultSpend(s);
     BOOST_REQUIRE_EQUAL(plan.vout.size(), 7u);
@@ -867,7 +925,7 @@ BOOST_AUTO_TEST_CASE(v3_claim_layout_attestor_fee_and_residual)
     BOOST_CHECK_EQUAL(plan.vout[3].nValue, s.attestFeeZat);
     vault::IntentParams ip;
     BOOST_REQUIRE(vault::ParseIntent(plan.vout[4].scriptPubKey, ip));
-    BOOST_CHECK(ip.recipientHash == vault::ScriptHash256(GetScriptForDestination(f.owner.GetPubKey().GetID())));
+    BOOST_CHECK(ip.recipientHash == vault::ScriptHash256(GetScriptForDestination(TestPQOwner(f.owner.GetPubKey()))));   // the owner's PQPKH (F-3)
     BOOST_CHECK_EQUAL(plan.vout[4].nValue, 2 * COIN);
     BOOST_CHECK_EQUAL(plan.collateralOut, f.vaultValue - 2 * COIN);
     BOOST_CHECK_EQUAL(plan.vout[0].nValue + plan.vout[4].nValue, f.vaultValue);     // the whole vault in intents (S-2)
@@ -886,7 +944,7 @@ BOOST_AUTO_TEST_CASE(v3_claim_layout_attestor_fee_and_residual)
     s0.attestPayee = s.attestPayee;
     s0.attestFeeZat = s.attestFeeZat;
     s0.residualZat = 2 * COIN;
-    s0.ownerPubKey = f.owner.GetPubKey();
+    s0.owner = TestPQOwner(f.owner.GetPubKey());
     s0.carrierValue = CARRIER_VALUE;
     plan = PlanVaultSpend(s0);
     BOOST_REQUIRE_EQUAL(plan.vout.size(), 5u);
@@ -900,7 +958,7 @@ BOOST_AUTO_TEST_CASE(v3_claim_layout_attestor_fee_and_residual)
     // A Sapling destination is refused: the claimant's intent pays a transparent script.
     VaultSpendShape sz = f.Shape(false, true, false, true, yed, 100);
     sz.residualZat = 2 * COIN;
-    sz.ownerPubKey = f.owner.GetPubKey();
+    sz.owner = TestPQOwner(f.owner.GetPubKey());
     BOOST_CHECK_THROW(PlanVaultSpend(sz), std::runtime_error);
     // Nothing v3 set (AFEE-0, no residual): intent, fee, change, payload, fee change.
     plan = PlanVaultSpend(f.Shape(false, true, true, true, yed, 100));
@@ -1060,7 +1118,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     State st(a.view);
     VaultRecord vault;
     const CPubKey ownerPk = owner.GetPubKey();
-    vault.ownerPubKey.assign(ownerPk.begin(), ownerPk.end());
+    vault.ownerPubKey = TestPQOwnerBytes(ownerPk);
     vault.termClass = 0;
     vault.lockHeight = a.R - 30;
     vault.claimHeight = a.R - 6;
@@ -1096,8 +1154,8 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     const uint16_t attestPayee = DefaultAttestPayee(a.view, a.P, a.R, selector, A, AttestPolicy()).value();
     VaultSpendShape s;
     s.vaultOut = vaultOut;
-    s.vaultScript = YedVaultScriptAt(a.P, ownerPk, vault.ownerHeight, vault.appHeight);            // U-23: the V template
-    s.vaultParams = YedVaultParamsAt(a.P, ownerPk, vault.ownerHeight, vault.appHeight);
+    s.vaultScript = YedVaultScriptAt(a.P, TestPQOwner(ownerPk), vault.ownerHeight, vault.appHeight);            // U-23: the V template
+    s.vaultParams = YedVaultParamsAt(a.P, TestPQOwner(ownerPk), vault.ownerHeight, vault.appHeight);
     s.vaultValue = vault.collateralZat;
     s.lockHeight = vault.lockHeight;
     s.claimHeight = vault.claimHeight;
@@ -1115,7 +1173,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     s.attestPayee = a.bond[attestPayee].GetPubKey().GetID();
     s.attestFeeZat = AttestFeeZat(s.feeZat, a.P.attestFeeBps);
     s.residualZat = residual;
-    s.ownerPubKey = ownerPk;
+    s.owner = TestPQOwner(ownerPk);
     s.carrierValue = CARRIER_VALUE;
     const CKey fundKey = NewKey();                                            // U-23: the claim's fee input
     ks.AddKey(fundKey);
@@ -1131,7 +1189,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
         b.tx.vout = plan.vout;
         b.vaultScript = shape.vaultScript;
         b.vaultValue = shape.vaultValue;
-        b.ownerPubKey = ownerPk;
+        b.owner = TestPQOwner(ownerPk);
         b.changeVout = plan.changeVout;
         b.yedPrevs.push_back(std::make_pair(coin.token.scriptPubKey, coin.token.nValue));
         for (const auto& fu : shape.funding) b.fundPrevs.push_back(std::make_pair(GetScriptForDestination(fundKey.GetPubKey().GetID()), fu.second));
@@ -1292,7 +1350,8 @@ BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
         m.claimHeight = m.lockHeight + a.P.grace;
         m.refHeight = a.R;
         m.owner = NewKey().GetPubKey();
-        m.vaultScript = YedVaultScript(a.P, m.owner, m.refHeight);     // U-23, IT-1
+        m.vaultOwner = TestPQOwner(m.owner);                            // quantum plan §4.3: the owner is a PQ key
+        m.vaultScript = YedVaultScript(a.P, m.vaultOwner, m.refHeight); // U-23, IT-1
         m.collateralZat = 251 * COIN;
         m.payee = NewKey().GetPubKey().GetID();
         m.feeZat = FeeZat(m.collateralZat, a.P.feeMin, a.P.feeBps);
@@ -1344,7 +1403,7 @@ BOOST_AUTO_TEST_CASE(p2_redeem_fee_is_the_conventional_fee)
     BOOST_CHECK_GT(s.networkFee, DEFAULT_YELLOWBACK_FEE);
     BOOST_CHECK_EQUAL(plan.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - s.networkFee - s.feeZat - TOKEN_VALUE);
     BuiltTx b = f.Built(s, plan);
-    SignVaultSpend(b, ks, f.branchId, true);
+    SignOwnerPath(b, ks, f.branchId, f.owner.GetPubKey());   // the PQ owner (quantum plan §4.3)
     const CTransaction tx(b.tx);
     BOOST_CHECK_EQUAL(s.networkFee, tx.GetConventionalFee());
     // Repricing is idempotent: the shape's own fee prices it again at the same amount.
@@ -1356,7 +1415,7 @@ BOOST_AUTO_TEST_CASE(p2_redeem_fee_is_the_conventional_fee)
     VaultSpendShape z = f.Shape(true, true, false, true, yed, 10000);
     VaultSpendPlan zp = PlanPricedVaultSpend(z, ks, std::nullopt);
     BuiltTx zb = f.Built(z, zp);
-    SignVaultSpend(zb, ks, f.branchId, true);
+    SignOwnerPath(zb, ks, f.branchId, f.owner.GetPubKey());
     const size_t zActions = CalculateLogicalActionCount(zb.tx.vin, zb.tx.vout, 0, 0, 2, 0);
     BOOST_CHECK_EQUAL(z.networkFee, CalculateConventionalFee(zActions));
     BOOST_CHECK_EQUAL(zp.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - z.networkFee - z.feeZat - TOKEN_VALUE);

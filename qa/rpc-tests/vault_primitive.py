@@ -44,6 +44,8 @@ from test_framework.vault_harness import (
     MEMPOOL_NONFINAL,
     OUTSIDER,
     OWNER,
+    OWNER_KEY,
+    OWNER_OUTSIDER,
     SCRIPT_FALSE,
     SCRIPT_LOCKTIME,
     SCRIPT_SETSIG,
@@ -86,7 +88,7 @@ class VaultPrimitiveTest(VaultTestBase):
         v.node_send(self.node, hex_)
         # a V-shaped output with a malformed field is an ordinary (nonstandard) output too
         bad_v = v.vault_script_unchecked(v.VaultParams(b'TEST', self.pre_sid, self.pre_sid, 0, 1000, 0,
-                                                       v.pubkey_of(OWNER)))
+                                                       OWNER_KEY))
         v.node_send(self.node, self.wallet_tx_hex([(COIN, bad_v)]))
         self.node.generate(1)
         sync_blocks(self.nodes)
@@ -364,7 +366,7 @@ class VaultPrimitiveTest(VaultTestBase):
         self.reject(self.owner_hex(out, spk, val, v.SEL_OWNER, lock_time=oh - 1), SCRIPT_LOCKTIME, 'script-locktime',
                     'OWNER with nLockTime = ownerHeight - 1')
         self.mine()
-        self.reject(self.owner_hex(out, spk, val, v.SEL_OWNER, lock_time=oh, secret=OUTSIDER), SCRIPT_FALSE,
+        self.reject(self.owner_hex(out, spk, val, v.SEL_OWNER, lock_time=oh, secret=OWNER_OUTSIDER), SCRIPT_FALSE,
                     'script-ownersig', 'OWNER signed by another key')
         before = self.info(self.S)['lockedValue']
         self.accept(self.owner_hex(out, spk, val, v.SEL_OWNER, lock_time=oh), 'OWNER spend after ownerHeight')

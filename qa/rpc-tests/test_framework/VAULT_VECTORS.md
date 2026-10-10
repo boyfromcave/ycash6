@@ -30,9 +30,10 @@ from fixed private keys, and replayed against the C++ by `src/test/vault_vectors
 | `branchId` | `0x6d5b7a31` as an int | constant |
 | `opcodes` | `CHECKSEQUENCEVERIFY` 0xb2, `CHECKSETSIG` 0xc0, `CHECKSETDORMANT` 0xc1 | constants |
 | `keys[]` | `label, secret, pubkey` | (reference) |
-| `vaults[]` | `name, params{tag, setId, cancelSetId, delay, ownerHeight, appHeight, ownerKey}, script` | `BuildVault(params) == script`, `ParseVault(script) == params` |
+| `pqOwner` | `label, seed (48), pk (32), owner{scheme, hash}` | the SLH-DSA-SHA2-128s owner of every V and I (quantum plan §4.3) |
+| `vaults[]` | `name, params{tag, setId, cancelSetId, delay, ownerHeight, appHeight, owner{scheme, hash}}, script` | `BuildVault(params) == script`, `ParseVault(script) == params` |
 | `vaultsInvalid[]` | `name, script, reason` | `ParseVault` fails |
-| `intents[]` | `name, params{tag, recipientHash, vaultHash, delay, cancelSetId, setId, ownerKey}, script, recipientScript, vaultScript` | `BuildIntent`, `ParseIntent`, `IntentFor(vault, recipient)` |
+| `intents[]` | `name, params{tag, recipientHash, vaultHash, delay, cancelSetId, setId, owner{scheme, hash}}, script, recipientScript, vaultScript` | `BuildIntent`, `ParseIntent`, `IntentFor(vault, recipient)` |
 | `intentsInvalid[]` | `name, script, reason` | `ParseIntent` fails |
 | `bonds[]` | `memberKey, locktime, redeem, spk` | `BuildBondRedeem`, `BondScriptPubKey`, `ParseBondRedeem` |
 | `selectors[]` | `kind (V/I), scriptSig, selector, nArgs` | `ParseTemplateSpend(V or I, scriptSig)` |
@@ -44,6 +45,13 @@ from fixed private keys, and replayed against the C++ by `src/test/vault_vectors
 | `signatures[]` | `label, secret, pubkey, msg, sig, lowSFlipped` | `CKey::SignCompact(msg) == sig` (libsecp256k1's RFC 6979 nonce), `RecoverSig` → `pubkey`; both low-S branches covered |
 | `signaturesInvalid[]` | `name, msg, sig, reason, nonStrictRecovers` | strict `RecoverSig` fails; `CPubKey::RecoverCompact` gives `nonStrictRecovers` where not null |
 | `spends[]` | `name, tx, nIn, scriptCode, amount, branchId, sighash, setId, role, setSigMsg, signers, sigs, scriptSig` | `SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branchId) == sighash`, `SetSigMsg`, the scriptSig's sigs recover |
+| `ownerSpends[]` | `name, tx, nIn, scriptCode, amount, branchId, sighash, selector, scriptSig` | the `pqOwner`'s SLH-DSA OWNER spend (selector 2, signed by `test_framework/pq.py`) passes `VerifyScript` under the vault flags |
+
+The V/I owner (docs/plans/yellowback-quantum-spec.md §1) is `owner{scheme, hash}`: the slot is
+`20 <hash> 51|52 c2` (`<ownerHash:32> OP_1|OP_2 OP_CHECKPQSIG`, 35 bytes, twice in V, once in I);
+`hash` is the 32 bytes as pushed (`uint256` internal order). Both registered schemes are templates
+(A-1: `owner-falcon-scheme-2`); a scheme outside {1, 2}, a scheme pushed as data (`01 01`), two
+owner slots that differ, or the former `<ownerKey:33> OP_CHECKSIG` shape are not.
 
 ## Readings of §15 this vector pins
 
@@ -52,8 +60,8 @@ Where §15 left a choice, the Python took the reading below; the vector makes an
 - **A-1 byte order.** `setId` is pushed and carried (act bodies, `setSigMsg`) as the 32 internal
   bytes of the `SET_CREATE` txid; prevouts as `COutPoint` serialises them.
 - **A-2 "compressed".** 33 bytes with prefix 02/03, **no curve check** (the C++ library's reading,
-  the smaller one). Off-curve keys parse (`owner-key-off-curve-accepted`,
-  `*-off-curve-accepted` acts); they can never sign or recover.
+  the smaller one). Off-curve keys parse (the `*-off-curve-accepted` acts); they can never sign or
+  recover. (The V/I owner is no longer a secp256k1 key: see `owner{scheme, hash}` above.)
 - **A-3 BIP68 height test** (reconciled: Bitcoin's test exactly). §15.2's prose says "coin height + n ≤ spending height − 1", but it
   also says "Bitcoin's CalculateSequenceLocks/EvaluateSequenceLocks", which give coin height + n
   − 1 < height, i.e. coin height + n ≤ height. The model follows Bitcoin: RELEASE is valid from

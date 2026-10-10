@@ -9,6 +9,7 @@
 #include "primitives/transaction.h"
 #include "pubkey.h"
 #include "script/script.h"
+#include "script/standard.h"
 #include "serialize.h"
 #include "uint256.h"
 #include "yellowback/params.h"
@@ -238,6 +239,13 @@ struct VaultRecord
     bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
     /** The owner key as a CPubKey (invalid when the bytes are not a key). */
     CPubKey OwnerKey() const { return CPubKey(ownerPubKey.begin(), ownerPubKey.end()); }
+    /** The owner as a post-quantum key id: the 33 bytes read as scheme || keyHash (quantum spec §3.4);
+     *  scheme 0 when the size is not 33. */
+    CPQKeyID Owner() const
+    {
+        if (ownerPubKey.size() != 33) return CPQKeyID();
+        return CPQKeyID(ownerPubKey[0], uint256(std::vector<unsigned char>(ownerPubKey.begin() + 1, ownerPubKey.end())));
+    }
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>

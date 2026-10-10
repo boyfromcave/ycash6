@@ -29,7 +29,9 @@ VECTORS = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 
                        'vault_vectors.json')
 
 ADMIT = v.fixed_secret('vault-test-admit')
-OWNER = v.fixed_secret('vault-test-owner')
+OWNER = v.pq_owner_secret('vault-test-owner')         # SLH-DSA (quantum plan §4.3)
+OWNER_OUTSIDER = v.pq_owner_secret('vault-test-owner-outsider')
+EC_OWNER = v.fixed_secret('vault-test-owner')
 MEMBERS = [v.fixed_secret('vault-test-member-%d' % i) for i in range(6)]
 MKEYS = [v.pubkey_of(s) for s in MEMBERS]
 SET_A = bytes(range(32))
@@ -38,7 +40,7 @@ SET_B = bytes(range(32, 64))
 
 def vparams(**kw):
     d = dict(tag=b'WYEC', set_id=SET_A, cancel_set_id=SET_B, delay=144, owner_height=1000, app_height=0,
-             owner_key=v.pubkey_of(OWNER))
+             owner=v.pq_owner_of(OWNER))
     d.update(kw)
     return v.VaultParams(**d)
 
@@ -87,8 +89,8 @@ class SignatureTests(unittest.TestCase):
 
     def test_der(self):
         msg = v.sha256(b'der')
-        der = v.ecdsa_sign_der(OWNER, msg)
-        self.assertTrue(v.ecdsa_verify_der(v.pubkey_of(OWNER), msg, der))
+        der = v.ecdsa_sign_der(EC_OWNER, msg)
+        self.assertTrue(v.ecdsa_verify_der(v.pubkey_of(EC_OWNER), msg, der))
         self.assertFalse(v.ecdsa_verify_der(MKEYS[0], msg, der))
 
     def test_messages(self):
@@ -135,14 +137,20 @@ class TemplateTests(unittest.TestCase):
         self.assertIsNone(v.parse_vault(s5[:j] + bytes([0x03, 0xe8, 0x03, 0x00]) + s5[j + 3:]))
         # PUSHDATA1 for a 32-byte push
         self.assertIsNone(v.parse_vault(spk[:5] + bytes([v.OP_PUSHDATA1]) + spk[5:]))
-        # bad keys
-        off_curve = b'\x02' + bytes(31) + b'\x07'
-        while v.is_valid_point(off_curve):
-            off_curve = off_curve[:-1] + bytes([off_curve[-1] + 1])
-        # A-2: "compressed" is the prefix only; an off-curve key parses (it can never sign)
-        self.assertEqual(v.parse_vault(v.vault_script(vparams(owner_key=off_curve))), vparams(owner_key=off_curve))
-        self.assertIsNone(v.parse_vault(v.vault_script_unchecked(vparams(owner_key=b'\x04' + v.pubkey_of(OWNER)[1:]))))
-        # the two setId / ownerKey copies must agree
+        # owners: both registered schemes parse (A-1); an unregistered scheme is not a template
+        h = v.pq_owner_of(OWNER)[1:]
+        for scheme in (1, 2):
+            self.assertEqual(v.parse_vault(v.vault_script(vparams(owner=bytes([scheme]) + h))),
+                             vparams(owner=bytes([scheme]) + h))
+        for scheme in (0, 3, 16):
+            self.assertIsNone(v.parse_vault(v.vault_script_unchecked(vparams(owner=bytes([scheme]) + h))))
+            self.assertEqual(v.template_shape(v.vault_script_unchecked(vparams(owner=bytes([scheme]) + h))),
+                             'malformed')
+        # a 33-byte EC owner key with OP_CHECKSIG is not V-shaped at all (one owner shape)
+        ec = spk.replace(v.owner_slot(vparams().owner),
+                         v.push(v.pubkey_of(EC_OWNER)) + bytes([v.OP_CHECKSIG]))
+        self.assertIsNone(v.template_shape(ec))
+        # the two setId / owner copies must agree
         k = spk.rfind(SET_A)
         self.assertIsNone(v.parse_vault(spk[:k] + SET_B + spk[k + 32:]))
         # trailing / truncated
@@ -597,7 +605,7 @@ class ModelTests(unittest.TestCase):
         early = v.build_owner_spend_tx(out, v.vault_script(vp), val, OWNER, c.dest, v.SEL_OWNER,
                                        lock_time=vp.owner_height)
         self.assertEqual(c.reject(early), 'bad-txns-nonfinal')
-        wrong_key = v.build_owner_spend_tx(out, v.vault_script(vp), val, MEMBERS[0], c.dest, v.SEL_OWNER,
+        wrong_key = v.build_owner_spend_tx(out, v.vault_script(vp), val, OWNER_OUTSIDER, c.dest, v.SEL_OWNER,
                                            lock_time=vp.owner_height)
         app = v.build_app_tx(out, vp, val, [(c.dest, val)], fee_vin=c.coin())
         self.assertEqual(c.m.check_tx(app), 'bad-txns-nonfinal')
@@ -661,7 +669,7 @@ class ModelTests(unittest.TestCase):
         ip = v.intent_for(vp, c.dest)
         self.assertEqual(v.template_shape(v.intent_script(ip)), 'I')
         bad_i = v.intent_script_unchecked(v.IntentParams(ip.tag, ip.recipient_hash, ip.vault_hash, 0,
-                                                         ip.cancel_set_id, ip.set_id, ip.owner_key))
+                                                         ip.cancel_set_id, ip.set_id, ip.owner))
         self.assertEqual(v.template_shape(bad_i), 'malformed')
         self.assertIsNone(v.template_shape(c.dest))
         self.assertIsNone(v.template_shape(v.bond_spk(MKEYS[0], 500)))

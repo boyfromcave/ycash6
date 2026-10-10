@@ -23,6 +23,8 @@
 
 #include "consensus/validation.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
+#include "hash.h"
 #include "key.h"
 #include "primitives/block.h"
 #include "script/standard.h"
@@ -43,6 +45,22 @@
 using namespace yellowback;
 
 namespace {
+
+/** The vault owner is a post-quantum key id (quantum plan §4.3); these cases keep their EC test keys
+ *  for tokens and payees and name the vault owner by a stand-in SLH-DSA key id derived from them. */
+CPQKeyID TestPQOwner(const CPubKey& k)
+{
+    return CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash(k.begin(), k.end()));
+}
+
+/** The 33 owner bytes (scheme || keyHash) a MINT payload and a VaultRecord carry. */
+std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
+{
+    const CPQKeyID id = TestPQOwner(k);
+    std::vector<unsigned char> b(1, id.scheme);
+    b.insert(b.end(), id.hash.begin(), id.hash.end());
+    return b;
+}
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
 const std::string GOLDEN_HASH = "b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87";   // in-term claims (SCHEMA_VERSION 8)
@@ -362,7 +380,7 @@ struct Fixture
     {
         CPubKey owner = o.owner.value_or(ownerKey.GetPubKey());
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, owner, refHeight));     // U-23, IT-1: the V template
+        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, TestPQOwner(owner), refHeight));     // U-23, IT-1: the V template
         CAmount collateral = o.collateral;
         // An invalid class is a payload the verdict rejects (bad-mint-class). Collateral is
         // computed from a real class so the helper does not index baseRatioBps out of range;
@@ -373,7 +391,7 @@ struct Fixture
         for (const COutPoint& op : o.yedInputs) m.vin.push_back(CTxIn(op));
         m.vout.push_back(CTxOut(collateral, o.p2shVault ? vs : GetScriptForDestination(owner.GetID())));
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
-        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, owner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
+        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
                                   o.attestPayee >= 0 ? o.attestFeeVout : FEE_VOUT_NONE);
         if (!o.rawOwner.empty()) p.ownerKeyBytes = o.rawOwner;
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
@@ -415,9 +433,9 @@ struct Fixture
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = YedVaultScriptAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        CScript vs = YedVaultScriptAt(P, v->Owner(), v->ownerHeight, v->appHeight);
         CScript sig = o.scriptSig.value_or(o.ownerPath ? (CScript() << valtype(71, 0x30) << OP_2) : (CScript() << OP_4));
-        const vault::VaultParams vp = YedVaultParamsAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        const vault::VaultParams vp = YedVaultParamsAt(P, v->Owner(), v->ownerHeight, v->appHeight);
         CMutableTransaction m;
         m.nLockTime = o.ownerPath ? v->ownerHeight : v->appHeight;
         if (!o.vaultFirst) m.vin.push_back(CTxIn(yed.front()));
@@ -450,7 +468,7 @@ struct Fixture
             m.vout.push_back(CTxOut(afee, GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID())));
         }
         if (o.residualValue.has_value()) {
-            const CScript to = o.residualScript.value_or(GetScriptForDestination(v->OwnerKey().GetID()));
+            const CScript to = o.residualScript.value_or(GetScriptForDestination(v->Owner()));
             m.vout.push_back(CTxOut(o.residualValue.value(), o.ownerPath ? to : vault::BuildIntent(vault::IntentFor(vp, vs, to))));
         }
         if (o.bundle.has_value()) m.vin.push_back(CarrierIn(o.bundle.value()));
@@ -1124,8 +1142,7 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     BOOST_CHECK_EQUAL(v.ownerHeight, ref + 1);                      // IT-1 (extended): and the owner's
     BOOST_CHECK_EQUAL(v.refHeight, ref);
     BOOST_CHECK_EQUAL(v.feePaidZat, FeeZat(v.collateralZat, f.P.feeMin, f.P.feeBps));
-    const CPubKey ownerPub = f.ownerKey.GetPubKey();
-    BOOST_CHECK(v.ownerPubKey == std::vector<unsigned char>(ownerPub.begin(), ownerPub.end()));
+    BOOST_CHECK(v.Owner() == TestPQOwner(f.ownerKey.GetPubKey()));
     BOOST_REQUIRE(f.Token(txid, 1).has_value());
     BOOST_CHECK_EQUAL(f.Token(txid, 1)->cents, 10000);
     BOOST_REQUIRE(f.Log(txid).has_value());
@@ -1140,7 +1157,7 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     // MINT-1 fails (version 1 payload): non-Yellowback, so its YED vault output is one no rule created (U-23):
     // the transaction is invalid; no vault.
     CMutableTransaction bad = f.MintTx(10000, 48, f.tip - 1);
-    std::vector<unsigned char> data = EncodePayload(Payload::Mint(0, 10000, f.tip + 47, f.tip - 1, f.ownerKey.GetPubKey(), 3));
+    std::vector<unsigned char> data = EncodePayload(Payload::Mint(0, 10000, f.tip + 47, f.tip - 1, TestPQOwner(f.ownerKey.GetPubKey()), 3));
     data[2] = 0x01;
     bad.vout[2] = CTxOut(0, PayloadScript(data));
     f.Mine(Fixture::Quote(50000, 1), { bad });
@@ -1275,7 +1292,7 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     // A V under another set or delay is not the YED vault either.
     { const int64_t lock = f.tip - 1 + 48;
-      vault::VaultParams vp = YedVaultParams(f.P, f.ownerKey.GetPubKey(), f.tip - 1);
+      vault::VaultParams vp = YedVaultParams(f.P, TestPQOwner(f.ownerKey.GetPubKey()), f.tip - 1);
       vp.delay += 1;
       MintOpts o; o.vaultScriptOverride = vault::BuildVault(vp);
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
@@ -1990,9 +2007,9 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     block.vtx.push_back(CTransaction(Fixture::Coinbase(1, std::nullopt)));
     CMutableTransaction mint;
     mint.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
-    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, k.GetPubKey(), 1)));
+    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, TestPQOwner(k.GetPubKey()), 1)));
     mint.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(k.GetPubKey().GetID())));
-    mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, k.GetPubKey(), FEE_VOUT_NONE)))));
+    mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, TestPQOwner(k.GetPubKey()), FEE_VOUT_NONE)))));
     block.vtx.push_back(CTransaction(mint));
     CMutableTransaction redeem;
     redeem.vin.push_back(CTxIn(COutPoint(uint256S("22"), 0), CScript() << OP_0 << std::vector<unsigned char>(5, 1)));
@@ -3689,10 +3706,10 @@ BOOST_AUTO_TEST_CASE(in_term_vault_app_height_is_mint_height)
     BOOST_CHECK_EQUAL(r.ownerHeight, r.refHeight + 1);
     BOOST_CHECK_EQUAL(r.claimHeight, r.lockHeight + f.P.grace);
     vault::VaultParams vp;
-    BOOST_REQUIRE(vault::ParseVault(YedVaultScriptAt(f.P, r.OwnerKey(), r.ownerHeight, r.appHeight), vp));
+    BOOST_REQUIRE(vault::ParseVault(YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight), vp));
     BOOST_CHECK_EQUAL(vp.appHeight, r.refHeight + 1);
     BOOST_CHECK_EQUAL(vp.ownerHeight, r.refHeight + 1);
-    BOOST_CHECK(YedVaultScript(f.P, r.OwnerKey(), r.refHeight) == YedVaultScriptAt(f.P, r.OwnerKey(), r.refHeight + 1, r.refHeight + 1));
+    BOOST_CHECK(YedVaultScript(f.P, r.Owner(), r.refHeight) == YedVaultScriptAt(f.P, r.Owner(), r.refHeight + 1, r.refHeight + 1));
 }
 
 // Rule: IT-1
@@ -3703,7 +3720,7 @@ BOOST_AUTO_TEST_CASE(in_term_old_shape_vault_spendable_but_not_mintable)
     f.Activate();
     // A new mint carrying the pre-plan V (appHeight = lockHeight + GRACE) is refused.
     const int64_t lock = f.tip - 1 + 48;
-    { MintOpts o; o.vaultScriptOverride = YedVaultScriptAt(f.P, f.ownerKey.GetPubKey(), lock, lock + f.P.grace);
+    { MintOpts o; o.vaultScriptOverride = YedVaultScriptAt(f.P, TestPQOwner(f.ownerKey.GetPubKey()), lock, lock + f.P.grace);
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     // A vault minted before the plan (its record remembers appHeight = lockHeight + GRACE) still spends: owner path ...
     const uint256 v = f.MintActive(10000);

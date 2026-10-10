@@ -7,6 +7,7 @@
 
 #include "primitives/transaction.h"
 #include "pubkey.h"
+#include "script/standard.h"
 #include "uint256.h"
 #include "yellowback/params.h"
 
@@ -127,6 +128,9 @@ struct Payload
                 seq(0), priceMicroUsd(0), citedHeight(0) { sig.fill(0); }
 
     static Payload Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout,
+                        uint8_t attestFeeVout = FEE_VOUT_NONE);
+    /** A MINT whose 33 owner bytes are scheme || keyHash (quantum spec §3.1); ownerPubKey stays invalid. */
+    static Payload Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPQKeyID& owner, uint8_t feeVout,
                         uint8_t attestFeeVout = FEE_VOUT_NONE);
     static Payload Transfer(const std::vector<Assignment>& assignments);
     static Payload Redeem(uint32_t refHeight, uint8_t feeVout, const std::vector<Assignment>& assignments,

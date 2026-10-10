@@ -4,6 +4,7 @@
 
 #include "vault/template.h"
 
+#include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
 #include "script/standard.h"
 
@@ -80,6 +81,18 @@ bool TokKey(const Tok& t, CPubKey& out)
     return true;
 }
 
+/** The owner slot <ownerHash:32> <schemeId>: the hash is exactly 32 bytes, the scheme a number
+ *  (OP_1/OP_2 after the rebuild compare) in the registry. */
+bool TokOwner(const Tok& hashTok, const Tok& schemeTok, CPQKeyID& out)
+{
+    uint256 h;
+    int64_t scheme;
+    if (!TokU256(hashTok, h) || !TokNum(schemeTok, scheme)) return false;
+    if (scheme < 0 || scheme > 255 || !pq::IsKnownScheme((uint8_t)scheme)) return false;
+    out = CPQKeyID((uint8_t)scheme, h);
+    return true;
+}
+
 bool TokTag(const Tok& t, Tag& out)
 {
     valtype d;
@@ -97,11 +110,11 @@ const std::vector<int>& VaultSkeleton()
         OP_DUP, OP_1, OP_EQUAL, OP_IF,                                                     // 5..8
         OP_DROP, F, OP_1, VAULT_OP_CHECKSETSIG,                                            // 9..12   setId@10
         OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,                                            // 13..17
-        OP_DROP, F, OP_CHECKLOCKTIMEVERIFY, OP_DROP, F, OP_CHECKSIG,                       // 18..23  ownerHeight@19 ownerKey@22
-        OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF,                                            // 24..28
-        OP_DROP, F, VAULT_OP_CHECKSETDORMANT, OP_VERIFY, F, OP_CHECKSIG,                   // 29..34  setId@30 ownerKey@33
-        OP_ELSE, OP_4, OP_EQUALVERIFY, F, OP_CHECKLOCKTIMEVERIFY,                          // 35..39  appHeight@38
-        OP_ENDIF, OP_ENDIF, OP_ENDIF};                                                     // 40..42
+        OP_DROP, F, OP_CHECKLOCKTIMEVERIFY, OP_DROP, F, F, VAULT_OP_CHECKPQSIG,            // 18..24  ownerHeight@19 ownerHash@22 scheme@23
+        OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF,                                            // 25..29
+        OP_DROP, F, VAULT_OP_CHECKSETDORMANT, OP_VERIFY, F, F, VAULT_OP_CHECKPQSIG,        // 30..36  setId@31 ownerHash@34 scheme@35
+        OP_ELSE, OP_4, OP_EQUALVERIFY, F, OP_CHECKLOCKTIMEVERIFY,                          // 37..41  appHeight@40
+        OP_ENDIF, OP_ENDIF, OP_ENDIF};                                                     // 42..44
     return s;
 }
 
@@ -113,8 +126,9 @@ const std::vector<int>& IntentSkeleton()
         OP_DROP, F, VAULT_OP_CHECKSEQUENCEVERIFY,                                          // 9..11   delay@10
         OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,                                            // 12..16
         OP_DROP, F, OP_2, VAULT_OP_CHECKSETSIG,                                            // 17..20  cancelSetId@18
-        OP_ELSE, OP_3, OP_EQUALVERIFY, F, VAULT_OP_CHECKSETDORMANT, OP_VERIFY, F, OP_CHECKSIG, // 21..28 setId@24 ownerKey@27
-        OP_ENDIF, OP_ENDIF};                                                               // 29..30
+        OP_ELSE, OP_3, OP_EQUALVERIFY, F, VAULT_OP_CHECKSETDORMANT, OP_VERIFY,             // 21..26  setId@24
+        F, F, VAULT_OP_CHECKPQSIG,                                                         // 27..29  ownerHash@27 scheme@28
+        OP_ENDIF, OP_ENDIF};                                                               // 30..31
     return s;
 }
 
@@ -139,17 +153,22 @@ bool IsCompressedKeyBytes(const std::vector<unsigned char>& key)
     return key.size() == CPubKey::COMPRESSED_PUBLIC_KEY_SIZE && (key[0] == 0x02 || key[0] == 0x03);
 }
 
+bool IsOwnerValid(const CPQKeyID& owner)
+{
+    return pq::IsKnownScheme(owner.scheme);
+}
+
 bool VaultParamsValid(const VaultParams& p)
 {
     return p.delay >= MIN_DELAY && p.delay <= MAX_DELAY &&
            p.ownerHeight >= 1 && p.ownerHeight <= MAX_TEMPLATE_HEIGHT &&
            p.appHeight >= 0 && p.appHeight <= MAX_TEMPLATE_HEIGHT &&
-           IsCompressedKey(p.ownerKey);
+           IsOwnerValid(p.owner);
 }
 
 bool IntentParamsValid(const IntentParams& p)
 {
-    return p.delay >= MIN_DELAY && p.delay <= MAX_DELAY && IsCompressedKey(p.ownerKey);
+    return p.delay >= MIN_DELAY && p.delay <= MAX_DELAY && IsOwnerValid(p.owner);
 }
 
 CScript BuildVault(const VaultParams& p)
@@ -158,15 +177,16 @@ CScript BuildVault(const VaultParams& p)
     const valtype tag(p.tag.begin(), p.tag.end());
     const valtype setId(p.setId.begin(), p.setId.end());
     const valtype cancelSetId(p.cancelSetId.begin(), p.cancelSetId.end());
-    const valtype key(p.ownerKey.begin(), p.ownerKey.end());
+    const valtype ownerHash(p.owner.hash.begin(), p.owner.hash.end());
+    const int64_t scheme = p.owner.scheme;
     CScript s;
     s << tag << cancelSetId << p.delay << OP_2DROP << OP_DROP;
     s << OP_DUP << OP_1 << OP_EQUAL << OP_IF;
     s << OP_DROP << setId << OP_1 << VAULT_OP_CHECKSETSIG;
     s << OP_ELSE << OP_DUP << OP_2 << OP_EQUAL << OP_IF;
-    s << OP_DROP << p.ownerHeight << OP_CHECKLOCKTIMEVERIFY << OP_DROP << key << OP_CHECKSIG;
+    s << OP_DROP << p.ownerHeight << OP_CHECKLOCKTIMEVERIFY << OP_DROP << ownerHash << scheme << VAULT_OP_CHECKPQSIG;
     s << OP_ELSE << OP_DUP << OP_3 << OP_EQUAL << OP_IF;
-    s << OP_DROP << setId << VAULT_OP_CHECKSETDORMANT << OP_VERIFY << key << OP_CHECKSIG;
+    s << OP_DROP << setId << VAULT_OP_CHECKSETDORMANT << OP_VERIFY << ownerHash << scheme << VAULT_OP_CHECKPQSIG;
     s << OP_ELSE;
     s << OP_4 << OP_EQUALVERIFY << p.appHeight << OP_CHECKLOCKTIMEVERIFY;
     s << OP_ENDIF << OP_ENDIF << OP_ENDIF;
@@ -181,7 +201,8 @@ CScript BuildIntent(const IntentParams& p)
     const valtype vh(p.vaultHash.begin(), p.vaultHash.end());
     const valtype setId(p.setId.begin(), p.setId.end());
     const valtype cancelSetId(p.cancelSetId.begin(), p.cancelSetId.end());
-    const valtype key(p.ownerKey.begin(), p.ownerKey.end());
+    const valtype ownerHash(p.owner.hash.begin(), p.owner.hash.end());
+    const int64_t scheme = p.owner.scheme;
     CScript s;
     s << tag << rh << vh << OP_2DROP << OP_DROP;
     s << OP_DUP << OP_1 << OP_EQUAL << OP_IF;
@@ -189,7 +210,7 @@ CScript BuildIntent(const IntentParams& p)
     s << OP_ELSE << OP_DUP << OP_2 << OP_EQUAL << OP_IF;
     s << OP_DROP << cancelSetId << OP_2 << VAULT_OP_CHECKSETSIG;
     s << OP_ELSE;
-    s << OP_3 << OP_EQUALVERIFY << setId << VAULT_OP_CHECKSETDORMANT << OP_VERIFY << key << OP_CHECKSIG;
+    s << OP_3 << OP_EQUALVERIFY << setId << VAULT_OP_CHECKSETDORMANT << OP_VERIFY << ownerHash << scheme << VAULT_OP_CHECKPQSIG;
     s << OP_ENDIF << OP_ENDIF;
     return s;
 }
@@ -200,13 +221,13 @@ Shape MatchVault(const CScript& spk, VaultParams& out)
     if (!MatchSkeleton(spk, VaultSkeleton(), t)) return Shape::NONE;
     VaultParams p;
     SetId setId2;
-    CPubKey key2;
+    CPQKeyID owner2;
     if (!TokTag(t[0], p.tag) || !TokU256(t[1], p.cancelSetId) || !TokNum(t[2], p.delay) ||
-        !TokU256(t[10], p.setId) || !TokNum(t[19], p.ownerHeight) || !TokKey(t[22], p.ownerKey) ||
-        !TokU256(t[30], setId2) || !TokKey(t[33], key2) || !TokNum(t[38], p.appHeight)) {
+        !TokU256(t[10], p.setId) || !TokNum(t[19], p.ownerHeight) || !TokOwner(t[22], t[23], p.owner) ||
+        !TokU256(t[31], setId2) || !TokOwner(t[34], t[35], owner2) || !TokNum(t[40], p.appHeight)) {
         return Shape::MALFORMED;
     }
-    if (setId2 != p.setId || key2 != p.ownerKey) return Shape::MALFORMED;
+    if (setId2 != p.setId || owner2 != p.owner) return Shape::MALFORMED;
     if (!VaultParamsValid(p)) return Shape::MALFORMED;
     if (BuildVault(p) != spk) return Shape::MALFORMED; // non-minimal push somewhere
     out = p;
@@ -220,7 +241,7 @@ Shape MatchIntent(const CScript& spk, IntentParams& out)
     IntentParams p;
     if (!TokTag(t[0], p.tag) || !TokU256(t[1], p.recipientHash) || !TokU256(t[2], p.vaultHash) ||
         !TokNum(t[10], p.delay) || !TokU256(t[18], p.cancelSetId) || !TokU256(t[24], p.setId) ||
-        !TokKey(t[27], p.ownerKey)) {
+        !TokOwner(t[27], t[28], p.owner)) {
         return Shape::MALFORMED;
     }
     if (!IntentParamsValid(p)) return Shape::MALFORMED;
@@ -255,7 +276,7 @@ IntentParams IntentFor(const VaultParams& v, const CScript& vaultSpk, const CScr
     i.delay = v.delay;
     i.cancelSetId = v.cancelSetId;
     i.setId = v.setId;
-    i.ownerKey = v.ownerKey;
+    i.owner = v.owner;
     return i;
 }
 

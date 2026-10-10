@@ -13,7 +13,10 @@ What lives here:
 - constants: ``VAULT_BRANCH_ID``, the opcode bytes (CSV ``0xb2``, ``OP_CHECKSETSIG`` ``0xc0``,
   ``OP_CHECKSETDORMANT`` ``0xc1``), roles, selectors, act types, field ranges (15.1-15.5);
 - the V / I / bond templates: ``vault_script`` / ``parse_vault``, ``intent_script`` /
-  ``parse_intent``, ``bond_script`` / ``parse_bond``, and the selector scriptSigs (15.3);
+  ``parse_intent``, ``bond_script`` / ``parse_bond``, and the selector scriptSigs (15.3). The
+  V / I owner is a post-quantum key id (docs/plans/yellowback-quantum-spec.md §1): ``owner`` is
+  the 33 bytes ``scheme || keyHash`` and the owner slot is ``<keyHash:32> OP_1|OP_2
+  OP_CHECKPQSIG``; owner spends are signed with ``pq.pq_sign_input`` (SLH-DSA);
 - the ``YV`` act codec for the six types: ``encode_act`` / ``decode_act`` and the OP_RETURN
   carrier ``act_script`` / ``parse_act_script`` (15.5);
 - the two signed messages ``act_msg`` / ``set_sig_msg`` (15.5, 15.2 step 4) and 65-byte
@@ -42,6 +45,7 @@ import hmac
 import struct
 from io import BytesIO
 
+from . import pq
 from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
 
 # ---------------------------------------------------------------------------
@@ -75,6 +79,7 @@ OP_CHECKLOCKTIMEVERIFY = 0xb1
 OP_CHECKSEQUENCEVERIFY = 0xb2            # BIP112's own byte, OP_NOP3 without the flag (U-10)
 OP_CHECKSETSIG = 0xc0
 OP_CHECKSETDORMANT = 0xc1
+OP_CHECKPQSIG = 0xc2
 
 SIGHASH_ALL = 1
 
@@ -418,6 +423,31 @@ def ecdsa_verify_der(pubkey33, msg32, der):
     return pt is not None and pt[0] % _N == r
 
 
+def pq_owner_secret(label):
+    """A deterministic SLH-DSA-SHA2-128s secret key (64 bytes; the public key is ``sk[32:64]``)
+    from a label: the 48-byte keygen seed is SHA256(label) || SHA256(label || 1)[:16]."""
+    if isinstance(label, str):
+        label = label.encode()
+    seed = sha256(label) + sha256(label + b'\x01')[:16]
+    return pq.slh_keygen(seed)[1]
+
+
+def pq_owner_id(scheme, pk):
+    """The 33-byte owner id ``scheme || SHA256(scheme || pk)`` (C++ ``CPQKeyID``, RPC ``pqkeyid``)."""
+    return bytes([scheme]) + pq.key_hash(scheme, pk)
+
+
+def pq_owner_of(sk):
+    """The SLH-DSA owner id of a secret key from ``pq_owner_secret``."""
+    return pq_owner_id(pq.SCHEME_SLH_DSA_SHA2_128S, bytes(sk)[32:64])
+
+
+def is_pq_owner(b):
+    """33 bytes ``scheme || hash`` with a registered scheme (C++ ``vault::IsOwnerValid``)."""
+    b = bytes(b)
+    return len(b) == 33 and pq.is_known_scheme(b[0])
+
+
 def fixed_secret(label):
     """A deterministic test secret: SHA256(label) reduced into [1, n-1]."""
     if isinstance(label, str):
@@ -568,18 +598,33 @@ def _b(x, size, name):
     return x
 
 
+def _owner_json(owner):
+    return {'scheme': owner[0], 'hash': owner[1:].hex()}
+
+
+def _owner_from_json(j):
+    return bytes([j['scheme']]) + bytes.fromhex(j['hash'])
+
+
+def owner_slot(owner):
+    """``<keyHash:32> OP_<scheme> OP_CHECKPQSIG`` (35 bytes) for any scheme byte 0..16 (OP_0 for 0;
+    out-of-range schemes are only for negative vectors)."""
+    owner = bytes(owner)
+    return push(owner[1:]) + push_int(owner[0]) + bytes([OP_CHECKPQSIG])
+
+
 class VaultParams(object):
     """The V template's fields.  ``set_id``/``cancel_set_id`` are 32 internal bytes."""
-    __slots__ = ('tag', 'set_id', 'cancel_set_id', 'delay', 'owner_height', 'app_height', 'owner_key')
+    __slots__ = ('tag', 'set_id', 'cancel_set_id', 'delay', 'owner_height', 'app_height', 'owner')
 
-    def __init__(self, tag, set_id, cancel_set_id, delay, owner_height, app_height, owner_key):
+    def __init__(self, tag, set_id, cancel_set_id, delay, owner_height, app_height, owner):
         self.tag = _b(tag, 4, 'tag')
         self.set_id = _b(set_id, 32, 'setId')
         self.cancel_set_id = _b(cancel_set_id, 32, 'cancelSetId')
         self.delay = int(delay)
         self.owner_height = int(owner_height)
         self.app_height = int(app_height)
-        self.owner_key = _b(owner_key, 33, 'ownerKey')
+        self.owner = _b(owner, 33, 'owner')
 
     def __eq__(self, o):
         return isinstance(o, VaultParams) and all(getattr(self, a) == getattr(o, a) for a in self.__slots__)
@@ -590,25 +635,26 @@ class VaultParams(object):
     def to_json(self):
         return {'tag': self.tag.hex(), 'setId': self.set_id.hex(), 'cancelSetId': self.cancel_set_id.hex(),
                 'delay': self.delay, 'ownerHeight': self.owner_height, 'appHeight': self.app_height,
-                'ownerKey': self.owner_key.hex()}
+                'owner': _owner_json(self.owner)}
 
     @classmethod
     def from_json(cls, j):
-        return cls(j['tag'], j['setId'], j['cancelSetId'], j['delay'], j['ownerHeight'], j['appHeight'], j['ownerKey'])
+        return cls(j['tag'], j['setId'], j['cancelSetId'], j['delay'], j['ownerHeight'], j['appHeight'],
+                   _owner_from_json(j['owner']))
 
 
 class IntentParams(object):
     """The I template's fields (all hashes / ids 32 raw bytes)."""
-    __slots__ = ('tag', 'recipient_hash', 'vault_hash', 'delay', 'cancel_set_id', 'set_id', 'owner_key')
+    __slots__ = ('tag', 'recipient_hash', 'vault_hash', 'delay', 'cancel_set_id', 'set_id', 'owner')
 
-    def __init__(self, tag, recipient_hash, vault_hash, delay, cancel_set_id, set_id, owner_key):
+    def __init__(self, tag, recipient_hash, vault_hash, delay, cancel_set_id, set_id, owner):
         self.tag = _b(tag, 4, 'tag')
         self.recipient_hash = _b(recipient_hash, 32, 'recipientHash')
         self.vault_hash = _b(vault_hash, 32, 'vaultHash')
         self.delay = int(delay)
         self.cancel_set_id = _b(cancel_set_id, 32, 'cancelSetId')
         self.set_id = _b(set_id, 32, 'setId')
-        self.owner_key = _b(owner_key, 33, 'ownerKey')
+        self.owner = _b(owner, 33, 'owner')
 
     def __eq__(self, o):
         return isinstance(o, IntentParams) and all(getattr(self, a) == getattr(o, a) for a in self.__slots__)
@@ -619,11 +665,12 @@ class IntentParams(object):
     def to_json(self):
         return {'tag': self.tag.hex(), 'recipientHash': self.recipient_hash.hex(), 'vaultHash': self.vault_hash.hex(),
                 'delay': self.delay, 'cancelSetId': self.cancel_set_id.hex(), 'setId': self.set_id.hex(),
-                'ownerKey': self.owner_key.hex()}
+                'owner': _owner_json(self.owner)}
 
     @classmethod
     def from_json(cls, j):
-        return cls(j['tag'], j['recipientHash'], j['vaultHash'], j['delay'], j['cancelSetId'], j['setId'], j['ownerKey'])
+        return cls(j['tag'], j['recipientHash'], j['vaultHash'], j['delay'], j['cancelSetId'], j['setId'],
+                   _owner_from_json(j['owner']))
 
 
 def check_vault_ranges(p):
@@ -634,15 +681,15 @@ def check_vault_ranges(p):
         raise VaultError('bad-template-ownerheight')
     if not APP_HEIGHT_MIN <= p.app_height <= APP_HEIGHT_MAX:
         raise VaultError('bad-template-appheight')
-    if not is_compressed_pubkey(p.owner_key):
-        raise VaultError('bad-template-ownerkey')
+    if not is_pq_owner(p.owner):
+        raise VaultError('bad-template-owner')
 
 
 def check_intent_ranges(p):
     if not DELAY_MIN <= p.delay <= DELAY_MAX:
         raise VaultError('bad-template-delay')
-    if not is_compressed_pubkey(p.owner_key):
-        raise VaultError('bad-template-ownerkey')
+    if not is_pq_owner(p.owner):
+        raise VaultError('bad-template-owner')
 
 
 def vault_script_unchecked(p):
@@ -652,10 +699,10 @@ def vault_script_unchecked(p):
             + bytes([OP_DROP]) + push(p.set_id) + bytes([OP_1, OP_CHECKSETSIG])
             + bytes([OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF])
             + bytes([OP_DROP]) + push_int(p.owner_height) + bytes([OP_CHECKLOCKTIMEVERIFY, OP_DROP])
-            + push(p.owner_key) + bytes([OP_CHECKSIG])
+            + owner_slot(p.owner)
             + bytes([OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF])
             + bytes([OP_DROP]) + push(p.set_id) + bytes([OP_CHECKSETDORMANT, OP_VERIFY])
-            + push(p.owner_key) + bytes([OP_CHECKSIG])
+            + owner_slot(p.owner)
             + bytes([OP_ELSE])
             + bytes([OP_4, OP_EQUALVERIFY]) + push_int(p.app_height) + bytes([OP_CHECKLOCKTIMEVERIFY])
             + bytes([OP_ENDIF, OP_ENDIF, OP_ENDIF]))
@@ -685,7 +732,7 @@ def intent_script_unchecked(p):
             + bytes([OP_DROP]) + push(p.cancel_set_id) + bytes([OP_2, OP_CHECKSETSIG])
             + bytes([OP_ELSE])
             + bytes([OP_3, OP_EQUALVERIFY]) + push(p.set_id) + bytes([OP_CHECKSETDORMANT, OP_VERIFY])
-            + push(p.owner_key) + bytes([OP_CHECKSIG])
+            + owner_slot(p.owner)
             + bytes([OP_ENDIF, OP_ENDIF]))
 
 
@@ -709,8 +756,8 @@ def _num_field(op, data, max_size=5):
 
 
 # token positions of the variable fields in the V / I op lists
-_V_LEN = 43
-_I_LEN = 31
+_V_LEN = 45
+_I_LEN = 32
 
 
 def parse_vault(spk):
@@ -725,10 +772,11 @@ def parse_vault(spk):
             return None
         delay = _num_field(*ops[2])
         owner_h = _num_field(*ops[19])
-        app_h = _num_field(*ops[38])
-        if delay is None or owner_h is None or app_h is None:
+        scheme = _num_field(*ops[23])
+        app_h = _num_field(*ops[40])
+        if delay is None or owner_h is None or app_h is None or scheme is None or not 0 <= scheme <= 255:
             return None
-        p = VaultParams(tag, set_id, cancel, delay, owner_h, app_h, key)
+        p = VaultParams(tag, set_id, cancel, delay, owner_h, app_h, bytes([scheme]) + key)
         check_vault_ranges(p)
     except VaultError:
         return None
@@ -746,9 +794,10 @@ def parse_intent(spk):
         if None in (tag, rh, vh, cancel, set_id, key):
             return None
         delay = _num_field(*ops[10])
-        if delay is None:
+        scheme = _num_field(*ops[28])
+        if delay is None or scheme is None or not 0 <= scheme <= 255:
             return None
-        p = IntentParams(tag, rh, vh, delay, cancel, set_id, key)
+        p = IntentParams(tag, rh, vh, delay, cancel, set_id, bytes([scheme]) + key)
         check_intent_ranges(p)
     except VaultError:
         return None
@@ -757,9 +806,9 @@ def parse_intent(spk):
 
 def intent_for(vp, recipient_spk):
     """The I a V's unlock creates for ``recipient_spk`` (S-2: V's tag, setId, cancelSetId, delay,
-    ownerKey; vaultHash = SHA256(V spk); recipientHash = SHA256(recipient spk))."""
+    owner; vaultHash = SHA256(V spk); recipientHash = SHA256(recipient spk))."""
     return IntentParams(vp.tag, sha256(bytes(recipient_spk)), sha256(vault_script(vp)), vp.delay,
-                        vp.cancel_set_id, vp.set_id, vp.owner_key)
+                        vp.cancel_set_id, vp.set_id, vp.owner)
 
 
 # The opcode skeletons of V and I, ``None`` at a field (any push: an opcode <= OP_16 other than
@@ -770,9 +819,9 @@ _V_SKELETON = [
     OP_DUP, OP_1, OP_EQUAL, OP_IF,
     OP_DROP, _F, OP_1, OP_CHECKSETSIG,
     OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,
-    OP_DROP, _F, OP_CHECKLOCKTIMEVERIFY, OP_DROP, _F, OP_CHECKSIG,
+    OP_DROP, _F, OP_CHECKLOCKTIMEVERIFY, OP_DROP, _F, _F, OP_CHECKPQSIG,
     OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF,
-    OP_DROP, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, OP_CHECKSIG,
+    OP_DROP, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, _F, OP_CHECKPQSIG,
     OP_ELSE, OP_4, OP_EQUALVERIFY, _F, OP_CHECKLOCKTIMEVERIFY,
     OP_ENDIF, OP_ENDIF, OP_ENDIF]
 _I_SKELETON = [
@@ -781,7 +830,7 @@ _I_SKELETON = [
     OP_DROP, _F, OP_CHECKSEQUENCEVERIFY,
     OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,
     OP_DROP, _F, OP_2, OP_CHECKSETSIG,
-    OP_ELSE, OP_3, OP_EQUALVERIFY, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, OP_CHECKSIG,
+    OP_ELSE, OP_3, OP_EQUALVERIFY, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, _F, OP_CHECKPQSIG,
     OP_ENDIF, OP_ENDIF]
 _OP_RESERVED = 0x50
 
@@ -802,7 +851,7 @@ def _matches_skeleton(spk, skel):
 def template_shape(spk):
     """``'V'`` / ``'I'`` for an exact template, ``'malformed'`` for an output with a template's
     opcode skeleton whose fields do not parse (wrong sizes, out-of-range numbers, non-minimal
-    pushes, or the V's two setId / ownerKey copies differing), ``None`` otherwise.  A malformed
+    pushes, or the V's two setId / owner copies differing), ``None`` otherwise.  A malformed
     shape makes the transaction invalid (``bad-txns-vault-malformed``, plan §15.5 reconciliation
     (8), C++ ``MatchVault`` / ``MatchIntent``), so I-0 and V-1 cannot be bypassed by
     mis-encoding."""
@@ -847,12 +896,20 @@ def vault_unlock_scriptsig(set_sigs):
     return b''.join(push(s) for s in set_sigs) + _sel(SEL_UNLOCK)
 
 
+def _owner_pushes(owner_sig):
+    """An owner signature: the ``pq.pq_sign_input`` push list ``[sig_1..sig_s, s, pk_1..pk_p, p]``
+    (serialised with OP_n counts), or raw bytes taken as one push (negative tests)."""
+    if isinstance(owner_sig, (list, tuple)):
+        return pq.pq_scriptsig_from_pushes(owner_sig)
+    return push(owner_sig)
+
+
 def vault_owner_scriptsig(owner_sig):
-    return push(owner_sig) + _sel(SEL_OWNER)
+    return _owner_pushes(owner_sig) + _sel(SEL_OWNER)
 
 
 def vault_owner_released_scriptsig(owner_sig):
-    return push(owner_sig) + _sel(SEL_OWNER_RELEASED)
+    return _owner_pushes(owner_sig) + _sel(SEL_OWNER_RELEASED)
 
 
 def vault_app_scriptsig():
@@ -868,7 +925,7 @@ def intent_cancel_scriptsig(set_sigs):
 
 
 def intent_owner_released_scriptsig(owner_sig):
-    return push(owner_sig) + _sel(SEL_OWNER_RELEASED)
+    return _owner_pushes(owner_sig) + _sel(SEL_OWNER_RELEASED)
 
 
 def parse_selector(script_sig, kind='V'):
@@ -1304,13 +1361,20 @@ def owner_sig(tx, n_in, spk, amount, owner_secret, branch_id=VAULT_BRANCH_ID):
     return ecdsa_sign_der(owner_secret, sh) + bytes([SIGHASH_ALL])
 
 
+def pq_owner_sig(tx, n_in, spk, amount, owner_secret, branch_id=VAULT_BRANCH_ID):
+    """The owner's post-quantum signature pushes (SLH-DSA, ``owner_secret`` from
+    ``pq_owner_secret``) over the ZIP-243 sighash of the template input."""
+    return pq.pq_sign_input(tx, n_in, spk, amount, branch_id, owner_secret)
+
+
 def build_owner_spend_tx(outpoint, spk, value, owner_secret, dest_spk, selector, lock_time=0, fee=VAULT_FEE,
                          branch_id=VAULT_BRANCH_ID):
     """OWNER (V selector 2: ``lock_time >= ownerHeight``, nSequence 0xFFFFFFFE) or OWNER-RELEASED
-    (V or I selector 3): one output of ``value - fee`` to ``dest_spk``."""
+    (V or I selector 3): one output of ``value - fee`` to ``dest_spk``, signed with the SLH-DSA
+    owner secret (quantum plan §4.3)."""
     seq = SEQUENCE_FINAL - 1 if selector == SEL_OWNER and parse_vault(spk) is not None else SEQUENCE_FINAL
     tx = make_tx([(outpoint[0], outpoint[1], seq)], [(value - fee, dest_spk)], lock_time)
-    sig = owner_sig(tx, 0, spk, value, owner_secret, branch_id)
+    sig = pq_owner_sig(tx, 0, spk, value, owner_secret, branch_id)
     if parse_vault(spk) is not None:
         tx.vin[0].scriptSig = vault_owner_scriptsig(sig) if selector == SEL_OWNER else vault_owner_released_scriptsig(sig)
     else:
@@ -1546,7 +1610,7 @@ class VaultModel(object):
     model).  An input whose coin it does not know is treated as an ordinary input (no BIP68
     check, no template rule).  Ordinary input scripts are not evaluated; template branches are,
     to the extent the rules need: set signatures (strict recovery, distinct current members of
-    the parent-block snapshot), the owner's DER signature, CLTV / CSV, dormancy.
+    the parent-block snapshot), the owner's post-quantum signature, CLTV / CSV, dormancy.
 
     ``connect_block(height, txs)`` returns None and commits, or returns ``(index, reason)`` of the
     first failing transaction and leaves the state untouched (the block is invalid).
@@ -1723,13 +1787,26 @@ class VaultModel(object):
                 raise VaultError('script-setsig', 'signer')
             seen.add(key)
 
-    def _check_owner(self, tx, i, coin, owner_key, args):
+    def _check_owner(self, tx, i, coin, owner, args):
+        """OP_CHECKPQSIG over ``<sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p>`` (quantum plan §4.2); the
+        chunking itself is the interpreter's (pq_script_tests), this checks key and signature."""
         if not self.check_scripts:
             return
-        if not args or len(args[-1]) < 2 or args[-1][-1] != SIGHASH_ALL:
+        try:
+            n_pk = decode_script_num(args[-1], 4)
+            pks = args[-1 - n_pk:-1]
+            n_sig = decode_script_num(args[-2 - n_pk], 4)
+            sigs = args[-2 - n_pk - n_sig:-2 - n_pk]
+            if n_pk < 1 or n_sig < 1 or len(pks) != n_pk or len(sigs) != n_sig:
+                raise IndexError
+        except (IndexError, TypeError, ValueError):
+            raise VaultError('script-ownersig')
+        pk, sig = b''.join(pks), b''.join(sigs)
+        scheme = owner[0]
+        if pq.key_hash(scheme, pk) != owner[1:] or not sig or sig[-1] != SIGHASH_ALL:
             raise VaultError('script-ownersig')
         sh = template_sighash(tx, i, coin.spk, coin.value, self.branch_id)
-        if not ecdsa_verify_der(owner_key, sh, args[-1][:-1]):
+        if not pq.verify(scheme, pk, sig[:-1], sh):
             raise VaultError('script-ownersig')
 
     @staticmethod
@@ -1746,12 +1823,12 @@ class VaultModel(object):
             self._check_set_sigs(tx, i, coin, vp.set_id, ROLE_UNLOCK, args, h, snapshot)
         elif selector == SEL_OWNER:
             self._cltv(tx, i, vp.owner_height, h)
-            self._check_owner(tx, i, coin, vp.owner_key, args)
+            self._check_owner(tx, i, coin, vp.owner, args)
         elif selector == SEL_OWNER_RELEASED:
             snap = snapshot.get(vp.set_id)
             if snap is not None and not snap.released(h):
                 raise VaultError('script-notreleased')
-            self._check_owner(tx, i, coin, vp.owner_key, args)
+            self._check_owner(tx, i, coin, vp.owner, args)
         else:
             if vp.app_height == 0:
                 raise VaultError('bad-vault-app-disabled')                         # S-4
@@ -1768,8 +1845,8 @@ class VaultModel(object):
         for n, o in enumerate(tx.vout):
             ip = parse_intent(o.scriptPubKey)
             if ip is not None:
-                if (ip.tag, ip.set_id, ip.cancel_set_id, ip.delay, ip.owner_key, ip.vault_hash) != \
-                        (want.tag, want.set_id, want.cancel_set_id, want.delay, want.owner_key, want.vault_hash):
+                if (ip.tag, ip.set_id, ip.cancel_set_id, ip.delay, ip.owner, ip.vault_hash) != \
+                        (want.tag, want.set_id, want.cancel_set_id, want.delay, want.owner, want.vault_hash):
                     raise VaultError('bad-vault-covenant', 'intent fields')
                 sum_i += o.nValue
             elif o.scriptPubKey == v_spk:
@@ -1801,7 +1878,7 @@ class VaultModel(object):
             snap = snapshot.get(ip.set_id)
             if snap is not None and not snap.released(h):
                 raise VaultError('script-notreleased')
-            self._check_owner(tx, i, coin, ip.owner_key, args)
+            self._check_owner(tx, i, coin, ip.owner, args)
 
     def _sig_keys(self, p, sigs, prevout36, require_distinct=True):
         msg = act_msg_raw(p, prevout36)

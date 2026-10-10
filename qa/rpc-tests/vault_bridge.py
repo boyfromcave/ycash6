@@ -46,8 +46,8 @@ DELAY = 6
 BRIDGE_MAX_AGE = 150          # a bridge constant (§4.1), not consensus: the wallet writes ownerHeight
 RATE_BPS = 5000
 W = 30                        # rateWindow
-USER = v.fixed_secret('bridge-user')
-USER_KEY = v.pubkey_of(USER)
+USER = v.pq_owner_secret('bridge-user')       # the bridge user owns the lock with a post-quantum key (§4.3)
+USER_KEY = v.pq_owner_of(USER)
 
 
 def eth_destination(label):

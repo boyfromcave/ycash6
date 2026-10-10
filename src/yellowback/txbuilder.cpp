@@ -44,7 +44,7 @@ std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFee
     const int attestFeeVout = s.attestPayee.has_value() ? (s.payee.has_value() ? 4 : 3) : -1;
     if (attestFeeVoutOut) *attestFeeVoutOut = attestFeeVout;
     std::vector<unsigned char> payload = EncodePayload(Payload::Mint((uint8_t)s.termClass, (uint32_t)s.cents, s.lockHeight, (uint32_t)s.refHeight,
-                                                                     s.owner, feeVout < 0 ? FEE_VOUT_NONE : (uint8_t)feeVout,
+                                                                     s.vaultOwner, feeVout < 0 ? FEE_VOUT_NONE : (uint8_t)feeVout,
                                                                      attestFeeVout < 0 ? FEE_VOUT_NONE : (uint8_t)attestFeeVout));
     if (payload.empty()) throw std::runtime_error("cannot encode the mint payload");
     std::vector<CTxOut> vout;
@@ -77,7 +77,7 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
     const bool fee = s.withPayload && s.payee.has_value();
     const bool attest = s.withPayload && s.attestPayee.has_value();
     const bool residual = s.withPayload && s.residualZat > 0;
-    if (residual && !s.ownerPubKey.IsValid()) throw std::runtime_error("vault-not-found: the residual needs the owner key");
+    if (residual && !vault::IsOwnerValid(s.owner)) throw std::runtime_error("vault-not-found: the residual needs the owner key");
     if (!s.ownerPath && s.withPayload) {
         // U-23: the claim moves the whole vault into intents; everything else is paid by the other inputs.
         if (!s.collateralScript.has_value()) throw std::runtime_error("bad-address: a claim pays an intent, whose recipient is a transparent script; pass a transparent address");
@@ -111,7 +111,7 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
                                                                            plan.attestFeeVout < 0 ? FEE_VOUT_NONE : (uint8_t)plan.attestFeeVout));
         if (payload.empty()) throw std::runtime_error("cannot encode the redeem payload");
         const CScript claimant = vault::BuildIntent(vault::IntentFor(s.vaultParams, s.vaultScript, s.collateralScript.value()));
-        const CScript ownerIntent = residual ? vault::BuildIntent(vault::IntentFor(s.vaultParams, s.vaultScript, GetScriptForDestination(s.ownerPubKey.GetID()))) : CScript();
+        const CScript ownerIntent = residual ? vault::BuildIntent(vault::IntentFor(s.vaultParams, s.vaultScript, GetScriptForDestination(s.owner))) : CScript();
         if (claimant.empty() || (residual && ownerIntent.empty())) throw std::runtime_error("vault-not-found: cannot build the claim intents");
         for (CSlot slot : order) {
             switch (slot) {
@@ -181,7 +181,7 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
         case FEE: plan.vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value()))); break;
         case CHANGE: plan.vout.push_back(CTxOut(TOKEN_VALUE, s.changeScript)); break;
         case ATTEST: plan.vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value()))); break;
-        case RESIDUAL: plan.vout.push_back(CTxOut(s.residualZat, GetScriptForDestination(s.ownerPubKey.GetID()))); break;
+        case RESIDUAL: plan.vout.push_back(CTxOut(s.residualZat, GetScriptForDestination(s.owner))); break;
         case PAYLOAD: plan.vout.push_back(CTxOut(0, PayloadScript(payload))); break;
         }
     }
@@ -211,16 +211,9 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     const size_t extra = out.carrierVin >= 0 ? 2 : 1;
     if (out.tx.vin.size() != out.yedPrevs.size() + out.fundPrevs.size() + extra) throw std::runtime_error("vault spend input count mismatch");
     if (ownerPath) {
-        // Owner signature: ZIP-243 over the V script (bare: it is the scriptCode) with the vault's nValue
-        // and the epoch branch id (both bound by the digest, mapping §13.1), as rpc/atomicswap.cpp signs by hand.
-        CKey ownerKey;
-        if (!keystore.GetKey(out.ownerPubKey.GetID(), ownerKey)) throw std::runtime_error("vault-not-owned: owner key not available");
-        const CTransaction txc(out.tx);
-        uint256 hash = SignatureHash(out.vaultScript, txc, 0, SIGHASH_ALL, out.vaultValue, branchId, V4TxData(txc));
-        valtype ownerSig;
-        if (!ownerKey.Sign(hash, ownerSig)) throw std::runtime_error("owner signature failed");
-        ownerSig.push_back((unsigned char)SIGHASH_ALL);
-        out.tx.vin[0].scriptSig = CScript() << ownerSig << OP_2;          // U-23: the V's owner selector
+        // The owner is a post-quantum key (quantum plan §4.3); the wallet signs with it once it holds
+        // PQ keys (quantum plan Q5).
+        throw std::runtime_error("not-supported: the vault owner is a post-quantum key and this wallet cannot sign with post-quantum keys yet");
     } else {
         out.tx.vin[0].scriptSig = CScript() << OP_4;                      // U-23: the V's APP selector (the claim)
     }
@@ -753,7 +746,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     const bool ownerPath = kind != BuiltKind::CLAIM;
     const bool withPayload = kind == BuiltKind::REDEEM || kind == BuiltKind::CLAIM;
 
-    const CPubKey owner = vault.OwnerKey();
+    const CPQKeyID owner = vault.Owner();
     VaultSpendShape shape;
     shape.vaultOut = vaultOut;
     shape.vaultScript = YedVaultScriptAt(ctx.params, owner, vault.ownerHeight, vault.appHeight);   // U-23: the V template, as minted
@@ -772,7 +765,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         shape.attestPayee = extras->attestKey;
         shape.attestFeeZat = extras->attestFeeZat;
         shape.residualZat = extras->residualZat;
-        shape.ownerPubKey = owner;
+        shape.owner = owner;
         shape.carrierValue = CARRIER_VALUE;
     }
 
@@ -784,7 +777,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     out.claimHeight = shape.claimHeight;
     out.vaultScript = shape.vaultScript;
     out.vaultValue = vault.collateralZat;
-    out.ownerPubKey = owner;
+    out.owner = owner;
     out.path = ownerPath ? "owner" : "claim";
     if (extras) {
         out.carrier = extras->carrier;
@@ -1407,6 +1400,10 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     CheckMaxCollateral(collateral, maxCollateralZat);                              // before any key is drawn
     AttestFeeFor(ctx, R, std::vector<unsigned char>(), f, collateral, out);
 
+    // The vault owner is a post-quantum key (quantum plan §4.3) the wallet draws once it holds PQ keys
+    // (quantum plan Q5); before any key is drawn, refuse.
+    const CPQKeyID vaultOwner;
+    if (!vault::IsOwnerValid(vaultOwner)) throw std::runtime_error("not-supported: a YED mint needs a post-quantum owner key and this wallet holds none yet");
     CPubKey owner = ctx.FreshKey("yellowback-vault");
     MintShape shape;
     shape.cents = cents;
@@ -1415,12 +1412,13 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     shape.claimHeight = (uint32_t)g.claimHeight;
     shape.refHeight = R;
     shape.owner = owner;
+    shape.vaultOwner = vaultOwner;
     shape.collateralZat = collateral;
     shape.payee = ctx.Payee(R, std::vector<unsigned char>(owner.begin(), owner.end()));
     shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;
-    shape.vaultScript = YedVaultScript(p, owner, R);    // U-23, IT-1: ownerHeight = appHeight = R + 1
+    shape.vaultScript = YedVaultScript(p, vaultOwner, R);    // U-23, IT-1: ownerHeight = appHeight = R + 1
     int feeVout = -1, attestFeeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(shape, feeVout, &attestFeeVout);
     CAmount outputs = 0;
@@ -1436,7 +1434,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     out.payee = shape.payee;
     out.feeVout = feeVout;
     out.attestFeeVout = attestFeeVout;
-    out.ownerPubKey = owner;
+    out.owner = vaultOwner;
     out.warning = ctx.KeypoolWarning();
     const uint32_t expiry = ctx.Expiry(R);
 

@@ -70,8 +70,10 @@ MEMPOOL_BIP68 = 'non-BIP68-final'
 BLOCK_NONFINAL = 'bad-txns-nonfinal'
 MEMPOOL_NONFINAL = 'non-final'
 
-OWNER = v.fixed_secret('vault-functional-owner')
-OWNER_KEY = v.pubkey_of(OWNER)
+# The vault owner is a post-quantum key (quantum plan §4.3): an SLH-DSA secret and its 33-byte id.
+OWNER = v.pq_owner_secret('vault-functional-owner')
+OWNER_KEY = v.pq_owner_of(OWNER)
+OWNER_OUTSIDER = v.pq_owner_secret('vault-functional-owner-outsider')
 OUTSIDER = v.fixed_secret('vault-functional-outsider')
 
 
@@ -338,9 +340,9 @@ class VaultTestBase(BitcoinTestFramework):
     def heartbeat(self, sid, secret_list, label='heartbeat'):
         return [self.accept(self.heartbeat_hex(sid, s), '%s %d' % (label, i)) for i, s in enumerate(secret_list)]
 
-    def vparams(self, sid, cancel_sid=None, delay=5, owner_height=None, app_height=0, tag=b'TEST', owner_key=OWNER_KEY):
+    def vparams(self, sid, cancel_sid=None, delay=5, owner_height=None, app_height=0, tag=b'TEST', owner=OWNER_KEY):
         return v.VaultParams(tag, sid, cancel_sid or sid, delay,
-                             owner_height if owner_height is not None else self.tip() + 500, app_height, owner_key)
+                             owner_height if owner_height is not None else self.tip() + 500, app_height, owner)
 
     def lock_hex(self, vp, amount, extra_vout=()):
         need = amount + FEE + sum(val for val, _ in extra_vout)

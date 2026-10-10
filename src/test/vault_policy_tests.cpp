@@ -45,7 +45,7 @@ VaultParams Params1()
     v.cancelSetId = uint256S("0x22");
     v.delay = 5;
     v.ownerHeight = 1000;
-    v.ownerKey = Key(1);
+    v.owner = CPQKeyID(1, Hash(Key(1).begin(), Key(1).end()));   // a post-quantum owner id (quantum plan §4.3)
     v.appHeight = 0;
     return v;
 }

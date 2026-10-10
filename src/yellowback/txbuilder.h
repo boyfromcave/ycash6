@@ -100,7 +100,7 @@ struct BuiltTx
     int changeVout;                         //!< index of the YED change output, -1 if none
     CScript vaultScript;                    //!< signing material for SignVaultSpend
     CAmount vaultValue;
-    CPubKey ownerPubKey;
+    CPQKeyID owner;                         //!< the vault's post-quantum owner
     std::vector<std::pair<CScript, CAmount>> yedPrevs;     //!< scriptPubKey/value of vin[1..] (YED inputs)
     std::vector<std::pair<CScript, CAmount>> fundPrevs;    //!< CLAIM (U-23): the YEC inputs after the YED ones that pay the fees (the vault's value goes to intents)
 
@@ -151,7 +151,8 @@ struct MintShape
     uint32_t lockHeight;
     uint32_t claimHeight;                   //!< lockHeight + GRACE
     int refHeight;
-    CPubKey owner;                          //!< vault ownerPubKey and the token output's key
+    CPubKey owner;                          //!< the token output's key
+    CPQKeyID vaultOwner;                    //!< the V's and the payload's owner (quantum plan §4.3: a post-quantum key)
     CAmount collateralZat;                  //!< vout[0].nValue (>= requiredZat, >= 4 * FEE_MIN, rounded)
     std::optional<CKeyID> payee;            //!< nullopt under FEE-0: no fee output, feeVout = 0xFF
     CAmount feeZat;                         //!< FeeZat(collateralZat)
@@ -193,11 +194,11 @@ struct VaultSpendShape
     // v3 (claim path when ARMED)
     std::optional<CKeyID> attestPayee;      //!< AFEE-1: P2PKH(bondPubKey(s)) of attestFeeZat; nullopt under AFEE-0
     CAmount attestFeeZat;
-    CAmount residualZat;                    //!< RED-5: > 0 => an output P2PKH(ownerPubKey) of residualZat
-    CPubKey ownerPubKey;                    //!< the residual's payee
+    CAmount residualZat;                    //!< RED-5: > 0 => an output PQPKH(owner) of residualZat
+    CPQKeyID owner;                         //!< the residual's payee (the vault's post-quantum owner)
     CAmount carrierValue;                   //!< CARRIER_VALUE when a carrier input is present (its value joins the inputs), else 0
     // U-23: a claim (ownerPath false, withPayload) moves the whole vault into intents built from vaultParams:
-    // the claimant's (paying collateralScript) and, when residualZat > 0, the owner's (paying P2PKH(ownerPubKey));
+    // the claimant's (paying collateralScript) and, when residualZat > 0, the owner's (paying PQPKH(owner));
     // the fees come from `funding` (YEC inputs after the YED ones), the rest of which goes to fundingChange.
     vault::VaultParams vaultParams;
     std::vector<std::pair<COutPoint, CAmount>> funding;

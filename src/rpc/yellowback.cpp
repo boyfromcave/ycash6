@@ -233,7 +233,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("ownerPubKey", HexStr(v.ownerPubKey.begin(), v.ownerPubKey.end()));
     const CPubKey owner = v.OwnerKey();
     o.pushKV("ownerKeyId", owner.IsValid() ? owner.GetID().GetHex() : "");
-    o.pushKV("ownerAddress", owner.IsValid() ? EncodeAddress(owner.GetID(), p) : "");
+    o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
     o.pushKV("termClass", ClassLetter(v.termClass));
     o.pushKV("lockHeight", (int64_t)v.lockHeight);
     o.pushKV("claimHeight", (int64_t)v.claimHeight);
@@ -254,7 +254,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOIDED ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
     // U-23: the vault's V scriptPubKey (the primitive's template, tag YED) and, while CLAIMING, its claim intents.
-    const CScript spk = YedVaultScriptAt(p, owner, v.ownerHeight, v.appHeight);
+    const CScript spk = YedVaultScriptAt(p, v.Owner(), v.ownerHeight, v.appHeight);
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     if (v.Status() == VaultStatus::CLAIMING) {
         UniValue intents(UniValue::VARR);
@@ -1275,10 +1275,9 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         // (underwaterAt); a claimable row always has a pClaim (an undefined pClaim makes RED-4 false).
         const bool claimable = est.claimable && est.pClaim.has_value();
         if (seen++ < skip) continue;
-        const CPubKey owner = v.OwnerKey();
         UniValue o(UniValue::VOBJ);
         o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));
-        o.pushKV("ownerAddress", owner.IsValid() ? EncodeAddress(owner.GetID(), p) : "");
+        o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
         o.pushKV("collateralZat", v.collateralZat);
         o.pushKV("mintedCents", v.mintedCents);
         o.pushKV("feeZat", FeeZat(v.collateralZat, p.feeMin, p.feeBps));

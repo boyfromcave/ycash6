@@ -100,6 +100,15 @@ bool ValidAssignments(const std::vector<Assignment>& assignments, size_t maxCoun
 
 } // namespace
 
+Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPQKeyID& owner, uint8_t feeVout,
+                      uint8_t attestFeeVout)
+{
+    Payload p = Mint(termClass, cents, lockHeight, refHeight, CPubKey(), feeVout, attestFeeVout);
+    p.ownerKeyBytes.assign(1, owner.scheme);
+    p.ownerKeyBytes.insert(p.ownerKeyBytes.end(), owner.hash.begin(), owner.hash.end());
+    return p;
+}
+
 Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout,
                       uint8_t attestFeeVout)
 {
