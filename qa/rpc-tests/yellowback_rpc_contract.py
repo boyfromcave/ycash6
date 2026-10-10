@@ -77,8 +77,8 @@ OPTIONAL = {
     'yed_listvaults': {'intents'},
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
-    'yed_validateaddress': {'address', 'keyid', 'ismine', 'transparentAddress'},
-    'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerPubKey', 'feeVout', 'attestFeeVout', 'assignments',
+    'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
+    'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerScheme', 'ownerHash', 'feeVout', 'attestFeeVout', 'assignments',
                           'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle'},
     'yed_getnotice': {'vault', 'txid', 'height', 'refHeight', 'pEmerg', 'emergencyOpenAt', 'expiresAt'},
     'yed_gettxinfo': {'seq'},
@@ -186,7 +186,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 6)
+        assert_equal(c.doc['rpcversion'], 7)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])

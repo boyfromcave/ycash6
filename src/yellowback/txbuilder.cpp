@@ -5,6 +5,7 @@
 #include "yellowback/txbuilder.h"
 
 #include "chainparams.h"
+#include "crypto/pq/scheme.h"
 #include "consensus/upgrades.h"
 #include "key_io.h"
 #include "main.h"
@@ -49,7 +50,8 @@ std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFee
     if (payload.empty()) throw std::runtime_error("cannot encode the mint payload");
     std::vector<CTxOut> vout;
     vout.push_back(CTxOut(s.collateralZat, vault));                                     // vout[0] vault (bare V)
-    vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(s.owner.GetID())));      // vout[1] token
+    // vout[1] token: the fresh holder key, P2PKH, or a Falcon TX_PQPKH from the Falcon height (TOK-PQ)
+    vout.push_back(CTxOut(TOKEN_VALUE, s.pqHolder.has_value() ? GetScriptForDestination(s.pqHolder.value()) : GetScriptForDestination(s.owner.GetID())));
     vout.push_back(CTxOut(0, PayloadScript(payload)));                                  // vout[2] payload
     if (s.payee.has_value()) vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value())));   // vout[3] fee
     if (s.attestPayee.has_value()) vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value())));   // attestor fee
@@ -210,15 +212,22 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     if (out.builder) throw std::runtime_error("FinishSapling must run before SignVaultSpend");
     const size_t extra = out.carrierVin >= 0 ? 2 : 1;
     if (out.tx.vin.size() != out.yedPrevs.size() + out.fundPrevs.size() + extra) throw std::runtime_error("vault spend input count mismatch");
+    // A V spend and a PQPKH holder input exist only under UPGRADE_VAULT: the signer's self-check runs with its
+    // flags (OP_CHECKPQSIG is BAD_OPCODE under STANDARD alone, quantum spec §5.2); PQ_FALCON lets a Falcon holder
+    // input verify (only a chain past the Falcon height has one).
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
     if (ownerPath) {
-        // The owner is a post-quantum key (quantum plan §4.3); the wallet signs with it once it holds
-        // PQ keys (quantum plan Q5).
-        throw std::runtime_error("not-supported: the vault owner is a post-quantum key and this wallet cannot sign with post-quantum keys yet");
+        // The owner is a post-quantum key (quantum plan §4.3): the wallet's PQ signer (q/wallet) pushes the chunked
+        // signature and key, then the V's OWNER selector (2); ZIP-243 over the bare V with the vault's value.
+        ScriptError serror = SCRIPT_ERR_OK;
+        if (!SignPQOwnerSpend(keystore, out.owner, out.vaultScript, out.tx, 0, out.vaultValue, vault::SEL_OWNER, branchId, flags, &serror)) {
+            throw std::runtime_error(std::string("vault-not-owned: cannot sign with the vault's post-quantum owner key: ") + ScriptErrorString(serror));
+        }
     } else {
         out.tx.vin[0].scriptSig = CScript() << OP_4;                      // U-23: the V's APP selector (the claim)
     }
     for (size_t i = 0; i < out.yedPrevs.size(); i++) {
-        if (!SignSignature(keystore, out.yedPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
+        if (!SignSignature(keystore, out.yedPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId, flags)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
         }
     }
@@ -513,6 +522,24 @@ struct Context
         return key;
     }
 
+    /** TOK-PQ (quantum spec F-7): from the Falcon height (judged at the next block) a YED output goes to a fresh
+     *  Falcon key of the wallet; nullopt before it (the caller's P2PKH key holds the YED, as before). */
+    std::optional<CPQKeyID> FreshPQHolder() const
+    {
+        if (!params.IsPQFalconActive((int64_t)chainHeight + 1)) return std::nullopt;
+        CPQKeyID id;
+        if (!wallet.GetNewPQKey(pq::SCHEME_FN_DSA_512, id)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum holder key");
+        return id;
+    }
+
+    /** The script of a fresh YED holder output (token, change): Falcon TX_PQPKH from the Falcon height, else P2PKH. */
+    CScript FreshHolderScript(const std::string& purpose, CPubKey& keyOut) const
+    {
+        keyOut = FreshKey(purpose);
+        const std::optional<CPQKeyID> pq = FreshPQHolder();
+        return pq.has_value() ? GetScriptForDestination(pq.value()) : GetScriptForDestination(keyOut.GetID());
+    }
+
     /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0. */
     std::optional<CKeyID> Payee(int r, const std::vector<unsigned char>& selector) const
     {
@@ -795,9 +822,9 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         shape.yedInputs = sel;
         shape.changeCents = change;
         if (change > 0) {
-            CPubKey changeKey = ctx.FreshKey("yellowback-change");
+            CPubKey changeKey;
+            shape.changeScript = ctx.FreshHolderScript("yellowback-change", changeKey);   // TOK-PQ from the Falcon height
             out.freshKey = changeKey;
-            shape.changeScript = GetScriptForDestination(changeKey.GetID());
         }
         shape.payee = ctx.Payee(R, OutPointSelector(vaultOut));
         shape.feeZat = shape.payee.has_value() ? FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) : 0;
@@ -1400,11 +1427,13 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     CheckMaxCollateral(collateral, maxCollateralZat);                              // before any key is drawn
     AttestFeeFor(ctx, R, std::vector<unsigned char>(), f, collateral, out);
 
-    // The vault owner is a post-quantum key (quantum plan §4.3) the wallet draws once it holds PQ keys
-    // (quantum plan Q5); before any key is drawn, refuse.
-    const CPQKeyID vaultOwner;
-    if (!vault::IsOwnerValid(vaultOwner)) throw std::runtime_error("not-supported: a YED mint needs a post-quantum owner key and this wallet holds none yet");
+    // The vault owner is a fresh SLH-DSA wallet key (quantum plan §4.3, spec §3.6, A-3); the token goes to a
+    // fresh holder key, P2PKH while Falcon is inactive and a Falcon TX_PQPKH from its height (TOK-PQ). The owner
+    // is no longer the holder: an SLH-DSA holder would cost an 8 KB scriptSig per transfer.
+    CPQKeyID vaultOwner;
+    if (!ctx.wallet.GetNewPQKey(pq::SCHEME_SLH_DSA_SHA2_128S, vaultOwner)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum owner key");
     CPubKey owner = ctx.FreshKey("yellowback-vault");
+    std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder();
     MintShape shape;
     shape.cents = cents;
     shape.termClass = g.termClass;
@@ -1412,9 +1441,13 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     shape.claimHeight = (uint32_t)g.claimHeight;
     shape.refHeight = R;
     shape.owner = owner;
+    shape.pqHolder = pqHolder;
     shape.vaultOwner = vaultOwner;
     shape.collateralZat = collateral;
-    shape.payee = ctx.Payee(R, std::vector<unsigned char>(owner.begin(), owner.end()));
+    // FEE-W's selector: the payload's 33 owner bytes, scheme || keyHash (a wallet-only choice, spec §3.6)
+    std::vector<unsigned char> ownerBytes(1, vaultOwner.scheme);
+    ownerBytes.insert(ownerBytes.end(), vaultOwner.hash.begin(), vaultOwner.hash.end());
+    shape.payee = ctx.Payee(R, ownerBytes);
     shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;
@@ -1528,6 +1561,12 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     const Params& p = ctx.params;
     if (recipients.empty()) throw std::runtime_error("no recipients");
     if (recipients.size() > MAX_ASSIGNMENTS - 1) throw std::runtime_error(strprintf("at most %u recipients per transaction", (unsigned)(MAX_ASSIGNMENTS - 1)));
+    // TOK-PQ (quantum spec F-7): from the Falcon height (judged at the next block) a YED output is a Falcon TX_PQPKH.
+    for (const auto& r : recipients) {
+        if (!HolderAllowed(ctx.params, (int64_t)ctx.chainHeight + 1, r.first)) {
+            throw std::runtime_error("bad-yed-holder: from the Falcon height YED is held by post-quantum (Falcon) addresses only; pass a 53-character ye… address");
+        }
+    }
     int64_t needed = 0;
     for (const auto& r : recipients) {
         if (r.second < p.minOutput || r.second > p.maxOutput) {
@@ -1552,9 +1591,10 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
         assignments.push_back(Assignment((uint8_t)i, (uint32_t)recipients[i].second));
     }
     if (change > 0) {
-        CPubKey changeKey = ctx.FreshKey("yellowback-change");
+        CPubKey changeKey;
+        const CScript changeScript = ctx.FreshHolderScript("yellowback-change", changeKey);   // TOK-PQ from the Falcon height
         out.freshKey = changeKey;
-        mtx.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(changeKey.GetID())));
+        mtx.vout.push_back(CTxOut(TOKEN_VALUE, changeScript));
         assignments.push_back(Assignment((uint8_t)recipients.size(), (uint32_t)change));
     }
     std::vector<unsigned char> payload = EncodePayload(Payload::Transfer(assignments));

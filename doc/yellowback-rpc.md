@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 6
+# Yellowback RPC contract (`yed_*`), rpcversion 7
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `6` (in-term claims, below; the vault upgrade took `5`, v3 `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `7` (post-quantum owners, below; in-term claims took `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -78,6 +78,28 @@ claim); `yed_listpositions` rows gain `earlyRedeemFeeZat`; `yed_estimateredeem` 
 wallet shows before the owner confirms a redeem); `vault-locked` no longer refuses an ACTIVE redeem
 in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
 `claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
+
+**Post-quantum owners (`rpcversion` 7; docs/plans/yellowback-quantum-spec.md §3, §4, §6.2; quantum plan
+§4.4).** Every vault's owner is a post-quantum key id, `scheme ‖ keyHash` (scheme 1 SLH-DSA-SHA2-128s, 2
+FN-DSA-512, the latter from the Falcon height only). Removed: `ownerPubKey` and `ownerKeyId` on
+`yed_getvault`, `yed_listvaults` and `yed_listpositions` rows, and `ownerPubKey` on a MINT's
+`yed_decodepayload` (no public key is on chain; hence the bump). Added: `ownerScheme` (number) and
+`ownerHash` (64 hex, the 32 bytes as the V pushes them) in their place; `yed_getinfo.params.pq`
+`{schemes, falconActive, falconHeight, feeRateZatPerKB}` (`schemes` = the owner schemes MINT-3 admits at
+the next block; `falconHeight` `-1` = never; `feeRateZatPerKB` = the size-priced rate wallets charge as
+`max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
+is payload version 4, every other type stays `payloadVersion` 3 — quantum spec C-1, so a client's
+TRANSFER builder is unchanged and a v3 MINT is non-Yellowback); `yed_mint`'s `ownerAddress` (the fresh
+SLH-DSA owner's address; the arguments are unchanged, A-3); `yed_validateaddress`'s `type` (`p2pkh` |
+`pq`) and, for a PQ address, `pqscheme` (`keyid` is then the 66-hex `scheme ‖ keyHash` and
+`transparentAddress` is `""`); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
+holder, `pqowner` an SLH-DSA key; the default follows the holder policy: `p2pkh` until Falcon is active,
+`pq` after). Addresses: a post-quantum YED address is Base58Check(`56BF`/`571E`/`5710` ‖ scheme ‖
+keyHash), `ye…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
+`yed_listtokens` and `yed_validateaddress` take either. The owner's residual intent of a claim pays the
+owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must
+be a Falcon `TX_PQPKH` (TOK-PQ, `bad-yed-holder`: the transaction is refused, never burned); the
+wallet then draws its token and change outputs from Falcon keys.
 
 **P4-b: the attestor registry is the attestor set** (upgrade plan §15.10; additions only, so
 `rpcversion` stays 5). An attestor is a member of the vault primitive's set `attestorSetId`: it
@@ -233,7 +255,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 6,
+  "rpcversion": 7,
   "enabled": true,
   "network": "regtest",
   "height": 331,
@@ -299,6 +321,12 @@ Result of `yed_getinfo`:
     "claimThresholdBps": 12500,
     "sigmaMultMaxBps": 10000,
     "inTermClaims": true,
+    "pq": {
+      "schemes": [ 1 ],
+      "falconActive": false,
+      "falconHeight": -1,
+      "feeRateZatPerKB": 100
+    },
     "policy": {
       "penaltyBlocks": 12,
       "accuracyWindow": 24,
@@ -308,6 +336,7 @@ Result of `yed_getinfo`:
     },
     "attest": {
       "payloadVersion": 3,
+      "mintPayloadVersion": 4,
       "armMin": 3,
       "armDelay": 8,
       "required": true,
@@ -633,8 +662,8 @@ Result of `yed_getvault`:
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vout": 0,
   "status": "ACTIVE",
-  "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
-  "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
+  "ownerScheme": 1,
+  "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
   "ownerAddress": "yrExampleOwnerAddress111111111111111",
   "termClass": "A",
   "lockHeight": 377,
@@ -675,8 +704,8 @@ Result of `yed_listvaults`:
     "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
     "vout": 0,
     "status": "ACTIVE",
-    "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
-    "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
+    "ownerScheme": 1,
+    "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
     "lockHeight": 377,
@@ -860,10 +889,10 @@ Result of `yed_gettxinfo`:
 ### `yed_decodepayload <hex>`
 
 Arguments: `hex` (string): a payload, an `OP_RETURN` script or a raw transaction. Decodes the
-**version-3** payload (v3 §3.3) without touching state; allowed while unhealthy. `valid` is false
+**version-3** payload (v3 §3.3) — a MINT at **version 4** (rpcversion 7, quantum spec §3.1, C-1) — without touching state; allowed while unhealthy. `valid` is false
 — with `type: "none"` and `reason` naming the defect — for anything §3.3 calls malformed or
 unknown, **including a version-1 or version-2 payload** (`reason: "version"`, V23).
-Type-specific fields: MINT `termClass`, `cents`, `lockHeight`, `refHeight`, `ownerPubKey`,
+Type-specific fields: MINT `termClass`, `cents`, `lockHeight`, `refHeight`, `ownerScheme`, `ownerHash` (rpcversion 7),
 `feeVout` (`255` = none), `attestFeeVout` (**v3**, `255` = none); TRANSFER `assignments:
 [{vout, cents}]`, `assignedCents`; REDEEM `refHeight`, `feeVout`, `attestFeeVout`,
 `assignments`, `assignedCents`; **v3** `register` (`0x05`) `attestorPubKey`, `bondPubKey`,
@@ -880,14 +909,15 @@ Result of `yed_decodepayload`:
 ```json
 {
   "valid": true,
-  "version": 3,
+  "version": 4,
   "type": "mint",
   "reason": "",
   "termClass": "A",
   "cents": 100000,
   "lockHeight": 377,
   "refHeight": 329,
-  "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "ownerScheme": 1,
+  "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
   "feeVout": 3,
   "attestFeeVout": 4
 }
@@ -1306,10 +1336,15 @@ wallet encryption is experimental (`-developerencryptwallet`) and must not be pr
 protection for vault keys; the custody rule is full-disk encryption, RPC on localhost only, and
 an offline copy of `wallet.dat`.
 
-### `yed_getnewaddress`
+### `yed_getnewaddress [type]`
 
-Arguments: none. A fresh keypool key as a Yellowback address string (`ye…` mainnet, `yt…`
-testnet, `yr…` regtest). The result is a bare string.
+Arguments: `type` (string, optional; rpcversion 7): `"p2pkh"` a fresh keypool key (35 characters),
+`"pq"` a fresh post-quantum holder key (FN-DSA-512 once Falcon is active, SLH-DSA-SHA2-128s before),
+`"pqowner"` a fresh SLH-DSA key, as `vault_getnewowner` (53 characters each); PQ keys derive from the HD
+seed (the wallet must be unlocked) and stay out of the address book; the default
+follows the holder policy (quantum plan D-Q-2, A-13): `"p2pkh"` while `params.pq.falconActive` is
+false, `"pq"` once it is true. A Yellowback address string (`ye…` mainnet, `yt…` testnet, `yr…`
+regtest). The result is a bare string.
 
 **ycashd 6.20.0:** the transparent keypool is gone (keys are HD, drawn by `GenerateNewKey` as
 stock `getnewaddress` does), so this command — and every builder that draws a fresh owner, token,
@@ -1332,7 +1367,9 @@ Arguments: `address` (string). `isvalid` false — and the other fields absent (
 with `not-a-yellowback-address` in `reason` when the string is not a `ye…`/`yt…`/`yr…` address of
 this network (the command itself does not throw, so the wallet can validate as the user types;
 `yed_send` throws the same identifier). `transparentAddress` is the same key hash as an `s1…`/
-`sm…` address.
+`sm…` address. rpcversion 7: `type` is `p2pkh` or `pq`; for a post-quantum (53-character)
+address `keyid` is the 66-hex `scheme ‖ keyHash`, `transparentAddress` is `""` and `pqscheme`
+(**optional**, present only for `pq`) is the scheme.
 
 Result of `yed_validateaddress`:
 
@@ -1340,6 +1377,7 @@ Result of `yed_validateaddress`:
 {
   "isvalid": true,
   "address": "yrExampleOwnerAddress111111111111111",
+  "type": "p2pkh",
   "keyid": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
   "ismine": true,
   "transparentAddress": "smExampleTransparentTwin111111111111",
@@ -1457,6 +1495,7 @@ Result of `yed_mint`:
 {
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
+  "ownerAddress": "yrExamplePQOwnerAddress11111111111111111111111111111",
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -1696,7 +1735,7 @@ would fail at the reference snapshot by both clauses), `insufficient-yed`, `chan
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
 `residualZat ≥ RESIDUAL_MIN_ZAT` — the **residual intent** (an I template paying
-`P2PKH(ownerPubKey)` at least `residualZat`, RED-5; anyone may `vault_release` it to the owner
+the owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, quantum spec F-3) at least `residualZat`, RED-5; anyone may `vault_release` it to the owner
 after `CLAIM_DELAY`, and a cancel never touches it). The wallet dry-runs RED-1..5
 before commit. `claimPath` is the clause that opened the claim (`"a"` underwater under the
 combined `pClaim`; `"b"` the emergency clause: a notice `EMERGENCY_PERSIST..EMERGENCY_NOTICE_TTL`
@@ -1944,7 +1983,7 @@ Result of `yed_signattestation`:
 ### `yed_listpositions [status]`
 
 Arguments: `status` (string, optional; as `yed_listvaults`). The wallet's own vaults (a vault is
-mine iff `HaveKey(ownerPubKey)`): every `yed_getvault` field plus `canRedeem` (true for an
+mine iff the wallet holds the owner's post-quantum key, `HavePQKey(ownerScheme ‖ ownerHash)`): every `yed_getvault` field plus `canRedeem` (true for an
 ACTIVE or VOID vault at or past its `ownerHeight` — in term too since IT-1; for VOID it is the
 Release, L14), `canClaim` (true when `claimable` and the wallet holds `≥ mintedCents`) and
 `earlyRedeemFeeZat` (IT-9: what a redeem confirming in the next block adds to the pool fee, `0` at
@@ -1967,8 +2006,8 @@ Result of `yed_listpositions`:
     "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
     "vout": 0,
     "status": "ACTIVE",
-    "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
-    "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
+    "ownerScheme": 1,
+    "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
     "lockHeight": 377,

@@ -13,6 +13,9 @@
 
 #include <rust/address.h>
 
+#include "chainparams.h"
+#include "yellowback/address.h"
+
 #include <assert.h>
 #include <string.h>
 #include <algorithm>
@@ -43,9 +46,20 @@ public:
         return EncodeBase58Check(data);
     }
 
-    // No plain-YEC encoding for a PQ key (quantum spec §2.4, D-Q-11); YED owner and holder
-    // addresses are yellowback::EncodeAddress.
-    std::string operator()(const CPQKeyID& id) const { return {}; }
+    // No plain-YEC encoding for a PQ key (quantum spec §2.4, D-Q-11): a PQ destination renders as its
+    // post-quantum YED address (yellowback::EncodeAddress, versions 56BF/571E/5710, coordinator ruling
+    // 2026-10-10), so decoderawtransaction, listunspent and the like name TX_PQPKH outputs. Encode only:
+    // DecodeDestination does not take it (not a YEC destination). "" when the network is not known.
+    std::string operator()(const CPQKeyID& id) const
+    {
+        const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
+        if (!chain) return {};
+        try {
+            return yellowback::EncodeAddress(id, yellowback::ParamsForNetwork(chain->NetworkIDString()));
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
 
     std::string operator()(const CNoDestination& no) const { return {}; }
 };

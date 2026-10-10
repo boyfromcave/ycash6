@@ -20,6 +20,7 @@
  */
 
 #include "chainparams.h"
+#include "crypto/pq/scheme.h"
 #include "coins.h"
 #include "consensus/upgrades.h"
 #include "core_io.h"
@@ -57,8 +58,10 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 6;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
-                                               // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee
+static const int YELLOWBACK_RPC_VERSION = 7;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+                                               // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
+                                               // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
+                                               //    the v4 MINT, params.pq, PQ ye… addresses
 
 namespace {
 
@@ -230,10 +233,12 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("txid", out.hash.GetHex());
     o.pushKV("vout", (int64_t)out.n);
     o.pushKV("status", VaultStatusName(v.Status()));
-    o.pushKV("ownerPubKey", HexStr(v.ownerPubKey.begin(), v.ownerPubKey.end()));
-    const CPubKey owner = v.OwnerKey();
-    o.pushKV("ownerKeyId", owner.IsValid() ? owner.GetID().GetHex() : "");
-    o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
+    // rpcversion 7 (quantum spec §6.2): the post-quantum owner as scheme and key hash (the bytes the V pushes);
+    // ownerPubKey and ownerKeyId are gone (no public key is on chain).
+    const CPQKeyID owner = v.Owner();
+    o.pushKV("ownerScheme", (int)owner.scheme);
+    o.pushKV("ownerHash", HexStr(owner.hash.begin(), owner.hash.end()));
+    o.pushKV("ownerAddress", EncodeAddress(owner, p));        // the PQ owner's address ("" when unregistered)
     o.pushKV("termClass", ClassLetter(v.termClass));
     o.pushKV("lockHeight", (int64_t)v.lockHeight);
     o.pushKV("claimHeight", (int64_t)v.claimHeight);
@@ -254,7 +259,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("underwaterAt", v.Status() == VaultStatus::VOIDED ? NullUniValue : UnderwaterAt(v, p));
     o.pushKV("voidReason", v.voidReason);
     // U-23: the vault's V scriptPubKey (the primitive's template, tag YED) and, while CLAIMING, its claim intents.
-    const CScript spk = YedVaultScriptAt(p, v.Owner(), v.ownerHeight, v.appHeight);
+    const CScript spk = YedVaultScriptAt(p, owner, v.ownerHeight, v.appHeight);
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     if (v.Status() == VaultStatus::CLAIMING) {
         UniValue intents(UniValue::VARR);
@@ -462,6 +467,15 @@ UniValue TagToJSON(const std::optional<CoinbaseTag>& tag)
     return o;
 }
 
+/**
+ * yed_getinfo.params.pq.feeRateZatPerKB (quantum spec C-5): the rate wallets charge as max(DEFAULT_FEE, rate × size).
+ * -pqfeerate (quantum plan §4.5, Q5's policy pqFeeRate; default 1× the per-KB relay floor).
+ */
+static int64_t PQFeeRateZatPerKB()
+{
+    return ::pqFeeRate.GetFeePerK();
+}
+
 UniValue PayloadToJSON(const Payload& p)
 {
     UniValue o(UniValue::VOBJ);
@@ -475,7 +489,9 @@ UniValue PayloadToJSON(const Payload& p)
         o.pushKV("cents", (int64_t)p.cents);
         o.pushKV("lockHeight", (int64_t)p.lockHeight);
         o.pushKV("refHeight", (int64_t)p.refHeight);
-        o.pushKV("ownerPubKey", HexStr(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end()));
+        // rpcversion 7, the v4 MINT (quantum spec §3.1, §6.2): owner = scheme || keyHash, the hash as the V pushes it
+        o.pushKV("ownerScheme", (int)p.owner.scheme);
+        o.pushKV("ownerHash", HexStr(p.owner.hash.begin(), p.owner.hash.end()));
         o.pushKV("feeVout", (int)p.feeVout);
         o.pushKV("attestFeeVout", (int)p.attestFeeVout);
         break;
@@ -712,6 +728,22 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("claimThresholdBps", p.claimThresholdBps);  // θ (D-IT-2)
     prm.pushKV("sigmaMultMaxBps", p.sigmaMultMaxBps);
     prm.pushKV("inTermClaims", true);                      // IT-7: RED-4 decides a claim at every height from the mint
+    // rpcversion 7 (quantum spec §6.2, C-5): the post-quantum parameters. schemes = the owner schemes MINT-3 admits at
+    // the next block; falconHeight -1 = never; feeRateZatPerKB = the size-priced fee rate wallets charge
+    // (max(DEFAULT_FEE, rate × size)): the relay floor (-pqfeerate's default, 1× the floor; quantum plan Q5).
+    {
+        const int next = chainActive.Height() + 1;
+        const bool falcon = p.IsPQFalconActive(next);
+        UniValue pqo(UniValue::VOBJ);
+        UniValue schemes(UniValue::VARR);
+        schemes.push_back((int)pq::SCHEME_SLH_DSA_SHA2_128S);
+        if (falcon) schemes.push_back((int)pq::SCHEME_FN_DSA_512);
+        pqo.pushKV("schemes", schemes);
+        pqo.pushKV("falconActive", falcon);
+        pqo.pushKV("falconHeight", p.pqFalconHeight);
+        pqo.pushKV("feeRateZatPerKB", PQFeeRateZatPerKB());
+        prm.pushKV("pq", pqo);
+    }
     UniValue policy(UniValue::VOBJ);
     policy.pushKV("penaltyBlocks", pp.penaltyBlocks);
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
@@ -721,7 +753,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("policy", policy);
     // v3 §3.1 attestation parameters (contract: params.attest; armMin and carrierMode are hashed on regtest, M13)
     UniValue attest(UniValue::VOBJ);
-    attest.pushKV("payloadVersion", (int)PayloadVersion());
+    attest.pushKV("payloadVersion", (int)PayloadVersion());              // every type but MINT (quantum spec C-1)
+    attest.pushKV("mintPayloadVersion", (int)MINT_PAYLOAD_VERSION);      // rpcversion 7: the MINT alone is version 4
     attest.pushKV("armMin", p.attestArmMin);
     attest.pushKV("armDelay", p.attestArmDelay);
     attest.pushKV("required", p.attestRequired);
@@ -1166,7 +1199,8 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
             "yed_listtokens [\"address\",...] ( minHeight count skip )\n"
             "\nThe YED outputs (Tokens records) paying the given addresses, whoever holds the keys: the node-context\n"
             "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (ye/yt/yr)\n"
-            "or transparent P2PKH (s1/sm) forms of the same key hash; 1..100 of them. minHeight (default 0) keeps\n"
+            "or transparent P2PKH (s1/sm) forms of the same key hash, or post-quantum YED addresses (53 characters, a\n"
+            "TX_PQPKH holder; transparentAddress \"\" for them); 1..100 of them. minHeight (default 0) keeps\n"
             "only tokens created at or above that height. Sorted by (height, txid, vout); paged by count (default 1000)\n"
             "and skip (default 0) over that order.\n");
 
@@ -1180,24 +1214,25 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
     const int count = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : DEFAULT_LIST_COUNT;   // C-6
     const int skip = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : 0;
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
-    // Every accepted address is one P2PKH script; both forms of one key hash are the same script.
-    std::map<CScript, CKeyID> wanted;
+    // Every accepted address is one holder script (P2PKH, or TX_PQPKH for a PQ address: HolderKey); both forms
+    // of one key hash are the same script.
+    std::map<CScript, CTxDestination> wanted;
     for (size_t i = 0; i < addresses.size(); i++) {
         if (!addresses[i].isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid-address: addresses must be strings");
         const std::string str = addresses[i].get_str();
-        CKeyID keyID;
-        if (!DecodeAddress(str, p, keyID)) {
+        CTxDestination holder;
+        if (!DecodeAddress(str, p, holder)) {
             KeyIO keyIO(::Params());
             CTxDestination dest = keyIO.DecodeDestination(str);
             const CKeyID* id = std::get_if<CKeyID>(&dest);
             if (!id) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid-address: " + str + " is not a YED or transparent P2PKH address of this network");
-            keyID = *id;
+            holder = *id;
         }
-        wanted[GetScriptForDestination(keyID)] = keyID;
+        wanted[GetScriptForDestination(holder)] = holder;
     }
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
-    struct Row { int32_t height; COutPoint out; CKeyID keyID; TokenRecord owned; };
+    struct Row { int32_t height; COutPoint out; CTxDestination holder; TokenRecord owned; };
     std::vector<Row> rows;
     index.View().Iterate("K", [&](const std::string& k, const std::string& raw) {
         TokenRecord t;
@@ -1208,7 +1243,7 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
         r.height = t.height;
         r.out = COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         r.owned = t;
-        r.keyID = it->second;
+        r.holder = it->second;
         rows.push_back(r);
         return true;
     });
@@ -1226,8 +1261,13 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
         o.pushKV("cents", r.owned.cents);
         o.pushKV("valueZat", r.owned.nValue);
         o.pushKV("height", r.height);
-        o.pushKV("address", EncodeAddress(r.keyID, p));
-        o.pushKV("transparentAddress", P2PKHAddress(r.keyID));
+        if (const CKeyID* id = std::get_if<CKeyID>(&r.holder)) {
+            o.pushKV("address", EncodeAddress(*id, p));
+            o.pushKV("transparentAddress", P2PKHAddress(*id));
+        } else {
+            o.pushKV("address", EncodeAddress(std::get<CPQKeyID>(r.holder), p));
+            o.pushKV("transparentAddress", "");
+        }
         list.push_back(o);
     }
     return list;

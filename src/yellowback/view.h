@@ -214,7 +214,8 @@ const char* VaultStatusName(VaultStatus s);
 
 struct VaultRecord
 {
-    std::vector<unsigned char> ownerPubKey;   //!< the 33 payload bytes verbatim (valid or not; a VOID vault may carry an invalid key)
+    std::vector<unsigned char> ownerPubKey;   //!< the 33 payload bytes verbatim: on the post-quantum line the owner id scheme || keyHash
+                                              //!< (quantum spec §3.4; the name and the serialisation are kept, no schema change)
     uint8_t termClass;                        //!< the payload byte (0/1/2 = A/B/C; a VOID vault may carry any value)
     int32_t lockHeight;
     int32_t claimHeight;                      //!< lockHeight + GRACE: the end of the owner's post-term window (RED-4 (c))
@@ -237,8 +238,6 @@ struct VaultRecord
 
     VaultStatus Status() const { return (VaultStatus)status; }
     bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
-    /** The owner key as a CPubKey (invalid when the bytes are not a key). */
-    CPubKey OwnerKey() const { return CPubKey(ownerPubKey.begin(), ownerPubKey.end()); }
     /** The owner as a post-quantum key id: the 33 bytes read as scheme || keyHash (quantum spec §3.4);
      *  scheme 0 when the size is not 33. */
     CPQKeyID Owner() const

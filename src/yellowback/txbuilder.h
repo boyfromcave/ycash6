@@ -152,6 +152,7 @@ struct MintShape
     uint32_t claimHeight;                   //!< lockHeight + GRACE
     int refHeight;
     CPubKey owner;                          //!< the token output's key
+    std::optional<CPQKeyID> pqHolder;       //!< TOK-PQ: from the Falcon height the token output's Falcon key (replaces `owner`'s P2PKH)
     CPQKeyID vaultOwner;                    //!< the V's and the payload's owner (quantum plan §4.3: a post-quantum key)
     CAmount collateralZat;                  //!< vout[0].nValue (>= requiredZat, >= 4 * FEE_MIN, rounded)
     std::optional<CKeyID> payee;            //!< nullopt under FEE-0: no fee output, feeVout = 0xFF

@@ -1076,8 +1076,35 @@ def yed_params():
     return ym.Params.regtest(VAULT_ACTIVATION, attestor_set=ATTESTOR_SET[0])
 
 
+# Post-quantum owners the raw builders drew (quantum plan §4.3): the 33-byte owner id scheme || keyHash -> the
+# Python SLH-DSA secret key, so build_vault_spend_raw can sign the owner path (the node wallet cannot yet, Q5).
+PQ_OWNER_SECRETS = {}
+_PQ_OWNER_COUNTER = [0]
+
+
+def new_pq_owner(label=None):
+    """A fresh deterministic SLH-DSA owner (vault.pq_owner_secret): returns the 33-byte owner id, remembered in
+    PQ_OWNER_SECRETS with its secret."""
+    from . import vault as _v
+    if label is None:
+        _PQ_OWNER_COUNTER[0] += 1
+        label = 'yellowback-util-owner-%d-%d' % (os.getpid(), _PQ_OWNER_COUNTER[0])
+    sk = _v.pq_owner_secret(label)
+    owner = _v.pq_owner_of(sk)
+    PQ_OWNER_SECRETS[owner] = sk
+    return owner
+
+
+def vault_owner(vault):
+    """The 33-byte owner id of a ``yed_getvault`` row (rpcversion 7: ``ownerScheme`` + ``ownerHash``) or of a
+    ``vault_from_mint`` dict (``ownerPubKey``: the 33 bytes as hex)."""
+    if vault.get('ownerScheme') is not None:
+        return bytes([int(vault['ownerScheme'])]) + hex_str_to_bytes(vault['ownerHash'])
+    return hex_str_to_bytes(vault['ownerPubKey'])
+
+
 def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=None, owner_pubkey=None,
-                  fee_zat_override=None, term_class=None, expiry=None):
+                  fee_zat_override=None, term_class=None, expiry=None, token_script=None):
     """The raw MINT of section 3.5, funded from ``node``'s confirmed transparent coins and signed
     with ``signrawtransaction``.  Outputs: vault ``vout[0]`` (the YED V template, U-23,
     ``collateral_zat`` — from ``yed_estimatecollateral``), token ``vout[1]`` (P2PKH of the owner
@@ -1088,11 +1115,16 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
     lockHeight + GRACE``, the V's ``ownerHeight = appHeight = ref_height + 1`` (IT-1), ``nExpiryHeight = ref_height +
     REF_WINDOW`` unless ``expiry``.
     ``term_class`` follows from ``lock_blocks`` unless given (adversarial payloads).
+    Quantum line (spec §3.1, §3.6): ``owner_pubkey`` is the 33-byte post-quantum owner id (scheme || keyHash, hex;
+    default a fresh SLH-DSA owner from ``new_pq_owner``, whose secret build_vault_spend_raw signs with); the token
+    goes to ``token_script`` (default P2PKH of a fresh ``node`` address), no longer to the owner.
     Returns ``(hex, owner_pubkey_hex)``."""
     if owner_pubkey is None:
-        owner_pubkey = node_pubkey(node)
+        owner_pubkey = bytes_to_hex_str(new_pq_owner())
     owner = hex_str_to_bytes(owner_pubkey)
     assert_equal(len(owner), 33)
+    if token_script is None:
+        token_script = _spk_of_address(node.getnewaddress())
     if term_class is None:
         term_class = term_class_of(lock_blocks)
         assert term_class is not None, 'lock_blocks %d is outside every class (pass term_class= to build it anyway)' % lock_blocks
@@ -1103,7 +1135,7 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
     payload = ym.encode_mint(class_index, cents, lock_height, ref_height, owner, fee_vout)
     vout = [
         (collateral_zat, vault),
-        (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner))),
+        (TOKEN_VALUE, bytes(token_script)),
         (0, bytes([ym.OP_RETURN]) + ym.push(payload)),
     ]
     enforcement_fee = 0
@@ -1130,7 +1162,7 @@ def vault_from_mint(mint_hex, lock_blocks, ref_height, owner_pubkey):
     lock_height = ref_height + lock_blocks
     return {'txid': tx.txid, 'vout': 0, 'collateralZat': tx.vout[0].value, 'lockHeight': lock_height,
             'claimHeight': lock_height + GRACE, 'appHeight': ref_height + 1, 'ownerHeight': ref_height + 1, 'ownerPubKey': owner_pubkey,
-            'ownerAddress': pubkey_to_address(owner), 'refHeight': ref_height}
+            'ownerScheme': owner[0], 'ownerHash': bytes_to_hex_str(owner[1:]), 'refHeight': ref_height}
 
 
 def vault_app_height(vault):
@@ -1160,7 +1192,7 @@ def _outpoint(o):
 def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None, expiry=None,
                           to=None, ref_height=None, extra_outputs=None, owner_wif=None,
                           branch_id=SIGNING_BRANCH_ID, selector=None, carrier=None, carrier_wif=None,
-                          charge_extra=False, extra_vin=None, value_adjust=0):
+                          charge_extra=False, extra_vin=None, value_adjust=0, owner_sk=None):
     """A vault spend assembled here (section 3.4/3.5), the adversarial builder for every
     "without a burn" case (K18) and, with ``payload=encode_redeem(...)`` and ``fee=(addr, zat)``,
     the *correct* spends too.
@@ -1187,7 +1219,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     Alternatively ``extra_vin`` (``[(txid, n, sequence)]``) appends unsigned inputs after the
     burns and ``value_adjust`` is added to ``vout[0]`` verbatim.  Returns the hex."""
     assert path in ('owner', 'claim')
-    owner = hex_str_to_bytes(vault['ownerPubKey'])
+    owner = vault_owner(vault)
     owner_height, app_height = vault_owner_height(vault), vault_app_height(vault)
     collateral = int(vault['collateralZat'])
     params = yed_params()
@@ -1249,18 +1281,15 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     tx = CTransaction()
     tx.deserialize(BytesIO(raw))
     if path == 'owner':
-        from .key import CECKey
-        # yed_getvault's ownerAddress is the ye/yt/yr rendering (§3.1); the wallet knows the key by
-        # its P2PKH address, so derive that from the owner key rather than trust the field.
-        wif = owner_wif or node.dumpprivkey(pubkey_to_address(owner))
-        key = CECKey()
-        key.set_secretbytes(wif_to_secret(wif))
-        key.set_compressed(True)
-        assert_equal(key.get_pubkey(), owner)
-        sighash = SignatureHash(CScript(script), tx, 0, SIGHASH_ALL, collateral, branch_id)[0]
-        sig = _low_s(key.sign(sighash)) + bytes([SIGHASH_ALL])
+        # The owner is a post-quantum key (quantum plan §4.3): SLH-DSA, signed in Python (pq.pq_sign_input) with
+        # ``owner_sk`` or the secret new_pq_owner remembered; the scriptSig is the chunked pushes then OP_2.
+        from . import pq as _pq
+        sk = owner_sk if owner_sk is not None else PQ_OWNER_SECRETS.get(owner)
+        assert sk is not None, 'no SLH-DSA secret for the owner %s (pass owner_sk=)' % bytes_to_hex_str(owner)
+        assert_equal(owner[0], _pq.SCHEME_SLH_DSA_SHA2_128S)
+        pushes = _pq.pq_sign_input(tx, 0, script, collateral, branch_id, sk)
         sel = bytes([ym.OP_2]) if selector is None else selector
-        tx.vin[0].scriptSig = ym.push(sig) + sel
+        tx.vin[0].scriptSig = _pq.pq_scriptsig_from_pushes(pushes) + sel
     else:
         sel = bytes([ym.OP_4]) if selector is None else selector
         tx.vin[0].scriptSig = sel

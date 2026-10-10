@@ -10,7 +10,9 @@
 #include "util/system.h"
 #include "wallet/wallet.h"
 #include "main.h"
+#include "vault/template.h"
 #include "yellowback/payload.h"
+#include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/txbuilder.h"
 
@@ -425,13 +427,19 @@ void YellowbackWallet::CompletionLoop()
 
 bool YellowbackWallet::IsMineScript(const CScript& scriptPubKey) const
 {
+    // A post-quantum holder (TX_PQPKH, HolderKey): the wallet's PQ keystore decides (quantum plan §4.4).
+    const std::optional<CTxDestination> holder = HolderKey(scriptPubKey);
+    if (holder.has_value()) {
+        if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&holder.value())) return wallet->HavePQKey(*pq);
+    }
     return (::IsMine(*wallet, scriptPubKey) & ISMINE_SPENDABLE) != 0;
 }
 
 bool YellowbackWallet::IsMineVault(const VaultRecord& v) const
 {
-    const CPubKey owner = v.OwnerKey();
-    return owner.IsValid() && wallet->HaveKey(owner.GetID());
+    // The owner is a post-quantum key id (quantum spec §3.4): the wallet owns the vault iff it holds that PQ key.
+    const CPQKeyID owner = v.Owner();
+    return vault::IsOwnerValid(owner) && wallet->HavePQKey(owner);
 }
 
 std::vector<YedCoin> YellowbackWallet::AllCoins() const

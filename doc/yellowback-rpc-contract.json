@@ -432,7 +432,7 @@
       "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command. Also the storage boundary of yed_addattestation and yed_buildbundle (audit A-3): a storage exception under either marks the index unhealthy and the call fails with yellowback-unhealthy: storage failure in AddAttestation: … / … in BuildBundle: …"
     }
   },
-  "rpcversion": 6,
+  "rpcversion": 7,
   "source": {
     "plan": "docs/plans/yellowback-v2-development-plan.md",
     "planInTerm": "docs/plans/yellowback-in-term-claims-plan.md",
@@ -534,13 +534,14 @@
       "cents": 100000,
       "feeVout": 3,
       "lockHeight": 377,
-      "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "ownerScheme": 1,
       "reason": "",
       "refHeight": 329,
       "termClass": "A",
       "type": "mint",
       "valid": true,
-      "version": 3
+      "version": 4
     }
   },
   "yed_estimatecollateral": {
@@ -766,6 +767,7 @@
           "foundingWindow": 16,
           "kSlack": 1,
           "mSelect": 2,
+          "mintPayloadVersion": 4,
           "nSlots": 5,
           "payloadVersion": 3,
           "pinDeltaBps": 500,
@@ -813,6 +815,14 @@
           "preferredPayee": null,
           "tiltBps": 10000
         },
+        "pq": {
+          "falconActive": false,
+          "falconHeight": -1,
+          "feeRateZatPerKB": 100,
+          "schemes": [
+            1
+          ]
+        },
         "recapRatioBps": 50000,
         "refLag": 2,
         "refWindow": 40,
@@ -829,7 +839,7 @@
       },
       "protectedByIndex": true,
       "rebuilt": false,
-      "rpcversion": 6,
+      "rpcversion": 7,
       "startHeight": 103,
       "supplyCapReached": false,
       "unhealthyReason": "",
@@ -845,7 +855,7 @@
     }
   },
   "yed_getnewaddress": {
-    "args": "",
+    "args": "[type]",
     "returns": "yrExampleOwnerAddress111111111111111"
   },
   "yed_getnotice": {
@@ -1057,8 +1067,8 @@
       "noticeHeight": null,
       "noticed": false,
       "ownerAddress": "yrExampleOwnerAddress111111111111111",
-      "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
-      "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "ownerScheme": 1,
       "refHeight": 329,
       "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
       "status": "ACTIVE",
@@ -1168,8 +1178,8 @@
         "noticeHeight": null,
         "noticed": false,
         "ownerAddress": "yrExampleOwnerAddress111111111111111",
-        "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
-        "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "ownerScheme": 1,
         "refHeight": 329,
         "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
         "status": "ACTIVE",
@@ -1252,8 +1262,8 @@
         "noticeHeight": null,
         "noticed": false,
         "ownerAddress": "yrExampleOwnerAddress111111111111111",
-        "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
-        "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "ownerScheme": 1,
         "refHeight": 329,
         "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
         "status": "ACTIVE",
@@ -1291,6 +1301,7 @@
       "feeZat": 629722922,
       "fundedFrom": "transparent",
       "lockHeight": 377,
+      "ownerAddress": "yrExamplePQOwnerAddress11111111111111111111111111111",
       "pMint": 1985000,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
       "pending": false,
@@ -1426,7 +1437,8 @@
       "isvalid": true,
       "keyid": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
       "reason": "",
-      "transparentAddress": "smExampleTransparentTwin111111111111"
+      "transparentAddress": "smExampleTransparentTwin111111111111",
+      "type": "p2pkh"
     }
   },
   "yed_validaterawtransaction": {

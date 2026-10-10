@@ -147,18 +147,20 @@ void MempoolGate(YellowbackIndex& index, const CTransaction& tx)
 
 CScript ParseYedAddress(const std::string& s, const yellowback::Params& params)
 {
-    CKeyID id;
-    if (!DecodeAddress(s, params, id)) {
+    // Either form (quantum spec §4): a 35-character P2PKH ye… or a 53-character post-quantum ye… (TX_PQPKH).
+    CTxDestination dest;
+    if (!DecodeAddress(s, params, dest)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "not-a-yellowback-address: expected a Yellowback address of this network (prefix '" + EncodeAddress(CKeyID(), params).substr(0, 2) + "')");
     }
-    return GetScriptForDestination(id);
+    return GetScriptForDestination(dest);
 }
 
 std::string ScriptToYedAddress(const CScript& s, const yellowback::Params& params)
 {
-    CTxDestination dest;
-    if (!ExtractDestination(s, dest)) return "";
-    if (const CKeyID* id = std::get_if<CKeyID>(&dest)) return EncodeAddress(*id, params);
+    const std::optional<CTxDestination> dest = HolderKey(s);       // P2PKH or TX_PQPKH (quantum plan §4.4)
+    if (!dest.has_value()) return "";
+    if (const CKeyID* id = std::get_if<CKeyID>(&dest.value())) return EncodeAddress(*id, params);
+    if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest.value())) return EncodeAddress(*pq, params);
     return "";
 }
 
@@ -201,10 +203,12 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("txid", out.hash.GetHex());
     o.pushKV("vout", (int64_t)out.n);
     o.pushKV("status", VaultStatusName(v.Status()));
-    o.pushKV("ownerPubKey", HexStr(v.ownerPubKey.begin(), v.ownerPubKey.end()));
-    const CPubKey owner = v.OwnerKey();
-    o.pushKV("ownerKeyId", owner.IsValid() ? owner.GetID().GetHex() : "");
-    o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
+    // rpcversion 7 (quantum spec §6.2): the post-quantum owner as scheme and key hash (the bytes the V pushes);
+    // ownerPubKey and ownerKeyId are gone (no public key is on chain).
+    const CPQKeyID owner = v.Owner();
+    o.pushKV("ownerScheme", (int)owner.scheme);
+    o.pushKV("ownerHash", HexStr(owner.hash.begin(), owner.hash.end()));
+    o.pushKV("ownerAddress", EncodeAddress(owner, p));        // the PQ owner's address ("" when unregistered)
     o.pushKV("termClass", ClassName(v.termClass));
     o.pushKV("lockHeight", (int64_t)v.lockHeight);
     o.pushKV("claimHeight", (int64_t)v.claimHeight);
@@ -545,6 +549,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
     o.pushKV("vault", txid.GetHex() + ":0");
+    o.pushKV("ownerAddress", EncodeAddress(built.owner, yw.Index()->GetParams()));   // rpcversion 7: the fresh SLH-DSA owner (quantum spec §6.2)
     o.pushKV("termClass", ClassName((uint8_t)built.termClass));
     o.pushKV("lockHeight", (int64_t)built.lockHeight);
     o.pushKV("claimHeight", (int64_t)built.claimHeight);
@@ -715,16 +720,29 @@ UniValue yed_validateaddress(const UniValue& params, bool fHelp)
             "isvalid is false and reason is \"not-a-yellowback-address\".\n");
     YellowbackWallet& yw = EnsureYW();
     UniValue o(UniValue::VOBJ);
-    CKeyID id;
-    bool valid = DecodeAddress(params[0].get_str(), yw.Index()->GetParams(), id);
+    CTxDestination dest;
+    bool valid = DecodeAddress(params[0].get_str(), yw.Index()->GetParams(), dest);
     o.pushKV("isvalid", valid);
     if (valid) {
         LOCK(pwalletMain->cs_wallet);
         o.pushKV("address", params[0].get_str());
-        o.pushKV("keyid", id.GetHex());
-        o.pushKV("ismine", pwalletMain->HaveKey(id));
-        KeyIO keyIO(::Params());
-        o.pushKV("transparentAddress", keyIO.EncodeDestination(id));
+        if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
+            o.pushKV("type", "p2pkh");
+            o.pushKV("keyid", id->GetHex());
+            o.pushKV("ismine", pwalletMain->HaveKey(*id));
+            KeyIO keyIO(::Params());
+            o.pushKV("transparentAddress", keyIO.EncodeDestination(*id));
+        } else if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest)) {
+            // quantum spec §4: a 53-character PQ address; keyid is the pqkeyid (scheme || keyHash, 66 hex), and
+            // there is no transparent (s1…) form (D-Q-11 defers a plain-YEC PQ encoding).
+            std::vector<unsigned char> raw(1, pq->scheme);
+            raw.insert(raw.end(), pq->hash.begin(), pq->hash.end());
+            o.pushKV("type", "pq");
+            o.pushKV("keyid", HexStr(raw));
+            o.pushKV("pqscheme", (int)pq->scheme);
+            o.pushKV("ismine", pwalletMain->HavePQKey(*pq));
+            o.pushKV("transparentAddress", "");
+        }
     }
     o.pushKV("reason", valid ? "" : "not-a-yellowback-address");
     return o;
@@ -797,7 +815,8 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             "yed_mint cents lockBlocks ( \"from\" \"bundleHex\" wait maxCollateralZat )\n"
             "\nMint YED: locks the required YEC collateral in a vault for lockBlocks blocks (the term class follows) and creates the YED.\n"
             "The collateral requirement, the enforcement fee and its payee are fixed at the reference height (index tip minus the\n"
-            "mint lag) and known before signing. Back up wallet.dat afterwards: the vault owner key is a fresh keypool key.\n"
+            "mint lag) and known before signing. Back up wallet.dat afterwards: the vault owner is a fresh post-quantum (SLH-DSA)\n"
+            "wallet key (quantum plan §4.3), the YED goes to a fresh holder key (P2PKH; a Falcon key from the Falcon height).\n"
             "v3 (W7): two transactions — the carrier funding transaction first (carrierTxid; its redeem script commits to the\n"
             "attestation bundle), then the MINT after one confirmation, spending the carrier as its last input. Before commit the\n"
             "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule.\n"
@@ -818,7 +837,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             "carriers.dat until its window (REF_WINDOW blocks past refHeight) lapses and yed_sweepcarriers (also run at\n"
             "startup) reclaims it. Call yed_mint again after the restart; no YED was issued and no collateral was locked.\n"
             "At most half of -rpcthreads wait=true calls may wait at once (carrier-wait-busy otherwise).\n"
-            "\nResult: { \"txid\", \"vault\", \"termClass\", \"lockHeight\", \"claimHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\",\n"
+            "\nResult: { \"txid\", \"vault\", \"ownerAddress\", \"termClass\", \"lockHeight\", \"claimHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\",\n"
             "          \"warning\", \"carrierTxid\", \"pending\", \"refHeight\", \"xMint\", \"aMint\", \"pMint\", \"source\", \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -850,6 +869,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", "");
         o.pushKV("vault", "");
+        o.pushKV("ownerAddress", "");
         o.pushKV("termClass", "");
         o.pushKV("lockHeight", 0);
         o.pushKV("claimHeight", 0);
