@@ -67,7 +67,7 @@ from test_framework import vault as v    # noqa: E402
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', '..'))
 OUT = os.path.join(ROOT, 'src', 'test', 'data', 'vault_vectors.json')
 
-LABELS = ['admit', 'owner', 'member-0', 'member-1', 'member-2', 'member-3', 'member-4', 'outsider']
+LABELS = ['admit', 'ec-legacy', 'member-0', 'member-1', 'member-2', 'member-3', 'member-4', 'outsider']
 
 
 def _keys():
@@ -90,6 +90,19 @@ def _pq_owner():
     return seed, pk, sk, v.pq_owner_id(v.pq.SCHEME_SLH_DSA_SHA2_128S, pk)
 
 
+# The Falcon (FN-DSA-512) owner. Python has no Falcon signer (test_framework/pq.py verifies only), so its
+# public key and its one signature are recorded here, made by the node's library: pq::KeyGen(2, FALCON_SEED)
+# and pq::SignWithEntropy(2, sk, sighash, FALCON_ENTROPY) over the 'owner-falcon-selector-2' spend's sighash.
+# src/test/vault_vectors_tests.cpp recomputes both byte for byte (and prints them on a mismatch, which is how
+# to refresh them if that spend's transaction ever changes); build() checks them with pq.falcon_verify.
+FALCON_SEED = v.sha256(b'vault-vectors-falcon-owner') + v.sha256(b'vault-vectors-falcon-owner\x01')[:16]
+FALCON_ENTROPY = b''.join(v.sha256(b'vault-vectors-falcon-entropy-%d' % i) for i in range(3))[:88]
+FALCON_PK = bytes.fromhex(
+    '0953f1c292034d8b58c86212f5e9e3a9dd0ff5dd9262bb32d7a347d43815dc4f700e10670b204ab92c2e9b12988019da41c341c227f492d0b502c02f426a8d6705900739c88fb49670b5729a9a97517528346f2b6269d042404cdb3da5ba3689d660eb57780b7844cff90ddee3f6ee838942dec610de194f316daec721dd3c7ae967f8411ffb08d6d103ff59330244e7552e6f4c75647f7613898159d82b1a7b1b537626a2da4f6507bde94d63b008358d6ef9fb7782e2a54910010cafd107b5610736e2813adacbb426497c51da12f1661c4b6528e77422eac6ba3e71367fd5e26e19b1c316217e4bb0d798c52fdb7dd47091e82ba082d111a49c048636d1edd1cf804e128c03778f9615bc02d9390c4a610d9c2ee99968bba0c07db5ba0c484339b2c500cf2a2638b8001dc8b4858ecc23d6cf5f6ae928017e596c6dcd7f58d14e322eece711566d1309c01eb7a24b4101916f310dd5856972e421596cccaa6e67f0634b55428eb7f68f5a205292c326b5e576603c48ab63aa19bb7409dab097b60e55c5ba6cad4f9f306be0b74aae7ce419a1c56e21285a22eb2454f394886a938fd96735ce7597994c386732f5aadf0f541155a1a64321fd82a82ba6220f230e362c25855d105abdb191a7c376440ce8d7d02e0620c0bb14469087027aefb31395a80cc8ed887592a7bac5d349cea3867b487f22dc9f1d5dedbbd69e06ef227962741d2a898f5aab34c9da2d77d13db292c9345a122197031f7e18e6f902faad7f02c211e05063877f20f4d69aea644ea6fc03a8436e84cc9ce92ec8409539eedbd2822a65794757eccb3c339969f916c72c80048a63471524215876c1b09ef0419933a7619d3b273854681245283a985d9037127e89256dd60d9367b62264b7f0156b212075b7b8043d107484a3e494838b7e04c33c03be0208b12b4127b034cd26a336d9026c168674c7934c569ca0045601a67e6594935695ce320af420c5a9147bad1d503353ce0424be36ba6e17ad7407b101def929f999603899028924d4123f95e318aaa00b72903fb7e412432368356a887d367619c728cd1be4e9d8253a201655f899c7b68cb6d29960b1239d6aa15515802a7e0834d8eec0a4bc3bb256e81e62a18947e2d14053f2e10563d73727a88e44939093a84dbf911de42d95b211d10884c024a180e2bac4494b3c67c560dba0a688398b1dcfcfa0754f262fce4b3019aadbac90b99158c789c6280326503f55ecdc1c583457f85bd666')
+FALCON_SIG = bytes.fromhex(
+    '39483d45c94913cb62ab183868acfe76358b48890a02b8fd7a589924166f2699fdbf249c3a16deda2b27399238d4448d2bacc1aa894a6a6f953cd4451c1e577ff7ba8faeced9f2446353ea458290db7019273f0b6f894f68f197b7f68af53224c08316fdfd90dc4cddc8240a0b206d2c5845b54895de21262b17962179ce9f09d4a7e3c8247108ae5b368c89bd86b6c902c6ad1deaac691589bb3611549b6e8cc7e7a495c9e6cc12b73c57281e79ba2a7ad0f9491fc3a1fa5672833cb70c32b1924071e819104a27df32739270e314be7409ac7ce19098b286f3b42bb6dbf1fa55d31424afcd7db909fd7e13dabc92efe4aecb2159b110528513676b26ba8c55a32102ddfd6987ab1ec105c9888848fcfbc38a4bb30810b34db69846d2d8fbb4c8ea3427f6c469dd302a02bd7a4108d41700d7759158a70283eff3b2581d735663ac9d360bacb364ca2bd2922739f21b418b7959b5a086eb2addc20b33f6307e2756a1e790b22f434e697dd05482bb44aa52597ebe6520b4c4b6cbb863163d79a869d945b2cb90bb7b6251f1e166149fc51d28d8ee1beebd798ab769a60d8128ada9db3817d63ffa60b210c348693a9bb824f6b16e44168d031b4b844751eda23a8de1d96415a65e2d69450d8167edb6525109c42fed25fdb92b30cc246a6e916ed4e69603098dabd08556d1139db4473e34a0c31f18ef9bfc9dcef366a1e9b8cfac6c4a129b4918867debe127eecfda096e127419928a52526aaa80d2684f2b5338a3741d5d54f8657697a9065bf7c94273ef54179995c57ba5301e7227e15f7064ab8a41d8efb3059ebdf0e444e91f36ee43daf1a7b414c2b1d9f224b1255f80a0f939bc9a845ac05f308caebb5f739e52d27b94e73d67baef39daaf132b2b4c7ebb15bd91c7f7492e508fff10000000000000000000000000')
+
+
 def build():
     K = _keys()
     P = {lab: v.pubkey_of(s) for lab, s in K.items()}
@@ -107,7 +120,10 @@ def build():
         'keys': [{'label': lab, 'secret': _h(K[lab]), 'pubkey': _h(P[lab])} for lab in LABELS],
         'pqOwner': {'label': 'pq-owner', 'seed': _h(pq_seed), 'pk': _h(pq_pk),
                     'owner': {'scheme': OWNER[0], 'hash': _h(OWNER[1:])}},
+        'falconOwner': {'label': 'falcon-owner', 'seed': _h(FALCON_SEED), 'pk': _h(FALCON_PK),
+                        'owner': {'scheme': 2, 'hash': _h(v.pq.key_hash(2, FALCON_PK))}},
     }
+    FOWNER = v.pq_owner_id(v.pq.SCHEME_FN_DSA_512, FALCON_PK)
 
     # --- vaults
     def vp(**kw):
@@ -131,7 +147,7 @@ def build():
         ('app-enabled', vp(tag=b'YED\x00', set_id=set_a, cancel_set_id=set_a, app_height=1288)),
         ('app-height-max', vp(app_height=499999999)),
         ('tag-zero', vp(tag=bytes(4))),
-        ('owner-falcon-scheme-2', vp(owner=b'\x02' + OWNER[1:])),      # A-1: a template whatever the Falcon flag
+        ('owner-falcon-scheme-2', vp(owner=FOWNER)),      # A-1: a template whatever the Falcon flag
     ]
     doc['vaults'] = [{'name': n, 'params': p.to_json(), 'script': _h(v.vault_script(p))} for n, p in vault_cases]
 
@@ -158,7 +174,7 @@ def build():
          + good[good.rfind(bytes([v.OP_1, v.OP_CHECKPQSIG])) + 2:], 'owner copies'),
         ('owner-hashes-differ', good[:good.rfind(OWNER[1:])] + bytes(32) + good[good.rfind(OWNER[1:]) + 32:],
          'owner copies'),
-        ('owner-ec-key-checksig', good.replace(v.owner_slot(OWNER), v.push(P['owner']) + bytes([v.OP_CHECKSIG])),
+        ('owner-ec-key-checksig', good.replace(v.owner_slot(OWNER), v.push(P['ec-legacy']) + bytes([v.OP_CHECKSIG])),
          'the secp256k1 owner shape is not a template'),
         ('setid-copies-differ', good[:k_set] + set_b + good[k_set + 32:], 'shape'),
         ('pushdata1-for-32-bytes', good[:5] + bytes([v.OP_PUSHDATA1]) + good[5:], 'non-minimal push'),
@@ -174,7 +190,8 @@ def build():
     # --- intents
     recipient = v.p2pkh_script_of_pubkey(P['member-4'])
     intents = []
-    for n, p in [('bridge-default', vp()), ('delay-1', vp(delay=1)), ('app-enabled', vault_cases[8][1])]:
+    for n, p in [('bridge-default', vp()), ('delay-1', vp(delay=1)), ('app-enabled', vault_cases[8][1]),
+                 ('owner-falcon-scheme-2', vp(owner=FOWNER))]:
         ip = v.intent_for(p, recipient)
         intents.append({'name': n, 'params': ip.to_json(), 'script': _h(v.intent_script(ip)),
                         'recipientScript': _h(recipient), 'vaultScript': _h(v.vault_script(p))})
@@ -191,8 +208,16 @@ def build():
         ('role-1-in-cancel-branch', igood.replace(bytes([v.OP_2, v.OP_CHECKSETSIG]), bytes([v.OP_1, v.OP_CHECKSETSIG])),
          'shape'),
         ('owner-scheme-3', igood.replace(bytes([v.OP_1, v.OP_CHECKPQSIG]), bytes([v.OP_3, v.OP_CHECKPQSIG])), 'owner scheme'),
-        ('owner-ec-key-checksig', igood.replace(v.owner_slot(OWNER), v.push(P['owner']) + bytes([v.OP_CHECKSIG])),
+        ('owner-ec-key-checksig', igood.replace(v.owner_slot(OWNER), v.push(P['ec-legacy']) + bytes([v.OP_CHECKSIG])),
          'the secp256k1 owner shape is not a template'),
+        ('owner-scheme-as-data-push', igood.replace(bytes([v.OP_1, v.OP_CHECKPQSIG]), bytes([1, 1, v.OP_CHECKPQSIG])),
+         'non-minimal number'),
+        ('owner-scheme-0', igood.replace(bytes([v.OP_1, v.OP_CHECKPQSIG]), bytes([v.OP_0, v.OP_CHECKPQSIG])),
+         'owner scheme'),
+        ('owner-hash-31-bytes', igood.replace(v.owner_slot(OWNER), v.push(OWNER[1:32]) + bytes([v.OP_1, v.OP_CHECKPQSIG])),
+         'owner hash size'),
+        ('owner-hash-33-bytes', igood.replace(v.owner_slot(OWNER), v.push(OWNER[1:] + b'\x00') + bytes([v.OP_1, v.OP_CHECKPQSIG])),
+         'owner hash size'),
     ]
     for n, s, _r in ibad:
         assert v.parse_intent(s) is None, n
@@ -410,11 +435,41 @@ def build():
                                  lock_time=1000)
     sh = v.template_sighash(otx, 0, o_spk, value)
     assert v.parse_selector(otx.vin[0].scriptSig, 'V')[0] == v.SEL_OWNER
-    owner_spends.append({'name': 'owner-selector-2', 'tx': v.tx_hex(otx), 'nIn': 0, 'scriptCode': _h(o_spk),
-                         'amount': value, 'branchId': v.VAULT_BRANCH_ID, 'sighash': _h(sh), 'selector': v.SEL_OWNER,
-                         'scriptSig': _h(otx.vin[0].scriptSig)})
+    owner_spends.append(_owner_spend('owner-selector-2', 'V', otx, o_spk, value, v.SEL_OWNER, 'script'))
+    # OWNER-RELEASED (selector 3) on V and on I: OP_CHECKSETDORMANT reads the set state, so the C++ replay
+    # checks the template, the sighash and the signature itself (pq::Verify), not the whole script.
+    otx3 = v.build_owner_spend_tx((_txid('owner-released-vault-utxo'), 0), o_spk, value, pq_sk, recipient,
+                                  v.SEL_OWNER_RELEASED)
+    owner_spends.append(_owner_spend('owner-released-selector-3-vault', 'V', otx3, o_spk, value, v.SEL_OWNER_RELEASED,
+                                     'signature'))
+    i_o = v.intent_script(v.intent_for(vp_o, recipient))
+    itx3 = v.build_owner_spend_tx((_txid('owner-released-intent-utxo'), 1), i_o, 20 * v.COIN, pq_sk, recipient,
+                                  v.SEL_OWNER_RELEASED)
+    owner_spends.append(_owner_spend('owner-released-selector-3-intent', 'I', itx3, i_o, 20 * v.COIN,
+                                     v.SEL_OWNER_RELEASED, 'signature'))
+    # The Falcon owner (selector 2), signed by the node's library (FALCON_SIG above); valid only with
+    # SCRIPT_VERIFY_PQ_FALCON.
+    vp_f = vp(delay=10, owner_height=1000, owner=FOWNER)
+    f_spk = v.vault_script(vp_f)
+    ftx = v.make_tx([(_txid('owner-falcon-vault-utxo'), 0, v.SEQUENCE_FINAL - 1)], [(value - v.VAULT_FEE, recipient)], 1000)
+    fsh = v.template_sighash(ftx, 0, f_spk, value)
+    assert v.pq.falcon_verify(FALCON_PK, fsh, FALCON_SIG), \
+        'FALCON_SIG does not verify over %s: refresh it (vault_vectors_tests prints the signature)' % fsh.hex()
+    ftx.vin[0].scriptSig = v.vault_owner_scriptsig(
+        v.pq.pq_scriptsig_pushes(FALCON_PK, FALCON_SIG + bytes([v.SIGHASH_ALL])))
+    fe = _owner_spend('owner-falcon-selector-2', 'V', ftx, f_spk, value, v.SEL_OWNER, 'script')
+    fe['falconEntropy'] = _h(FALCON_ENTROPY)
+    owner_spends.append(fe)
     doc['ownerSpends'] = owner_spends
     return doc
+
+
+def _owner_spend(name, kind, tx, spk, amount, selector, verify):
+    sh = v.template_sighash(tx, 0, spk, amount)
+    assert v.parse_selector(tx.vin[0].scriptSig, kind)[0] == selector
+    return {'name': name, 'kind': kind, 'tx': v.tx_hex(tx), 'nIn': 0, 'scriptCode': _h(spk), 'amount': amount,
+            'branchId': v.VAULT_BRANCH_ID, 'sighash': _h(sh), 'selector': selector, 'verify': verify,
+            'scriptSig': _h(tx.vin[0].scriptSig)}
 
 
 def _spend(name, tx, n_in, spk, amount, set_id, role, signers, K, P):

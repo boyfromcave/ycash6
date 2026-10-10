@@ -29,8 +29,9 @@ from fixed private keys, and replayed against the C++ by `src/test/vault_vectors
 |---|---|---|
 | `branchId` | `0x6d5b7a31` as an int | constant |
 | `opcodes` | `CHECKSEQUENCEVERIFY` 0xb2, `CHECKSETSIG` 0xc0, `CHECKSETDORMANT` 0xc1 | constants |
-| `keys[]` | `label, secret, pubkey` | (reference) |
-| `pqOwner` | `label, seed (48), pk (32), owner{scheme, hash}` | the SLH-DSA-SHA2-128s owner of every V and I (quantum plan §4.3) |
+| `keys[]` | `label, secret, pubkey` | (reference; secp256k1 set, member and bond keys; `ec-legacy` only builds the rejected former owner shape) |
+| `pqOwner` | `label, seed (48), pk (32), owner{scheme, hash}` | the SLH-DSA-SHA2-128s owner of every V and I (quantum plan §4.3) but the scheme-2 cases |
+| `falconOwner` | `label, seed (48), pk (897), owner{scheme 2, hash}` | the FN-DSA-512 owner (`owner-falcon-scheme-2`, the Falcon owner spend); `pq::KeyGen(2, seed)` reproduces `pk` |
 | `vaults[]` | `name, params{tag, setId, cancelSetId, delay, ownerHeight, appHeight, owner{scheme, hash}}, script` | `BuildVault(params) == script`, `ParseVault(script) == params` |
 | `vaultsInvalid[]` | `name, script, reason` | `ParseVault` fails |
 | `intents[]` | `name, params{tag, recipientHash, vaultHash, delay, cancelSetId, setId, owner{scheme, hash}}, script, recipientScript, vaultScript` | `BuildIntent`, `ParseIntent`, `IntentFor(vault, recipient)` |
@@ -45,7 +46,7 @@ from fixed private keys, and replayed against the C++ by `src/test/vault_vectors
 | `signatures[]` | `label, secret, pubkey, msg, sig, lowSFlipped` | `CKey::SignCompact(msg) == sig` (libsecp256k1's RFC 6979 nonce), `RecoverSig` → `pubkey`; both low-S branches covered |
 | `signaturesInvalid[]` | `name, msg, sig, reason, nonStrictRecovers` | strict `RecoverSig` fails; `CPubKey::RecoverCompact` gives `nonStrictRecovers` where not null |
 | `spends[]` | `name, tx, nIn, scriptCode, amount, branchId, sighash, setId, role, setSigMsg, signers, sigs, scriptSig` | `SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branchId) == sighash`, `SetSigMsg`, the scriptSig's sigs recover |
-| `ownerSpends[]` | `name, tx, nIn, scriptCode, amount, branchId, sighash, selector, scriptSig` | the `pqOwner`'s SLH-DSA OWNER spend (selector 2, signed by `test_framework/pq.py`) passes `VerifyScript` under the vault flags |
+| `ownerSpends[]` | `name, kind (V/I), tx, nIn, scriptCode, amount, branchId, sighash, selector, verify, scriptSig, falconEntropy?` | the owner's chunked pushes hash to the template's owner and verify (`pq::Verify`) over the sighash; `verify` = `script`: the whole spend passes `VerifyScript` under the vault flags (with `SCRIPT_VERIFY_PQ_FALCON` for scheme 2, `SCRIPT_ERR_PQ_SCHEME` without); `signature`: OWNER-RELEASED (selector 3, V and I), whose `OP_CHECKSETDORMANT` needs set state. SLH-DSA spends are signed by `test_framework/pq.py`; the Falcon spend by `pq::SignWithEntropy(2, sk, sighash, falconEntropy)`, which the C++ replay reproduces byte for byte |
 
 The V/I owner (docs/plans/yellowback-quantum-spec.md §1) is `owner{scheme, hash}`: the slot is
 `20 <hash> 51|52 c2` (`<ownerHash:32> OP_1|OP_2 OP_CHECKPQSIG`, 35 bytes, twice in V, once in I);
