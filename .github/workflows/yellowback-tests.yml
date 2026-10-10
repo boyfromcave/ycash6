@@ -1024,6 +1024,14 @@ jobs:
           python3 -m pyflakes qa/rpc-tests/test_framework/vault.py qa/rpc-tests/test_framework/test_vault.py qa/rpc-tests/test_framework/gen_vault_vectors.py qa/rpc-tests/test_framework/vault_harness.py qa/rpc-tests/vault_primitive.py qa/rpc-tests/vault_slashing.py qa/rpc-tests/vault_bridge.py
           python3 qa/rpc-tests/test_framework/gen_vault_vectors.py --check
           cd qa/rpc-tests && python3 -m unittest test_framework.test_vault -v
+      - name: PQ framework unit tests (quantum plan §4.7; NIST ACVP SLH-DSA + PQClean falcon-padded-512 subset)
+        # test_framework/pq.py is the pure-Python SLH-DSA-SHA2-128s signer/verifier and Falcon padded-512
+        # verifier; test_pq.py also replays src/test/data/pq_vectors.json once the library ships it.
+        if: ${{ !cancelled() }}
+        run: |
+          if [ ! -f qa/rpc-tests/test_framework/test_pq.py ]; then echo "no PQ framework on this line"; exit 0; fi
+          python3 -m pyflakes qa/rpc-tests/test_framework/pq.py qa/rpc-tests/test_framework/test_pq.py
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_pq -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
