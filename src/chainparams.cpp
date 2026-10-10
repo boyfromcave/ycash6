@@ -839,6 +839,10 @@ public:
         nChainSupplyCheckpointOrchardValue = 0;
         hashChainSupplyCheckpointBlock.SetNull();
     }
+
+    void SetRegTestPqFalconHeight(int height) {
+        consensus.pqFalconHeight = height;
+    }
 };
 static CRegTestParams regTestParams;
 
@@ -889,6 +893,13 @@ void SelectParams(const std::string& network)
     // Enable ZIP 209 enforcement without zeroing shielded pool balances.
     if (network == CBaseChainParams::REGTEST && mapArgs.count("-regtestenablezip209")) {
         regTestParams.SetRegTestZIP209Enabled();
+    }
+
+    // OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) on regtest only (quantum plan §4.8, spec R-A2):
+    // -pqfalconheight=<h>, or -pqfalcon=1 for height 0; init.cpp refuses both on other networks.
+    if (network == CBaseChainParams::REGTEST) {
+        int height = GetBoolArg("-pqfalcon", false) ? 0 : Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        regTestParams.SetRegTestPqFalconHeight(GetArg("-pqfalconheight", height));
     }
 }
 

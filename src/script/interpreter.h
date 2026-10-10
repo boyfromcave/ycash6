@@ -103,7 +103,7 @@ enum
     SCRIPT_VERIFY_VAULT = (1U << 11),
 
     // Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512). Set only beside SCRIPT_VERIFY_VAULT and only
-    // where the network's pqFalconActive is true (docs/plans/yellowback-quantum-plan.md §4.1, §4.8);
+    // from the network's pqFalconHeight (IsPQFalconActive) (docs/plans/yellowback-quantum-plan.md §4.1, §4.8);
     // without it scheme 0x02 is SCRIPT_ERR_PQ_SCHEME.
     SCRIPT_VERIFY_PQ_FALCON = (1U << 12),
 };

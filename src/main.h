@@ -516,8 +516,15 @@ bool CheckFinalTx(const CTransaction &tx, int flags = -1);
 /**
  * The script verification flags UPGRADE_VAULT adds for a block at nHeight
  * (SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT, plan §15.1), or 0 before it.
+ * From params.pqFalconHeight (IsPQFalconActive) it adds SCRIPT_VERIFY_PQ_FALCON too (quantum plan §4.8).
  */
 unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params);
+
+/**
+ * OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) is admitted at nHeight: UPGRADE_VAULT is active and
+ * nHeight >= params.pqFalconHeight (quantum spec R-A2). The one test for Falcon activation.
+ */
+bool IsPQFalconActive(const Consensus::Params& params, int nHeight);
 
 /**
  * BIP68 relative lock-time, height-based only (UPGRADE_VAULT, plan §15.2). Consensus

@@ -834,10 +834,19 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
 
+bool IsPQFalconActive(const Consensus::Params& params, int nHeight)
+{
+    return params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) &&
+           params.pqFalconHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+           nHeight >= params.pqFalconHeight;
+}
+
 unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params)
 {
     if (!params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT))
         return 0;
+    if (IsPQFalconActive(params, nHeight))
+        return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
     return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
 }
 

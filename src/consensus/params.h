@@ -215,6 +215,15 @@ struct Params {
 
     bool fCoinbaseMustBeShielded = false;
 
+    /**
+     * The height from which OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) is admitted, with UPGRADE_VAULT
+     * active (IsPQFalconActive; GetVaultScriptFlags adds SCRIPT_VERIFY_PQ_FALCON). NO_ACTIVATION_HEIGHT
+     * on mainnet and testnet until FIPS 206 is final (docs/plans/yellowback-quantum-plan.md D-Q-2,
+     * §4.8; quantum spec R-A2: a height, so every node switches at the same block and a reindex
+     * applies the rule only from it). Regtest: -pqfalconheight=<h>, or -pqfalcon=1 for height 0.
+     */
+    int pqFalconHeight = NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+
     /** Needs to evenly divide MAX_SUBSIDY to avoid rounding errors. */
     int nSubsidySlowStartInterval;
     /**
