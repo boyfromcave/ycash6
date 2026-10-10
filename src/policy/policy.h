@@ -18,6 +18,8 @@
 class CChainParams;
 class CCoinsViewCache;
 class CTransaction;
+class CFeeRate;
+class CTxOut;
 namespace Consensus { struct Params; }
 
 // Ycash per-Sapling-output mempool fee floor (anti-spam policy, see policy.cpp).
@@ -122,6 +124,14 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType);
  * nullopt for any other script.
  */
 std::optional<uint8_t> PQScriptScheme(const CScript& scriptPubKey, txnouttype whichType);
+
+/** The serialized size of the input that spends a TX_PQPKH output of `scheme` (outpoint, sequence and
+ *  the chunked scriptSig: SLH-DSA 7,938 + 43 bytes, Falcon 1,577 + 43); 0 for an unknown scheme. */
+size_t PQSpendInputSize(uint8_t scheme);
+
+/** The dust threshold of a TX_PQPKH output, priced with its real spend size (review A F8); any other
+ *  output's CTxOut::GetDustThreshold. */
+CAmount GetPQDustThreshold(const CTxOut& txout, const CFeeRate& minRelayTxFee);
     /**
      * Check for standard transaction types
      * @return True if all outputs (scriptPubKeys) use only standard transaction forms

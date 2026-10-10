@@ -372,4 +372,44 @@ BOOST_AUTO_TEST_CASE(pq_scriptsig_limits)
     BOOST_CHECK(!AreInputsStandard(spend(pSh, shSig, 12), view, branch));
 }
 
+BOOST_AUTO_TEST_CASE(pqpkh_dust_uses_the_real_spend_size)
+{
+    // Review A F8: a TX_PQPKH output's dust threshold prices the input that spends it (SLH-DSA 7,938
+    // bytes of scriptSig, Falcon 1,577, plus outpoint, sequence and a 3-byte length), not 148 bytes.
+    RegtestVault rv;
+    BOOST_CHECK_EQUAL(PQSpendInputSize(pq::SCHEME_SLH_DSA_SHA2_128S), 40U + 3U + 7938U);
+    BOOST_CHECK_EQUAL(PQSpendInputSize(pq::SCHEME_FN_DSA_512), 40U + 3U + 1577U);
+    BOOST_CHECK_EQUAL(PQSpendInputSize(3), 0U);
+    // the size agrees with a real chunked scriptSig's serialization in a CTxIn
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        CTxIn in(COutPoint(uint256S("0x01"), 0), PQArgs(scheme));
+        BOOST_CHECK_EQUAL(GetSerializeSize(in, SER_NETWORK, PROTOCOL_VERSION), PQSpendInputSize(scheme));
+    }
+    // 6.20.0: the dust rate is the fixed ONE_THIRD_DUST_THRESHOLD_RATE (CTxOut::GetDustThreshold()).
+    const CFeeRate rate(ONE_THIRD_DUST_THRESHOLD_RATE);
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        CTxOut out(0, GetScriptForDestination(CPQKeyID(scheme, uint256S("0x0a"))));
+        const CAmount want = 3 * rate.GetFee(GetSerializeSize(out, SER_DISK, 0) + PQSpendInputSize(scheme));
+        BOOST_CHECK_EQUAL(GetPQDustThreshold(out, rate), want);
+        BOOST_CHECK(GetPQDustThreshold(out, rate) > out.GetDustThreshold());
+    }
+    // other outputs keep CTxOut::GetDustThreshold
+    CTxOut p2pkh(0, GetScriptForDestination(Key(9).GetID()));
+    BOOST_CHECK_EQUAL(GetPQDustThreshold(p2pkh, rate), p2pkh.GetDustThreshold());
+
+    // IsStandardTx at the dust rate: one zat below the PQ threshold is dust, the threshold is not
+    std::string reason;
+    CTxOut slh(0, GetScriptForDestination(CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256S("0x0b"))));
+    const CAmount t = GetPQDustThreshold(slh, rate);
+    BOOST_REQUIRE(t > slh.GetDustThreshold());
+    CMutableTransaction m = Tx(10);
+    slh.nValue = t - 1;
+    m.vout.push_back(slh);
+    BOOST_CHECK(!IsStandardTx(CTransaction(m), reason, Params(), 10));
+    BOOST_CHECK_EQUAL(reason, "dust");
+    m.vout[0].nValue = t;
+    reason.clear();
+    BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(m), reason, Params(), 10), reason);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
