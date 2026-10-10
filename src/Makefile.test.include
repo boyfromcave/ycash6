@@ -99,6 +99,7 @@ BITCOIN_TESTS =\
   test/pmt_tests.cpp \
   test/pow_tests.cpp \
   test/pq_script_tests.cpp \
+  test/pq_standard_tests.cpp \
   test/prevector_tests.cpp \
   test/raii_event_tests.cpp \
   test/random_tests.cpp \

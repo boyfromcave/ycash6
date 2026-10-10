@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "serialize.h"
 #include "uint256.h"
 
 static const unsigned int MAX_SCRIPT_ELEMENT_SIZE = 520; // bytes
@@ -662,6 +663,35 @@ public:
     explicit CScriptID(const CScript& in);
     CScriptID(const uint160& in) : uint160(in) {}
     explicit CScriptID(const std::vector<unsigned char>& vch) : uint160(vch) {}
+};
+
+/**
+ * A post-quantum key's id, the TX_PQPKH destination (docs/plans/yellowback-quantum-spec.md §2):
+ * the scheme byte (crypto/pq/scheme.h) and keyHash = SHA256(scheme || pk). Also the owner of a
+ * vault V / intent I. Ordered by scheme, then hash.
+ */
+struct CPQKeyID
+{
+    uint8_t scheme = 0;
+    uint256 hash;
+
+    CPQKeyID() {}
+    CPQKeyID(uint8_t schemeIn, const uint256& hashIn) : scheme(schemeIn), hash(hashIn) {}
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(scheme);
+        READWRITE(hash);
+    }
+
+    friend bool operator==(const CPQKeyID& a, const CPQKeyID& b) { return a.scheme == b.scheme && a.hash == b.hash; }
+    friend bool operator!=(const CPQKeyID& a, const CPQKeyID& b) { return !(a == b); }
+    friend bool operator<(const CPQKeyID& a, const CPQKeyID& b)
+    {
+        return a.scheme < b.scheme || (a.scheme == b.scheme && a.hash < b.hash);
+    }
 };
 
 class CReserveScript

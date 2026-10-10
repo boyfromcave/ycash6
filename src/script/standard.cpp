@@ -35,6 +35,7 @@ const char* GetTxnOutputType(txnouttype t)
     case TX_NULL_DATA: return "nulldata";
     case TX_VAULT: return "vault";
     case TX_VAULT_INTENT: return "vaultintent";
+    case TX_PQPKH: return "pqpubkeyhash";
     }
     return NULL;
 }
@@ -56,6 +57,17 @@ static bool MatchPayToPubkeyHash(const CScript& script, valtype& pubkeyhash)
 {
     if (script.size() == 25 && script[0] == OP_DUP && script[1] == OP_HASH160 && script[2] == 20 && script[23] == OP_EQUALVERIFY && script[24] == OP_CHECKSIG) {
         pubkeyhash = valtype(script.begin () + 3, script.begin() + 23);
+        return true;
+    }
+    return false;
+}
+
+/** TX_PQPKH (quantum spec §2.1): exactly 0x20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG, 35 bytes. */
+static bool MatchPayToPQKeyHash(const CScript& script, uint8_t& scheme, valtype& keyhash)
+{
+    if (script.size() == 35 && script[0] == 32 && (script[33] == OP_1 || script[33] == OP_2) && script[34] == OP_CHECKPQSIG) {
+        scheme = (uint8_t)CScript::DecodeOP_N((opcodetype)script[33]);
+        keyhash = valtype(script.begin() + 1, script.begin() + 33);
         return true;
     }
     return false;
@@ -132,6 +144,14 @@ bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::v
         return true;
     }
 
+    uint8_t pqScheme;
+    if (MatchPayToPQKeyHash(scriptPubKey, pqScheme, data)) {
+        typeRet = TX_PQPKH;
+        vSolutionsRet.push_back({pqScheme});
+        vSolutionsRet.push_back(std::move(data));
+        return true;
+    }
+
     // The vault primitive's templates (plan §15.3): exact shapes only, no solutions.
     {
         vault::VaultParams vp;
@@ -159,6 +179,7 @@ int ScriptSigArgsExpected(txnouttype t, const std::vector<std::vector<unsigned c
     case TX_NULL_DATA:
     case TX_VAULT:        // variable: checked by the vault rules (S-1), see AreInputsStandard
     case TX_VAULT_INTENT:
+    case TX_PQPKH:        // variable (s + p + 2 pushes per scheme): checked in AreInputsStandard
         return -1;
     case TX_PUBKEY:
         return 1;
@@ -198,6 +219,11 @@ bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet)
     else if (whichType == TX_SCRIPTHASH)
     {
         addressRet = CScriptID(uint160(vSolutions[0]));
+        return true;
+    }
+    else if (whichType == TX_PQPKH)
+    {
+        addressRet = CPQKeyID(vSolutions[0][0], uint256(vSolutions[1]));
         return true;
     }
     // Multisig txns have more than one address...
@@ -269,6 +295,11 @@ public:
         *script << OP_HASH160 << ToByteVector(scriptID) << OP_EQUAL;
         return true;
     }
+
+    bool operator()(const CPQKeyID &id) const {
+        *script = GetScriptForPQKey(id);
+        return !script->empty();
+    }
 };
 }
 
@@ -283,6 +314,12 @@ CScript GetScriptForDestination(const CTxDestination& dest)
 CScript GetScriptForRawPubKey(const CPubKey& pubKey)
 {
     return CScript() << std::vector<unsigned char>(pubKey.begin(), pubKey.end()) << OP_CHECKSIG;
+}
+
+CScript GetScriptForPQKey(const CPQKeyID& id)
+{
+    if (id.scheme < 1 || id.scheme > 16) return CScript();
+    return CScript() << ToByteVector(id.hash) << CScript::EncodeOP_N(id.scheme) << OP_CHECKPQSIG;
 }
 
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys)
@@ -306,6 +343,10 @@ bool IsKeyDestination(const CTxDestination& dest) {
 
 bool IsScriptDestination(const CTxDestination& dest) {
     return std::holds_alternative<CScriptID>(dest);
+}
+
+bool IsPQKeyDestination(const CTxDestination& dest) {
+    return std::holds_alternative<CPQKeyID>(dest);
 }
 
 // insightexplorer

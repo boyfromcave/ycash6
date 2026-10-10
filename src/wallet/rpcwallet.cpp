@@ -630,6 +630,10 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
         [&](const CNoDestination& addr) -> std::optional<PaymentAddressSource> {
             return std::nullopt;
         },
+        // Post-quantum keys are not in the transparent address book (quantum spec A-15): listaddresses omits them.
+        [&](const CPQKeyID&) -> std::optional<PaymentAddressSource> {
+            return std::nullopt;
+        },
     };
 
     // Get the CTxDestination values for all the entries in the transparent address book.

@@ -43,6 +43,10 @@ public:
         return EncodeBase58Check(data);
     }
 
+    // No plain-YEC encoding for a PQ key (quantum spec §2.4, D-Q-11); YED owner and holder
+    // addresses are yellowback::EncodeAddress.
+    std::string operator()(const CPQKeyID& id) const { return {}; }
+
     std::string operator()(const CNoDestination& no) const { return {}; }
 };
 
@@ -525,6 +529,11 @@ std::optional<libzcash::PaymentAddress> KeyIO::DecodePaymentAddress(const std::s
         [](const CNoDestination& d) {
             std::optional<libzcash::PaymentAddress> result = std::nullopt;
             return result;
+        },
+        [](const CPQKeyID&) {
+            // A post-quantum key is no PaymentAddress (quantum spec A-15; DecodeDestination never yields one).
+            std::optional<libzcash::PaymentAddress> result = std::nullopt;
+            return result;
         }
     });
 }
@@ -560,6 +569,11 @@ std::optional<libzcash::PaymentAddress> KeyIO::DecodeLegacyPaymentAddress(const 
             return scriptId;
         },
         [](const CNoDestination&) {
+            std::optional<libzcash::PaymentAddress> result = std::nullopt;
+            return result;
+        },
+        [](const CPQKeyID&) {
+            // A post-quantum key is no PaymentAddress (quantum spec A-15).
             std::optional<libzcash::PaymentAddress> result = std::nullopt;
             return result;
         }

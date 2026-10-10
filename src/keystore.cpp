@@ -21,6 +21,8 @@ std::optional<AddressUFVKMetadata> CKeyStore::GetUFVKMetadataForAddress(
     auto self = this;
     return examine(address, match {
             [](const CNoDestination&) -> std::optional<AddressUFVKMetadata> { return std::nullopt; },
+            // A post-quantum key is no unified-address receiver (quantum spec A-15).
+            [](const CPQKeyID&) -> std::optional<AddressUFVKMetadata> { return std::nullopt; },
             [&](const auto& addr) { return self->GetUFVKMetadataForReceiver(addr); }
     });
 }

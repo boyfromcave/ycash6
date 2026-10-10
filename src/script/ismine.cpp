@@ -66,6 +66,7 @@ isminetype IsMineInner(const CKeyStore& keystore, const CScript& scriptPubKey, I
     case TX_NULL_DATA:
     case TX_VAULT:        // vault templates are spent through the vault_* / set_* RPCs
     case TX_VAULT_INTENT:
+    case TX_PQPKH:        // PQ keys join the keystore in the wallet phase (quantum plan Q5)
         break;
     case TX_PUBKEY:
         keyID = CPubKey(vSolutions[0]).GetID();

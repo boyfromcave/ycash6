@@ -6,6 +6,7 @@
 #define YCASH_YELLOWBACK_ADDRESS_H
 
 #include "pubkey.h"
+#include "script/standard.h"
 #include "yellowback/params.h"
 
 #include <string>
@@ -28,6 +29,19 @@ std::string EncodeAddress(const CKeyID& keyID, const Params& params);
 bool DecodeAddress(const std::string& str, const Params& params, CKeyID& keyID);
 
 bool IsValidAddress(const std::string& str, const Params& params);
+
+/**
+ * PQ keys (quantum spec §4): Base58Check(pqAddressVersion || scheme || 32-byte keyHash), versions
+ * 0x56BF / 0x571E / 0x5710, also "ye…"/"yt…"/"yr…" but 53 characters long. Empty for a scheme
+ * outside the registry (crypto/pq/scheme.h).
+ */
+std::string EncodeAddress(const CPQKeyID& id, const Params& params);
+
+/** False unless the string is a PQ Yellowback address of this network with a registered scheme. */
+bool DecodeAddress(const std::string& str, const Params& params, CPQKeyID& id);
+
+/** Either form: a CKeyID (35-character) or a CPQKeyID (53-character) address; false otherwise. */
+bool DecodeAddress(const std::string& str, const Params& params, CTxDestination& dest);
 
 } // namespace yellowback
 

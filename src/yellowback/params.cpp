@@ -136,6 +136,7 @@ const Params& MainParams()
         m.network = "main";
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
+        m.pqAddressVersion = { 0x56, 0xBF }; // renders "ye…", 53 characters (quantum spec §4)
         // U-22: startHeight is the UPGRADE_VAULT activation height and attestorSetId the network's
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
@@ -152,6 +153,7 @@ const Params& TestParams()
         t.network = "test";
         SetCommon(t);
         t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
+        t.pqAddressVersion = { 0x57, 0x1E }; // renders "yt…", 53 characters (quantum spec §4)
         // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
         t.startHeight = 0;
         return t;
@@ -185,6 +187,7 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.network = "regtest";
     SetCommon(r);
     r.addressVersion = { 0x20, 0x02 };       // renders "yr…" (D10)
+    r.pqAddressVersion = { 0x57, 0x10 };     // renders "yr…", 53 characters (quantum spec §4)
     r.pFastWindow = 8;  r.pFastMinFill = 4;
     r.pMidWindow  = 24; r.pMidMinFill  = 16;
     r.pSlowWindow = 64; r.pSlowMinFill = 43;

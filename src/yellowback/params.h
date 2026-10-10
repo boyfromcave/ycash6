@@ -117,6 +117,7 @@ struct Params
 
     int startHeight;                     //!< first height whose tags count = the UPGRADE_VAULT activation height (U-22); 0 = YED off
     std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of Yellowback addresses (D10)
+    std::vector<unsigned char> pqAddressVersion; //!< the same for a PQ key, scheme || keyHash (quantum spec §4, F-4)
     uint256 attestorSetId;               //!< the vault primitive set whose members cancel claims (U-22, U-23); null = YED off
     int claimDelay;                      //!< CLAIM_DELAY: the YED vault's (and its claim intents') delay, blocks (U-23); 576 (12 h), regtest 10
 

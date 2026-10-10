@@ -58,6 +58,9 @@ enum txnouttype
     // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
     TX_VAULT,        //!< vault V
     TX_VAULT_INTENT, //!< intent I
+    // Post-quantum pay-to-key-hash <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG (quantum spec §2.1);
+    // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
+    TX_PQPKH,
 };
 
 class CNoDestination {
@@ -72,9 +75,10 @@ public:
  *  * CNoDestination: no destination set
  *  * CKeyID: TX_PUBKEYHASH destination
  *  * CScriptID: TX_SCRIPTHASH destination
+ *  * CPQKeyID: TX_PQPKH destination (no plain-YEC address encoding; EncodeDestination returns "")
  *  A CTxDestination is the internal data type encoded in a bitcoin address
  */
-typedef std::variant<CNoDestination, CKeyID, CScriptID> CTxDestination;
+typedef std::variant<CNoDestination, CKeyID, CScriptID, CPQKeyID> CTxDestination;
 
 /** Check whether a CTxDestination is a CNoDestination. */
 bool IsValidDestination(const CTxDestination& dest);
@@ -84,6 +88,9 @@ bool IsKeyDestination(const CTxDestination& dest);
 
 /** Check whether a CTxDestination is a CScriptID. */
 bool IsScriptDestination(const CTxDestination& dest);
+
+/** Check whether a CTxDestination is a CPQKeyID. */
+bool IsPQKeyDestination(const CTxDestination& dest);
 
 /** Get the name of a txnouttype as a C string, or nullptr if unknown. */
 const char* GetTxnOutputType(txnouttype t);
@@ -126,6 +133,9 @@ bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::
  */
 CScript GetScriptForDestination(const CTxDestination& dest);
 CScript GetScriptForRawPubKey(const CPubKey& pubkey);
+
+/** The TX_PQPKH script <hash:32> OP_<scheme> OP_CHECKPQSIG (empty unless scheme is 1..16). */
+CScript GetScriptForPQKey(const CPQKeyID& id);
 
 /** Generate a multisig script. */
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys);

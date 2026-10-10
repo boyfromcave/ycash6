@@ -87,6 +87,7 @@ static bool SignStep(const BaseSignatureCreator& creator, const CScript& scriptP
     case TX_NULL_DATA:
     case TX_VAULT:        // vault templates are signed by the vault_* / set_* RPCs
     case TX_VAULT_INTENT:
+    case TX_PQPKH:        // PQ signing joins in the wallet phase (quantum plan Q5)
         return false;
     case TX_PUBKEY:
         keyID = CPubKey(vSolutions[0]).GetID();
@@ -295,6 +296,7 @@ static Stacks CombineSignatures(const CScript& scriptPubKey, const BaseSignature
     case TX_NULL_DATA:
     case TX_VAULT:
     case TX_VAULT_INTENT:
+    case TX_PQPKH:        // one signer: the non-empty (bigger) side is the signature
         // Don't know anything about this, assume bigger one is correct:
         if (sigs1.script.size() >= sigs2.script.size())
             return sigs1;
