@@ -127,9 +127,12 @@ BOOST_AUTO_TEST_CASE(pqpkh_solver_failure)
         raw.push_back(OP_CHECKPQSIG);
         BOOST_CHECK(!Solver(CScript(raw.begin(), raw.end()), type, sol));
     }
-    // GetScriptForDestination of a scheme outside 1..16 is empty
-    BOOST_CHECK(GetScriptForDestination(CPQKeyID(0, h)).empty());
-    BOOST_CHECK(GetScriptForDestination(CPQKeyID(17, h)).empty());
+    // GetScriptForDestination / GetScriptForPQKey of an unregistered scheme is empty (review A F6),
+    // including the OP_n-encodable 3..16
+    for (int scheme : {0, 3, 4, 16, 17, 255}) {
+        BOOST_CHECK(GetScriptForDestination(CPQKeyID((uint8_t)scheme, h)).empty());
+        BOOST_CHECK(GetScriptForPQKey(CPQKeyID((uint8_t)scheme, h)).empty());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(pqkeyid_order_and_serialization)

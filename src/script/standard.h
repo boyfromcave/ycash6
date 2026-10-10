@@ -134,7 +134,8 @@ bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::
 CScript GetScriptForDestination(const CTxDestination& dest);
 CScript GetScriptForRawPubKey(const CPubKey& pubkey);
 
-/** The TX_PQPKH script <hash:32> OP_<scheme> OP_CHECKPQSIG (empty unless scheme is 1..16). */
+/** The TX_PQPKH script <hash:32> OP_<scheme> OP_CHECKPQSIG; empty unless the scheme is registered
+ *  (pq::IsKnownScheme). Consensus-reachable through RED-5 (the owner's residual intent). */
 CScript GetScriptForPQKey(const CPQKeyID& id);
 
 /** Generate a multisig script. */

@@ -7,6 +7,7 @@
 
 #include "script/standard.h"
 
+#include "crypto/pq/scheme.h"
 #include "pubkey.h"
 #include "script/script.h"
 #include "util/system.h"
@@ -318,7 +319,7 @@ CScript GetScriptForRawPubKey(const CPubKey& pubKey)
 
 CScript GetScriptForPQKey(const CPQKeyID& id)
 {
-    if (id.scheme < 1 || id.scheme > 16) return CScript();
+    if (!pq::IsKnownScheme(id.scheme)) return CScript();   // registered schemes only (review A F6)
     return CScript() << ToByteVector(id.hash) << CScript::EncodeOP_N(id.scheme) << OP_CHECKPQSIG;
 }
 
