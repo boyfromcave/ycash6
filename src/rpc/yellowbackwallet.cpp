@@ -26,6 +26,7 @@
 #include "chainparams.h"
 #include "coins.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
 #include "experimental_features.h"
 #include "httpserver.h"
 #include "init.h"
@@ -677,10 +678,28 @@ void SchedulePending(YellowbackWallet& yw, const CarrierRecord& carrier, std::fu
 
 UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 0)
-        throw std::runtime_error("yed_getnewaddress\n\nA fresh Yellowback (YED) address from the keypool, added to the address book.\n");
+    if (fHelp || params.size() > 1)
+        throw std::runtime_error(
+            "yed_getnewaddress ( \"type\" )\n\nA fresh Yellowback (YED) address of this wallet. The default follows the holder policy\n"
+            "(quantum spec A-13): a P2PKH address from the keypool (added to the address book) until Falcon is active, a\n"
+            "post-quantum FN-DSA-512 address (53 characters) once it is.\n"
+            "\nArguments:\n"
+            "1. \"type\" (string, optional) \"p2pkh\"; \"pq\" (a post-quantum holder key: FN-DSA-512 once Falcon is active,\n"
+            "   SLH-DSA-SHA2-128s before); \"pqowner\" (an SLH-DSA-SHA2-128s key, as vault_getnewowner)\n");
     YellowbackWallet& yw = EnsureYW();
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    const bool falcon = IsPQFalconActive(::Params().GetConsensus(), chainActive.Height() + 1);
+    std::string type = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : (falcon ? "pq" : "p2pkh");
+    if (type == "pq" || type == "pqowner") {
+        // PQ keys come from the HD seed (quantum plan §4.6); they are not in the transparent address book
+        // (no plain-YEC encoding, D-Q-11).
+        EnsureWalletIsUnlocked();
+        const uint8_t scheme = type == "pq" && falcon ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
+        CPQKeyID id;
+        if (!pwalletMain->GetNewPQKey(scheme, id)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
+        return EncodeAddress(id, yw.Index()->GetParams());
+    }
+    if (type != "p2pkh") throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqowner\"");
     // 6.20.0: no keypool draw; a fresh HD key, exactly as stock getnewaddress (needs an unlocked wallet).
     EnsureWalletIsUnlocked();
     CPubKey key = pwalletMain->GenerateNewKey(true);
