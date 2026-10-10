@@ -224,6 +224,9 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
             {
                 // Any other Script with less than 15 sigops OK:
                 unsigned int sigops = subscript.GetSigOpCount(true);
+                // ... OP_CHECKPQSIG's 20 policy sigops included (quantum spec R-B2), so a redeem
+                // script that holds one is non-standard:
+                sigops += GetPQSigOpCount(subscript);
                 // ... extra data left on the stack after execution is OK, too:
                 return (sigops <= MAX_P2SH_SIGOPS);
             }
