@@ -40,6 +40,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     fee_zat,
     mine_block_raw,
+    new_pq_owner,
     node_pubkey,
     set_quote,
     term_class_of,
@@ -73,14 +74,14 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
     def raw_mint(self, node, cents, lock_blocks, ref, collateral, fee_addr=None, fee=None, payload=None,
                  vault_script=None, token_first=True, expiry=None):
-        owner_hex = node_pubkey(node)
+        owner_hex = bytes_to_hex_str(new_pq_owner())     # a post-quantum owner (quantum plan §4.3)
         owner = hex_str_to_bytes(owner_hex)
         lock_height = ref + lock_blocks
         script = vault_script if vault_script is not None else ym.yed_vault_script(yed_params(), owner, ref)
         fee_vout = 3 if fee_addr else FEE_VOUT_NONE
         if payload is None:
             payload = ym.encode_mint('ABC'.index(term_class_of(lock_blocks) or 'A'), cents, lock_height, ref, owner, fee_vout)
-        token = (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner)))
+        token = (TOKEN_VALUE, ym.p2pkh_script(ym.address_key_hash(node.getnewaddress())))
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
         vout = [(collateral, script)] + ([token, opret] if token_first else [opret, token])
         enforcement_fee = 0
@@ -187,7 +188,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: MINT-1
         print('mint1_malformed_payload: a truncated MINT payload is not a mint, so its YED vault output is one no rule created')
-        good_payload = ym.encode_mint(0, 10000, self.ref() + 48, self.ref(), hex_str_to_bytes(node_pubkey(user)), FEE_VOUT_NONE)
+        good_payload = ym.encode_mint(0, 10000, self.ref() + 48, self.ref(), new_pq_owner(), FEE_VOUT_NONE)
         self.expect_invalid(user, self.raw_mint(user, 10000, 48, self.ref(), 10 * COIN, payload=good_payload[:-5]), 'yed-template-output', POOLS[2])
         assert_equal(nodes[2].yed_getstats()['voidVaults'], 0)
 
@@ -201,7 +202,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 # Rule: MINT-3
         print('mint3_bad_vault_script: vout[0] commits to a vault script with another refHeight (IT-1: the V carries no lockHeight)')
         r = self.ref()
-        wrong = ym.yed_vault_script(yed_params(), hex_str_to_bytes(node_pubkey(user)), r - 1)
+        wrong = ym.yed_vault_script(yed_params(), new_pq_owner(), r - 1)
         self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, 10 * COIN, vault_script=wrong), 'bad-mint-vault-script', POOLS[1])
 
 # Rule: MINT-5 K14

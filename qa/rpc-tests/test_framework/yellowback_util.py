@@ -551,7 +551,11 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # --- node arguments and start --------------------------------------------
 
     def node_args(self, i, extra=None):
-        """Role-based arguments for node ``i`` (section 6.0 item 2)."""
+        """Role-based arguments for node ``i`` (section 6.0 item 2).  Every node gets ``-exportdir`` (the run's
+        ``export`` directory): ``wallet_pq_secret`` reads a wallet's post-quantum owner seeds from ``dumpwallet``."""
+        export = os.path.join(self.options.tmpdir, 'export')
+        os.makedirs(export, exist_ok=True)
+        extra = list(extra or []) + ['-exportdir=%s' % export]
         kw = {'sigma_ref': self.sigma_ref}
         if not self.yellowback_enabled or i == STOCK:
             return yellowback_node_args(extra, yellowback=False)
@@ -1095,6 +1099,26 @@ def new_pq_owner(label=None):
     return owner
 
 
+_DUMP_COUNTER = [0]
+
+
+def wallet_pq_secret(node, owner):
+    """The SLH-DSA secret key of the wallet's post-quantum owner ``owner`` (33 bytes): ``z_exportwallet`` (needs
+    ``-exportdir``, which YellowbackTestFramework.node_args sets) lists ``pqseed=<scheme>:<index>:<seed>`` with
+    ``# owner=<pqkeyid>``; the 48-byte seed is the SLH-DSA keygen seed (q/wallet)."""
+    from . import pq as _pq
+    _DUMP_COUNTER[0] += 1
+    path = node.z_exportwallet('pqdump%d' % _DUMP_COUNTER[0])     # 6.20.0: no dumpwallet (same format)
+    want = bytes_to_hex_str(bytes(owner))
+    with open(path) as f:
+        for line in f:
+            if line.startswith('pqseed=') and ('owner=' + want) in line:
+                scheme, _index, seed = line.split()[0][len('pqseed='):].split(':')
+                assert_equal(int(scheme), _pq.SCHEME_SLH_DSA_SHA2_128S)
+                return _pq.slh_keygen(hex_str_to_bytes(seed))[1]
+    raise AssertionError('owner %s is not a post-quantum key of the wallet' % want)
+
+
 def vault_owner(vault):
     """The 33-byte owner id of a ``yed_getvault`` row (rpcversion 7: ``ownerScheme`` + ``ownerHash``) or of a
     ``vault_from_mint`` dict (``ownerPubKey``: the 33 bytes as hex)."""
@@ -1285,7 +1309,9 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         # ``owner_sk`` or the secret new_pq_owner remembered; the scriptSig is the chunked pushes then OP_2.
         from . import pq as _pq
         sk = owner_sk if owner_sk is not None else PQ_OWNER_SECRETS.get(owner)
-        assert sk is not None, 'no SLH-DSA secret for the owner %s (pass owner_sk=)' % bytes_to_hex_str(owner)
+        if sk is None:
+            sk = wallet_pq_secret(node, owner)          # a wallet-minted vault: the node wallet's owner seed
+            PQ_OWNER_SECRETS[owner] = sk
         assert_equal(owner[0], _pq.SCHEME_SLH_DSA_SHA2_128S)
         pushes = _pq.pq_sign_input(tx, 0, script, collateral, branch_id, sk)
         sel = bytes([ym.OP_2]) if selector is None else selector

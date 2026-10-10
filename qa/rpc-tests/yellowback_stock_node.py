@@ -195,7 +195,6 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         # past the lock, then the correct redemption -- built raw, broadcast and mined by node 1
         self.mine(POOLS[0], LOCK + 2)
         live = dict(user.yed_getvault(txid))
-        live['ownerPubKey'] = owner
         r = user.getblockcount() - REF_LAG
         fee = user.yed_getfeepayee(r, int(live['collateralZat']))
         good = build_vault_spend_raw(user, live, 'owner', [(txid, 1)],
@@ -221,7 +220,6 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0], LOCK + 2)
         live = dict(user.yed_getvault(txid))
-        live['ownerPubKey'] = owner
         bad = build_vault_spend_raw(user, live, 'owner', [], expiry=0)
         bad_txid = stock.sendrawtransaction(bad)
         blockhash = stock.generate(1)[0]

@@ -354,8 +354,10 @@ def _v3(type_, body):
 
 
 def encode_mint_v3(term_class, cents, lock_height, ref_height, owner_pubkey, fee_vout, attest_fee_vout=FEE_VOUT_NONE):
-    """52 bytes."""
+    """52 bytes; on the post-quantum line the MINT is payload version 4 (quantum spec C-1) and ``owner_pubkey`` is the
+    33-byte owner id scheme || keyHash: ym.encode_mint."""
     assert_equal(len(owner_pubkey), 33)
+    return ym.encode_mint(term_class, cents, lock_height, ref_height, bytes(owner_pubkey), fee_vout, attest_fee_vout)
     return _v3(PAYLOAD_MINT, bytes([term_class & 0xFF]) + struct.pack('<III', cents, lock_height, ref_height)
                + bytes(owner_pubkey) + bytes([fee_vout & 0xFF, attest_fee_vout & 0xFF]))
 
@@ -661,7 +663,7 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
     carrier input (``carrier`` from ``build_carrier_tx``, confirmed) as ``vin[last]``, signed
     here.  Returns ``(hex, owner_pubkey_hex)``."""
     if owner_pubkey is None:
-        owner_pubkey = yu.node_pubkey(node)
+        owner_pubkey = bytes_to_hex_str(yu.new_pq_owner())          # a post-quantum owner (quantum plan §4.3)
     owner = hex_str_to_bytes(owner_pubkey)
     if term_class is None:
         term_class = yu.term_class_of(lock_blocks)
@@ -671,7 +673,7 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
     vault = ym.yed_vault_script(yu.yed_params(), owner, ref_height)     # the YED V template (U-23, IT-1)
     vout = [
         (collateral_zat, vault),
-        (TOKEN_VALUE, ym.p2pkh_script(ym.hash160(owner))),
+        (TOKEN_VALUE, yu._spk_of_address(node.getnewaddress())),   # the token: a fresh holder, no longer the owner
         None,   # the payload, once the vout indices are known
     ]
     needed = collateral_zat + TOKEN_VALUE

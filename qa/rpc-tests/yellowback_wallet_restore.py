@@ -64,7 +64,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(restored.yed_listpositions(), [])
         coins0 = sorted((c['txid'], c['vout'], c['cents']) for c in user.yed_listunspent())
         assert_equal(sorted(c[2] for c in coins0), [5000, 5000, 20000])
-        owner_keyids = sorted(p['ownerKeyId'] for p in user.yed_listpositions())
+        owner_keyids = sorted((p['ownerScheme'], p['ownerHash']) for p in user.yed_listpositions())
         yed_addrs = {c['address'] for c in user.yed_listunspent()}
 
         print('dump every key node 0 used and import it into node 5 without a rescan')
@@ -76,6 +76,8 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
             restored.importprivkey(user.dumpprivkey(addr), '', False)
             imported += 1
         assert_greater_than(imported, 2)
+        # the vault owners are post-quantum keys (quantum plan §4.3, §4.6): dumpwallet's pqseed lines carry them
+        restored.importwallet(user.dumpwallet('yellowback-restore'))
         for a in yed_addrs:
             assert_equal(restored.yed_validateaddress(a)['ismine'], True)
             assert_equal(user.yed_validateaddress(a)['transparentAddress'], restored.yed_validateaddress(a)['transparentAddress'])
@@ -84,9 +86,9 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(restored.yed_getbalance()['confirmedCents'], 30000)
         assert_equal(sorted((c['txid'], c['vout'], c['cents']) for c in restored.yed_listunspent()), coins0)
         assert_equal(sorted(p['txid'] for p in restored.yed_listpositions()), positions0)
-        assert_equal(sorted(p['ownerKeyId'] for p in restored.yed_listpositions()), owner_keyids)
+        assert_equal(sorted((p['ownerScheme'], p['ownerHash']) for p in restored.yed_listpositions()), owner_keyids)
         for p in restored.yed_listpositions():
-            assert_equal(set(p) >= {'txid', 'vout', 'status', 'ownerPubKey', 'ownerKeyId', 'ownerAddress', 'termClass',
+            assert_equal(set(p) >= {'txid', 'vout', 'status', 'ownerScheme', 'ownerHash', 'ownerAddress', 'termClass',
                                     'lockHeight', 'claimHeight', 'collateralZat', 'collateral', 'mintedCents', 'mintHeight',
                                     'refHeight', 'feePaidZat', 'closeHeight', 'closingTxid', 'burnedCents', 'unbacked',
                                     'claimable', 'underwaterAt', 'voidReason', 'scriptPubKey', 'canRedeem', 'canClaim'}, True)

@@ -66,6 +66,7 @@ from test_framework.yellowback_model import assert_model_matches
 from test_framework.yellowback_util import (
     ATTESTOR_A,
     vault_app_height,
+    vault_owner,
     vault_owner_height,
     ATTESTOR_B,
     ATTEST_ARM_DELAY,
@@ -288,10 +289,11 @@ class YellowbackAttestTest(YellowbackTestFramework):
         payee = user.yed_getfeepayee(ref, collateral)
         extra = [(self.attest_fee(collateral), spk(self.bond_key_address(built['seqs'][0])))]
         residual = int(row['residualZat'])
-        owner = hex_str_to_bytes(live['ownerPubKey'])
-        residual_addr = residual_to or pubkey_to_address(owner)
+        owner = vault_owner(live)
+        # RED-5 (quantum spec F-3): the owner's residual intent pays the owner's PQPKH unless a test redirects it
+        residual_spk = spk(residual_to) if residual_to else ym.pqpkh_script(owner)
         if residual > 0:
-            extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), spk(residual_addr))))
+            extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), residual_spk)))
         hex_ = build_vault_spend_raw(node, live, 'claim', [token],
                                      payload=ym.encode_redeem(ref, 1, [], attest_fee_vout=2),
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),

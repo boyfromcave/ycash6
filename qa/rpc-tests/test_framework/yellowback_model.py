@@ -357,6 +357,9 @@ def params_from_getinfo(info):
         params = Params.mainnet(int(p['startHeight']), p.get('attestorSetId', ''), network=network)
         params.sigma_ref_bps = int(p.get('sigmaRefBps', params.sigma_ref_bps))
         params.supply_cap_bps = int(p.get('supplyCapBps', params.supply_cap_bps))
+    # rpcversion 7: the Falcon height (the A-5 mirror; -1 = never)
+    falcon = int(p.get('pq', {}).get('falconHeight', -1))
+    params.pq_falcon_height = None if falcon < 0 else falcon
     return params
 
 

@@ -58,7 +58,9 @@ from test_framework.yellowback_util import (
     early_redeem_fee_zat,
     fee_zat,
     mine_block_raw,
+    new_pq_owner,
     set_quote,
+    vault_owner,
     usd_to_micro,
     yed_params,
 )
@@ -170,7 +172,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
 # Rule: MINT-3 IT-1
         print('the pre-plan V shape (appHeight = lockHeight + GRACE) is refused for a new mint')
         r = user.yed_getinfo()['height'] - REF_LAG
-        owner = hex_str_to_bytes(user.validateaddress(user.getnewaddress())['pubkey'])
+        owner = new_pq_owner()                                         # a post-quantum owner (quantum plan §4.3)
         lock = r + 48
         old_shape = ym.yed_vault_script_at(yed_params(), owner, lock, lock + yed_params().grace)
         old_hex, _ = build_mint_tx(user, 10000, 48, r, self.estimate(user, 10000, 48)['requiredZat'], owner_pubkey=bytes_to_hex_str(owner))
@@ -378,7 +380,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         raw = claimant.getrawtransaction(claimed['txid'], 1)
         ispk = hex_str_to_bytes(raw['vout'][0]['scriptPubKey']['hex'])
         ip = v.IntentParams(*ym.yed_intent_fields(ispk))
-        owner = hex_str_to_bytes(vault['ownerPubKey'])
+        owner = vault_owner(vault)
         s = yed_params().attestor_set_internal
         vp = v.VaultParams(ym.YED_TAG, s, s, CLAIM_DELAY, vault['lockHeight'], vault['refHeight'] + 1, owner)
         assert_equal(v.sha256(v.vault_script(vp)), ip.vault_hash)

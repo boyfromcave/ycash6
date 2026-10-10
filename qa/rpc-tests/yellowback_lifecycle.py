@@ -72,7 +72,7 @@ def coin_of(node, cents):
 class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
 
     def owner_wif(self, node, vault):
-        return node.dumpprivkey(pubkey_to_address(hex_str_to_bytes(vault['ownerPubKey'])))
+        return None    # the owner is a post-quantum key: build_vault_spend_raw signs with the wallet's seed (wallet_pq_secret)
 
     def raw_redeem(self, node, vault, burn_cents, payee, fee, ref_height, assignments=(), change_script=None):
         coin = coin_of(node, burn_cents)
@@ -113,7 +113,8 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(mint_a['fundedFrom'], 'transparent')
         # the wallet's default choice is the FEE-W choice for the owner key as selector
         raw = user.getrawtransaction(mint_a['txid'], 1)
-        owner_hex = user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:])['ownerPubKey']
+        dec = user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:])
+        owner_hex = '%02x' % dec['ownerScheme'] + dec['ownerHash']          # the 33 owner bytes, FEE-W's selector
         payee = user.yed_getfeepayee(ref, mint_a['collateralZat'], owner_hex)
         assert mint_a['payee'] in payee['eligible']
         assert_equal(mint_a['payee'], payee['default']['payoutAddress'])

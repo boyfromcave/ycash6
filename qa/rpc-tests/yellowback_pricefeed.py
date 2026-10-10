@@ -325,7 +325,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(len(chosen), 2)
         assert_greater_than(r + 1, vault['lockHeight'])
         coin = [c for c in user.yed_listunspent() if c['cents'] == 10000][0]
-        owner_wif = user.dumpprivkey(pubkey_to_address(hex_str_to_bytes(vault['ownerPubKey'])))
+        owner_wif = None   # a post-quantum owner: build_vault_spend_raw signs with the wallet's seed
         hex_ = build_vault_spend_raw(user, vault, 'owner', [(coin['txid'], coin['vout'])], payload=ym.encode_redeem(r, 1, []),
                                      fee=(liar_addr, fee_zat(vault['collateralZat'])), ref_height=r, owner_wif=owner_wif)
         v = nodes[3].yed_validaterawtransaction(hex_)
