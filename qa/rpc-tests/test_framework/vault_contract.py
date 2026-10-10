@@ -20,6 +20,7 @@ CONTRACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '
 HEX = re.compile(r'^(?:[0-9a-f]{2})*$')
 HASH = re.compile(r'^[0-9a-f]{64}$')
 KEY = re.compile(r'^0[23][0-9a-f]{64}$')
+PQKEYID = re.compile(r'^0[12][0-9a-f]{64}$')    # scheme || keyHash (quantum spec §6.2)
 OUTPOINT = re.compile(r'^[0-9a-f]{64}:[0-9]+$')
 
 
@@ -32,6 +33,7 @@ SCALARS = {
     'hex': lambda v: isinstance(v, str) and bool(HEX.match(v)),
     'hash': lambda v: isinstance(v, str) and bool(HASH.match(v)),
     'key': lambda v: isinstance(v, str) and bool(KEY.match(v)),
+    'pqkeyid': lambda v: isinstance(v, str) and bool(PQKEYID.match(v)),
     'outpoint': lambda v: isinstance(v, str) and bool(OUTPOINT.match(v)),
     'address': lambda v: isinstance(v, str) and len(v) > 0,
     'int': _is_int,

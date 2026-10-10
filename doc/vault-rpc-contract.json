@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "744c041915b05f6d850904fbfd44734aea13373f27b9c0aa1bcfe63c32f48819"
+    "sha256": "49e2ad718cfb779e919dbd14e500645093fe00724b7eb752e5aab36827364744"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -25,6 +25,10 @@
     "key": {
       "json": "string",
       "meaning": "a 33-byte compressed public key, 66 hex digits"
+    },
+    "pqkeyid": {
+      "json": "string",
+      "meaning": "a post-quantum key id, 66 hex digits: the scheme byte (`01` or `02`) then the 32-byte key hash as pushed in the template"
     },
     "outpoint": {
       "json": "string",
@@ -264,8 +268,11 @@
         "appheight": {
           "type": "height"
         },
-        "ownerkey": {
-          "type": "key"
+        "owner": {
+          "type": "pqkeyid"
+        },
+        "ownerscheme": {
+          "type": "int"
         }
       },
       "optional": []
@@ -288,8 +295,11 @@
         "delay": {
           "type": "int"
         },
-        "ownerkey": {
-          "type": "key"
+        "owner": {
+          "type": "pqkeyid"
+        },
+        "ownerscheme": {
+          "type": "int"
         },
         "recipienthash": {
           "type": "hash"
@@ -350,8 +360,11 @@
             "appheight": {
               "type": "height"
             },
-            "ownerkey": {
-              "type": "key"
+            "owner": {
+              "type": "pqkeyid"
+            },
+            "ownerscheme": {
+              "type": "int"
             },
             "wallet": {
               "type": "bool"
@@ -401,8 +414,11 @@
             "delay": {
               "type": "int"
             },
-            "ownerkey": {
-              "type": "key"
+            "owner": {
+              "type": "pqkeyid"
+            },
+            "ownerscheme": {
+              "type": "int"
             },
             "recipienthash": {
               "type": "hash"
@@ -928,7 +944,7 @@
                 "type": "hash"
               },
               "owner": {
-                "type": "key"
+                "type": "pqkeyid"
               },
               "kind": {
                 "oneOf": [
@@ -1002,8 +1018,11 @@
               "appheight": {
                 "type": "height"
               },
-              "ownerkey": {
-                "type": "key"
+              "owner": {
+                "type": "pqkeyid"
+              },
+              "ownerscheme": {
+                "type": "int"
               }
             },
             "optional": []
@@ -1029,8 +1048,11 @@
               "delay": {
                 "type": "int"
               },
-              "ownerkey": {
-                "type": "key"
+              "owner": {
+                "type": "pqkeyid"
+              },
+              "ownerscheme": {
+                "type": "int"
               },
               "recipienthash": {
                 "type": "hash"
@@ -1732,14 +1754,13 @@
               "amount": {
                 "type": "yec"
               },
-              "ownerkey": {
-                "type": "key"
+              "owner": {
+                "type": "pqkeyid"
               }
             },
             "optional": [
               "appheight",
-              "cancelsetid",
-              "ownerkey"
+              "cancelsetid"
             ]
           }
         }
@@ -1759,8 +1780,8 @@
           "script": {
             "type": "hex"
           },
-          "ownerkey": {
-            "type": "key"
+          "owner": {
+            "type": "pqkeyid"
           }
         },
         "optional": []
@@ -2062,6 +2083,39 @@
         "vault_lock"
       ],
       "provokedBy": "`delay` 0"
+    },
+    {
+      "code": -8,
+      "message": "ownerkey-removed",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "the former `ownerkey` parameter"
+    },
+    {
+      "code": -8,
+      "message": "owner (pqkeyid or PQ address) is required",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "no `owner`"
+    },
+    {
+      "code": -8,
+      "message": "unregistered post-quantum scheme",
+      "raisedBy": [
+        "vault_lock",
+        "vault_list"
+      ],
+      "provokedBy": "an `owner` with scheme `03`"
+    },
+    {
+      "code": -4,
+      "message": "not yet supported",
+      "raisedBy": [
+        "vault_ownerspend"
+      ],
+      "provokedBy": "an open owner branch (the wallet holds no PQ keys)"
     },
     {
       "code": -8,

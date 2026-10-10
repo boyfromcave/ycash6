@@ -22,9 +22,14 @@ checks live answers against it. Edit this document, then regenerate.
 - **Tag**: 1–4 ASCII characters (zero-padded to 4 bytes) or 8 hex digits. `WYEC` is the bridge
   tag; `YED\0` is reserved for the YED module (P4). An unregistered tag is governed by the
   primitive alone.
-- **Keys**: 33-byte compressed public keys in hex. RPCs that sign (member, admit and owner
-  signatures) use the private key of that public key in **this node's wallet**; where a key
-  parameter is optional, a new wallet key is generated.
+- **Keys**: 33-byte compressed public keys in hex. RPCs that sign (member and admit signatures)
+  use the private key of that public key in **this node's wallet**; where a key parameter is
+  optional, a new wallet key is generated.
+- **Owners**: a vault's owner is a post-quantum key (docs/plans/yellowback-quantum-plan.md §4.3),
+  named by its `pqkeyid` (`scheme || SHA256(scheme || pk)`, scheme 1 SLH-DSA-SHA2-128s or 2
+  FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`ye…`/`yt…`/`yr…`, 53
+  characters). Until the node wallet holds post-quantum keys the owner is named explicitly and
+  owner spends are signed outside the node.
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields
   (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
   the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
@@ -51,6 +56,7 @@ contract generator reads (the prose around them is not part of the contract).
 | `hex` | string | hex-encoded bytes (a transaction, a script, a signature, a tag) |
 | `hash` | string | 32 bytes, 64 hex digits (a txid or set id in RPC byte order; a sighash in raw order) |
 | `key` | string | a 33-byte compressed public key, 66 hex digits |
+| `pqkeyid` | string | a post-quantum key id, 66 hex digits: the scheme byte (`01` or `02`) then the 32-byte key hash as pushed in the template |
 | `outpoint` | string | `"txid:n"` in results; parameters also accept `{"txid", "vout"}` |
 | `address` | string | a transparent address of this network |
 | `int` | number | an integer |
@@ -71,8 +77,8 @@ Undocumented result fields are a contract violation; so is a missing field not m
 - `SetParams` = `{"seats": int, "unlockthreshold": int, "cancelthreshold": int, "slashthreshold": int, "open": bool, "ratelimitbps": int, "ratewindow": int, "livenesswindow": int, "bondmin": yec, "bondlockmin": int, "maturity": int, "admitkey": key}`
 - `Set` = `{"setid": hash, "height": height, ...SetParams, "createheight": height, "winddownheight": height, "lockedvalue": yec, "epoch": int, "epochbasis": yec, "epochused": yec, "unlockavailable"?: yec, "members": int, "active": int, "current": int, "dormant": bool, "released": bool}`
 - `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "wallet": bool}`
-- `VaultFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerheight": height, "appheight": height, "ownerkey": key}`
-- `IntentFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerkey": key, "recipienthash": hash, "vaulthash": hash}`
+- `VaultFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerheight": height, "appheight": height, "owner": pqkeyid, "ownerscheme": int}`
+- `IntentFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "owner": pqkeyid, "ownerscheme": int, "recipienthash": hash, "vaulthash": hash}`
 - `TemplateOut` = `{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "vault", "value": yec, "valuezat": zat, "height": height, "script": hex, ...VaultFields, "wallet": bool}|{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "intent", "value": yec, "valuezat": zat, "height": height, "script": hex, ...IntentFields, "matureheight": height, "mature": bool, "cancellable": bool, "origin": hex, "wallet": bool}`
 - `ActType` = `"create"|"join"|"heartbeat"|"remove"|"equivocation"|"winddown"`
 - `Proof` = `{"setid": hash, "prevout": outpoint, "rolea": int, "sighasha": hash, "siga": hex, "roleb": int, "sighashb": hash, "sigb": hex}`
@@ -114,13 +120,13 @@ rate limited), counts (`members`, `active`, `current`), the §15.4 predicates `d
 `height` (default: the next block) over the state at the tip. Error `-5` for an unknown set.
 
 ### `vault_list ( {"tag", "setid", "owner", "kind": "vault"|"intent", "mine": bool} )`
-Params: `["filter"?: {"tag"?: str, "setid"?: hash, "owner"?: key, "kind"?: "vault"|"intent", "mine"?: bool}]`
+Params: `["filter"?: {"tag"?: str, "setid"?: hash, "owner"?: pqkeyid, "kind"?: "vault"|"intent", "mine"?: bool}]`
 
 Result: `[TemplateOut]`
 
 The unspent V and I outputs confirmed since activation (the database's template-output index),
-optionally filtered (`setid` matches either set of the template; `mine` = the owner key is in
-this wallet). For an intent, `origin` is the script of the vault it was unlocked from.
+optionally filtered (`setid` matches either set of the template; `owner` is a pqkeyid or a PQ
+address; `mine` = the owner key is in this wallet, never true before the wallet holds PQ keys). For an intent, `origin` is the script of the vault it was unlocked from.
 
 ### `vault_decodescript "hex"`
 Params: `["hex": hex]`
@@ -206,12 +212,13 @@ EJECTED and its bond frozen. Result: the txid.
 ## Vault RPCs (wallet)
 
 ### `vault_lock {params}`
-Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "ownerkey"?: key}]`
+Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "owner": pqkeyid}]`
 
-Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "ownerkey": key}`
+Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "owner": pqkeyid}`
 
-`delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch), `ownerkey`
-to a new wallet key. Both sets must be confirmed. `vout` is 0.
+`delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch). `owner` is
+a pqkeyid or a PQ address (required until the wallet holds post-quantum keys); the former
+`ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...]`
 Params: `["outpoint": outpoint, "recipients": [Recipient]]`
@@ -285,7 +292,9 @@ Result: `{"txid": hash, "selector": int}`
 
 Spends a vault with its owner key (in this wallet) to `address`, less the fee: selector 2 with
 `nLockTime = ownerheight` once the next block is above `ownerheight`, else selector 3 when the
-set is released (dormant or wound down). An intent has only selector 3.
+set is released (dormant or wound down). An intent has only selector 3. The owner is a
+post-quantum key: until the wallet holds post-quantum keys the command answers `not yet
+supported` once the branch is open, and the spend is signed outside the node.
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
 Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`
@@ -311,6 +320,10 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
 | -8 | `vault parameters out of range` | `vault_lock` | `delay` 0 |
+| -8 | `ownerkey-removed` | `vault_lock` | the former `ownerkey` parameter |
+| -8 | `owner (pqkeyid or PQ address) is required` | `vault_lock` | no `owner` |
+| -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
+| -4 | `not yet supported` | `vault_ownerspend` | an open owner branch (the wallet holds no PQ keys) |
 | -8 | `not an unspent vault output` | `vault_buildunlock`, `vault_app` | a spent vault outpoint |
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
@@ -333,13 +346,13 @@ B: set_join S 1 <h+500>                       -> {"hex": J, "complete": false}
 A: set_signact J S                            -> {"hex": J2, "complete": true}
 B: set_sendact J2                                                    ; same for C; mine 1 + maturity
 A, B, C: set_heartbeat S                                             ; mine 1
-A: vault_lock '{"tag":"TEST","setid":S,"delay":5,"ownerheight":<h+40>,"amount":10}' -> V
+A: vault_lock '{"tag":"TEST","setid":S,"delay":5,"ownerheight":<h+40>,"amount":10,"owner":<pqkeyid>}' -> V
 A: vault_buildunlock V '[{"address":"<C addr>","amount":4}]' -> U    ; mine 1 first
 B: set_signunlock U -> U1 ; C: set_signunlock U1 -> U2 (complete)
 A: vault_send U2                                                     ; mine 1: intent I (4) + re-lock (6)
 C: vault_release I            (after 5 blocks)
 C: vault_buildcancel I' -> X ; C: set_signcancel X -> X1 ; C: vault_send X1   (a cancel by one member)
-A: vault_ownerspend V' <addr> (after ownerheight)
+(owner) the SLH-DSA owner spend of V' (after ownerheight), signed outside the node until Q5
 ```
 
 `qa/rpc-tests/vault_rpc.py` runs this flow, a reorg across an act and restart reconciliation.

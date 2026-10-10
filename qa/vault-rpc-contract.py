@@ -35,7 +35,7 @@ CLIENT_SRC = os.path.join(ROOT, 'src', 'rpc', 'client.cpp')
 COMMON_SRC = os.path.join(ROOT, 'src', 'rpc', 'common.h')
 
 # Types whose JSON form is a string: a parameter of one of these is passed as is by ycash-cli.
-STRING_TYPES = {'str', 'hex', 'hash', 'key', 'outpoint', 'address'}
+STRING_TYPES = {'str', 'hex', 'hash', 'key', 'pqkeyid', 'outpoint', 'address'}
 
 
 class ContractError(Exception):
@@ -256,7 +256,7 @@ def build():
     types = {}
     for row in table_rows(lines, section_line('## Contract notation')):
         types[unquote(row[0])] = {'json': row[1], 'meaning': row[2]}
-    for t in ('str', 'hex', 'hash', 'key', 'outpoint', 'int', 'height', 'bool', 'yec', 'zat'):
+    for t in ('str', 'hex', 'hash', 'key', 'pqkeyid', 'outpoint', 'int', 'height', 'bool', 'yec', 'zat'):
         if t not in types:
             raise ContractError('the notation table lacks type %r' % t)
 

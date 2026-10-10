@@ -83,6 +83,7 @@ BASE_SCRIPTS= [
     # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
     # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
     'vault_primitive.py',
+    'vault_pq.py',
     'vault_slashing.py',
     'vault_bridge.py',
     # A reorg below Falcon's height evicts Falcon (OP_CHECKPQSIG scheme 0x02) spends (quantum review F-1).
