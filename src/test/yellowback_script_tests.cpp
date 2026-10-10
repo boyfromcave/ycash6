@@ -23,6 +23,7 @@
 #include "main.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
+#include "random.h"
 #include "script/interpreter.h"
 #include "script/script_error.h"
 #include "script/sign.h"
@@ -505,7 +506,7 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 0)));
         mtx.vout.push_back(CTxOut(vaultValue, vaultSpk));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
-        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3)))));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, CPQKeyID(0x01, GetRandHash()), 3)))));
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(10000 * COIN - vaultValue - TOKEN_VALUE - feeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));
         BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, PrecomputedTransactionData(CTransaction(mtx), {}), 0, 10000 * COIN, SIGHASH_ALL, branchId));
@@ -927,7 +928,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
         mtx.vout.push_back(CTxOut(vaultValue, vaultSpk));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
-        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3, 4)))));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, CPQKeyID(0x01, GetRandHash()), 3, 4)))));
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
         mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - vaultValue - TOKEN_VALUE - feeZat - attestFeeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));

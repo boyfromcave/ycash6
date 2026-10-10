@@ -2,7 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-// The version-3 payload codec (v3 plan §3.3, W14, V23): round trips, fixed-width
+// The version-3 payload codec (v3 plan §3.3, W14, V23) with the version-4 MINT of the
+// post-quantum line (quantum spec §3.1, header C-1): round trips, fixed-width
 // little-endian layout, every malformed case, feeVout / attestFeeVout semantics,
 // the four attestation types and the transaction-level shape rules FindPayload
 // applies.
@@ -11,6 +12,7 @@
 
 #include "key.h"
 #include "primitives/transaction.h"
+#include "random.h"
 #include "script/script.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
@@ -28,6 +30,12 @@ CPubKey TestKey()
     return key.GetPubKey();
 }
 
+/** A post-quantum owner id (quantum spec §3.1): a registered scheme and a random key hash. */
+CPQKeyID TestOwner(uint8_t scheme = 0x01)
+{
+    return CPQKeyID(scheme, GetRandHash());
+}
+
 std::vector<unsigned char> Hex(const std::string& s) { return ParseHex(s); }
 
 CMutableTransaction TxWithOutputs(size_t n, const CScript& opret, size_t opretIndex)
@@ -43,6 +51,8 @@ CMutableTransaction TxWithOutputs(size_t n, const CScript& opret, size_t opretIn
 
 /** A fixed syntactically valid compressed key, so hex vectors are reproducible. */
 const std::string KEYHEX = "02cb81cc0269783ebd9e6484b5495343036874a407856f230a8ee0384986759e70";
+/** A fixed post-quantum owner, scheme 0x01 || 32 key-hash bytes (the v4 MINT's owner field). */
+const std::string OWNERHEX = "01" "cb81cc0269783ebd9e6484b5495343036874a407856f230a8ee0384986759e70";
 /** A second one for the bond key of ATTESTOR_REGISTER. */
 const std::string KEY2HEX = "03a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
@@ -64,6 +74,7 @@ BOOST_AUTO_TEST_CASE(mint1_roundtrip_table)
 {
     CPubKey owner = TestKey();
     CPubKey bond = TestKey();
+    const CPQKeyID pqOwner = TestOwner(), falconOwner = TestOwner(0x02), unknownScheme = TestOwner(0x07);
     std::vector<Assignment> thirteen, fifteen;
     for (uint8_t i = 0; i < 15; i++) {
         if (i < 13) thirteen.push_back(Assignment(i, 100 + i));
@@ -71,10 +82,10 @@ BOOST_AUTO_TEST_CASE(mint1_roundtrip_table)
     }
     const uint256 vault = uint256S("0x1122334455667788990011223344556677889900112233445566778899001122");
     const std::vector<std::pair<Payload, size_t>> cases = {
-        { Payload::Mint(0, 10000, 1000, 950, owner, 3), 52 },                     // attestFeeVout defaults to none (AFEE-0)
-        { Payload::Mint(0, 10000, 1000, 950, owner, 3, 4), 52 },
-        { Payload::Mint(2, 1000000, 0xFFFFFFFF, 0, owner, FEE_VOUT_NONE, FEE_VOUT_NONE), 52 },
-        { Payload::Mint(0xFF, 0, 0, 0xFFFFFFFF, owner, 0, 0), 52 },               // the codec fixes the shape, MINT-2 the ranges
+        { Payload::Mint(0, 10000, 1000, 950, pqOwner, 3), 52 },                   // attestFeeVout defaults to none (AFEE-0)
+        { Payload::Mint(0, 10000, 1000, 950, pqOwner, 3, 4), 52 },
+        { Payload::Mint(2, 1000000, 0xFFFFFFFF, 0, falconOwner, FEE_VOUT_NONE, FEE_VOUT_NONE), 52 },
+        { Payload::Mint(0xFF, 0, 0, 0xFFFFFFFF, unknownScheme, 0, 0), 52 },       // the codec fixes the shape, MINT-2/3 the ranges and the scheme
         { Payload::Transfer({}), 5 },
         { Payload::Transfer({ Assignment(1, 100) }), 10 },
         { Payload::Transfer({ Assignment(0, 100), Assignment(1, 200), Assignment(3, 0xFFFFFFFF) }), 20 },
@@ -98,14 +109,18 @@ BOOST_AUTO_TEST_CASE(mint1_roundtrip_table)
         BOOST_REQUIRE(!enc.empty());
         BOOST_CHECK_EQUAL(enc[0], 0x59);
         BOOST_CHECK_EQUAL(enc[1], 0x42);
-        BOOST_CHECK_EQUAL(enc[2], PAYLOAD_VERSION);
-        BOOST_CHECK_EQUAL(enc[2], 0x03);
-        BOOST_CHECK_EQUAL(enc[2], PayloadVersion());
+        // C-1: the MINT alone is version 4; every other type stays version 3.
+        const bool mint = c.first.type == PayloadType::MINT;
+        BOOST_CHECK_EQUAL(enc[2], mint ? MINT_PAYLOAD_VERSION : PAYLOAD_VERSION);
+        BOOST_CHECK_EQUAL(enc[2], mint ? 0x04 : 0x03);
+        BOOST_CHECK_EQUAL(enc[2], VersionOf(c.first.type));
+        if (!mint) BOOST_CHECK_EQUAL(enc[2], PayloadVersion());
         BOOST_CHECK_EQUAL(enc[3], (unsigned char)c.first.type);
         Payload dec;
         BOOST_REQUIRE(DecodePayload(enc, dec));
         BOOST_CHECK(dec == c.first);
-        BOOST_CHECK_EQUAL(dec.version, PAYLOAD_VERSION);
+        BOOST_CHECK_EQUAL(dec.version, VersionOf(c.first.type));
+        if (mint) BOOST_CHECK(dec.owner == c.first.owner);
         BOOST_CHECK_EQUAL(dec.AssignedCents(), c.first.AssignedCents());
         BOOST_CHECK(EncodePayload(dec) == enc);
     }
@@ -125,11 +140,19 @@ BOOST_AUTO_TEST_CASE(mint1_fixed_width_little_endian_layout)
 {
     CPubKey owner(Hex(KEYHEX));
     CPubKey bond(Hex(KEY2HEX));
-    std::vector<unsigned char> enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, owner, 0x03, 0x04));
+    // v4 MINT (quantum spec §3.1): offset 17 ownerScheme, 18..49 ownerHash (the uint256's internal bytes, as pushed
+    // in V), 50 feeVout, 51 attestFeeVout; 52 bytes, the v3 length and offsets.
+    const std::vector<unsigned char> ownerBytes = Hex(OWNERHEX);
+    const CPQKeyID pqOwner(ownerBytes[0], uint256(std::vector<unsigned char>(ownerBytes.begin() + 1, ownerBytes.end())));
+    std::vector<unsigned char> enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, pqOwner, 0x03, 0x04));
     BOOST_REQUIRE_EQUAL(enc.size(), 52u);
-    BOOST_CHECK_EQUAL(HexStr(enc), "59420301" "02" "04030201" "0d0c0b0a" "44332211" + KEYHEX + "03" "04");
-    enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, owner, 0x03));
-    BOOST_CHECK_EQUAL(HexStr(enc), "59420301" "02" "04030201" "0d0c0b0a" "44332211" + KEYHEX + "03" "ff");
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420401" "02" "04030201" "0d0c0b0a" "44332211" + OWNERHEX + "03" "04");
+    BOOST_CHECK_EQUAL(enc[17], 0x01);
+    BOOST_CHECK(std::vector<unsigned char>(enc.begin() + 18, enc.begin() + 50) == std::vector<unsigned char>(pqOwner.hash.begin(), pqOwner.hash.end()));
+    BOOST_CHECK_EQUAL(enc[50], 0x03);
+    BOOST_CHECK_EQUAL(enc[51], 0x04);
+    enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, pqOwner, 0x03));
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420401" "02" "04030201" "0d0c0b0a" "44332211" + OWNERHEX + "03" "ff");
     enc = EncodePayload(Payload::Transfer({ Assignment(3, 0x0100) }));
     BOOST_CHECK_EQUAL(HexStr(enc), "59420302" "01" "03" "00010000");
     enc = EncodePayload(Payload::Redeem(0x11223344, 0xFF, { Assignment(2, 0x0100) }, 0x05));
@@ -158,19 +181,25 @@ BOOST_AUTO_TEST_CASE(mint1_fixed_width_little_endian_layout)
 // Rule: RED-1
 BOOST_AUTO_TEST_CASE(mint1_malformed_table)
 {
-    const std::string mintBody = "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff" "ff";   // 48 bytes
+    const std::string mintBody = "00" "10270000" "e8030000" "b6030000" + OWNERHEX + "ff" "ff";   // 48 bytes
     const std::string sigHex(128, '1');
     const std::string txidHex(64, 'a');
     struct Case { const char* name; std::string hex; bool ok; };
     const std::vector<Case> cases = {
-        { "mint_ok",             "59420301" + mintBody, true },
+        { "mint_ok",             "59420401" + mintBody, true },                               // C-1: MINT is version 4
         { "bad_magic_0",         "58420301" + mintBody, false },
         { "bad_magic_1",         "59430301" + mintBody, false },
         { "version_0",           "59420001" + mintBody, false },
         { "version_1",           "59420101" + mintBody, false },
         { "version_2",           "59420201" + mintBody, false },                              // V23: the v2 header, even over a v3 body
         { "version_2_v2_body",   "59420201" + mintBody.substr(0, mintBody.size() - 2), false }, // a real v2 MINT (51 bytes)
-        { "version_4",           "59420401" + mintBody, false },
+        { "mint_version_3",      "59420301" + mintBody, false },                              // C-1: a v3 MINT is non-Yellowback on this line
+        { "mint_version_3_ec",   "59420301" "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff" "ff", false },   // the v3 EC-owner MINT
+        { "version_5",           "59420501" + mintBody, false },
+        { "transfer_version_4",  "59420402" "00", false },                                    // C-1: every other type stays version 3
+        { "redeem_version_4",    "59420403" "b6030000" "ff" "ff" "00", false },
+        { "notice_version_4",    "59420406" + txidHex + "01" "b6030000", false },
+        { "equivocation_version_4", "59420407", false },
         { "version_ff",          "5942ff01" + mintBody, false },
         { "unknown_type_04",     "59420304" "01000000", false },
         { "unknown_type_09",     "59420309" "00", false },
@@ -182,15 +211,16 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
         { "empty",               "", false },
         { "one_byte",            "59", false },
         { "header_only",         "594203", false },
-        { "header_no_body",      "59420301", false },
-        { "mint_short_by_one",   "59420301" + mintBody.substr(0, mintBody.size() - 2), false },   // the v2 length (no attestFeeVout)
-        { "mint_no_feevout",     "59420301" "00" "10270000" "e8030000" "b6030000" + KEYHEX, false },   // the v1 length
-        { "mint_trailing",       "59420301" + mintBody + "00", false },
-        // Any 33 bytes decode as the owner key (the codec fixes the shape; MINT-3 gives bad-mint-owner-key
-        // and a VOID vault records the bytes verbatim, SERIALISATION.md §3 C).
-        { "mint_key_prefix_04",  "59420301" "00" "10270000" "e8030000" "b6030000" "04" + KEYHEX.substr(2) + "ff" "ff", true },
-        { "mint_key_prefix_01",  "59420301" "00" "10270000" "e8030000" "b6030000" "01" + KEYHEX.substr(2) + "ff" "ff", true },
-        { "mint_key_prefix_03",  "59420301" "00" "10270000" "e8030000" "b6030000" "03" + KEYHEX.substr(2) + "ff" "ff", true },
+        { "header_no_body",      "59420401", false },
+        { "mint_short_by_one",   "59420401" + mintBody.substr(0, mintBody.size() - 2), false },   // the v2 length (no attestFeeVout)
+        { "mint_no_feevout",     "59420401" "00" "10270000" "e8030000" "b6030000" + OWNERHEX, false },   // the v1 length
+        { "mint_trailing",       "59420401" + mintBody + "00", false },
+        // Any 33 bytes decode as the owner, whatever the scheme byte (the codec fixes the shape; MINT-3 gives
+        // bad-mint-owner-key and the vault record keeps the bytes verbatim, SERIALISATION.md §3 C).
+        { "mint_scheme_02",      "59420401" "00" "10270000" "e8030000" "b6030000" "02" + OWNERHEX.substr(2) + "ff" "ff", true },
+        { "mint_scheme_00",      "59420401" "00" "10270000" "e8030000" "b6030000" "00" + OWNERHEX.substr(2) + "ff" "ff", true },
+        { "mint_scheme_03",      "59420401" "00" "10270000" "e8030000" "b6030000" "03" + OWNERHEX.substr(2) + "ff" "ff", true },
+        { "mint_ec_key_bytes",   "59420401" "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff" "ff", true },
         { "transfer_empty",      "59420302" "00", true },
         { "transfer_short",      "59420302" "01" "01640000", false },
         { "transfer_long",       "59420302" "01" "0164000000" "00", false },
@@ -276,8 +306,19 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
     CPubKey unc;
     { CKey k; k = CKey::TestOnlyRandomKey(false); unc = k.GetPubKey(); }
     const CPubKey good(Hex(KEYHEX));
-    BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, unc, 0xFF)).empty());
-    BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, CPubKey(), 0xFF)).empty());
+    {
+        // C-1: a MINT is encodable at version 4 only, and its owner field must be 33 bytes.
+        Payload m = Payload::Mint(0, 1, 1, 1, TestOwner(), 0xFF);
+        BOOST_CHECK(!EncodePayload(m).empty());
+        m.version = PAYLOAD_VERSION;
+        BOOST_CHECK(EncodePayload(m).empty());
+        m = Payload::Mint(0, 1, 1, 1, TestOwner(), 0xFF);
+        m.ownerKeyBytes.pop_back();
+        BOOST_CHECK(EncodePayload(m).empty());
+        Payload t = Payload::Transfer({ Assignment(1, 100) });
+        t.version = MINT_PAYLOAD_VERSION;
+        BOOST_CHECK(EncodePayload(t).empty());
+    }
     BOOST_CHECK(EncodePayload(Payload::AttestorRegister(unc, good, 1, 0)).empty());
     BOOST_CHECK(EncodePayload(Payload::AttestorRegister(good, CPubKey(), 1, 0)).empty());
     BOOST_CHECK(!EncodePayload(Payload::AttestorRegister(good, good, 1, 0)).empty());
@@ -293,7 +334,7 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
 // indices, so FindPayload keeps a payload whose feeVout is out of range.
 BOOST_AUTO_TEST_CASE(mint8_feevout_semantics)
 {
-    CPubKey owner = TestKey();
+    const CPQKeyID owner = TestOwner();
     for (uint8_t fv : { (uint8_t)0, (uint8_t)3, (uint8_t)0xFE, FEE_VOUT_NONE }) {
         Payload p;
         BOOST_REQUIRE(DecodePayload(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner, fv)), p));
@@ -375,7 +416,8 @@ BOOST_AUTO_TEST_CASE(tx0_opreturn_shape)
 BOOST_AUTO_TEST_CASE(tx0_find_payload_in_transaction)
 {
     CPubKey owner = TestKey();
-    const CScript mint = PayloadScript(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner, 3)));
+    const CPQKeyID pqOwner = TestOwner();
+    const CScript mint = PayloadScript(EncodePayload(Payload::Mint(0, 10000, 1000, 950, pqOwner, 3)));
     const CScript xfer = PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100), Assignment(2, 200) })));
 
     // Found, with its index.
@@ -497,6 +539,7 @@ BOOST_AUTO_TEST_CASE(version2_is_non_yellowback)
     // The same bodies under version 3: TRANSFER is unchanged and decodes; MINT and REDEEM need the extra byte.
     BOOST_CHECK(DecodePayload(Hex("59420302" "01" "03" "00010000"), p));
     BOOST_CHECK(!DecodePayload(Hex("59420301" "02" "04030201" "0d0c0b0a" "44332211" + KEYHEX + "03"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420401" "02" "04030201" "0d0c0b0a" "44332211" + OWNERHEX + "03"), p));   // v4 MINT without attestFeeVout
     BOOST_CHECK(!DecodePayload(Hex("59420303" "44332211" "ff" "01" "02" "00010000"), p));
     // A version-2 payload is ignored at the transaction level too.
     CMutableTransaction mtx = TxWithOutputs(2, PayloadScript(Hex("59420202" "01" "00" "64000000")), 1);
@@ -508,6 +551,7 @@ BOOST_AUTO_TEST_CASE(version2_is_non_yellowback)
     v2.version = 2;
     BOOST_CHECK(EncodePayload(v2).empty());
     BOOST_CHECK_EQUAL(PAYLOAD_VERSION, 3);
+    BOOST_CHECK_EQUAL(MINT_PAYLOAD_VERSION, 4);
 }
 
 // Rule: REG-A1

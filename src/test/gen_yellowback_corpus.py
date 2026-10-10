@@ -7,7 +7,7 @@
 One deterministic generator owns five corpora:
 
     src/fuzzing/YellowbackTag/input/*.bin       LE32(nHeight) ‖ coinbase scriptSig
-    src/fuzzing/YellowbackPayload/input/*.bin   OP_RETURN payload bytes (version 3)
+    src/fuzzing/YellowbackPayload/input/*.bin   OP_RETURN payload bytes (version 3; MINT version 4, quantum spec C-1)
     src/fuzzing/YellowbackScript/input/*.bin    vault scripts and vault scriptSigs
     src/fuzzing/YellowbackEvaluate/input/*.bin  the prefix grammar of src/test/yellowback_fuzz_harness.h ‖ a CBlock
     src/fuzzing/YellowbackPayee/input/*.bin     the FEE-W grammar of the same header
@@ -195,6 +195,8 @@ def tag_corpus():
 
 # ---------------------------------------------------------------- payload (v3 plan §3.3)
 PAYLOAD_VERSION = 3
+MINT_VERSION = 4          # quantum spec header C-1: the MINT alone moves to version 4 (owner = scheme || keyHash)
+OWNER = bytes([0x01]) + KEY[1:]   # a post-quantum owner id: scheme 0x01 || 32 key-hash bytes
 KEY2 = bytes.fromhex("03a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90")
 SIG64 = bytes(range(64))
 TXID = bytes([0xAA]) * 32
@@ -204,7 +206,7 @@ def hdr(t, version=PAYLOAD_VERSION):
     return bytes([0x59, 0x42, version, t])
 
 
-def mint(term=0, cents=10000, lock=1000, ref=950, key=KEY, fee=3, attest_fee=0xFF, version=PAYLOAD_VERSION):
+def mint(term=0, cents=10000, lock=1000, ref=950, key=OWNER, fee=3, attest_fee=0xFF, version=MINT_VERSION):
     return hdr(1, version) + bytes([term]) + struct.pack("<III", cents, lock, ref) + key + bytes([fee, attest_fee])
 
 
@@ -258,7 +260,8 @@ def payload_corpus():
         ("mint", mint()),
         ("mint_feevout_none", mint(term=2, cents=1000000, lock=0xFFFFFFFF, ref=0, fee=0xFF)),
         ("mint_attest_fee", mint(fee=3, attest_fee=4)),
-        ("mint_key_prefix_03", mint(key=bytes([0x03]) + KEY[1:])),
+        ("mint_scheme_02", mint(key=bytes([0x02]) + OWNER[1:])),
+        ("mint_ec_owner_bytes", mint(key=KEY)),                                     # decodes; MINT-3 judges the scheme
         ("transfer_empty", transfer([])),
         ("transfer_one", transfer([(1, 100)])),
         ("transfer_15", transfer(fifteen)),
@@ -278,7 +281,10 @@ def payload_corpus():
         ("version2_transfer", transfer([(1, 100)], version=2)),
         ("version2_redeem", redeem_v2(950, 3, [(1, 12345)])),
         ("version2_header_v3_body", mint(version=2)),
-        ("version4", mint(version=4)),
+        ("mint_version3", mint(version=3)),                                         # C-1: a v3 MINT is non-Yellowback
+        ("mint_version3_ec", mint(key=KEY, version=3)),                             # the upgrade line's MINT
+        ("transfer_version4", transfer([(1, 100)], version=4)),                     # C-1: TRANSFER stays version 3
+        ("version5", mint(version=5)),
         ("unknown_type_04", hdr(4) + b"\x01\x00\x00\x00"),
         ("unknown_type_09", hdr(9) + b"\x00"),
         ("retired_type_10", hdr(0x10) + struct.pack("<Q", 50000)),
@@ -288,7 +294,7 @@ def payload_corpus():
         ("mint_no_attest_feevout", mint()[:-1]),        # the v2 length under the v3 header
         ("mint_no_feevout", mint()[:-2]),               # the v1 length
         ("mint_trailing", mint() + b"\x00"),
-        ("mint_uncompressed_key", hdr(1) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + UNCOMPRESSED_KEY[:33] + b"\x03\xff"),
+        ("mint_uncompressed_key", hdr(1, MINT_VERSION) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + UNCOMPRESSED_KEY[:33] + b"\x03\xff"),
         ("transfer_dup", transfer([(1, 1), (1, 2)])),
         ("transfer_zero", transfer([(1, 0)])),
         ("transfer_16", transfer([(i, 1) for i in range(16)])),

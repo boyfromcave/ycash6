@@ -17,16 +17,17 @@
 #include <vector>
 
 /**
- * Yellowback payload codec, version 3 (v3 plan §3.3, W14; v2 §3.3 where unchanged).
+ * Yellowback payload codec, version 3 (v3 plan §3.3, W14; v2 §3.3 where unchanged), with the MINT at
+ * version 4 on the post-quantum line (quantum spec §3.1, header C-1).
  *
  *   magic   2 bytes   0x59 0x42 ("YB")
- *   version 1 byte    0x03
+ *   version 1 byte    0x04 for MINT, 0x03 for every other type (another version => non-Yellowback)
  *   type    1 byte    0x01 MINT | 0x02 TRANSFER | 0x03 REDEEM | 0x05 ATTESTOR_REGISTER |
  *                     0x06 CLAIM_NOTICE | 0x07 EQUIVOCATION | 0x08 ATTESTOR_REVIVE
  *   body    per type; total <= 80 bytes; trailing bytes => malformed
  *
- *   MINT               termClass u8, cents u32, lockHeight u32, refHeight u32, ownerPubKey 33,
- *                      feeVout u8, attestFeeVout u8                                            (52)
+ *   MINT (v4)          termClass u8, cents u32, lockHeight u32, refHeight u32,
+ *                      ownerScheme u8, ownerHash 32, feeVout u8, attestFeeVout u8              (52)
  *   TRANSFER           count u8, count x (vout u8, cents u32)                                  (5 + 5n, n <= 15)
  *   REDEEM             refHeight u32, feeVout u8, attestFeeVout u8, count u8,
  *                      count x (vout u8, cents u32)                                            (11 + 5n, n <= 13)
@@ -50,11 +51,11 @@
  * OP_RETURN (ref/digibyte/src/digidollar/txbuilder.cpp:407-418, 807-818);
  * Ycash pins nVersion == 4, so the type lives in the payload (mapping.md §5).
  *
- * The MINT owner key is carried as its 33 raw bytes (`ownerKeyBytes`) as
- * well as a CPubKey: the codec fixes only the shape (33 bytes), MINT-3
- * decides validity (`bad-mint-owner-key`), and a VOID vault records the
- * bytes verbatim so every implementation serialises the same record
- * (SERIALISATION.md §3 C). The ATTESTOR_REGISTER keys are carried the same
+ * The MINT owner is carried as its 33 raw bytes (`ownerKeyBytes`, scheme ||
+ * keyHash) as well as a CPQKeyID: the codec fixes only the shape (33 bytes,
+ * any scheme byte), MINT-3 decides validity (`bad-mint-owner-key`), and the
+ * vault record keeps the bytes verbatim so every implementation serialises
+ * the same record (SERIALISATION.md §3 C). The ATTESTOR_REGISTER keys are carried the same
  * way (REG-A1 judges them). Versions 1 and 2 are non-Yellowback (V23).
  */
 namespace yellowback {
@@ -89,7 +90,7 @@ static const size_t COMPACT_SIG_SIZE = 64;
 
 struct Payload
 {
-    uint8_t version;          //!< PAYLOAD_VERSION (3)
+    uint8_t version;          //!< MINT_PAYLOAD_VERSION (4) for a MINT, PAYLOAD_VERSION (3) otherwise
     PayloadType type;
 
     // MINT
@@ -97,8 +98,8 @@ struct Payload
     uint32_t cents;
     uint32_t lockHeight;
     uint32_t refHeight;       //!< MINT, REDEEM (V11) and CLAIM_NOTICE
-    CPubKey ownerPubKey;      //!< from ownerKeyBytes; invalid (size 0) when the bytes are not a key encoding
-    std::vector<unsigned char> ownerKeyBytes;   //!< the 33 payload bytes verbatim
+    CPQKeyID owner;           //!< from ownerKeyBytes: scheme = byte 0, hash = bytes 1..32 (any scheme decodes; MINT-3 judges)
+    std::vector<unsigned char> ownerKeyBytes;   //!< the 33 payload bytes verbatim (scheme || keyHash)
     uint8_t feeVout;          //!< MINT and REDEEM; FEE_VOUT_NONE = no fee output
     uint8_t attestFeeVout;    //!< MINT and REDEEM; FEE_VOUT_NONE = no attestor-fee output (AFEE-0)
 
@@ -127,9 +128,7 @@ struct Payload
                 feeVout(FEE_VOUT_NONE), attestFeeVout(FEE_VOUT_NONE), bondLocktime(0), flags(0), vaultVout(0),
                 seq(0), priceMicroUsd(0), citedHeight(0) { sig.fill(0); }
 
-    static Payload Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout,
-                        uint8_t attestFeeVout = FEE_VOUT_NONE);
-    /** A MINT whose 33 owner bytes are scheme || keyHash (quantum spec §3.1); ownerPubKey stays invalid. */
+    /** A v4 MINT whose 33 owner bytes are scheme || keyHash (quantum spec §3.1). */
     static Payload Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPQKeyID& owner, uint8_t feeVout,
                         uint8_t attestFeeVout = FEE_VOUT_NONE);
     static Payload Transfer(const std::vector<Assignment>& assignments);
@@ -150,13 +149,16 @@ struct Payload
     friend bool operator==(const Payload& a, const Payload& b);
 };
 
+/** The version byte a payload of `type` carries: MINT_PAYLOAD_VERSION for a MINT, PAYLOAD_VERSION otherwise (C-1). */
+uint8_t VersionOf(PayloadType type);
+
 /** Serialise; the result is the data push of the OP_RETURN output. Empty if the payload is not encodable. */
 std::vector<unsigned char> EncodePayload(const Payload& payload);
 
 /**
  * Parse a payload. Returns false for every malformed case of §3.3: bad magic,
- * version or type, short or long body, count > 15 (TRANSFER) / 13 (REDEEM),
- * duplicate vout, cents == 0. The owner and attestor keys are any 33 bytes
+ * version (4 for MINT, 3 for every other type) or type, short or long body, count > 15 (TRANSFER) / 13 (REDEEM),
+ * duplicate vout, cents == 0. The MINT owner and the attestor keys are any 33 bytes
  * (MINT-3 / REG-A1 judge them). Range checks that need the transaction (vout
  * exists, vout is not the OP_RETURN) are done by FindPayload. Versions 1 and
  * 2 are non-Yellowback (V23).

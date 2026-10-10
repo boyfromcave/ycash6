@@ -49,6 +49,12 @@ static const unsigned char PAYLOAD_MAGIC_1 = 0x42;
 static const unsigned char PAYLOAD_VERSION = 0x03;
 /** The payload version this release emits and accepts (v3 plan W14); versions 1 and 2 are non-Yellowback (V23). */
 inline uint8_t PayloadVersion() { return PAYLOAD_VERSION; }
+/**
+ * The MINT's payload version on the post-quantum line (quantum spec header C-1, §3.1): its owner field
+ * is ownerScheme u8 || ownerHash 32 (same 33 bytes, same offsets). Only MINT moves; every other type
+ * stays PAYLOAD_VERSION, and a MINT at PAYLOAD_VERSION is non-Yellowback.
+ */
+static const unsigned char MINT_PAYLOAD_VERSION = 0x04;
 /** Largest payload: Ycash nMaxDatacarrierBytes (83) minus OP_RETURN and the push opcode. */
 static const size_t MAX_PAYLOAD = 80;
 static const size_t MIN_PAYLOAD = 4;

@@ -14,7 +14,7 @@ namespace yellowback {
 namespace {
 
 const size_t KEY_SIZE = CPubKey::COMPRESSED_PUBLIC_KEY_SIZE;                 // 33
-const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + KEY_SIZE + 1 + 1;              // 48 (v3: + attestFeeVout)
+const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + KEY_SIZE + 1 + 1;              // 48 (v3: + attestFeeVout; v4: the 33 owner bytes are scheme || keyHash)
 const size_t REDEEM_HEAD_SIZE = 4 + 1 + 1 + 1;                               // refHeight, feeVout, attestFeeVout, count
 const size_t REGISTER_BODY_SIZE = KEY_SIZE + KEY_SIZE + 4 + 1;               // 71
 const size_t NOTICE_BODY_SIZE = 32 + 1 + 4;                                  // 37
@@ -103,23 +103,16 @@ bool ValidAssignments(const std::vector<Assignment>& assignments, size_t maxCoun
 Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPQKeyID& owner, uint8_t feeVout,
                       uint8_t attestFeeVout)
 {
-    Payload p = Mint(termClass, cents, lockHeight, refHeight, CPubKey(), feeVout, attestFeeVout);
-    p.ownerKeyBytes.assign(1, owner.scheme);
-    p.ownerKeyBytes.insert(p.ownerKeyBytes.end(), owner.hash.begin(), owner.hash.end());
-    return p;
-}
-
-Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout,
-                      uint8_t attestFeeVout)
-{
     Payload p;
+    p.version = MINT_PAYLOAD_VERSION;
     p.type = PayloadType::MINT;
     p.termClass = termClass;
     p.cents = cents;
     p.lockHeight = lockHeight;
     p.refHeight = refHeight;
-    p.ownerPubKey = owner;
-    p.ownerKeyBytes.assign(owner.begin(), owner.end());
+    p.owner = owner;
+    p.ownerKeyBytes.assign(1, owner.scheme);
+    p.ownerKeyBytes.insert(p.ownerKeyBytes.end(), owner.hash.begin(), owner.hash.end());
     p.feeVout = feeVout;
     p.attestFeeVout = attestFeeVout;
     return p;
@@ -244,7 +237,7 @@ void PutAssignments(std::vector<unsigned char>& out, const std::vector<Assignmen
     }
 }
 
-/** Version 3 bodies (v3 plan §3.3). */
+/** Version 3 bodies (v3 plan §3.3); the MINT body is version 4's (quantum spec §3.1: the same 48 bytes, owner = scheme || keyHash). */
 bool DecodeBodyV3(Reader& r, uint8_t type, size_t size, Payload& p)
 {
     switch (type) {
@@ -253,9 +246,9 @@ bool DecodeBodyV3(Reader& r, uint8_t type, size_t size, Payload& p)
         p.type = PayloadType::MINT;
         if (!r.U8(p.termClass) || !r.U32(p.cents) || !r.U32(p.lockHeight) || !r.U32(p.refHeight) ||
             !r.Bytes(KEY_SIZE, p.ownerKeyBytes) || !r.U8(p.feeVout) || !r.U8(p.attestFeeVout)) return false;
-        // Any 33 bytes: the codec fixes the shape, MINT-3 judges the key
-        // (bad-mint-owner-key) and a VOID vault records the bytes verbatim.
-        p.ownerPubKey.Set(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end());
+        // Any 33 bytes: the codec fixes the shape, MINT-3 judges the owner
+        // (bad-mint-owner-key) and the vault record keeps the bytes verbatim.
+        p.owner = CPQKeyID(p.ownerKeyBytes[0], uint256(std::vector<unsigned char>(p.ownerKeyBytes.begin() + 1, p.ownerKeyBytes.end())));
         return true;
     }
     case (uint8_t)PayloadType::TRANSFER: {
@@ -311,6 +304,11 @@ bool DecodeBodyV3(Reader& r, uint8_t type, size_t size, Payload& p)
 
 } // namespace
 
+uint8_t VersionOf(PayloadType type)
+{
+    return type == PayloadType::MINT ? MINT_PAYLOAD_VERSION : PAYLOAD_VERSION;
+}
+
 std::vector<unsigned char> EncodePayload(const Payload& payload)
 {
     std::vector<unsigned char> out;
@@ -318,7 +316,7 @@ std::vector<unsigned char> EncodePayload(const Payload& payload)
     out.push_back(PAYLOAD_MAGIC_1);
     out.push_back(payload.version);
     out.push_back((unsigned char)payload.type);
-    if (payload.version == PAYLOAD_VERSION) {
+    if (payload.version == VersionOf(payload.type)) {
         switch (payload.type) {
         case PayloadType::MINT:
             if (payload.ownerKeyBytes.size() != KEY_SIZE) return {};
@@ -382,7 +380,8 @@ bool DecodePayload(const std::vector<unsigned char>& data, Payload& out)
 
     Payload p;
     p.version = version;
-    if (version != PAYLOAD_VERSION) return false; // versions 1, 2 and every later version: non-Yellowback (V23)
+    // versions 1, 2 and every later version: non-Yellowback (V23); a MINT is version 4 and every other type version 3 (C-1)
+    if (version != VersionOf((PayloadType)type)) return false;
     if (!DecodeBodyV3(r, type, data.size(), p)) return false;
     if (!r.AtEnd()) return false;
     out = p;
