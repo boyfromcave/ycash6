@@ -211,13 +211,24 @@ EJECTED and its bond frozen. Result: the txid.
 
 ## Vault RPCs (wallet)
 
+### `vault_getnewowner ( scheme )`
+Params: `["scheme"?: int]`
+
+Result: `{"scheme": int, "keyhash": hex, "owner": pqkeyid, "address": str}`
+
+A new post-quantum key of this wallet, derived from its HD seed (HKDF-SHA256, quantum plan §4.6),
+for a vault owner. `scheme` 1 (SLH-DSA-SHA2-128s, the default) or 2 (FN-DSA-512, only once Falcon
+is active at the next block). `keyhash` is the 32 bytes the V pushes, `owner` = scheme ‖ keyhash,
+`address` the 53-character PQ Yellowback address. The wallet must be unlocked.
+
 ### `vault_lock {params}`
-Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "owner": pqkeyid}]`
+Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "owner"?: pqkeyid}]`
 
 Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "owner": pqkeyid}`
 
 `delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch). `owner` is
-a pqkeyid or a PQ address (required until the wallet holds post-quantum keys); the former
+a pqkeyid, a PQ address or `{"scheme": int, "keyhash": hex}` (any key: an external owner is
+allowed); without it the wallet draws a new SLH-DSA owner (as `vault_getnewowner`). The former
 `ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...]`
@@ -293,8 +304,8 @@ Result: `{"txid": hash, "selector": int}`
 Spends a vault with its owner key (in this wallet) to `address`, less the fee: selector 2 with
 `nLockTime = ownerheight` once the next block is above `ownerheight`, else selector 3 when the
 set is released (dormant or wound down). An intent has only selector 3. The owner is a
-post-quantum key: until the wallet holds post-quantum keys the command answers `not yet
-supported` once the branch is open, and the spend is signed outside the node.
+post-quantum key this wallet must hold (an external owner signs outside the node); the fee is
+max(10,000 zat, `-pqfeerate` × size) (quantum plan §4.5).
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
 Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`
@@ -321,9 +332,9 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
 | -8 | `vault parameters out of range` | `vault_lock` | `delay` 0 |
 | -8 | `ownerkey-removed` | `vault_lock` | the former `ownerkey` parameter |
-| -8 | `owner (pqkeyid or PQ address) is required` | `vault_lock` | no `owner` |
+| -8 | `unknown post-quantum scheme` | `vault_getnewowner` | `scheme` 3 |
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
-| -4 | `not yet supported` | `vault_ownerspend` | an open owner branch (the wallet holds no PQ keys) |
+| -4 | `not a post-quantum key of this wallet` | `vault_ownerspend` | a vault with an external owner |
 | -8 | `not an unspent vault output` | `vault_buildunlock`, `vault_app` | a spent vault outpoint |
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |

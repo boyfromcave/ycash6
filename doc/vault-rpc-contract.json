@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "49e2ad718cfb779e919dbd14e500645093fe00724b7eb752e5aab36827364744"
+    "sha256": "662ac36d7410d7c0434fccdef91edf659acbdf430911d552f5610eceda498e55"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -1723,6 +1723,37 @@
         "type": "hash"
       }
     },
+    "vault_getnewowner": {
+      "wallet": true,
+      "signature": "vault_getnewowner ( scheme )",
+      "params": [
+        {
+          "name": "scheme",
+          "required": false,
+          "type": {
+            "type": "int"
+          }
+        }
+      ],
+      "result": {
+        "type": "object",
+        "fields": {
+          "scheme": {
+            "type": "int"
+          },
+          "keyhash": {
+            "type": "hex"
+          },
+          "owner": {
+            "type": "pqkeyid"
+          },
+          "address": {
+            "type": "str"
+          }
+        },
+        "optional": []
+      }
+    },
     "vault_lock": {
       "wallet": true,
       "signature": "vault_lock {params}",
@@ -1760,7 +1791,8 @@
             },
             "optional": [
               "appheight",
-              "cancelsetid"
+              "cancelsetid",
+              "owner"
             ]
           }
         }
@@ -2094,11 +2126,11 @@
     },
     {
       "code": -8,
-      "message": "owner (pqkeyid or PQ address) is required",
+      "message": "unknown post-quantum scheme",
       "raisedBy": [
-        "vault_lock"
+        "vault_getnewowner"
       ],
-      "provokedBy": "no `owner`"
+      "provokedBy": "`scheme` 3"
     },
     {
       "code": -8,
@@ -2111,11 +2143,11 @@
     },
     {
       "code": -4,
-      "message": "not yet supported",
+      "message": "not a post-quantum key of this wallet",
       "raisedBy": [
         "vault_ownerspend"
       ],
-      "provokedBy": "an open owner branch (the wallet holds no PQ keys)"
+      "provokedBy": "a vault with an external owner"
     },
     {
       "code": -8,

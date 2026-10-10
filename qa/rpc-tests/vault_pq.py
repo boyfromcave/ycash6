@@ -9,7 +9,7 @@ Post-quantum vault owners and TX_PQPKH end to end (docs/plans/yellowback-quantum
 model (test_framework/vault.py) and checked against the node:
 
 A. a one-seat set; vaults locked with an SLH-DSA owner (vault_lock names it as a pqkeyid;
-   vault_list reports owner / ownerscheme; vault_ownerspend answers "not yet supported" (Q5));
+   vault_list reports owner / ownerscheme; vault_ownerspend refuses an owner the wallet lacks);
 B. OWNER (selector 2): non-final at ownerHeight, another SLH-DSA key's signature evaluates false,
    the owner's 7,939-byte spend relays (the 9,000-byte policy bound) and confirms;
 C. APP (selector 4) into an intent: no owner signature, unchanged by the PQ owner;
@@ -105,7 +105,7 @@ class VaultPQTest(VaultTestBase):
         self.reject(self.owner_hex(self.v1, spk, 2 * COIN, v.SEL_OWNER, lock_time=oh), MEMPOOL_NONFINAL,
                     'bad-txns-nonfinal', 'OWNER with nLockTime = ownerHeight = tip + 1')
         self.mine()
-        assert_rpc_error('not yet supported', self.node.vault_ownerspend, '%s:%d' % self.v1, self.node.getnewaddress())
+        assert_rpc_error('not a post-quantum key of this wallet', self.node.vault_ownerspend, '%s:%d' % self.v1, self.node.getnewaddress())
         self.reject(self.owner_hex(self.v1, spk, 2 * COIN, v.SEL_OWNER, lock_time=oh, secret=OWNER_OUTSIDER),
                     SCRIPT_FALSE, 'script-ownersig', 'OWNER signed by another SLH-DSA key')
         hex_ = self.owner_hex(self.v1, spk, 2 * COIN, v.SEL_OWNER, lock_time=oh)

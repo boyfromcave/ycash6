@@ -105,8 +105,8 @@ class VaultPQWalletTest(BitcoinTestFramework):
         self.nodes[0].generate(n)
         self.sync_all()
 
-    def tx_of(self, txid):
-        return self.nodes[0].getrawtransaction(txid, 1)
+    def tx_of(self, txid, node=0):
+        return self.nodes[node].getrawtransaction(txid, 1)
 
     def fee_of(self, txid, in_value_zat):
         tx = self.tx_of(txid)
@@ -246,7 +246,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         if others:
             assert n1.lockunspent(False, others)
         txid = n1.sendtoaddress(n0.getnewaddress(), 1)
-        tx = self.tx_of(txid)
+        tx = self.tx_of(txid, 1)
         assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(pq_txid, pq_vout)])
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
         size = len(tx['hex']) // 2

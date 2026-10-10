@@ -15,8 +15,10 @@ joins, heartbeats through set_heartbeat and through set_buildact / set_signact /
 each set_buildact type, vault_lock (with and without an APP branch), unlock -> intent ->
 release, a cancel built and signed (not sent), the APP spend through vault_app + vault_send, an
 equivocation proof from two set_signunlock answers over one outpoint, and the owner spend that
-the ejection's dormancy opens (selector 3): the owner is a post-quantum key (quantum plan §4.3),
-so vault_ownerspend answers "not yet supported" (Q5) and the test signs with test_framework/pq.py.
+the ejection's dormancy opens (selector 3): owners are post-quantum keys (quantum plan §4.3); a
+vault with an external owner (a pqkeyid) is refused by vault_ownerspend and signed with
+test_framework/pq.py, one with a wallet owner (vault_lock's default, vault_getnewowner) is spent by
+vault_ownerspend.
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_rpc_contract.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -108,15 +110,16 @@ class VaultRpcContractTest(BitcoinTestFramework):
                 {'tag': 'TEST', 'setid': setid, 'delay': 0, 'ownerheight': h + 100, 'amount': 1, 'owner': OWNER_ID})
         c.error('ownerkey-removed', n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200,
                                                       'amount': 5, 'ownerkey': '02' + '11' * 32})
-        c.error('owner (pqkeyid or PQ address) is required', n, 'vault_lock',
-                {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5})
+        c.error('unknown post-quantum scheme', n, 'vault_getnewowner', 3)
+        own = c.call(n, 'vault_getnewowner')
+        assert_equal(own['owner'], '01' + own['keyhash'])
         c.error('unregistered post-quantum scheme', n, 'vault_lock',
                 {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5, 'owner': '03' + '11' * 32})
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,
                                       'owner': OWNER_ID})
         app_height = h + 12
         lk_app = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200,
-                                          'appheight': app_height, 'amount': 2, 'owner': OWNER_ID})
+                                          'appheight': app_height, 'amount': 2})      # a new wallet owner
         mine(1)
         vaults = c.call(n, 'vault_list', {'kind': 'vault'})
         assert_equal(sorted(v['valuezat'] for v in vaults), [200000000, 500000000])
@@ -190,7 +193,7 @@ class VaultRpcContractTest(BitcoinTestFramework):
         info = c.call(n, 'set_getinfo', setid)
         assert_equal(info['memberlist'][0]['status'], 'ejected')
         assert_equal(info['released'], True)
-        c.error('not yet supported', n, 'vault_ownerspend', relock, addr)
+        c.error('not a post-quantum key of this wallet', n, 'vault_ownerspend', relock, addr)
         coin = n.gettxout(relock.split(':')[0], int(relock.split(':')[1]))
         otx = vault.build_owner_spend_tx((relock.split(':')[0], int(relock.split(':')[1])),
                                          bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000), OWNER,
@@ -198,11 +201,14 @@ class VaultRpcContractTest(BitcoinTestFramework):
         n.sendrawtransaction(vault.tx_hex(otx))
         mine(1)
         assert_equal(n.gettxout(relock.split(':')[0], int(relock.split(':')[1])), None)
+        # the APP spend's re-lock keeps the wallet owner: vault_ownerspend signs it (selector 3)
+        rest = c.call(n, 'vault_list', {'owner': lk_app['owner'], 'kind': 'vault'})
+        assert_equal(len(rest), 1)
+        assert_equal(rest[0]['wallet'], True)
+        assert_equal(c.call(n, 'vault_ownerspend', rest[0]['outpoint'], addr)['selector'], 3)
+        mine(1)
         assert_equal(c.call(n, 'vault_getinfo')['active'], True)
 
-        # vault_ownerspend answers only "not yet supported" until the node wallet signs with PQ keys
-        # (quantum plan Q5); its result shape is checked again from then on.
-        c.checked.add('vault_ownerspend')
         c.assert_complete()
 
 
