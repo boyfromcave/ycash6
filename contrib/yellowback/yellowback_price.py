@@ -43,7 +43,7 @@ LOG = logging.getLogger("yellowback-price")
 
 MICRO = 1_000_000
 PRICE_MIN = 100                 # µUSD; plan §3.1 (as DigiByte primitives/oracle.h:23-24)
-PRICE_MAX = 100_000_000
+PRICE_MAX = 4_294_967_295     # UINT32_MAX µUSD, the attestation field (quantum plan D-Q-22; was $100, DigiByte)
 OUTLIER_BPS = 1000              # sources more than 10 % from the median are dropped
 TWAP_SECONDS = 900              # the proposal's 15-minute window (§5, §10.1)
 SOURCE_SILENCE_SECONDS = 120

@@ -69,9 +69,14 @@ static const int BLOCKS_PER_HOUR = 48;
 static const int BLOCKS_PER_DAY = 1152;
 static const int BLOCKS_PER_YEAR = 420480;
 
-/** Price bounds in micro-USD per YEC: $0.0001 .. $100 (DigiByte's bounds, primitives/oracle.h:23-24). */
+/**
+ * Price bounds in micro-USD per YEC: $0.0001 .. $4,294.967295. PRICE_MIN is DigiByte's bound
+ * (primitives/oracle.h:23-24); PRICE_MAX is UINT32_MAX, the attestation format's limit (attest.h:
+ * priceMicroUsd u32), raised from DigiByte's $100 (quantum plan D-Q-22). Every price product is taken
+ * in arith_uint256 or uint64_t (math.h, state.cpp HALT-3/judgement), so no bound below 2^32 overflows.
+ */
 static const MicroUsd PRICE_MIN = 100;
-static const MicroUsd PRICE_MAX = 100000000;
+static const MicroUsd PRICE_MAX = 4294967295;
 
 /**
  * Protocol constant equal to DEFAULT_POST_BLOSSOM_TX_EXPIRY_DELTA (main.h) but

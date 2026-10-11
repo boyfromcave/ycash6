@@ -1016,7 +1016,7 @@ def _walk_run(args):
         current = read_mock(directory) or Decimal(state["price_usd"])
         step = math.exp(drift_per_tick + vol * rng.gauss(0.0, 1.0))
         value = (current * Decimal(repr(step))).quantize(Decimal("0.000001"))
-        value = max(Decimal("0.000100"), min(Decimal("100000000"), value))
+        value = max(Decimal("0.000100"), min(Decimal("4294.967295"), value))   # [PRICE_MIN, PRICE_MAX] in USD (D-Q-22)
         try: apply_price(state, value)
         except Exception as error: log("could not apply $%s: %s" % (value, error)); continue
         log("$%s -> $%s" % (current, value))

@@ -20,6 +20,8 @@
 #include "univalue.h"
 #include "util/strencodings.h"
 
+#include <limits>
+
 #include <boost/test/unit_test.hpp>
 
 #include <map>
@@ -394,10 +396,11 @@ BOOST_AUTO_TEST_CASE(verify_order_every_reason)
         Attestation a = f.atts[0];
         a.priceMicroUsd = PRICE_MIN - 1;
         BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[1], a })) })).reason, "range");
-        a.priceMicroUsd = (uint32_t)PRICE_MAX + 1;
-        BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[1], a })) })).reason, "range");
+        // D-Q-22: PRICE_MAX is UINT32_MAX, so the u32 field cannot exceed it; the upper bound is the format's
+        // and is exercised through limits.priceMax below. The u32 maximum is in range (its signature is not).
+        BOOST_CHECK_EQUAL(PRICE_MAX, (MicroUsd)std::numeric_limits<uint32_t>::max());
         a.priceMicroUsd = 0xFFFFFFFF;
-        BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[1], a })) })).reason, "range");
+        BOOST_CHECK(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[1], a })) })).reason != "range");
         Fixture g;
         g.limits.priceMin = 100001;   // atts[0] is at 100000
         BOOST_CHECK_EQUAL(g.Verify(TxWith({ CarrierIn(Enc({ g.atts[1], g.atts[0] })) })).reason, "range");

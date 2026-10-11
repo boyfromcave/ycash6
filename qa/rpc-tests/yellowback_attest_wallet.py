@@ -604,7 +604,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
 
 # Rule: MINT-10 MINT-5 PRICE-2
         print('W17: a rally -- pools jump to $90; after a fast window the attestors agree with the fast median, the mint goes through, priced at the lagging minimum')
-        self.price(90)                                                          # ($100 is PRICE_MAX itself, which yed_signattestation refuses)
+        self.price(90)                                                          # (a rally inside the walk; PRICE_MAX is $4,294.967295 since D-Q-22)
         self.mine_round_robin(POOLS, P_FAST_WINDOW + REF_LAG)
         pr = user.yed_getprice()
         assert abs(pr['pFast'] - usd_to_micro(90)) < usd_to_micro(1), pr        # the pools' quotes carry a small per-pool jitter

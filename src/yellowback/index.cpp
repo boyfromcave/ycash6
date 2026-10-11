@@ -839,7 +839,7 @@ bool YellowbackIndex::AddAttestationLocked(const Attestation& att, std::string& 
         return false;
     }
     if ((MicroUsd)att.priceMicroUsd < PRICE_MIN || (MicroUsd)att.priceMicroUsd > PRICE_MAX) {
-        reason = strprintf("attest-range: priceMicroUsd %u is outside [%d, %d]", (unsigned)att.priceMicroUsd, (int)PRICE_MIN, (int)PRICE_MAX);
+        reason = strprintf("attest-range: priceMicroUsd %u is outside [%d, %d]", (unsigned)att.priceMicroUsd, PRICE_MIN, PRICE_MAX);
         return false;
     }
     std::optional<uint256> blockHash = BlockHashAtLocked(cited);

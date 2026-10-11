@@ -140,7 +140,7 @@ def tag_corpus():
         ("bad_version", tag_seed(h, pre + tag_push(version=0))),
         ("reserved_flag_bit", tag_seed(h, pre + tag_push(flags=0x03))),
         ("price_below_min", tag_seed(h, pre + tag_push(price=99))),
-        ("price_above_max", tag_seed(h, pre + tag_push(price=100000001))),
+        ("price_above_max", tag_seed(h, pre + tag_push(price=4294967296))),   # PRICE_MAX + 1 (D-Q-22)
         ("signal_only", tag_seed(h, pre + tag_push(price=0))),
         ("wrong_height", tag_seed(h + 1, pre + tag_push())),
         ("no_prefix", tag_seed(h, tag_push())),

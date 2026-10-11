@@ -39,7 +39,7 @@ static const std::vector<std::pair<std::string, std::string>> TAG_CORPUS = {
     {"bad_version", "87d612000387d6122459454421000150c30000000000000700abababababababababababababababababababab"},
     {"reserved_flag_bit", "87d612000387d6122459454421010350c30000000000000700abababababababababababababababababababab"},
     {"price_below_min", "87d612000387d6122459454421010163000000000000000700abababababababababababababababababababab"},
-    {"price_above_max", "87d612000387d6122459454421010101e1f505000000000700abababababababababababababababababababab"},
+    {"price_above_max", "87d612000387d6122459454421010100000000010000000700abababababababababababababababababababab"},
     {"signal_only", "87d612000387d6122459454421010100000000000000000700abababababababababababababababababababab"},
     {"wrong_height", "88d612000387d6122459454421010150c30000000000000700abababababababababababababababababababab"},
     {"no_prefix", "87d612002459454421010150c30000000000000700abababababababababababababababababababab"},

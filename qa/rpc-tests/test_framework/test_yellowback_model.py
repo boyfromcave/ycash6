@@ -390,9 +390,10 @@ class TagTests(unittest.TestCase):
         self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(1, 50_000, 0, KEY1, version=2)), 5, self.P))
         self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(0x02, 50_000, 0, KEY1)), 5, self.P))
         self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(1, 99, 0, KEY1)), 5, self.P))
-        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(1, 100_000_001, 0, KEY1)), 5, self.P))
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(1, 4_294_967_296, 0, KEY1)), 5, self.P))   # PRICE_MAX + 1 (D-Q-22)
         self.assertIsNotNone(ym.find_tag(self.ss(5, ym.tag_push(1, 100, 0, KEY1)), 5, self.P))
-        self.assertIsNotNone(ym.find_tag(self.ss(5, ym.tag_push(1, 100_000_000, 0, KEY1)), 5, self.P))
+        self.assertIsNotNone(ym.find_tag(self.ss(5, ym.tag_push(1, 100_000_001, 0, KEY1)), 5, self.P))  # above the old $100 bound
+        self.assertIsNotNone(ym.find_tag(self.ss(5, ym.tag_push(1, 4_294_967_295, 0, KEY1)), 5, self.P))  # PRICE_MAX
 
     # Rule: TAG-3
     def test_kinds(self):
@@ -954,9 +955,11 @@ class MintTests(unittest.TestCase):
         t = self.mint(collateral=req)
         self.assertEqual(c.model.vaults[(t, 0)].status, ym.V_ACTIVE)
         self.assertLessEqual(req, coll)
-        # the 4 * FEE_MIN floor (2 YEC) can never bind with the section 3.1 parameters: MIN_MINT at
-        # PRICE_MAX and the lowest ratio (class C, 1x) still needs 3 YEC
+        # the 4 * FEE_MIN floor (2 YEC) does not bind up to $100/YEC (the pre-D-Q-22 PRICE_MAX): MIN_MINT
+        # at the lowest ratio (300 %) still needs 3 YEC there; at PRICE_MAX ($4,294.97, D-Q-22) it needs
+        # 0.07 YEC, and the floor sets the collateral (MINT-5's second clause, state.cpp)
         self.assertGreater(ym.required_zat(10_000, 30_000, 100_000_000), 4 * 50_000_000)
+        self.assertLess(ym.required_zat(10_000, 30_000, 4_294_967_295), 4 * 50_000_000)
 
     # Rule: MINT-5
     def test_mint5_unsatisfiable(self):

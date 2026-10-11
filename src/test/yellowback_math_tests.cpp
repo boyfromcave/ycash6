@@ -12,6 +12,8 @@
 
 #include "test/test_bitcoin.h"
 
+#include <limits>
+
 #include <boost/test/unit_test.hpp>
 
 /** The YED attestor set the regtest parameters of these cases name (U-22). */
@@ -205,13 +207,35 @@ BOOST_AUTO_TEST_CASE(mint5_required_collateral_overflow_at_max_mint_and_price_mi
     BOOST_REQUIRE(r.has_value());
     BOOST_CHECK_EQUAL(r.value(), 300000000000000LL);
     // Exactly MAX_MONEY is satisfiable; one zat above is not.
-    // ratio 10,000 bps at PRICE_MAX ($100/YEC): required = cents * 1e4 zat => MAX_MONEY at cents = 2.1e11.
-    BOOST_CHECK_EQUAL(RequiredCollateral(210000000000LL, 10000, PRICE_MAX).value(), MAX_MONEY);
-    BOOST_CHECK(!RequiredCollateral(210000000001LL, 10000, PRICE_MAX).has_value());
-    // MAX_OUTPUT-sized amounts at PRICE_MAX are tiny and fine.
-    r = RequiredCollateral(m.maxOutput, 30000, PRICE_MAX);
+    // ratio 10,000 bps at $100/YEC (the pre-D-Q-22 PRICE_MAX): required = cents * 1e4 zat => MAX_MONEY at cents = 2.1e11.
+    BOOST_CHECK_EQUAL(RequiredCollateral(210000000000LL, 10000, 100000000).value(), MAX_MONEY);
+    BOOST_CHECK(!RequiredCollateral(210000000001LL, 10000, 100000000).has_value());
+    // MAX_OUTPUT-sized amounts at $100 are tiny and fine.
+    r = RequiredCollateral(m.maxOutput, 30000, 100000000);
     BOOST_REQUIRE(r.has_value());
     BOOST_CHECK_EQUAL(r.value(), 3000 * COIN);   // $100,000 * 300 % / $100 per YEC = 3,000 YEC
+}
+
+// Rule: MINT-5
+// D-Q-22: PRICE_MAX = UINT32_MAX micro-USD ($4,294.967295). Every product is arith_uint256; the results
+// stay in MoneyRange and int64, and the MAX_MONEY boundary is exact.
+BOOST_AUTO_TEST_CASE(mint5_required_collateral_at_uint32_price_max)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK_EQUAL(PRICE_MAX, 4294967295LL);
+    BOOST_CHECK_EQUAL(PRICE_MAX, (MicroUsd)std::numeric_limits<uint32_t>::max());
+    // ceil(cents * 1e12 / PRICE_MAX) <= MAX_MONEY  <=>  cents <= floor(MAX_MONEY * PRICE_MAX / 1e12) = 9,019,431,319,500
+    BOOST_CHECK_EQUAL(RequiredCollateral(9019431319500LL, 10000, PRICE_MAX).value(), MAX_MONEY);
+    BOOST_CHECK(!RequiredCollateral(9019431319501LL, 10000, PRICE_MAX).has_value());   // 2,100,000,000,000,233 zat > MAX_MONEY
+    // MAX_OUTPUT at 300 %: 69.84919312 YEC; the v2 worst ratio on the regtest max mint: 34.92459656 YEC.
+    BOOST_CHECK_EQUAL(RequiredCollateral(m.maxOutput, 30000, PRICE_MAX).value(), 6984919312LL);
+    BOOST_CHECK_EQUAL(RequiredCollateral(1000000, MinRatioBps(50000, SIGMA_MAX_V2), PRICE_MAX).value(), 3492459656LL);
+    // the smallest product rounds up to one zat, never zero
+    BOOST_CHECK_EQUAL(RequiredCollateral(1, 1, PRICE_MAX).value(), 1);
+    // the 1,000-zat rounding stays in range
+    BOOST_CHECK_EQUAL(RequiredCollateralRounded(m.maxOutput, 30000, PRICE_MAX).value(), 6984920000LL);
+    // MIN_MINT at 300 % needs 0.0698 YEC here: the 4 * FEE_MIN floor (MINT-5's second clause) binds above ~$150/YEC
+    BOOST_CHECK_LT(RequiredCollateral(m.minMint, 30000, PRICE_MAX).value(), 4 * m.feeMin);
 }
 
 // Rule: MINT-6
@@ -229,8 +253,11 @@ BOOST_AUTO_TEST_CASE(mint6_market_cap_and_supply_cap)
     BOOST_CHECK(!SupplyCapCents(issued, 50000, 0).has_value());
     BOOST_CHECK(!CapCents(issued, std::nullopt).has_value());
     BOOST_CHECK(!SupplyCapCents(issued, std::nullopt, 1500).has_value());
-    // Full issuance at PRICE_MAX: 2.1e7 YEC * $100 = $2.1e9 = 2.1e11 cents, no overflow.
-    BOOST_CHECK_EQUAL(CapCents(MAX_MONEY, PRICE_MAX).value(), 210000000000LL);
+    // Full issuance at $100: 2.1e7 YEC * $100 = $2.1e9 = 2.1e11 cents, no overflow.
+    BOOST_CHECK_EQUAL(CapCents(MAX_MONEY, 100000000).value(), 210000000000LL);
+    // Full issuance at PRICE_MAX (D-Q-22): 2.1e15 * 4,294,967,295 / 1e12 = 9,019,431,319,500 cents; 15 % of it.
+    BOOST_CHECK_EQUAL(CapCents(MAX_MONEY, PRICE_MAX).value(), 9019431319500LL);
+    BOOST_CHECK_EQUAL(SupplyCapCents(MAX_MONEY, PRICE_MAX, 1500).value(), 1352914697925LL);
 }
 
 // Rule: HALT-2
@@ -244,8 +271,10 @@ BOOST_AUTO_TEST_CASE(halt2_global_ratio)
     // No supply: "no supply", never halts. Undefined price: undefined.
     BOOST_CHECK(!GlobalRatioBps(500000000000LL, 50000, 0).has_value());
     BOOST_CHECK(!GlobalRatioBps(500000000000LL, std::nullopt, 10000).has_value());
-    // Everything at the top: MAX_MONEY collateral at PRICE_MAX backing one cent.
-    BOOST_CHECK_EQUAL(GlobalRatioBps(MAX_MONEY, PRICE_MAX, 1).value(), 2100000000000000LL);
+    // Everything at the top: MAX_MONEY collateral at $100 backing one cent.
+    BOOST_CHECK_EQUAL(GlobalRatioBps(MAX_MONEY, 100000000, 1).value(), 2100000000000000LL);
+    // ... and at PRICE_MAX (D-Q-22): 2.1e15 * 4,294,967,295 / 1e8 = 9.02e16 < 2^63, no overflow.
+    BOOST_CHECK_EQUAL(GlobalRatioBps(MAX_MONEY, PRICE_MAX, 1).value(), 90194313195000000LL);
 }
 
 // Rule: RED-4
@@ -264,6 +293,11 @@ BOOST_AUTO_TEST_CASE(red4_underwater_worked_example)
     BOOST_CHECK(!IsUnderwater(0, 50000, 0, 11000));
     // Big numbers: MAX_MONEY * PRICE_MAX vs MAX_MINT * 11,000 * COIN, no overflow.
     BOOST_CHECK(!IsUnderwater(MAX_MONEY, PRICE_MAX, 1000000, 11000));
+    // D-Q-22: one zat at PRICE_MAX is worth 0.0043 cents: one cent of debt at 110 % is underwater,
+    // and the boundary is exact (collateral * P < cents * bps * COIN, all arith_uint256).
+    BOOST_CHECK(IsUnderwater(1, PRICE_MAX, 1, 11000));
+    BOOST_CHECK(IsUnderwater(256, PRICE_MAX, 1, 11000));         // 256 * P = 1.0995e12 < 1 * 11,000 * COIN = 1.1e12
+    BOOST_CHECK(!IsUnderwater(257, PRICE_MAX, 1, 11000));        // 257 * P = 1.1038e12
 }
 
 // Rule: FEE-1
@@ -755,11 +789,15 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
     auto c = ClaimantMaxZat(m.minMint, m.claimThresholdBps, PRICE_MIN);
     BOOST_REQUIRE(c.has_value());
     BOOST_CHECK_EQUAL(c.value(), 125000000000000LL);
-    // Exactly MAX_MONEY is representable; one zat more is not. margin 10^4 at PRICE_MAX: cents * 1e4 zat => MAX_MONEY at 2.1e11 cents.
-    BOOST_CHECK_EQUAL(ClaimantMaxZat(210000000000LL, 10000, PRICE_MAX).value(), MAX_MONEY);
-    BOOST_CHECK(!ClaimantMaxZat(210000000001LL, 10000, PRICE_MAX).has_value());
+    // Exactly MAX_MONEY is representable; one zat more is not. margin 10^4 at $100: cents * 1e4 zat => MAX_MONEY at 2.1e11 cents.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(210000000000LL, 10000, 100000000).value(), MAX_MONEY);
+    BOOST_CHECK(!ClaimantMaxZat(210000000001LL, 10000, 100000000).has_value());
     // The product itself passes int64 before the division (1e6 * 11,000 * 1e8 = 1.1e18 fits; 1e7 cents would not): still exact.
-    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 125000000000LL);   // $100,000 at 125 % / $100 per YEC = 1,250 YEC
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, 100000000).value(), 125000000000LL);   // $100,000 at 125 % / $100 per YEC = 1,250 YEC
+    // D-Q-22, at PRICE_MAX: the same boundary moves to 9,019,431,319,500 cents; $100,000 at 125 % is 29.10383047 YEC.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(9019431319500LL, 10000, PRICE_MAX).value(), MAX_MONEY);
+    BOOST_CHECK(!ClaimantMaxZat(9019431319501LL, 10000, PRICE_MAX).has_value());
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 2910383047LL);
 }
 
 // Rule: AFEE-1
@@ -831,6 +869,10 @@ BOOST_AUTO_TEST_CASE(price2_combine_takes_the_conservative_side)
     BOOST_CHECK(!CombinedPrices().pMint.has_value());
     // The bounds survive: PRICE_MIN and PRICE_MAX on either side.
     c = PriceCombine(PRICE_MIN, PRICE_MAX, PRICE_MAX, PRICE_MIN);
+    // D-Q-22: SIGMA-1 across the whole range (r = (PRICE_MAX - PRICE_MIN) * 1e4 / PRICE_MIN = 4.29e11, squared in
+    // arith_uint256) gives the cap, never a wrapped value; HALT-3's int64 products stay below 4.3e13.
+    BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MIN, PRICE_MAX }, 10000, 1152, 30000), 30000);
+    BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MAX }, 10000, 1152, 30000), 10000);
     BOOST_CHECK_EQUAL(c.pMint.value(), PRICE_MIN);
     BOOST_CHECK_EQUAL(c.pClaim.value(), PRICE_MAX);
     BOOST_CHECK_EQUAL(c.pEmerg.value(), PRICE_MIN);

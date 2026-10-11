@@ -186,7 +186,7 @@ class Params(object):
                  class_min, class_max, base_ratio_bps, vol_window, vol_step,
                  vol_periods_per_year, sigma_mult_max_bps, min_mint, max_mint, min_output,
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
-                 price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
+                 price_min=100, price_max=4_294_967_295, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
                  recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100)):
         self.network = network

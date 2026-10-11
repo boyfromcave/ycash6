@@ -1163,7 +1163,14 @@ BOOST_AUTO_TEST_CASE(pool_add_replace_freshness_three_per_seq)
     future.citedHeight = (uint32_t)(tip + 1);
     BOOST_CHECK_EQUAL(AddReason(index, future), "attest-stale");
     BOOST_CHECK_EQUAL(AddReason(index, b.Att(0, PRICE_MIN - 1, tip - 1)), "attest-range");
-    BOOST_CHECK_EQUAL(AddReason(index, b.Att(0, PRICE_MAX + 1, tip - 1)), "attest-range");
+    // D-Q-22: PRICE_MAX == UINT32_MAX, the attestation field's maximum: no u32 price is above it, and the
+    // maximum itself passes the range check (a damaged signature then refuses it without adding it to the pool).
+    {
+        Attestation top = b.Att(0, PRICE_MAX, tip - 1);
+        BOOST_CHECK_EQUAL(top.priceMicroUsd, 0xFFFFFFFFu);
+        top.sig[5] ^= 0x01;
+        BOOST_CHECK_EQUAL(AddReason(index, top), "attest-bad-sig");
+    }
     Attestation flipped = b.Att(0, 50000, tip - 1);
     flipped.sig[5] ^= 0x01;
     BOOST_CHECK_EQUAL(AddReason(index, flipped), "attest-bad-sig");
