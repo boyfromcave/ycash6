@@ -549,8 +549,21 @@ class ModelTests(unittest.TestCase):
         c.block(v.build_bond_spend_tx(m0.bond_outpoint, MEMBERS[0], m0.bond_value, m0.bond_locktime, c.dest))
         self.assertEqual(c.reject(v.build_bond_spend_tx(m3.bond_outpoint, MEMBERS[3], m3.bond_value,
                                                         m3.bond_locktime, c.dest)), 'bad-vault-bond-frozen')
-        c.block(v.build_bond_spend_tx(m1.bond_outpoint, MEMBERS[1], m1.bond_value, m1.bond_locktime, c.dest))
-        self.assertEqual(c.m.get_set(sid).members[MKEYS[1]].status, v.MEMBER_WITHDRAWN)
+        # the bond exit delay (owner 2026-10-11): an ACTIVE member's bond is locked; it leaves (its own SET_REMOVE,
+        # signed by itself alone, no burn) and its bond is spendable the set's maturity later
+        m1_spend = v.build_bond_spend_tx(m1.bond_outpoint, MEMBERS[1], m1.bond_value, m1.bond_locktime, c.dest)
+        self.assertEqual(c.reject(m1_spend), 'bad-vault-bond-locked')
+        self_burn, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[1], [MEMBERS[1]], burn=1)
+        self.assertEqual(c.reject(self_burn), 'bad-vault-act-sig')
+        leave, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[1], [MEMBERS[1]], burn=0)
+        c.block(leave)
+        left = c.h - 1
+        self.assertEqual(c.m.bonds[m1.bond_outpoint][3], left)
+        c.mine_to(left + s.p['maturity'] - 1)
+        self.assertEqual(c.reject(m1_spend), 'bad-vault-bond-locked')
+        c.mine_to(left + s.p["maturity"])
+        c.block(m1_spend)
+        self.assertEqual(c.m.get_set(sid).members[MKEYS[1]].status, v.MEMBER_REMOVED)
         # a burned member rejoins with a fresh bond: the old bond stays frozen
         c.block(c.join_tx(sid, 3))            # one current member left (< slashThreshold): admitKey admits
         self.assertEqual(c.m.get_set(sid).members[MKEYS[3]].status, v.MEMBER_ACTIVE)

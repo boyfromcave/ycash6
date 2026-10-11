@@ -1622,7 +1622,7 @@ class VaultModel(object):
         self.branch_id = branch_id
         self.check_scripts = check_scripts
         self.sets = {}               # setId32 -> SetState
-        self.bonds = {}              # (txid, n) -> [setId32, key33, frozen]: the frozen-bond index
+        self.bonds = {}              # (txid, n) -> [setId32, key33, frozen, exitHeight]: the bond index (exitHeight 0 = a member's)
         self.coins = {}              # (txid, n) -> Coin
         self.tip = activation_height - 1
         self._undo = []
@@ -1714,6 +1714,9 @@ class VaultModel(object):
                     continue
                 if b[2]:
                     raise VaultError('bad-vault-bond-frozen')
+                # the bond exit delay (owner 2026-10-11): spendable from exitHeight + the set's maturity only
+                if not b[3] or h < b[3] + self.sets[b[0]].p['maturity']:
+                    raise VaultError('bad-vault-bond-locked')
                 m = self.sets[b[0]].members.get(b[1])
                 if m is not None and m.bond_outpoint == key and m.status == MEMBER_ACTIVE:
                     m.status = MEMBER_WITHDRAWN
@@ -1954,7 +1957,7 @@ class VaultModel(object):
             m = Member(mk, (txid, bv), bo.nValue, a['bondLocktime'], h, s.p['maturity'])
             s.members.pop(mk, None)
             s.members[mk] = m
-            self.bonds[(txid, bv)] = [sid, mk, False]
+            self.bonds[(txid, bv)] = [sid, mk, False, 0]
         elif t == ACT_SET_HEARTBEAT:
             mk = bytes.fromhex(a['memberKey'])
             if keys != [mk] or not s.is_current(mk, h):
@@ -1965,11 +1968,14 @@ class VaultModel(object):
             m = s.members.get(mk)
             if m is None or m.status != MEMBER_ACTIVE:
                 raise VaultError('bad-vault-act-remove', 'target not active')
-            if len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys):
+            own = keys == [mk] and not a['burn']        # a member's voluntary exit (owner 2026-10-11)
+            if not own and (len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys)):
                 raise VaultError('bad-vault-act-sig', 'removal signers')
             m.status = MEMBER_REMOVED
             if a['burn']:
                 m.bond_frozen = self.bonds[m.bond_outpoint][2] = True
+            elif m.bond_outpoint in self.bonds:
+                self.bonds[m.bond_outpoint][3] = h          # the bond exit delay starts
         elif t == ACT_SET_WINDDOWN:
             if s.wind_down_height:
                 raise VaultError('bad-vault-act-winddown', 'already wound down')

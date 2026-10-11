@@ -112,20 +112,34 @@ struct MemberRecord
 };
 
 /** The bond index: outpoint → its member (the frozen-bond index of §15.4, extended to every
- *  unspent member bond so that a spend can mark the member WITHDRAWN). */
+ *  unspent member bond so that a spend can mark the member WITHDRAWN).
+ *  exitHeight (owner 2026-10-11, the bond exit delay): the height its member left the set without a
+ *  freeze (a SET_REMOVE without burn, by the set or by the member itself, or the module displacement
+ *  hook); 0 = still a member's bond. The bond is spendable only from exitHeight + the set's maturity.
+ *  Serialised only when set, so every record without an exit keeps its pre-exit bytes. */
 struct BondRecord
 {
     SetId setId;
     CPubKey memberKey;
     bool frozen = false;
+    int64_t exitHeight = 0;
 
-    ADD_SERIALIZE_METHODS;
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action)
+    template <typename Stream>
+    void Serialize(Stream& s) const
     {
-        READWRITE(setId);
-        READWRITE(memberKey);
-        READWRITE(frozen);
+        ::Serialize(s, setId);
+        ::Serialize(s, memberKey);
+        ::Serialize(s, frozen);
+        if (exitHeight != 0) ::Serialize(s, exitHeight);
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        ::Unserialize(s, setId);
+        ::Unserialize(s, memberKey);
+        ::Unserialize(s, frozen);
+        exitHeight = 0;
+        if (!s.empty()) ::Unserialize(s, exitHeight);
     }
 };
 

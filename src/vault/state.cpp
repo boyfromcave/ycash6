@@ -445,6 +445,12 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
             const COutPoint& prevout = tx.vin[i].prevout;
             if (auto bond = GetBond(*this, prevout)) {
                 if (bond->frozen) return std::string("bad-vault-bond-frozen");
+                // the bond exit delay (owner 2026-10-11): a bond is spendable only once its member has left the set
+                // without a freeze and the set's maturity has passed since (the lock lives here, not in the script)
+                auto bset = GetSet(*this, bond->setId);
+                if (bond->exitHeight == 0 || !bset || h < bond->exitHeight + (int64_t)bset->params.maturity) {
+                    return std::string("bad-vault-bond-locked");
+                }
                 auto m = GetMember(*this, bond->setId, bond->memberKey);
                 if (m && m->status == MEMBER_ACTIVE && m->bondOutpoint == prevout) {
                     m->status = MEMBER_WITHDRAWN;
@@ -724,6 +730,9 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
             auto dm = GetMember(*this, j.setId, *displaced);
             dm->status = MEMBER_REMOVED;
             PutRecord(KeyMember(j.setId, *displaced), *dm);
+            auto db = GetBond(*this, dm->bondOutpoint);
+            db->exitHeight = h;                      // the bond exit delay starts (owner 2026-10-11)
+            PutRecord(KeyBond(dm->bondOutpoint), *db);
         }
         MemberRecord m;
         m.bondOutpoint = COutPoint(tx.GetHash(), j.bondVout);
@@ -761,7 +770,9 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         auto m = GetMember(*this, r.setId, r.memberKey);
         if (!m || m->status != MEMBER_ACTIVE) return std::string("bad-vault-act-remove");
         const MemberList members = GetMembers(*this, r.setId);
-        if (!cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
+        // A member's voluntary exit (owner 2026-10-11): the SET_REMOVE of itself, signed by itself alone, without burn.
+        const bool self = keys.size() == 1 && keys[0] == r.memberKey && r.burn == 0;
+        if (!self && !cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
         m->status = MEMBER_REMOVED;
         if (r.burn) {
             m->bondFrozen = true;
@@ -769,6 +780,9 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
                 b->frozen = true;
                 PutRecord(KeyBond(m->bondOutpoint), *b);
             }
+        } else if (auto b = GetBond(*this, m->bondOutpoint)) {
+            b->exitHeight = h;                       // the bond exit delay starts (owner 2026-10-11)
+            PutRecord(KeyBond(m->bondOutpoint), *b);
         }
         PutRecord(KeyMember(r.setId, r.memberKey), *m);
         return std::nullopt;
