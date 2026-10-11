@@ -148,6 +148,10 @@ CScript GetScriptForPQKey(const CPQKeyID& id);
  *   OP_ELSE <refundHeight> OP_CHECKLOCKTIMEVERIFY OP_DROP <clientHash:32> OP_1|OP_2 OP_CHECKPQSIG OP_ENDIF
  * Both client slots identical, refundHeight a minimal script number in [1, LOCKTIME_THRESHOLD), the server
  * key a valid compressed secp256k1 key, the client scheme registered.
+ *
+ * CONSENSUS-REACHABLE through TOK-PQ (yellowback::HolderKey/HolderAllowed): MatchPQChannel and
+ * GetScriptForPQChannel decide which outputs may hold YED from pqFalconHeight. Changing either changes
+ * consensus after pqFalconHeight (review B M-1, A n-1): rule 7 applies.
  */
 struct PQChannelParams
 {

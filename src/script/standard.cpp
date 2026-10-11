@@ -339,6 +339,7 @@ CScript GetScriptForPQKey(const CPQKeyID& id)
     return CScript() << ToByteVector(id.hash) << CScript::EncodeOP_N(id.scheme) << OP_CHECKPQSIG;
 }
 
+// CONSENSUS-REACHABLE through TOK-PQ (yellowback::HolderKey): changing this changes consensus after pqFalconHeight.
 CScript GetScriptForPQChannel(const CPQKeyID& client, const CPubKey& server, int64_t refundHeight)
 {
     if (!pq::IsKnownScheme(client.scheme)) return CScript();
@@ -351,6 +352,7 @@ CScript GetScriptForPQChannel(const CPQKeyID& client, const CPubKey& server, int
                      << OP_ENDIF;
 }
 
+// CONSENSUS-REACHABLE through TOK-PQ (yellowback::HolderKey): changing this changes consensus after pqFalconHeight.
 bool MatchPQChannel(const CScript& script, PQChannelParams& out)
 {
     // Cheap pre-checks, then decode the four fields by token and require the rebuilt script byte for byte
