@@ -6,9 +6,19 @@
 #include "chainparams.h"
 #include "zmqpublishnotifier.h"
 #include "main.h"
+#include "sync.h"
 #include "util/system.h"
 
 static std::multimap<std::string, CZMQAbstractPublishNotifier*> mapPublishNotifiers;
+
+/** Serializes every send on the publisher sockets. A libzmq socket is not thread-safe, and the
+ *  notifiers are driven from more than one thread: UpdatedBlockTip from whichever thread runs
+ *  ActivateBestChain (after it drops cs_main), SyncTransaction from ThreadNotifyWallets and
+ *  BlockChecked from ConnectTip. Notifiers for one address also share a socket. Two concurrent
+ *  sends corrupt the socket's outgoing pipe and the io thread aborts (libzmq msg.cpp "check ()" /
+ *  pipe.cpp "rc == 0") once a subscriber is connected. Leaf lock: the cs_main scopes in
+ *  NotifyBlock are closed before SendMessage is reached, so nothing is taken while it is held. */
+static CCriticalSection cs_zmqSend;
 
 static const char *MSG_HASHBLOCK = "hashblock";
 static const char *MSG_HASHTX    = "hashtx";
@@ -128,6 +138,8 @@ void CZMQAbstractPublishNotifier::Shutdown()
 bool CZMQAbstractPublishNotifier::SendMessage(const char *command, const void* data, size_t size)
 {
     assert(psocket);
+
+    LOCK(cs_zmqSend);
 
     /* send three parts, command & data & a LE 4byte sequence number */
     unsigned char msgseq[sizeof(uint32_t)];
