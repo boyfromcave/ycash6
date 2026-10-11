@@ -64,13 +64,16 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
     return std::max(g_yellowbackFee, std::min(PQSizeFee(g_yellowbackFee, bytes), maxTxFee));
 }
 
-/** SelectYec's fee follower: the fee grows when the selection takes a PQ coin (YedNetworkFee). */
-struct PQFeeFollower
+CAmount PQFeeFollower::Follow(const std::vector<std::pair<CScript, CAmount>>& selected)
 {
-    std::vector<CScript> scripts;           //!< the transaction's other inputs' scripts
-    std::optional<uint8_t> ownerScheme;
-    CAmount fee;                            //!< the fee the caller's `needed` includes; raised by SelectYec
-};
+    std::vector<CScript> all = scripts;
+    for (const auto& pv : selected) all.push_back(pv.first);
+    const CAmount next = YedNetworkFee(all, ownerScheme);
+    if (next <= fee) return 0;              // never below the fee already set
+    const CAmount rise = next - fee;
+    fee = next;
+    return rise;
+}
 
 // ---------------------------------------------------------------- pure shapes (§3.5)
 
@@ -668,13 +671,7 @@ struct Context
             selected += c.Value();
             if (follow) {
                 // B L-1: a PQ coin raises the size-priced fee; `needed` follows it
-                std::vector<CScript> all = follow->scripts;
-                for (const auto& pv : prevs) all.push_back(pv.first);
-                const CAmount fee = YedNetworkFee(all, follow->ownerScheme);
-                if (fee > follow->fee) {
-                    needed += fee - follow->fee;
-                    follow->fee = fee;
-                }
+                needed += follow->Follow(prevs);
             }
             if (selected >= needed) break;
         }
@@ -944,6 +941,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                 CMutableTransaction scratch;
                 PQFeeFollower follow;
                 for (const YedCoin& c : shape.yedInputs) follow.scripts.push_back(c.token.scriptPubKey);
+                follow.ownerScheme = ownerPath ? std::optional<uint8_t>(owner.scheme) : std::nullopt;   // as shape.networkFee was priced
                 follow.fee = shape.networkFee;
                 ctx.SelectYec(needed, scratch, out.fundPrevs, nullptr, "", &follow);
                 shape.networkFee = follow.fee;                                  // B L-1: a PQ fee coin raises it

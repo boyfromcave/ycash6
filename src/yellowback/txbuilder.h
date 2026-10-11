@@ -176,6 +176,20 @@ std::vector<CTxOut> MintOutputs(const MintShape& shape, int& feeVout, int* attes
  *  g_yellowbackFee, or the size-priced PQ fee capped at -maxtxfee (txbuilder.cpp). */
 CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme);
 
+/**
+ * SelectYec's fee follower (review B L-1): the fee grows when the selection takes a PQ coin. `scripts` and
+ * `ownerScheme` must be the inputs `fee` was priced with (YedNetworkFee): the owner's PQ spend on the owner
+ * path, nothing on the claim path. Follow() reprices with the coins selected so far and returns how much
+ * `fee` rose; it never lowers `fee`.
+ */
+struct PQFeeFollower
+{
+    std::vector<CScript> scripts;           //!< the transaction's other inputs' scripts
+    std::optional<uint8_t> ownerScheme;     //!< the V's owner scheme when the owner path spends it
+    CAmount fee = 0;                        //!< the fee the caller's `needed` includes; raised by Follow()
+    CAmount Follow(const std::vector<std::pair<CScript, CAmount>>& selected);
+};
+
 /** A vault spend's fixed inputs (REDEEM, CLAIM, the VOID release and the SWEEP). */
 struct VaultSpendShape
 {

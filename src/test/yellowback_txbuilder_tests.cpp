@@ -1463,4 +1463,48 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     maxTxFee = savedMax;
 }
 
+// Review B L-1 (ycash6 port finding): the funding follower reprices with the owner's PQ spend when the vault
+// spend was priced with it, so a PQ fee coin never prices the transaction below the fee already set.
+BOOST_AUTO_TEST_CASE(pq_fee_follower_keeps_the_owner_spend)
+{
+    const CFeeRate savedRate = pqFeeRate;
+    const CAmount savedMax = maxTxFee;
+    pqFeeRate = CFeeRate(COIN / 100);                                       // size pricing binds
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
+    const uint8_t owner = pq::SCHEME_SLH_DSA_SHA2_128S;
+    const CScript pqCoin = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("33")));
+    const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x44))));
+
+    PQFeeFollower follow;
+    follow.ownerScheme = owner;
+    follow.fee = YedNetworkFee({}, owner);
+    const CAmount fee0 = follow.fee;
+    BOOST_CHECK_GT(fee0, g_yellowbackFee);
+    // A P2PKH coin: one more 150-byte input, the fee follows it upward.
+    std::vector<std::pair<CScript, CAmount>> sel{{p2pkh, COIN}};
+    CAmount rise = follow.Follow(sel);
+    BOOST_CHECK_EQUAL(follow.fee, YedNetworkFee({p2pkh}, owner));
+    BOOST_CHECK_EQUAL(rise, follow.fee - fee0);
+    // A PQ coin: priced with the owner's spend AND the coin's, above the coin-only price.
+    sel.push_back({pqCoin, COIN});
+    const CAmount before = follow.fee;
+    rise = follow.Follow(sel);
+    BOOST_CHECK_EQUAL(follow.fee, YedNetworkFee({p2pkh, pqCoin}, owner));
+    BOOST_CHECK_GT(follow.fee, YedNetworkFee({p2pkh, pqCoin}, std::nullopt));
+    BOOST_CHECK_EQUAL(rise, follow.fee - before);
+
+    // Without the owner scheme (the defect) the PQ coin's repricing lands below the owner-path fee already set.
+    PQFeeFollower bare;
+    bare.fee = fee0;
+    BOOST_CHECK_EQUAL(bare.Follow({{pqCoin, COIN}}) + fee0, std::max(fee0, YedNetworkFee({pqCoin}, std::nullopt)));
+    BOOST_CHECK_LT(bare.fee, YedNetworkFee({pqCoin}, owner));
+    // Never lowers the fee.
+    PQFeeFollower high;
+    high.fee = COIN;
+    BOOST_CHECK_EQUAL(high.Follow({{pqCoin, COIN}}), CAmount(0));
+    BOOST_CHECK_EQUAL(high.fee, COIN);
+    pqFeeRate = savedRate;
+    maxTxFee = savedMax;
+}
+
 BOOST_AUTO_TEST_SUITE_END()
