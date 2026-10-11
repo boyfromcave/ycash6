@@ -94,7 +94,9 @@ transactions are **dollars per KB** at the attested tip price — the highest of
 (`params.fees.network.priceMicroUsd`; none while any halt bit is set) — (`params.fees.network`: plain PQ
 $0.02/KB, vault/Yellowback $0.05/KB, floor max(5,000 zat/KB, `-pqfeerate`), the Yellowback cap
 min(max(`-maxtxfee`, $2 at the price), `-yellowbackmaxtxfee`, default 10 YEC:
-`yellowback.maxTxFeeCeilingZat`); the `-pqfeerate` rate is the fallback while no price exists). A
+`yellowback.maxTxFeeCeilingZat`), which caps plain post-quantum transfers too (D-Q-26: the node's own wallet
+relays one above `-maxtxfee` but within that cap; `sendrawtransaction` keeps `-maxtxfee` unless
+`allowhighfees`); the `-pqfeerate` rate is the fallback while no price exists). A
 Yellowback-builder transaction is priced by its estimated size whether or not it has a post-quantum input; an
 owner-path vault spend whose dollar-priced fee would exceed what the vault has left pays max(the flat fee,
 the floor rate × size) instead of being refused. Removed (hence the bump): `params.feeMinZat`,

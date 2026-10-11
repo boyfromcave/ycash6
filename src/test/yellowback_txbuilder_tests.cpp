@@ -1506,6 +1506,7 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
     BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 111111112);
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 277777778);
     BOOST_CHECK_EQUAL(YedMaxTxFee(), 10 * COIN);                                     // review M-1: $2 = 111 YEC, the 10-YEC ceiling binds
+    BOOST_CHECK_EQUAL(PQMaxTxFee(), YedMaxTxFee());                                 // D-Q-26: plain PQ transfers share the cap
     attestedFeePolicy.yedMaxTxFeeZat = 1000 * COIN;                                  // -yellowbackmaxtxfee=1000: the dollar cap stands
     BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);                                 // $2 > 0.1 YEC at $0.018
     // review A-2: a transaction without a PQ input is priced at the Yellowback rate by its estimated size too

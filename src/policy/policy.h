@@ -207,6 +207,9 @@ CAmount AttestedFeeFloorPerKB();
 /** The cap of a vault/Yellowback transaction's size-priced fee: min(max(-maxtxfee, yedMaxTxFeeUsdMicro at the price),
  *  -yellowbackmaxtxfee); min(-maxtxfee, -yellowbackmaxtxfee) without a price. */
 CAmount YedMaxTxFee();
+/** The cap of a plain post-quantum transaction's size-priced fee (owner D-Q-26, 2026-10-11): the same cap as the
+ *  vault/Yellowback paths, YedMaxTxFee() -- min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee). */
+CAmount PQMaxTxFee();
 
 /** max(floor, PlainPQFeeRate() x nBytes): the fee of a transaction of nBytes with a PQ input (ycash-dd:
  *  floor = DEFAULT_FEE for the wallet). */
@@ -220,5 +223,9 @@ CAmount YedFloorSizeFee(CAmount flat, size_t nBytes);
  *  nullopt when it does not or its inputs are unknown. The vault/Yellowback broadcast paths submit with the mempool's
  *  absurd-fee check off (their cap may exceed -maxtxfee), so they enforce this cap themselves. cs_main held. */
 std::optional<CAmount> YedFeeOverCap(const CTransaction& tx);
+/** D-Q-26: true when `tx` spends a post-quantum input (IsPQInputScript, inputs from the tip + mempool view) and its
+ *  network fee is within PQMaxTxFee(): the wallet then submits its own transaction without the -maxtxfee absurd-fee
+ *  check (sendrawtransaction from outside keeps -maxtxfee unless allowhighfees). cs_main held. */
+bool PQFeeWithinCap(const CTransaction& tx);
 
 #endif // BITCOIN_POLICY_POLICY_H

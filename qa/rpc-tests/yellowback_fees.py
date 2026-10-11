@@ -292,6 +292,36 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all(blocks_only=True)
         self.checkpoint('small vault at the floor')
 
+        print('D-Q-26: a plain post-quantum send pays its $/KB fee above -maxtxfee (0.1 YEC) up to the Yellowback cap, from the node\'s own wallet')
+        # $50/KB at $750 = 0.0667 YEC/KB: an SLH-DSA spend (~8.9 KB) is ~0.6 YEC; the cap max(0.1 YEC, $1,000 at $750 = 1.33 YEC)
+        self.restart(USER, ['-pqfeeusdperkb=50', '-yellowbackmaxtxfeeusd=1000'])
+        self.sync_all(blocks_only=True)
+        pq_addr = user.getnewaddress('', 'pqslh')
+        user.sendtoaddress(pq_addr, 5)
+        self.sync_all()
+        self.mine(POOLS[0])
+        net = user.yed_getinfo()['params']['fees']['network']
+        assert_equal(net['priceSource'], 'tip')
+        cap = net['yellowback']['maxTxFeeZat']
+        assert_greater_than(cap, MAX_TX_FEE)
+        locked = [{'txid': u['txid'], 'vout': u['vout']} for u in user.listunspent(0) if u.get('address') != pq_addr]
+        assert_equal(len([u for u in user.listunspent(0) if u.get('address') == pq_addr]), 1)
+        user.lockunspent(False, locked)
+        txid = user.sendtoaddress(user.getnewaddress(), 1)
+        user.lockunspent(True, locked)
+        fee = -int(round(user.gettransaction(txid)['fee'] * COIN))
+        rate = net['plain']['zatPerKB']
+        assert_equal(rate, rate_zat_per_kb(50 * 10 ** 6, usd_to_micro(DOWN)))
+        assert_greater_than(fee, MAX_TX_FEE)                      # above -maxtxfee: the wallet's own mempool took it
+        assert_greater_than(cap + 1, fee)                         # within the cap
+        assert txid in user.getrawmempool()
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_greater_than(user.gettransaction(txid)['confirmations'], 0)
+        self.restart(USER, [])
+        self.sync_all(blocks_only=True)
+        self.checkpoint('plain PQ fee cap')
+
         print('the price feed stops: the network fee falls back to -pqfeerate; FEE-0 skips the protocol fee (and the early fee)')
         m = self.mint(user, 10000, TERMS['C'])          # class C: the only class that mints under HALT-2 (the claimed vault dragged the global ratio down)
         self.sync_all()
