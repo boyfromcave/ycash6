@@ -1602,6 +1602,28 @@ BOOST_AUTO_TEST_CASE(recap_floor_is_the_class_minimum_with_sigma)
     BOOST_CHECK(MinRatioBps(30000, 13000) < 50000);
 }
 
+// Rule: MINT-6 (D-Q-25)
+// The virtual snapshot's issuedZat is Params::issuedBeforeStart (the circulating YEC below the start height), so every
+// snapshot's issuedZat is the circulating supply at its height and the cap is supplyCapBps of market capitalisation.
+BOOST_AUTO_TEST_CASE(mint6_issued_seeded_with_the_circulating_supply)
+{
+    Fixture f(1, 0, 1500, 0);
+    f.P.issuedBeforeStart = 1000000 * COIN;                 // 1,000,000 YEC circulating below height 1
+    f.Activate(1000000);
+    const CAmount issuedSinceStart = f.Snap(f.tip).issuedZat - f.P.issuedBeforeStart;
+    BOOST_CHECK_EQUAL(issuedSinceStart, (CAmount)f.tip * SUBSIDY);  // the fixture's subsidies since block 1, on top of the seed
+    BOOST_CHECK_EQUAL(f.Snap(1).issuedZat, f.P.issuedBeforeStart + SUBSIDY);
+    // 15 % of (1,000,000 YEC + the fixture's blocks) at $1 is the cap: > $150,000; the pre-D-Q-25 base (the issuance
+    // since the start alone) was a few hundred dollars on a young chain
+    const Cents cap = SupplyCapCents(f.Snap(f.tip - 1).issuedZat, 1000000, 1500).value();
+    BOOST_CHECK_GT(cap, 15000000);
+    BOOST_CHECK_LT(SupplyCapCents(issuedSinceStart, 1000000, 1500).value(), 100000);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
+    Fixture g;                                              // the default seed is 0: issuedZat counts from the start, as before
+    g.Activate();
+    BOOST_CHECK_EQUAL(g.Snap(g.tip).issuedZat, (CAmount)g.tip * SUBSIDY);
+}
+
 // Rule: MINT-5
 BOOST_AUTO_TEST_CASE(mint5_collateral_and_unsatisfiable)
 {

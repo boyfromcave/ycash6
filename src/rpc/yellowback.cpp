@@ -692,6 +692,17 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("claimDelay", p.claimDelay);
     prm.pushKV("sigmaRefBps", p.sigmaRefBps);
     prm.pushKV("supplyCapBps", p.supplyCapBps);
+    {
+        // rpcversion 8 (D-Q-25): the cap's base at the tip: the circulating YEC (the subsidy sum from genesis), the
+        // cross-section xMint it is valued at (MINT-6's price) and the resulting cap
+        const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
+        std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), p.supplyCapBps);
+        UniValue sc(UniValue::VOBJ);
+        sc.pushKV("circulatingZat", s.issuedZat);
+        sc.pushKV("priceMicroUsd", PriceOrNull(s.PMint()));
+        sc.pushKV("capCents", cap.has_value() ? UniValue(cap.value()) : NullUniValue);
+        prm.pushKV("supplyCap", sc);
+    }
     prm.pushKV("refLag", g_yellowbackMintLag);
     prm.pushKV("refWindow", p.refWindow);
     prm.pushKV("grace", p.grace);

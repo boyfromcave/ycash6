@@ -972,6 +972,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
         out = ParamsForNetwork(networkId);
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         out.pqFalconHeight = PQFalconHeightOf(consensus);
+        out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25
         return std::nullopt;
     }
     uint256 setId;
@@ -992,7 +993,46 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
     const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
     out = RegtestParams(setId.IsNull() ? 0 : startHeight, (int)sigmaRef, (int)capBps, setId, (int)armMin, carrier.value(), requireArmed);
     out.pqFalconHeight = PQFalconHeightOf(consensus);
+    out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25
     return std::nullopt;
+}
+
+CAmount CirculatingSupplyAt(int height, const Consensus::Params& c)
+{
+    // The sum of GetBlockSubsidy(h) over 0 <= h <= height (the genesis block's subsidy is 0: the slow start ramps
+    // from 0), in closed form: the two slow-start ramps as arithmetic series, then one product per segment of
+    // constant subsidy, whose boundaries are the slow-start end, the Blossom activation and every halving height.
+    // The whole subsidy counts (miner plus founders' reward / funding streams: both circulate); nothing is subtracted
+    // for lost coins or fees. Equal to Σ GetBlockSubsidy by construction (yellowback_index_tests checks it against the
+    // brute-force sum across every boundary).
+    if (height < 0) return 0;
+    arith_uint256 total = 0;
+    const int interval = c.nSubsidySlowStartInterval;
+    const int shift = c.SubsidySlowStartShift();
+    if (interval > 0) {
+        const uint64_t rate = (uint64_t)((CAmount)(12.5 * COIN) / interval);                 // GetBlockSubsidy's integer rate
+        // h in [0, shift): rate * h;  h in [shift, interval): rate * (h + 1)
+        const int64_t a = std::min(height, shift - 1);                                     // the last ramp-1 height
+        if (a >= 0) total += arith_uint256(rate) * arith_uint256((uint64_t)a * (uint64_t)(a + 1) / 2);
+        if (height >= shift) {
+            const int64_t b = std::min(height, interval - 1);
+            const uint64_t n = (uint64_t)(b - shift + 1);                                  // blocks shift..b, each rate * (h + 1)
+            total += arith_uint256(rate) * arith_uint256(n * (uint64_t)(shift + 1 + b + 1) / 2);
+        }
+    }
+    int h = interval;                                                                      // the first full-subsidy block
+    const int blossom = c.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight;
+    while (h <= height) {
+        const CAmount subsidy = c.GetBlockSubsidy(h);
+        int next = height + 1;                                                             // the segment [h, next)
+        const int nextHalving = c.HalvingHeight(h, c.Halving(h) + 1);                      // valid within h's regime
+        if (nextHalving > h && nextHalving < next) next = nextHalving;
+        if (blossom != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT && blossom > h && blossom < next) next = blossom;
+        if (subsidy == 0) break;                                                           // beyond the 64th halving
+        total += arith_uint256((uint64_t)subsidy) * arith_uint256((uint64_t)(next - h));
+        h = next;
+    }
+    return FitsInt64(total) && MoneyRange((CAmount)total.GetLow64()) ? (CAmount)total.GetLow64() : MAX_MONEY;
 }
 
 } // namespace yellowback

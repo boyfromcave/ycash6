@@ -1475,7 +1475,10 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     // Issuance, totals, global ratio
     std::optional<Snapshot> prevOpt = SnapshotAt(st, P, H - 1);
     const Snapshot prev = prevOpt.has_value() ? prevOpt.value() : Snapshot();
-    s.issuedZat = (CAmount)((uint64_t)prev.issuedZat + (uint64_t)subsidyZat);       // wraps rather than overflows (total)
+    // D-Q-25: issuedZat is the circulating supply at H: the virtual snapshot below startHeight carries the subsidy sum
+    // from genesis (Params::issuedBeforeStart, CirculatingSupplyAt(startHeight - 1)), every later one adds its subsidy
+    const CAmount issuedBefore = prevOpt.has_value() && H - 1 >= P.startHeight ? prev.issuedZat : P.issuedBeforeStart;
+    s.issuedZat = (CAmount)((uint64_t)issuedBefore + (uint64_t)subsidyZat);          // wraps rather than overflows (total)
     const Totals totals = st.GetTotals();
     s.supplyCents = totals.supplyCents;
     s.collateralZat = totals.collateralZat;

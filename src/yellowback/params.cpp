@@ -14,6 +14,7 @@ namespace {
 void SetCommon(Params& p)
 {
     p.minMint   = 10000;      // $100
+    p.issuedBeforeStart = 0;          // MINT-6 (D-Q-25): set by the index to CirculatingSupplyAt(startHeight - 1)
     p.maxMint   = 250000;     // $2,500 (H-12: guarded issuance for the first parameter lifetime; DigiByte $100,000)
     p.minOutput = 100;        // $1.00 (DigiByte minOutputAmount)
     p.maxOutput = 10000000;   // $100,000 (param; DigiByte's maxMintAmount)
@@ -110,7 +111,7 @@ Params::Params()
       feeFloorCents(0),
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), recapRatioBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
-      minMint(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
+      minMint(0), issuedBeforeStart(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
       nPenalty(0), accuracyWindow(0), payeeTiltBps(0),
       attestArmMin(0), attestArmDelay(0), attestRequired(true), bundleCarrier(BundleCarrier::SCRIPTSIG),
       nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),

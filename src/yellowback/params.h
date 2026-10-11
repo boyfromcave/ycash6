@@ -185,6 +185,9 @@ struct Params
 
     // Amounts
     Cents minMint;                       //!< MINT-2
+    CAmount issuedBeforeStart;           //!< MINT-6 (D-Q-25): the YEC circulating below startHeight (the closed-form subsidy sum, CirculatingSupplyAt(startHeight - 1)),
+                                         //!< the virtual snapshot's issuedZat so Snapshots[h].issuedZat is the circulating supply at h; set by the index from the chain
+                                         //!< parameters, never hashed (derived from startHeight and the emission schedule)
     Cents maxMint;                       //!< MINT-2: $2,500 (H-12; regtest $10,000)
     Cents minOutput;                     //!< XFER-1
     Cents maxOutput;                     //!< XFER-1

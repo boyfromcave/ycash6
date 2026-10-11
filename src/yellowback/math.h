@@ -135,7 +135,10 @@ inline std::optional<CAmount> RequiredCollateralRounded(Cents cents, int minRati
     return z;
 }
 
-/** capCents(S) = issuedZat * pMint / (COIN * 10^4); nullopt if the price is undefined. */
+/** capCents(S) = issuedZat * pMint / (COIN * 10^4); nullopt if the price is undefined. Since D-Q-25 issuedZat is the YEC
+ *  circulating at the snapshot's height (the subsidy sum from genesis: Params::issuedBeforeStart below startHeight, plus
+ *  every block's subsidy since), so capCents is the market capitalisation in cents and supplyCapCents its supplyCapBps
+ *  share (15 % at 1,500). */
 inline std::optional<Cents> CapCents(CAmount issuedZat, std::optional<MicroUsd> pMint)
 {
     if (!pMint.has_value() || pMint.value() <= 0 || issuedZat < 0) return std::nullopt;

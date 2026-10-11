@@ -1559,4 +1559,47 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     }
 }
 
+// Rule: MINT-6 (D-Q-25)
+// CirculatingSupplyAt is the closed form of the brute-force subsidy sum from genesis: checked at every segment
+// boundary of each emission schedule (the slow-start ramps, the Blossom activation, the halvings) and far beyond.
+BOOST_AUTO_TEST_CASE(circulating_supply_closed_form_matches_the_subsidy_sum)
+{
+    auto brute = [](int height, const Consensus::Params& c) {
+        arith_uint256 t = 0;
+        for (int h = 0; h <= height; h++) t += arith_uint256((uint64_t)c.GetBlockSubsidy(h));
+        return (CAmount)t.GetLow64();
+    };
+    // regtest (as this suite configures it: no slow start, the 150-block halving interval): every height to 2,000
+    const Consensus::Params& r = ::Params().GetConsensus();
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(-1, r), 0);
+    CAmount running = 0;
+    for (int h = 0; h <= 2000; h++) {
+        running += r.GetBlockSubsidy(h);
+        BOOST_REQUIRE_EQUAL(CirculatingSupplyAt(h, r), running);
+    }
+    // mainnet: the slow start (20,000 blocks, the shift at 10,000), Blossom at 1,100,000 and the first two halvings
+    const Consensus::Params& m = ::Params(CBaseChainParams::MAIN).GetConsensus();
+    const int shift = m.SubsidySlowStartShift(), interval = m.nSubsidySlowStartInterval;
+    const int blossom = m.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight;
+    const int h1 = m.HalvingHeight(0, 1), h2 = m.HalvingHeight(blossom, 2);     // the first halving before Blossom (850,000), the second after
+    BOOST_CHECK_EQUAL(interval, 20000);
+    BOOST_CHECK_EQUAL(blossom, 1100000);
+    BOOST_CHECK_EQUAL(h1, 850000);
+    BOOST_CHECK(h1 < blossom && blossom < h2);
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(h1 - 1), 2 * m.GetBlockSubsidy(h1));
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(blossom - 1), 2 * m.GetBlockSubsidy(blossom));   // Blossom halves the per-block subsidy (twice the blocks)
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(h2 - 1), 2 * m.GetBlockSubsidy(h2));
+    std::vector<int> heights = { 0, 1, shift - 1, shift, shift + 1, interval - 1, interval, interval + 1,
+                                 blossom - 1, blossom, blossom + 1, h1 - 1, h1, h1 + 1, h2 - 1, h2, h2 + 1 };
+    for (int h : heights) BOOST_CHECK_EQUAL(CirculatingSupplyAt(h, m), brute(h, m));
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(interval - 1, m), 1250000000LL * (interval / 2));    // the ramps sum to half an interval of full subsidies (zip208)
+    BOOST_CHECK(MoneyRange(CirculatingSupplyAt(h2 + 1, m)));
+    BOOST_CHECK_LT(CirculatingSupplyAt(100000000, m), MAX_MONEY);               // the whole schedule stays below MAX_MONEY
+    // the index seeds the virtual snapshot with it: at a regtest start height every later snapshot's issuedZat is the
+    // circulating supply at its height (MINT-6's base, D-Q-25)
+    yellowback::Params p;
+    BOOST_REQUIRE(!ParamsFromArgs("regtest", r, p).has_value());
+    BOOST_CHECK_EQUAL(p.issuedBeforeStart, p.startHeight > 0 ? CirculatingSupplyAt(p.startHeight - 1, r) : 0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -1894,7 +1894,10 @@ class YellowbackModel(object):
         self.attestor_set_rec = None   # P4-b: AttestorSetRecord once the set's SET_CREATE is seen
         self._bundle_acc = None   # the BundleLog[H] accumulator of the block being fed (R12)
         # issuedZat is carried from the previous snapshot; the virtual snapshot below START_HEIGHT
-        # carries ``issued_before_start`` (default 0 = the sum over [START_HEIGHT, H]; see SERIALISATION.md)
+        # carries ``issued_before_start``: since D-Q-25 the node seeds it with the YEC circulating below the start
+        # (CirculatingSupplyAt(startHeight - 1), the closed-form subsidy sum from genesis), so issuedZat is the
+        # circulating supply at every height and the MINT-6 cap is supply_cap_bps of market capitalisation. The
+        # default 0 is the golden vector's (start height 1; the model carries no emission schedule)
         self._issued_below_start = issued_before_start
 
     # -- lookups ------------------------------------------------------------
