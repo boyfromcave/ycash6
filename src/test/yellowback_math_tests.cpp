@@ -869,13 +869,13 @@ BOOST_AUTO_TEST_CASE(price2_combine_takes_the_conservative_side)
     BOOST_CHECK(!CombinedPrices().pMint.has_value());
     // The bounds survive: PRICE_MIN and PRICE_MAX on either side.
     c = PriceCombine(PRICE_MIN, PRICE_MAX, PRICE_MAX, PRICE_MIN);
+    BOOST_CHECK_EQUAL(c.pMint.value(), PRICE_MIN);
+    BOOST_CHECK_EQUAL(c.pClaim.value(), PRICE_MAX);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), PRICE_MIN);
     // D-Q-22: SIGMA-1 across the whole range (r = (PRICE_MAX - PRICE_MIN) * 1e4 / PRICE_MIN = 4.29e11, squared in
     // arith_uint256) gives the cap, never a wrapped value; HALT-3's int64 products stay below 4.3e13.
     BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MIN, PRICE_MAX }, 10000, 1152, 30000), 30000);
     BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MAX }, 10000, 1152, 30000), 10000);
-    BOOST_CHECK_EQUAL(c.pMint.value(), PRICE_MIN);
-    BOOST_CHECK_EQUAL(c.pClaim.value(), PRICE_MAX);
-    BOOST_CHECK_EQUAL(c.pEmerg.value(), PRICE_MIN);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

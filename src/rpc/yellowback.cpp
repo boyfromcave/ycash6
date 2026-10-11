@@ -1628,7 +1628,7 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
                 const arith_uint256 d = diff * arith_uint256(BPS) / lo;
                 divergenceBps = FitsInt64(d) ? (int64_t)d.GetLow64() : std::numeric_limits<int64_t>::max();
                 if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, p.divergeBpsAttest)) * lo) {
-                    throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("mint10-diverged: pFast %d and aMint %d differ by %d bps (DIVERGE_BPS_ATTEST %d)", (int)fast, (int)a, (int)divergenceBps.value(), p.divergeBpsAttest));
+                    throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("mint10-diverged: pFast %d and aMint %d differ by %d bps (DIVERGE_BPS_ATTEST %d)", fast, a, divergenceBps.value(), p.divergeBpsAttest));
                 }
                 pMint = std::min(x, a);
                 source = pMint.value() == a && a < x ? "a" : "x";
