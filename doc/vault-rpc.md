@@ -376,7 +376,6 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the set parameters are out of range` | `set_create`, `set_buildact` | `seats` 16 |
 | -5 | `unknown set` | `set_getinfo`, `set_join`, `set_heartbeat`, `set_buildact`, `vault_lock` | `set_getinfo` of a random id |
 | -4 | `this wallet holds no current member key of the set` | `set_heartbeat` | a heartbeat for a set with no members |
-| -26 | `bad-vault-bond-locked` | `sendrawtransaction`, `vault_send` | a member bond spent before its member left, or before `exitHeight + maturity` (the bond exit delay) |
 | -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set (a set a registered module governs may instead displace a member, below) |
 | -8 | `unknown act type` | `set_buildact` | type `"bogus"` |
 | -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |
