@@ -86,7 +86,11 @@ FN-DSA-512, the latter from the Falcon height only). Removed: `ownerPubKey` and 
 `yed_decodepayload` (no public key is on chain; hence the bump). Added: `ownerScheme` (number) and
 `ownerHash` (64 hex, the 32 bytes as the V pushes them) in their place; `yed_getinfo.params.pq`
 `{schemes, falconActive, falconHeight, feeRateZatPerKB, plainAddressVersion}` (`schemes` = the owner schemes MINT-3 admits at
-the next block; `falconHeight` `-1` = never; `feeRateZatPerKB` = the size-priced rate wallets charge as
+the next block; `falconHeight` = the module's mirror of the Falcon activation, the later of the `UPGRADE_VAULT`
+height and the consensus `pqFalconHeight` (`-1` = never). Falcon goes live from day one (quantum plan D-Q-2, owner
+2026-10-10): `pqFalconHeight` is 0 on mainnet and testnet, so there `falconHeight` is the vault activation height
+(`-1` while that height is unset, until the release that sets it) and `falconActive` is true from the vault upgrade's
+first block; regtest reports `-1` unless started with `-pqfalconheight`/`-pqfalcon=1`; `feeRateZatPerKB` = the size-priced rate wallets charge as
 `max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`; `plainAddressVersion` = the hex Base58Check version of
 the plain-YEC PQ address, `4dd9`/`4f61`/`4c51` for `sq…`/`tq…`/`rq…`, D-Q-20); `yed_getinfo.params.addressVersion` and
 `pqAddressVersion` (hex, the YED address versions of this network: mainnet `1fdd`/`56ab`, testnet `2007`/`571e`,
@@ -98,7 +102,8 @@ in its 53-character mainnet `yb…` form); `yed_validateaddress`'s `type` (`p2pk
 `pq`) and, for a PQ address, `pqscheme` (`keyid` is then the 66-hex `scheme ‖ keyHash` and
 `transparentAddress` is `""`); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
 holder, `pqowner` an SLH-DSA key; the default follows the holder policy: `p2pkh` until Falcon is active,
-`pq` after). Addresses: a post-quantum YED address is Base58Check(`56AB`/`571E`/`5710` ‖ scheme ‖
+`pq` after — on mainnet and testnet Falcon is active from the vault upgrade, so the default there is always `pq` and
+no P2PKH YED holder ever exists; `p2pkh` defaults only on a regtest chain without Falcon). Addresses: a post-quantum YED address is Base58Check(`56AB`/`571E`/`5710` ‖ scheme ‖
 keyHash), `yb…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
 `yed_listtokens` and `yed_validateaddress` take either. The owner's residual intent of a claim pays the
 owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must

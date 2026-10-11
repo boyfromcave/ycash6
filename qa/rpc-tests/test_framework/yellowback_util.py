@@ -543,6 +543,12 @@ class YellowbackTestFramework(BitcoinTestFramework):
         parser.add_option('--stock-binary', dest='stock_binary', default=default,
                           help='ycashd binary for node 1, the stock node (default: $REF_YCASHD where the script '
                                'supports a reference binary, else ZCASHD)')
+        # Quantum plan D-Q-2 (owner 2026-10-10, Falcon from day one): mainnet and testnet run Falcon from the vault
+        # activation. --pqfalconheight=0 starts every node (stock included: a consensus parameter) with
+        # -pqfalconheight=0, so any script can be run in the mainnet regime; a script's own -pqfalconheight wins.
+        parser.add_option('--pqfalconheight', dest='pq_falcon_height', default=None, type='int',
+                          help='start every node with -pqfalconheight=<h> (0 = Falcon from the vault activation, '
+                               'as on mainnet; default: unset, Falcon inactive on regtest)')
 
     def stock_binary(self):
         """The path from --stock-binary (or REF_YCASHD, where the script opts in), or None for the fork binary (P9)."""
@@ -556,6 +562,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
         export = os.path.join(self.options.tmpdir, 'export')
         os.makedirs(export, exist_ok=True)
         extra = list(extra or []) + ['-exportdir=%s' % export]
+        falcon = getattr(self.options, 'pq_falcon_height', None)
+        if falcon is not None and not any(a.startswith('-pqfalcon') for a in extra):
+            extra.append('-pqfalconheight=%d' % falcon)
         kw = {'sigma_ref': self.sigma_ref}
         if not self.yellowback_enabled or i == STOCK:
             return yellowback_node_args(extra, yellowback=False)

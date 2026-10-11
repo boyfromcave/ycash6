@@ -733,7 +733,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("sigmaMultMaxBps", p.sigmaMultMaxBps);
     prm.pushKV("inTermClaims", true);                      // IT-7: RED-4 decides a claim at every height from the mint
     // rpcversion 7 (quantum spec §6.2, C-5): the post-quantum parameters. schemes = the owner schemes MINT-3 admits at
-    // the next block; falconHeight -1 = never; feeRateZatPerKB = the size-priced fee rate wallets charge
+    // the next block; falconHeight = the A-5 mirror (the UPGRADE_VAULT height on mainnet/testnet, where Falcon is live
+    // from day one, D-Q-2), -1 = never; feeRateZatPerKB = the size-priced fee rate wallets charge
     // (max(DEFAULT_FEE, rate × size)): the relay floor (-pqfeerate's default, 1× the floor; quantum plan Q5).
     {
         const int next = chainActive.Height() + 1;
