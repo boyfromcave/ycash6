@@ -20,6 +20,8 @@
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #endif
+#include "yellowback/address.h"
+#include "yellowback/params.h"
 
 #include <stdint.h>
 #include <unordered_set>
@@ -165,6 +167,7 @@ public:
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("isscript", false);
         obj.pushKV("pqscheme", (int)id.scheme);
+        obj.pushKV("pqkeyhash", HexStr(id.hash.begin(), id.hash.end()));   // the 32 bytes as pushed in TX_PQPKH
         return obj;
     }
 };
@@ -187,6 +190,8 @@ UniValue validateaddress(const UniValue& params, bool fHelp)
             "  \"isscript\" : true|false,        (boolean) If the key is a script\n"
             "  \"pubkey\" : \"publickeyhex\",    (string) The hex value of the raw public key\n"
             "  \"iscompressed\" : true|false,    (boolean) If the address is compressed\n"
+            "  \"pqscheme\" : n,                 (numeric) A post-quantum address (sq…/tq…/rq…) only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "  \"pqkeyhash\" : \"hex\",          (string) A post-quantum address only: SHA256(scheme || public key), as in its TX_PQPKH script\n"
             "  \"account\" : \"account\"         (string) DEPRECATED. The account associated with the address, \"\" is the default account\n"
             "}\n"
             "\nExamples:\n"
@@ -569,15 +574,22 @@ UniValue getexperimentalfeatures(const UniValue& params, bool fHelp)
     return experimentalfeatures;
 }
 
+// insightexplorer: the addresses a request named, by index key. A post-quantum key is indexed by a hash of its
+// scheme and key hash (CScript::AddressHash), which cannot be turned back into the address, so the results name
+// it as the request did.
+typedef std::map<std::pair<uint160, int>, std::string> AddressNames;
+
 // insightexplorer
 static bool getAddressFromIndex(
-    int type, const uint160 &hash, std::string &address)
+    int type, const uint160 &hash, std::string &address, const AddressNames* names = nullptr)
 {
     KeyIO keyIO(Params());
     if (type == CScript::P2SH) {
         address = keyIO.EncodeDestination(CScriptID(hash));
     } else if (type == CScript::P2PKH) {
         address = keyIO.EncodeDestination(CKeyID(hash));
+    } else if (type == CScript::P2PQPKH && names && names->count(std::make_pair(hash, type))) {
+        address = names->at(std::make_pair(hash, type));
     } else {
         return false;
     }
@@ -598,6 +610,12 @@ static bool getIndexKey(
         type = CScript::P2PKH;
         return true;
     }
+    if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest)) {
+        // A TX_PQPKH output's index key (CScript::AddressHash): Hash160(scheme || keyHash).
+        hashBytes = GetScriptForPQKey(*pq).AddressHash();
+        type = CScript::P2PQPKH;
+        return true;
+    }
     if (IsScriptDestination(dest)) {
         auto x = std::get_if<CScriptID>(&dest);
         memcpy(&hashBytes, x->begin(), 20);
@@ -610,7 +628,8 @@ static bool getIndexKey(
 // insightexplorer
 static bool getAddressesFromParams(
     const UniValue& params,
-    std::vector<std::pair<uint160, int>> &addresses)
+    std::vector<std::pair<uint160, int>> &addresses,
+    AddressNames* names = nullptr)
 {
     std::vector<std::string> param_addresses;
     if (params[0].isStr()) {
@@ -630,14 +649,22 @@ static bool getAddressesFromParams(
     }
 
     KeyIO keyIO(Params());
+    const yellowback::Params& ybParams = yellowback::ParamsForNetwork(Params().NetworkIDString());
     for (const auto& it : param_addresses) {
         CTxDestination address = keyIO.DecodeDestination(it);
+        // A YED address (yb…/yt…/yr…, P2PKH or post-quantum) names the same key as its transparent form.
+        if (!IsValidDestination(address)) {
+            yellowback::DecodeAddress(it, ybParams, address);
+        }
         uint160 hashBytes;
         int type = 0;
         if (!getIndexKey(address, hashBytes, type)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
         }
         addresses.push_back(std::make_pair(hashBytes, type));
+        if (names && type == CScript::P2PQPKH) {
+            (*names)[std::make_pair(hashBytes, type)] = it;
+        }
     }
     return true;
 }
@@ -687,8 +714,9 @@ UniValue getaddressmempool(const UniValue& params, bool fHelp)
     }
 
     std::vector<std::pair<uint160, int>> addresses;
+    AddressNames names;
 
-    if (!getAddressesFromParams(params, addresses)) {
+    if (!getAddressesFromParams(params, addresses, &names)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
     }
     std::vector<std::pair<CMempoolAddressDeltaKey, CMempoolAddressDelta>> indexes;
@@ -704,7 +732,7 @@ UniValue getaddressmempool(const UniValue& params, bool fHelp)
 
     for (const auto& it : indexes) {
         std::string address;
-        if (!getAddressFromIndex(it.first.type, it.first.addressBytes, address)) {
+        if (!getAddressFromIndex(it.first.type, it.first.addressBytes, address, &names)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unknown address type");
         }
         UniValue delta(UniValue::VOBJ);
@@ -790,7 +818,8 @@ UniValue getaddressutxos(const UniValue& params, bool fHelp)
         }
     }
     std::vector<std::pair<uint160, int>> addresses;
-    if (!getAddressesFromParams(params, addresses)) {
+    AddressNames names;
+    if (!getAddressesFromParams(params, addresses, &names)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
     }
     std::vector<CAddressUnspentDbEntry> unspentOutputs;
@@ -809,7 +838,7 @@ UniValue getaddressutxos(const UniValue& params, bool fHelp)
     for (const auto& it : unspentOutputs) {
         UniValue output(UniValue::VOBJ);
         std::string address;
-        if (!getAddressFromIndex(it.first.type, it.first.hashBytes, address)) {
+        if (!getAddressFromIndex(it.first.type, it.first.hashBytes, address, &names)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unknown address type");
         }
 
@@ -875,9 +904,10 @@ static void getAddressesInHeightRange(
     const UniValue& params,
     int start, int end,
     std::vector<std::pair<uint160, int>>& addresses,
-    std::vector<std::pair<CAddressIndexKey, CAmount>> &addressIndex)
+    std::vector<std::pair<CAddressIndexKey, CAmount>> &addressIndex,
+    AddressNames* names = nullptr)
 {
-    if (!getAddressesFromParams(params, addresses)) {
+    if (!getAddressesFromParams(params, addresses, names)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
     }
     for (const auto& it : addresses) {
@@ -967,7 +997,8 @@ UniValue getaddressdeltas(const UniValue& params, bool fHelp)
 
     std::vector<std::pair<uint160, int>> addresses;
     std::vector<std::pair<CAddressIndexKey, CAmount>> addressIndex;
-    getAddressesInHeightRange(params, start, end, addresses, addressIndex);
+    AddressNames names;
+    getAddressesInHeightRange(params, start, end, addresses, addressIndex, &names);
 
     bool includeChainInfo = false;
     if (params[0].isObject()) {
@@ -995,7 +1026,7 @@ UniValue getaddressdeltas(const UniValue& params, bool fHelp)
         std::string address;
         if (haveCached && it.first.type == cachedType && it.first.hashBytes == cachedHashBytes) {
             address = cachedAddress;
-        } else if (!getAddressFromIndex(it.first.type, it.first.hashBytes, address)) {
+        } else if (!getAddressFromIndex(it.first.type, it.first.hashBytes, address, &names)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Unknown address type");
         } else {
             cachedType = it.first.type;
@@ -1218,6 +1249,10 @@ UniValue getaddressfirstlastheight(const UniValue& params, bool fHelp)
     // dropped.
     KeyIO keyIO(Params());
     CTxDestination dest = keyIO.DecodeDestination(params[0].get_str());
+    // A YED address (yb…/yt…/yr…, P2PKH or post-quantum) names the same key as its transparent form (D-Q-20).
+    if (!IsValidDestination(dest)) {
+        yellowback::DecodeAddress(params[0].get_str(), yellowback::ParamsForNetwork(Params().NetworkIDString()), dest);
+    }
 
     int firstHeight = 0;
     int lastHeight = 0;

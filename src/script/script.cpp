@@ -267,6 +267,13 @@ bool CScript::IsPushOnly() const
     return this->IsPushOnly(begin());
 }
 
+// insightexplorer: 0x20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG, the TX_PQPKH shape (quantum spec §2.1). Used only by
+// the address index (GetType / AddressHash), never by script evaluation or standardness.
+static bool IsPQPKHForIndex(const CScript& s)
+{
+    return s.size() == 35 && s[0] == 0x20 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG;
+}
+
 // insightexplorer
 CScript::ScriptType CScript::GetType() const
 {
@@ -276,6 +283,8 @@ CScript::ScriptType CScript::GetType() const
         return CScript::P2SH;
     if (this->IsPayToPublicKey())
         return CScript::P2PK;
+    if (IsPQPKHForIndex(*this))
+        return CScript::P2PQPKH;
     // We don't know this script type
     return CScript::UNKNOWN;
 }
@@ -289,7 +298,14 @@ uint160 CScript::AddressHash() const
         start = 3;
     else if (this->IsPayToScriptHash())
         start = 2;
-    else {
+    else if (IsPQPKHForIndex(*this)) {
+        // A post-quantum key hash is 32 bytes and the index key 20: index it by Hash160(scheme || keyHash), the
+        // scheme byte being OP_1 / OP_2 - OP_RESERVED.
+        unsigned char id[33];
+        id[0] = (*this)[33] - OP_RESERVED;
+        std::copy(this->begin() + 1, this->begin() + 33, id + 1);
+        return Hash160(id, id + 33);
+    } else {
         // unknown script type; return zeros (this can happen)
         vector<unsigned char> hashBytes;
         hashBytes.resize(20);
