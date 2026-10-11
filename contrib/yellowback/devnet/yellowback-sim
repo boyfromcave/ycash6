@@ -161,11 +161,61 @@ class Persona(threading.Thread):
             return " ".join("%s=%s" % (k, str(result[k])[:16]) for k in ("txid", "vault", "termClass", "burnedCents", "claimPath", "changeCents") if k in result)
         return str(result)[:60]
 
+    # -- the post-quantum line (quantum plan §4.9): every action's PQ shape is observed and tallied as
+    #    "pq-…" next to the action, so `sim stats` and yellowback_devnet_roles.py can see the PQ paths taken
+    def holder_kind(self, spk_hex):
+        """'falcon' / 'slh' (TX_PQPKH by scheme), 'p2pkh' or 'other' for a YED output's script."""
+        if len(spk_hex) == 70 and spk_hex.startswith("20") and spk_hex.endswith("c2"):
+            return {"51": "slh", "52": "falcon"}.get(spk_hex[66:68], "other")
+        if len(spk_hex) == 50 and spk_hex.startswith("76a914"):
+            return "p2pkh"
+        return "other"
+
+    def observe_mint(self, txid):
+        """A PQ minter: the vault's owner is SLH-DSA (ownerScheme 1, a 53-character owner address); its token holder
+        is Falcon once Falcon is active, else P2PKH (yed_getnewaddress's holder policy, quantum spec A-13)."""
+        try:
+            raw = self.rpc.getrawtransaction(txid, 1)
+            owner = self.rpc.yed_decodepayload(raw["vout"][2]["scriptPubKey"]["hex"])
+            token = self.holder_kind(raw["vout"][1]["scriptPubKey"]["hex"])
+        except Exception as error:
+            self.tally.note(self.name, "mint %s not observable yet: %s" % (txid[:16], error))
+            return
+        if owner.get("ownerScheme") == 1 and owner.get("version") == 4:
+            self.tally.ok(self.name, "pq-owner-slh", txid[:16])
+        else:
+            self.tally.refused(self.name, "pq-owner-slh", "owner-not-slh: %s" % owner.get("ownerScheme"))
+        self.tally.ok(self.name, "pq-token-%s" % token, txid[:16])
+
+    def observe_spend(self, action, txid, vin_index=None):
+        """The holder or owner signatures a spend carries: an SLH-DSA owner signature (> 7.8 KB) on a redeem's vault
+        input, FN-DSA-512 (~1.6 KB) or SLH-DSA holder signatures on its YED inputs."""
+        try:
+            raw = self.rpc.getrawtransaction(txid, 1)
+        except Exception:
+            return
+        kinds = set()
+        for k, vin in enumerate(raw["vin"]):
+            if "txid" not in vin or (vin_index is not None and k != vin_index):
+                continue
+            try:
+                spk = self.rpc.getrawtransaction(vin["txid"], 1)["vout"][vin["vout"]]["scriptPubKey"]["hex"]
+            except Exception:
+                continue
+            kind = self.holder_kind(spk)
+            if kind in ("falcon", "slh"):
+                kinds.add(kind)
+            elif vin_index is not None and len(vin["scriptSig"]["hex"]) // 2 > 7_800:
+                kinds.add("slh-owner")
+        for kind in sorted(kinds):
+            self.tally.ok(self.name, "pq-%s-%s" % (action, kind), txid[:16])
+
     def mint(self, cents, lock_blocks):
         result = self.call("mint", "yed_mint", cents, lock_blocks, "", "", True)
         if result and result.get("txid"):
             self.vaults.append(result["txid"])
             self.tally.vault(self.name, result["txid"])
+            self.observe_mint(result["txid"])
             self.log("%-12s minted %s YED, class %s, lock %d, claim opens at %s, vault %s"
                      % (self.name, Decimal(cents) / 100, result.get("termClass"), lock_blocks, result.get("claimHeight"), result["txid"][:16]))
         return result
@@ -184,7 +234,9 @@ class Persona(threading.Thread):
         for row in self.my_positions():
             if row["status"] in ("ACTIVE", "VOID") and row.get("canRedeem"):
                 action = "release-void" if row["status"] == "VOID" else "redeem"
-                if self.call(action, "yed_redeem", row["txid"]):
+                redeemed = self.call(action, "yed_redeem", row["txid"])
+                if redeemed:
+                    self.observe_spend("redeem", redeemed["txid"], 0)        # the vault input: the SLH-DSA owner signature
                     done += 1
                     self.vaults.remove(row["txid"])
                     self.log("%-12s %s vault %s (%s YED)" % (self.name, action, row["txid"][:16], Decimal(row["mintedCents"]) / 100))
@@ -269,7 +321,9 @@ class Trader(Persona):
     cadence_key = "trader"
 
     def setup(self):
-        self.second = self.rpc.yed_getnewaddress()
+        # the second address is always post-quantum: FN-DSA-512 once Falcon is active, SLH-DSA before (PQ holder transfers in
+        # both regimes; yed_getnewaddress "pq")
+        self.second = self.rpc.yed_getnewaddress("pq")
 
     def act(self, tip):
         try:
@@ -284,14 +338,16 @@ class Trader(Persona):
         liquidator = self.sim.liquidator_address
         roll = self.rng.random()
         if roll < 0.25 and liquidator:
-            self.call("send", "yed_send", liquidator, amount)
+            sent, action = self.call("send", "yed_send", liquidator, amount), "send"
         elif roll < 0.55:
-            self.call("send", "yed_send", self.second, amount)
+            sent, action = self.call("send", "yed_send", self.second, amount), "send"
         elif roll < 0.8:
-            self.call("send", "yed_send", self.address, amount)
+            sent, action = self.call("send", "yed_send", self.address, amount), "send"
         else:
             half = max(100, amount // 2)
-            self.call("sendmany", "yed_sendmany", {self.address: half, self.second: half})
+            sent, action = self.call("sendmany", "yed_sendmany", {self.address: half, self.second: half}), "sendmany"
+        if sent and sent.get("txid"):
+            self.observe_spend(action, sent["txid"])                     # the YED inputs' holder signatures
 
 
 class Absentee(Persona):
@@ -398,6 +454,7 @@ class Liquidator(Persona):
                     continue
                 released = self.call("release", "vault_release", "%s:%d" % (intent["txid"], intent["vout"]))
                 if released:
+                    self.observe_residual(row)
                     worth = Decimal(claim["collateralOut"] or 0) * Decimal(claim["pClaim"] or 0) / Decimal(100_000_000) / Decimal(10_000)   # cents
                     margin = worth - Decimal(claim["burnedCents"])
                     self.tally.note(self.name, "released claim of %s: margin %s%s YED" % (vault[:16], "+" if margin >= 0 else "", (margin / 100).quantize(Decimal("0.01"))))
@@ -407,6 +464,24 @@ class Liquidator(Persona):
                                 "+" if margin >= 0 else "-", (abs(margin) / 100).quantize(Decimal("0.01"))))
                     del self.claims[vault]
 
+    def observe_residual(self, row):
+        """RED-5 / F-3: a claim's residual intent pays the vault owner's TX_PQPKH (the owner's SLH-DSA key hash); release
+        it (anyone may) and tally the PQPKH payout."""
+        for intent in row.get("intents") or []:
+            if intent.get("role") != "residual":
+                continue
+            try:
+                txid = self.rpc.vault_release("%s:%d" % (intent["txid"], intent["vout"]))
+                out = self.rpc.getrawtransaction(txid, 1)["vout"][0]["scriptPubKey"]["hex"]
+            except Exception as error:
+                self.tally.refused(self.name, "pq-residual", error)
+                continue
+            ok = self.holder_kind(out) == "slh" and row.get("ownerHash") and row["ownerHash"] in out
+            if ok:
+                self.tally.ok(self.name, "pq-residual-pqpkh", txid[:16])
+            else:
+                self.tally.refused(self.name, "pq-residual", "residual-not-owner-pqpkh")
+
     def claim(self, row):
         """yed_claim with the H-9.3 bounds: at most the debt plus a sub-dollar remainder burned, at
         least 95 % of collateral - residual received (U-23: the fees come from the claimant's YEC)."""
@@ -414,6 +489,8 @@ class Liquidator(Persona):
         max_burn = int(row["mintedCents"]) + self.max_burn_slack_cents
         min_out = max(0, (int(row["collateralZat"]) - int(row.get("residualZat") or 0)) * self.min_out_slack_bps // 10_000)
         result = self.call("claim", "yed_claim", vault, "", "", True, min_out, max_burn)
+        if result and result.get("txid"):
+            self.observe_spend("claim", result["txid"])                  # the claimant's YED inputs: its PQ holder signatures
         if result:
             if result.get("txid"):
                 self.claims[vault] = {"txid": result["txid"], "burnedCents": int(result.get("burnedCents") or row["mintedCents"]),

@@ -270,8 +270,9 @@ class Bridge:
         dest_bytes = bytes.fromhex(dest[2:] if dest.startswith("0x") else dest)
         if len(dest_bytes) == 20: dest_bytes = b"\x00" * 12 + dest_bytes      # ABI bytes32, left-padded (finding 27)
         if len(dest_bytes) != 32 or dest_bytes[:2] == b"YV": sys.exit("destination must be 20 or 32 bytes and never begin 0x5956")
-        address = n.getnewaddress()
-        owner_key = bytes.fromhex(n.validateaddress(address)["pubkey"])
+        # every vault's owner is post-quantum (quantum plan D-Q-1): a fresh SLH-DSA owner from node 0's wallet,
+        # the 33-byte pqkeyid scheme || keyHash that the V's owner slot commits to (vault_ownerspend signs with it)
+        owner_key = bytes.fromhex(n.vault_getnewowner()["owner"])
         lock_h = self.tip() + 1
         vp = v.VaultParams(TAG.encode(), v.txid_internal(b["set"]), v.txid_internal(b["cancelset"]), b["delay"],
                            lock_h + b["bridge_max_age"], 0, owner_key)
@@ -295,7 +296,7 @@ class Bridge:
             txid = n.sendrawtransaction(signed["hex"])
         except Exception as error:
             sys.exit("the lock was refused: %s" % getattr(error, "error", {}).get("message", error))
-        print("locked %s YEC under %s: %s:0 (owner key %s, ownerHeight %d, destination %s)"
+        print("locked %s YEC under %s: %s:0 (owner %s, ownerHeight %d, destination %s)"
               % (amount, b["set"][:16], txid, owner_key.hex()[:16], lock_h + b["bridge_max_age"], dest_bytes.hex()))
         self.wait_mempool(txid)
         return txid
