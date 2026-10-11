@@ -84,6 +84,37 @@ std::vector<CPubKey> Module::Ejections(const CTransaction& tx, const vault::Modu
     return {};
 }
 
+std::optional<std::string> Module::CheckBlock(const CBlock& block, const CBlockIndex* pindex, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p) return std::nullopt;
+    for (const CTransaction& tx : block.vtx) {
+        if (RefusedAttestorSetAct(tx, *p)) return std::string("bad-yellowback-attestor-set-act");
+    }
+    return std::nullopt;
+}
+
+std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::SetJoinBody& join, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p || !ctx.state || join.setId != p->attestorSetId || join.bondVout >= tx.vout.size()) return std::nullopt;
+    std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, join.setId);
+    if (!s || !s->params.IsOpen() || (int)s->params.seats != p->attestorSeats) return std::nullopt;   // a set the module does not adopt
+    std::vector<SeatCandidate> members;
+    for (const auto& m : vault::GetMembers(*ctx.state, join.setId)) {
+        if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;
+        std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+        if (!b || b->frozen) continue;
+        SeatCandidate c;
+        c.key = m.first;
+        c.bondZat = m.second.bondValue;
+        c.joinHeight = m.second.joinHeight;
+        c.lastAct = m.second.lastAct;
+        members.push_back(c);
+    }
+    return EvictionVictim(members, ctx.height, tx.vout[join.bondVout].nValue, (int64_t)s->params.livenessWindow, *p);
+}
+
 const vault::Module* RegisteredModule()
 {
     static const Module instance;

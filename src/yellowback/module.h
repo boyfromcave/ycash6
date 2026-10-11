@@ -25,8 +25,9 @@
  *   creation, TRANSFER, the intent release/cancel, the token index, SNAP) is EvaluateBlock in
  *   yellowback/state.cpp over the index's state, run by the index's ConnectBlock hook as a
  *   consensus rejection (DoS 100, `bad-yellowback-<verdict>`; U-21) and by its mempool check.
- *   CheckBlock is therefore empty: the primitive's per-block module hook runs over the vault
- *   database, which holds none of that state, and the index's hook already sees the whole block.
+ *   CheckBlock therefore holds only the structural attestor-set rule (no SET_REMOVE or SET_WINDDOWN of the
+ *   attestor set): the primitive's per-block module hook runs over the vault database, which holds none of
+ *   the module's state, and the index's hook already sees the whole block.
  *
  * Until SetParams is called with a configured parameter set (a network with an UPGRADE_VAULT
  * height and an attestor set, U-22) the module accepts everything: the YED tag is then governed by
@@ -49,6 +50,18 @@ public:
      * same member's Attestors record.
      */
     std::vector<CPubKey> Ejections(const CTransaction& tx, const vault::ModuleContext& ctx) const override;
+    /**
+     * Owner, 2026-10-11: the attestor set is open and never shrinks by vote. A block holding a SET_REMOVE or
+     * SET_WINDDOWN of the attestor set is invalid (RefusedAttestorSetAct; the index's mirror refuses the same
+     * transaction, so the mempool never takes one).
+     */
+    std::optional<std::string> CheckBlock(const CBlock& block, const CBlockIndex* pindex, const vault::ModuleContext& ctx) const override;
+    /**
+     * Owner, 2026-10-11 (the primitive's displacement hook): a SET_JOIN into the full attestor set, when the set is
+     * the one the module adopts (OPEN, ATTESTOR_SEATS seats), displaces EvictionVictim over its ACTIVE members with
+     * an unfrozen bond (state.h); the module's mirror makes the same member's record WITHDRAWN (evicted).
+     */
+    std::optional<CPubKey> Displace(const CTransaction& tx, const vault::SetJoinBody& join, const vault::ModuleContext& ctx) const override;
 };
 
 /** The registered instance (vault/module.cpp's table entry). */

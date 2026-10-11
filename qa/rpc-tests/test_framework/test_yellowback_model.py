@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = '782038d14a928963f76bc29eb901f2220afd3379fc69ad45d4da94a333c656b6'
+GOLDEN_STATE_HASH = 'b4a3b75a05d9f5860b18a59e5b7c826f822aee96b6b613231538a41f10027d51'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1612,6 +1612,59 @@ def golden_document(c):
     }
 
 
+class SeatTests(unittest.TestCase):
+    """Seat ranking and eviction (owner 2026-10-11), mirroring yellowback_math_tests seat_weight_log_tenure_factor and
+    yellowback_state_tests seat_eviction_victim_rule / seat_eviction_mirror / p4b_slashed_key_barred_remove_winddown_refused."""
+
+    def test_log2_and_factor(self):
+        self.assertEqual([ym.log2_q16(x) for x in (0, 1, 2, 3, 1024, 2**64 - 1)], [0, 0, 65536, 103872, 10 << 16, (63 << 16) | 0xFFFF])
+        u, cap = 1152, 420480
+        self.assertEqual([ym.seat_age_factor_q16(a, u, cap) for a in (0, -10, 1152, 8064, 210240, cap, 3 * cap)],
+                         [65536, 65536, 72462, 86314, 117619, 124518, 124518])
+        self.assertEqual(ym.seat_weight(8000 * ym.COIN, 8064, u, cap) // 65536, 1053637695312)
+        p = ym.Params.regtest(1, 0, 0, '5e' * 32)
+        self.assertEqual((p.seat_age_unit, p.seat_age_cap, p.seat_margin_bps, p.evict_margin_bps, p.attestor_seats),
+                         (1152, 420480, 500, 500, 15))
+
+    def test_eviction_victim(self):
+        p = ym.Params.regtest(1, 0, 0, '5e' * 32)
+        H, LW, C = 100000, 1000, ym.COIN
+        k = lambda i: bytes([2]) + bytes([i]) * 32  # noqa: E731
+        m = [(k(0), 20 * C, H - 8064, H), (k(1), 8 * C, H - 8064, H), (k(2), 8 * C, H - 10, H)]
+        self.assertIsNone(ym.eviction_victim(m, H, 8 * C, LW, p))
+        self.assertEqual(ym.eviction_victim(m, H, 9 * C, LW, p), k(2))
+        self.assertIsNone(ym.eviction_victim(m, H, 8 * C * 105 // 100, LW, p))
+        self.assertIsNotNone(ym.eviction_victim([(k(0), 2 * C, H - 8064, H)], H, 3 * C, LW, p))
+        self.assertIsNone(ym.eviction_victim([(k(0), 2 * C, H - 420480, H)], H, 3 * C, LW, p))
+        self.assertIsNotNone(ym.eviction_victim([(k(0), 8000 * C, H - 10 * 420480, H)], H, 20000 * C, LW, p))
+        m.append((k(3), 1000 * C, H - 420480, H - LW - 1))
+        self.assertEqual(ym.eviction_victim(m, H, 1, LW, p), k(3))
+        m[3] = (k(3), 1000 * C, H - 420480, H - LW)
+        self.assertIsNone(ym.eviction_victim(m, H, 1, LW, p))
+        self.assertEqual(ym.eviction_victim([(k(6), 8 * C, H - 50, H), (k(5), 8 * C, H - 50, H)], H, 100 * C, LW, p), k(5))
+
+    def test_mirror_evicts_and_refuses_remove(self):
+        secrets = [ym.sha256(b'seat-test-%d' % i) for i in range(17)]
+        keys = [(sec, bytes(ya.yu.secret_to_pubkey(sec))) for sec in secrets]
+        c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id()))
+        tag = lambda: (1, 50000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
+        c.mine_n(135)
+        c.mine(tag(), [attestor_set_create()])
+        for i in range(15):
+            c.mine(tag(), [c.register_tx(keys[i], c.height + 1 + 200, 10 * ym.COIN)])
+        # SET_REMOVE of the attestor set: invalid (the block is mined again without it)
+        c.mine(tag(), [c.remove_tx(keys[3][1], keys[1])])
+        self.assertEqual(c.model.last_failed.verdict, 'attestor-set-act')
+        self.assertNotEqual(c.model.attestors[3].status, ym.A_EJECTED)
+        # 11 YEC evicts the youngest 10-YEC member (seq 14)
+        c.mine(tag(), [c.register_tx(keys[15], c.height + 1 + 200, 11 * ym.COIN)])
+        r = c.model.attestors[14]
+        self.assertEqual((r.status, r.status_height, bool(r.flags & ym.ATTESTOR_FLAG_EVICTED), r.bond_frozen, r.bond_spent_height),
+                         (ym.A_WITHDRAWN, c.height, True, False, 0))
+        self.assertEqual(c.model.attestors[15].status, ym.A_PENDING)
+        self.assertTrue(all(c.model.attestors[s].status != ym.A_WITHDRAWN for s in range(14)))
+
+
 class StateHashTests(unittest.TestCase):
 
     # Rule: N18
@@ -1623,7 +1676,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0a\x00\x00\x00')        # SCHEMA_VERSION 10 (D-Q-28)
+        self.assertEqual(pre[37:41], b'\x0b\x00\x00\x00')        # SCHEMA_VERSION 11 (seat ranking and eviction)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))

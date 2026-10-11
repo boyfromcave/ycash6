@@ -792,6 +792,54 @@ BOOST_AUTO_TEST_CASE(bundle1_bond_weight_clamps_age)
     BOOST_CHECK(BondWeight(r.bondMinNoPriceZat, 100, r.ageCap) == arith_uint256(10 * COIN) * arith_uint256(64));
 }
 
+// Rule: seat ranking and eviction (owner 2026-10-11)
+// Log2Q16 is exact integer log2 in Q16; SeatAgeFactorQ16 runs 1.0 .. 1.9 (65,536 .. 124,518) over SEAT_AGE_CAP.
+BOOST_AUTO_TEST_CASE(seat_weight_log_tenure_factor)
+{
+    BOOST_CHECK_EQUAL(Log2Q16(0), 0u);
+    BOOST_CHECK_EQUAL(Log2Q16(1), 0u);
+    BOOST_CHECK_EQUAL(Log2Q16(2), 65536u);
+    BOOST_CHECK_EQUAL(Log2Q16(1024), 10u << 16);
+    BOOST_CHECK_EQUAL(Log2Q16(3), 103872u);                    // 1.58496 x 65536 = 103,872.7: truncated
+    BOOST_CHECK_EQUAL(Log2Q16((uint64_t)1 << 40), 40u << 16);
+    BOOST_CHECK_EQUAL(Log2Q16(UINT64_MAX), (63u << 16) | 0xFFFFu);
+    for (uint64_t x = 1; x < 5000; x++) BOOST_CHECK(Log2Q16(x + 1) >= Log2Q16(x));   // monotone
+
+    const Params& m = MainParams();
+    const int64_t u = m.seatAgeUnit, cap = m.seatAgeCap;
+    BOOST_CHECK_EQUAL(u, 1152);
+    BOOST_CHECK_EQUAL(cap, 420480);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(0, u, cap), 65536u);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(-10, u, cap), 65536u);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(cap, u, cap), 65536u + 58982u);       // floor(0.9 x 65536): x1.9
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(cap * 3, u, cap), 65536u + 58982u);   // clamped at the cap
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(1152, u, cap), 72462u);               // one day: lg 2 = 1 of lg 366
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(8064, u, cap), 86314u);               // one week: lg 8 = 3 of lg 366, x1.317
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(210240, u, cap), 117619u);            // half a year
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(100, 0, cap), 65536u);                // degenerate: 1.0
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(100, u, 0), 65536u);
+    for (int64_t a = 0; a < 20000; a += 7) BOOST_CHECK(SeatAgeFactorQ16(a + 7, u, cap) >= SeatAgeFactorQ16(a, u, cap));
+
+    // 8,000 YEC at one week weighs 10,536.4 YEC; a new 20,000 YEC bond beats 8,000 YEC at any tenure, even with the margin
+    BOOST_CHECK(SeatWeight(8000 * COIN, 8064, u, cap) == arith_uint256((uint64_t)(8000 * COIN)) * arith_uint256(86314));
+    BOOST_CHECK(SeatWeight(8000 * COIN, 8064, u, cap) / arith_uint256(65536) == arith_uint256((uint64_t)1053637695312ULL));
+    BOOST_CHECK(SeatWeight(20000 * COIN, 0, u, cap) * arith_uint256(10000) > SeatWeight(8000 * COIN, cap, u, cap) * arith_uint256(10500));
+    // 1.5x the bond beats a one-week member (by more than EVICT_MARGIN) and loses to a one-year member
+    BOOST_CHECK(SeatWeight(3000 * COIN, 0, u, cap) * arith_uint256(10000) > SeatWeight(2000 * COIN, 8064, u, cap) * arith_uint256(10500));
+    BOOST_CHECK(SeatWeight(3000 * COIN, 0, u, cap) < SeatWeight(2000 * COIN, cap, u, cap));
+    // MAX_MONEY x 1.9 fits arith_uint256 with room (and not int64): the comparison is never truncated
+    BOOST_CHECK(!FitsInt64(SeatWeight(MAX_MONEY, cap, u, cap)));
+    BOOST_CHECK(SeatWeight(0, 10, u, cap) == arith_uint256(0));
+    BOOST_CHECK(SeatWeight(-1, 10, u, cap) == arith_uint256(0));
+    // regtest carries the mainnet values (only the bonds are scaled)
+    Params r = RegtestParams(1, 0, 0, TestSet());
+    BOOST_CHECK_EQUAL(r.seatAgeUnit, 1152);
+    BOOST_CHECK_EQUAL(r.seatAgeCap, 420480);
+    BOOST_CHECK_EQUAL(r.seatMarginBps, 500);
+    BOOST_CHECK_EQUAL(r.evictMarginBps, 500);
+    BOOST_CHECK_EQUAL(r.attestorSeats, 15);
+}
+
 // Rule: PRICE-2
 // Rule: BUNDLE-1
 // The bundle statistic: the price at which cumulative weight first reaches

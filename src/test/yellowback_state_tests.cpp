@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "782038d14a928963f76bc29eb901f2220afd3379fc69ad45d4da94a333c656b6";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 10 since D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "b4a3b75a05d9f5860b18a59e5b7c826f822aee96b6b613231538a41f10027d51";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction; 10, D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -161,7 +161,7 @@ struct Fixture
     {
         ownerKey = CKey::TestOnlyRandomKey(true);
         userKey = CKey::TestOnlyRandomKey(true);
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 20; i++) {
             hotKeys.push_back(DeterministicKey("yellowback-state-test-hot", i));
             bondKeys.push_back(hotKeys.back());
         }
@@ -2661,36 +2661,39 @@ BOOST_AUTO_TEST_CASE(p4b_rejoin_after_withdraw_new_seq)
 // Rule: P4-b
 // Rule: EQV-1
 // Rule: IN-2
-BOOST_AUTO_TEST_CASE(p4b_slashed_key_barred_removed_key_not)
+BOOST_AUTO_TEST_CASE(p4b_slashed_key_barred_remove_winddown_refused)
 {
     Fixture f;
     f.Arm(4);
-    // EQV-1 ejects seq 0 and freezes its bond; SET_REMOVE without burn ejects seq 3 and leaves the bond free.
+    // EQV-1 ejects seq 0 and freezes its bond.
     const int cited = f.tip;
     f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 50000, cited), f.Att(0, 51000, cited))), verdict::OK);
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::EJECTED);
     BOOST_CHECK(f.Attestor(0)->bondFrozen);
+    // Owner 2026-10-11: SET_REMOVE (with or without burn) and SET_WINDDOWN of the attestor set are invalid; nothing moves.
+    const AttestorRecord three = f.Attestor(3).value();
     CMutableTransaction rm = f.RemoveTx(3, 1, false);
-    BOOST_CHECK_EQUAL(VerdictOf(f, rm), verdict::OK);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::EJECTED);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->statusHeight, f.tip);
-    BOOST_CHECK(!f.Attestor(3)->bondFrozen);
-    BOOST_CHECK_EQUAL(f.Log(CTransaction(rm).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_SET_ACT);
-    // SET_REMOVE with burn freezes
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RemoveTx(2, 1, true)), verdict::OK);
-    BOOST_CHECK(f.Attestor(2)->bondFrozen);
-    // both rejoin; only the key that was never slashed can become ELIGIBLE again
+    BOOST_CHECK(RefusedAttestorSetAct(CTransaction(rm), f.P));
+    BOOST_CHECK_EQUAL(VerdictOf(f, rm), verdict::ATTESTOR_SET_ACT);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RemoveTx(2, 1, true)), verdict::ATTESTOR_SET_ACT);
+    vault::Act wd;
+    wd.type = vault::ACT_SET_WINDDOWN;
+    wd.winddown.setId = f.P.attestorSetId;
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ActTx(wd, { f.hotKeys[1] })), verdict::ATTESTOR_SET_ACT);
+    BOOST_CHECK(SerializeRecord(f.Attestor(3).value()) == SerializeRecord(three));
+    BOOST_CHECK(!f.Attestor(2)->bondFrozen);
+    // ... of another set they are not the module's business
+    vault::Act other;
+    other.type = vault::ACT_SET_REMOVE;
+    other.remove.setId = uint256S("0x1234");
+    other.remove.memberKey = f.hotKeys[3].GetPubKey();
+    BOOST_CHECK(!RefusedAttestorSetAct(CTransaction(f.ActTx(other, { f.hotKeys[1] })), f.P));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ActTx(other, { f.hotKeys[1] })), "none");      // no TxLog entry: not a YED transaction
+    // the slashed key rejoins and stays PENDING for good
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(4, 10 * COIN, -1, 0)), verdict::OK);   // seq 4 = key 0
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(5, 10 * COIN, -1, 3)), verdict::OK);   // seq 5 = key 3
     for (int i = 0; i < f.P.bondMaturity + 1; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::PENDING);
-    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);
-    // EJECTED then spent stays EJECTED (IN-2)
-    while (f.tip < (int)f.Attestor(3)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(3)), verdict::OK);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::EJECTED);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->bondSpentHeight, f.tip);
 }
 
 // Rule: P4-b: the set's member dormancy (lastAct < H - livenessWindow) and revival by SET_HEARTBEAT
@@ -2720,16 +2723,89 @@ BOOST_AUTO_TEST_CASE(p4b_set_dormancy_and_heartbeat_revival)
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::DORMANT);
 }
 
-// Rule: P4-b: the set's seats bound N_SLOTS
-BOOST_AUTO_TEST_CASE(p4b_seats_bound_nslots)
+// Rule: P4-b: the module adopts only an OPEN attestor set of ATTESTOR_SEATS (15) seats (owner 2026-10-11)
+BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
+{
+    for (int variant = 0; variant < 3; variant++) {
+        Fixture f;
+        f.RecreateSet(1000000, 1, variant == 0 ? 2 : 15);       // 2 seats; 15 closed; 15 open
+        if (variant == 1) {
+            vault::Act a;
+            BOOST_REQUIRE(!vault::DecodeAct(f.setCreate.vout[0].scriptPubKey, a));
+            a.create.flags = 0;
+            f.setCreate.vout[0].scriptPubKey = vault::EncodeAct(a);
+            f.P.attestorSetId = CTransaction(f.setCreate).GetHash();
+        }
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.setCreate });
+        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 2);
+    }
+}
+
+// Rule: seat ranking and eviction (owner 2026-10-11): EvictionVictim over primitive fields
+BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
+{
+    const yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
+    auto key = [](int i) { return Fixture::DeterministicKey("yellowback-evict", i).GetPubKey(); };
+    auto cand = [&](int i, CAmount bond, int64_t join, int64_t lastAct) { SeatCandidate c; c.key = key(i); c.bondZat = bond; c.joinHeight = join; c.lastAct = lastAct; return c; };
+    const int64_t H = 100000, LW = 1000;
+    // all live: the least seat weight, only above x1.05
+    std::vector<SeatCandidate> m = { cand(0, 20 * COIN, H - 8064, H), cand(1, 8 * COIN, H - 8064, H), cand(2, 8 * COIN, H - 10, H) };
+    BOOST_CHECK(!EvictionVictim(m, H, 8 * COIN, LW, P).has_value());                 // equal bond, no tenure: never
+    BOOST_CHECK(EvictionVictim(m, H, 9 * COIN, LW, P) == std::optional<CPubKey>(key(2)));   // the youngest 8 YEC
+    BOOST_CHECK(!EvictionVictim(m, H, 8 * COIN * 105 / 100, LW, P).has_value());     // not above x1.05 (and f(10) > 1)
+    // 1.5x beats a one-week member, loses to a one-year member
+    std::vector<SeatCandidate> week = { cand(0, 2 * COIN, H - 8064, H) }, year = { cand(0, 2 * COIN, H - 420480, H) };
+    BOOST_CHECK(EvictionVictim(week, H, 3 * COIN, LW, P).has_value());
+    BOOST_CHECK(!EvictionVictim(year, H, 3 * COIN, LW, P).has_value());
+    // a new 20,000 YEC bond beats 8,000 YEC at any tenure
+    std::vector<SeatCandidate> old8k = { cand(0, 8000 * COIN, H - 10 * 420480LL, H) };
+    BOOST_CHECK(EvictionVictim(old8k, H, 20000 * COIN, LW, P).has_value());
+    // a member that is not live goes first, whatever its weight, and with any bond
+    m.push_back(cand(3, 1000 * COIN, H - 420480, H - LW - 1));
+    BOOST_CHECK(EvictionVictim(m, H, 1, LW, P) == std::optional<CPubKey>(key(3)));
+    m[3].lastAct = H - LW;                                                             // lastAct = H - LW is live
+    BOOST_CHECK(!EvictionVictim(m, H, 1, LW, P).has_value());
+    // among the not-live, the least weight; ties by key bytes
+    m.push_back(cand(4, 10 * COIN, H - 420480, H - LW - 5));
+    m[3].lastAct = H - LW - 1;
+    BOOST_CHECK(EvictionVictim(m, H, 1, LW, P) == std::optional<CPubKey>(key(4)));
+    std::vector<SeatCandidate> tie = { cand(5, 8 * COIN, H - 50, H), cand(6, 8 * COIN, H - 50, H) };
+    const CPubKey lo = std::lexicographical_compare(key(5).begin(), key(5).end(), key(6).begin(), key(6).end()) ? key(5) : key(6);
+    BOOST_CHECK(EvictionVictim(tie, H, 100 * COIN, LW, P) == std::optional<CPubKey>(lo));
+    BOOST_CHECK(!EvictionVictim({}, H, 100 * COIN, LW, P).has_value());
+}
+
+// Rule: seat ranking and eviction (owner 2026-10-11): the mirror of a join into the full set
+BOOST_AUTO_TEST_CASE(seat_eviction_mirror)
 {
     Fixture f;
-    f.RecreateSet(1000000, 1, 2);                               // two seats; N_SLOTS 5 on regtest
-    f.MineQuotesTo(20);
-    f.Register(3);                                              // the third join would be refused by the primitive; the mirror follows blocks
-    for (int i = 0; i < f.P.bondMaturity + 1; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).seated.size(), 2u);
-    BOOST_CHECK_EQUAL(Seated(f.view, f.P, f.tip).size(), 2u);
+    f.Activate();
+    f.Register(15);                                             // seq i = key i, one per block, 10 YEC each
+    for (int i = 0; i < 15; i++) BOOST_REQUIRE(f.Attestor((uint16_t)i).has_value());
+    // equal bond: no eviction (the primitive refuses; the mirror, given the block anyway, leaves every record alone)
+    CMutableTransaction eq = f.RegisterTx(15, 10 * COIN);
+    BOOST_CHECK_EQUAL(VerdictOf(f, eq), verdict::OK);
+    for (int i = 0; i < 15; i++) BOOST_CHECK(f.Attestor((uint16_t)i)->Status() != AttestorStatus::WITHDRAWN);
+    f.Undo();
+    // 11 YEC evicts the youngest 10-YEC member (seq 14): WITHDRAWN, flagged, bond neither frozen nor spent
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(15, 11 * COIN)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->statusHeight, f.tip);
+    BOOST_CHECK(f.Attestor(14)->flags & ATTESTOR_FLAG_EVICTED);
+    BOOST_CHECK(!f.Attestor(14)->bondFrozen);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->bondSpentHeight, 0);
+    BOOST_CHECK_EQUAL(f.Attestor(15)->status, (uint8_t)AttestorStatus::PENDING);
+    for (int i = 0; i < 14; i++) BOOST_CHECK(f.Attestor((uint16_t)i)->Status() != AttestorStatus::WITHDRAWN);
+    // the evicted bond is spent later: still WITHDRAWN, statusHeight kept, bondSpentHeight set
+    const int evictedAt = f.tip;
+    while (f.tip < (int)f.Attestor(14)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(14)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->statusHeight, evictedAt);
+    BOOST_CHECK_EQUAL(f.Attestor(14)->bondSpentHeight, f.tip);
+    // the evicted key can rejoin (a new seq) and is not barred: it is not slashed
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(16, 50 * COIN, -1, 14)), verdict::OK);
+    BOOST_CHECK(f.Attestor(16)->attestorPubKey == f.Attestor(14)->attestorPubKey);
 }
 
 // Rule: D-Q-28: the module's bond floor reads Snapshots[registerHeight - 1]: the no-price bond below START, before ARMED
@@ -2770,14 +2846,17 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_regimes_and_registration_price)
     BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
     // seats (N_SLOTS 5): founders 0..2 (10 YEC), then 4 and 5 (4 YEC, same block: ties by seq), 6 unseated
     BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
-    // the bump: seq 7 posts 10 YEC (the cap) and, by YEC bond x age, outranks seq 5 once 10 x age > 4 x min(age5, AGE_CAP)
+    // the bump: seq 7 posts 10 YEC (the cap) and, by SeatRank (bond x the tenure factor; seq 5 seated, x1.05), outranks
+    // seq 5 at the first SNAP where seq 7 is ELIGIBLE (the tenure factor is near 1.0 at regtest ages)
     f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(7, 10 * COIN) });
     const int reg7 = f.tip;
     BOOST_REQUIRE(f.Attestor(7).has_value());
     int expected = -1;
     for (int64_t h = reg7 + f.P.bondMaturity; expected < 0; h++) {
-        if (BondWeight(10 * COIN, h - reg7, f.P.ageCap) > BondWeight(4 * COIN, h - reg, f.P.ageCap)) expected = (int)h;
+        if (SeatWeight(10 * COIN, h - reg7, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10000) >
+            SeatWeight(4 * COIN, h - reg, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10500)) expected = (int)h;
     }
+    BOOST_CHECK_EQUAL(expected, reg7 + f.P.bondMaturity);
     while (f.tip < expected - 1) quote(50000);
     BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
     quote(50000);

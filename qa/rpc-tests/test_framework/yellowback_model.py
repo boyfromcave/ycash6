@@ -103,6 +103,7 @@ SEL_UNLOCK, SEL_OWNER, SEL_RELEASED, SEL_APP = 1, 2, 3, 4
 
 # Attestors.status, declaration order (v3 plan section 3.6)
 A_PENDING, A_ELIGIBLE, A_DORMANT, A_EJECTED, A_WITHDRAWN = 0, 1, 2, 3, 4
+ATTESTOR_FLAG_EVICTED = 0x80          # AttestorRecord.flags: evicted by a larger bond (owner 2026-10-11)
 ATTESTOR_STATUS_NAMES = {A_PENDING: 'PENDING', A_ELIGIBLE: 'ELIGIBLE', A_DORMANT: 'DORMANT',
                          A_EJECTED: 'EJECTED', A_WITHDRAWN: 'WITHDRAWN'}
 # Attest.status (ARM-1/2), declaration order
@@ -256,7 +257,8 @@ class Params(object):
                  emergency_persist=48, emergency_notice_ttl=1_152, residual_min_zat=100_000, attest_fee_bps=2_500,
                  bond_min_no_price_zat=20_000 * COIN, bond_min_floor_zat=2_000 * COIN, bond_min_usd_cents=800_000,
                  bond_min_lock=420_480, bond_maturity=16_128, age_cap=207_360,
-                 founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48)
+                 founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
+                 seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
         a.update(attest or {})
         for k, v in a.items():
             setattr(self, k, v)
@@ -268,7 +270,8 @@ class Params(object):
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
                           bond_min_no_price_zat=10 * COIN, bond_min_floor_zat=1 * COIN, bond_min_usd_cents=400,   # D-Q-28 at 1/2,000
                           bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
-                          dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4)
+                          dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
+                          seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
 
     def pq_falcon_active(self, height):
         """IsPQFalconActive(params, height): scheme 0x02 owners mint and TOK-PQ binds from this height."""
@@ -404,6 +407,74 @@ def lower_median(values):
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def log2_q16(x):
+    """Log2Q16 (math.h): log2(x) in Q16, exactly as the node: bit length, a Q31 mantissa, 16 squarings."""
+    if x <= 0:
+        return 0
+    n = x.bit_length() - 1
+    m = (x << (31 - n)) if n <= 31 else (x >> (n - 31))
+    frac = 0
+    for _ in range(16):
+        m = (m * m) >> 31
+        frac <<= 1
+        if m >= 1 << 32:
+            m >>= 1
+            frac |= 1
+    return (n << 16) | frac
+
+
+def seat_age_factor_q16(age, u, cap):
+    """SeatAgeFactorQ16 (owner 2026-10-11): 65536 + floor(9 * 65536 * (lg(u+a) - lg(u)) / (10 * (lg(u+cap) - lg(u))))."""
+    if u <= 0 or cap <= 0:
+        return 65536
+    a = clamp(age, 0, cap)
+    lu = log2_q16(u)
+    den = log2_q16(u + cap) - lu
+    if den == 0:
+        return 65536
+    return 65536 + (9 * 65536 * (log2_q16(u + a) - lu)) // (10 * den)
+
+
+def seat_weight(bond_zat, age, u, cap):
+    """SeatWeight: bondZat * the tenure factor (seats and eviction only)."""
+    return 0 if bond_zat <= 0 else bond_zat * seat_age_factor_q16(age, u, cap)
+
+
+def eviction_victim(members, height, new_bond_zat, liveness_window, p):
+    """EvictionVictim (state.h): members = [(key33, bond_zat, join_height, last_act)].  The not-live member of least
+    seat weight first; else the member of least seat weight when the joiner's beats it by EVICT_MARGIN; ties by key."""
+    best = None
+    for key, bond, join, last_act in members:
+        dead = last_act < height - liveness_window
+        w = seat_weight(bond, height - join, p.seat_age_unit, p.seat_age_cap)
+        k = (0 if dead else 1, w, bytes(key))
+        if best is None or k < best[0]:
+            best = (k, key)
+    if best is None:
+        return None
+    if best[0][0] == 0:
+        return best[1]
+    if seat_weight(new_bond_zat, 0, p.seat_age_unit, p.seat_age_cap) * BPS > best[0][1] * (BPS + max(0, p.evict_margin_bps)):
+        return best[1]
+    return None
+
+
+def refused_attestor_set_act(tx, p):
+    """RefusedAttestorSetAct (owner 2026-10-11): a SET_REMOVE or SET_WINDDOWN naming the attestor set."""
+    from . import vault as va
+    if not p.attestor_set:
+        return False
+    for o in tx.vout:
+        if not va.is_act_script(o.script):
+            continue
+        try:
+            _payload, act, _sigs = va.parse_act_script(o.script)
+        except va.VaultError:
+            return False
+        return act['type'] in (va.ACT_SET_REMOVE, va.ACT_SET_WINDDOWN) and bytes.fromhex(act.get('setId', '')) == p.attestor_set_internal
+    return False
 
 
 def sigma_mult_bps(samples, sigma_ref_bps, periods_per_year, max_bps):
@@ -1906,7 +1977,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 10       # D-Q-28 bond minimum (view.h); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 11       # seat ranking and eviction (owner 2026-10-11, view.h); 10 was the D-Q-28 bond minimum; 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2049,11 +2120,17 @@ class YellowbackModel(object):
         """weight(seq, H) = bondZat * clamp(H - ageOrigin, 0, AGE_CAP)."""
         return rec.bond_zat * clamp(height - self.age_origin(rec, attest), 0, self.params.age_cap)
 
+    def seat_rank(self, rec, attest, height):
+        """SeatRank (owner 2026-10-11): SeatWeight(bondZat, H - ageOrigin) * (10,000 + SEAT_MARGIN_BPS if seated else 10,000)."""
+        p = self.params
+        w = seat_weight(rec.bond_zat, height - self.age_origin(rec, attest), p.seat_age_unit, p.seat_age_cap)
+        return w * (BPS + (max(0, p.seat_margin_bps) if rec.seated_since != 0 else 0))
+
     def seated(self, height, attest=None):
-        """The min(N_SLOTS, seats) ELIGIBLE seq of greatest weight(seq, H), ties by seq; ascending (P4-b: the set's
+        """The min(N_SLOTS, seats) ELIGIBLE seq of greatest SeatRank(seq, H), ties by seq; ascending (P4-b: the set's
         seats bound N_SLOTS)."""
         attest = self.attest if attest is None else attest
-        ranked = sorted(((-self.weight(r, attest, height), seq) for seq, r in self.attestors.items() if r.status == A_ELIGIBLE))
+        ranked = sorted(((-self.seat_rank(r, attest, height), seq) for seq, r in self.attestors.items() if r.status == A_ELIGIBLE))
         z = self.attestor_set_rec
         slots = min(max(0, self.params.n_slots), z.seats if z is not None else 0)
         return sorted(seq for _w, seq in ranked[:slots])
@@ -2446,12 +2523,16 @@ class YellowbackModel(object):
             a = self.attestors[seq]
             if a.bond_spent_height:
                 continue
-            if a.status != A_EJECTED:
+            if a.status not in (A_EJECTED, A_WITHDRAWN):           # an evicted record keeps its statusHeight
                 a.status = A_WITHDRAWN
                 a.status_height = height
             a.bond_spent_height = height
             bond_spent = True
         # P4-b: the attestor set's acts on the Attestors mirror (after the bond spends, as the primitive orders them)
+        # owner 2026-10-11: a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid
+        if refused_attestor_set_act(tx, self.params):
+            rec.type = 'ATTESTOR_SET_ACT'
+            return self._fail(rec, 'attestor-set-act')
         set_act = self._apply_set_act(tx, height, rec)
         set_act_type = rec.type
         active_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_ACTIVE]
@@ -2646,6 +2727,8 @@ class YellowbackModel(object):
         if t == va.ACT_SET_CREATE:
             if tx.txid != p.attestor_set or self.attestor_set_rec is not None:
                 return False
+            if not (act['flags'] & va.SET_FLAG_OPEN) or act['seats'] != p.attestor_seats:
+                return False              # owner 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted
             self.attestor_set_rec = AttestorSetRecord(height, act['seats'], act['maturity'], act['livenessWindow'])
             rec.type = 'ATTESTOR_SET_ACT'
             rec.attestor_seq = 0          # the C++ TxLog's attestorSeq default (yed_gettxinfo shows seq 0)
@@ -2660,6 +2743,21 @@ class YellowbackModel(object):
             seq = self.attestor_seq
             if seq in self.attestors:
                 return False
+            # owner 2026-10-11: into a full set the join evicts EvictionVictim (WITHDRAWN, flagged, the bond untouched)
+            newest = {}
+            for s_, r_ in sorted(self.attestors.items()):
+                newest[r_.attestor_pubkey] = s_
+            cands = [(s_, r_) for s_, r_ in sorted(self.attestors.items())
+                     if r_.status not in (A_EJECTED, A_WITHDRAWN) and not r_.bond_spent_height and not r_.bond_frozen
+                     and newest[r_.attestor_pubkey] == s_]
+            if len(cands) >= z.seats:
+                victim = eviction_victim([(r_.attestor_pubkey, r_.bond_zat, r_.register_height, r_.last_act) for _s, r_ in cands],
+                                         height, tx.vout[vout].value, z.liveness_window, p)
+                for s_, r_ in cands:
+                    if victim is not None and r_.attestor_pubkey == victim:
+                        r_.status = A_WITHDRAWN
+                        r_.status_height = height
+                        r_.flags |= ATTESTOR_FLAG_EVICTED
             a = AttestorRecord()
             a.attestor_pubkey = bytes.fromhex(act['memberKey'])
             a.bond_pubkey = a.attestor_pubkey
@@ -3415,6 +3513,9 @@ def compare_attestors(model, node):
             _check(bool(r['seated']) == (seq in snap.seated), 'attestor.seated', tip, str(seq))
             _check(bool(r['pinned']) == (seq in snap.pinned_seqs), 'attestor.pinned', tip, str(seq))
             _check(int(r['weight']) == model.weight(rec, snap.attest, tip), 'attestor.weight', tip, '%d model=%r rpc=%r' % (seq, model.weight(rec, snap.attest, tip), r['weight']))
+            sw = seat_weight(rec.bond_zat, tip - model.age_origin(rec, snap.attest), model.params.seat_age_unit, model.params.seat_age_cap)
+            _check(int(r['seatWeight']) == sw, 'attestor.seatWeight', tip, '%d model=%r rpc=%r' % (seq, sw, r['seatWeight']))
+        _check(bool(r.get('evicted')) == bool(rec.flags & ATTESTOR_FLAG_EVICTED), 'attestor.evicted', extra=str(seq))
 
 
 def compare_attest_history(model, node):

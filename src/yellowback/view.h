@@ -81,7 +81,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 10;  //!< 10: D-Q-28 (the attestor bond minimum follows the price at registration; eligibility can differ from 9, so a 9 directory is rebuilt); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 11;  //!< 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ from 10); 10: D-Q-28 (the attestor bond minimum follows the price at registration; eligibility can differ from 9, so a 9 directory is rebuilt); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView

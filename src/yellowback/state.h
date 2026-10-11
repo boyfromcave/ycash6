@@ -119,7 +119,15 @@ extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUN
 // P4-b (§15.10): the v3 registry acts, invalid since the attestor registry is the primitive set
 extern const char* const ATTESTOR_REGISTER_RETIRED;   //!< an ATTESTOR_REGISTER payload (join attestorSetId with SET_JOIN)
 extern const char* const ATTESTOR_REVIVE_RETIRED;     //!< an ATTESTOR_REVIVE payload (revive with SET_HEARTBEAT)
+extern const char* const ATTESTOR_SET_ACT;            //!< a SET_REMOVE or SET_WINDDOWN of the attestor set (owner, 2026-10-11)
 } // namespace verdict
+
+/**
+ * Owner, 2026-10-11: the attestor set is open and never shrinks by vote. A transaction whose act is a SET_REMOVE or
+ * SET_WINDDOWN naming attestorSetId is invalid (the module's CheckBlock on the primitive side, verdict
+ * ATTESTOR_SET_ACT here); equivocation (SET_EQUIVOCATION, EQV-1) is the only removal. Structure only.
+ */
+bool RefusedAttestorSetAct(const CTransaction& tx, const Params& params);
 
 /** The result of EvaluateBlock (§4.2a). */
 struct BlockEvaluation
@@ -251,19 +259,23 @@ std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, 
  * set's acts to the mirror from the transactions themselves (the primitive has validated them: a block whose act
  * fails is invalid before the module sees it), so the index never reads the vault database and replays on its own:
  *
- * - SET_CREATE of attestorSetId (txid = the set id): the AttestorSet record (maturity, livenessWindow, seats).
+ * - SET_CREATE of attestorSetId (txid = the set id): the AttestorSet record (maturity, livenessWindow, seats), adopted
+ *   only for an OPEN set of ATTESTOR_SEATS (15) seats (owner, 2026-10-11); any other leaves the module without a set.
  * - SET_JOIN: a PENDING record, attestorPubKey = bondPubKey = memberKey, bond = vout[bondVout],
- *   registerHeight = h, lastAct = h + maturity (the set's start value).
- * - SET_HEARTBEAT: lastAct = h on the key's newest record.  SET_REMOVE: EJECTED (FROZEN when burn = 1).
- *   SET_EQUIVOCATION and EQV-1: EJECTED and FROZEN.  SET_WINDDOWN: nothing (no joins follow; seats stay).
- * - A bond spend: WITHDRAWN unless EJECTED (IN-2, as v3).
+ *   registerHeight = h, lastAct = h + maturity (the set's start value). Into a full set, first the EvictionVictim's
+ *   newest record becomes WITHDRAWN with ATTESTOR_FLAG_EVICTED, its bond neither frozen nor spent (the primitive's
+ *   Displace hook removed the same member).
+ * - SET_HEARTBEAT: lastAct = h on the key's newest record.  SET_EQUIVOCATION and EQV-1: EJECTED and FROZEN.
+ *   SET_REMOVE and SET_WINDDOWN of the attestor set are invalid (the module's CheckBlock, and the mirror's
+ *   attestor-set-act verdict): equivocation is the only removal, and the set never winds down.
+ * - A bond spend: WITHDRAWN unless EJECTED or already WITHDRAWN (IN-2, as v3).
  *
  * At SNAP: a PENDING record becomes ELIGIBLE at registerHeight + max(set maturity, BOND_MATURITY) when its bond
  * meets the module's floor (bondZat >= BondMinZat(registerHeight), D-Q-28; bondLocktime >= registerHeight + BOND_MIN_LOCK) and its key has
  * no frozen bond in any record (a slashed key is barred for good, as v3 barred an ejected one); else it stays PENDING. An ELIGIBLE record whose lastAct < H - livenessWindow (the set's member dormancy) becomes DORMANT; a
  * DORMANT record (set dormancy or S15) is ELIGIBLE again once lastAct >= H - livenessWindow and lastAct >
  * statusHeight, i.e. after a SET_HEARTBEAT that follows its dormancy (REV-1's replacement). Seats are the
- * min(N_SLOTS, seats) ELIGIBLE records of greatest weight.
+ * min(N_SLOTS, seats) ELIGIBLE records of greatest SeatRank.
  */
 
 /**
@@ -299,8 +311,39 @@ CAmount BondMinZat(const State& st, const Params& params, int64_t registerHeight
 arith_uint256 AttestorWeight(const AttestorRecord& rec, const AttestState& attest, const Params& params, int64_t height);
 
 /**
+ * The seat rank of an ELIGIBLE record at H (owner, 2026-10-11): SeatWeight(bondZat, H - ageOrigin) (math.h:
+ * bondZat x the log tenure factor, 1.0 to 1.9 over SEAT_AGE_CAP) x (10,000 + SEAT_MARGIN_BPS) when the record is
+ * currently seated (seatedSince != 0: hysteresis), else x 10,000. Seats only; the price statistic and W9 keep
+ * AttestorWeight.
+ */
+arith_uint256 SeatRank(const AttestorRecord& rec, const AttestState& attest, const Params& params, int64_t height);
+
+/** A member of the attestor set as the primitive records it (vault::MemberRecord's fields; the mirror's equal ones). */
+struct SeatCandidate
+{
+    CPubKey key;
+    CAmount bondZat = 0;
+    int64_t joinHeight = 0;
+    int64_t lastAct = 0;
+};
+
+/**
+ * The eviction rule (owner, 2026-10-11) for a SET_JOIN of a bond of newBondZat into the full attestor set at height h,
+ * over its ACTIVE members with an unfrozen bond (primitive fields only, so the module's Displace hook and its mirror
+ * pick the same key). w = SeatWeight(bondZat, h - joinHeight). A member that is not live (lastAct < h - livenessWindow)
+ * goes first: the not-live member of least w. Otherwise the member of least w, only when
+ * SeatWeight(newBondZat, 0) x 10,000 > w x (10,000 + EVICT_MARGIN_BPS). Ties by key bytes ascending. nullopt: no
+ * eviction (the join is refused as into any full set).
+ */
+std::optional<CPubKey> EvictionVictim(const std::vector<SeatCandidate>& members, int64_t height, CAmount newBondZat,
+                                      int64_t livenessWindow, const Params& params);
+
+/** AttestorRecord.flags: the record was evicted by a larger bond (WITHDRAWN without slashing; owner, 2026-10-11). */
+static const uint8_t ATTESTOR_FLAG_EVICTED = 0x80;
+
+/**
  * seated(H) over the current Attestors and the carried Attest: the N_SLOTS ELIGIBLE seq with the
- * greatest weight(seq, H), ties by seq ascending; returned ascending. SNAP calls it after ARM-1/2,
+ * greatest SeatRank(seq, H), ties by seq ascending; returned ascending. SNAP calls it after ARM-1/2,
  * so Snapshots[H].seated is Seated(view, params, H) at that point.
  */
 std::vector<uint16_t> Seated(const StateView& view, const Params& params, int height);

@@ -100,6 +100,11 @@ void SetCommon(Params& p)
     p.bondMaturity        = 16128;  // two weeks
     p.ageCap              = 207360; // 180 d
     p.foundingWindow      = 8064;   // 7 d
+    p.seatAgeUnit         = 1152;   // seat ranking and eviction (owner 2026-10-11): one day
+    p.seatAgeCap          = 420480; // one year: x1.9
+    p.seatMarginBps       = 500;    // SEAT_MARGIN: a seated attestor's hysteresis
+    p.evictMarginBps      = 500;    // EVICT_MARGIN: a live member is evicted only by a bond above x1.05 its seat weight
+    p.attestorSeats       = 15;     // the attestor set is OPEN with 15 seats (the primitive's maximum)
     p.dormancyBlocks      = 16128;
     p.dormancyMinBundles  = 20;
     p.dormancyCheck       = 48;     // S15
@@ -125,6 +130,7 @@ Params::Params()
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
       bondMinNoPriceZat(0), bondMinFloorZat(0), bondMinUsdCents(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
+      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {

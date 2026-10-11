@@ -1391,4 +1391,79 @@ BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1_yed)
     yellowback::ClearModuleParams();
 }
 
+BOOST_AUTO_TEST_CASE(module_displace_hook)
+{
+    // Owner 2026-10-11: a SET_JOIN into a full set the YED module governs displaces the member the module names
+    // (MEMBER_REMOVED, the bond neither frozen nor unindexed); an ungoverned set, or one the module does not adopt
+    // (not OPEN with 15 seats), refuses the join as before.
+    Chain c;
+    SetCreateBody p = Params(true);
+    p.seats = 15;
+    p.unlockThreshold = p.cancelThreshold = p.slashThreshold = 1;
+    std::vector<CKey> keys;
+    for (int i = 0; i < 15; i++) keys.push_back(MakeKey((unsigned char)(70 + i)));   // one join per block: keys[14] is the youngest
+    const SetId s = SetWithMembers(c, keys, p);
+    SetCreateBody small = Params(true);
+    small.seats = 1;
+    small.unlockThreshold = small.cancelThreshold = small.slashThreshold = 1;
+    const SetId s1 = SetWithMembers(c, {MakeKey(69)}, small);
+    BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 15);
+
+    // Ungoverned (the module unconfigured): full is full, whatever the bond.
+    yellowback::ClearModuleParams();
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 100000)), "bad-vault-act-seats");
+    // Governed, but a set the module does not adopt (one seat): refused as before.
+    yellowback::SetModuleParams(yellowback::RegtestParams(10, 0, 0, s1));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s1, MakeKey(90), {}, 100000)), "bad-vault-act-seats");
+    // Governed and adopted: a bond not above x1.05 the least seat weight is refused; a larger one displaces it.
+    const yellowback::Params yp = yellowback::RegtestParams(10, 0, 0, s);
+    yellowback::SetModuleParams(yp);
+    BOOST_CHECK(yellowback::RegisteredModule()->GovernedSet() == std::optional<SetId>(s));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 1000)), "bad-vault-act-seats");
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 1050)), "bad-vault-act-seats");   // 1050 x 1.0 vs 1000 x f(age) x 1.05
+    // A member's own join while ACTIVE is still bad-vault-act-join (after the displacement check).
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, keys[0], {}, 5000)), "bad-vault-act-join");
+    const COutPoint youngBond = Member(c, s, keys[14]).bondOutpoint;
+    const CMutableTransaction big = JoinTx(c, s, MakeKey(90), {}, 2000);
+    const MemoryKV before = c.kv;
+    BOOST_REQUIRE(!c.Block1(big));
+    BOOST_CHECK_EQUAL(Member(c, s, keys[14]).status, MEMBER_REMOVED);
+    BOOST_CHECK(!Member(c, s, keys[14]).bondFrozen);
+    BOOST_REQUIRE(GetBond(c.kv, youngBond));
+    BOOST_CHECK(!GetBond(c.kv, youngBond)->frozen);
+    BOOST_CHECK_EQUAL(Member(c, s, MakeKey(90)).status, MEMBER_ACTIVE);
+    BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 15);
+    for (int i = 0; i < 14; i++) BOOST_CHECK_EQUAL(Member(c, s, keys[i]).status, MEMBER_ACTIVE);
+    // The block's undo restores the base byte for byte.
+    {
+        MemoryKV back = c.kv;
+        VaultState u(back);
+        u.ApplyUndo(c.history.back().second);
+        back.Apply(u.Changes());
+        BOOST_CHECK(back.data == before.data);
+    }
+    // The displaced bond is spendable (the primitive drops its index entry; the member stays REMOVED).
+    {
+        CMutableTransaction spend;
+        spend.vin.push_back(CTxIn(youngBond));
+        spend.vout.push_back(CTxOut(500, Recipient(91)));
+        VaultState st(c.kv);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(spend), c.h, c.coins)), "OK");
+        BOOST_CHECK(!GetBond(st, youngBond));
+        BOOST_CHECK_EQUAL(GetMember(st, s, keys[14].GetPubKey())->status, MEMBER_REMOVED);
+    }
+    // A member that is not live goes first, whatever its weight: all but keys[0] (the oldest, the heaviest) heartbeat.
+    c.Empty((int)p.livenessWindow + 1);
+    std::vector<CMutableTransaction> beats;
+    for (int i = 1; i < 14; i++) beats.push_back(HeartbeatTx(c, s, keys[i]));
+    beats.push_back(HeartbeatTx(c, s, MakeKey(90)));
+    BOOST_REQUIRE(!c.Block(beats));
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, MakeKey(91), {}, 1000)));
+    BOOST_CHECK_EQUAL(Member(c, s, keys[0]).status, MEMBER_REMOVED);
+    BOOST_CHECK_EQUAL(Member(c, s, MakeKey(91)).status, MEMBER_ACTIVE);
+    yellowback::ClearModuleParams();
+    // Unconfigured again: no displacement.
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(92), {}, 100000)), "bad-vault-act-seats");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

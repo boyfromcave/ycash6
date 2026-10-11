@@ -237,6 +237,11 @@ struct Params
     int bondMaturity;                    //!< BOND_MATURITY 16,128
     int ageCap;                          //!< AGE_CAP 207,360 (bond weight)
     int foundingWindow;                  //!< FOUNDING_WINDOW 8,064
+    int seatAgeUnit;                     //!< SEAT_AGE_UNIT 1,152 (u of SeatAgeFactorQ16, owner 2026-10-11; every network)
+    int seatAgeCap;                      //!< SEAT_AGE_CAP 420,480 (one year: the seat-tenure factor reaches 1.9; every network)
+    int seatMarginBps;                   //!< SEAT_MARGIN_BPS 500: a seated attestor's SeatWeight counts x1.05 in seat ranking
+    int evictMarginBps;                  //!< EVICT_MARGIN_BPS 500: a join into a full set evicts a live member only above x1.05
+    int attestorSeats;                   //!< ATTESTOR_SEATS 15: the module adopts only an OPEN attestor set of this many seats
     int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128
     int dormancyMinBundles;              //!< DORMANCY_MIN_BUNDLES 20
     int dormancyCheck;                   //!< DORMANCY_CHECK 48 (S15)
