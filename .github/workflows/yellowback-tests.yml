@@ -53,11 +53,13 @@ name: yellowback tests
 # Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
 on:
   push:
-    # upgrade/vault-in-term (in-term claims plan §7, T6) is the in-term line, cut from upgrade/vault.
+    # upgrade/vault-in-term (in-term claims plan §7, T6) is the in-term line, cut from upgrade/vault;
+    # upgrade/quantum-vaults (quantum plan rev 2) is the post-quantum line, cut from the in-term line.
     branches: &node-line-branches
       - harden/yellowback
       - upgrade/vault
       - upgrade/vault-in-term
+      - upgrade/quantum-vaults
       - feature/yellowback
   pull_request:
     branches: *node-line-branches
@@ -167,7 +169,10 @@ env:
   # in the same push as the regenerated copy: otherwise the audit compares against the old plan.
   # On upgrade/vault-in-term: e37a7b0, the first pushed workspace commit with the generator's in-term mode
   # (scripts/extract_spec.py --check-in-term, `make spec-check-in-term`).
-  YB_WORKSPACE_COMMIT: e37a7b058b61750725e94f9cea13939cd3173ab4
+  # On upgrade/quantum-vaults: d992997, the workspace commit with the generator's quantum mode
+  # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
+  # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md).
+  YB_WORKSPACE_COMMIT: d9929976647757750b0c97d1c4276547b448e0d1
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
