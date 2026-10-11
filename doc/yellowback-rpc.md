@@ -90,12 +90,13 @@ the next block; `falconHeight` `-1` = never; `feeRateZatPerKB` = the size-priced
 `max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
 is payload version 4, every other type stays `payloadVersion` 3 — quantum spec C-1, so a client's
 TRANSFER builder is unchanged and a v3 MINT is non-Yellowback); `yed_mint`'s `ownerAddress` (the fresh
-SLH-DSA owner's address; the arguments are unchanged, A-3); `yed_validateaddress`'s `type` (`p2pkh` |
+SLH-DSA owner's address; the arguments are unchanged, A-3; the examples below show the example `ownerHash`
+in its 53-character mainnet `yb…` form); `yed_validateaddress`'s `type` (`p2pkh` |
 `pq`) and, for a PQ address, `pqscheme` (`keyid` is then the 66-hex `scheme ‖ keyHash` and
 `transparentAddress` is `""`); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
 holder, `pqowner` an SLH-DSA key; the default follows the holder policy: `p2pkh` until Falcon is active,
-`pq` after). Addresses: a post-quantum YED address is Base58Check(`56BF`/`571E`/`5710` ‖ scheme ‖
-keyHash), `ye…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
+`pq` after). Addresses: a post-quantum YED address is Base58Check(`56AB`/`571E`/`5710` ‖ scheme ‖
+keyHash), `yb…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
 `yed_listtokens` and `yed_validateaddress` take either. The owner's residual intent of a claim pays the
 owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must
 be a Falcon `TX_PQPKH` (TOK-PQ, `bad-yed-holder`: the transaction is refused, never burned); the
@@ -196,10 +197,10 @@ before); ELIGIBLE again after a heartbeat that follows. `seated` holds at most `
 
 ## Address format
 
-A Yellowback address is Base58Check(version ‖ 20-byte key hash) with version bytes `0x1F 0xE4`
-(mainnet, `ye…`), `0x20 0x07` (testnet, `yt…`), `0x20 0x02` (regtest, `yr…`); it decodes to an
+A Yellowback address is Base58Check(version ‖ 20-byte key hash) with version bytes `0x1F 0xDD`
+(mainnet, `yb…`; `ye…`/`0x1F 0xE4` before quantum plan D-Q-21), `0x20 0x07` (testnet, `yt…`), `0x20 0x02` (regtest, `yr…`); it decodes to an
 ordinary P2PKH destination (`src/yellowback/address.cpp`, no `chainparams.cpp` edit). YED is
-carried by `TOKEN_VALUE` (10,000 zat) P2PKH outputs assigned cents by a payload; the `ye…` prefix
+carried by `TOKEN_VALUE` (10,000 zat) P2PKH outputs assigned cents by a payload; the `yb…` prefix
 is the only technical guard against sending YED to software that does not run the overlay (H9).
 `yed_send`/`yed_sendmany`/`yed_validateaddress` refuse anything else with
 `not-a-yellowback-address`. Sapling `ys1…` addresses are accepted as the *funding* of `yed_mint`
@@ -669,7 +670,7 @@ Result of `yed_getvault`:
   "status": "ACTIVE",
   "ownerScheme": 1,
   "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-  "ownerAddress": "yrExampleOwnerAddress111111111111111",
+  "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -711,7 +712,7 @@ Result of `yed_listvaults`:
     "status": "ACTIVE",
     "ownerScheme": 1,
     "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-    "ownerAddress": "yrExampleOwnerAddress111111111111111",
+    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
     "termClass": "A",
     "lockHeight": 377,
     "claimHeight": 401,
@@ -738,7 +739,7 @@ Result of `yed_listvaults`:
 
 ### `yed_listtokens <addresses> [minHeight] [count] [skip]`
 
-Arguments: `addresses` (array of strings, 1..100; each a YED address `ye…`/`yt…`/`yr…` or the
+Arguments: `addresses` (array of strings, 1..100; each a YED address `yb…`/`yt…`/`yr…` or the
 transparent P2PKH form `s1…`/`sm…` of the same key hash — the two name one script), `minHeight`
 (number, default `0`: only tokens created at or above it), `count` (number, default `1000`) and
 `skip` (number, default `0`): a page of the sorted result — a client that needs every token of
@@ -800,7 +801,7 @@ Result of `yed_listclaimable`:
 [
   {
     "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
-    "ownerAddress": "yrExampleOwnerAddress111111111111111",
+    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
     "collateralZat": 251889169000,
     "mintedCents": 100000,
     "feeZat": 629722922,
@@ -1348,7 +1349,7 @@ Arguments: `type` (string, optional; rpcversion 7): `"p2pkh"` a fresh keypool ke
 `"pqowner"` a fresh SLH-DSA key, as `vault_getnewowner` (53 characters each); PQ keys derive from the HD
 seed (the wallet must be unlocked) and stay out of the address book; the default
 follows the holder policy (quantum plan D-Q-2, A-13): `"p2pkh"` while `params.pq.falconActive` is
-false, `"pq"` once it is true. A Yellowback address string (`ye…` mainnet, `yt…` testnet, `yr…`
+false, `"pq"` once it is true. A Yellowback address string (`yb…` mainnet, `yt…` testnet, `yr…`
 regtest). The result is a bare string.
 
 **ycashd 6.20.0:** the transparent keypool is gone (keys are HD, drawn by `GenerateNewKey` as
@@ -1369,7 +1370,7 @@ Result of `yed_getnewaddress`:
 ### `yed_validateaddress <address>`
 
 Arguments: `address` (string). `isvalid` false — and the other fields absent (**optional**) —
-with `not-a-yellowback-address` in `reason` when the string is not a `ye…`/`yt…`/`yr…` address of
+with `not-a-yellowback-address` in `reason` when the string is not a `yb…`/`yt…`/`yr…` address of
 this network (the command itself does not throw, so the wallet can validate as the user types;
 `yed_send` throws the same identifier). `transparentAddress` is the same key hash as an `s1…`/
 `sm…` address. rpcversion 7: `type` is `p2pkh` or `pq`; for a post-quantum (53-character)
@@ -1500,7 +1501,7 @@ Result of `yed_mint`:
 {
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
-  "ownerAddress": "yrExamplePQOwnerAddress11111111111111111111111111111",
+  "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -2013,7 +2014,7 @@ Result of `yed_listpositions`:
     "status": "ACTIVE",
     "ownerScheme": 1,
     "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-    "ownerAddress": "yrExampleOwnerAddress111111111111111",
+    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
     "termClass": "A",
     "lockHeight": 377,
     "claimHeight": 401,
@@ -2110,7 +2111,7 @@ what `yellowback_rpc_contract.py` uses.
 | `unlock-acknowledgement-missing` | `yed_unlockcoin` | the third argument is not exactly `I understand this burns YED` |
 | `yed-locked-outpoint` | `lockunspent` (the stock RPC) | `lockunspent false\|true [{txid,vout}]` naming an outpoint the Yellowback wallet layer holds: use `yed_unlockcoin` |
 | `yed-burn-refused` | `sendrawtransaction` (the stock RPC) | with `-yellowback`, a raw transaction that spends a `Tokens` outpoint of this wallet without a payload that reassigns it (no payload, or a TRANSFER that assigns nothing): pass `allowyedburn = true` to send it anyway |
-| `not-a-yellowback-address` | `yed_send`, `yed_sendmany`, `yed_validateaddress` (in `reason`, no throw) | the recipient is not a `ye…`/`yt…`/`yr…` address of this network: pass an `s1…`/`sm…` address |
+| `not-a-yellowback-address` | `yed_send`, `yed_sendmany`, `yed_validateaddress` (in `reason`, no throw) | the recipient is not a `yb…`/`yt…`/`yr…` address of this network: pass an `s1…`/`sm…` address |
 | `verdict-parent-not-tip` | `yed_getblockverdict` | the block's parent is not the index tip and the block is not a rejected child of it (N12): pass the tip's grandparent |
 | `insufficient-yed` | `yed_redeem`, `yed_claim`, `yed_send`, `yed_sendmany` | wallet YED below the burn or amount |
 | `mempool-check-failed:<verdict>` | `yed_redeem`, `yed_claim` | `MempoolCheck` returned the named RED verdict (K7); provoke with a redemption whose reference snapshot has no `pClaim` where the claim path is chosen (`vault-claim-not-underwater`) |
@@ -2149,7 +2150,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 
 | Identifier | Raised by | When (provocation) |
 |---|---|---|
-| `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim` (`to`; a claim's must be transparent) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `ye…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
+| `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim` (`to`; a claim's must be transparent) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `yb…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
 | `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
 | `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
 | `insufficient-yec` | `yed_mint` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes: `yed_mint … <an empty s1… address>` |

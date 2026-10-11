@@ -155,13 +155,13 @@ ycash-cli yed_getinfo                       # index height, healthy, upgrade, at
 ycash-cli yed_getstats                      # supply, collateral, prices, halts, mintingAllowed
 ycash-cli yed_getprice                      # the three medians and their fill
 ycash-cli yed_getactivation                 # the vault upgrade: status, activationHeight, attestorSetId, claimDelay
-ycash-cli yed_getnewaddress                 # a YED address (ye… on mainnet)
+ycash-cli yed_getnewaddress                 # a YED address (yb… on mainnet)
 ycash-cli yed_getbalance
 ycash-cli yed_estimatecollateral 10000 48   # YEC needed now to mint $100.00 with a 48-block lock (class A on regtest)
 ycash-cli yed_mint 10000 48                 # mint; back up wallet.dat afterwards
 ycash-cli yed_mint 10000 48 ys1…            # the same, funded from that Sapling address in one transaction
 ycash-cli yed_listpositions                 # your vaults: status, lockHeight, claimHeight, canRedeem, intents
-ycash-cli yed_send ye… 2500                 # send $25.00
+ycash-cli yed_send yb… 2500                 # send $25.00
 ycash-cli yed_estimateredeem <vaultTxid>    # quote a redeem: the burn, the pool fee and, before lockHeight, the early fee
 ycash-cli yed_redeem <vaultTxid>            # burn the debt, pay the pool fee, take the collateral back
 ycash-cli yed_listclaimable                 # open vaults: claimable (under the threshold) or the price that makes them so
@@ -274,7 +274,7 @@ software here can prevent them:
 - **Other Yellowback nodes.** Another node that holds the same keys but is not this wallet locks
   nothing of yours until it reconciles; two wallets sharing keys can each build a spend the other
   does not know about.
-- **Sending YED to someone whose wallet does not know Yellowback.** The `ye…`/`yt…`/`yr…` address
+- **Sending YED to someone whose wallet does not know Yellowback.** The `yb…`/`yt…`/`yr…` address
   prefix is the only technical guard: an address that decodes to the same key hash spells the
   same output. If the recipient's wallet does not run Yellowback, the YED you sent is theirs to
   burn by accident. Ask before sending.

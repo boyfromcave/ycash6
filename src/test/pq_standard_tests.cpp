@@ -4,7 +4,7 @@
 
 // TX_PQPKH and CPQKeyID (docs/plans/yellowback-quantum-spec.md §2, §4): the 35-byte script
 // <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG, its Solver/ExtractDestination/GetScriptForDestination
-// round trip, and the PQ Yellowback address (versions 0x56BF / 0x571E / 0x5710, 53 characters).
+// round trip, and the PQ Yellowback address (versions 0x56AB / 0x571E / 0x5710, 53 characters; mainnet "yb…", D-Q-21).
 
 #include "base58.h"
 #include "crypto/pq/scheme.h"
@@ -178,7 +178,7 @@ BOOST_AUTO_TEST_CASE(pq_yellowback_address)
             BOOST_CHECK_EQUAL(m.size(), 53U);
             BOOST_CHECK_EQUAL(t.size(), 53U);
             BOOST_CHECK_EQUAL(r.size(), 53U);
-            BOOST_CHECK_EQUAL(m.substr(0, 2), "ye");
+            BOOST_CHECK_EQUAL(m.substr(0, 2), "yb");
             BOOST_CHECK_EQUAL(t.substr(0, 2), "yt");
             BOOST_CHECK_EQUAL(r.substr(0, 2), "yr");
             CPQKeyID back;
@@ -208,10 +208,18 @@ BOOST_AUTO_TEST_CASE(pq_yellowback_address)
     std::vector<unsigned char> lo = main.pqAddressVersion, hi = main.pqAddressVersion;
     lo.insert(lo.end(), 33, 0x00);
     hi.insert(hi.end(), 33, 0xff);
-    BOOST_CHECK_EQUAL(EncodeBase58Check(lo).substr(0, 2), "ye");
-    BOOST_CHECK_EQUAL(EncodeBase58Check(hi).substr(0, 2), "ye");
+    BOOST_CHECK_EQUAL(EncodeBase58Check(lo).substr(0, 2), "yb");
+    BOOST_CHECK_EQUAL(EncodeBase58Check(hi).substr(0, 2), "yb");
     BOOST_CHECK_EQUAL(EncodeBase58Check(lo).size(), 53U);
     BOOST_CHECK_EQUAL(EncodeBase58Check(hi).size(), 53U);
+    // D-Q-21 known answers: mainnet PQ version 0x56AB renders "yb…"
+    BOOST_CHECK_EQUAL(HexStr(main.pqAddressVersion), "56ab");
+    BOOST_CHECK_EQUAL(EncodeBase58Check(lo), "yb5qxNeom9jvVt6r568NoAXzAhDR7jZ6iof6nsRuW1jFdBFSvPpBv");
+    BOOST_CHECK_EQUAL(EncodeBase58Check(hi), "ybERawpAfKtqdrcrqeCmgxi5ewecmZyNSy6ivRtFbWD1LTaaj8eCA");
+    BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash32(0x5a)), main),
+                      "yb5taumpu5RVtFHRjsEgzLi1T33PqEcM3Ac2MipTj3qcLeGaSRJGu");
+    BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_FN_DSA_512, Hash32(0x5a)), main),
+                      "yb5vXex4M7GvZURFKa9GcLfL3oxWSxG3t3PfRq4cQwqGM2mH4L3Kg");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

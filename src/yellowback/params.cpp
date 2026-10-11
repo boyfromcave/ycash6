@@ -135,8 +135,8 @@ const Params& MainParams()
         Params m;
         m.network = "main";
         SetCommon(m);
-        m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
-        m.pqAddressVersion = { 0x56, 0xBF }; // renders "ye…", 53 characters (quantum spec §4)
+        m.addressVersion = { 0x1F, 0xDD };   // renders "yb…", 35 characters (D10; mainnet prefix D-Q-21)
+        m.pqAddressVersion = { 0x56, 0xAB }; // renders "yb…", 53 characters (quantum spec §4; D-Q-21)
         // U-22: startHeight is the UPGRADE_VAULT activation height and attestorSetId the network's
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)

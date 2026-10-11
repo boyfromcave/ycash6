@@ -57,7 +57,7 @@
         "yed_redeem",
         "yed_claim"
       ],
-      "when": "the address is not an s1…/sm… or ys1… address of this network (a ye… YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a yed_getnewaddress result as from"
+      "when": "the address is not an s1…/sm… or ys1… address of this network (a yb… YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a yed_getnewaddress result as from"
     },
     "bad-mint-amount": {
       "raisedBy": [
@@ -302,7 +302,7 @@
         "yed_sendmany",
         "yed_validateaddress"
       ],
-      "when": "the recipient is not a ye…/yt…/yr… address of this network: pass an s1…/sm… address"
+      "when": "the recipient is not a yb…/yt…/yr… address of this network: pass an s1…/sm… address"
     },
     "not-dormant": {
       "raisedBy": [
@@ -1066,7 +1066,7 @@
       "mintedCents": 100000,
       "noticeHeight": null,
       "noticed": false,
-      "ownerAddress": "yrExampleOwnerAddress111111111111111",
+      "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
       "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
       "ownerScheme": 1,
       "refHeight": 329,
@@ -1129,7 +1129,7 @@
         "mintedCents": 100000,
         "noticeHeight": null,
         "noticed": false,
-        "ownerAddress": "yrExampleOwnerAddress111111111111111",
+        "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
         "pClaim": 400000,
         "residualZat": 0,
         "underwaterAt": 436700,
@@ -1177,7 +1177,7 @@
         "mintedCents": 100000,
         "noticeHeight": null,
         "noticed": false,
-        "ownerAddress": "yrExampleOwnerAddress111111111111111",
+        "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
         "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
         "ownerScheme": 1,
         "refHeight": 329,
@@ -1261,7 +1261,7 @@
         "mintedCents": 100000,
         "noticeHeight": null,
         "noticed": false,
-        "ownerAddress": "yrExampleOwnerAddress111111111111111",
+        "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
         "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
         "ownerScheme": 1,
         "refHeight": 329,

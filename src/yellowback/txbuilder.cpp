@@ -438,7 +438,7 @@ struct AddressChoice
     AddressChoice() : kind(NONE) {}
 };
 
-/** Parse "" / s1… / ys1…; anything else (a Yellowback ye… address, a Sprout zc… address) is refused. */
+/** Parse "" / s1… / ys1…; anything else (a Yellowback yb… address, a Sprout zc… address) is refused. */
 AddressChoice ParseAddressChoice(const std::string& s, const char* what)
 {
     AddressChoice c;
@@ -1640,7 +1640,7 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     // TOK-PQ (quantum spec F-7): from the Falcon height (judged at the next block) a YED output is a Falcon TX_PQPKH.
     for (const auto& r : recipients) {
         if (!HolderAllowed(ctx.params, (int64_t)ctx.chainHeight + 1, r.first)) {
-            throw std::runtime_error("bad-yed-holder: from the Falcon height YED is held by post-quantum (Falcon) addresses only; pass a 53-character ye… address");
+            throw std::runtime_error("bad-yed-holder: from the Falcon height YED is held by post-quantum (Falcon) addresses only; pass a 53-character yb…/yt…/yr… address");
         }
     }
     int64_t needed = 0;

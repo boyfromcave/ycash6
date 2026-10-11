@@ -27,7 +27,7 @@ checks live answers against it. Edit this document, then regenerate.
   optional, a new wallet key is generated.
 - **Owners**: a vault's owner is a post-quantum key (docs/plans/yellowback-quantum-plan.md §4.3),
   named by its `pqkeyid` (`scheme || SHA256(scheme || pk)`, scheme 1 SLH-DSA-SHA2-128s or 2
-  FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`ye…`/`yt…`/`yr…`, 53
+  FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`yb…`/`yt…`/`yr…`, 53
   characters). Until the node wallet holds post-quantum keys the owner is named explicitly and
   owner spends are signed outside the node.
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields

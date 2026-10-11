@@ -120,7 +120,7 @@ std::string PQKeyIdHex(const CPQKeyID& id)
     return HexStr(b.begin(), b.end());
 }
 
-/** A pqkeyid (66 hex) or a PQ Yellowback address of this network ("ye…"/"yt…"/"yr…", 53 characters). */
+/** A pqkeyid (66 hex) or a PQ Yellowback address of this network ("yb…"/"yt…"/"yr…", 53 characters). */
 CPQKeyID ParsePQKeyId(const UniValue& v, const std::string& name)
 {
     const std::string s = v.get_str();

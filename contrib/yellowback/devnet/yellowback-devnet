@@ -1610,9 +1610,10 @@ def report(args):
 # ---------------------------------------------------------------------------------- vectors for the YEW core (wallet plan W0c)
 
 # Base58Check version bytes, from ref/ycash/src/chainparams.cpp:149-153 (mainnet), 409-413
-# (testnet), 613-615 (regtest) and src/yellowback/params.cpp:142/156/189 (the D10 form).
+# (testnet), 613-615 (regtest) and src/yellowback/params.cpp:138/155/189 (the D10 form;
+# the mainnet prefix is "yb…", D-Q-21).
 ADDRESS_VERSIONS = {
-    "mainnet": {"pubkey": "1c28", "script": "1c2c", "secret": "80", "yellowback": "1fe4", "yellowbackPrefix": "ye", "transparentPrefix": "s1"},
+    "mainnet": {"pubkey": "1c28", "script": "1c2c", "secret": "80", "yellowback": "1fdd", "yellowbackPrefix": "yb", "transparentPrefix": "s1"},
     "testnet": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2007", "yellowbackPrefix": "yt", "transparentPrefix": "sm"},
     "regtest": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2002", "yellowbackPrefix": "yr", "transparentPrefix": "sm"},
 }

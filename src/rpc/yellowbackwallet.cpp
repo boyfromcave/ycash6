@@ -147,7 +147,7 @@ void MempoolGate(YellowbackIndex& index, const CTransaction& tx)
 
 CScript ParseYedAddress(const std::string& s, const yellowback::Params& params)
 {
-    // Either form (quantum spec §4): a 35-character P2PKH ye… or a 53-character post-quantum ye… (TX_PQPKH).
+    // Either form (quantum spec §4): a 35-character P2PKH yb… or a 53-character post-quantum yb… (TX_PQPKH).
     CTxDestination dest;
     if (!DecodeAddress(s, params, dest)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "not-a-yellowback-address: expected a Yellowback address of this network (prefix '" + EncodeAddress(CKeyID(), params).substr(0, 2) + "')");

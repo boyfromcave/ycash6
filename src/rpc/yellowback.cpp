@@ -61,7 +61,7 @@ using namespace yellowback;
 static const int YELLOWBACK_RPC_VERSION = 7;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
-                                               //    the v4 MINT, params.pq, PQ ye… addresses
+                                               //    the v4 MINT, params.pq, PQ yb… addresses
 
 namespace {
 
@@ -1198,7 +1198,7 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_listtokens [\"address\",...] ( minHeight count skip )\n"
             "\nThe YED outputs (Tokens records) paying the given addresses, whoever holds the keys: the node-context\n"
-            "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (ye/yt/yr)\n"
+            "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (yb/yt/yr)\n"
             "or transparent P2PKH (s1/sm) forms of the same key hash, or post-quantum YED addresses (53 characters, a\n"
             "TX_PQPKH holder; transparentAddress \"\" for them); 1..100 of them. minHeight (default 0) keeps\n"
             "only tokens created at or above that height. Sorted by (height, txid, vout); paged by count (default 1000)\n"

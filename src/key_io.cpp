@@ -48,7 +48,7 @@ public:
 
     // A PQ destination renders as its plain-YEC PQ address (owner decision D-Q-20): Base58Check(version ||
     // scheme || keyHash), versions 0x4DD9 "sq…" / 0x4F61 "tq…" / 0x4C51 "rq…", 53 characters, the same
-    // TX_PQPKH script a PQ "ye…" names. Encode only, for now: DecodeDestination does not take it (the
+    // TX_PQPKH script a PQ "yb…" names. Encode only, for now: DecodeDestination does not take it (the
     // chain-wide decode and the RPCs that would accept it are a later task), and the wallet keeps PQ keys
     // out of the address book, so no walletdb name record carries one. "" for an unknown network or scheme.
     std::string operator()(const CPQKeyID& id) const

@@ -38,7 +38,7 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
         std::string m = EncodeAddress(id, main);
         std::string t = EncodeAddress(id, test);
         std::string r = EncodeAddress(id, regtest);
-        BOOST_CHECK_EQUAL(m.substr(0, 2), "ye");
+        BOOST_CHECK_EQUAL(m.substr(0, 2), "yb");
         BOOST_CHECK_EQUAL(t.substr(0, 2), "yt");
         BOOST_CHECK_EQUAL(r.substr(0, 2), "yr");
         BOOST_CHECK_EQUAL(m.size(), 35u);
@@ -62,12 +62,32 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
     }
 }
 
+BOOST_AUTO_TEST_CASE(mainnet_yb_vectors)
+{
+    // D-Q-21: the mainnet prefix is "yb…" (version 0x1FDD); known answers at the extreme payloads
+    // (Base58 is monotone at a fixed length, so these bound every 20-byte key hash).
+    const Params& main = MainParams();
+    BOOST_CHECK_EQUAL(HexStr(main.addressVersion), "1fdd");
+    BOOST_CHECK_EQUAL(EncodeAddress(CKeyID(uint160()), main), "ybCxAdkN4XYouwZHde9wgVkDDujbS9ByGQz");
+    BOOST_CHECK_EQUAL(EncodeAddress(CKeyID(uint160(std::vector<unsigned char>(20, 0xff))), main),
+                      "ybcHmcrfMEjGnkzRifaGzysV1YErNnEcqyf");
+    BOOST_CHECK_EQUAL(EncodeAddress(CKeyID(uint160(std::vector<unsigned char>(20, 0x33))), main),
+                      "ybHctRyDvGauHhqv3r3D9PmfadqSpd7iKbS");
+    CKeyID back;
+    BOOST_CHECK(DecodeAddress("ybHctRyDvGauHhqv3r3D9PmfadqSpd7iKbS", main, back));
+    BOOST_CHECK(back == CKeyID(uint160(std::vector<unsigned char>(20, 0x33))));
+    // the retired "ye…" version 0x1FE4 is no longer a mainnet Yellowback address
+    std::vector<unsigned char> old = {0x1F, 0xE4};
+    old.insert(old.end(), 20, 0x33);
+    BOOST_CHECK(!DecodeAddress(EncodeBase58Check(old), main, back));
+}
+
 BOOST_AUTO_TEST_CASE(rejects_garbage)
 {
     const Params& main = MainParams();
     CKeyID id;
     BOOST_CHECK(!DecodeAddress("", main, id));
-    BOOST_CHECK(!DecodeAddress("ye", main, id));
+    BOOST_CHECK(!DecodeAddress("yb", main, id));
     // A Ycash transparent address (s1…) is not a Yellowback address.
     BOOST_CHECK(!DecodeAddress("s1RyNzGjPzkgc7jP6uvjJx8tmv7gY9dvRbP", main, id));
     // Checksum damage.
