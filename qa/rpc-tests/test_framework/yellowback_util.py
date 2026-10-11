@@ -111,7 +111,8 @@ __all__ = [
     'build_vault_spend_raw', 'template_coinbase', 'mine_block_raw', 'assert_same_statehash',
     'assert_best_hash', 'assert_rejected', 'assert_banscore_zero', 'wait_yed_healthy', 'unlock_all',
     'snapshot_ledger', 'format_ledger', 'assert_model_matches', 'assert_start_raises_init_error',
-    'restart_with_yellowback', 'sync_all_nodes', 'node_pubkey', 'term_class_of', 'fee_zat',
+    'restart_with_yellowback', 'sync_all_nodes', 'node_pubkey', 'term_class_of', 'protocol_fee_cents', 'protocol_fee_zat',
+    'vault_fee_zat', 'early_redeem_fee_zat', 'vault_early_redeem_fee_zat',
     'mint_vault_raw', 'redeem_vault_raw', 'malformed_vault_spend', 'mine_rejected_block',
     'wait_for_rejection', 'debug_log_contains',
 ]
@@ -180,9 +181,11 @@ ACCURACY_BAND_BPS = 300
 ACCURACY_WINDOW = 24
 PAYEE_TILT_BPS = 10_000
 PAYEE_WINDOW = 10
-FEE_MIN = 50_000_000           # enforcement fee floor, zat (0.5 YEC)
-FEE_BPS = 25
-EARLY_REDEEM_FEE_BPS = (500, 250, 100)   # IT-9: per class, on an owner redeem before lockHeight (on top of FEE-1)
+# FEE-1' (quantum plan D-Q-23): the protocol fee is tiered by the debt in cents (uptoCents, bps), the last band unbounded,
+# at least FEE_FLOOR_CENTS per action, converted to zat at the vault's pMint; the same on every network
+FEE_BANDS = ((100_000, 100), (1_000_000, 50), (0, 10))
+FEE_FLOOR_CENTS = 100
+EARLY_REDEEM_FEE_BPS = (500, 250, 100)   # IT-9': per class, of the debt at pMint, on an owner redeem before lockHeight (on top of FEE-1')
 GRACE = 24
 CLAIM_THRESHOLD_BPS = 12_500   # theta (D-IT-2)
 GLOBAL_RATIO_HALT_BPS = 25_000
@@ -437,15 +440,34 @@ def term_class_of(lock_blocks):
     return None
 
 
-def fee_zat(collateral_zat):
-    """FEE-1: the enforcement fee for a collateral (max(FEE_MIN, collateral * FEE_BPS / BPS))."""
-    return ym.fee_zat(collateral_zat, FEE_MIN, FEE_BPS)
+_FEE_PARAMS = ym.Params.regtest(1)      # the bands and the floor are the same on every network and need no attestor set
 
 
-def early_redeem_fee_zat(collateral_zat, term_class):
-    """IT-9: the early-redeem fee of a redeem before lockHeight (``term_class`` 'A'/'B'/'C' or 0..2)."""
+def protocol_fee_cents(cents):
+    """FEE-1': the protocol fee of a debt of ``cents`` in cents (the bands, then the floor)."""
+    return ym.protocol_fee_cents(cents, _FEE_PARAMS)
+
+
+def protocol_fee_zat(cents, p_mint):
+    """FEE-1': the protocol fee of a debt of ``cents`` at the mint price ``p_mint`` (micro-USD), zat (ceil)."""
+    return ym.protocol_fee_zat(cents, p_mint, _FEE_PARAMS)
+
+
+def vault_fee_zat(vault):
+    """RED-3': the protocol fee a spend of ``vault`` (a ``yed_getvault`` result) pays: its debt at its own pMint."""
+    return protocol_fee_zat(int(vault['mintedCents']), int(vault['pMint']))
+
+
+def early_redeem_fee_zat(cents, term_class, p_mint):
+    """IT-9': the early-redeem fee of a redeem before lockHeight (``term_class`` 'A'/'B'/'C' or 0..2): bps of the
+    debt at the mint price."""
     i = 'ABC'.index(term_class) if isinstance(term_class, str) else int(term_class)
-    return ym.early_redeem_fee_zat(collateral_zat, EARLY_REDEEM_FEE_BPS[i])
+    return ym.early_redeem_fee_zat(cents, EARLY_REDEEM_FEE_BPS[i], p_mint)
+
+
+def vault_early_redeem_fee_zat(vault):
+    """IT-9' for a ``yed_getvault`` result (its class, debt and pMint)."""
+    return early_redeem_fee_zat(int(vault['mintedCents']), vault['termClass'], int(vault['pMint']))
 
 
 def usd_to_micro(usd):
@@ -1137,12 +1159,13 @@ def vault_owner(vault):
 
 
 def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=None, owner_pubkey=None,
-                  fee_zat_override=None, term_class=None, expiry=None, token_script=None):
+                  fee_zat_override=None, term_class=None, expiry=None, token_script=None, p_mint=None):
     """The raw MINT of section 3.5, funded from ``node``'s confirmed transparent coins and signed
     with ``signrawtransaction``.  Outputs: vault ``vout[0]`` (the YED V template, U-23,
     ``collateral_zat`` — from ``yed_estimatecollateral``), token ``vout[1]`` (P2PKH of the owner
     key, ``TOKEN_VALUE``), payload ``vout[2]`` (``feeVout = 3`` when ``fee_addr`` — from
-    ``yed_getfeepayee`` — else ``0xFF``), fee ``vout[3]`` (``fee_zat(collateral)`` unless
+    ``yed_getfeepayee`` — else ``0xFF``), fee ``vout[3]`` (``protocol_fee_zat(cents, p_mint)`` with ``p_mint`` the
+    estimate's ``pMint`` (default: the snapshot at ``ref_height``'s, ``yed_getsnapshot``) unless
     ``fee_zat_override``; absent without ``fee_addr``), then YEC change (``vout[4]`` with a fee
     output, ``vout[3]`` without).  ``lockHeight = ref_height + lock_blocks``, ``claimHeight =
     lockHeight + GRACE``, the V's ``ownerHeight = appHeight = ref_height + 1`` (IT-1), ``nExpiryHeight = ref_height +
@@ -1173,7 +1196,12 @@ def build_mint_tx(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr
     ]
     enforcement_fee = 0
     if fee_addr:
-        enforcement_fee = fee_zat(collateral_zat) if fee_zat_override is None else fee_zat_override
+        if fee_zat_override is None:
+            if p_mint is None:
+                p_mint = int(node.yed_getprice(ref_height)['pMint'])    # the cross-section xMint at R (= pMint unarmed)
+            enforcement_fee = protocol_fee_zat(cents, p_mint)
+        else:
+            enforcement_fee = fee_zat_override
         vout.append((enforcement_fee, _spk_of_address(fee_addr)))
     needed = collateral_zat + TOKEN_VALUE + enforcement_fee + YELLOWBACK_FEE
     utxos, total = _select_funding(node, needed)
@@ -1390,11 +1418,11 @@ def mint_vault_raw(test, user, pool, cents=10_000, lock_blocks=48, fee=True):
     ``sendrawtransaction`` on ``user`` and mine it on ``pool``.  Returns ``(txid, yed_getvault)``."""
     est = user.yed_estimatecollateral(cents, lock_blocks)
     ref = int(est['refHeight'])
-    collateral = int(est['requiredZatFloored'])   # what a mint locks: max(requiredZat, 4 * FEE_MIN) (MINT-5)
+    collateral = int(est['requiredZatFloored'])   # what a mint locks: requiredZat rounded up to 1,000 (MINT-5')
     fee_addr = None
     if fee:
-        fee_addr = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
-    hex_, _owner = build_mint_tx(user, cents, lock_blocks, ref, collateral, fee_addr=fee_addr)
+        fee_addr = user.yed_getfeepayee(ref)['default']['payoutAddress']
+    hex_, _owner = build_mint_tx(user, cents, lock_blocks, ref, collateral, fee_addr=fee_addr, p_mint=int(est['pMint']))
     txid = user.sendrawtransaction(hex_)
     test.sync_all()
     test.mine(pool)

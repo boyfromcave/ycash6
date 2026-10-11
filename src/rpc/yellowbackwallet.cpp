@@ -327,7 +327,7 @@ CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, con
     payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), index.GetPayeePolicy());
     if (v.Status() != VaultStatus::ACTIVE || !payee.has_value() || !p.IsValidClass(v.termClass)) return 0;
     if ((int64_t)tip + 1 >= (int64_t)v.lockHeight) return 0;
-    return EarlyRedeemFeeZat(v.collateralZat, p.earlyRedeemFeeBps[v.termClass]);
+    return EarlyRedeemFeeZat(v.mintedCents, p.earlyRedeemFeeBps[v.termClass], v.pMint);   // IT-9': of the debt at the mint price
 }
 
 // ---------------------------------------------------------------- v3: the two-step flow (W7), shared pieces
@@ -1001,7 +1001,7 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     std::optional<CKeyID> payee;
     const CAmount early = EarlyRedeemFeeAt(index, out, v, tip, payee);
     // FEE-1 on the ACTIVE redeem (FEE-0 without an eligible payee); a VOID release pays nothing (L14).
-    const CAmount fee1 = active && payee.has_value() ? FeeZat(v.collateralZat, p.feeMin, p.feeBps) : 0;
+    const CAmount fee1 = active && payee.has_value() ? ProtocolFeeZat(v.mintedCents, v.pMint, p).value_or(MAX_MONEY) : 0;   // FEE-1' at the vault's pMint
     std::string error;
     if (!v.IsOpen()) error = strprintf("vault-not-active: the vault is %s", VaultStatusName(v.Status()));
     else if (!yw.IsMineVault(v)) error = "vault-not-owned: the vault owner key is not in this wallet";

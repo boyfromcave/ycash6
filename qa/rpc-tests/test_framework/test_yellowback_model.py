@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'd3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f'
+GOLDEN_STATE_HASH = '6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -161,9 +161,10 @@ class Chain(object):
 
     def mint_tx(self, cents, lock_blocks, ref_height, collateral, fee_key=None, fee_value=None,
                 owner=G_OWNER, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
-                opret_at=2, lock_height=None, carrier=None, attest_fee=None, token_script=None):
+                opret_at=2, lock_height=None, carrier=None, attest_fee=None, token_script=None, p_mint=None):
         """``carrier`` = a bundle (bytes) carried by an extra input; ``attest_fee`` = (bond key hash, zat)
-        paid at vout 4 (after the pool fee) and named by attestFeeVout."""
+        paid at vout 4 (after the pool fee) and named by attestFeeVout. The default fee is FEE-1' at ``p_mint``
+        (default the snapshot's xMint at ``ref_height``; an ARMED mint passes min(xMint, aMint))."""
         lock = ref_height + lock_blocks if lock_height is None else lock_height
         vin = [self.fund_input()] + [(t, n, b'', 0xFFFFFFFF) for t, n in yed_inputs]
         if carrier is not None:
@@ -183,11 +184,27 @@ class Chain(object):
             vouts.insert(1, opret)
         if fee_key is not None:
             if fee_value is None:
-                fee_value = ym.fee_zat(collateral, self.params.fee_min, self.params.fee_bps)
+                fee_value = self.mint_fee(cents, ref_height, p_mint)
             vouts.append((fee_value, ym.p2pkh_script(fee_key)))
         if attest_fee is not None:
             vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
+
+    def mint_fee(self, cents, ref_height, p_mint=None):
+        """FEE-1': the protocol fee of a mint of ``cents`` at ``p_mint`` (default the snapshot's xMint at ``ref_height``); 0 without a price."""
+        if p_mint is None:
+            s = self.model.snapshot(ref_height)
+            p_mint = None if (s is None or s.virtual) else s.p_mint
+        fee = ym.protocol_fee_zat(cents, p_mint, self.params)
+        return 0 if fee is None else fee
+
+    def vault_fee(self, vault_op, height=None, owner=True):
+        """RED-3' (and IT-9' for an owner spend mined at ``height`` below lockHeight): the fee a spend of the vault pays."""
+        v = self.model.vaults[vault_op]
+        fee = ym.protocol_fee_zat(v.minted_cents, v.p_mint, self.params)
+        if owner and height is not None and height < v.lock_height:
+            fee += ym.early_redeem_fee_zat(v.minted_cents, self.params.early_redeem_fee_bps[v.term_class], v.p_mint)
+        return fee
 
     def transfer_tx(self, yed_inputs, assignments, opret_index=None):
         """assignments = [(vout, cents)]; token outputs at each assigned vout, OP_RETURN after them."""
@@ -571,10 +588,32 @@ class ArithmeticTests(unittest.TestCase):
         self.assertFalse(ym.is_underwater(6 * 10 ** 11, 18_334, 10_000, 11_000))
         self.assertFalse(ym.is_underwater(6 * 10 ** 11, None, 10_000, 11_000))
 
-    # Rule: FEE-1
+    # Rule: FEE-1'
     def test_fee(self):
-        self.assertEqual(ym.fee_zat(10 ** 9, 50_000_000, 25), 50_000_000)
-        self.assertEqual(ym.fee_zat(10 ** 12, 50_000_000, 25), 2_500_000_000)
+        p = ym.Params.regtest(1)
+        # the bands (D-Q-23): $100 pays the $1 floor, $1,000 $10, $10,000 $55, $100,000 $145; cent-bps, ceil to the cent
+        self.assertEqual(ym.protocol_fee_units(10_000, p), 1_000_000)
+        self.assertEqual(ym.protocol_fee_units(100_000, p), 10_000_000)
+        self.assertEqual(ym.protocol_fee_units(100_001, p), 10_000_050)
+        self.assertEqual(ym.protocol_fee_units(1_000_000, p), 55_000_000)
+        self.assertEqual(ym.protocol_fee_units(1_000_001, p), 55_000_010)
+        self.assertEqual(ym.protocol_fee_units(10_000_000, p), 145_000_000)
+        self.assertEqual(ym.protocol_fee_units(0, p), 0)
+        self.assertEqual(ym.protocol_fee_cents(100_001, p), 1_001)
+        # zat = ceil(units x COIN / pMint): the fees spec §1.3 worked values
+        self.assertEqual(ym.protocol_fee_zat(10_000, 100, p), 10 ** 12)
+        self.assertEqual(ym.protocol_fee_zat(10_000, 18_000, p), 5_555_555_556)
+        self.assertEqual(ym.protocol_fee_zat(10_000, 4_294_967_295, p), 23_284)
+        self.assertEqual(ym.protocol_fee_zat(10_000_000, 18_000, p), 805_555_555_556)
+        self.assertEqual(ym.protocol_fee_zat(10_000_000, 100, p), 145 * 10 ** 12)
+        self.assertIsNone(ym.protocol_fee_zat(10_000, None, p))
+        self.assertIsNone(ym.protocol_fee_zat(10_000, 0, p))
+        # IT-9': bps of the debt at pMint, ceil, no floor
+        self.assertEqual(ym.early_redeem_fee_zat(10_000, 500, 50_000), 10 ** 10)
+        self.assertEqual(ym.early_redeem_fee_zat(10_000_000, 500, 18_000), 27_777_777_777_778)
+        self.assertEqual(ym.early_redeem_fee_zat(10_000, 0, 50_000), 0)
+        self.assertEqual(ym.early_redeem_fee_zat(10_000, 500, None), 0)
+        self.assertEqual(ym.early_redeem_fee_zat(10_000_000, 500, 100), ym.MAX_MONEY)
 
     # Rule: HALT-2
     def test_global_ratio_and_cap(self):
@@ -791,7 +830,8 @@ class MintTests(unittest.TestCase):
         self.assertEqual(v.status, ym.V_ACTIVE)
         self.assertEqual((v.minted_cents, v.collateral_zat, v.lock_height, v.claim_height, v.ref_height, v.mint_height),
                          (10_000, coll, ref + 48, ref + 48 + 24, ref, c.height))
-        self.assertEqual(v.fee_paid_zat, ym.fee_zat(coll, 50_000_000, 25))
+        self.assertEqual(v.p_mint, c.model.snapshot(ref).p_mint)                      # FEE-1': the mint price is stored
+        self.assertEqual(v.fee_paid_zat, ym.protocol_fee_zat(10_000, v.p_mint, c.params))
         self.assertEqual(m.tokens[(txid, 1)].cents, 10_000)
         self.assertEqual(m.totals.supply_cents, 10_000)
         self.assertEqual(m.totals.collateral_zat, coll)
@@ -955,11 +995,9 @@ class MintTests(unittest.TestCase):
         t = self.mint(collateral=req)
         self.assertEqual(c.model.vaults[(t, 0)].status, ym.V_ACTIVE)
         self.assertLessEqual(req, coll)
-        # the 4 * FEE_MIN floor (2 YEC) does not bind up to $100/YEC (the pre-D-Q-22 PRICE_MAX): MIN_MINT
-        # at the lowest ratio (300 %) still needs 3 YEC there; at PRICE_MAX ($4,294.97, D-Q-22) it needs
-        # 0.07 YEC, and the floor sets the collateral (MINT-5's second clause, state.cpp)
-        self.assertGreater(ym.required_zat(10_000, 30_000, 100_000_000), 4 * 50_000_000)
-        self.assertLess(ym.required_zat(10_000, 30_000, 4_294_967_295), 4 * 50_000_000)
+        # MINT-5' (D-Q-23): the 4 * FEE_MIN floor (2 YEC) is gone; at PRICE_MAX ($4,294.97, D-Q-22) MIN_MINT at
+        # 300 % needs 0.07 YEC and that is the collateral (every fee is <= 2 % of it, fees spec §1.6)
+        self.assertEqual(ym.required_zat(10_000, 30_000, 4_294_967_295), 6_984_920)
 
     # Rule: MINT-5
     def test_mint5_unsatisfiable(self):
@@ -1005,7 +1043,7 @@ class MintTests(unittest.TestCase):
         self.assertVoid(self.mint(fee_key=KEY1, fee_vout=2), 'bad-mint-fee')              # the OP_RETURN
         self.assertVoid(self.mint(fee_key=OWNER_KEYHASH), 'bad-mint-fee')                 # not in E(R)
         coll = collateral_for(c, 10_000, c.height - 1)
-        self.assertVoid(self.mint(fee_key=KEY1, fee_value=ym.fee_zat(coll, 50_000_000, 25) - 1), 'bad-mint-fee')
+        self.assertVoid(self.mint(fee_key=KEY1, fee_value=c.mint_fee(10_000, c.height - 1) - 1), 'bad-mint-fee')
         # FEE-0 (no quote tag in (R - 10, R]) can never reach MINT-8 on regtest: PAYEE_WINDOW (10) covers
         # P_FAST_WINDOW (8), so an empty E(R) implies an undefined pFast and MINT-4's NO_PRICE halt
         c.mine_n(12, price_fn=lambda h: 0)
@@ -1108,7 +1146,7 @@ class RedeemTests(unittest.TestCase):
         c.mine((1, 50_000, 0, KEY2), [raw2])
         self.vault2 = (txid_of(raw2), 0)
         self.token2 = (txid_of(raw2), 1)
-        self.fee = ym.fee_zat(self.coll, 50_000_000, 25)
+        self.fee = c.vault_fee(self.vault)         # RED-3': spent at or after lockHeight below, no early fee
         while c.height < self.lock:
             c.mine_n(1, price_fn=lambda h: 50_000)
 
@@ -1339,7 +1377,7 @@ def build_golden():
             script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
             txs_at['redeem1'] = c.spend_tx((txid_of(txs_at['mint1']), 0), script, 'owner',
                                            [(txid_of(txs_at['xfer1']), 0), (txid_of(txs_at['mint4']), 1)], 183,
-                                           KEY2, ym.fee_zat(v.collateral_zat, params.fee_min, params.fee_bps),
+                                           KEY2, c.vault_fee((txid_of(txs_at['mint1']), 0), h),
                                            [(3, 6_000)], collateral_out=v.collateral_zat - 10 ** 9)
             txs.append(txs_at['redeem1'])
         elif h == 215:
@@ -1347,7 +1385,7 @@ def build_golden():
             script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
             txs_at['claim3'] = c.spend_tx((txid_of(txs_at['mint3']), 0), script, 'claim',
                                           [(txid_of(txs_at['mint3']), 1), (txid_of(txs_at['redeem1']), 3)], 213,
-                                          KEY3, ym.fee_zat(v.collateral_zat, params.fee_min, params.fee_bps),
+                                          KEY3, c.vault_fee((txid_of(txs_at['mint3']), 0), owner=False),
                                           [(3, 6_000)], collateral_out=v.collateral_zat - 10 ** 9)
             txs.append(txs_at['claim3'])
         elif h == 217:
@@ -1379,9 +1417,9 @@ def build_golden():
             bundle, sel = c.bundle_for(ref, b'', {'*': 9_000})
             x = c.model.snapshot(ref).p_mint
             collateral = collateral_for(c, 10_000, ref, p_mint=min(x, 9_000))
-            fee = ym.fee_zat(collateral, params.fee_min, params.fee_bps)
+            fee = c.mint_fee(10_000, ref, p_mint=min(x, 9_000))          # FEE-1' at min(xMint, aMint)
             payee = sel[0]
-            txs_at['mint5'] = c.mint_tx(10_000, 48, ref, collateral, fee_key=KEY1, carrier=bundle,
+            txs_at['mint5'] = c.mint_tx(10_000, 48, ref, collateral, fee_key=KEY1, carrier=bundle, p_mint=min(x, 9_000),
                                         attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)))
             txs.append(txs_at['mint5'])
             v3['mint5_selected'] = sel
@@ -1406,7 +1444,7 @@ def build_golden():
                 v = c.model.vaults[vault]
                 script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
                 bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
-                fee = ym.fee_zat(v.collateral_zat, params.fee_min, params.fee_bps)
+                fee = c.vault_fee(vault, owner=False)                        # RED-3': the claimant pays the redeem fee at the vault's pMint
                 p_claim = max(c.model.snapshot(ref).p_claim, 3_000)
                 residual = ym.residual_zat(v.collateral_zat, ym.claimant_max_zat(v.minted_cents, ym.BPS, p_claim))
                 payee = [q for q in sel if q != v3['lazy']][0]

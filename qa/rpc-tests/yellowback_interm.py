@@ -55,8 +55,8 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
-    early_redeem_fee_zat,
-    fee_zat,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     new_pq_owner,
     set_quote,
@@ -114,8 +114,8 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
 
     def raw_claim(self, node, vault, burn_cents, ref_height):
         coin = coin_of(node, burn_cents)
-        payees = node.yed_getfeepayee(ref_height, vault['collateralZat'], outpoint_selector(vault['txid']))
-        fee = (payees['default']['payoutAddress'], payees['feeZat'])
+        payees = node.yed_getfeepayee(ref_height, outpoint_selector(vault['txid']))
+        fee = (payees['default']['payoutAddress'], vault_fee_zat(vault))               # RED-3'
         if self.armed:
             return armed_raw_claim(self, node, vault, [(coin['txid'], coin['vout'])], ref_height,
                                    self.price_at(node, ref_height, 'pClaim'), fee)
@@ -197,7 +197,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
             x_txid = self.mint(user, 10000, TERMS['B'])['txid']
         else:
             x_hex, _x_owner = build_mint_tx(user, 10000, TERMS['B'], r, X_COLLATERAL,
-                                            fee_addr=user.yed_getfeepayee(r, X_COLLATERAL)['default']['payoutAddress'])
+                                            fee_addr=user.yed_getfeepayee(r)['default']['payoutAddress'])
             x_txid = user.sendrawtransaction(x_hex)
         self.sync_all()
         self.mine(POOLS[2])
@@ -224,16 +224,16 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         vy = user.yed_getvault(y['txid'])
         assert_greater_than(vy['lockHeight'], user.getblockcount())
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, y['txid']))
-        # IT-9: a redeem before lockHeight pays the class's early-redeem fee (A: 500 bps of the collateral) on top of FEE-1
-        early = early_redeem_fee_zat(vy['collateralZat'], 'A')
+        # IT-9': a redeem before lockHeight pays the class's early-redeem fee (A: 500 bps of the debt at pMint) on top of FEE-1'
+        early = vault_early_redeem_fee_zat(vy)
         assert_equal(params['earlyRedeemFeeBps'], [500, 250, 100])
         redeemed = user.yed_redeem(y['txid'])
         assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat'], redeemed['feeZat']),
-                     (10000, early, fee_zat(vy['collateralZat']) + early))
+                     (10000, early, vault_fee_zat(vy) + early))
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(nodes[2].yed_getvault(y['txid'])['status'], 'CLOSED')
-        assert_equal(nodes[2].yed_getvault(y['txid'])['feePaidZat'], fee_zat(vy['collateralZat']) + early)
+        assert_equal(nodes[2].yed_getvault(y['txid'])['feePaidZat'], vault_fee_zat(vy) + early)
         y2 = self.mint(user, 10000, TERMS['B'])                                        # Y2 (class B, 400 %: under theta at AT, a 97-block term): redeemed in term while under theta, below
         self.sync_all()
         self.mine(POOLS[2])
@@ -304,16 +304,16 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(vy2['claimable'], True)
         # IT-9: an early redeem paying FEE-1 alone is refused by every Yellowback mempool (bad-redeem-early-fee)
         r = user.getblockcount()
-        payee = user.yed_getfeepayee(r, vy2['collateralZat'])['default']['payoutAddress']
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']
         coin = coin_of(user, 10000)
         short_hex = build_vault_spend_raw(user, vy2, 'owner', [(coin['txid'], coin['vout'])],
-                                          payload=ym.encode_redeem(r, 1, []), fee=(payee, fee_zat(vy2['collateralZat'])), ref_height=r)
+                                          payload=ym.encode_redeem(r, 1, []), fee=(payee, vault_fee_zat(vy2)), ref_height=r)
         for i in OVERLAY:
             assert_rpc_error('bad-yellowback-bad-redeem-early-fee', nodes[i].sendrawtransaction, short_hex)
         result, _ = mine_block_raw(nodes[POOLS[2]], [short_hex])
         assert_equal(result, 'bad-yellowback-bad-redeem-early-fee')
         redeemed = user.yed_redeem(y2['txid'])
-        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, early_redeem_fee_zat(vy2['collateralZat'], 'B')))
+        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, vault_early_redeem_fee_zat(vy2)))
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(nodes[2].yed_getvault(y2['txid'])['status'], 'CLOSED')

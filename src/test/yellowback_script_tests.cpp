@@ -470,7 +470,7 @@ void CheckTemplatesStandard(uint32_t branchId, const char* upgrade)
     const CScript vault = VaultScript(lockHeight, ownerKey.GetPubKey(), claimHeight);
     const CScript vaultSpk = P2SHScript(vault);
     const CAmount vaultValue = 6000 * COIN;
-    const CAmount feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps);
+    const CAmount feeZat = ProtocolFeeZat(10000, 50000, params).value();   // FEE-1': $100 at $0.05 = 20 YEC
 
     // Funding transaction providing every kind of input.
     CMutableTransaction fund;
@@ -878,7 +878,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
     const CScript vault = VaultScript(lockHeight, ownerKey.GetPubKey(), claimHeight);
     const CScript vaultSpk = P2SHScript(vault);
     const CAmount vaultValue = 6000 * COIN;
-    const CAmount feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps);
+    const CAmount feeZat = ProtocolFeeZat(10000, 50000, params).value();   // FEE-1': $100 at $0.05 = 20 YEC
     const CAmount attestFeeZat = feeZat / 4;
     const CAmount carrierValue = 10000;
     const valtype bundle(448, 0xAB);   // BUNDLE_MAX attestations' worth of bytes

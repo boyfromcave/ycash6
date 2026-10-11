@@ -46,7 +46,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
-    fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     set_quote,
 )
@@ -91,8 +91,8 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
     def raw_claim(self, node, vault, burn_cents, ref_height):
         """A claim-path spend from ``node``'s YED with the FEE-W default payee for the vault's selector."""
         coin = coin_of(node, burn_cents)
-        payees = node.yed_getfeepayee(ref_height, vault['collateralZat'], outpoint_selector(vault['txid']))
-        fee = (payees['default']['payoutAddress'], payees['feeZat'])
+        payees = node.yed_getfeepayee(ref_height, outpoint_selector(vault['txid']))
+        fee = (payees['default']['payoutAddress'], vault_fee_zat(vault))        # RED-3': the claimant pays the redeem fee at the vault's pMint
         if self.armed:
             # v3: the carrier (mined first) as vin[last], the bundle at R and the attestor fee (AFEE-1)
             return armed_raw_claim(self, node, vault, [(coin['txid'], coin['vout'])], ref_height, self.price_at(node, ref_height, 'pClaim'), fee)
@@ -192,7 +192,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
             assert m['txid'] + ':0' in claimable, name
         assert mint_v3['txid'] + ':0' in claimable              # IT-2: V3 is in term and under theta: claimable now
         row = claimable[mints['V']['txid'] + ':0']
-        assert_equal((row['mintedCents'], row['pClaim'], row['feeZat']), (10000, 10000, fee_zat(row['collateralZat'])))
+        assert_equal((row['mintedCents'], row['pClaim'], row['feeZat']), (10000, 10000, vault_fee_zat(row)))
         assert_equal(user.yed_getvault(mints['V']['txid'])['claimable'], True)
         assert_equal(nodes[2].yed_getstats()['mintingAllowed'], False)
 
@@ -224,7 +224,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         print('the claimant claims V3 with yed_claim: the vault moves into the claimant intent (CLAIMING)')
         r = user.getblockcount()
         vault_v3 = user.yed_getvault(mint_v3['txid'])
-        payees = user.yed_getfeepayee(r, vault_v3['collateralZat'], outpoint_selector(mint_v3['txid']))
+        payees = user.yed_getfeepayee(r, outpoint_selector(mint_v3['txid']))
         supply_before = nodes[2].yed_getstats()['supplyCents']
         # yed_listclaimable.residualZat is what the builder pays: RED-5's floor applied (0 below RESIDUAL_MIN_ZAT)
         listed = {x['vault']: x for x in claimant.yed_listclaimable()}
@@ -234,7 +234,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         claimed = self.claim(claimant, mint_v3['txid'])
         assert_equal(listed_v3['residualZat'], claimed['residualZat'])
         assert_equal(claimed['burnedCents'], 10000)
-        assert_equal(claimed['feeZat'], payees['feeZat'])
+        assert_equal(claimed['feeZat'], vault_fee_zat(vault_v3))                        # RED-3': the claimant pays the redeem fee
         assert_equal(claimed['payee'], payees['default']['payoutAddress'])
         # U-23: the claimant intent carries the collateral less the RED-5 residual; the fees come from the claimant's YEC
         assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] - claimed['residualZat'])

@@ -74,7 +74,7 @@ class YellowbackMintArmedTest(ArmedModeMixin, YellowbackTestFramework):
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref, required = int(est['refHeight']), int(est['requiredZat'])
         assert_equal(est['armed'], False)
-        fee_addr = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        fee_addr = user.yed_getfeepayee(ref)['default']['payoutAddress']
         hex_, _owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=fee_addr)
         txid = user.decoderawtransaction(hex_)['txid']
         assert_rpc_error('bad-yellowback-mint-halted-unarmed', user.sendrawtransaction, hex_)

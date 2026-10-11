@@ -163,6 +163,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         v.ownerHeight = v.appHeight;
         v.ownerPubKey = FixedKey();
         v.mintHeight = P.startHeight;
+        v.pMint = 50000;             // FEE-1': the seeded snapshot price (the grammar's ev_prev), so RED-3' prices the corpus' fee outputs; the grammar is unchanged
         st.Put(keys::Vault(COutPoint(Fill((uint8_t)(i + 1)), 0)), v);
         switch (v.Status()) {
         case VaultStatus::ACTIVE: totals.activeVaults++; totals.collateralZat += v.collateralZat; break;

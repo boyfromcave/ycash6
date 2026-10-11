@@ -889,11 +889,12 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
             out.freshKey = changeKey;
         }
         shape.payee = ctx.Payee(R, OutPointSelector(vaultOut));
-        shape.feeZat = shape.payee.has_value() ? FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) : 0;
-        // IT-9: a redeem that confirms before lockHeight pays the early-redeem fee too; the spend confirms at
-        // indexHeight + 1 at the earliest, and a later confirmation at or past lockHeight only overpays.
+        // FEE-1' / RED-3': the protocol fee of the debt at the vault's stored mint price (D-Q-23)
+        shape.feeZat = shape.payee.has_value() ? ProtocolFeeZat(vault.mintedCents, vault.pMint, ctx.params).value_or(MAX_MONEY) : 0;
+        // IT-9': a redeem that confirms before lockHeight pays the early-redeem fee (of the debt at pMint) too; the spend
+        // confirms at indexHeight + 1 at the earliest, and a later confirmation at or past lockHeight only overpays.
         if (ownerPath && shape.payee.has_value() && (int64_t)ctx.indexHeight + 1 < (int64_t)vault.lockHeight && ctx.params.IsValidClass(vault.termClass)) {
-            out.earlyRedeemFeeZat = EarlyRedeemFeeZat(vault.collateralZat, ctx.params.earlyRedeemFeeBps[vault.termClass]);
+            out.earlyRedeemFeeZat = EarlyRedeemFeeZat(vault.mintedCents, ctx.params.earlyRedeemFeeBps[vault.termClass], vault.pMint);
             shape.feeZat += out.earlyRedeemFeeZat;
         }
         for (const YedCoin& c : sel) {
@@ -1065,8 +1066,8 @@ BundleFactsW BundleAt(const Context& ctx, int R, const std::vector<unsigned char
     return f;
 }
 
-/** AFEE-W: the attestor payee and fee for a transaction of `collateral` at (R, selector); nothing under AFEE-0. */
-void AttestFeeFor(const Context& ctx, int R, const std::vector<unsigned char>& selector, const BundleFactsW& f, CAmount collateral, BuiltTx& out)
+/** AFEE-W: the attestor payee and fee for a transaction whose protocol fee is `protocolFeeZat` (AFEE-1': half of it) at (R, selector); nothing under AFEE-0. */
+void AttestFeeFor(const Context& ctx, int R, const std::vector<unsigned char>& selector, const BundleFactsW& f, CAmount protocolFeeZat, BuiltTx& out)
 {
     out.armed = f.armed;
     out.bundleSeqs = f.seqs;
@@ -1079,7 +1080,7 @@ void AttestFeeFor(const Context& ctx, int R, const std::vector<unsigned char>& s
     if (!key.has_value()) throw std::runtime_error(strprintf("attest-unknown-seq: attestor %u has no bond key", (unsigned)payee.value()));
     out.attestPayee = payee;
     out.attestPayeeKey = key;
-    out.attestFeeZat = AttestFeeZat(FeeZat(collateral, ctx.params.feeMin, ctx.params.feeBps), ctx.params.attestFeeBps);
+    out.attestFeeZat = AttestFeeZat(protocolFeeZat, ctx.params.attestFeeBps);
 }
 
 /** MINTPOL-1 and the class / lock arithmetic of a mint at R (§4.6). */
@@ -1297,15 +1298,14 @@ std::array<unsigned char, 64> DerToCompact(const std::vector<unsigned char>& der
 
 namespace {
 
-/** vout[0] of a MINT of `cents` in `g`'s class at pMint: max(required, 4 * FEE_MIN) rounded up to 1000 (MINT-5, K14). */
+/** vout[0] of a MINT of `cents` in `g`'s class at pMint: the required collateral rounded up to 1000 (MINT-5', K14; the
+ *  4 x FEE_MIN floor went with D-Q-23: every fee is <= 2 % of a valid collateral, fees spec §1.6). */
 CAmount MintCollateral(const Context& ctx, Cents cents, const MintGateFacts& g, MicroUsd pMint)
 {
     const Params& p = ctx.params;
     std::optional<CAmount> required = RequiredCollateralRounded(cents, MinRatioBps(p.baseRatioBps[g.termClass], g.S.sigmaMultBps), pMint);
-    if (!required.has_value()) throw std::runtime_error("mint-unsatisfiable: the collateral requirement exceeds MAX_MONEY (K14)");
-    CAmount collateral = std::max(required.value(), 4 * p.feeMin);
-    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
-    return collateral;
+    if (!required.has_value()) throw std::runtime_error("mint-unsatisfiable: the collateral requirement exceeds MAX_MONEY (more YEC than can exist; lower the amount or the term class, K14)");
+    return required.value();
 }
 
 /** Audit F-1: the caller's bound on vout[0]; 0 = unbounded. */
@@ -1497,7 +1497,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     CombineMint(ctx, g, f, out.pMint, out.source);
     const CAmount collateral = MintCollateral(ctx, cents, g, out.pMint.value());   // MINT-5, K14
     CheckMaxCollateral(collateral, maxCollateralZat);                              // before any key is drawn
-    AttestFeeFor(ctx, R, std::vector<unsigned char>(), f, collateral, out);
+    AttestFeeFor(ctx, R, std::vector<unsigned char>(), f, ProtocolFeeZat(cents, out.pMint.value(), p).value_or(MAX_MONEY), out);   // AFEE-1' on FEE-1'
 
     // The vault owner is a fresh SLH-DSA wallet key (quantum plan §4.3, spec §3.6, A-3); the token goes to a
     // fresh holder key, P2PKH while Falcon is inactive and a Falcon TX_PQPKH from its height (TOK-PQ). The owner
@@ -1521,7 +1521,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     std::vector<unsigned char> ownerBytes(1, vaultOwner.scheme);
     ownerBytes.insert(ownerBytes.end(), vaultOwner.hash.begin(), vaultOwner.hash.end());
     shape.payee = ctx.Payee(R, ownerBytes);
-    shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
+    shape.feeZat = shape.payee.has_value() ? ProtocolFeeZat(cents, out.pMint.value(), p).value_or(MAX_MONEY) : 0;   // FEE-1' at the mint price
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;
     shape.vaultScript = YedVaultScript(p, vaultOwner, R);    // U-23, IT-1: ownerHeight = appHeight = R + 1
@@ -1760,7 +1760,7 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
     extras.carrier = carrier;
     extras.residualZat = c.residualZat;
     BuiltTx probe;
-    AttestFeeFor(ctx, R, selector, f, vault.collateralZat, probe);
+    AttestFeeFor(ctx, R, selector, f, ProtocolFeeZat(vault.mintedCents, vault.pMint, ctx.params).value_or(MAX_MONEY), probe);   // AFEE-1' on RED-3'
     extras.attestKey = probe.attestPayeeKey;
     extras.attestFeeZat = probe.attestFeeZat;
     BuiltTx out = BuildVaultSpend(ctx, BuiltKind::CLAIM, vaultOut, vault, to, R, &extras);

@@ -21,7 +21,7 @@ The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block ent
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`d3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f`. Four entries are flagged
+`6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
@@ -135,8 +135,14 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   declaration order — `NOT_ACTIVE` (the virtual snapshot) ⇒ `mint-not-active`, `NO_PRICE` ⇒
   `mint-halted-no-price`, `GLOBAL_RATIO`, `DIVERGENCE` (**U-21**: `mint-halted-participation` is gone); last (hardening H-1), with
   `MINT_REQUIRES_ARMED` and `R` not ARMED ⇒ `mint-halted-unarmed`. MINT-5: `mint-unsatisfiable` before
-  `bad-mint-collateral` (which also covers `< 4 · FEE_MIN`). MINT-6, MINT-7, MINT-8 (`bad-mint-fee`
-  for every MINT-8 failure).
+  `bad-mint-collateral` (MINT-5′, quantum plan D-Q-23: the `< 4 · FEE_MIN` clause is gone). MINT-6, MINT-7,
+  MINT-8 shape and payee (`bad-mint-fee` for every MINT-8 failure); the MINT-8′ amount clause,
+  `vout[feeVout] ≥ ProtocolFeeZat(cents, pMint)` (FEE-1′: the debt's dollar fee by `Params.feeBands` with the
+  `feeFloorCents` floor, `ceil(units · COIN / pMint)` zat, D-Q-23), is evaluated right after MINT-5 in both
+  branches (it needs `pMint`), and AFEE-1′ (half of it) after that when ARMED. RED-3′ / IT-9′ read the vault's
+  stored `pMint`: `vout[feeVout] ≥ ProtocolFeeZat(mintedCents, pMint)` (+ `ceil(mintedCents · earlyRedeemFeeBps ·
+  COIN / pMint)` on an owner spend below `lockHeight`), never the collateral; RED-1′: `pMint ≤ 0` ⇒
+  `vault-spend-malformed`.
 - **E. XFER verdict precedence.** XFER-1 (`bad-transfer-assignment`), XFER-2
   (`transfer-over-assigned`), XFER-3 (`transfer-no-yed-input`). When XFER-1..3 hold the verdict is
   `ok` if `Σ = yedIn` and **`burned`** if `Σ < yedIn` ("a burn by rule is `burned`"). A

@@ -30,7 +30,7 @@ from test_framework.yellowback_util import (
     TOKEN_VALUE,
     wallet_network_fee,
     YellowbackTestFramework,
-    fee_zat,
+    protocol_fee_zat,
 )
 from test_framework.yellowback_attest import ArmedModeMixin
 from test_framework.yellowback_util import CARRIER_VALUE
@@ -85,7 +85,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         vault1 = mint1['txid']
         assert_equal(mint1['fundedFrom'], 'sapling')
         assert_equal(mint1['collateralZat'], 6 * COIN)                     # armed too: the attestors track xMint, pMint = $50
-        assert_equal(mint1['feeZat'], fee_zat(mint1['collateralZat']))
+        assert_equal(mint1['feeZat'], protocol_fee_zat(10000, mint1['pMint']))    # FEE-1': the $1 floor at $50 = 0.02 YEC
         raw = user.getrawtransaction(vault1, 1)
         assert_equal([v['txid'] for v in raw['vin']], [mint1['carrierTxid']])    # v3: the carrier is the one transparent input
         assert_greater_than(len(raw['vShieldedSpend']), 0)

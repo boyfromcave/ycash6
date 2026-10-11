@@ -40,7 +40,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
-    fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     set_quote,
     template_coinbase,
@@ -422,7 +422,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         est = node.yed_estimatecollateral(CENTS, LOCK)
         assert_equal(est['refHeight'], ref)
         required = est['requiredZat']
-        payee = node.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        payee = node.yed_getfeepayee(ref)['default']['payoutAddress']
         return ref, required, payee
 
     def build_transfer(self, node, tokens, assignments, prevtxs):
@@ -534,11 +534,10 @@ class YellowbackMiningTest(YellowbackTestFramework):
         vault = self.live_vault(self.vault_a)
         assert_equal(vault['status'], 'ACTIVE')
         assert_greater_than(tip + 1, vault['lockHeight'])
-        collateral = int(vault['collateralZat'])
-        payee = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         expiry = tip + 4                                        # past the stock node's expiring-soon threshold (3)
         bad_hex = build_vault_spend_raw(user, vault, 'owner', [], payload=self.redeem_payload(ref),
-                                        fee=(payee, fee_zat(collateral)), expiry=expiry)
+                                        fee=(payee, vault_fee_zat(vault)), expiry=expiry)
         v = user.yed_validaterawtransaction(bad_hex)
         assert_equal(v['wouldBeRejected'], True)
         rpc_error('bad-yellowback-vault-spend', user.sendrawtransaction, bad_hex)
@@ -559,11 +558,10 @@ class YellowbackMiningTest(YellowbackTestFramework):
         user, stock = self.nodes[0], self.nodes[STOCK]
         vault = self.live_vault(self.vault_b)
         assert_equal(vault['status'], 'ACTIVE')
-        collateral = int(vault['collateralZat'])
         tip = user.getblockcount()
         ref = tip - REF_LAG
-        payee = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
-        fee = (payee, fee_zat(collateral))
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
+        fee = (payee, vault_fee_zat(vault))
         no_expiry = build_vault_spend_raw(user, vault, 'owner', [self.token_b], payload=self.redeem_payload(ref), fee=fee, expiry=0)
         assert_equal(user.yed_validaterawtransaction(no_expiry)['wouldBeRejected'], True)
         rpc_error('bad-yellowback-mempool-expiry', user.sendrawtransaction, no_expiry)
@@ -575,8 +573,8 @@ class YellowbackMiningTest(YellowbackTestFramework):
         tip = user.getblockcount()
         ref = tip - REF_LAG
         expiry = ref + REF_WINDOW
-        payee = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
-        fee = (payee, fee_zat(collateral))
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
+        fee = (payee, vault_fee_zat(vault))
         ok_hex = build_vault_spend_raw(user, vault, 'owner', [self.token_b], payload=self.redeem_payload(ref), fee=fee,
                                        expiry=expiry)
         assert_equal(user.yed_validaterawtransaction(ok_hex)['wouldBeRejected'], False)
@@ -614,8 +612,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         ref = tip                                                # R = the tip: pool 4's only tag in [R-9, R]
         vault = self.live_vault(self.vault_c)
         assert_equal(vault['status'], 'ACTIVE')
-        collateral = int(vault['collateralZat'])
-        eligible = user.yed_getfeepayee(ref, collateral)['eligible']
+        eligible = user.yed_getfeepayee(ref)['eligible']
         payee4 = self.pool_addresses[POOLS.index(4)]
         assert payee4 in eligible
         assert self.pool_addresses[0] in eligible
@@ -627,7 +624,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(stock.getblockcount(), tip - 1)
         stock.generate(2)
         spend_hex = build_vault_spend_raw(user, vault, 'owner', [token_c], payload=self.redeem_payload(ref),
-                                          fee=(payee4, fee_zat(collateral)), expiry=ref + REF_WINDOW)
+                                          fee=(payee4, vault_fee_zat(vault)), expiry=ref + REF_WINDOW)
         assert_equal(pool2.yed_validaterawtransaction(spend_hex)['wouldBeRejected'], False)
         spend_txid = pool2.sendrawtransaction(spend_hex)
         assert spend_txid in pool2.getrawmempool()
@@ -638,7 +635,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(user.getblockcount(), tip + 1)
         assert_equal(user.getblock(r_hash)['confirmations'], -1)
         self.assert_tag(str(ref), 'none')
-        assert payee4 not in user.yed_getfeepayee(ref, collateral)['eligible']
+        assert payee4 not in user.yed_getfeepayee(ref)['eligible']
         wait_for_mempool(pool2, spend_txid, present=False)      # the ConnectTip sweep
         assert spend_txid not in user.getrawmempool()
         assert spend_txid not in gbt_hashes(pool2.getblocktemplate())

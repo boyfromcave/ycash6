@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "d3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f";   // VaultRecord.pMint (SCHEMA_VERSION 9, FEE-1' D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -85,7 +85,8 @@ struct MintOpts
     CAmount collateral = -1;         //!< -1 = the required amount
     int feeKey = -2;                 //!< -2 = payee of the tag at refHeight; -1 = no fee output
     uint8_t feeVout = 3;
-    CAmount feeValue = -1;           //!< -1 = feeZat(collateral)
+    CAmount feeValue = -1;           //!< -1 = ProtocolFeeZat(cents, pMint) (FEE-1')
+    std::optional<MicroUsd> pMint;   //!< the price the default fee converts at; default the snapshot's xMint at R (an ARMED mint with a lower aMint passes min(x, aMint))
     std::optional<CPubKey> owner;
     std::vector<unsigned char> rawOwner; //!< overrides the key bytes in the payload
     int extraOutputs = 0;
@@ -379,6 +380,12 @@ struct Fixture
         BOOST_REQUIRE(r.has_value());
         return r.value();
     }
+    /** The cross-section xMint at refHeight (0 = undefined). */
+    MicroUsd PMintAt(int refHeight) const { std::optional<Snapshot> s = SnapOpt(refHeight); return s.has_value() ? s->PMint().value_or(0) : 0; }
+    /** FEE-1': the protocol fee of a mint of `cents` at refHeight's xMint (0 when the price is undefined). */
+    CAmount MintFee(Cents cents, int refHeight) const { return ProtocolFeeZat(cents, PMintAt(refHeight), P).value_or(0); }
+    /** RED-3': the protocol fee a spend of `v` pays (its debt at its own pMint). */
+    CAmount VaultFee(const VaultRecord& v) const { return ProtocolFeeZat(v.mintedCents, v.pMint, P).value_or(0); }
 
     /** A MINT of `cents` with lockHeight = refHeight + lockBlocks, refHeight given. */
     CMutableTransaction MintTx(Cents cents, int lockBlocks, int refHeight, MintOpts o = MintOpts())
@@ -404,12 +411,12 @@ struct Fixture
         if (o.feeKey != -1) {
             int key = o.feeKey;
             if (key == -2) key = refHeight % 3;
-            CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(collateral, P.feeMin, P.feeBps);
+            CAmount fee = o.feeValue >= 0 ? o.feeValue : ProtocolFeeZat(cents, o.pMint.value_or(PMintAt(refHeight)), P).value_or(0);
             m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key)))));
         }
         if (o.attestPayee >= 0) {
             while (m.vout.size() < 4) m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
-            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(FeeZat(collateral, P.feeMin, P.feeBps), P.attestFeeBps);
+            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(ProtocolFeeZat(cents, o.pMint.value_or(PMintAt(refHeight)), P).value_or(0), P.attestFeeBps);
             m.vout.push_back(CTxOut(afee, o.attestFeeScript.value_or(GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID()))));
         }
         for (int i = 0; i < o.extraOutputs; i++) m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
@@ -456,8 +463,8 @@ struct Fixture
             m.vin.push_back(CTxIn(FakeInput()));     // the claim's fees (the vault's value goes to intents)
         }
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
-        CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(v->collateralZat, P.feeMin, P.feeBps);
-        if (o.feeValue < 0 && o.ownerPath && tip + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: mined at tip + 1
+        CAmount fee = o.feeValue >= 0 ? o.feeValue : VaultFee(*v);
+        if (o.feeValue < 0 && o.ownerPath && tip + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->mintedCents, P.earlyRedeemFeeBps[v->termClass], v->pMint);   // IT-9': mined at tip + 1
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
         size_t nOut = 3;
         for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
@@ -470,7 +477,7 @@ struct Fixture
         }
         while (m.vout.size() < nOut) m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(userKey.GetPubKey().GetID())));
         if (o.attestPayee >= 0) {
-            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(FeeZat(v->collateralZat, P.feeMin, P.feeBps), P.attestFeeBps);
+            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(VaultFee(*v), P.attestFeeBps);
             m.vout.push_back(CTxOut(afee, GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID())));
         }
         if (o.residualValue.has_value()) {
@@ -630,6 +637,7 @@ struct Fixture
     {
         const int ref = tip - 1;
         o.bundle = BundleFor(ref, valtype(), price, skip);
+        if (!o.pMint.has_value() && PMintAt(ref) > 0) o.pMint = std::min(PMintAt(ref), price);   // FEE-1': the fee at min(xMint, aMint)
         if (o.attestPayee == -1) {
             std::vector<uint16_t> sel = Selected(view, P, ref, valtype());
             for (uint16_t q : sel) {
@@ -1051,14 +1059,16 @@ BOOST_AUTO_TEST_CASE(fee2_eligible_set_window_edges)
     BOOST_CHECK(e[1] == CKeyID(KeyOf(0)));
 }
 
-// Rule: FEE-1
-BOOST_AUTO_TEST_CASE(fee1_min_dominates_small_vault)
+// Rule: FEE-1'
+BOOST_AUTO_TEST_CASE(fee1_floor_dominates_small_vault)
 {
     const yellowback::Params P = RegtestParams(1, 0, 0, TestSet());
-    BOOST_CHECK_EQUAL(FeeZat(100 * COIN, P.feeMin, P.feeBps), P.feeMin);                  // 0.25% of 100 YEC < 0.5 YEC
-    BOOST_CHECK_EQUAL(FeeZat(200 * COIN, P.feeMin, P.feeBps), P.feeMin);                  // exactly 0.5 YEC
-    BOOST_CHECK_EQUAL(FeeZat(200 * COIN + 400, P.feeMin, P.feeBps), P.feeMin + 1);
-    BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, P.feeMin, P.feeBps), MAX_MONEY * 25 / 10000);     // fee1_at_max_money
+    // The regtest column carries mainnet's bands and floor (fees spec ambiguity 8): $100 pays the $1 floor, $10,000 pays $55.
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(10000, P), 100);
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(1000000, P), 5500);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000, 50000, P).value(), 2000000000LL);          // $1 at $0.05 = 20 YEC
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000, 50000 + 1, P).value(), 1999960001LL);      // ceil
+    BOOST_CHECK(!ProtocolFeeZat(10000, 0, P).has_value());                             // no price, no fee (RED-1' refuses the vault)
 }
 
 namespace {
@@ -1206,7 +1216,8 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     BOOST_CHECK_EQUAL(v.appHeight, ref + 1);                        // IT-1: the APP branch opens the block after the mint
     BOOST_CHECK_EQUAL(v.ownerHeight, ref + 1);                      // IT-1 (extended): and the owner's
     BOOST_CHECK_EQUAL(v.refHeight, ref);
-    BOOST_CHECK_EQUAL(v.feePaidZat, FeeZat(v.collateralZat, f.P.feeMin, f.P.feeBps));
+    BOOST_CHECK_EQUAL(v.pMint, f.PMintAt(ref));                                      // FEE-1': the mint price is stored
+    BOOST_CHECK_EQUAL(v.feePaidZat, f.VaultFee(v));
     BOOST_CHECK(v.Owner() == TestPQOwner(f.ownerKey.GetPubKey()));
     BOOST_REQUIRE(f.Token(txid, 1).has_value());
     BOOST_CHECK_EQUAL(f.Token(txid, 1)->cents, 10000);
@@ -1686,7 +1697,7 @@ BOOST_AUTO_TEST_CASE(mint8_fee_edges)
     f.Activate();
     { MintOpts o; o.feeKey = -1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }   // 0xFF with a non-empty E(R)
     { MintOpts o; o.feeKey = 7; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }    // not in E(R)
-    { MintOpts o; o.feeValue = FeeZat(600000000000LL, f.P.feeMin, f.P.feeBps) - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
+    { MintOpts o; o.feeValue = f.MintFee(10000, f.tip - 1) - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
     for (int fv : { 0, 1, 2, 4 }) {                         // the vault, the token, the OP_RETURN, out of range
         MintOpts o; o.feeVout = (uint8_t)fv;
         BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee");
@@ -1817,7 +1828,7 @@ BOOST_AUTO_TEST_CASE(red_owner_redeem_passes_and_closes)
     BOOST_CHECK_EQUAL(r.vault.burnedCents, 10000);
     BOOST_CHECK(!r.vault.unbacked);
     BOOST_CHECK_EQUAL(r.vault.closeHeight, f.tip);
-    BOOST_CHECK_EQUAL(r.vault.feePaidZat, FeeZat(r.vault.collateralZat, f.P.feeMin, f.P.feeBps) + EarlyRedeemFeeZat(r.vault.collateralZat, f.P.earlyRedeemFeeBps[0]));   // rewritten by the close; IT-9: redeemed in term
+    BOOST_CHECK_EQUAL(r.vault.feePaidZat, f.VaultFee(r.vault) + EarlyRedeemFeeZat(r.vault.mintedCents, f.P.earlyRedeemFeeBps[0], r.vault.pMint));   // rewritten by the close; IT-9': redeemed in term
     BOOST_CHECK_EQUAL(r.log.type, (uint8_t)TxLogType::REDEEM);
     BOOST_CHECK_EQUAL(r.log.path, "owner");
     BOOST_CHECK_EQUAL(r.log.burned, 10000);
@@ -1896,7 +1907,7 @@ BOOST_AUTO_TEST_CASE(red3_fee_and_payee_edges)
     auto vault = [&] { return f.MintActive(10000); };
     { uint256 v = vault(); SpendOpts o; o.feeKey = 7;
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-payee"); }
-    { uint256 v = vault(); SpendOpts o; o.feeValue = FeeZat(600000000000LL, f.P.feeMin, f.P.feeBps) - 1;
+    { uint256 v = vault(); SpendOpts o; o.feeValue = f.VaultFee(f.Vault(v).value()) - 1;
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-fee"); }
     { uint256 v = vault(); SpendOpts o; o.feeKey = -1;                                   // 0xFF with E(R) non-empty
       BOOST_CHECK_EQUAL(Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o)).verdict, "vault-spend-bad-fee"); }
@@ -3130,7 +3141,7 @@ BOOST_AUTO_TEST_CASE(red5_residual_paid)
     BOOST_CHECK_EQUAL(r.log.residualZat, residual);
     BOOST_CHECK_EQUAL(r.log.claimPath, "b");
     BOOST_CHECK(r.log.hasAttestPayee);
-    BOOST_CHECK(r.log.attestFeeZat >= AttestFeeZat(FeeZat(EmergencyFixture::COLLATERAL, g.f.P.feeMin, g.f.P.feeBps), g.f.P.attestFeeBps));
+    BOOST_CHECK(r.log.attestFeeZat >= AttestFeeZat(g.f.VaultFee(r.vault), g.f.P.attestFeeBps));
 }
 
 // Rule: RED-5
@@ -3551,9 +3562,10 @@ BOOST_AUTO_TEST_CASE(afee1_fee_to_contributor)
 {
     Fixture f;
     f.Arm(4);
-    const CAmount collateral = 600000000000LL;             // MintV3's $100 at 300 % and $0.05
-    const CAmount afee = AttestFeeZat(FeeZat(collateral, f.P.feeMin, f.P.feeBps), f.P.attestFeeBps);
-    BOOST_CHECK_EQUAL(afee, FeeZat(collateral, f.P.feeMin, f.P.feeBps) / 4);
+    const CAmount fee = f.MintFee(10000, f.tip - 1);        // MintV3's $100: the $1 floor at $0.05 = 20 YEC
+    BOOST_CHECK_EQUAL(fee, 2000000000LL);
+    const CAmount afee = AttestFeeZat(fee, f.P.attestFeeBps);
+    BOOST_CHECK_EQUAL(afee, fee / 4);
     // to a seated attestor that did not contribute: afee1-fee; one zat short: afee1-fee; missing: afee1-fee; at 0xFF: afee1-fee
     std::vector<uint16_t> sel = Selected(f.view, f.P, f.tip - 1, valtype());
     int outsider = -1;
@@ -4009,9 +4021,10 @@ BOOST_AUTO_TEST_CASE(in_term_early_redeem_fee_per_class_and_boundary)
     for (int cls = 0; cls < NUM_CLASSES; cls++) {
         const uint256 v = f.MintActive(10000, f.P.classMin[cls], cls);
         const VaultRecord r = f.Vault(v).value();
-        const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
-        const CAmount early = EarlyRedeemFeeZat(r.collateralZat, f.P.earlyRedeemFeeBps[cls]);
-        BOOST_CHECK_EQUAL(early, r.collateralZat * f.P.earlyRedeemFeeBps[cls] / BPS);
+        const CAmount fee1 = f.VaultFee(r);
+        const CAmount early = EarlyRedeemFeeZat(r.mintedCents, f.P.earlyRedeemFeeBps[cls], r.pMint);
+        // IT-9': bps of the debt at pMint: $100 x 5 / 2.5 / 1 % at $0.05 = 100 / 50 / 20 YEC
+        BOOST_CHECK_EQUAL(early, (CAmount)(10000LL * f.P.earlyRedeemFeeBps[cls] * COIN / r.pMint));
         BOOST_REQUIRE(f.tip + 1 < r.lockHeight);
         // FEE-1 alone, and one zat short of FEE-1 + the early fee: bad-redeem-early-fee; the vault stays ACTIVE
         { SpendOpts o; o.feeValue = fee1; RedResult x = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip, o));
@@ -4029,7 +4042,7 @@ BOOST_AUTO_TEST_CASE(in_term_early_redeem_fee_per_class_and_boundary)
     // The boundary: a redeem mined at lockHeight - 1 pays the early fee, one mined at lockHeight pays FEE-1 only.
     const uint256 w = f.MintActive(10000);
     const VaultRecord r = f.Vault(w).value();
-    const CAmount fee1 = FeeZat(r.collateralZat, f.P.feeMin, f.P.feeBps);
+    const CAmount fee1 = f.VaultFee(r);
     while (f.tip + 1 < r.lockHeight - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_REQUIRE_EQUAL(f.tip + 1, r.lockHeight - 1);
     { SpendOpts o; o.feeValue = fee1;

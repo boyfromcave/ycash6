@@ -38,7 +38,8 @@ from test_framework.yellowback_util import (
     YELLOWBACK_FEE,
     YellowbackTestFramework,
     assert_same_statehash,
-    fee_zat,
+    protocol_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     new_pq_owner,
     set_quote,
@@ -85,7 +86,9 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         vout = [(collateral, script)] + ([token, opret] if token_first else [opret, token])
         enforcement_fee = 0
         if fee_addr:
-            enforcement_fee = fee_zat(collateral) if fee is None else fee
+            if fee is None:
+                fee = protocol_fee_zat(cents, int(node.yed_getprice(ref)['pMint']))     # FEE-1': the debt at xMint(R) (= pMint when the attestors track it)
+            enforcement_fee = fee
             vout.append((enforcement_fee, ym.p2pkh_script(ym.address_key_hash(fee_addr))))
         needed = collateral + TOKEN_VALUE + enforcement_fee + YELLOWBACK_FEE
         utxos = [u for u in node.listunspent(1) if int(Decimal(str(u['amount'])) * COIN) > 20 * TOKEN_VALUE
@@ -209,7 +212,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         r = self.ref()
         req = self.collateral()
         # armed (R15): MINT-8 precedes MINT-5, so the shape carries the pool fee too; unarmed the v2 order stands
-        col_fee = user.yed_getfeepayee(r, req - 1000)['eligible'][0] if self.armed else None
+        col_fee = user.yed_getfeepayee(r)['eligible'][0] if self.armed else None
         self.expect_invalid(user, self.raw_mint_v3(user, 10000, 48, r, req - 1000, fee_addr=col_fee), 'bad-mint-collateral', POOLS[2])
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 0)
         print('the wallet never under-collateralises: yed_mint at the same snapshot is ACTIVE')
@@ -229,16 +232,16 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         r = self.ref()
         self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=stock.getnewaddress()), 'bad-mint-fee', POOLS[2])
         r = self.ref()
-        eligible = user.yed_getfeepayee(r, self.collateral())['eligible'][0]
-        self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=eligible, fee=fee_zat(self.collateral()) - 1), 'bad-mint-fee', POOLS[0])
+        eligible = user.yed_getfeepayee(r)['eligible'][0]
+        self.expect_invalid(user, self.raw_mint(user, 10000, 48, r, self.collateral(), fee_addr=eligible, fee=protocol_fee_zat(10000, int(user.yed_getprice(r)['pMint'])) - 1), 'bad-mint-fee', POOLS[0])
         print('and the same shape with the right fee is ACTIVE')
         r = self.ref()
         # armed: pMint = min(xMint, aMint) is the attested price, so the requirement is sized at it
         col = self.collateral()          # armed too: the attestors track xMint, so pMint = xMint
-        eligible = user.yed_getfeepayee(r, col)['eligible'][0]
+        eligible = user.yed_getfeepayee(r)['eligible'][0]
         ok = self.send_and_mine(user, self.raw_mint_v3(user, 10000, 48, r, col, fee_addr=eligible), POOLS[1])
         assert_equal(user.yed_getvault(ok)['status'], 'ACTIVE')
-        assert_equal(user.yed_getvault(ok)['feePaidZat'], fee_zat(col))
+        assert_equal(user.yed_getvault(ok)['feePaidZat'], vault_fee_zat(user.yed_getvault(ok)))
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000)
         assert_equal(nodes[2].yed_getstats()['voidVaults'], 0)
         self.checkpoint('rule cases')

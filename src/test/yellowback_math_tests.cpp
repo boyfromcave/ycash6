@@ -234,8 +234,8 @@ BOOST_AUTO_TEST_CASE(mint5_required_collateral_at_uint32_price_max)
     BOOST_CHECK_EQUAL(RequiredCollateral(1, 1, PRICE_MAX).value(), 1);
     // the 1,000-zat rounding stays in range
     BOOST_CHECK_EQUAL(RequiredCollateralRounded(m.maxOutput, 30000, PRICE_MAX).value(), 6984920000LL);
-    // MIN_MINT at 300 % needs 0.0698 YEC here: the 4 * FEE_MIN floor (MINT-5's second clause) binds above ~$150/YEC
-    BOOST_CHECK_LT(RequiredCollateral(m.minMint, 30000, PRICE_MAX).value(), 4 * m.feeMin);
+    // MIN_MINT at 300 % needs 0.0698 YEC here (MINT-5' has no 4 * FEE_MIN floor since D-Q-23: $300 of YEC is the smallest collateral)
+    BOOST_CHECK_EQUAL(RequiredCollateral(m.minMint, 30000, PRICE_MAX).value(), 6984920LL);
 }
 
 // Rule: MINT-6
@@ -300,31 +300,102 @@ BOOST_AUTO_TEST_CASE(red4_underwater_worked_example)
     BOOST_CHECK(!IsUnderwater(257, PRICE_MAX, 1, 11000));        // 257 * P = 1.1038e12
 }
 
-// Rule: FEE-1
-BOOST_AUTO_TEST_CASE(fee1_min_dominates_small_vault)
+// Rule: FEE-1'
+// D-Q-23: the protocol fee is tiered by the debt (1.0 % of the first $1,000, 0.5 % to $10,000, 0.1 % above), at
+// least $1, in cent-bps; the bands and the floor are Params (yb-calibration's), read from the table, not restated.
+BOOST_AUTO_TEST_CASE(fee1_bands_and_floor)
 {
     const Params& m = MainParams();
-    // 15 bps (H-4): FEE_MIN applies up to 333 1/3 YEC; at 25 bps (regtest) it was 200 YEC.
-    BOOST_CHECK_EQUAL(FeeZat(333 * COIN, m.feeMin, m.feeBps), m.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(200 * COIN, m.feeMin, m.feeBps), m.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(334 * COIN, m.feeMin, m.feeBps), 50100000);
-    BOOST_CHECK_EQUAL(FeeZat(1, m.feeMin, m.feeBps), m.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(0, m.feeMin, m.feeBps), m.feeMin);
-    // 6,000 YEC (the worked vault) pays 9 YEC.
-    BOOST_CHECK_EQUAL(FeeZat(6000 * COIN, m.feeMin, m.feeBps), 9 * COIN);
-    // The regtest column keeps 25 bps: 200 YEC is exactly FEE_MIN, 201 YEC pays 0.5025 YEC.
+    BOOST_CHECK_EQUAL(FEE_BANDS, 3);
+    BOOST_CHECK_EQUAL(m.feeBands[0].uptoCents, 100000);  BOOST_CHECK_EQUAL(m.feeBands[0].bps, 100);
+    BOOST_CHECK_EQUAL(m.feeBands[1].uptoCents, 1000000); BOOST_CHECK_EQUAL(m.feeBands[1].bps, 50);
+    BOOST_CHECK_EQUAL(m.feeBands[2].uptoCents, 0);       BOOST_CHECK_EQUAL(m.feeBands[2].bps, 10);
+    BOOST_CHECK_EQUAL(m.feeFloorCents, 100);
+    // The floor binds exactly at minMint ($100 x 1 % = $1) and below it; above, the bands.
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(m.minMint, m), 1000000);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(1, m), 1000000);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(0, m), 0);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(-1, m), 0);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(10001, m), 1000100);                 // one cent over minMint: 1 % of it, over the floor
+    // The band edges: $1,000 is all in the first band; $1,000.01 puts one cent in the second.
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(100000, m), 10000000);               // $10
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(100001, m), 10000050);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(1000000, m), 55000000);              // $10 + $45 = $55
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(1000001, m), 55000010);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(10000000, m), 145000000);            // $100,000: $145 (0.145 %)
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(10000, m), 100);
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(100001, m), 1001);                   // ceil to the cent
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(1000000, m), 5500);
+    BOOST_CHECK_EQUAL(ProtocolFeeCents(10000000, m), 14500);
+    // The same bands on every network (fees spec ambiguity 8).
     const Params r = RegtestParams(1, 0, 0, TestSet());
-    BOOST_CHECK_EQUAL(FeeZat(200 * COIN, r.feeMin, r.feeBps), r.feeMin);
-    BOOST_CHECK_EQUAL(FeeZat(201 * COIN, r.feeMin, r.feeBps), 50250000);
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(1000000, r), ProtocolFeeUnits(1000000, m));
+    BOOST_CHECK_EQUAL(r.feeFloorCents, m.feeFloorCents);
+    // A table with a zero or negative rate contributes nothing; a bounded last band stops at its edge.
+    Params t = m;
+    t.feeBands[1].bps = -5;
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(1000000, t), 10000000);
+    t.feeBands[2].uptoCents = 2000000;
+    BOOST_CHECK_EQUAL(ProtocolFeeUnits(5000000, t), ProtocolFeeUnits(2000000, t));
 }
 
-// Rule: FEE-1
-BOOST_AUTO_TEST_CASE(fee1_at_max_money)
+// Rule: FEE-1'
+// zat = ceil(units x COIN / pMint): the worked values of the fees spec §1.3 at PRICE_MIN, $0.018 and PRICE_MAX.
+BOOST_AUTO_TEST_CASE(fee1_zat_at_the_mint_price)
 {
     const Params& m = MainParams();
-    BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, m.feeMin, m.feeBps), 3150000000000LL);   // 31,500 YEC at 15 bps, no overflow
-    BOOST_CHECK(MoneyRange(FeeZat(MAX_MONEY, m.feeMin, m.feeBps)));
-    BOOST_CHECK_EQUAL(FeeZat(MAX_MONEY, m.feeMin, 10000), MAX_MONEY);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000, PRICE_MIN, m).value(), 1000000000000LL);         // $1 at $0.0001 = 10,000 YEC
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000, 18000, m).value(), 5555555556LL);                // 55.6 YEC (ceil)
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000, PRICE_MAX, m).value(), 23284);                   // > dust and > TOKEN_VALUE: never a dust output
+    BOOST_CHECK_GT(ProtocolFeeZat(10000, PRICE_MAX, m).value(), TOKEN_VALUE);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(100000, 18000, m).value(), 55555555556LL);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(1000000, 18000, m).value(), 305555555556LL);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000000, PRICE_MIN, m).value(), 145000000000000LL);    // 1.45 M YEC: 6.9 % of MAX_MONEY
+    BOOST_CHECK(MoneyRange(ProtocolFeeZat(10000000, PRICE_MIN, m).value()));
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000000, 18000, m).value(), 805555555556LL);
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(10000000, PRICE_MAX, m).value(), 3376045);                // ceil(1.45e16 / UINT32_MAX)
+    // undefined price: nullopt (RED-1' refuses such a vault); a debt of 0 at any price: the floor
+    BOOST_CHECK(!ProtocolFeeZat(10000, 0, m).has_value());
+    BOOST_CHECK(!ProtocolFeeZat(10000, -1, m).has_value());
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(0, 18000, m).value(), 0);                                 // no debt, no fee (the floor is per debt)
+    // MAX_MONEY only for an impossible debt: units x COIN / PRICE_MIN > MAX_MONEY needs units > 2.1e15
+    Params t = m;
+    t.feeFloorCents = 300000000000LL;   // a $3 B floor
+    BOOST_CHECK_EQUAL(ProtocolFeeZat(1, PRICE_MIN, t).value(), MAX_MONEY);
+}
+
+// Rule: IT-9'
+// The early fee is bps of the debt at pMint (ceil, no floor); K14': protocol + early <= collateral / 50 + 2 zat at any price.
+BOOST_AUTO_TEST_CASE(it9_early_fee_of_the_debt_and_k14_bound)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000, 500, 50000), 10000000000LL);                  // $5 at $0.05 = 100 YEC
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000000, 500, 18000), 27777777777778LL);           // $5,000 at $0.018 (ceil)
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000000, 500, PRICE_MAX), 116415322);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000000, 500, PRICE_MIN), MAX_MONEY);             // 5e15 > MAX_MONEY: a vault that cannot exist (§1.6)
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000, 0, 50000), 0);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(0, 500, 50000), 0);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000, 500, 0), 0);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(1, 1, PRICE_MAX), 1);                              // ceil: never zero for a positive product
+    for (MicroUsd p : { PRICE_MIN, (MicroUsd)14286, (MicroUsd)18000, (MicroUsd)50000, (MicroUsd)1000000, PRICE_MAX }) {
+        for (Cents d : { m.minMint, (Cents)100000, (Cents)1000000, m.maxMint }) {
+            for (int cls = 0; cls < NUM_CLASSES; cls++) {
+                auto C = RequiredCollateral(d, m.baseRatioBps[cls], p);
+                if (!C.has_value()) continue;                                               // unsatisfiable: no such vault (K14)
+                const CAmount early = EarlyRedeemFeeZat(d, m.earlyRedeemFeeBps[cls], p);
+                const CAmount protocol = ProtocolFeeZat(d, p, m).value();
+                BOOST_CHECK_LT(early, MAX_MONEY);
+                BOOST_CHECK_LE(protocol + early, C.value() / 50 + 2);                      // K14': every fee is payable from the collateral
+            }
+        }
+    }
+    // The satisfiability thresholds at maxMint (fees spec §2.1): class A from 14,286 uUSD, B from 19,048, C from 23,810.
+    BOOST_CHECK(RequiredCollateral(10000000, 30000, 14286).has_value());
+    BOOST_CHECK(!RequiredCollateral(10000000, 30000, 14285).has_value());
+    BOOST_CHECK(RequiredCollateral(10000000, 40000, 19048).has_value());
+    BOOST_CHECK(!RequiredCollateral(10000000, 40000, 19047).has_value());
+    BOOST_CHECK(RequiredCollateral(10000000, 50000, 23810).has_value());
+    BOOST_CHECK(!RequiredCollateral(10000000, 50000, 23809).has_value());
 }
 
 namespace {
@@ -462,13 +533,13 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.accuracyWindow, 576);
     BOOST_CHECK_EQUAL(m.payeeTiltBps, 10000);
     BOOST_CHECK_EQUAL(m.payeeWindow, 100);
-    BOOST_CHECK_EQUAL(m.feeMin, 50000000);
-    BOOST_CHECK_EQUAL(m.feeBps, 15);                          // H-4
-    BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[0], 500);           // IT-9
+    BOOST_CHECK_EQUAL(m.feeFloorCents, 100);                  // FEE-1' (D-Q-23): $1 per action
+    BOOST_CHECK_EQUAL(m.feeBands[0].bps, 100);
+    BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[0], 500);           // IT-9'
     BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[1], 250);
     BOOST_CHECK_EQUAL(m.earlyRedeemFeeBps[2], 100);
-    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(600000000000LL, 500), 30000000000LL);   // 5 % of 6,000 YEC = 300 YEC
-    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(600000000000LL, 0), 0);
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000, 500, 50000), 10000000000LL);   // 5 % of $100 at $0.05 = 100 YEC
+    BOOST_CHECK_EQUAL(EarlyRedeemFeeZat(10000, 0, 50000), 0);
     BOOST_CHECK_EQUAL(m.grace, 34560);
     BOOST_CHECK_EQUAL(m.claimThresholdBps, 12500);            // D-IT-2
     BOOST_CHECK_EQUAL(m.supplyCapBps, 1500);
@@ -512,10 +583,10 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(r.volStep, 8);
     BOOST_CHECK_EQUAL(r.volPeriodsPerYear, 8760);   // K13: equal on every network
     BOOST_CHECK_EQUAL(r.volWindow / r.volStep, 8);
-    BOOST_CHECK_EQUAL(r.feeMin, m.feeMin);
+    BOOST_CHECK_EQUAL(r.feeFloorCents, m.feeFloorCents);      // the fee bands and floor are mainnet's everywhere (D-Q-23)
+    BOOST_CHECK_EQUAL(r.feeBands[2].bps, m.feeBands[2].bps);
     BOOST_CHECK_EQUAL(r.claimThresholdBps, m.claimThresholdBps);
-    // The regtest column keeps the v3 values the hardening plan changed on mainnet (H-4, H-11, H-12).
-    BOOST_CHECK_EQUAL(r.feeBps, 25);
+    // The regtest column keeps the v3 values the hardening plan changed on mainnet (H-11, H-12).
     BOOST_CHECK_EQUAL(r.globalRatioHaltBps, 25000);
     BOOST_CHECK_EQUAL(r.recapRatioBps, 50000);
     BOOST_CHECK_EQUAL(r.maxMint, 1000000);
@@ -573,7 +644,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(TestParams().attestArmMin, 7);
     BOOST_CHECK_EQUAL(TestParams().mintRequiresArmed, true);
     BOOST_CHECK_EQUAL(TestParams().attestFeeBps, 5000);
-    BOOST_CHECK_EQUAL(TestParams().feeBps, 15);
+    BOOST_CHECK_EQUAL(TestParams().feeFloorCents, 100);
     BOOST_CHECK_EQUAL(TestParams().bondMin, 20000 * COIN);
     // "ARMED" means both the snapshot status and ATTEST_REQUIRED (W15).
     BOOST_CHECK(m.IsArmed(true));
@@ -805,12 +876,12 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
 BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_half_of_the_pool_fee)
 {
     const Params& m = MainParams();
-    // The worked vault (H-4: 15 bps, 5,000 bps): 6,000 YEC pays 9 YEC to the pool and 4.5 YEC to the attestor.
-    const CAmount fee = FeeZat(6000 * COIN, m.feeMin, m.feeBps);
-    BOOST_CHECK_EQUAL(fee, 9 * COIN);
-    BOOST_CHECK_EQUAL(AttestFeeZat(fee, m.attestFeeBps), 450000000);
-    // The minimum fee: 0.5 YEC => 0.25 YEC.
-    BOOST_CHECK_EQUAL(AttestFeeZat(m.feeMin, m.attestFeeBps), 25000000);
+    // The worked vault ($100 at $0.05, 5,000 bps): the $1 floor = 20 YEC to the pool and 10 YEC to the attestor.
+    const CAmount fee = ProtocolFeeZat(10000, 50000, m).value();
+    BOOST_CHECK_EQUAL(fee, 20 * COIN);
+    BOOST_CHECK_EQUAL(AttestFeeZat(fee, m.attestFeeBps), 10 * COIN);
+    // $10,000 at $0.018: $55 = 305,555,555,556 zat => half, floored.
+    BOOST_CHECK_EQUAL(AttestFeeZat(ProtocolFeeZat(1000000, 18000, m).value(), m.attestFeeBps), 152777777778LL);
     // Floor.
     BOOST_CHECK_EQUAL(AttestFeeZat(1, m.attestFeeBps), 0);
     BOOST_CHECK_EQUAL(AttestFeeZat(3, m.attestFeeBps), 1);

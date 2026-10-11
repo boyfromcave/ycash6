@@ -153,7 +153,7 @@ class YellowbackPQDayOneTest(ArmedModeMixin, YellowbackTestFramework):
         assert_rpc_error('bad-yed-holder', user.yed_send, p2pkh, 1000)
         r = user.yed_getinfo()['height'] - REF_LAG
         coll = user.yed_estimatecollateral(10000, 48)['requiredZat']
-        payee = user.yed_getfeepayee(r, coll)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']
         p2pkh_hex, _ = build_mint_tx(user, 10000, 48, r, coll, fee_addr=payee)       # the raw builder's P2PKH token
         assert_rpc_error('bad-yellowback-bad-yed-holder', user.sendrawtransaction, p2pkh_hex)
         result, _ = mine_block_raw(nodes[POOLS[2]], [p2pkh_hex])

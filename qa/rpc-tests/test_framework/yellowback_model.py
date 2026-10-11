@@ -181,14 +181,15 @@ class Params(object):
     def __init__(self, network, start_height, sigma_ref_bps, supply_cap_bps, attestor_set,
                  p_fast_window, p_mid_window, p_slow_window,
                  n_reg, n_penalty, peer_lag, peer_min, deviation_bps, accuracy_band_bps,
-                 accuracy_window, payee_tilt_bps, payee_window, fee_min, fee_bps, grace,
+                 accuracy_window, payee_tilt_bps, payee_window, grace,
                  claim_threshold_bps, global_ratio_halt_bps, divergence_bps,
                  class_min, class_max, base_ratio_bps, vol_window, vol_step,
                  vol_periods_per_year, sigma_mult_max_bps, min_mint, max_mint, min_output,
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
                  price_min=100, price_max=4_294_967_295, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
-                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100)):
+                 recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100),
+                 fee_bands=((100_000, 100), (1_000_000, 50), (0, 10)), fee_floor_cents=100):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -208,8 +209,10 @@ class Params(object):
         self.accuracy_window = accuracy_window
         self.payee_tilt_bps = payee_tilt_bps
         self.payee_window = payee_window
-        self.fee_min = fee_min
-        self.fee_bps = fee_bps
+        # FEE-1' (quantum plan D-Q-23): the protocol fee is tiered by the debt in cents, (uptoCents, bps) per band, the
+        # last band unbounded (uptoCents 0), at least fee_floor_cents per action; converted to zat at the vault's p_mint
+        self.fee_bands = tuple((int(u), int(b)) for u, b in fee_bands)
+        self.fee_floor_cents = fee_floor_cents
         self.grace = grace
         self.claim_threshold_bps = claim_threshold_bps
         self.global_ratio_halt_bps = global_ratio_halt_bps
@@ -218,7 +221,7 @@ class Params(object):
         self.class_min = list(class_min)
         self.class_max = list(class_max)
         self.base_ratio_bps = list(base_ratio_bps)
-        self.early_redeem_fee_bps = list(early_redeem_fee_bps)    # IT-9: bps of the collateral on an owner redeem before lockHeight
+        self.early_redeem_fee_bps = list(early_redeem_fee_bps)    # IT-9': bps of the DEBT at p_mint on an owner redeem before lockHeight (D-Q-23)
         self.vol_window = vol_window
         self.vol_step = vol_step
         self.vol_periods_per_year = vol_periods_per_year
@@ -309,7 +312,7 @@ class Params(object):
             p_fast_window=8, p_mid_window=24, p_slow_window=64,
             n_reg=24, n_penalty=12, peer_lag=4, peer_min=3, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=24, payee_tilt_bps=10_000, payee_window=10,
-            fee_min=50_000_000, fee_bps=25, grace=24, claim_threshold_bps=12_500,          # D-IT-2
+            grace=24, claim_threshold_bps=12_500,          # D-IT-2
             global_ratio_halt_bps=25_000, divergence_bps=2_000,
             # class A [48, 96], B (96, 144], C (144, 240]  (section 3.1 regtest column); flat ratios 300/400/500 % (D-IT-4)
             class_min=[48, 97, 145], class_max=[96, 144, 240], base_ratio_bps=[30_000, 40_000, 50_000],
@@ -328,7 +331,7 @@ class Params(object):
             p_fast_window=96, p_mid_window=576, p_slow_window=2_016,
             n_reg=576, n_penalty=288, peer_lag=10, peer_min=5, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=576, payee_tilt_bps=10_000, payee_window=100,
-            fee_min=50_000_000, fee_bps=15, grace=34_560, claim_threshold_bps=12_500,     # H-4, D-IT-2
+            grace=34_560, claim_threshold_bps=12_500,     # D-IT-2
             global_ratio_halt_bps=20_000, recap_ratio_bps=50_000, divergence_bps=2_000,   # D-IT-11, D-IT-12
             class_min=[34_560, 103_681, 207_361], class_max=[103_680, 207_360, 420_480],
             base_ratio_bps=[30_000, 40_000, 50_000],
@@ -479,13 +482,41 @@ def residual_zat(collateral_zat, claimant_max):
     return collateral_zat - claimant_max
 
 
-def fee_zat(collateral_zat, fee_min, fee_bps):
-    return max(fee_min, (collateral_zat * fee_bps) // BPS)
+def protocol_fee_units(debt_cents, p):
+    """FEE-1' (D-Q-23): the protocol fee of a debt in cent-bps: the sum over p.fee_bands of (the debt inside the
+    band) x bps, at least p.fee_floor_cents x 10^4."""
+    if debt_cents <= 0:
+        return 0
+    units, lo = 0, 0
+    for hi, bps in p.fee_bands:
+        in_band = (debt_cents if hi == 0 else min(debt_cents, hi)) - lo
+        if in_band <= 0:
+            break
+        units += in_band * max(0, bps)
+        lo = hi
+    return max(units, max(0, p.fee_floor_cents) * BPS)
 
 
-def early_redeem_fee_zat(collateral_zat, early_redeem_fee_bps):
-    """IT-9: collateral * earlyRedeemFeeBps / 10^4 (floor, no minimum)."""
-    return (collateral_zat * early_redeem_fee_bps) // BPS if early_redeem_fee_bps > 0 else 0
+def protocol_fee_cents(debt_cents, p):
+    """The dollar fee: ceil(units / 10^4) cents."""
+    return ceil_div(protocol_fee_units(debt_cents, p), BPS)
+
+
+def protocol_fee_zat(debt_cents, p_mint, p):
+    """FEE-1' in zat at the vault's mint price: ceil(units x COIN / pMint); None when p_mint is undefined;
+    MAX_MONEY when it does not fit (unreachable for a vault that exists)."""
+    if p_mint is None or p_mint <= 0:
+        return None
+    z = ceil_div(protocol_fee_units(debt_cents, p) * COIN, p_mint)
+    return z if z <= MAX_MONEY else MAX_MONEY
+
+
+def early_redeem_fee_zat(debt_cents, early_redeem_fee_bps, p_mint):
+    """IT-9' (D-Q-23): ceil(debt x bps x COIN / pMint), no floor; 0 when bps <= 0 or p_mint is undefined."""
+    if debt_cents <= 0 or early_redeem_fee_bps <= 0 or p_mint is None or p_mint <= 0:
+        return 0
+    z = ceil_div(debt_cents * early_redeem_fee_bps * COIN, p_mint)
+    return z if z <= MAX_MONEY else MAX_MONEY
 
 
 # ---------------------------------------------------------------------------
@@ -2741,7 +2772,7 @@ class YellowbackModel(object):
 
     def _mint_verdict(self, tx, height, pl, opret, facts):
         """Not ARMED at R: the v2 order MINT-2..8 exactly.  ARMED: MINT-2, 3, 4, 6, 7, 8, then MINT-9,
-        AFEE-1, MINT-5 (with the combined pMint), MINT-10 (v3 plan R15)."""
+        MINT-5 (with the combined pMint), MINT-8' amount, AFEE-1', MINT-10 (v3 plan R15 as amended by the fees spec §1.5)."""
         p = self.params
         # MINT-2 (signed arithmetic)
         rng = p.class_range(pl.term_class)
@@ -2798,9 +2829,18 @@ class YellowbackModel(object):
             req = required_zat(pl.cents, min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps), p_mint)
             if req is None:
                 return 'mint-unsatisfiable'
-            if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
+            if tx.vout[0].value < req:    # MINT-5': the 4 x FEE_MIN floor went with D-Q-23 (fees spec §2.3)
                 return 'bad-mint-collateral'
             facts['p_mint'] = p_mint       # the vault's fee price (FEE-1'): exactly the price MINT-5 passed at
+            return None
+
+        def mint8_amount():
+            # MINT-8' (FEE-1'): vout[feeVout] >= protocol_fee_zat(cents, pMint), right after MINT-5 in both branches
+            if not self.eligible_payees(pl.ref_height):
+                return None
+            fee = protocol_fee_zat(pl.cents, facts['p_mint'], p)
+            if fee is None or tx.vout[pl.fee_vout].value < fee:
+                return 'bad-mint-fee'
             return None
 
         # MINT-5 at its v2 position when not ARMED (pMint = xMint)
@@ -2830,9 +2870,10 @@ class YellowbackModel(object):
             key = p2pkh_key(tx.vout[fv].script)
             if key is None or key not in eligible:
                 return 'bad-mint-fee'
-            if tx.vout[fv].value < fee_zat(tx.vout[0].value, p.fee_min, p.fee_bps):
-                return 'bad-mint-fee'
         if not armed:
+            v = mint8_amount()                     # MINT-8' (not ARMED: pMint = xMint)
+            if v is not None:
+                return v
             return VERDICT_OK
         # MINT-9 (ARMED at R: BUNDLE-1 with the empty selector; aMint defined)
         if True:
@@ -2842,19 +2883,23 @@ class YellowbackModel(object):
                 return 'mint9-no-bundle' if not b['carrier_present'] else 'mint9-bundle-' + b['reason']
             if b['a_mint'] is None:
                 return 'mint9-bundle-stat'
-            # AFEE-1 (MINT-8's attestor-fee clause)
-            attest_fee = attest_fee_zat(fee_zat(tx.vout[0].value, p.fee_min, p.fee_bps), p.attest_fee_bps)
+            # PRICE-2 (revised)
+            p_mint = None if x_mint is None else min(x_mint, b['a_mint'])
+        # MINT-5 (ARMED: after MINT-9, with the combined pMint), then MINT-8' amount and AFEE-1' (both need pMint)
+        v = mint5(p_mint)
+        if v is not None:
+            return v
+        v = mint8_amount()
+        if v is not None:
+            return v
+        if True:
+            # AFEE-1' (MINT-8's attestor-fee clause): half the protocol fee, never the early fee
+            attest_fee = attest_fee_zat(protocol_fee_zat(pl.cents, facts['p_mint'], p), p.attest_fee_bps)
             A = [seq for seq, _p, _c in b['atts']]
             payee = self._attest_fee_ok(tx, pl.attest_fee_vout, A, {0, 1, opret, pl.fee_vout}, attest_fee)
             if payee is None:
                 return 'afee1-fee'
             facts['attest_payee'] = payee
-            # PRICE-2 (revised)
-            p_mint = None if x_mint is None else min(x_mint, b['a_mint'])
-        # MINT-5 (ARMED: after MINT-9, with the combined pMint)
-        v = mint5(p_mint)
-        if v is not None:
-            return v
         # MINT-10 (amended W17): the agreement test reads the pools' fast median, not the
         # min-of-windows x_mint that MINT-5 prices collateral at
         a = facts['bundle']['a_mint']
@@ -2966,6 +3011,8 @@ class YellowbackModel(object):
             if not self.holder_ok(height, tx.vout[vout].script):
                 return 'bad-yed-holder'
         vault = self.vaults[outpoints[0]]
+        if vault.p_mint is None or vault.p_mint <= 0:
+            return 'vault-spend-malformed'    # RED-1' (FEE-1'): a vault without a mint price cannot exist; the rule is total
         claim = path == 'claim'
         # U-23: a claim moves the whole vault into intents: one claimant intent, at most one owner residual
         # intent (RED-5 decides which is due), no re-lock
@@ -2996,7 +3043,9 @@ class YellowbackModel(object):
         burn = yed_in - total
         if burn < vault.minted_cents:
             return 'vault-spend-missing-burn' if burn <= 0 else 'vault-spend-short-burn'
-        # RED-3
+        # RED-3' (FEE-1'): the protocol fee of the debt at the vault's stored mint price, owner and claimant alike;
+        # the redeem reads vault.p_mint only (never a snapshot, never a bundle)
+        protocol_fee = protocol_fee_zat(vault.minted_cents, vault.p_mint, p)
         eligible = self.eligible_payees(pl.ref_height)
         assigned_vouts = [v for v, _ in pl.assignments]
         if eligible:
@@ -3006,16 +3055,17 @@ class YellowbackModel(object):
             key = p2pkh_key(tx.vout[fv].script)
             if key is None or key not in eligible:
                 return 'vault-spend-bad-payee'
-            if tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps):
+            if tx.vout[fv].value < protocol_fee:
                 return 'vault-spend-bad-fee'
-            # IT-9: an owner redeem before lockHeight pays the class's early-redeem fee on top, through the same output
+            # IT-9': an owner redeem before lockHeight pays the class's early-redeem fee (of the debt at p_mint) on top,
+            # through the same output
             if (not claim and height < vault.lock_height and vault.term_class in (0, 1, 2)
-                    and tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps)
-                    + early_redeem_fee_zat(vault.collateral_zat, p.early_redeem_fee_bps[vault.term_class])):
+                    and tx.vout[fv].value < protocol_fee
+                    + early_redeem_fee_zat(vault.minted_cents, p.early_redeem_fee_bps[vault.term_class], vault.p_mint)):
                 return 'bad-redeem-early-fee'
-        # AFEE-1 (RED-3's attestor-fee clause)
+        # AFEE-1' (RED-3's attestor-fee clause): half the protocol fee
         if armed:
-            attest_fee = attest_fee_zat(fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps), p.attest_fee_bps)
+            attest_fee = attest_fee_zat(protocol_fee, p.attest_fee_bps)
             A = [seq for seq, _p, _c in facts['bundle']['atts']]
             payee = self._attest_fee_ok(tx, pl.attest_fee_vout, A, set(assigned_vouts) | {0, 1, opret, pl.fee_vout}, attest_fee)
             if payee is None:

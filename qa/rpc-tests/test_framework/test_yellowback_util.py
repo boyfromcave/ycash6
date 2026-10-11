@@ -59,6 +59,9 @@ class FakeNode(object):
         assert addr == self.address
         return yu.secret_to_wif(self.secret)
 
+    def yed_getprice(self, height=None):
+        return {'pMint': 1_000_000}      # FEE-1': the fake snapshot price, $1
+
 
 def utxo(txid_seed, vout, yec, spk=None):
     txid = hashlib.sha256(txid_seed).digest()[::-1].hex()
@@ -130,8 +133,8 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual((p.cents, p.lock_height, p.ref_height, p.fee_vout, p.term_class), (10_000, lock_height, 190, 3, 0))
         self.assertEqual(p.owner_pubkey, owner33)                           # the v4 MINT's owner field
         self.assertEqual(ym.script_single_push(tx.vout[2].script)[2], ym.MINT_PAYLOAD_VERSION)   # C-1: v4 MINT
-        fee = yu.fee_zat(collateral)
-        self.assertEqual(fee, yu.FEE_MIN)   # 20 YEC * 25 bps < 0.5 YEC floor
+        fee = yu.protocol_fee_zat(10_000, 1_000_000)
+        self.assertEqual(fee, COIN)         # FEE-1': the $1 floor at the fake node's $1 = 1 YEC
         self.assertEqual(tx.vout[3].value, fee)
         self.assertEqual(tx.vout[3].script, ym.p2pkh_script(ym.address_key_hash(yu.address_of(yu.POOL_WIFS[0]))))
         self.assertEqual(tx.vout[4].value, 30 * COIN - collateral - yu.TOKEN_VALUE - fee - yu.YELLOWBACK_FEE)
@@ -229,7 +232,7 @@ class VaultSpendTests(unittest.TestCase):
         # Rule: RED-4
         payload = ym.encode_redeem(298, 1, [])
         hex_ = yu.build_vault_spend_raw(self.node, self.vault, 'claim', ['%s:1' % self.vault['txid'], (self.vault['txid'], 5)],
-                                        payload=payload, fee=(yu.address_of(yu.POOL_WIFS[2]), 3 * yu.FEE_MIN), ref_height=298)
+                                        payload=payload, fee=(yu.address_of(yu.POOL_WIFS[2]), 3 * COIN), ref_height=298)
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(tx.lock_time, self.vault["appHeight"])          # IT-1: the APP branch CLTV, refHeight + 1
         self.assertEqual(tx.expiry_height, 298 + yu.REF_WINDOW)
@@ -243,7 +246,7 @@ class VaultSpendTests(unittest.TestCase):
         f = ym.yed_intent_fields(tx.vout[0].script)
         self.assertIsNotNone(f)
         self.assertEqual(f[2], ym.sha256(self.script))                                       # vaultHash
-        self.assertEqual(tx.vout[1].value, 3 * yu.FEE_MIN)
+        self.assertEqual(tx.vout[1].value, 3 * COIN)
         self.assertEqual(tx.vout[1].script, ym.p2pkh_script(ym.address_key_hash(yu.address_of(yu.POOL_WIFS[2]))))
         self.assertEqual(ym.script_single_push(tx.vout[2].script), payload)
         self.assertEqual(len(self.node.signed), 2)   # the mint, then the burn and fee inputs of the spend
@@ -312,8 +315,8 @@ class ArgsTests(unittest.TestCase):
         self.assertEqual((p.p_fast_window, p.p_mid_window, p.p_slow_window), (yu.P_FAST_WINDOW, yu.P_MID_WINDOW, yu.P_SLOW_WINDOW))
         self.assertEqual((p.min_fill_fast, p.min_fill_mid, p.min_fill_slow), yu.MIN_FILL)
         self.assertEqual(p.claim_delay, yu.CLAIM_DELAY)
-        self.assertEqual((p.grace, p.payee_window, p.fee_min, p.fee_bps, p.ref_window, p.ref_lag),
-                         (yu.GRACE, yu.PAYEE_WINDOW, yu.FEE_MIN, yu.FEE_BPS, yu.REF_WINDOW, yu.REF_LAG))
+        self.assertEqual((p.grace, p.payee_window, p.fee_bands, p.fee_floor_cents, p.ref_window, p.ref_lag),
+                         (yu.GRACE, yu.PAYEE_WINDOW, yu.FEE_BANDS, yu.FEE_FLOOR_CENTS, yu.REF_WINDOW, yu.REF_LAG))
         self.assertEqual((p.token_value, p.yellowback_fee, p.min_mint, p.max_mint), (yu.TOKEN_VALUE, yu.YELLOWBACK_FEE, yu.MIN_MINT, yu.MAX_MINT))
         for i, name in enumerate('ABC'):
             self.assertEqual((p.class_min[i], p.class_max[i], p.base_ratio_bps[i]), yu.CLASS_RANGES[name])

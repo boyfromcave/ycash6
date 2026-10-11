@@ -287,7 +287,7 @@ struct Builder
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
-        m.vout.push_back(CTxOut(FeeZat(collateral, P.feeMin, P.feeBps), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
+        m.vout.push_back(CTxOut(ProtocolFeeZat(cents, Snap(refHeight).PMint().value(), P).value(), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));   // FEE-1' at xMint(R)
         return m;
     }
 
@@ -306,8 +306,8 @@ struct Builder
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << valtype(71, 0x30) << OP_2, 0xFFFFFFFE));   // U-23: the V's owner selector
         for (const COutPoint& o : yed) m.vin.push_back(CTxIn(o));
         m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
-        CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
-        if ((int64_t)refHeight + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: an owner redeem mined before lockHeight
+        CAmount fee = ProtocolFeeZat(v->mintedCents, v->pMint, P).value();   // RED-3': the debt at the vault's pMint
+        if ((int64_t)refHeight + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->mintedCents, P.earlyRedeemFeeBps[v->termClass], v->pMint);   // IT-9': an owner redeem mined before lockHeight
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         if (wellFormed) {
             m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {})))));
@@ -422,7 +422,7 @@ struct Builder
         const int payee = FirstSeq(bundle);
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
-        const CAmount fee = FeeZat(collateral, P.feeMin, P.feeBps);
+        const CAmount fee = ProtocolFeeZat(cents, pMint, P).value();   // FEE-1' at min(xMint, aMint)
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         if (payee >= 0) m.vout.push_back(CTxOut(AttestFeeZat(fee, P.attestFeeBps), GetScriptForDestination(bondKeys[payee].GetPubKey().GetID())));
         m.vin.push_back(CarrierIn(bundle));
@@ -444,7 +444,7 @@ struct Builder
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 1)));
         m.vin.push_back(CTxIn(FakeInput()));
         m.vout.push_back(CTxOut(v->collateralZat - residual.value_or(0), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(userKey.GetPubKey().GetID())))));
-        const CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
+        const CAmount fee = ProtocolFeeZat(v->mintedCents, v->pMint, P).value();   // RED-3': the claimant pays the redeem fee at the vault's pMint
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         const int payee = FirstSeq(bundle);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {}, payee >= 0 ? 3 : FEE_VOUT_NONE)))));

@@ -188,7 +188,8 @@ struct Fixture
         s.withPayload = withPayload;
         s.refHeight = 250;
         if (withPayee) s.payee = payeeKey.GetPubKey().GetID();
-        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps) + (ownerPath ? EarlyRedeemFeeZat(vaultValue, params.earlyRedeemFeeBps[0]) : 0);   // IT-9: judged at H = R + 3 < lockHeight 300
+        // FEE-1' / IT-9': a nominal $100 debt minted at $10: $1 protocol fee = 0.1 YEC, early fee 5 % of $100 = 0.5 YEC (judged at H = R + 3 < lockHeight 300)
+        s.feeZat = ProtocolFeeZat(10000, 10000000, params).value() + (ownerPath ? EarlyRedeemFeeZat(10000, params.earlyRedeemFeeBps[0], 10000000) : 0);
         s.yedInputs = yed;
         s.changeCents = change;
         s.changeScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
@@ -366,12 +367,11 @@ CMutableTransaction ArmedMint(const Armed& a, Cents cents, const std::vector<uns
     s.vaultOwner = TestPQOwner(s.owner);
     s.vaultScript = YedVaultScript(a.P, s.vaultOwner, a.R);     // U-23, IT-1
     const MicroUsd pMint = aMint.has_value() ? std::min(a.x, aMint.value()) : a.x;
-    CAmount collateral = std::max(RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value(), 4 * a.P.feeMin);
-    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
+    const CAmount collateral = RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value();   // MINT-5': no 4 x FEE_MIN floor
     s.collateralZat = collateral;
     s.payee = DefaultPayee(a.view, a.P, a.R, std::vector<unsigned char>(s.owner.begin(), s.owner.end()), PayeePolicy::Defaults(a.P));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(collateral, a.P.feeMin, a.P.feeBps);
+    s.feeZat = ProtocolFeeZat(cents, pMint, a.P).value();   // FEE-1' at min(xMint, aMint)
     std::vector<uint16_t> sel;
     BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, std::vector<unsigned char>(), &sel);
     if (withAttestFee && v.ok) {
@@ -420,7 +420,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     int feeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(s, feeVout);
@@ -495,10 +495,10 @@ BOOST_AUTO_TEST_CASE(mint_shape_passes_the_state_machine)
     s.vaultScript = YedVaultScript(f.params, s.vaultOwner, R);
     std::optional<CAmount> required = RequiredCollateralRounded(s.cents, MinRatioBps(f.params.baseRatioBps[0], S.sigmaMultBps), pMint);
     BOOST_REQUIRE(required.has_value());
-    s.collateralZat = std::max(required.value(), 4 * f.params.feeMin);
+    s.collateralZat = required.value();
     s.payee = DefaultPayee(view, f.params, R, std::vector<unsigned char>(s.owner.begin(), s.owner.end()), PayeePolicy::Defaults(f.params));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, pMint, f.params).value();   // FEE-1'
     int feeVout = -1;
     CMutableTransaction mtx = Shell(R + REF_WINDOW);
     mtx.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
@@ -717,6 +717,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         v.ownerHeight = f.appHeight;
         v.collateralZat = f.vaultValue;
         v.mintedCents = 10000;   // $100 against 5 YEC
+        v.pMint = 20000000;      // minted at $20 (FEE-1': the $1 fee = 0.05 YEC, payable from 5 YEC)
         v.mintHeight = 200;
         v.refHeight = 197;
         v.status = (uint8_t)status;
@@ -863,7 +864,7 @@ BOOST_AUTO_TEST_CASE(v3_mint_layout_places_the_attestor_fee_after_the_pool_fee)
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     const CKey bondKey = NewKey();
     s.attestPayee = bondKey.GetPubKey().GetID();
@@ -1059,7 +1060,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
     BOOST_CHECK_EQUAL(o.log.verdict, verdict::OK);
     BOOST_CHECK_EQUAL(o.log.bundleSeqs.size(), 3u);
     BOOST_CHECK_EQUAL(o.log.aMint, aPrice);
-    BOOST_CHECK_EQUAL(o.log.attestFeeZat, AttestFeeZat(FeeZat(collateral, a.P.feeMin, a.P.feeBps), a.P.attestFeeBps));
+    BOOST_CHECK_EQUAL(o.log.attestFeeZat, AttestFeeZat(ProtocolFeeZat(100000, std::min(a.x, aPrice), a.P).value(), a.P.attestFeeBps));   // AFEE-1' on FEE-1' at min(x, aMint)
     BOOST_CHECK(o.log.hasAttestPayee);
     // The same collateral sized at xMint alone would be short under the combined pMint (MINT-5).
     {
@@ -1126,6 +1127,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     vault.ownerHeight = a.R - 81;
     vault.collateralZat = 50 * COIN;
     vault.mintedCents = 10000;
+    vault.pMint = 2600000;           // minted at the pools' $2.60 (FEE-1')
     vault.mintHeight = a.R - 80;
     vault.refHeight = a.R - 82;
     vault.status = (uint8_t)VaultStatus::ACTIVE;
@@ -1166,7 +1168,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     s.refHeight = a.R;
     s.payee = DefaultPayee(a.view, a.P, a.R, selector, PayeePolicy::Defaults(a.P));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(vault.collateralZat, a.P.feeMin, a.P.feeBps);
+    s.feeZat = ProtocolFeeZat(vault.mintedCents, vault.pMint, a.P).value();   // RED-3'
     s.yedInputs = { coin };
     s.collateralScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
     s.networkFee = DEFAULT_YELLOWBACK_FEE;
@@ -1354,7 +1356,7 @@ BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
         m.vaultScript = YedVaultScript(a.P, m.vaultOwner, m.refHeight); // U-23, IT-1
         m.collateralZat = 251 * COIN;
         m.payee = NewKey().GetPubKey().GetID();
-        m.feeZat = FeeZat(m.collateralZat, a.P.feeMin, a.P.feeBps);
+        m.feeZat = ProtocolFeeZat(m.cents, a.x, a.P).value();       // FEE-1' at the pools' price
         m.attestPayee = a.bond[0].GetPubKey().GetID();
         m.attestFeeZat = AttestFeeZat(m.feeZat, a.P.attestFeeBps);
         int feeVout = -1, attestFeeVout = -1;

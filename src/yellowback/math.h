@@ -181,22 +181,51 @@ inline bool IsUnderwater(CAmount collateralZat, std::optional<MicroUsd> pClaim, 
     return lhs < rhs;
 }
 
-/** FEE-1: feeZat(collateralZat) = max(feeMin, collateralZat * feeBps / 10^4). Never overflows: collateral <= MAX_MONEY. */
-/** IT-9: the early-redeem fee, collateral * earlyRedeemFeeBps / 10^4 (floor, no minimum); 0 at or after lockHeight. */
-inline CAmount EarlyRedeemFeeZat(CAmount collateralZat, int earlyRedeemFeeBps)
+/**
+ * FEE-1' (quantum plan D-Q-23, fees spec §1.3): the protocol fee of a debt in cent-bps (cents x bps): the sum
+ * over the bands of (the debt inside the band) x the band's bps, then at least feeFloorCents x 10^4. Pure,
+ * total, never overflows (debt <= maxMint: 1.45 x 10^8 at $100,000). The bands are Params::feeBands (parameters).
+ */
+inline int64_t ProtocolFeeUnits(Cents debtCents, const Params& P)
 {
-    if (collateralZat < 0 || earlyRedeemFeeBps <= 0) return 0;
-    arith_uint256 f = arith_uint256(collateralZat) * arith_uint256(earlyRedeemFeeBps) / arith_uint256(BPS);
-    return FitsInt64(f) ? (CAmount)f.GetLow64() : MAX_MONEY;
+    if (debtCents <= 0) return 0;
+    int64_t units = 0, lo = 0;
+    for (int i = 0; i < FEE_BANDS; i++) {
+        const Cents hi = P.feeBands[i].uptoCents;                 // 0 = unbounded
+        const Cents inBand = (hi == 0 ? debtCents : std::min(debtCents, hi)) - lo;
+        if (inBand <= 0) break;
+        units += (int64_t)inBand * (int64_t)std::max(0, P.feeBands[i].bps);
+        lo = hi;
+    }
+    return std::max(units, (int64_t)std::max<Cents>(0, P.feeFloorCents) * BPS);
 }
 
-inline CAmount FeeZat(CAmount collateralZat, CAmount feeMin, int feeBps)
+/** The dollar fee for display and RPC: ceil(units / 10^4) cents. */
+inline Cents ProtocolFeeCents(Cents debtCents, const Params& P) { return (ProtocolFeeUnits(debtCents, P) + BPS - 1) / BPS; }
+
+/**
+ * FEE-1' in zat at the vault's mint price: ceil(units x COIN / pMint) = the YEC worth of the dollar fee, rounded
+ * up to the zat (cents / 100 USD / (pMint / 10^6 USD per YEC) x 10^8 zat = cents x 10^12 / pMint = units x 10^8 /
+ * pMint: RequiredCollateral's arithmetic with the fee's bps). nullopt when pMint is undefined (<= 0); MAX_MONEY
+ * when the quotient does not fit (unreachable for a vault that exists, fees spec §1.6).
+ */
+inline std::optional<CAmount> ProtocolFeeZat(Cents debtCents, MicroUsd pMint, const Params& P)
 {
-    if (collateralZat < 0) collateralZat = 0;
-    if (feeBps < 0) feeBps = 0;
-    arith_uint256 f = arith_uint256(collateralZat) * arith_uint256(feeBps) / arith_uint256(BPS);
-    CAmount fee = FitsInt64(f) ? (CAmount)f.GetLow64() : MAX_MONEY;
-    return std::max(feeMin, fee);
+    if (pMint <= 0) return std::nullopt;
+    arith_uint256 f = CeilDiv(arith_uint256(ProtocolFeeUnits(debtCents, P)) * arith_uint256(COIN), arith_uint256(pMint));
+    return FitsInt64(f) && MoneyRange((CAmount)f.GetLow64()) ? (CAmount)f.GetLow64() : MAX_MONEY;
+}
+
+/**
+ * IT-9' (D-Q-23): the early-redeem fee, bps of the DEBT at the mint price: ceil(debt x bps x COIN / pMint), no floor;
+ * 0 at or after lockHeight (the caller's test), when bps <= 0 or when pMint is undefined. MAX_MONEY when the quotient
+ * does not fit (unreachable for a vault that exists: protocol + early <= collateral / 50 + 2 zat, fees spec §1.6).
+ */
+inline CAmount EarlyRedeemFeeZat(Cents debtCents, int earlyRedeemFeeBps, MicroUsd pMint)
+{
+    if (debtCents <= 0 || earlyRedeemFeeBps <= 0 || pMint <= 0) return 0;
+    arith_uint256 f = CeilDiv(arith_uint256(debtCents) * arith_uint256(earlyRedeemFeeBps) * arith_uint256(COIN), arith_uint256(pMint));
+    return FitsInt64(f) && MoneyRange((CAmount)f.GetLow64()) ? (CAmount)f.GetLow64() : MAX_MONEY;
 }
 
 // ---------------------------------------------------------------- v3 (v3 plan §3.7)
@@ -274,7 +303,7 @@ inline CAmount ResidualZat(CAmount collateralZat, std::optional<CAmount> claiman
     return collateralZat - claimantMaxZat.value();
 }
 
-/** attestFeeZat = feeZat * attestFeeBps / 10^4 (floor; AFEE-1). feeZat is FEE-1's, so it never overflows. */
+/** attestFeeZat = feeZat * attestFeeBps / 10^4 (floor; AFEE-1'). feeZat is FEE-1''s protocol fee (never the early fee), so it never overflows. */
 inline CAmount AttestFeeZat(CAmount feeZat, int attestFeeBps)
 {
     if (feeZat <= 0 || attestFeeBps <= 0) return 0;

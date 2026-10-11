@@ -31,8 +31,12 @@ void SetCommon(Params& p)
     p.accuracyBandBps = 300;
     p.payeeWindow     = 100;
 
-    p.feeMin = 50000000;            // 0.5 YEC (V10)
-    p.feeBps = 15;                  // H-4 (was 25)
+    // FEE-1' (D-Q-23, fees spec §1.1): the protocol fee in dollars at the vault's mint price, tiered by the debt
+    // (replaces max(0.5 YEC, 15 bps of the collateral)); yb-calibration's fee study (D-Q-23a) confirmed these values
+    p.feeBands[0].uptoCents = 100000;   p.feeBands[0].bps = 100;   // the first $1,000 at 1.0 %
+    p.feeBands[1].uptoCents = 1000000;  p.feeBands[1].bps = 50;    // $1,000 - $10,000 at 0.5 %
+    p.feeBands[2].uptoCents = 0;        p.feeBands[2].bps = 10;    // above $10,000 at 0.1 % (unbounded)
+    p.feeFloorCents = 100;              // $1 per action
 
     p.grace              = 34560;   // 30 d
     p.claimDelay         = 576;     // CLAIM_DELAY 12 h (U-23; owner 2026-10-07, was 1,152): the window in which one attestor can cancel a claim
@@ -48,8 +52,8 @@ void SetCommon(Params& p)
     p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 30000;   // A: 30-90 d, 300 %
     p.classMin[1] = 103681; p.classMax[1] = 207360;  p.baseRatioBps[1] = 40000;   // B: 91-180 d, 400 %
     p.classMin[2] = 207361; p.classMax[2] = 420480;  p.baseRatioBps[2] = 50000;   // C: 181-365 d, 500 %
-    // IT-9 (owner, 2026-10-07): an owner redeem before lockHeight pays, on top of FEE-1, this share of the collateral
-    p.earlyRedeemFeeBps[0] = 500; p.earlyRedeemFeeBps[1] = 250; p.earlyRedeemFeeBps[2] = 100;
+    // IT-9 (owner, 2026-10-07): an owner redeem before lockHeight pays, on top of FEE-1', this share of the debt
+    p.earlyRedeemFeeBps[0] = 500; p.earlyRedeemFeeBps[1] = 250; p.earlyRedeemFeeBps[2] = 100;   // IT-9' (D-Q-23): of the debt at pMint
 
     p.volWindow         = 2016;
     p.volStep           = 48;
@@ -103,7 +107,7 @@ Params::Params()
     : startHeight(0), claimDelay(0),
       pFastWindow(0), pMidWindow(0), pSlowWindow(0), pFastMinFill(0), pMidMinFill(0), pSlowMinFill(0),
       nReg(0), peerLag(0), peerMin(0), deviationBps(0), accuracyBandBps(0), payeeWindow(0),
-      feeMin(0), feeBps(0),
+      feeFloorCents(0),
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), recapRatioBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
       minMint(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
@@ -118,6 +122,9 @@ Params::Params()
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = earlyRedeemFeeBps[i] = 0;
+    }
+    for (int i = 0; i < FEE_BANDS; i++) {
+        feeBands[i].uptoCents = 0; feeBands[i].bps = 0;
     }
 }
 
@@ -198,8 +205,8 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.grace = 24;
     r.claimDelay = 10;
     // The hardening plan's mainnet values (H-4, H-11, H-12) stay out of the regtest column: its
-    // scripts' fee, cap and recapitalisation arithmetic is written against the v3 values.
-    r.feeBps             = 25;
+    // scripts' cap and recapitalisation arithmetic is written against the v3 values. The protocol fee
+    // bands and floor are mainnet's on every network (fees spec §4.3 ambiguity 8).
     r.attestFeeBps       = 2500;
     r.maxMint            = 1000000;
     r.globalRatioHaltBps = 25000;   // (below class A's 300 % base, the §1.4 invariant; the in-term plan's §3 brackets leave it)

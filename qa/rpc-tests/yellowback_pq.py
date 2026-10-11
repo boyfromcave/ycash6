@@ -52,8 +52,8 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
-    early_redeem_fee_zat,
-    fee_zat,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     set_quote,
     usd_to_micro,
@@ -116,7 +116,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
     def raw_mint(self, node, owner=None, token_script=None, lock_blocks=48):
         r = node.yed_getinfo()['height'] - REF_LAG
         coll = node.yed_estimatecollateral(10000, lock_blocks)['requiredZat']
-        payee = node.yed_getfeepayee(r, coll)['default']['payoutAddress']
+        payee = node.yed_getfeepayee(r)['default']['payoutAddress']
         return build_mint_tx(node, 10000, lock_blocks, r, coll, fee_addr=payee,
                              owner_pubkey=None if owner is None else bytes_to_hex_str(owner), token_script=token_script)
 
@@ -221,7 +221,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_validateaddress(vault['ownerAddress'])['ismine'], True)
         print("the owner's redeem from the wallet: an SLH-DSA owner signature (q/wallet's signer), the early-redeem fee")
         redeemed = user.yed_redeem(m['txid'])
-        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, early_redeem_fee_zat(vault['collateralZat'], 'A')))
+        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, vault_early_redeem_fee_zat(vault)))
         sig_hex = user.getrawtransaction(redeemed['txid'], 1)['vin'][0]['scriptSig']['hex']
         assert_greater_than(len(sig_hex) // 2, 7900)                                                  # 7,938 + the OP_2 selector
         assert sig_hex.endswith('52')
@@ -285,8 +285,8 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         pv = user.yed_getvault(mint_txid)
         assert_equal((pv['status'], pv['ownerScheme'], pv['ownerHash']), ('ACTIVE', 1, owner_hex[2:]))
         r = user.getblockcount()
-        payee = user.yed_getfeepayee(r, pv['collateralZat'])['default']['payoutAddress']
-        fee = fee_zat(pv['collateralZat']) + early_redeem_fee_zat(pv['collateralZat'], 'A')            # IT-9: before lockHeight
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']
+        fee = vault_fee_zat(pv) + vault_early_redeem_fee_zat(pv)                                       # IT-9': before lockHeight
         coin = coin_of(user, 10000)
         spend_hex = build_vault_spend_raw(user, pv, 'owner', [(coin['txid'], coin['vout'])],
                                           payload=ym.encode_redeem(r, 1, []), fee=(payee, fee), ref_height=r)

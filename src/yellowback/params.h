@@ -101,6 +101,19 @@ static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
 static const uint8_t FEE_VOUT_NONE = 0xFF;
 
 /**
+ * FEE-1' (quantum plan D-Q-23, fees spec §1.1): the protocol fee is tiered by the vault's debt, in cents, like
+ * tax brackets. A band covers (the previous band's uptoCents, uptoCents]; the last band has uptoCents = 0 =
+ * unbounded. The values are parameters (yb-calibration's fee study may change them before activation): read
+ * them from Params, never restate them.
+ */
+static const int FEE_BANDS = 3;
+struct FeeBand
+{
+    Cents uptoCents;   //!< the band's upper edge in cents (inclusive); 0 = unbounded (the last band only)
+    int bps;           //!< the rate inside the band, basis points of the debt
+};
+
+/**
  * Where a transaction carries its attestation bundle (v3 plan §3.1 BUNDLE_CARRIER, W2):
  * the scriptSig of a P2SH carrier input (shipped), the OP_RETURN payload tail
  * (unshipped), or either. Regtest-only override -yellowbackbundlecarrier.
@@ -147,9 +160,9 @@ struct Params
     int accuracyBandBps;                 //!< 300
     int payeeWindow;                     //!< 100
 
-    // Enforcement fee (FEE-1)
-    CAmount feeMin;                      //!< 0.5 YEC
-    int feeBps;                          //!< 15 (H-4; regtest 25)
+    // Protocol fee (FEE-1', D-Q-23): dollars, converted to YEC at the vault's stored mint price (VaultRecord.pMint)
+    FeeBand feeBands[FEE_BANDS];         //!< { {100000, 100}, {1000000, 50}, {0, 10} }: the first $1,000 at 1.0 %, $1,000-$10,000 at 0.5 %, above at 0.1 %
+    Cents feeFloorCents;                 //!< 100: $1 per action (mint, redeem, claim); the early fee has no floor
 
     // Vaults
     int grace;                           //!< claimHeight = lockHeight + grace
@@ -161,7 +174,7 @@ struct Params
     int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive;
     int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5; none is since D-IT-9)
     int baseRatioBps[NUM_CLASSES];       //!< 30,000 / 40,000 / 50,000 (D-IT-4)
-    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9: 500 / 250 / 100 bps of the collateral, charged on an owner redeem before lockHeight on top of FEE-1
+    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9': 500 / 250 / 100 bps of the DEBT at pMint (D-Q-23; was of the collateral), charged on an owner redeem before lockHeight on top of FEE-1'
 
     // Volatility (SIGMA-1, V17)
     int volWindow;                       //!< 2,016

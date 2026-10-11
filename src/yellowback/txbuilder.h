@@ -156,7 +156,7 @@ struct MintShape
     CPQKeyID vaultOwner;                    //!< the V's and the payload's owner (quantum plan §4.3: a post-quantum key)
     CAmount collateralZat;                  //!< vout[0].nValue (>= requiredZat, >= 4 * FEE_MIN, rounded)
     std::optional<CKeyID> payee;            //!< nullopt under FEE-0: no fee output, feeVout = 0xFF
-    CAmount feeZat;                         //!< FeeZat(collateralZat)
+    CAmount feeZat;                         //!< ProtocolFeeZat(cents, pMint) (FEE-1')
     std::optional<CKeyID> attestPayee;      //!< v3 AFEE-1: P2PKH(bondPubKey(s)) of attestFeeZat after the pool fee; nullopt under AFEE-0
     CAmount attestFeeZat;
     CScript vaultScript;                    //!< U-23: the V template (YedVaultScript) vout[0] carries
