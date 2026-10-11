@@ -761,8 +761,9 @@ class Walk:
         bal = self.node(HOLDER).yed_getbalance()["confirmedCents"]
         b = self.call(HOLDER, "yed_send", to_c, bal, keys=["txid", "burnedCents"])
         self.wait_mempool(b["txid"]); self.mine(1)
-        tx = self.node(HOLDER).getrawtransaction(b["txid"], 1)
-        pq_in = [v for v in tx["vin"] if self.holder_kind(self.node(HOLDER).getrawtransaction(v["txid"], 1)["vout"][v["vout"]]["scriptPubKey"]["hex"]) == kind]
+        # node 0 has -txindex: a spent input's transaction is not found elsewhere once all its outputs are spent
+        tx = self.node(USER).getrawtransaction(b["txid"], 1)
+        pq_in = [v for v in tx["vin"] if self.holder_kind(self.node(USER).getrawtransaction(v["txid"], 1)["vout"][v["vout"]]["scriptPubKey"]["hex"]) == kind]
         self.ok(pq_in and min(len(v["scriptSig"]["hex"]) // 2 for v in pq_in) > (7_800 if kind == "slh" else 1_500) and not b.get("burnedCents"),
                 "the holder's %s coin moved on to the claimant's PQ address: a %s holder signature (scriptSig %d bytes), nothing burned"
                 % (kind, "SLH-DSA" if kind == "slh" else "FN-DSA-512", len(pq_in[0]["scriptSig"]["hex"]) // 2 if pq_in else 0))
