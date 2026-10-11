@@ -385,14 +385,15 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
     def bad_mint(self, node):
         """A $50 mint (MINT-2: bad-mint-amount) on the YED V, signed by ``node``'s wallet."""
         params = ym.Params.regtest(ACTIVATION, attestor_set=self.set_id)
-        owner = hex_str_to_bytes(node.validateaddress(node.getnewaddress())['pubkey'])
+        owner = hex_str_to_bytes(node.vault_getnewowner()['owner'])          # a post-quantum owner (quantum plan §4.3)
+        holder = ym.hash160(hex_str_to_bytes(node.validateaddress(node.getnewaddress())['pubkey']))
         ref = node.getblockcount() - REF_LAG
         lock = ref + 48
-        coin = [u for u in node.listunspent() if u['amount'] > 2][0]
+        coin = [u for u in node.listunspent() if u['amount'] > 2 and u['scriptPubKey'].startswith('76a914')][0]
         vouts = [(1 * ym.COIN, ym.yed_vault_script(params, owner, ref)),
-                 (10_000, ym.p2pkh_script(ym.hash160(owner))),
+                 (10_000, ym.p2pkh_script(holder)),
                  (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_mint(0, 5_000, lock, ref, owner, ym.FEE_VOUT_NONE))),
-                 (int(coin['amount'] * ym.COIN) - 1 * ym.COIN - 10_000 - 10_000, ym.p2pkh_script(ym.hash160(owner)))]
+                 (int(coin['amount'] * ym.COIN) - 1 * ym.COIN - 10_000 - 10_000, ym.p2pkh_script(holder))]
         raw = ym.serialize_tx_v4([(coin['txid'], coin['vout'], b'', 0xFFFFFFFF)], vouts, 0, ref + 40).hex()
         signed = node.signrawtransaction(raw)
         assert signed['complete'], signed
