@@ -446,6 +446,7 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(o2), 1000)));
     BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
     BOOST_CHECK(b.HavePQKey(beyond));
+    BOOST_CHECK(!b.HavePQKey(WalletDerived(1, PQ_KEY_LOOKAHEAD + 3).GetID()));
     // and a vault V whose owner is the Falcon key h0 (index 0 of scheme 2)
     vault::VaultParams vp;
     vp.tag = {'T', 'E', 'S', 'T'};
@@ -461,6 +462,26 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(o0), 1000)));
     b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(CPQKeyID(1, uint256S("0x99"))), 1000)));
     BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+    // Quantum review F-1 (ycash-dd 90f175ca1): a key of another seed stored with its foreign index (1000;
+    // 0xfffffffe, one below PQ_INDEX_NONE) never moves B's index: not by MarkPQKeyUsed, not when seen on chain.
+    for (uint32_t foreignIndex : {1000U, 0xfffffffeU}) {
+        CPQKey foreign;
+        std::vector<unsigned char> other(48, 0x5a);
+        other[0] = (unsigned char)(foreignIndex & 0xff);
+        BOOST_REQUIRE(foreign.Set(1, CPQKey::Secret(other.begin(), other.end()), foreignIndex));
+        BOOST_CHECK(!b.IsOwnPQKey(foreign));
+        BOOST_REQUIRE(b.AddPQKey(foreign));
+        b.MarkPQKeyUsed(foreign.GetID());
+        b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(foreign.GetID()), 1000)));
+        BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+    }
+    // even an own key at 0xfffffffe cannot push the index to PQ_INDEX_NONE (GetNewPQKey would fail for good)
+    const CPQKey ownTop = WalletDerived(1, 0xfffffffeU);
+    BOOST_CHECK(b.IsOwnPQKey(ownTop));
+    BOOST_REQUIRE(b.AddPQKey(ownTop));
+    b.MarkPQKeyUsed(ownTop.GetID());
+    BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+
     CPQKeyID next, nextF;
     BOOST_REQUIRE(b.GetNewPQKey(1, next) && b.GetNewPQKey(2, nextF));
     BOOST_CHECK(next == WalletDerived(1, 3).GetID());
@@ -469,6 +490,21 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     CPQKeyID an;
     BOOST_REQUIRE(a.GetNewPQKey(1, an));
     BOOST_CHECK(an == next);
+
+    // A wallet without the "pqissued" record (one that predates the lookahead) continues one past its highest
+    // own-seed key (quantum review F-1; 6.20.0 started such a wallet at 0 before it).
+    CWallet c(Params());
+    LOCK(c.cs_wallet);
+    BOOST_REQUIRE(c.SetMnemonicSeed(TestMnemonicSeed()));
+    BOOST_REQUIRE(c.LoadPQKey(WalletDerived(1, 0), 0) && c.LoadPQKey(WalletDerived(1, 1), 0));
+    CPQKey legacyForeign;                                    // a foreign key a wallet stored with its index before F-1
+    const std::vector<unsigned char> lf(48, 0x6b);
+    BOOST_REQUIRE(legacyForeign.Set(1, CPQKey::Secret(lf.begin(), lf.end()), 500));
+    BOOST_REQUIRE(c.LoadPQKey(legacyForeign, 0));
+    CPQKeyID cn;
+    BOOST_REQUIRE(c.GetNewPQKey(1, cn));
+    BOOST_CHECK(cn == WalletDerived(1, 2).GetID());        // one past the highest own index, not 0, not 501
+    BOOST_CHECK_EQUAL(c.mapPQIssued[1], 3U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -484,6 +484,12 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
                 fGood = false;
                 continue;
             }
+            // Quantum review F-1: the dump's index belongs to the seed the key came from. A key of another seed is
+            // stored with PQ_INDEX_NONE, so it never moves this wallet's issued index (nor its fallback).
+            if (!pwalletMain->IsOwnPQKey(pqkey) && !pqkey.Set(pqkey.Scheme(), seed, CPQKey::PQ_INDEX_NONE)) {
+                fGood = false;
+                continue;
+            }
             if (pwalletMain->HavePQKey(pqkey.GetID())) {
                 LogPrintf("Skipping import of a post-quantum key (key already present)\n");
                 pwalletMain->MarkPQKeyUsed(pqkey.GetID());   // 6.20.0 (review B I-2): never issued again

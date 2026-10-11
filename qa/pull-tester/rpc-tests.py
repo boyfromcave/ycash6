@@ -92,6 +92,8 @@ BASE_SCRIPTS= [
     # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',
+    # The PQ key lookahead and quantum review F-1: a restored wallet re-finds its PQ keys; foreign keys never move the index.
+    'vault_pq_wallet_restore.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',
