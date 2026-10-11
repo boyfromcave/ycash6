@@ -104,7 +104,7 @@ bool StartsWith(const std::string& s, const char* prefix)
                                         "bond-below-min", "lock-below-min", "bond-locked", "bond-spent", "not-dormant", "not-equivocation",
                                         "attest-unknown-seq", "attest-key-not-held", "attest-range", "attest-stale", "equivocation-guard",
                                         "carrier-lapsed", "carrier-unconfirmed", "register-refused", "bad-mint-", "vault-spend-", "vault-claim-",
-                                        "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-dry-run", nullptr };
+                                        "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-vault-share", "mint-dry-run", nullptr };
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
                                          "vault-not-owned", "not-a-yellowback-address", "bad-address",
                                          "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
@@ -1019,7 +1019,7 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     o.pushKV("burnedCents", active ? v.mintedCents : (int64_t)0);
     o.pushKV("collateralZat", v.collateralZat);
     o.pushKV("pMint", v.pMint);                                 // rpcversion 8: the price every fee below is struck at
-    o.pushKV("protocolFeeCents", active ? ProtocolFeeCents(v.mintedCents, p) : (Cents)0);
+    o.pushKV("protocolFeeCents", active && payee.has_value() ? ProtocolFeeCents(v.mintedCents, p) : (Cents)0);   // 0 under FEE-0: not charged
     o.pushKV("protocolFeeZat", fee1);                           // 0 under FEE-0 or on a release
     o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1' plus the early-redeem fee
     o.pushKV("earlyRedeemFeeBps", p.IsValidClass(v.termClass) ? p.earlyRedeemFeeBps[v.termClass] : 0);

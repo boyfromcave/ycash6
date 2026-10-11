@@ -45,7 +45,12 @@ checks live answers against it. Edit this document, then regenerate.
 - **Fees**: every transaction these RPCs build pays a flat 10,000 zatoshi from the wallet's
   confirmed transparent P2PKH coins (change to a new wallet address). Coins chosen are locked in
   the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
-  first transaction confirms.
+  first transaction confirms. `vault_ownerspend` prices its owner spend instead (below). Every
+  transaction these RPCs broadcast must pay a network fee within the vault/Yellowback cap,
+  min(max(`-maxtxfee`, `-yellowbackmaxtxfeeusd` (default $2) at the attested price),
+  `-yellowbackmaxtxfee` (default 10 YEC)), never below max(`-yellowbackfee`, 10,000 zat); the
+  node submits them without the `-maxtxfee` absurd-fee check, so it enforces that cap itself and
+  refuses one above it with `-26` `absurdly-high-fee: … exceeds the vault/Yellowback cap …`.
 - **Heights**: unless stated, rules are evaluated at the next block (`tip + 1`) against the set
   state after the tip, exactly as the mempool does (plan U-17).
 - **Errors**: RPC error `-8` (invalid parameter), `-5` (unknown set / outpoint / address),
@@ -317,7 +322,12 @@ Spends a vault with its owner key (in this wallet) to `address`, less the fee: s
 `nLockTime = ownerheight` once the next block is above `ownerheight`, else selector 3 when the
 set is released (dormant or wound down). An intent has only selector 3. The owner is a
 post-quantum key this wallet must hold (an external owner signs outside the node); the fee is
-max(10,000 zat, `-pqfeerate` × size) (quantum plan §4.5).
+max(10,000 zat, the vault/Yellowback rate × size), capped at the vault/Yellowback cap (above):
+the rate is `-yellowbackfeeusdperkb` (default $0.05/KB) at the attested price -- the highest of the
+Yellowback index tip's window medians, none while a halt bit is set -- never below
+max(5,000 zat/KB, `-pqfeerate`); without an attested price (no Yellowback index, below its start,
+under a halt) it is `-pqfeerate` (quantum plan §4.5, D-Q-23 (b), D-Q-26;
+`yed_getinfo.params.fees.network` reports the values in force).
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
 Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`

@@ -337,7 +337,8 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_getinfo()['params']['pq']['feeRateZatPerKB'], 100)
         assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount())
         est = user.yed_estimateredeem(m['txid'])
-        assert_equal((est['pMint'], est['protocolFeeZat'], est['feeZat'], est['payee']), (vlast['pMint'], 0, 0, None))
+        assert_equal((est['pMint'], est['protocolFeeCents'], est['protocolFeeZat'], est['feeZat'], est['earlyRedeemFeeCents'], est['payee']),
+                     (vlast['pMint'], 0, 0, 0, 0, None))                                          # FEE-0: every fee field 0, the cents too
         redeemed = user.yed_redeem(m['txid'])
         assert_equal((redeemed['feeZat'], redeemed['payee']), (0, None))
         net_fee, raw = network_fee_of(user, redeemed['txid'])

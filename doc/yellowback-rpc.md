@@ -108,7 +108,12 @@ the debt and the mint price, quoted by the estimate RPCs); `yed_estimatefee` cha
 `yed_estimateredeem.pMint` / `protocolFeeCents` / `protocolFeeZat` / `earlyRedeemFeeCents`. Changed meanings:
 `params.pq.feeRateZatPerKB` = `params.fees.network.plain.zatPerKB` (so `rpcversion`-7 clients keep working);
 `params.earlyRedeemFeeBps` and `classes[].earlyRedeemFeeBps` are of the debt; every `feeZat` /
-`attestFeeZat` / `feePaidZat` is the same field on the new base.
+`attestFeeZat` / `feePaidZat` is the same field on the new base. The samples below are a regtest node's:
+`fees.protocol.attestFeeBps` is 2,500 there (the regtest parameter set) and 5,000 on mainnet and testnet
+(`ATTEST_FEE_BPS`, AFEE-1′), so a sample `attestFeeZat` is a quarter of the protocol fee where mainnet's is
+half; the sample vault ($1,000 minted at `pMint` $1.985) pays a $10 protocol fee = 503,778,338 zat and, in
+term, a 5 % early fee of the debt = 2,518,891,688 zat. Under FEE-0 (no eligible payee) every protocol and
+early fee field is `0`, `protocolFeeCents` and `earlyRedeemFeeCents` included.
 
 **Post-quantum owners (`rpcversion` 7; docs/plans/yellowback-quantum-spec.md §3, §4, §6.2; quantum plan
 §4.4).** Every vault's owner is a post-quantum key id, `scheme ‖ keyHash` (scheme 1 SLH-DSA-SHA2-128s, 2
@@ -394,10 +399,10 @@ Result of `yed_getinfo`:
       },
       "earlyRedeemFeeBps": [ 500, 250, 100 ],
       "network": {
-        "priceMicroUsd": 50000,
+        "priceMicroUsd": 400000,
         "priceSource": "tip",
-        "plain": { "usdPerKBMicro": 20000, "zatPerKB": 40000000 },
-        "yellowback": { "usdPerKBMicro": 50000, "zatPerKB": 100000000, "maxTxFeeUsdMicro": 2000000, "maxTxFeeCeilingZat": 1000000000, "maxTxFeeZat": 1000000000 },
+        "plain": { "usdPerKBMicro": 20000, "zatPerKB": 5000000 },
+        "yellowback": { "usdPerKBMicro": 50000, "zatPerKB": 12500000, "maxTxFeeUsdMicro": 2000000, "maxTxFeeCeilingZat": 1000000000, "maxTxFeeZat": 500000000 },
         "floorZatPerKB": 5000,
         "fallbackZatPerKB": 100,
         "flatZat": 1000,
@@ -407,7 +412,7 @@ Result of `yed_getinfo`:
     "supplyCap": {
       "circulatingZat": 1656250000000,
       "issuedBeforeStartZat": 625000000000,
-      "priceMicroUsd": 50000,
+      "priceMicroUsd": 400000,
       "capCents": null,
       "maxVaultShareBps": 1000,
       "vaultShareFloorCents": 1000000,
@@ -430,7 +435,7 @@ Result of `yed_getinfo`:
       "schemes": [ 1 ],
       "falconActive": false,
       "falconHeight": -1,
-      "feeRateZatPerKB": 100,
+      "feeRateZatPerKB": 5000000,
       "plainAddressVersion": "4c51"
     },
     "policy": {
@@ -779,7 +784,7 @@ Result of `yed_getvault`:
   "mintedCents": 100000,
   "mintHeight": 332,
   "refHeight": 329,
-  "feePaidZat": 50377833753,
+  "feePaidZat": 503778338,
   "pMint": 1985000,
   "closeHeight": null,
   "closingTxid": "",
@@ -825,7 +830,7 @@ Result of `yed_listvaults`:
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 50377833753,
+    "feePaidZat": 503778338,
     "pMint": 1985000,
     "closeHeight": null,
     "closingTxid": "",
@@ -912,7 +917,7 @@ Result of `yed_listclaimable`:
     "collateralZat": 251889169000,
     "mintedCents": 100000,
     "pMint": 1985000,
-    "feeZat": 50377833753,
+    "feeZat": 503778338,
     "claimHeight": 401,
     "lockHeight": 377,
     "claimable": true,
@@ -923,7 +928,7 @@ Result of `yed_listclaimable`:
     "noticeHeight": null,
     "emergencyOpenAt": null,
     "residualZat": 0,
-    "attestFeeZat": 157430730
+    "attestFeeZat": 125944584
   }
 ]
 ```
@@ -990,7 +995,7 @@ Result of `yed_gettxinfo`:
   "pMint": 1985000,
   "pClaim": 2000000,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 157430730,
+  "attestFeeZat": 125944584,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0,
   "claimPath": "",
@@ -1143,7 +1148,7 @@ Result of `yed_estimatecollateral`:
   "requiredZat": 251889169000,
   "requiredZatFloored": 251889169000,
   "protocolFeeCents": 1000,
-  "protocolFeeZat": 50377833753,
+  "protocolFeeZat": 503778338,
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -1157,7 +1162,7 @@ Result of `yed_estimatecollateral`:
   "source": "a",
   "armed": true,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 157430730,
+  "attestFeeZat": 125944584,
   "divergenceBps": 25
 }
 ```
@@ -1378,9 +1383,9 @@ Result of `yed_estimatefee`:
 ```json
 {
   "feeCents": 1000,
-  "feeZat": 50377833753,
+  "feeZat": 503778338,
   "pMint": 1985000,
-  "attestFeeZat": 12594458438
+  "attestFeeZat": 125944584
 }
 ```
 
@@ -1645,7 +1650,7 @@ Result of `yed_mint`:
   "pMint": 1985000,
   "source": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 157430730,
+  "attestFeeZat": 125944584,
   "attestPayee": "smExampleBondAddress11111111111111111"
 }
 ```
@@ -1791,10 +1796,10 @@ Result of `yed_redeem`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 13224181372,
-  "earlyRedeemFeeZat": 12594458450,
+  "feeZat": 3022670026,
+  "earlyRedeemFeeZat": 2518891688,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 238664977628,
+  "collateralOut": 248866488974,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0
 }
@@ -1830,11 +1835,11 @@ Result of `yed_estimateredeem`:
   "collateralZat": 251889169000,
   "pMint": 1985000,
   "protocolFeeCents": 1000,
-  "protocolFeeZat": 50377833753,
-  "feeZat": 302266750630,
+  "protocolFeeZat": 503778338,
+  "feeZat": 3022670026,
   "earlyRedeemFeeBps": 500,
   "earlyRedeemFeeCents": 5000,
-  "earlyRedeemFeeZat": 251888916877,
+  "earlyRedeemFeeZat": 2518891688,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "canRedeem": true,
   "error": ""
@@ -1904,7 +1909,7 @@ Result of `yed_claim`:
   "pEmerg": null,
   "claimPath": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 157430730,
+  "attestFeeZat": 125944584,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0
 }
@@ -2156,7 +2161,7 @@ Result of `yed_listpositions`:
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 50377833753,
+    "feePaidZat": 503778338,
     "pMint": 1985000,
     "closeHeight": null,
     "closingTxid": "",
@@ -2233,6 +2238,8 @@ what `yellowback_rpc_contract.py` uses.
 | `yellowback-unhealthy` | every gated command | the index is unhealthy (`unhealthyReason` follows); provoke with `-yellowbacktestfault=storage:commit` then any non-allow-listed command. Also the storage boundary of `yed_addattestation` and `yed_buildbundle` (audit A-3): a storage exception under either marks the index unhealthy and the call fails with `yellowback-unhealthy: storage failure in AddAttestation: …` / `… in BuildBundle: …` |
 | `mintpol-not-active`, `mintpol-no-price`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's base ratio below `RECAP_RATIO_BPS` (W16, IT-5: only a class whose base ratio reaches it mints through a global-ratio halt — class C with the in-term parameter set; the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says "after N cents of mints in the mempool"). W20, IT-5 (replacing H-10's class-A rule): above the cap only a class whose base ratio is at or over `RECAP_RATIO_BPS` mints (class C with the in-term parameter set); the message says whether it can. **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by `yed_redeem` at `lockHeight`, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached. |
 | `mintpol-unarmed` | `yed_mint` | MINTPOL-1 for H-1: `yed_getinfo.mintRequiresArmed` is `true` and the reference height `R` is not ARMED, so the mint would confirm VOID with `mint-halted-unarmed` (MINT-4); provoke on regtest with `-yellowbackmintrequiresarmed` before arming |
+| `mint-supply-cap` | `yed_mint` | the wallet's dry run of MINT-1..10 refused the built mint under MINT-6 (a mint raced it to the cap after the `mintpol-cap` gate; `RPC_VERIFY_REJECTED`); `yellowback_void_mint.py` shows the consensus verdict |
+| `mint-vault-share` | `yed_mint` | the wallet's dry run refused the built mint under MINT-6b (D-Q-23a): its debt exceeds max(`maxVaultShareBps` of the MINT-6 cap, `vaultShareFloorCents`) (`params.supplyCap.maxVaultCents`); silent while the cap is undefined (regtest's `supplyCapBps` 0), so provoke on a network parameter set with a cap (`RPC_VERIFY_REJECTED`) |
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |

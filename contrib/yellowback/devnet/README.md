@@ -273,7 +273,7 @@ actionable at any height — at the fee's cost before the term ends.
 
 ## 8. The post-quantum line (`docs/plans/yellowback-quantum-plan.md`, `yellowback-quantum-spec.md`)
 
-On a node built from `upgrade/quantum-vaults` (`yed_getinfo.rpcversion` 7, `params.pq`) every vault's owner is a
+On a node built from `upgrade/quantum-vaults` (`yed_getinfo.rpcversion` 8, `params.pq`, `params.fees`) every vault's owner is a
 post-quantum key (SLH-DSA-SHA2-128s, D-Q-1) and YED holders are post-quantum once Falcon (FN-DSA-512) is active
 (`TOK-PQ`: an assigned YED output must be a scheme-2 `TX_PQPKH`, or a `TX_PQCHANNEL` with a scheme-2 client; anything
 else is `bad-yed-holder`). Falcon's activation is the consensus parameter `pqFalconHeight`; on regtest it is
@@ -287,7 +287,8 @@ else is `bad-yed-holder`). Falcon's activation is the consensus parameter `pqFal
 
 Nothing else changes for a person at the GUI: `yed_mint` keeps its arguments and draws a fresh SLH-DSA owner
 (`ownerAddress`, 53 characters, `yr…` on regtest); the owner's redeem carries a ~7.9 KB SLH-DSA signature; the
-fees grow with the size (`params.pq.feeRateZatPerKB`). The mainnet YED prefix is `yb…`, testnet `yt…`, regtest `yr…`
+network fees are dollars per KB at the attested price, so they grow with the size (`params.fees.network`;
+`params.pq.feeRateZatPerKB` is the plain rate). The mainnet YED prefix is `yb…`, testnet `yt…`, regtest `yr…`
 (the tooling reads `params.addressVersion` / `params.pqAddressVersion`, never a hard-coded prefix).
 
 ### A Falcon-active devnet for client work (YecWallet, YEW, lightwalletd, chain-viz, x402, hawkeye)
@@ -296,11 +297,11 @@ fees grow with the size (`params.pq.feeRateZatPerKB`). The mainnet YED prefix is
 cd <workspace>/ycash6             # or a worktree on upgrade/quantum-vaults, with src/ycashd built
 export YELLOWBACK_ATTEST_BIN=<attest target>/release/yellowback-attest     # cargo build --release in contrib/yellowback/attest
 export CHAINVIZ_BIN=<chain-viz on upgrade/quantum-vaults>/target/release/chain-viz   # optional
-export YELLOWBACK_LWD_BIN=<lightwalletd-dd on upgrade/quantum-vaults>/lightwalletd   # optional: KnownRPCVersion 7
+export YELLOWBACK_LWD_BIN=<lightwalletd-dd on upgrade/quantum-vaults>/lightwalletd   # optional: KnownRPCVersion 8
 export YELLOWBACK_LWD_REPO=<that lightwalletd-dd tree>                                 # the walk's go test runs there
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up --role user --seed 480 --portseed 7   # Falcon live (default)
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet status      # "post-quantum: Falcon ACTIVE (falconHeight 103, -pqfalconheight 0) ..."
-../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getinfo   # params.pq, rpcversion 7
+../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getinfo   # params.pq, params.fees, rpcversion 8
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getnewaddress          # a Falcon holder (53 chars)
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- vault_getnewowner          # an SLH-DSA owner {scheme, keyhash, owner, address}
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet down --wipe
@@ -324,7 +325,7 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
 ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk
 ```
 
-- `pq`: rpcversion 7 and `params.pq`; a wallet mint's owner (ownerScheme 1, a 53-character owner address, the
+- `pq`: rpcversion 8 and `params.pq`; a wallet mint's owner (ownerScheme 1, a 53-character owner address, the
   V's owner slot `<hash> OP_1 OP_CHECKPQSIG`, a version-4 MINT) and its token holder (Falcon or P2PKH by the
   regime); the primitive with post-quantum owners: `vault_getnewowner` → `vault_lock {owner}` under the
   attestor set → `vault_ownerspend` (selector 2) with an SLH-DSA owner and, once Falcon is active, an

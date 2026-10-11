@@ -18,7 +18,7 @@ appetite is the term class):
   leveraged     class A (300 %, the shortest terms): the most leveraged tier, the first underwater
                 on a downswing; one vault at a time, redeems at maturity
   conservative  class C (500 %, the longest terms): the most collateralised tier; holds two, never
-                redeems early (the in-term early-redeem fee is 1 % for C)
+                redeems early (the in-term early-redeem fee is 1 % of the debt for C)
   exiter        redeems the moment lockHeight passes; runs yed_sweepcarriers as
                 housekeeping
   trader        never mints: moves YED between its addresses (and to the liquidator) with
