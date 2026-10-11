@@ -738,6 +738,7 @@ def up(args):
     steps = 7 if role != "none" else (6 if attest else 4)
     addresses = [address_of(wif) for wif in POOL_WIFS]
     pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agents_wanted else None
+    falcon_args = [] if args.no_pqfalcon else ["-pqfalcon=1"]
     # node 0 also serves lightwalletd (`lightwalletd` below): the server's getaddresstxids needs the
     # address index, which is experimental and needs -txindex (both are only ever set on a fresh datadir here).
     def build_node_args():
@@ -748,6 +749,9 @@ def up(args):
         for node in range(NODES, count):
             node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: no payout
         for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
+        # quantum plan D-Q-2 (owner 2026-10-10): the devnet mirrors mainnet, Falcon from the vault activation
+        # (-pqfalcon=1 = -pqfalconheight=0, a consensus parameter: every node); --no-pqfalcon for the P2PKH-holder regime
+        for node in node_args: node_args[node] = node_args[node] + falcon_args
         return node_args
     _yu.ATTESTOR_SET[0] = None
     node_args = build_node_args()
@@ -765,7 +769,7 @@ def up(args):
              "agents": agents, "attestors": attestors, "auto_attestors": attestors, "attest_agents": attest_agents,
              "attest_seqs": {}, "dir": directory, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
              "role": role, "seat": preset["seat"], "population": population, "liquidator": liquidator,
-             "seed": seed, "node_args": {str(k): v for k, v in node_args.items()},
+             "seed": seed, "node_args": {str(k): v for k, v in node_args.items()}, "pqfalcon": not args.no_pqfalcon,
              "rpc": {str(n): {"url": rpc_url(n), "port": rpc_port(n), "user": rpc_auth_pair(n)[0], "password": rpc_auth_pair(n)[1]} for n in range(count)},
              "nodes": {str(n): {"zmq": zmq_record(n)} for n in range(count)},
              "heartbeat": {}, "walk": {}, "sim": {}, "session": None,
@@ -1063,6 +1067,7 @@ def pool(args):
     if node not in all_pools(state): sys.exit("pool must be one of %s" % ", ".join(str(p) for p in all_pools(state)))
     address = pool_address(state, node)
     extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agent_pids(state) else []
+    if state.get("pqfalcon", False): extra.append("-pqfalcon=1")      # D-Q-2: Falcon from the vault activation
     if args.action == "configure":
         restart_node(state, node, pool_args(address, extra), "with payout address %s" % address)
         state["pool_signal"][str(node)] = True; save(directory, state)
@@ -1856,6 +1861,7 @@ def main():
     command = add("up", up); command.add_argument("--portseed", type=int, default=_default_portseed()); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
     command.add_argument("--agents", action="store_true", help="run one real yellowback-quote --mock-price per pool instead of yed_setquote from this script (always on under --role)")
     command.add_argument("--no-attest", action="store_true", help="five nodes: no attestor nodes, no attest agents, never ARMED")
+    command.add_argument("--no-pqfalcon", action="store_true", help="Falcon inactive (P2PKH YED holders); default: Falcon from the vault activation, as on mainnet (quantum plan D-Q-2)")
     command.add_argument("--role", choices=sorted(ROLES), default="none", help="leave one seat empty for you: user (node 0), attestor (node 8) or pool (node 4); default none = the fully automated demo")
     command.add_argument("--seed", type=int, help="the personas' and the walk's random seed (printed; replay with the same value)")
     command.add_argument("--lean", action="store_true", help="a constrained machine: no price walk, heartbeat at half rate")

@@ -60,7 +60,7 @@ bool Verify(uint8_t scheme, const std::vector<unsigned char>& pk,
     }
     case SCHEME_FN_DSA_512:
         return ycash_falcon512_verify(sig.data(), sig.size(), msg.begin(), msg.size(),
-                                      pk.data()) == 0;
+                                      pk.data(), pk.size()) == 0;
     default:
         return false;
     }

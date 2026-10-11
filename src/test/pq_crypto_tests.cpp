@@ -437,11 +437,20 @@ BOOST_AUTO_TEST_CASE(pq_falcon_padding_is_canonical)
         s[0] = h;
         BOOST_CHECK(!pq::Verify(pq::SCHEME_FN_DSA_512, kp.pk, s, msg));
     }
-    // The compact (unpadded) form verifies in the raw library at its own length, never through
-    // the registry.
+    // The compact (unpadded) form: PQClean's verifier accepts it at its own length; Ycash's C entry
+    // point refuses it itself (local patch P2, Falcon consensus audit F-1), and so does the registry.
     const Bytes compact(sig.begin(), sig.begin() + end);
-    BOOST_CHECK_EQUAL(ycash_falcon512_verify(compact.data(), compact.size(), msg.begin(), 32, kp.pk.data()), 0);
+    BOOST_CHECK_EQUAL(ycash_falcon512_verify(compact.data(), compact.size(), msg.begin(), 32, kp.pk.data(), kp.pk.size()), -1);
     BOOST_CHECK(!pq::Verify(pq::SCHEME_FN_DSA_512, kp.pk, compact, msg));
+    BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.begin(), 32, kp.pk.data(), kp.pk.size()), 0);
+    // The exact key length too: a pk one byte short or long (same leading bytes) is refused.
+    BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.begin(), 32, kp.pk.data(), kp.pk.size() - 1), -1);
+    Bytes longPk = kp.pk;
+    longPk.push_back(0);
+    BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.begin(), 32, longPk.data(), longPk.size()), -1);
+    Bytes longSig = sig;
+    longSig.push_back(0);
+    BOOST_CHECK_EQUAL(ycash_falcon512_verify(longSig.data(), longSig.size(), msg.begin(), 32, kp.pk.data(), kp.pk.size()), -1);
     // Public key header byte must be 0x09.
     BOOST_CHECK_EQUAL(kp.pk[0], 0x09);
 }
@@ -542,10 +551,36 @@ BOOST_AUTO_TEST_CASE(pq_falcon_kat)
         padded.insert(padded.end(), comp.begin(), comp.end());
         padded.resize(YCASH_FALCON512_SIGBYTES, 0);
         BOOST_CHECK_MESSAGE(sig == padded, "r3 signature count " << e["count"].get_int());
-        BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.data(), msg.size(), pk.data()), 0);
+        BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.data(), msg.size(), pk.data(), pk.size()), 0);
+        // Audit F-1: the round-3 signature in the compact length (0x39 || nonce || compressed s, no padding),
+        // which PQClean's do_verify accepts, is refused by the C entry point itself.
+        Bytes compact(1, 0x39);
+        compact.insert(compact.end(), nonce.begin(), nonce.end());
+        compact.insert(compact.end(), comp.begin(), comp.end());
+        BOOST_REQUIRE(compact.size() < (size_t)YCASH_FALCON512_SIGBYTES);
+        BOOST_CHECK_EQUAL(ycash_falcon512_verify(compact.data(), compact.size(), msg.data(), msg.size(), pk.data(), pk.size()), -1);
         n++;
     }
     BOOST_CHECK_EQUAL(n, 5);
+
+    // Audit F-6: all 100 round-3 entries as verify-only rows (the padded layout of the round-3 compressed
+    // signature); each verifies, and fails with one bit of the signature flipped. The first five equal "r3".
+    n = 0;
+    for (const UniValue& e : doc["r3_all"].getValues()) {
+        BOOST_REQUIRE_EQUAL(e["count"].get_int(), n);
+        const Bytes pk = Hex(e["pk"]), msg = Hex(e["msg"]), sig = Hex(e["sig"]);
+        BOOST_REQUIRE_EQUAL(pk.size(), (size_t)YCASH_FALCON512_PUBLICKEYBYTES);
+        BOOST_REQUIRE_EQUAL(sig.size(), (size_t)YCASH_FALCON512_SIGBYTES);
+        BOOST_CHECK_EQUAL(msg.size(), (size_t)33 * (n + 1));
+        BOOST_CHECK_MESSAGE(ycash_falcon512_verify(sig.data(), sig.size(), msg.data(), msg.size(), pk.data(), pk.size()) == 0,
+                            "r3_all count " << n);
+        const Bytes bad = Flip(sig, 41 + (n % 200));
+        BOOST_CHECK_MESSAGE(ycash_falcon512_verify(bad.data(), bad.size(), msg.data(), msg.size(), pk.data(), pk.size()) == -1,
+                            "r3_all flipped count " << n);
+        if (n < (int)doc["r3"].size()) BOOST_CHECK(e["pk"].get_str() == doc["r3"][n]["pk"].get_str());
+        n++;
+    }
+    BOOST_CHECK_EQUAL(n, 100);
 
     // PQClean falcon-padded-512 KAT (count 0): sm = signature(666) || msg.
     n = 0;
@@ -563,7 +598,7 @@ BOOST_AUTO_TEST_CASE(pq_falcon_kat)
         Bytes sm = sig;
         sm.insert(sm.end(), msg.begin(), msg.end());
         BOOST_CHECK(HexStr(sm) == e["sm"].get_str());
-        BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.data(), msg.size(), pk.data()), 0);
+        BOOST_CHECK_EQUAL(ycash_falcon512_verify(sig.data(), sig.size(), msg.data(), msg.size(), pk.data(), pk.size()), 0);
         n++;
     }
     BOOST_CHECK_EQUAL(n, 1);

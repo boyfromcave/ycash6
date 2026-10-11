@@ -90,14 +90,25 @@ checks them with **verify** only. Falcon keygen from a seed is reproducible only
   without an include path.
 * **Not vendored: `pqclean.c` and `api.h`.** `pqclean.c` takes its randomness from a global `randombytes()`.
   It is replaced by Ycash files (MIT, derived from it):
-  * `ycash_falcon_verify.c`: `do_verify` + `crypto_sign_verify`, logic unchanged (consensus).
+  * `ycash_falcon_verify.c`: `do_verify` + `crypto_sign_verify`, logic unchanged (consensus) but for local patch
+    P2 (exact lengths, below).
   * `ycash_falcon_sign.c`: `crypto_sign_keypair` / `do_sign` with the randomness as parameters (keygen seed of
     any length; nonce 40 + sampler seed 48), plus wiping the secret polynomials and scratch on exit (wallet).
   * `ycash_falcon.h`: their declarations and the sizes.
   No `randombytes` symbol exists in the node.
-* Falcon's padded verifier also accepts the unpadded "compact" signature at its own shorter length;
-  `pq::Verify` accepts exactly 666 bytes, so the only accepted form is `0x39 ‖ nonce ‖ compressed s ‖ zero padding`
-  (tested: every non-zero padding byte, every other header, and the compact form are rejected).
+* PQClean's padded verifier also accepts the unpadded "compact" signature at its own shorter length;
+  `ycash_falcon512_verify` (local patch P2) and `pq::Verify` each accept exactly 666 bytes, so the only accepted
+  form is `0x39 ‖ nonce ‖ compressed s ‖ zero padding` (tested: every non-zero padding byte, every other header,
+  and the compact form are rejected, by the C entry point and by the registry).
+* **Malleability** (audit F-2, F-5): a (pk, sig) has exactly one accepted byte encoding, so the signature adds no
+  *new* third-party malleability. Push minimality (`MINIMALDATA`) is policy, as for every Ycash input, so a miner
+  can still re-encode the chunk pushes of a scriptSig (ECDSA inputs included). Likewise `STRICTENC` is policy:
+  an undefined hashtype byte is consensus-valid, as for `OP_CHECKSIG`, but it is committed in the ZIP-243
+  preimage, so only the signer chooses it.
+* **`hash_to_point_ct`** (audit F-3): the verifier hashes the message to a point with Falcon's constant-time
+  sampler (717 SHAKE draws, 205 spares; `common.c`). It equals the specification's variable-time rejection
+  sampler (used by the Python model and `fn-dsa`) unless more than 205 of the 717 draws are rejected, probability
+  about 2^-256; the audit traced 1,500 inputs coefficient for coefficient. Not a consensus divergence.
 
 ### No floating point in verification
 
@@ -139,6 +150,14 @@ SHAKE256 incremental API, and nothing else includes `fips202.h`). The same patch
 `sha2_512.c`; the SHAKE parameter sets and `sha3_*` are not vendored), and no vendored `slhdsa/` file contains
 `malloc`, `calloc`, `free`, `exit` or `abort` (grep, 2026-10-10); its state lives on the stack.
 
+### P2: `falcon/ycash_falcon_verify.c` + `ycash_falcon.h`, exact lengths in the C entry point (2026-10-10)
+
+Falcon consensus audit F-1 (`docs/audits/yellowback-falcon-consensus-audit-20261010.md` in the workspace):
+`ycash_falcon512_verify` gains a `pklen` argument and returns -1 unless `siglen == 666` and `pklen == 897`, before
+any decoding. PQClean's `do_verify` logic is otherwise unchanged; `pq::Verify` keeps its own size gate, so the
+consensus path checks the lengths twice. Changed lines are marked `YCASH LOCAL PATCH`; `pq_crypto_tests`
+calls the entry point directly with the compact form, a short and a long key (all rejected). Both node lines.
+
 ## Conformance data (tests)
 
 * `src/test/data/pq_acvp_slhdsa.json`: NIST ACVP-Server `gen-val/json-files/SLH-DSA-{keyGen,sigGen,sigVer}-FIPS205/internalProjection.json`
@@ -147,5 +166,8 @@ SHAKE256 incremental API, and nothing else includes `fips202.h`). The same patch
   253–259, 262, 266 (every fail reason, 2 passes).
 * `src/test/data/pq_falcon_kat.json`: NIST round-3 Falcon-512 KAT (`falcon-round3.zip`, `KAT/falcon512-KAT.rsp`)
   counts 0–4, replayed through the NIST AES-CTR DRBG: keys equal; signatures equal the round-3 compressed
-  signatures in padded layout. And PQClean's padded KAT (count 0; its `.rsp` hashes to META.yml's
+  signatures in padded layout. `r3_all`: all 100 entries of the same file as verify-only rows (pk, msg, the
+  compressed signature in the padded layout; all 100 fit 625 bytes), each verified by `ycash_falcon512_verify`
+  and rejected with one bit flipped (audit F-6; converted with the audit harness's `kat.py`, the first five
+  cross-checked against `r3`). And PQClean's padded KAT (count 0; its `.rsp` hashes to META.yml's
   `nistkat-sha256` 91842d41…0395).

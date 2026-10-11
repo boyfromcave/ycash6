@@ -1138,4 +1138,24 @@ BOOST_AUTO_TEST_CASE(pq_falcon_mirror_equals_consensus)
     }
 }
 
+// Rule: TOK-PQ
+// Falcon from day one (quantum plan D-Q-2, owner 2026-10-10): on mainnet and testnet pqFalconHeight is 0, so the
+// module's mirror is the UPGRADE_VAULT height itself (TOK-PQ binds from the vault upgrade's first block), and -1 (never)
+// while that height is unset (P8). yed_getinfo.params.pq.falconHeight reports this mirror.
+BOOST_AUTO_TEST_CASE(pq_falcon_mirror_public_networks)
+{
+    for (const std::string& net : { CBaseChainParams::MAIN, CBaseChainParams::TESTNET }) {
+        Consensus::Params c = ::Params(net).GetConsensus();
+        BOOST_CHECK_EQUAL(c.pqFalconHeight, 0);
+        BOOST_CHECK_EQUAL(c.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+        BOOST_CHECK_EQUAL(yellowback::PQFalconHeightOf(c), -1);
+        c.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 3000000;
+        BOOST_CHECK_EQUAL(yellowback::PQFalconHeightOf(c), 3000000);
+        yellowback::Params p = RegtestParams(1, 0, 0, uint256S("5e75"));
+        p.pqFalconHeight = yellowback::PQFalconHeightOf(c);
+        BOOST_CHECK(!p.IsPQFalconActive(2999999));
+        BOOST_CHECK(p.IsPQFalconActive(3000000));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

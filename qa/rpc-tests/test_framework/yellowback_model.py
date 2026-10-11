@@ -237,7 +237,8 @@ class Params(object):
         self.bundle_carrier = bundle_carrier
         self.mint_requires_armed = bool(mint_requires_armed)   # H-1: MINT-4 refuses a mint whose R is not ARMED
         # The Falcon activation height (quantum spec R-A2, A-5): a mirror of the consensus pqFalconHeight
-        # (regtest -pqfalconheight / -pqfalcon=1 = 0); None = never (mainnet/testnet). Not hashed (spec section 3.4).
+        # (regtest -pqfalconheight / -pqfalcon=1 = 0); None = never. Mainnet/testnet: the UPGRADE_VAULT height (consensus
+        # pqFalconHeight 0, Falcon from day one, quantum plan D-Q-2), None while it is unset. Not hashed (spec section 3.4).
         self.pq_falcon_height = None
         # v3 plan section 3.1 (the mainnet column unless `attest` overrides; regtest() passes its column)
         a = dict(attest_arm_delay=1_152, attest_required=True, n_slots=9, m_select=4, k_slack=2, bundle_max=6,

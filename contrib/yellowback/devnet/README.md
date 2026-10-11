@@ -40,6 +40,8 @@ You also need `src/ycashd` built and `contrib/yellowback/attest` built (`cargo b
 yellowback-devnet up                # ~6 min on 6.20.0: 8 nodes, node 0 funded, 3 pools quoting, 3 attestors registered, ARMED
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
 yellowback-devnet up --no-attest    # five nodes, no attestors: never ARMED
+yellowback-devnet up --no-pqfalcon  # Falcon inactive: P2PKH YED holders (the default mirrors mainnet, quantum plan
+                                    # D-Q-2: every node runs -pqfalcon=1, Falcon holders from the vault activation)
 yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
 yellowback-devnet status | check | mine N [node] [--untagged] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
