@@ -52,7 +52,7 @@ bool EnsureWalletIsAvailable(bool avoidException);
 namespace {
 
 /** The flat fee every vault RPC pays (zatoshi), as the conventional transparent fee. */
-static const CAmount VAULT_RPC_FEE = 10000;
+// VAULT_RPC_FEE (10,000 zat) is policy.h's: the floor of the vault/Yellowback fee cap too
 /** Change below this goes to the fee. */
 static const CAmount VAULT_RPC_MIN_CHANGE = 1000;
 

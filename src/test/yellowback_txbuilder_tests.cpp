@@ -1459,9 +1459,11 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), uncapped);
     maxTxFee = COIN / 50;                                                   // -maxtxfee=0.02: capped
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), COIN / 50);
-    maxTxFee = 1;                                                           // below the flat fee: the flat fee
-    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), g_yellowbackFee);
-    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // capped below the flat fee: the flat fee
+    maxTxFee = 1;                                                           // below the flat fees: the cap's floor, minCapZat
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), attestedFeePolicy.minCapZat);           // review: a low -maxtxfee never blocks the flat fees
+    BOOST_CHECK_EQUAL(attestedFeePolicy.minCapZat, VAULT_RPC_FEE);
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), std::max(g_yellowbackFee, VAULT_RPC_FEE));
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), std::max(g_yellowbackFee, VAULT_RPC_FEE));
     maxTxFee = DEFAULT_TRANSACTION_MAXFEE;                                   // review A-2: no PQ input is priced by size too
     BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), pqFeeRate.GetFee(1000 + 150));
     BOOST_CHECK_EQUAL(YedNetworkFee({}, std::nullopt), pqFeeRate.GetFee(1000));
@@ -1560,6 +1562,18 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
     attestedFeePolicy = saved;
     pqFeeRate = savedRate;
     maxTxFee = savedMax;
+}
+
+// Review L-1: the small-vault clamp triggers when the owner output would be dust, not only when the fee eats the vault.
+BOOST_AUTO_TEST_CASE(owner_fee_clamp_keeps_a_non_dust_output)
+{
+    const CAmount dust = 546, floorFee = 45000;
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 10000000, dust, floorFee), 100000);        // room to spare: the priced fee
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000 + dust, dust, floorFee), 100000);   // exactly a non-dust output left
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000 + dust - 1, dust, floorFee), floorFee);   // dust left: the floor
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 50000, dust, floorFee), floorFee);         // the fee would eat the vault
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(10000, 10100, dust, floorFee), 10000);            // never raised above the priced fee
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000, 0, floorFee), floorFee);           // Sapling (no dust): nothing left still clamps
 }
 
 // Review B L-1 (the 6.20.0 port finding): the funding follower reprices with the owner's PQ spend when the vault

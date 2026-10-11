@@ -72,6 +72,7 @@ void YellowbackWallet::StartupSweep()
         LogPrintf("yellowback: %u lapsed carrier(s) outstanding; the wallet is locked, run yed_sweepcarriers after walletpassphrase\n", lapsed.size());
         return;
     }
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback (Commit's fee cap and submit take it)
     LOCK(index->cs_yellowback);
     try {
         BuiltTx b = BuildSweepCarriers(*this, lapsed);

@@ -172,6 +172,10 @@ struct MintShape
  */
 std::vector<CTxOut> MintOutputs(const MintShape& shape, int& feeVout, int* attestFeeVout = nullptr);
 
+/** Review L-1: the owner path's network fee: `networkFee` while it leaves the owner at least `dust` of `spendable`
+ *  (the vault's value after the protocol fees), else min(networkFee, floorFee) -- floorFee = max(flat, floor rate x
+ *  size). The caller still refuses vault-value-too-small when even that leaves nothing. */
+CAmount ClampOwnerNetworkFee(CAmount networkFee, CAmount spendable, CAmount dust, CAmount floorFee);
 /** The estimated size of a YED transaction with these input scripts and (for a vault spend) owner scheme (txbuilder.cpp). */
 size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme);
 /** The network fee of a YED transaction with these input scripts and (for a vault spend) owner scheme: the

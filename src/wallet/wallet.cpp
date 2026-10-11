@@ -5806,7 +5806,10 @@ void CWallet::ReacceptWalletTransactions()
     for (std::pair<const int64_t, CWalletTx*>& item : mapSorted) {
         CWalletTx& wtx = *(item.second);
         CValidationState state;
-        wtx.AcceptToMemoryPool(state, false, !PQFeeWithinCap(wtx));     // D-Q-26, as CommitTransaction
+        // A transaction this wallet already committed is not re-judged against a price-dependent cap that has since
+        // moved (a halt, a price change): a PQ or Yellowback transaction within the absolute -yellowbackmaxtxfee is
+        // reaccepted without the -maxtxfee absurd-fee check (review: D-Q-26 / A-2 reaccept).
+        wtx.AcceptToMemoryPool(state, false, !OwnTxFeeWithinCeiling(wtx));
     }
 }
 

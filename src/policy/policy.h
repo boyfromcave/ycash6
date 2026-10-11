@@ -183,7 +183,10 @@ struct AttestedFeePolicy
     CAmount floorZatPerKB;             //!< DEFAULT_ATTESTED_FEE_FLOOR_PER_KB: with -pqfeerate, the rate never goes below max(this, -pqfeerate) (D-Q-23a: 5,000 zat/KB)
     int64_t yedMaxTxFeeUsdMicro;       //!< -yellowbackmaxtxfeeusd: the vault/Yellowback cap is max(-maxtxfee, this at the price); 2,000,000 ($2)
     CAmount yedMaxTxFeeZat;            //!< -yellowbackmaxtxfee: the absolute YEC ceiling of that cap (10 YEC)
+    CAmount minCapZat;                 //!< the cap never goes below the flat fees it must admit: max(-yellowbackfee, VAULT_RPC_FEE), set at init
 };
+/** The flat fee of the vault_* / set_* RPCs (rpc/vault.cpp); the floor of the vault/Yellowback cap. */
+static const CAmount VAULT_RPC_FEE = 10000;
 static const int64_t DEFAULT_PQ_FEE_USD_PER_KB_MICRO = 20000;
 static const int64_t DEFAULT_YED_FEE_USD_PER_KB_MICRO = 50000;
 static const CAmount DEFAULT_ATTESTED_FEE_FLOOR_PER_KB = 5000;
@@ -205,7 +208,8 @@ CFeeRate YedFeeRate();
 /** The floor rate with a price: max(floorZatPerKB, -pqfeerate) (review A-7: -pqfeerate stays a floor). */
 CAmount AttestedFeeFloorPerKB();
 /** The cap of a vault/Yellowback transaction's size-priced fee: min(max(-maxtxfee, yedMaxTxFeeUsdMicro at the price),
- *  -yellowbackmaxtxfee); min(-maxtxfee, -yellowbackmaxtxfee) without a price. */
+ *  -yellowbackmaxtxfee); min(-maxtxfee, -yellowbackmaxtxfee) without a price; never below minCapZat (review, so a low
+ *  -maxtxfee cannot block a flat-fee vault RPC or Yellowback transaction). */
 CAmount YedMaxTxFee();
 /** The cap of a plain post-quantum transaction's size-priced fee (owner D-Q-26, 2026-10-11): the same cap as the
  *  vault/Yellowback paths, YedMaxTxFee() -- min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee). */
@@ -227,5 +231,10 @@ std::optional<CAmount> YedFeeOverCap(const CTransaction& tx);
  *  network fee is within PQMaxTxFee(): the wallet then submits its own transaction without the -maxtxfee absurd-fee
  *  check (sendrawtransaction from outside keeps -maxtxfee unless allowhighfees). cs_main held. */
 bool PQFeeWithinCap(const CTransaction& tx);
+/** Review (reaccept): true when `tx` is a post-quantum or Yellowback/vault transaction (a PQ input, a vault or intent
+ *  input or output, or a YED payload) whose network fee is within the ABSOLUTE ceiling -yellowbackmaxtxfee, whatever the
+ *  price says now: a transaction the wallet already committed is not re-judged against a price-dependent cap that has
+ *  since moved (ReacceptWalletTransactions). cs_main held. */
+bool OwnTxFeeWithinCeiling(const CTransaction& tx);
 
 #endif // BITCOIN_POLICY_POLICY_H

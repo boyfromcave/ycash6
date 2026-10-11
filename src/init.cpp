@@ -1345,6 +1345,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(strprintf(_("Invalid amount for -yellowbackmaxtxfee=<amount>: '%s'"), mapArgs["-yellowbackmaxtxfee"]));
             ::attestedFeePolicy.yedMaxTxFeeZat = n;
         }
+        if (::attestedFeePolicy.yedMaxTxFeeZat < VAULT_RPC_FEE)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least the vault RPCs' flat fee, %s"), FormatMoney(VAULT_RPC_FEE)));
     }
 
 #ifdef ENABLE_WALLET
@@ -1561,6 +1563,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (yellowback::g_yellowbackFee < yellowback::DEFAULT_YELLOWBACK_FEE) {
             return InitError(strprintf(_("-yellowbackfee must be at least %d zatoshi."), yellowback::DEFAULT_YELLOWBACK_FEE));
         }
+        // the vault/Yellowback fee cap admits the flat fees: -yellowbackmaxtxfee may not be below them, and the cap never is
+        ::attestedFeePolicy.minCapZat = std::max(yellowback::g_yellowbackFee, VAULT_RPC_FEE);
+        if (::attestedFeePolicy.yedMaxTxFeeZat < ::attestedFeePolicy.minCapZat)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least max(-yellowbackfee, %s): %s"),
+                                       FormatMoney(VAULT_RPC_FEE), FormatMoney(::attestedFeePolicy.minCapZat)));
         yellowback::g_yellowbackMintLag = GetArg("-yellowbackmintlag", yellowback::DEFAULT_REF_LAG);
         if (yellowback::g_yellowbackMintLag < 0 || yellowback::g_yellowbackMintLag > yellowback::MAX_REF_LAG) {
             return InitError(strprintf(_("-yellowbackmintlag must be between 0 and %d."), yellowback::MAX_REF_LAG));

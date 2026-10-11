@@ -75,6 +75,13 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
     return std::max(g_yellowbackFee, std::min(YedSizeFee(g_yellowbackFee, bytes), YedMaxTxFee()));
 }
 
+CAmount ClampOwnerNetworkFee(CAmount networkFee, CAmount spendable, CAmount dust, CAmount floorFee)
+{
+    const CAmount left = spendable - networkFee;
+    if (left > 0 && left >= dust) return networkFee;             // the owner keeps a positive, non-dust output
+    return std::min(networkFee, floorFee);                       // never raises the fee (the floor may exceed a tiny priced fee)
+}
+
 CAmount PQFeeFollower::Follow(const std::vector<std::pair<CScript, CAmount>>& selected)
 {
     std::vector<CScript> all = scripts;
@@ -922,8 +929,8 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         out.feeZat = shape.feeZat;
     }
     if (ownerPath) {
-        // review L-1: the owner path pays its network fee from the vault. When the dollar-priced fee would take
-        // everything the vault has left after the protocol fees (a small vault after a price crash), the fee is
+        // review L-1: the owner path pays its network fee from the vault. When the dollar-priced fee would leave the
+        // owner less than a non-dust output after the protocol fees (a small vault after a price crash), the fee is
         // clamped to max(flat, the floor rate x size) instead of refusing vault-value-too-small: the owner is never
         // stuck behind a policy rate, and the floor still pays relay.
         CAmount yedValue = 0;
@@ -935,10 +942,12 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                                   - (payload && shape.attestPayee.has_value() ? shape.attestFeeZat : 0)
                                   - (payload ? shape.residualZat : 0)
                                   - (payload && shape.changeCents > 0 ? TOKEN_VALUE : 0);
-        if (shape.networkFee >= spendable) {
-            // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional)
-            shape.networkFee = YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme)));
-        }
+        // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
+        const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
+                             : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold();   // 6.20.0: a fixed dust threshold
+        // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional)
+        shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
+                                                YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme))));
     }
     const uint32_t expiry = ctx.Expiry(R);
     if (dest.kind == AddressChoice::TRANSPARENT) {

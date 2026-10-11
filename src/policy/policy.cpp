@@ -18,6 +18,7 @@
 #include "util/strencodings.h"
 #include "vault/act.h"
 #include "vault/template.h"
+#include "yellowback/payload.h"
 
 #include <atomic>
 
@@ -407,7 +408,8 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
 
 CFeeRate pqFeeRate = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
 AttestedFeePolicy attestedFeePolicy = { DEFAULT_PQ_FEE_USD_PER_KB_MICRO, DEFAULT_YED_FEE_USD_PER_KB_MICRO,
-                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, DEFAULT_YED_MAX_TX_FEE };
+                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, DEFAULT_YED_MAX_TX_FEE,
+                                        VAULT_RPC_FEE };
 /** The attested price in force (uUSD per YEC), 0 = none. Written by the index (cs_main), read by any thread. */
 static std::atomic<int64_t> g_attestedFeePriceMicroUsd{0};
 
@@ -460,7 +462,8 @@ CAmount YedMaxTxFee()
     // the dollar cap in zat: uUSD x COIN / price, rounded up; never below -maxtxfee
     if (price.has_value() && p.yedMaxTxFeeUsdMicro > 0) cap = std::max(maxTxFee, AttestedRateZatPerKB(p.yedMaxTxFeeUsdMicro, price.value(), 0));
     // review M-1: the absolute YEC ceiling (-yellowbackmaxtxfee), whatever the price says
-    return p.yedMaxTxFeeZat > 0 ? std::min(cap, p.yedMaxTxFeeZat) : cap;
+    if (p.yedMaxTxFeeZat > 0) cap = std::min(cap, p.yedMaxTxFeeZat);
+    return std::max(cap, p.minCapZat);
 }
 
 CAmount PQMaxTxFee()
@@ -507,4 +510,31 @@ bool PQFeeWithinCap(const CTransaction& tx)
         if (IsPQInputScript(view.GetOutputFor(in).scriptPubKey)) { pq = true; break; }
     }
     return pq && view.GetValueIn(tx) - tx.GetValueOut() <= PQMaxTxFee();
+}
+
+bool OwnTxFeeWithinCeiling(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return false;
+    auto vaultish = [](const CScript& spk) {
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        return vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE;
+    };
+    bool ours = yellowback::FindPayload(tx).has_value();
+    for (const CTxIn& in : tx.vin) {
+        if (ours) break;
+        const CScript& prev = view.GetOutputFor(in).scriptPubKey;
+        ours = IsPQInputScript(prev) || vaultish(prev);
+    }
+    for (const CTxOut& out : tx.vout) {
+        if (ours) break;
+        ours = vaultish(out.scriptPubKey);
+    }
+    if (!ours) return false;
+    const CAmount ceiling = attestedFeePolicy.yedMaxTxFeeZat > 0 ? attestedFeePolicy.yedMaxTxFeeZat : MAX_MONEY;
+    return view.GetValueIn(tx) - tx.GetValueOut() <= std::max(ceiling, attestedFeePolicy.minCapZat);
 }
