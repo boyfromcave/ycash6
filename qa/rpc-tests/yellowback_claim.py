@@ -287,14 +287,14 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: RED-1 RED-2 RED-3 RED-4
         print('the owner can still redeem the underwater vault W via the owner path')
-        # D-Q-23 (b) / D-Q-23a: at $0.01 the Yellowback network fee is $0.05/KB = 5 YEC/KB and its cap $2 = 200 YEC, so
-        # a 9 KB SLH-DSA owner redeem (45 YEC) exceeds W's 6 YEC of collateral: the builder refuses (vault-value-too-small)
-        # rather than underpay the policy rate; with the dollar cap off (-yellowbackmaxtxfeeusd=0) the cap is -maxtxfee
-        # (0.1 YEC: the spec's "capped, never refused") and the owner path goes through.
-        assert_rpc_error('vault-value-too-small', user.yed_redeem, mints['W']['txid'])
-        self.restart(USER, ['-yellowbackmaxtxfeeusd=0'])
-        self.sync_all(blocks_only=True)
-        assert_equal(user.yed_getinfo()['params']['fees']['network']['yellowback']['maxTxFeeZat'], 10000000)
+        # D-Q-23 (b) / review L-1: at $0.01 the Yellowback network fee is $0.05/KB = 5 YEC/KB, so a 9 KB SLH-DSA owner
+        # redeem (45 YEC, capped at 10 YEC by -yellowbackmaxtxfee, review M-1) would still exceed W's 6 YEC of collateral;
+        # the builder clamps the owner path's fee to max(flat, floor rate x size) instead of refusing, so the owner
+        # redeems at the crashed price with the default dollar cap.
+        net = user.yed_getinfo()['params']['fees']['network']
+        print('  fee price %s (%s), Yellowback rate %d zat/KB, cap %d zat' % (net['priceMicroUsd'], net['priceSource'],
+                                                                         net['yellowback']['zatPerKB'], net['yellowback']['maxTxFeeZat']))
+        assert_equal(net['yellowback']['maxTxFeeCeilingZat'], 1000000000)   # 10 YEC
         redeemed = user.yed_redeem(mints['W']['txid'])
         assert_equal(redeemed['burnedCents'], 10000)
         self.sync_all()

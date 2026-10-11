@@ -40,16 +40,11 @@ namespace yellowback {
 static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
 
 /**
- * The network fee of a YED transaction (review B L-1, quantum plan §4.5; D-Q-23 (b)): g_yellowbackFee, or
- * YedSizeFee(g_yellowbackFee, size) -- the Yellowback dollars-per-KB rate at the attested tip price, -pqfeerate
- * without one (policy.h AttestedFeePolicy) -- when it has a post-quantum input: a TX_PQPKH among `prevScripts`
- * (a YED token or a YEC coin) or the V's owner (`ownerScheme`). The size is estimated before signing: every PQ
- * input at PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
- * The size-priced fee obeys the cap as CWallet::CreateTransaction obeys -maxtxfee (wallet.cpp, "always obey
- * the maximum") -- here YedMaxTxFee(), max(-maxtxfee, $2 at the price) (D-Q-23a): capped, never refused
- * (review B, Y-B sweep); never below the flat g_yellowbackFee.
+ * The estimated size of a YED transaction with these input scripts and owner scheme, before signing: every PQ
+ * input -- a TX_PQPKH among `prevScripts` (a YED token or a YEC coin) or the V's owner (`ownerScheme`) -- at
+ * PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
  */
-CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
 {
     std::vector<uint8_t> schemes;
     size_t other = 0;
@@ -60,9 +55,23 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
         if (id && spk == GetScriptForPQKey(*id)) schemes.push_back(id->scheme);
         else other++;
     }
-    if (schemes.empty()) return g_yellowbackFee;
     size_t bytes = 1000 + 150 * other;
     for (uint8_t scheme : schemes) bytes += PQSpendInputSize(scheme);
+    return bytes;
+}
+
+/**
+ * The network fee of a YED transaction (review B L-1, quantum plan §4.5; D-Q-23 (b)): YedSizeFee(g_yellowbackFee,
+ * size) -- the Yellowback dollars-per-KB rate at the attested tip price, -pqfeerate without one (policy.h
+ * AttestedFeePolicy) -- by the estimated size (YedEstimatedSize), with or without a post-quantum input (review
+ * A-2: a P2PKH-funded mint or a claimant-funded claim is a Yellowback transaction too). The size-priced fee
+ * obeys the cap as CWallet::CreateTransaction obeys -maxtxfee (wallet.cpp, "always obey the maximum") -- here
+ * YedMaxTxFee(), min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee) (D-Q-23a, review M-1): capped, never
+ * refused (review B, Y-B sweep); never below the flat g_yellowbackFee.
+ */
+CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+{
+    const size_t bytes = YedEstimatedSize(prevScripts, ownerScheme);
     return std::max(g_yellowbackFee, std::min(YedSizeFee(g_yellowbackFee, bytes), YedMaxTxFee()));
 }
 
@@ -911,6 +920,25 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         out.changeCents = change;
         out.payee = shape.payee;
         out.feeZat = shape.feeZat;
+    }
+    if (ownerPath) {
+        // review L-1: the owner path pays its network fee from the vault. When the dollar-priced fee would take
+        // everything the vault has left after the protocol fees (a small vault after a price crash), the fee is
+        // clamped to max(flat, the floor rate x size) instead of refusing vault-value-too-small: the owner is never
+        // stuck behind a policy rate, and the floor still pays relay.
+        CAmount yedValue = 0;
+        std::vector<CScript> yedScripts;
+        for (const YedCoin& c : shape.yedInputs) { yedValue += c.token.nValue; yedScripts.push_back(c.token.scriptPubKey); }
+        const bool payload = shape.withPayload;
+        const CAmount spendable = shape.vaultValue + shape.carrierValue + yedValue
+                                  - (payload && shape.payee.has_value() ? shape.feeZat : 0)
+                                  - (payload && shape.attestPayee.has_value() ? shape.attestFeeZat : 0)
+                                  - (payload ? shape.residualZat : 0)
+                                  - (payload && shape.changeCents > 0 ? TOKEN_VALUE : 0);
+        if (shape.networkFee >= spendable) {
+            // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional)
+            shape.networkFee = YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme)));
+        }
     }
     const uint32_t expiry = ctx.Expiry(R);
     if (dest.kind == AddressChoice::TRANSPARENT) {

@@ -1461,13 +1461,17 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), COIN / 50);
     maxTxFee = 1;                                                           // below the flat fee: the flat fee
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), g_yellowbackFee);
-    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // no PQ input: never priced by size
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // capped below the flat fee: the flat fee
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;                                   // review A-2: no PQ input is priced by size too
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), pqFeeRate.GetFee(1000 + 150));
+    BOOST_CHECK_EQUAL(YedNetworkFee({}, std::nullopt), pqFeeRate.GetFee(1000));
     pqFeeRate = savedRate;
     maxTxFee = savedMax;
 }
 
 // D-Q-23 (b), D-Q-23a: with an attested price the rates are dollars per KB (plain $0.02, Yellowback $0.05), never
-// below the 5,000 zat/KB floor; the Yellowback cap is max(-maxtxfee, $2 at the price); no price = the fallback.
+// below the 5,000 zat/KB floor (nor -pqfeerate, review A-7); the Yellowback cap is min(max(-maxtxfee, $2 at the price),
+// -yellowbackmaxtxfee) (review M-1); no price = the fallback.
 BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
 {
     const CFeeRate savedRate = pqFeeRate;
@@ -1497,10 +1501,16 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
     attestedFeePolicy.yedUsdPerKBMicro = DEFAULT_YED_FEE_USD_PER_KB_MICRO;
     attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
     attestedFeePolicy.yedMaxTxFeeUsdMicro = DEFAULT_YED_MAX_TX_FEE_USD_MICRO;
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
     SetAttestedFeePrice(18000);
     BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 111111112);
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 277777778);
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 10 * COIN);                                     // review M-1: $2 = 111 YEC, the 10-YEC ceiling binds
+    attestedFeePolicy.yedMaxTxFeeZat = 1000 * COIN;                                  // -yellowbackmaxtxfee=1000: the dollar cap stands
     BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);                                 // $2 > 0.1 YEC at $0.018
+    // review A-2: a transaction without a PQ input is priced at the Yellowback rate by its estimated size too
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), YedFeeRate().GetFee(1000 + 150));
+    BOOST_CHECK_EQUAL(YedEstimatedSize({falcon, p2pkh}, std::nullopt), bytes);
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
     BOOST_CHECK_EQUAL(PQSizeFee(1000, bytes), PlainPQFeeRate().GetFee(bytes));
     BOOST_CHECK_GT(YedSizeFee(1000, bytes), PQSizeFee(1000, bytes));
@@ -1513,10 +1523,23 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
     attestedFeePolicy.floorZatPerKB = 0;
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 1165);
     attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
+    // review A-7: with a price the floor is max(floorZatPerKB, -pqfeerate), so -pqfeerate stays a floor
+    pqFeeRate = CFeeRate(8000);
+    BOOST_CHECK_EQUAL(AttestedFeeFloorPerKB(), 8000);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 8000);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 8000);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 2000), 16000);                         // review L-1's clamp: the floor rate x size
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(100000, 2000), 100000);                      // never below the flat fee
+    pqFeeRate = CFeeRate(100);
+    BOOST_CHECK_EQUAL(AttestedFeeFloorPerKB(), DEFAULT_ATTESTED_FEE_FLOOR_PER_KB);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 2000), 10000);
     maxTxFee = COIN / 50;
     SetAttestedFeePrice(50000);                                                     // regtest's $0.05: a 2.6 KB Falcon spend
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100000000);                        // 1 YEC/KB
     BOOST_CHECK_EQUAL(YedMaxTxFee(), 40 * COIN);                                    // $2 = 40 YEC
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 10 * COIN);                                    // the ceiling
+    attestedFeePolicy.yedMaxTxFeeZat = 1000 * COIN;
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
     // the target off (0): the fallback even with a price; no price: the fallback
     attestedFeePolicy.yedUsdPerKBMicro = 0;
@@ -1526,7 +1549,12 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
     BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 100);
     BOOST_CHECK_EQUAL(YedMaxTxFee(), COIN / 50);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 20000), 2000);                         // no price: -pqfeerate x size
+    attestedFeePolicy.yedMaxTxFeeZat = COIN / 100;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), COIN / 100);                                   // the ceiling binds without a price too
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
     SetAttestedFeePrice(0);                                                         // an undefined price (0) is no price
+    BOOST_CHECK(!AttestedFeePrice().has_value());
     BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
     attestedFeePolicy = saved;
     pqFeeRate = savedRate;

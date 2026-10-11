@@ -271,6 +271,27 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all(blocks_only=True)
         self.checkpoint('dollar cap')
 
+        print('review L-1: an owner redeem whose dollar-priced network fee exceeds the vault pays max(flat, floor rate x size) instead of failing')
+        small = self.mint(user, 10000, TERMS['C'])
+        self.sync_all()
+        self.mine(POOLS[0])
+        vsmall = user.yed_getvault(small['txid'])
+        # $1,000,000/KB and caps out of the way: the size-priced fee is far above the vault's collateral
+        self.restart(USER, ['-yellowbackfeeusdperkb=1000000', '-yellowbackmaxtxfeeusd=1000000', '-yellowbackmaxtxfee=1000000'])
+        self.sync_all(blocks_only=True)
+        net = user.yed_getinfo()['params']['fees']['network']
+        assert_equal((net['priceSource'], net['yellowback']['maxTxFeeCeilingZat']), ('tip', 1000000 * COIN))
+        assert_greater_than(net['yellowback']['zatPerKB'] * 9, vsmall['collateralZat'])
+        redeemed = user.yed_redeem(small['txid'])
+        net_fee, raw = network_fee_of(user, redeemed['txid'])
+        assert_equal(net_fee, max(YELLOWBACK_FEE, FLOOR_ZAT_PER_KB * estimated_bytes(raw) // 1000))   # the floor rate, 5,000 zat/KB
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(small['txid'])['status'], 'CLOSED')
+        self.restart(USER, [])
+        self.sync_all(blocks_only=True)
+        self.checkpoint('small vault at the floor')
+
         print('the price feed stops: the network fee falls back to -pqfeerate; FEE-0 skips the protocol fee (and the early fee)')
         m = self.mint(user, 10000, TERMS['C'])          # class C: the only class that mints under HALT-2 (the claimed vault dragged the global ratio down)
         self.sync_all()

@@ -90,9 +90,14 @@ floor is gone (`requiredZatFloored = requiredZat`). `maxMint` is $100,000 (`para
 mint may not exceed max(10 % of the supply cap, $10,000) (`mint-vault-share`, MINT-6b, D-Q-23a); the supply
 cap's base is the circulating YEC supply at the tip (`params.supplyCap`, D-Q-25); a claim's residual is due
 from $0.48 at `pMint` (never below 100,000 zat, RED-5′). Network fees of post-quantum and Yellowback
-transactions are **dollars per KB** at the attested tip price (`params.fees.network`: plain PQ $0.02/KB,
-vault/Yellowback $0.05/KB, floor 5,000 zat/KB, the Yellowback cap max(`-maxtxfee`, $2 at the price); the
-`-pqfeerate` rate is the fallback while no price exists). Removed (hence the bump): `params.feeMinZat`,
+transactions are **dollars per KB** at the attested tip price — the highest of the tip's window medians
+(`params.fees.network.priceMicroUsd`; none while any halt bit is set) — (`params.fees.network`: plain PQ
+$0.02/KB, vault/Yellowback $0.05/KB, floor max(5,000 zat/KB, `-pqfeerate`), the Yellowback cap
+min(max(`-maxtxfee`, $2 at the price), `-yellowbackmaxtxfee`, default 10 YEC:
+`yellowback.maxTxFeeCeilingZat`); the `-pqfeerate` rate is the fallback while no price exists). A
+Yellowback-builder transaction is priced by its estimated size whether or not it has a post-quantum input; an
+owner-path vault spend whose dollar-priced fee would exceed what the vault has left pays max(the flat fee,
+the floor rate × size) instead of being refused. Removed (hence the bump): `params.feeMinZat`,
 `params.feeBps`, `yed_getfeepayee`'s `collateralZat` argument and `feeZat` field (the fee is a property of
 the debt and the mint price, quoted by the estimate RPCs); `yed_estimatefee` changes its signature to
 `<mintedCents> [priceMicroUsd]` → `{feeCents, feeZat, pMint, attestFeeZat}`. Added: `params.maxMintCents`,
@@ -390,7 +395,7 @@ Result of `yed_getinfo`:
         "priceMicroUsd": 50000,
         "priceSource": "tip",
         "plain": { "usdPerKBMicro": 20000, "zatPerKB": 40000000 },
-        "yellowback": { "usdPerKBMicro": 50000, "zatPerKB": 100000000, "maxTxFeeUsdMicro": 2000000, "maxTxFeeZat": 4000000000 },
+        "yellowback": { "usdPerKBMicro": 50000, "zatPerKB": 100000000, "maxTxFeeUsdMicro": 2000000, "maxTxFeeCeilingZat": 1000000000, "maxTxFeeZat": 1000000000 },
         "floorZatPerKB": 5000,
         "fallbackZatPerKB": 100,
         "flatZat": 1000,
@@ -2285,7 +2290,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`); on 6.20.0 only the `CReserveKey` change paths can raise it (see `yed_getnewaddress`) |
 | `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
 | `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
-| `vault-value-too-small` | `yed_redeem`, `yed_claim` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
+| `vault-value-too-small` | `yed_redeem`, `yed_claim` | the vault does not cover the network fee (at the floor rate on the owner path) plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
 | `collateral-above-max` | `yed_mint` | maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1 |
 | `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the claimant intent: the collateral less the RED-5 residual, U-23; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
 | `claim-burn-above-max` | `yed_claim` | maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1 |

@@ -399,7 +399,7 @@
         "yed_redeem",
         "yed_claim"
       ],
-      "when": "the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted)"
+      "when": "the vault does not cover the network fee (at the floor rate on the owner path) plus the enforcement fee (cannot happen for a vault MINT-5 accepted)"
     },
     "verdict-parent-not-tip": {
       "raisedBy": [
@@ -816,19 +816,20 @@
           "network": {
             "fallbackZatPerKB": 100,
             "flatZat": 1000,
-            "floorZatPerKB": 100,
+            "floorZatPerKB": 5000,
             "maxTxFeeZat": 10000000,
             "plain": {
               "usdPerKBMicro": 20000,
-              "zatPerKB": 111112
+              "zatPerKB": 5000000
             },
-            "priceMicroUsd": 18000,
+            "priceMicroUsd": 400000,
             "priceSource": "tip",
             "yellowback": {
+              "maxTxFeeCeilingZat": 1000000000,
               "maxTxFeeUsdMicro": 2000000,
-              "maxTxFeeZat": 4000000000,
+              "maxTxFeeZat": 1000000000,
               "usdPerKBMicro": 50000,
-              "zatPerKB": 277778
+              "zatPerKB": 12500000
             }
           },
           "protocol": {
@@ -890,7 +891,7 @@
           "issuedBeforeStartZat": 625000000000,
           "maxVaultCents": null,
           "maxVaultShareBps": 1000,
-          "priceMicroUsd": 18000,
+          "priceMicroUsd": 400000,
           "vaultShareFloorCents": 1000000
         },
         "supplyCapBps": 0,
