@@ -66,6 +66,7 @@ isminetype IsMineInner(const CKeyStore& keystore, const CScript& scriptPubKey, I
     case TX_NULL_DATA:
     case TX_VAULT:        // vault templates are spent through the vault_* / set_* RPCs, never by coin
     case TX_VAULT_INTENT: // selection, even when the wallet holds the PQ owner key (vault_list "wallet")
+    case TX_PQCHANNEL:    // a two-party channel (quantum spec D-Q-19) is spent by its own builders, never by coin selection
         break;
     case TX_PQPKH:
         if (keystore.HavePQKey(CPQKeyID(vSolutions[0][0], uint256(vSolutions[1]))))

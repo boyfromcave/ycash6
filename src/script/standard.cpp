@@ -37,6 +37,7 @@ const char* GetTxnOutputType(txnouttype t)
     case TX_VAULT: return "vault";
     case TX_VAULT_INTENT: return "vaultintent";
     case TX_PQPKH: return "pqpubkeyhash";
+    case TX_PQCHANNEL: return "pqchannel";
     }
     return NULL;
 }
@@ -153,6 +154,20 @@ bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::v
         return true;
     }
 
+    // The hybrid channel (quantum spec D-Q-19): {client scheme || hash (33), server key (33), refundHeight (script number)}.
+    {
+        PQChannelParams cp;
+        if (MatchPQChannel(scriptPubKey, cp)) {
+            typeRet = TX_PQCHANNEL;
+            valtype client(1, cp.client.scheme);
+            client.insert(client.end(), cp.client.hash.begin(), cp.client.hash.end());
+            vSolutionsRet.push_back(client);
+            vSolutionsRet.push_back(valtype(cp.server.begin(), cp.server.end()));
+            vSolutionsRet.push_back(CScriptNum(cp.refundHeight).getvch());
+            return true;
+        }
+    }
+
     // The vault primitive's templates (plan §15.3): exact shapes only, no solutions.
     {
         vault::VaultParams vp;
@@ -181,6 +196,7 @@ int ScriptSigArgsExpected(txnouttype t, const std::vector<std::vector<unsigned c
     case TX_VAULT:        // variable: checked by the vault rules (S-1), see AreInputsStandard
     case TX_VAULT_INTENT:
     case TX_PQPKH:        // variable (s + p + 2 pushes per scheme): checked in AreInputsStandard
+    case TX_PQCHANNEL:    // variable (s + p + 4 cooperative, s + p + 3 refund): checked in AreInputsStandard
         return -1;
     case TX_PUBKEY:
         return 1;
@@ -321,6 +337,61 @@ CScript GetScriptForPQKey(const CPQKeyID& id)
 {
     if (!pq::IsKnownScheme(id.scheme)) return CScript();   // registered schemes only (review A F6)
     return CScript() << ToByteVector(id.hash) << CScript::EncodeOP_N(id.scheme) << OP_CHECKPQSIG;
+}
+
+CScript GetScriptForPQChannel(const CPQKeyID& client, const CPubKey& server, int64_t refundHeight)
+{
+    if (!pq::IsKnownScheme(client.scheme)) return CScript();
+    if (!server.IsValid() || !server.IsCompressed()) return CScript();
+    if (refundHeight < 1 || refundHeight >= LOCKTIME_THRESHOLD) return CScript();
+    return CScript() << OP_IF << ToByteVector(client.hash) << CScript::EncodeOP_N(client.scheme) << OP_CHECKPQSIG << OP_VERIFY
+                     << ToByteVector(server) << OP_CHECKSIG
+                     << OP_ELSE << refundHeight << OP_CHECKLOCKTIMEVERIFY << OP_DROP
+                     << ToByteVector(client.hash) << CScript::EncodeOP_N(client.scheme) << OP_CHECKPQSIG
+                     << OP_ENDIF;
+}
+
+bool MatchPQChannel(const CScript& script, PQChannelParams& out)
+{
+    // Cheap pre-checks, then decode the four fields by token and require the rebuilt script byte for byte
+    // (minimal pushes, identical client slots).
+    // 111 bytes + the refundHeight push (1..6): 112..117 bytes
+    if (script.size() < 112 || script.size() > 117 || script[0] != OP_IF || script.back() != OP_ENDIF)
+        return false;
+    std::vector<std::pair<opcodetype, valtype>> ops;
+    CScript::const_iterator pc = script.begin();
+    while (pc < script.end()) {
+        opcodetype op;
+        valtype data;
+        if (!script.GetOp(pc, op, data)) return false;
+        ops.emplace_back(op, data);
+        if (ops.size() > 15) return false;
+    }
+    if (ops.size() != 15) return false;
+    if (ops[1].second.size() != 32 || ops[5].second.size() != 33) return false;
+    const opcodetype schemeOp = ops[2].first;
+    if (schemeOp != OP_1 && schemeOp != OP_2) return false;
+    int64_t refund;
+    if (ops[8].first >= OP_1 && ops[8].first <= OP_16) {
+        refund = CScript::DecodeOP_N(ops[8].first);
+    } else if (ops[8].first <= OP_PUSHDATA4 && !ops[8].second.empty() && ops[8].second.size() <= 5) {
+        try {
+            refund = CScriptNum(ops[8].second, true, 5).getint();
+        } catch (const scriptnum_error&) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    PQChannelParams cp;
+    cp.client = CPQKeyID((uint8_t)CScript::DecodeOP_N(schemeOp), uint256(ops[1].second));
+    cp.server = CPubKey(ops[5].second.begin(), ops[5].second.end());
+    cp.refundHeight = refund;
+    if (!cp.server.IsFullyValid()) return false;
+    const CScript rebuilt = GetScriptForPQChannel(cp.client, cp.server, cp.refundHeight);
+    if (rebuilt.empty() || rebuilt != script) return false;
+    out = cp;
+    return true;
 }
 
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys)

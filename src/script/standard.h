@@ -8,6 +8,7 @@
 #ifndef BITCOIN_SCRIPT_STANDARD_H
 #define BITCOIN_SCRIPT_STANDARD_H
 
+#include "pubkey.h"
 #include "script/interpreter.h"
 #include "uint256.h"
 
@@ -61,6 +62,9 @@ enum txnouttype
     // Post-quantum pay-to-key-hash <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG (quantum spec §2.1);
     // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
     TX_PQPKH,
+    // The hybrid payment channel (quantum spec D-Q-19): a post-quantum client and a secp256k1 server
+    // (cooperative), or the client alone after refundHeight; standard only where UPGRADE_VAULT is active.
+    TX_PQCHANNEL,
 };
 
 class CNoDestination {
@@ -137,6 +141,24 @@ CScript GetScriptForRawPubKey(const CPubKey& pubkey);
 /** The TX_PQPKH script <hash:32> OP_<scheme> OP_CHECKPQSIG; empty unless the scheme is registered
  *  (pq::IsKnownScheme). Consensus-reachable through RED-5 (the owner's residual intent). */
 CScript GetScriptForPQKey(const CPQKeyID& id);
+
+/**
+ * TX_PQCHANNEL (quantum spec D-Q-19), a bare output:
+ *   OP_IF <clientHash:32> OP_1|OP_2 OP_CHECKPQSIG OP_VERIFY <serverKey:33> OP_CHECKSIG
+ *   OP_ELSE <refundHeight> OP_CHECKLOCKTIMEVERIFY OP_DROP <clientHash:32> OP_1|OP_2 OP_CHECKPQSIG OP_ENDIF
+ * Both client slots identical, refundHeight a minimal script number in [1, LOCKTIME_THRESHOLD), the server
+ * key a valid compressed secp256k1 key, the client scheme registered.
+ */
+struct PQChannelParams
+{
+    CPQKeyID client;
+    CPubKey server;
+    int64_t refundHeight = 0;
+};
+/** The channel script; empty when a field is out of range. */
+CScript GetScriptForPQChannel(const CPQKeyID& client, const CPubKey& server, int64_t refundHeight);
+/** Exact match (rebuild and compare): true and the fields when `script` is a TX_PQCHANNEL. */
+bool MatchPQChannel(const CScript& script, PQChannelParams& out);
 
 /** Generate a multisig script. */
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys);

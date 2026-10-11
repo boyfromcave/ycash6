@@ -133,6 +133,7 @@ static bool SignStep(const BaseSignatureCreator& creator, const CScript& scriptP
     case TX_NULL_DATA:
     case TX_VAULT:        // vault templates are signed by the vault_* / set_* RPCs (SignPQOwnerSpend)
     case TX_VAULT_INTENT:
+    case TX_PQCHANNEL:    // two signers (quantum spec D-Q-19): signed by the channel's own builders
         return false;
     case TX_PQPKH:        // <sig chunks> <s> <pk chunks> <p> (quantum plan §4.2, spec §2.1)
         return SignPQ(CPQKeyID(vSolutions[0][0], uint256(vSolutions[1])), creator, scriptPubKey, ret, consensusBranchId);
@@ -399,6 +400,7 @@ static Stacks CombineSignatures(const CScript& scriptPubKey, const BaseSignature
     case TX_NULL_DATA:
     case TX_VAULT:
     case TX_VAULT_INTENT:
+    case TX_PQCHANNEL:
     case TX_PQPKH:        // one signer: the non-empty (bigger) side is the signature
         // Don't know anything about this, assume bigger one is correct:
         if (sigs1.script.size() >= sigs2.script.size())
