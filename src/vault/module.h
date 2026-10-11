@@ -6,6 +6,7 @@
 #define YCASH_VAULT_MODULE_H
 
 #include "pubkey.h"
+#include "vault/act.h"
 #include "vault/template.h"
 
 #include <cstddef>
@@ -75,6 +76,17 @@ public:
      */
     virtual std::optional<SetId> GovernedSet() const { return std::nullopt; }
     virtual std::vector<CPubKey> Ejections(const CTransaction& tx, const ModuleContext& ctx) const { return {}; }
+
+    /**
+     * The module displacement hook (owner, 2026-10-11). A SET_JOIN into the module's GovernedSet() when that set
+     * already has `seats` ACTIVE members is refused (bad-vault-act-seats) unless this names a member to make room:
+     * the primitive then checks that the key is an ACTIVE member of the set, not the joining key, whose bond is
+     * unspent (indexed) and not frozen, sets it MEMBER_REMOVED without freezing its bond (it stays spendable at its
+     * locktime) and admits the join, in the same overlay. Any other answer, or nullopt (the default), refuses the
+     * join as before. Asked only for a full governed set; a set no module governs is unchanged. The primitive does
+     * not know why the module picks a member (for YED: the eviction rule, a larger bond or a member not live).
+     */
+    virtual std::optional<CPubKey> Displace(const CTransaction& tx, const SetJoinBody& join, const ModuleContext& ctx) const { return std::nullopt; }
 };
 
 /** The registered module for `tag`, or nullptr (the primitive alone governs the vault). */

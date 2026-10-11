@@ -688,7 +688,28 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         } else {
             if (keys.size() != 2 || keys[1] != s->params.admitKey) return std::string("bad-vault-act-sigs");
         }
-        if (CountActive(members) >= (int)s->params.seats) return std::string("bad-vault-act-seats");
+        // A full set refuses the join, unless the module governing the set names a member to displace (owner,
+        // 2026-10-11): an ACTIVE member, not the joining key, with an unspent, unfrozen bond; removed below.
+        std::optional<CPubKey> displaced;
+        if (CountActive(members) >= (int)s->params.seats) {
+            for (const auto& entry : Modules()) {
+                if (entry.second->GovernedSet() != std::optional<SetId>(j.setId)) continue;
+                ModuleContext mctx;
+                mctx.height = h;
+                mctx.state = this;
+                mctx.blockHashAt = blockHashes;
+                displaced = entry.second->Displace(tx, j, mctx);
+                break;
+            }
+            bool room = false;
+            if (displaced && *displaced != j.memberKey) {
+                auto dm = GetMember(*this, j.setId, *displaced);
+                auto db = dm ? GetBond(*this, dm->bondOutpoint) : std::nullopt;
+                room = dm && dm->status == MEMBER_ACTIVE && !dm->bondFrozen &&
+                       db && !db->frozen && db->setId == j.setId && db->memberKey == *displaced;
+            }
+            if (!room) return std::string("bad-vault-act-seats");
+        }
         auto existing = GetMember(*this, j.setId, j.memberKey);
         if (existing && existing->status == MEMBER_ACTIVE) return std::string("bad-vault-act-join");
         if (j.bondVout >= tx.vout.size()) return std::string("bad-vault-act-bond");
@@ -698,6 +719,11 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         if (!MoneyRange(bond.nValue) || bond.nValue < s->params.bondMin) return std::string("bad-vault-act-bond");
         if ((int64_t)j.bondLocktime < h + (int64_t)s->params.bondLockMin || j.bondLocktime >= 500000000) {
             return std::string("bad-vault-act-bond");
+        }
+        if (displaced) {
+            auto dm = GetMember(*this, j.setId, *displaced);
+            dm->status = MEMBER_REMOVED;
+            PutRecord(KeyMember(j.setId, *displaced), *dm);
         }
         MemberRecord m;
         m.bondOutpoint = COutPoint(tx.GetHash(), j.bondVout);
