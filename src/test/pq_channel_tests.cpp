@@ -21,12 +21,15 @@
 #include "script/script.h"
 #include "script/script_error.h"
 #include "script/standard.h"
+#include "test/data/yellowback_pq_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
 #include "yellowback/params.h"
 #include "yellowback/script.h"
 
 #include <boost/test/unit_test.hpp>
+
+#include <univalue.h>
 
 typedef std::vector<unsigned char> valtype;
 
@@ -332,6 +335,113 @@ BOOST_AUTO_TEST_CASE(pqchannel_policy_and_tokpq)
     wrongSel.back() = OP_2;
     BOOST_CHECK(!AreInputsStandard(spend(wrongSel), view, VAULT_BRANCH_ID));
     SelectParams(CBaseChainParams::MAIN);
+}
+
+BOOST_AUTO_TEST_CASE(pqchannel_falcon_client_spends)
+{
+    // Review A n-3: a Falcon client verifies only under SCRIPT_VERIFY_PQ_FALCON (from pqFalconHeight).
+    const PQKey client = MakeKey(FALCON, 0x6f);
+    CKey server;
+    const CPubKey serverPk = ServerKey(server);
+    const int64_t refund = 400;
+    const CScript spk = GetScriptForPQChannel(client.Id(), serverPk, refund);
+    BOOST_REQUIRE(!spk.empty());
+    const CAmount amount = 100000;
+    auto sigs = [&](const CMutableTransaction& mtx, valtype& pqs, valtype& ecs) {
+        const uint256 sighash = SigHash6(spk, mtx, amount);
+        BOOST_REQUIRE(pq::Sign(FALCON, client.sk, sighash, pqs));
+        pqs.push_back(SIGHASH_ALL);
+        BOOST_REQUIRE(server.Sign(sighash, ecs));
+        ecs.push_back(SIGHASH_ALL);
+    };
+    {
+        CMutableTransaction mtx = SpendTx(0, 0xFFFFFFFF);
+        valtype pqs, ecs;
+        sigs(mtx, pqs, ecs);
+        CScript ss = CScript() << ecs;
+        const CScript pushes = PQPushes(pqs, client.pk);
+        ss.insert(ss.end(), pushes.begin(), pushes.end());
+        ss << OP_1;
+        BOOST_CHECK_EQUAL(Verify(ss, spk, mtx, amount, FLAGS | SCRIPT_VERIFY_PQ_FALCON), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(Verify(ss, spk, mtx, amount, FLAGS), SCRIPT_ERR_PQ_SCHEME);     // before the Falcon height
+        BOOST_CHECK(ss.size() < MAX_STANDARD_SCRIPTSIG + 100);                          // ~1.65 KB
+    }
+    {
+        CMutableTransaction mtx = SpendTx((uint32_t)refund, 0xFFFFFFFE);
+        valtype pqs, ecs;
+        sigs(mtx, pqs, ecs);
+        CScript ss = PQPushes(pqs, client.pk);
+        ss << OP_0;
+        BOOST_CHECK_EQUAL(Verify(ss, spk, mtx, amount, FLAGS | SCRIPT_VERIFY_PQ_FALCON), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(Verify(ss, spk, mtx, amount, FLAGS), SCRIPT_ERR_PQ_SCHEME);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pqchannel_standardness_around_falcon)
+{
+    // Review B: IsStandardTx refuses a scheme-2 channel output before the Falcon height (A-1's policy), admits it
+    // from that height; an SLH-DSA client channel is standard from the vault upgrade; none before it.
+    mapArgs["-pqfalconheight"] = "20";
+    SelectParams(CBaseChainParams::REGTEST);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, 10);
+    CKey server;
+    const CPubKey serverPk = ServerKey(server);
+    auto txWith = [&](const CScript& spk) {
+        CMutableTransaction mtx = SpendTx(0, 0xFFFFFFFF);
+        mtx.vin[0].scriptSig = CScript() << OP_1;
+        mtx.vout[0] = CTxOut(100000, spk);
+        return CTransaction(mtx);
+    };
+    const CScript slhCh = GetScriptForPQChannel(CPQKeyID(SLH, GetRandHash()), serverPk, 500);
+    const CScript falconCh = GetScriptForPQChannel(CPQKeyID(FALCON, GetRandHash()), serverPk, 500);
+    std::string reason;
+    BOOST_CHECK(!IsStandardTx(txWith(slhCh), reason, Params(), 9));                       // before the vault upgrade
+    BOOST_CHECK_EQUAL(reason, "scriptpubkey");
+    BOOST_CHECK_MESSAGE(IsStandardTx(txWith(slhCh), reason, Params(), 10), reason);
+    BOOST_CHECK(!IsStandardTx(txWith(falconCh), reason, Params(), 19));                   // a scheme-2 client before Falcon
+    BOOST_CHECK_EQUAL(reason, "scriptpubkey");
+    BOOST_CHECK_MESSAGE(IsStandardTx(txWith(falconCh), reason, Params(), 20), reason);
+    for (auto idx : {Consensus::UPGRADE_OVERWINTER, Consensus::UPGRADE_SAPLING, Consensus::UPGRADE_VAULT})
+        UpdateNetworkUpgradeParameters(idx, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    mapArgs.erase("-pqfalconheight");
+    SelectParams(CBaseChainParams::REGTEST);
+    SelectParams(CBaseChainParams::MAIN);
+}
+
+BOOST_AUTO_TEST_CASE(pqchannel_cross_implementation_vectors)
+{
+    // yellowback_pq_vectors.json "scripts" (review B's differential, 364 cases, the Python model's verdicts):
+    // Solver's type and the YED holder (HolderKey: a TX_PQPKH's key, a channel's client) agree with the model.
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_pq_vectors, json_tests::yellowback_pq_vectors + sizeof(json_tests::yellowback_pq_vectors))));
+    const UniValue& rows = doc["scripts"];
+    BOOST_REQUIRE_EQUAL(rows.size(), 364U);
+    int channels = 0;
+    for (size_t i = 0; i < rows.size(); i++) {
+        const std::string name = rows[i]["name"].get_str();
+        const valtype raw = ParseHex(rows[i]["hex"].get_str());
+        const CScript spk(raw.begin(), raw.end());
+        txnouttype type;
+        std::vector<valtype> sol;
+        Solver(spk, type, sol);
+        const std::string want = rows[i]["type"].get_str();
+        const std::string got = type == TX_PQCHANNEL ? "pqchannel" : type == TX_PQPKH ? "pqpubkeyhash" : "other";
+        BOOST_CHECK_MESSAGE(got == want, name + ": " + got + " != " + want);
+        const std::optional<CTxDestination> h = yellowback::HolderKey(spk);
+        std::string holder;
+        if (h.has_value()) {
+            if (const CPQKeyID* id = std::get_if<CPQKeyID>(&h.value())) {
+                valtype b(1, id->scheme);
+                b.insert(b.end(), id->hash.begin(), id->hash.end());
+                holder = HexStr(b);
+            }
+        }
+        BOOST_CHECK_MESSAGE(holder == rows[i]["holder"].get_str(), name + ": holder " + holder);
+        if (got == "pqchannel") channels++;
+    }
+    BOOST_CHECK(channels > 50);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

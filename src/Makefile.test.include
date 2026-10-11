@@ -45,6 +45,7 @@ JSON_TEST_FILES = \
   test/data/merkle_commitments_sapling.json \
   test/data/sapling_key_components.json \
   test/data/yellowback_golden.json \
+  test/data/yellowback_pq_vectors.json \
   test/data/yellowback_attest_vectors.json \
   test/data/vault_vectors.json \
   test/data/pq_acvp_slhdsa.json \

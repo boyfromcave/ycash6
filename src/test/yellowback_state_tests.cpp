@@ -30,6 +30,7 @@
 #include "primitives/block.h"
 #include "script/standard.h"
 #include "test/data/yellowback_golden.json.h"
+#include "test/data/yellowback_pq_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "test/yellowback_bench.h"
 #include "util/strencodings.h"
@@ -756,6 +757,65 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
 
 // ===========================================================================
 // Tags, medians, activation (§3.2, §3.7 PRICE/ACT, §3.8 ACT/HALT)
+
+// Rule: TOK-PQ
+// Rule: MINT-3
+// The cross-implementation post-quantum chain (yellowback_pq_vectors.json "chain", built by the Python model):
+// Falcon owners and every holder shape on both sides of pqFalconHeight; the C++ module rejects exactly the listed
+// blocks with the listed verdicts and ends on the model's state hash; undoing everything restores the empty view.
+BOOST_AUTO_TEST_CASE(pq_vectors_chain_across_falcon)
+{
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_pq_vectors, json_tests::yellowback_pq_vectors + sizeof(json_tests::yellowback_pq_vectors))));
+    const UniValue& c = doc["chain"];
+    const UniValue& pj = c["params"];
+    yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), uint256S(pj["attestorSetId"].get_str()),
+                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
+                                         pj["mintRequiresArmed"].get_bool());
+    P.pqFalconHeight = pj["pqFalconHeight"].get_int();
+    std::map<int, std::string> expected;
+    for (size_t i = 0; i < c["invalid"].size(); i++) expected[c["invalid"][i]["height"].get_int()] = c["invalid"][i]["verdict"].get_str();
+    BOOST_REQUIRE_EQUAL(expected.size(), 6U);
+    MemoryStateView view;
+    const MemoryStateView empty = view;
+    std::vector<UndoRecord> undos;
+    size_t invalidBlocks = 0;
+    const UniValue& blocks = c["blocks"];
+    for (size_t i = 0; i < blocks.size(); i++) {
+        const UniValue& b = blocks[i];
+        CBlock block;
+        for (size_t j = 0; j < b["txs"].size(); j++) {
+            CTransaction tx;
+            BOOST_REQUIRE_NO_THROW(DecodeHexTx(tx, b["txs"][j].get_str()));
+            block.vtx.push_back(tx);
+        }
+        const int height = b["height"].get_int();
+        const uint256 hash = uint256S(b["hash"].get_str());
+        OverlayStateView overlay(view);
+        BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, hash, b["subsidyZat"].get_int64());
+        overlay.Discard();
+        if (ev.blockInvalid) {
+            invalidBlocks++;
+            BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
+            BOOST_REQUIRE_MESSAGE(expected.count(height), strprintf("block %d invalid: %s", height, ev.reason));
+            BOOST_CHECK_EQUAL(ev.verdict, expected.at(height));
+            continue;
+        }
+        BOOST_CHECK_MESSAGE(!b.exists("invalid") || !b["invalid"].get_bool(), strprintf("block %d should be invalid", height));
+        UndoRecord undo;
+        BOOST_REQUIRE(!ApplyBlock(view, P, block, height, hash, b["subsidyZat"].get_int64(), undo).has_value());
+        undos.push_back(undo);
+    }
+    BOOST_CHECK_EQUAL(invalidBlocks, expected.size());
+    BOOST_CHECK_EQUAL(Hash(view), c["stateHash"].get_str());
+    State st(view);
+    BOOST_CHECK_EQUAL(st.GetTip()->height, c["tip"]["height"].get_int());
+    BOOST_CHECK_EQUAL(st.GetTotals().supplyCents, c["totals"]["supplyCents"].get_int64());
+    BOOST_CHECK_EQUAL((int)st.GetTotals().activeVaults, c["totals"]["activeVaults"].get_int());
+    for (auto it = undos.rbegin(); it != undos.rend(); ++it) UndoBlock(view, *it);
+    BOOST_CHECK(view == empty);
+}
+
 
 // Rule: TAG-3
 // Rule: TAG-4

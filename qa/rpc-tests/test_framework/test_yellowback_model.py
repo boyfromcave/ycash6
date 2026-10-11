@@ -1684,6 +1684,193 @@ class JsonFeedTests(unittest.TestCase):
         self.assertEqual(p.p_slow_window, 64)
 
 
+# ---------------------------------------------------------------------------
+# The post-quantum cross-implementation vectors (reviews A m-2, B M-1 of Q4): yellowback_pq_vectors.json, replayed
+# by the C++ unit tests (pq_channel_tests: the scripts; yellowback_state_tests: the chain) and by this model, and
+# later by ycash6.  Regenerate with --write-pq-vectors.
+
+PQ_VECTORS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_pq_vectors.json')
+PQ_FALCON_HEIGHT = 150
+_P_SECP = 2 ** 256 - 2 ** 32 - 977
+_SERVER_PK = bytes.fromhex('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')   # G
+
+
+def _push_num_raw(n):
+    """A script-number push as a channel's refundHeight is written (OP_n for 1..16)."""
+    if 1 <= n <= 16:
+        return bytes([0x50 + n])
+    out = bytearray()
+    v = n
+    while v:
+        out.append(v & 0xff)
+        v >>= 8
+    if out[-1] & 0x80:
+        out.append(0)
+    return bytes([len(out)]) + bytes(out)
+
+
+def _raw_channel(scheme_byte, h, pk, refund_push):
+    return (bytes([ym.OP_IF, 0x20]) + h + bytes([scheme_byte, ym.OP_CHECKPQSIG, ym.OP_VERIFY, 0x21]) + pk
+            + bytes([ym.OP_CHECKSIG, ym.OP_ELSE]) + refund_push + bytes([ym.OP_CHECKLOCKTIMEVERIFY, ym.OP_DROP, 0x20]) + h
+            + bytes([scheme_byte, ym.OP_CHECKPQSIG, ym.OP_ENDIF]))
+
+
+def pq_script_cases():
+    """The channel / PQPKH matcher cases of reviewer B's differential (wt/scratch/q45-review-b, 364 cases): every
+    refund encoding and scheme byte, non-minimal refunds, slot mismatches, server keys off the curve, 240 seeded
+    single-byte mutations, truncation and extension, PQPKH near misses."""
+    import random
+    rnd = random.Random(4545)
+    hh = ym.sha256(b'client')
+    cases = []
+    for sch in (0, 1, 2, 3, 16):
+        for refund in (1, 2, 16, 17, 127, 128, 255, 256, 32767, 32768, 8388607, 8388608, 499999999, 500000000, 2 ** 31 - 1, 2 ** 31):
+            cases.append(('chan sch=%d refund=%d' % (sch, refund), _raw_channel(0x50 + sch if sch else 0, hh, _SERVER_PK, _push_num_raw(refund))))
+    base = _raw_channel(0x52, hh, _SERVER_PK, _push_num_raw(1000))
+    for enc in (b'\x01\x05', b'\x03\xe8\x03\x00', b'\x02\x10\x00', b'\x01\x81', b'\x01\x00', b'\x00', b'\x4f',
+                b'\x4c\x02\xe8\x03', b'\x05\x00\x65\xcd\x1d\x00', b'\x04\xff\xff\xff\x7f', b'\x04\x00\x65\xcd\x1d', b'\x04\xff\x64\xcd\x1d'):
+        cases.append(('chan refund-enc %s' % enc.hex(), base[:73] + enc + base[76:]))
+    cases.append(('chan slot hash differs', base[:-35] + bytes([0x20]) + ym.sha256(b'other') + base[-3:]))
+    cases.append(('chan slot scheme differs', base[:-3] + bytes([0x51]) + base[-2:]))
+    for name, pk in (('pk 04', b'\x04' + _SERVER_PK[1:]), ('pk x>=p', b'\x02' + (_P_SECP + 1).to_bytes(32, 'big')),
+                     ('pk off-curve', b'\x02' + (5).to_bytes(32, 'big')), ('pk 03 G', b'\x03' + _SERVER_PK[1:]),
+                     ('pk x=p', b'\x02' + _P_SECP.to_bytes(32, 'big'))):
+        cases.append(('chan ' + name, base[:38] + pk + base[71:]))
+    for i in rnd.sample(range(len(base)), 40):
+        for b in (0x00, 0x51, 0x52, 0xb2, 0x61, 0xff):
+            if base[i] != b:
+                cases.append(('chan mut[%d]=%02x' % (i, b), base[:i] + bytes([b]) + base[i + 1:]))
+    cases.append(('chan +byte', base + b'\x61'))
+    cases.append(('chan -byte', base[:-1]))
+    cases.append(('chan OP_NOTIF', bytes([0x64]) + base[1:]))
+    for n in range(1, 17):
+        cases.append(('chan off-curve-x=%d' % n, base[:38] + b'\x02' + n.to_bytes(32, 'big') + base[71:]))
+    for sb in (0x00, 0x50, 0x51, 0x52, 0x53, 0x60):
+        cases.append(('pqpkh scheme %02x' % sb, bytes([0x20]) + hh + bytes([sb, 0xc2])))
+    cases.append(('pqpkh pushdata1', bytes([0x4c, 0x20]) + hh + bytes([0x52, 0xc2])))
+    cases.append(('pqpkh 01 02 scheme', bytes([0x20]) + hh + bytes([0x01, 0x02, 0xc2])))
+    rows = []
+    for name, spk in cases:
+        ch = ym.pqchannel_client(spk)
+        pk = ym.pqpkh_owner(spk)
+        kind = 'pqchannel' if ch is not None else 'pqpubkeyhash' if pk is not None else 'other'
+        holder = (ch or pk or b'').hex()
+        rows.append({'name': name, 'hex': spk.hex(), 'type': kind, 'holder': holder})
+    return rows
+
+
+def build_pq_chain():
+    """A chain across PQ_FALCON_HEIGHT: Falcon owner mints, P2PKH / SLH / Falcon / channel holders on both sides
+    of F, an off-curve server key, the yedIn = 0 TRANSFER and an over-assignment (both unaffected by TOK-PQ)."""
+    params = ym.Params.regtest(1)
+    params.pq_falcon_height = PQ_FALCON_HEIGHT
+    c = activated_chain(params)
+    expected = []
+    falcon_owner = bytes([2]) + ym.sha256(b'pq-vectors-falcon-owner')
+    falcon_h = ym.pqpkh_script(bytes([2]) + ym.sha256(b'pq-vectors-falcon-holder'))
+    slh_h = ym.pqpkh_script(bytes([1]) + ym.sha256(b'pq-vectors-slh-holder'))
+    p2pkh = ym.p2pkh_script(OWNER_KEYHASH)
+    chan_falcon = ym.pqchannel_script(bytes([2]) + ym.sha256(b'pq-vectors-chan-falcon'), _SERVER_PK, 1000)
+    chan_slh = ym.pqchannel_script(bytes([1]) + ym.sha256(b'pq-vectors-chan-slh'), _SERVER_PK, 1000)
+    off_curve = _raw_channel(0x52, ym.sha256(b'pq-vectors-off-curve'), b'\x02' + (5).to_bytes(32, 'big'), _push_num_raw(1000))
+    assert ym.pqchannel_client(off_curve) is None
+
+    def step(raws, want=None):
+        """Mine ``raws`` in the next block; ``want`` = the verdict that must refuse the (single) transaction."""
+        h = c.height + 1
+        before = dict(c.refused)
+        c.mine((1, 50_000, 0, KEY2), raws)
+        new = {k: v for k, v in c.refused.items() if k not in before}
+        if want is None:
+            assert not new, new
+        else:
+            assert list(new.values()) == [want], (h, new, want)
+            expected.append({'height': h, 'verdict': want})
+        return [txid_of(x) for x in raws]
+
+    def mint(owner=G_OWNER, token=None, want=None):
+        ref = c.height - 1
+        raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1, owner=owner, token_script=token)
+        return step([raw], want)[0]
+
+    def transfer(inputs, outs, want=None):
+        vin = [(t, n, b'', 0xFFFFFFFF) for t, n in inputs] + [c.fund_input()]
+        vouts = [(c.params.token_value, spk) for spk, _ in outs]
+        vouts.append((0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([(i, cents) for i, (_, cents) in enumerate(outs)]))))
+        return step([ym.serialize_tx_v4(vin, vouts).hex()], want)[0]
+
+    # below F
+    a = mint(token=p2pkh)
+    mint(owner=falcon_owner, token=falcon_h, want='bad-mint-owner-key')
+    b = mint(token=slh_h)
+    mint(token=chan_slh)
+    mint(token=chan_falcon)
+    mint(token=off_curve)                                   # no shape rule below F: any script holds YED
+    e = transfer([(a, 1)], [(p2pkh, 3000), (falcon_h, 3000), (chan_falcon, 4000)])
+    while c.height + 1 < PQ_FALCON_HEIGHT:
+        c.mine_n(1, price_fn=lambda h: 50_000)
+    # from F
+    mint(token=p2pkh, want='bad-yed-holder')
+    g = mint(owner=falcon_owner, token=falcon_h)
+    mint(token=slh_h, want='bad-yed-holder')
+    mint(token=chan_slh, want='bad-yed-holder')
+    mint(token=chan_falcon)
+    mint(token=off_curve, want='bad-yed-holder')
+    transfer([(b, 1)], [(falcon_h, 10_000)])                 # a pre-F SLH token spent to a Falcon holder
+    transfer([], [(p2pkh, 1_000)])                          # yedIn = 0: no YED moves, TOK-PQ unaffected
+    transfer([(e, 0)], [(p2pkh, 5_000)])                    # over-assigned: XFER-2 burns, TOK-PQ unaffected
+    transfer([(g, 1)], [(p2pkh, 10_000)], want='bad-yed-holder')
+    transfer([(g, 1)], [(chan_falcon, 6_000), (falcon_h, 4_000)])
+    c.mine_n(2, price_fn=lambda h: 50_000)
+    return c, expected
+
+
+def pq_vectors_document():
+    c, expected = build_pq_chain()
+    return {
+        'description': 'Post-quantum cross-implementation vectors (quantum spec D-Q-19, F-7, R-A2; Q4 reviews A m-2, B M-1). '
+                       '"scripts": TX_PQCHANNEL / TX_PQPKH matcher cases (reviewer B\'s differential): type pqchannel | '
+                       'pqpubkeyhash | other and the YED holder (scheme || hash, HolderKey) or "". "chain": regtest params '
+                       '{startHeight 1, the TEST_SET attestor set, pqFalconHeight %d}; synthetic blocks as yellowback_golden.json '
+                       '(txs[0] the coinbase; "invalid" blocks are rejected with the listed verdict and mined again without the '
+                       'transaction): Falcon owners and P2PKH / SLH / Falcon / channel / off-curve-server holders on both sides of '
+                       'the Falcon height, a pre-F token spent after it, the yedIn = 0 TRANSFER and an over-assignment (unaffected '
+                       'by TOK-PQ). Regenerate: test_yellowback_model.py --write-pq-vectors.' % PQ_FALCON_HEIGHT,
+        'scripts': pq_script_cases(),
+        'chain': {
+            'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': c.params.attestor_set,
+                       'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False,
+                       'pqFalconHeight': PQ_FALCON_HEIGHT},
+            'invalid': expected,
+            'stateHash': c.model.state_hash(),
+            'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
+            'totals': c.model.totals.as_dict(),
+            'blocks': c.blocks,
+        },
+    }
+
+
+def write_pq_vectors():
+    doc = pq_vectors_document()
+    with open(PQ_VECTORS_PATH, 'w') as f:
+        json.dump(doc, f, indent=1)
+        f.write('\n')
+    print('wrote %s: %d scripts, %d blocks, stateHash %s' % (PQ_VECTORS_PATH, len(doc['scripts']), len(doc['chain']['blocks']),
+                                                            doc['chain']['stateHash']))
+
+
+class PQVectorTests(unittest.TestCase):
+
+    # Rule: TOK-PQ
+    # Rule: MINT-3
+    def test_pq_vectors_pinned(self):
+        """The model regenerates yellowback_pq_vectors.json byte for byte (the C++ suites replay the same file)."""
+        with open(PQ_VECTORS_PATH) as f:
+            pinned = json.load(f)
+        self.assertEqual(pq_vectors_document(), pinned)
+        self.assertEqual(len(pinned['scripts']), 364)
+
+
 def write_golden():
     c, _ = build_golden()
     doc = golden_document(c)
@@ -1696,5 +1883,7 @@ def write_golden():
 if __name__ == '__main__':
     if '--write-golden' in sys.argv:
         write_golden()
+    elif '--write-pq-vectors' in sys.argv:
+        write_pq_vectors()
     else:
         unittest.main()
