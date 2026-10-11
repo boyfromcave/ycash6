@@ -218,6 +218,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("mintHeight", v.mintHeight);
     o.pushKV("refHeight", v.refHeight);
     o.pushKV("feePaidZat", v.feePaidZat);
+    o.pushKV("pMint", v.pMint);                                // rpcversion 8 (D-Q-23): the mint price every fee of this vault converts at
     o.pushKV("closeHeight", v.IsOpen() ? NullUniValue : UniValue(v.closeHeight));
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
