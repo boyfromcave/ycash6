@@ -151,7 +151,7 @@ class EncoderTests(unittest.TestCase):
     def test_payload_sizes(self):
         mint = ya.encode_mint_v3(0, 10_000, 250, 200, self.hot, 3, 4)
         self.assertEqual(len(mint), 52)
-        self.assertEqual(mint[:4], b'YB\x03\x01')
+        self.assertEqual(mint[:4], b'YB\x04\x01')                  # C-1: the MINT alone is payload version 4
         self.assertEqual(mint[-2:], b'\x03\x04')
         self.assertEqual(mint, ym.encode_mint(0, 10_000, 250, 200, self.hot, 3, 4))
         self.assertEqual(mint[4:51], ym.encode_mint(0, 10_000, 250, 200, self.hot, 3)[4:51])
@@ -408,14 +408,17 @@ class BuilderTests(unittest.TestCase):
         collateral = 20 * yu.COIN
         pool_addr = yu.address_of(yu.POOL_WIFS[0])
         bond_addr = yu.pubkey_to_address(bytes.fromhex(ya.bond_keys(1)[0][1]))
+        owner33 = yu.new_pq_owner()                    # a post-quantum owner (the node wallet's vault_getnewowner live)
         hex_, owner = ya.build_mint_tx_v3(node, 10_000, 48, 190, collateral, fee_addr=pool_addr, carrier=carrier,
-                                          attest_fee=(bond_addr, 12_500_000))
+                                          attest_fee=(bond_addr, 12_500_000), owner_pubkey=owner33.hex())
+        self.assertEqual(owner, owner33.hex())
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(len(tx.vout), 6)
         self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), bytes.fromhex(owner), 190))
         p = ym.script_single_push(tx.vout[2].script)
         self.assertEqual(len(p), 52)
-        self.assertEqual(p[:4], b'YB\x03\x01')
+        self.assertEqual(p[:4], b'YB\x04\x01')
+        self.assertEqual(p[17:50], owner33)                      # the v4 MINT's owner field, scheme || keyHash
         self.assertEqual(p[-2:], b'\x03\x04')
         self.assertEqual(tx.vout[3].value, yu.fee_zat(collateral))
         self.assertEqual(tx.vout[4].value, 12_500_000)
@@ -425,7 +428,7 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(tx.vout[5].value, 30 * yu.COIN + yu.CARRIER_VALUE - collateral - yu.TOKEN_VALUE
                          - yu.fee_zat(collateral) - 12_500_000 - yu.YELLOWBACK_FEE)
         # without carrier and fees: the v2 layout with a v3 payload
-        hex2, _o = ya.build_mint_tx_v3(self.node(), 10_000, 48, 190, collateral)
+        hex2, _o = ya.build_mint_tx_v3(self.node(), 10_000, 48, 190, collateral, owner_pubkey=yu.new_pq_owner().hex())
         tx2 = ym.tx_from_hex(hex2)
         self.assertEqual(len(tx2.vout), 4)
         self.assertEqual(ym.script_single_push(tx2.vout[2].script)[-2:], b'\xff\xff')

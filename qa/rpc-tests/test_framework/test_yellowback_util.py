@@ -108,22 +108,28 @@ class MintLayoutTests(unittest.TestCase):
 
     def test_layout_with_fee(self):
         node, collateral, tx, owner = self.build(yu.address_of(yu.POOL_WIFS[0]))
-        self.assertEqual(owner, node.pubkey.hex())
+        # quantum line (spec §3.1, §3.6): the owner is a fresh SLH-DSA key, the 33-byte owner id scheme || keyHash
+        owner33 = bytes.fromhex(owner)
+        self.assertEqual((len(owner33), owner33[0]), (33, 1))
+        self.assertIn(owner33, yu.PQ_OWNER_SECRETS)
         # funded from the 30 YEC coin alone (largest first); never the token or the P2SH coin
         self.assertEqual(len(tx.vin), 1)
         self.assertEqual(tx.vin[0].prev_txid, node.utxos[0]['txid'])
         self.assertEqual(len(tx.vout), 5)
         lock_height = 190 + 48
         self.assertEqual(tx.vout[0].value, collateral)
-        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), node.pubkey, 190))   # U-23, IT-1: the V
+        self.assertEqual(tx.vout[0].script, ym.yed_vault_script(yu.yed_params(), owner33, 190))   # U-23, IT-1: the V
         self.assertTrue(ym.is_yed_vault(tx.vout[0].script))
+        self.assertIn(ym.pqpkh_script(owner33), tx.vout[0].script)          # the V's PQ owner slot 20 <hash> 51 c2
         self.assertEqual(tx.vout[1].value, yu.TOKEN_VALUE)
+        # the token goes to a fresh holder of the node (P2PKH while Falcon is inactive), no longer to the owner
         self.assertEqual(tx.vout[1].script, ym.p2pkh_script(ym.hash160(node.pubkey)))
         self.assertEqual(tx.vout[2].value, 0)
         p = ym.decode_payload(ym.script_single_push(tx.vout[2].script))
         self.assertEqual(p.type, ym.PAYLOAD_MINT)
         self.assertEqual((p.cents, p.lock_height, p.ref_height, p.fee_vout, p.term_class), (10_000, lock_height, 190, 3, 0))
-        self.assertEqual(p.owner_pubkey, node.pubkey)
+        self.assertEqual(p.owner_pubkey, owner33)                           # the v4 MINT's owner field
+        self.assertEqual(ym.script_single_push(tx.vout[2].script)[2], ym.MINT_PAYLOAD_VERSION)   # C-1: v4 MINT
         fee = yu.fee_zat(collateral)
         self.assertEqual(fee, yu.FEE_MIN)   # 20 YEC * 25 bps < 0.5 YEC floor
         self.assertEqual(tx.vout[3].value, fee)
@@ -156,7 +162,11 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual((v['vout'], v['collateralZat'], v['lockHeight'], v['claimHeight'], v['refHeight']),
                          (0, COIN, 238, 262, 190))
         self.assertEqual(v['txid'], ym.tx_from_hex(hex_).txid)
-        self.assertEqual(v['ownerAddress'], node.address)
+        # rpcversion 7 shape: ownerScheme + ownerHash (no ownerAddress or EC key); ownerPubKey keeps the 33-byte id
+        owner33 = bytes.fromhex(owner)
+        self.assertEqual((v['ownerScheme'], v['ownerHash'], v['ownerPubKey']), (owner33[0], owner33[1:].hex(), owner))
+        self.assertEqual((v['ownerHeight'], v['appHeight']), (191, 191))
+        self.assertEqual(yu.vault_owner(v), owner33)
 
 
 class VaultSpendTests(unittest.TestCase):
@@ -164,8 +174,9 @@ class VaultSpendTests(unittest.TestCase):
         yu.ATTESTOR_SET[0] = ym.TEST_SET
         self.node = FakeNode([utxo(b'a', 0, 30)], height=300)
         hex_, owner = yu.build_mint_tx(self.node, 10_000, 48, 190, 20 * COIN)
+        self.owner = bytes.fromhex(owner)
         self.vault = yu.vault_from_mint(hex_, 48, 190, owner)
-        self.script = ym.yed_vault_script(yu.yed_params(), self.node.pubkey, 190)
+        self.script = ym.yed_vault_script(yu.yed_params(), self.owner, 190)
 
     def _key(self):
         try:
@@ -175,10 +186,10 @@ class VaultSpendTests(unittest.TestCase):
         return CECKey
 
     def test_owner_path_signature_verifies(self):
-        # Rule: RED-1
-        CECKey = self._key()
+        # Rule: RED-1 (quantum line: the owner path is <sig_1..sig_16> <16> <pk> <1> OP_2, SLH-DSA, spec §2.2)
+        from test_framework import pq
         from test_framework.mininode import CTransaction
-        from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
+        from test_framework.script import SIGHASH_ALL
         signed_before = len(self.node.signed)
         hex_ = yu.build_vault_spend_raw(self.node, self.vault, 'owner', [], ref_height=298)
         tx = CTransaction()
@@ -188,32 +199,28 @@ class VaultSpendTests(unittest.TestCase):
         self.assertEqual(tx.nLockTime, self.vault['ownerHeight'])      # IT-1 (extended): the owner branch's CLTV, refHeight + 1
         self.assertEqual(tx.nExpiryHeight, 298 + yu.REF_WINDOW)
         pushes = ym.parse_pushes(tx.vin[0].scriptSig)
-        self.assertEqual(len(pushes), 2)                     # U-23: <sig> OP_2
-        sig, selector = pushes
+        self.assertEqual(len(pushes), 16 + 1 + 1 + 1 + 1)                # 16 sig chunks, s, pk, p, the selector
         self.assertEqual(ym.selector_of(tx.vin[0].scriptSig), ym.SEL_OWNER)
+        sig, pk = b''.join(pushes[:16]), pushes[17]
+        self.assertEqual([len(c) for c in pushes[:16]], [520] * 15 + [57])
+        self.assertEqual((len(sig), len(pk)), (pq.sig_size(1) + 1, pq.pubkey_size(1)))
         self.assertEqual(sig[-1], SIGHASH_ALL)
-        sighash = SignatureHash(CScript(self.script), tx, 0, SIGHASH_ALL, 20 * COIN, yu.SIGNING_BRANCH_ID)[0]
-        k = CECKey()
-        k.set_pubkey(self.node.pubkey)
-        self.assertTrue(k.verify(sighash, sig[:-1]))
+        self.assertEqual(pq.key_hash(1, pk), self.owner[1:])            # the key the V commits to
+        sighash = pq.pq_sighash(tx, 0, self.script, 20 * COIN, yu.SIGNING_BRANCH_ID)
+        self.assertTrue(pq.verify(1, pk, sig[:-1], sighash))
         # a different amount or branch id is a different message
-        other = SignatureHash(CScript(self.script), tx, 0, SIGHASH_ALL, 20 * COIN - 1, yu.SIGNING_BRANCH_ID)[0]
-        self.assertFalse(k.verify(other, sig[:-1]))
-        other = SignatureHash(CScript(self.script), tx, 0, SIGHASH_ALL, 20 * COIN, yu.YCASH_HEARTWOOD_BRANCH_ID)[0]
-        self.assertFalse(k.verify(other, sig[:-1]))
-        # low-S
-        s = int.from_bytes(sig[6 + sig[3]:6 + sig[3] + sig[5 + sig[3]]], 'big')
-        self.assertLessEqual(s, yu._SECP256K1_N // 2)
+        self.assertFalse(pq.verify(1, pk, sig[:-1], pq.pq_sighash(tx, 0, self.script, 20 * COIN - 1, yu.SIGNING_BRANCH_ID)))
+        self.assertFalse(pq.verify(1, pk, sig[:-1], pq.pq_sighash(tx, 0, self.script, 20 * COIN, yu.YCASH_HEARTWOOD_BRANCH_ID)))
         # one output: the collateral less the network fee, to the node's address
         self.assertEqual(len(tx.vout), 1)
         self.assertEqual(tx.vout[0].nValue, 20 * COIN - yu.YELLOWBACK_FEE)
         self.assertEqual(bytes(tx.vout[0].scriptPubKey), ym.p2pkh_script(ym.hash160(self.node.pubkey)))
         self.assertEqual(len(self.node.signed), signed_before)  # no burn: signrawtransaction not called
 
-    def test_owner_wif_bypasses_node(self):
-        self._key()
+    def test_owner_sk_bypasses_node(self):
+        # the owner's SLH-DSA secret passed in: no node is consulted (no burn, an explicit recipient and expiry)
         hex_ = yu.build_vault_spend_raw(None, self.vault, 'owner', [], expiry=0, to=self.node.address,
-                                        owner_wif=yu.secret_to_wif(self.node.secret))
+                                        owner_sk=yu.PQ_OWNER_SECRETS[self.owner])
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(tx.expiry_height, 0)
         self.assertEqual(ym.selector_of(tx.vin[0].script_sig), ym.SEL_OWNER)
