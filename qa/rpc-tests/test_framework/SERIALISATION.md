@@ -21,7 +21,7 @@ The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block ent
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873`. Four entries are flagged
+`782038d14a928963f76bc29eb901f2220afd3379fc69ad45d4da94a333c656b6`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
