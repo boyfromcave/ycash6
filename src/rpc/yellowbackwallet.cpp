@@ -982,7 +982,8 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "\nResult: { \"vault\", \"status\", \"termClass\", \"lockHeight\", \"height\", \"early\", \"burnedCents\",\n"
-            "          \"collateralZat\", \"feeZat\", \"earlyRedeemFeeBps\", \"earlyRedeemFeeZat\", \"payee\", \"canRedeem\", \"error\" }\n");
+            "          \"collateralZat\", \"pMint\", \"protocolFeeCents\", \"protocolFeeZat\", \"feeZat\", \"earlyRedeemFeeBps\",\n"
+            "          \"earlyRedeemFeeCents\", \"earlyRedeemFeeZat\", \"payee\", \"canRedeem\", \"error\" }  (rpcversion 8: the fees in dollars at pMint)\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
@@ -1016,8 +1017,13 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     o.pushKV("early", active && (int64_t)tip + 1 < (int64_t)v.lockHeight);
     o.pushKV("burnedCents", active ? v.mintedCents : (int64_t)0);
     o.pushKV("collateralZat", v.collateralZat);
-    o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1 plus the early-redeem fee
+    o.pushKV("pMint", v.pMint);                                 // rpcversion 8: the price every fee below is struck at
+    o.pushKV("protocolFeeCents", active ? ProtocolFeeCents(v.mintedCents, p) : (Cents)0);
+    o.pushKV("protocolFeeZat", fee1);                           // 0 under FEE-0 or on a release
+    o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1' plus the early-redeem fee
     o.pushKV("earlyRedeemFeeBps", p.IsValidClass(v.termClass) ? p.earlyRedeemFeeBps[v.termClass] : 0);
+    // IT-9' in dollars: ceil(debt x bps / 10^4) cents, what a wallet shows (0 when no early fee is due)
+    o.pushKV("earlyRedeemFeeCents", early > 0 && p.IsValidClass(v.termClass) ? (v.mintedCents * p.earlyRedeemFeeBps[v.termClass] + BPS - 1) / BPS : (Cents)0);
     o.pushKV("earlyRedeemFeeZat", early);
     o.pushKV("payee", active ? PayeeToJSON(payee) : NullUniValue);
     o.pushKV("canRedeem", error.empty());

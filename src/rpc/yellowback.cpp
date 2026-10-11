@@ -58,7 +58,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 7;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+static const int YELLOWBACK_RPC_VERSION = 8;   // 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
                                                //    the v4 MINT, params.pq, PQ yb… addresses
@@ -715,6 +715,49 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("payeeWindow", p.payeeWindow);
     prm.pushKV("tokenValueZat", p.tokenValue);
     prm.pushKV("feeZat", g_yellowbackFee);
+    prm.pushKV("maxMintCents", p.maxMint);                 // rpcversion 8 (D-Q-24): $100,000
+    {
+        // rpcversion 8 (D-Q-23, fees spec §3.4): the protocol fee's bands and floor (FEE-1', struck at the vault's stored
+        // pMint), the early fee (IT-9', of the debt) and the network-fee policy (dollars per KB at the tip's attested
+        // price, policy.h AttestedFeePolicy; the -pqfeerate fallback without one)
+        UniValue fees(UniValue::VOBJ);
+        UniValue protocol(UniValue::VOBJ);
+        UniValue bands(UniValue::VARR);
+        for (int i = 0; i < FEE_BANDS; i++) {
+            UniValue b(UniValue::VOBJ);
+            b.pushKV("uptoCents", p.feeBands[i].uptoCents > 0 ? UniValue(p.feeBands[i].uptoCents) : NullUniValue);   // null = unbounded
+            b.pushKV("bps", p.feeBands[i].bps);
+            bands.push_back(b);
+        }
+        protocol.pushKV("bands", bands);
+        protocol.pushKV("floorCents", p.feeFloorCents);
+        protocol.pushKV("attestFeeBps", p.attestFeeBps);
+        protocol.pushKV("priceSource", "pMint");
+        fees.pushKV("protocol", protocol);
+        UniValue early2(UniValue::VARR);
+        for (int i = 0; i < NUM_CLASSES; i++) early2.push_back(p.earlyRedeemFeeBps[i]);
+        fees.pushKV("earlyRedeemFeeBps", early2);
+        const AttestedFeePolicy& fp = ::attestedFeePolicy;
+        UniValue network(UniValue::VOBJ);
+        network.pushKV("priceMicroUsd", fp.priceMicroUsd.has_value() ? UniValue(fp.priceMicroUsd.value()) : NullUniValue);
+        network.pushKV("priceSource", fp.priceMicroUsd.has_value() ? "tip" : "fallback");
+        UniValue plain(UniValue::VOBJ);
+        plain.pushKV("usdPerKBMicro", fp.plainUsdPerKBMicro);
+        plain.pushKV("zatPerKB", PlainPQFeeRate().GetFeePerK());
+        network.pushKV("plain", plain);
+        UniValue yb(UniValue::VOBJ);
+        yb.pushKV("usdPerKBMicro", fp.yedUsdPerKBMicro);
+        yb.pushKV("zatPerKB", YedFeeRate().GetFeePerK());
+        yb.pushKV("maxTxFeeUsdMicro", fp.yedMaxTxFeeUsdMicro);      // D-Q-23a: the vault/Yellowback cap is max(-maxtxfee, this at the price)
+        yb.pushKV("maxTxFeeZat", YedMaxTxFee());
+        network.pushKV("yellowback", yb);
+        network.pushKV("floorZatPerKB", fp.floorZatPerKB);
+        network.pushKV("fallbackZatPerKB", ::pqFeeRate.GetFeePerK());   // -pqfeerate
+        network.pushKV("flatZat", g_yellowbackFee);
+        network.pushKV("maxTxFeeZat", maxTxFee);
+        fees.pushKV("network", network);
+        prm.pushKV("fees", fees);
+    }
     // the Base58Check version bytes of this network's YED addresses (hex), so clients need not hard-code them:
     // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the 33-byte PQ form (quantum spec §4; 56ab)
     prm.pushKV("addressVersion", HexStr(p.addressVersion));
