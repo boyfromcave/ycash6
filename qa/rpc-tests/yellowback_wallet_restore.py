@@ -77,7 +77,7 @@ class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
             imported += 1
         assert_greater_than(imported, 2)
         # the vault owners are post-quantum keys (quantum plan §4.3, §4.6): dumpwallet's pqseed lines carry them
-        restored.importwallet(user.dumpwallet('yellowback-restore'))
+        restored.importwallet(user.z_exportwallet('yellowbackrestore'))   # 6.20.0: z_exportwallet (no dumpwallet)
         for a in yed_addrs:
             assert_equal(restored.yed_validateaddress(a)['ismine'], True)
             assert_equal(user.yed_validateaddress(a)['transparentAddress'], restored.yed_validateaddress(a)['transparentAddress'])

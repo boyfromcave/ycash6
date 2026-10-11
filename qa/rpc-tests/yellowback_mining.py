@@ -470,7 +470,8 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert_equal(user.yed_getvault(a_txid)['status'], 'ACTIVE')
         # a would-burn TRANSFER of vault A's token: 4,000 of 10,000 cents assigned, 6,000 burn
         token_a = (a_txid, 1)
-        prev = [{'txid': a_txid, 'vout': 1, 'scriptPubKey': bytes_to_hex_str(ym.p2pkh_script(ym.hash160(hex_str_to_bytes(a_owner)))),
+        # the token is a fresh holder of the node (the PQ owner no longer holds it, quantum spec §3.6)
+        prev = [{'txid': a_txid, 'vout': 1, 'scriptPubKey': user.getrawtransaction(a_txid, 1)['vout'][1]['scriptPubKey']['hex'],
                  'amount': TOKEN_VALUE / 1e8}]
         burn_hex = self.build_transfer(user, [token_a], [4_000], prev)
         rpc_error('yed-burn-refused', user.sendrawtransaction, burn_hex)        # H7 (audit C-7): 6,000 of 10,000 would burn
@@ -494,7 +495,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         b_hex, b_owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=payee)
         b_txid = send_locked(user, b_hex)
         self.vault_b = vault_from_mint(b_hex, LOCK, ref, b_owner)
-        prev = [{'txid': b_txid, 'vout': 1, 'scriptPubKey': bytes_to_hex_str(ym.p2pkh_script(ym.hash160(hex_str_to_bytes(b_owner)))),
+        prev = [{'txid': b_txid, 'vout': 1, 'scriptPubKey': user.getrawtransaction(b_txid, 1)['vout'][1]['scriptPubKey']['hex'],
                  'amount': TOKEN_VALUE / 1e8}]
         t_hex = self.build_transfer(user, [(b_txid, 1)], [CENTS], prev)
         t_txid = send_locked(user, t_hex)
