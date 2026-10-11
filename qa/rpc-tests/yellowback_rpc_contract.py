@@ -55,6 +55,8 @@ from test_framework.yellowback_util import (
     build_mint_tx,
     mine_block_raw,
     protocol_fee_zat,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     set_quote,
     usd_to_micro,
 )
@@ -387,10 +389,14 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         vault_b = user.yed_getvault(mint_b['txid'])
         fee_bps = user.yed_getinfo()['params']['classes'][0]['earlyRedeemFeeBps']
         assert_equal(fee_bps, user.yed_getinfo()['params']['earlyRedeemFeeBps'][0])
-        early_fee = vault_b['collateralZat'] * fee_bps // 10000
+        early_fee = vault_early_redeem_fee_zat(vault_b)          # IT-9' (D-Q-23): of the debt at the vault's pMint, ceil
+        assert_equal(early_fee, -(-vault_b['mintedCents'] * fee_bps * COIN // vault_b['pMint']))
         quote = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_b['txid']))
         assert_equal((quote['early'], quote['earlyRedeemFeeBps'], quote['earlyRedeemFeeZat'], quote['canRedeem'], quote['error']),
                      (True, 500, early_fee, True, ''))
+        assert_equal((quote['pMint'], quote['protocolFeeZat'], quote['protocolFeeCents'], quote['earlyRedeemFeeCents']),
+                     (vault_b['pMint'], vault_fee_zat(vault_b), 100, 500))    # rpcversion 8: $1 at pMint, 5 % of $100
+        assert_equal(quote['feeZat'], vault_fee_zat(vault_b) + early_fee)
         assert_equal((quote['burnedCents'], quote['collateralZat'], quote['height']), (10000, vault_b['collateralZat'], user.getblockcount() + 1))
         pos_b = [x for x in c.check('yed_listpositions', user.yed_listpositions()) if x['txid'] == mint_b['txid']][0]
         assert_equal((pos_b['canRedeem'], pos_b['earlyRedeemFeeZat']), (True, early_fee))
