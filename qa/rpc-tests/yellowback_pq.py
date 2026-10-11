@@ -246,7 +246,8 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         out = receiver.getrawtransaction(by_addr[pq_addr]['txid'], 1)['vout'][by_addr[pq_addr]['vout']]['scriptPubKey']
         assert_equal(out['hex'], bytes_to_hex_str(pqpkh_of(va['keyid'])))
         assert_equal(len(out['hex']), 70)                                                             # 35-byte TX_PQPKH
-        assert_equal(out.get('addresses'), [pq_addr])                                                 # EncodeDestination renders the PQ ye… (ruling)
+        rq = ym.base58check_encode(bytes([0x4C, 0x51]) + hex_str_to_bytes(va['keyid']))
+        assert_equal((out.get('addresses'), rq[:2], len(rq)), ([rq], 'rq', 53))                        # D-Q-20: the plain-YEC rq… form
 
 # Rule: XFER-1 TOK-PQ
         self.channel_case(user, receiver, p2pkh)

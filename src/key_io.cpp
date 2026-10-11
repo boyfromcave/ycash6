@@ -14,7 +14,7 @@
 #include <rust/address.h>
 
 #include "chainparams.h"
-#include "yellowback/address.h"
+#include "crypto/pq/scheme.h"
 
 #include <assert.h>
 #include <string.h>
@@ -46,19 +46,24 @@ public:
         return EncodeBase58Check(data);
     }
 
-    // No plain-YEC encoding for a PQ key (quantum spec §2.4, D-Q-11): a PQ destination renders as its
-    // post-quantum YED address (yellowback::EncodeAddress, versions 56BF/571E/5710, coordinator ruling
-    // 2026-10-10), so decoderawtransaction, listunspent and the like name TX_PQPKH outputs. Encode only:
-    // DecodeDestination does not take it (not a YEC destination). "" when the network is not known.
+    // A PQ destination renders as its plain-YEC PQ address (owner decision D-Q-20): Base58Check(version ||
+    // scheme || keyHash), versions 0x4DD9 "sq…" / 0x4F61 "tq…" / 0x4C51 "rq…", 53 characters, the same
+    // TX_PQPKH script a PQ "ye…" names. Encode only, for now: DecodeDestination does not take it (the
+    // chain-wide decode and the RPCs that would accept it are a later task), and the wallet keeps PQ keys
+    // out of the address book, so no walletdb name record carries one. "" for an unknown network or scheme.
     std::string operator()(const CPQKeyID& id) const
     {
         const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
-        if (!chain) return {};
-        try {
-            return yellowback::EncodeAddress(id, yellowback::ParamsForNetwork(chain->NetworkIDString()));
-        } catch (const std::exception&) {
-            return {};
-        }
+        if (!chain || !pq::IsKnownScheme(id.scheme)) return {};
+        const std::string net = chain->NetworkIDString();
+        std::vector<unsigned char> data;
+        if (net == "main") data = {0x4D, 0xD9};
+        else if (net == "test") data = {0x4F, 0x61};
+        else if (net == "regtest") data = {0x4C, 0x51};
+        else return {};
+        data.push_back(id.scheme);
+        data.insert(data.end(), id.hash.begin(), id.hash.end());
+        return EncodeBase58Check(data);
     }
 
     std::string operator()(const CNoDestination& no) const { return {}; }

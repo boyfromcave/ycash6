@@ -77,11 +77,13 @@ BOOST_AUTO_TEST_CASE(pqpkh_solver_success)
         BOOST_CHECK(std::get<CPQKeyID>(dests[0]) == id);
         BOOST_CHECK_EQUAL(nRequired, 1);
 
-        // no plain-YEC encoding (quantum spec §2.4): a PQ destination renders as its post-quantum YED
-        // address (coordinator ruling 2026-10-10), which DecodeDestination does not take
+        // the plain-YEC PQ address (D-Q-20): "sq…" on mainnet, 53 characters, encode only (no decode yet)
         KeyIO keyIO(Params());
         const std::string enc = keyIO.EncodeDestination(dest);
-        BOOST_CHECK_EQUAL(enc, yellowback::EncodeAddress(id, yellowback::ParamsForNetwork(Params().NetworkIDString())));
+        std::vector<unsigned char> raw = {0x4D, 0xD9, id.scheme};
+        raw.insert(raw.end(), id.hash.begin(), id.hash.end());
+        BOOST_CHECK_EQUAL(enc, EncodeBase58Check(raw));
+        BOOST_CHECK_EQUAL(enc.substr(0, 2), "sq");
         BOOST_CHECK_EQUAL(enc.size(), 53U);
         BOOST_CHECK(std::holds_alternative<CNoDestination>(keyIO.DecodeDestination(enc)));
     }
