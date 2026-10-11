@@ -999,13 +999,14 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
 
 CAmount CirculatingSupplyAt(int height, const Consensus::Params& c)
 {
-    // The sum of GetBlockSubsidy(h) over 0 <= h <= height (the genesis block's subsidy is 0: the slow start ramps
-    // from 0), in closed form: the two slow-start ramps as arithmetic series, then one product per segment of
-    // constant subsidy, whose boundaries are the slow-start end, the Blossom activation and every halving height.
-    // The whole subsidy counts (miner plus founders' reward / funding streams: both circulate); nothing is subtracted
-    // for lost coins or fees. Equal to Σ GetBlockSubsidy by construction (yellowback_index_tests checks it against the
-    // brute-force sum across every boundary).
-    if (height < 0) return 0;
+    // The sum of GetBlockSubsidy(h) over 1 <= h <= height, in closed form: the two slow-start ramps as arithmetic
+    // series, then one product per segment of constant subsidy, whose boundaries are the slow-start end, the Blossom
+    // activation and every halving height. The genesis block is excluded (its coinbase is unspendable by construction,
+    // and GetBlockSubsidy(0) is 0 on mainnet anyway; getblocksubsidy, which the Python model sums block by block to
+    // check this, refuses height 0). The whole subsidy counts (miner plus founders' reward / funding streams: both
+    // circulate); nothing is subtracted for lost coins or fees. Equal to Σ GetBlockSubsidy by construction
+    // (yellowback_index_tests checks it against the brute-force sum across every boundary).
+    if (height < 1) return 0;
     arith_uint256 total = 0;
     const int interval = c.nSubsidySlowStartInterval;
     const int shift = c.SubsidySlowStartShift();
@@ -1020,7 +1021,7 @@ CAmount CirculatingSupplyAt(int height, const Consensus::Params& c)
             total += arith_uint256(rate) * arith_uint256(n * (uint64_t)(shift + 1 + b + 1) / 2);
         }
     }
-    int h = interval;                                                                      // the first full-subsidy block
+    int h = std::max(interval, 1);                                                         // the first full-subsidy block (never genesis)
     const int blossom = c.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight;
     while (h <= height) {
         const CAmount subsidy = c.GetBlockSubsidy(h);

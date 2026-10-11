@@ -700,6 +700,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         std::optional<Cents> maxVault = MaxVaultCents(cap, p.maxVaultShareBps, p.vaultShareFloorCents);
         UniValue sc(UniValue::VOBJ);
         sc.pushKV("circulatingZat", s.issuedZat);
+        sc.pushKV("issuedBeforeStartZat", p.issuedBeforeStart);        // CirculatingSupplyAt(startHeight - 1): the seed
         sc.pushKV("priceMicroUsd", PriceOrNull(s.PMint()));
         sc.pushKV("capCents", cap.has_value() ? UniValue(cap.value()) : NullUniValue);
         sc.pushKV("maxVaultShareBps", p.maxVaultShareBps);

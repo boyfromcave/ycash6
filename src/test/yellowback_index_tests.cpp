@@ -1566,14 +1566,15 @@ BOOST_AUTO_TEST_CASE(circulating_supply_closed_form_matches_the_subsidy_sum)
 {
     auto brute = [](int height, const Consensus::Params& c) {
         arith_uint256 t = 0;
-        for (int h = 0; h <= height; h++) t += arith_uint256((uint64_t)c.GetBlockSubsidy(h));
+        for (int h = 1; h <= height; h++) t += arith_uint256((uint64_t)c.GetBlockSubsidy(h));   // genesis excluded
         return (CAmount)t.GetLow64();
     };
     // regtest (as this suite configures it: no slow start, the 150-block halving interval): every height to 2,000
     const Consensus::Params& r = ::Params().GetConsensus();
     BOOST_CHECK_EQUAL(CirculatingSupplyAt(-1, r), 0);
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(0, r), 0);                                      // genesis: nothing circulates
     CAmount running = 0;
-    for (int h = 0; h <= 2000; h++) {
+    for (int h = 1; h <= 2000; h++) {
         running += r.GetBlockSubsidy(h);
         BOOST_REQUIRE_EQUAL(CirculatingSupplyAt(h, r), running);
     }

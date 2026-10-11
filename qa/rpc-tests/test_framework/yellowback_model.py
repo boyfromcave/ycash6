@@ -3257,9 +3257,18 @@ def model_transaction(model, tx, height):
 
 def build_model_from_node(node, params=None, check_tags=True):
     """Rebuild the model from a live node over [0, tip] via getblockcount/getblockhash/getblock 2."""
+    info = node.yed_getinfo()
     if params is None:
-        params = params_from_getinfo(node.yed_getinfo())
-    model = YellowbackModel(params)
+        params = params_from_getinfo(info)
+    # D-Q-25: the virtual snapshot below the start carries the YEC circulating there (the node's closed-form
+    # CirculatingSupplyAt(startHeight - 1)); the model seeds it from the subsidy sum the node's own getblocksubsidy
+    # reports, block by block, and checks the node's closed form against it
+    issued_before_start = sum(subsidy_from_rpc(node, h) for h in range(1, params.start_height))   # genesis excluded (getblocksubsidy refuses 0)
+    reported = (info.get('params', {}).get('supplyCap') or {}).get('issuedBeforeStartZat')
+    if reported is not None:
+        _check(int(reported) == issued_before_start, 'yed_getinfo.params.supplyCap.issuedBeforeStartZat', params.start_height - 1,
+               '%d != %d' % (int(reported), issued_before_start))
+    model = YellowbackModel(params, issued_before_start)
     tip = node.getblockcount()
     for h in range(0, tip + 1):
         bh = node.getblockhash(h)

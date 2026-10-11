@@ -481,7 +481,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
 
 /**
  * MINT-6 (quantum plan D-Q-25): the YEC circulating at `height`, the closed-form sum of GetBlockSubsidy over
- * 0..height (the whole subsidy: miner and founders' reward / funding streams alike; nothing subtracted for fees
+ * 1..height (genesis excluded: unspendable; the whole subsidy: miner and founders' reward / funding streams alike; nothing subtracted for fees
  * or lost coins). Params::issuedBeforeStart = CirculatingSupplyAt(startHeight - 1), so every snapshot's
  * issuedZat is the circulating supply at its height and the supply cap is supplyCapBps of market capitalisation.
  * MAX_MONEY if the sum does not fit (it cannot: the schedule sums below MAX_MONEY).
