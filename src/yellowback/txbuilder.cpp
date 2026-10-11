@@ -1881,6 +1881,17 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
     if ((int64_t)ctx.chainHeight < (int64_t)rec->bondLocktime) {
         throw std::runtime_error(strprintf("bond-locked: the bond is locked until height %u (tip %d)", rec->bondLocktime, ctx.chainHeight));
     }
+    // the bond exit delay (owner 2026-10-11): the vault primitive returns a bond the set's maturity (BOND_MATURITY) after its
+    // member left (set_leave, or evicted): the record's statusHeight once WITHDRAWN; a frozen bond never
+    if (rec->Frozen()) throw std::runtime_error(strprintf("bond-locked: the bond of seq %u is frozen (slashed)", (unsigned)seq));
+    if (rec->Status() != AttestorStatus::WITHDRAWN) {
+        throw std::runtime_error(strprintf("bond-locked: seq %u is still a member (%s); leave the set first (set_leave)", (unsigned)seq, AttestorStatusName(rec->Status())));
+    }
+    const std::optional<AttestorSetRecord> aset = ctx.st.GetAttestorSet();
+    const int64_t spendableAt = (int64_t)rec->statusHeight + (aset.has_value() ? (int64_t)aset->maturity : 0);
+    if ((int64_t)ctx.chainHeight + 1 < spendableAt) {
+        throw std::runtime_error(strprintf("bond-locked: the bond is returned at height %d (left at %d; tip %d)", spendableAt, rec->statusHeight, ctx.chainHeight));
+    }
     // P-2: one bond input, one P2PKH output or one (padded) Sapling note; the fee never moves the shape.
     CMutableTransaction probe;
     probe.vin.push_back(CTxIn(rec->bondOutpoint, CScript() << valtype(MAX_SIG_SIZE, 0x30) << ToByteVector(BondScript(bond, rec->bondLocktime))));

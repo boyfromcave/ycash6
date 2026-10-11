@@ -76,8 +76,8 @@ system; YED is the unit.
   `relays = ["https://relay.you.example"]` (your own, or one the Ycash project lists for mainnet)
   or `relays = ["none"]` with direct peers only. Either way, what leaves your machine is 74
   public bytes per interval and nothing else.
-- **No periodic transactions.** Registration is one transaction; withdrawal, a year or more
-  later, is one more. Attestations are 74-byte gossip messages, never on chain unless a minter
+- **No periodic transactions.** Registration is one transaction; leaving (`set_leave`) is one more and
+  the withdrawal, 14 days later, a third. Attestations are 74-byte gossip messages, never on chain unless a minter
   or claimant carries them (or someone proves an equivocation with them).
 - **No hot wallet beyond the node's own.** The node holds the hot key and signs; the only spend
   it may ever make on your behalf is the rare `yed_revive`, funded from whatever confirmed YEC
@@ -112,8 +112,8 @@ can **grief but not extract** — no direction the price is pushed in pays them 
 What you need: an upgraded `ycashd` on a network where Yellowback is live (no payout address, no
 mining), outbound connectivity, a bond of at least `params.attest.bondMinZat` (D-Q-28 on mainnet: 20,000 YEC before arming and in the founding
 window, then max(2,000 YEC, $8,000 at the attested price), never above 20,000 YEC; a larger bond outranks smaller ones
-for a seat, and tenure adds up to ×1.9 over a year) you can lock
-for at least `BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no
+for a seat, and tenure adds up to ×1.9 over a year) — no fixed lock: you can leave any time and the bond
+returns 14 days after you leave (below) — and price sources. No inbound port, no
 domain, no funded hot wallet beyond the node's own for the rare `yed_revive`.
 
 ## Registration
@@ -135,7 +135,7 @@ weeks), then `ELIGIBLE`; `yed_listattestors` shows your `seq` — the attestor's
 on — once the transaction confirms.
 
 **A bond cannot be topped up.** To change it, register a new identity (new keys, new `seq`, age
-from zero) and let the old one go dormant and withdraw at its locktime. **Back up `wallet.dat`
+from zero) and let the old one leave (`set_leave`) and withdraw 14 days later. **Back up `wallet.dat`
 right after registering** — both keys came from the keypool, and a backup taken before the
 registration does not contain them (Ycash 4.5 transparent keys are not HD).
 
@@ -146,8 +146,8 @@ approval (proposal §5.3). Duplicate hot keys are refused (REG-A1) unless the ea
 ## Bond key hygiene
 
 The registering wallet holds both keys. The hot key must stay in it — `yed_signattestation` uses
-it every ten blocks. The bond key is used by exactly one command, `yed_withdrawbond`, a year or
-more later; until then it is worth `bondYec` to whoever holds it, and it collects your fees.
+it every ten blocks. The bond key is used by exactly one command, `yed_withdrawbond`, 14 days
+after you leave; until then it is worth `bondYec` to whoever holds it, and it collects your fees.
 
 Two addresses are involved, and only one of them takes a private key: `bondAddress` (in
 `yed_registerattestor`, `yed_listattestors` and `yed_decodepayload`) is the **P2SH address of the
@@ -344,11 +344,23 @@ separate and stays safe if it stayed cold.
 
 ## Withdrawal
 
-After `bondLocktime`, `yed_withdrawbond <seq> [to]` spends the bond to any address; the record
-becomes `WITHDRAWN` (an ejected record stays `EJECTED`, the spend only recorded). Before
-`bondLocktime` the command refuses (`bond-locked`); the coin is time-locked by consensus, not by
-the overlay, so nothing shorter exists. The hot key is then free to be discarded; a withdrawn
-attestor's hot key may register again.
+**The bond exit delay (owner 2026-10-11).** There is no one-year lock: an attestor can leave at any time,
+and its bond returns `BOND_MATURITY` (16,128 blocks, 14 days; 8 on regtest) after it leaves, evicted or
+voluntary. The lock lives in the vault primitive's state, not in the bond script (`BOND_MIN_LOCK` is 0; the
+attestor set's maturity is `BOND_MATURITY`, the delay): a bond is spendable only from its member's
+`exitHeight + maturity`; before that the primitive refuses it (`bad-vault-bond-locked`).
+
+1. **Leave**: `set_leave <attestorSetId> [memberkey]` broadcasts the member's own `SET_REMOVE`, signed by its
+   key alone, without burn — the one `SET_REMOVE` of the attestor set that is valid. The record is
+   `WITHDRAWN` from that block (no seat, no selection), `statusHeight` the exit height. An eviction (above)
+   starts the same clock.
+2. **Wait** `BOND_MATURITY` blocks. You are still slashable: an equivocation proved during the delay ejects
+   you and freezes the bond for good.
+3. **Withdraw**: `yed_withdrawbond <seq> [to]` spends the bond to any address (the record keeps its
+   `statusHeight`; `bondSpentHeight` is set). Before `statusHeight + BOND_MATURITY`, while still a member, or
+   with a frozen bond it refuses (`bond-locked`).
+
+The hot key is then free to be discarded; a withdrawn attestor's key may register again.
 
 ## Quick reference
 
@@ -361,6 +373,7 @@ attestor's hot key may register again.
 | sign (the agent does this) | `yed_signattestation <seq> <priceMicroUsd> [citedHeight]` | `attest-unknown-seq`, `attest-key-not-held`, `equivocation-guard`, `attest-range`, `attest-stale` |
 | return from dormancy | `yed_revive <seq> <priceMicroUsd>` | `not-dormant`, `attest-key-not-held`, `equivocation-guard` |
 | report someone's equivocation | `yed_reportequivocation <hexA> <hexB>` | `not-equivocation` |
+| leave the set (starts the 14-day delay) | `set_leave <attestorSetId> [memberkey]` | `bad-vault-act-remove` (not an active member) |
 | withdraw the bond | `yed_withdrawbond <seq> [to]` | `bond-locked`, `bond-spent`, `attest-key-not-held` |
 
 Every identifier is defined in `doc/yellowback-rpc.md`. The two calibration measurements that

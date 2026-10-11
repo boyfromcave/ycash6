@@ -82,7 +82,7 @@
       "raisedBy": [
         "yed_withdrawbond"
       ],
-      "when": "tip < bondLocktime: withdraw right after registering"
+      "when": "still a member, a frozen bond, or within BOND_MATURITY of leaving (the bond exit delay): withdraw right after registering"
     },
     "bond-spent": {
       "raisedBy": [
@@ -224,7 +224,7 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "lockBlocks < BOND_MIN_LOCK (200 on regtest), or the resulting bondLocktime ≥ LOCKTIME_THRESHOLD"
+      "when": "lockBlocks < BOND_MIN_LOCK (0 since the bond exit delay: a negative lockBlocks), or the resulting bondLocktime ≥ LOCKTIME_THRESHOLD"
     },
     "mempool-check-failed:<verdict>": {
       "raisedBy": [
@@ -775,7 +775,7 @@
           "attestMaxAge": 8,
           "bondMaturity": 8,
           "bondMinFloorZat": 100000000,
-          "bondMinLock": 200,
+          "bondMinLock": 0,
           "bondMinNoPriceZat": 1000000000,
           "bondMinUsdCents": 400,
           "bondMinZat": 1000000000,

@@ -1293,8 +1293,9 @@ UniValue yed_withdrawbond(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
             "yed_withdrawbond seq ( \"to\" )\n"
-            "\nSpend the bond of an attestor whose bondPubKey this wallet holds, after bondLocktime (nLockTime = bondLocktime, the\n"
-            "CLTV path), signed by hand. Any status may withdraw once the locktime passes; IN-2 then marks the record WITHDRAWN.\n"
+            "\nSpend the bond of an attestor whose bondPubKey this wallet holds (nLockTime = bondLocktime, the CLTV path), signed\n"
+            "by hand. The bond exit delay (owner 2026-10-11): only a WITHDRAWN record (it left with set_leave, or was evicted) whose\n"
+            "bond is not frozen, from statusHeight + the set's maturity (BOND_MATURITY); bond-locked before.\n"
             "Refused with attest-unknown-seq, attest-key-not-held, bond-locked, bond-spent, bad-address.\n"
             "\nResult: { \"txid\", \"seq\", \"bondZat\", \"bondOut\", \"to\" }\n");
     YellowbackWallet& yw = EnsureYW();

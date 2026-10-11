@@ -473,7 +473,7 @@ Result of `yed_getinfo`:
       "bondMinNoPriceZat": 1000000000,
       "bondMinFloorZat": 100000000,
       "bondMinUsdCents": 400,
-      "bondMinLock": 200,
+      "bondMinLock": 0,
       "bondMaturity": 8,
       "ageCap": 64,
       "foundingWindow": 16,
@@ -2039,11 +2039,13 @@ Result of `yed_registerattestor`:
 Arguments: `seq` (number), `to` (string, optional; a transparent or `ys1…` destination; default
 a fresh own transparent address). Spends the bond outpoint of an attestor whose `bondPubKey`
 this wallet holds, after `bondLocktime` (`nLockTime = bondLocktime`, the CLTV path), signed by
-hand as the vault owner path is. Any status may withdraw once the locktime passes: IN-2 then
-marks the record WITHDRAWN (or, for an EJECTED record, only `bondSpentHeight`). `bondOut` is
+hand as the vault owner path is. **The bond exit delay (owner 2026-10-11):** only a `WITHDRAWN` record (the
+member left with `set_leave`, doc/vault-rpc.md, or was evicted) whose bond is not frozen, from `statusHeight +` the
+attestor set's maturity (`BOND_MATURITY`, 16,128; 8 on regtest), which is when the vault primitive releases the bond
+(`bad-vault-bond-locked` before); the record keeps its `statusHeight` and gains `bondSpentHeight`. `bondOut` is
 the zat paid to `to` net of the network fee. Refusals: `attest-unknown-seq`, `attest-key-not-held`
-(the bond key is not in this wallet), `bond-locked` (tip `< bondLocktime`), `bond-spent` (the
-outpoint is already spent), `bad-address`.
+(the bond key is not in this wallet), `bond-locked` (tip `< bondLocktime`; still a member; a frozen bond; or the
+next block `< statusHeight + BOND_MATURITY`), `bond-spent` (the outpoint is already spent), `bad-address`.
 
 Result of `yed_withdrawbond`:
 
@@ -2303,8 +2305,8 @@ provokes each.
 | `notice-standing` | `yed_claimnotice` | a `Notices` record for the vault exists with `tip − notice.height ≤ EMERGENCY_NOTICE_TTL` (NOT-1's no-reset clause): post twice |
 | `notice-not-underwater` | `yed_claimnotice` | `collateralZat · pEmerg ≥ mintedCents · EMERGENCY_RATIO_BPS · COIN` under this node's bundle, or the snapshot at `R` is not armed: notice on a healthy vault |
 | `bond-below-min` | `yed_registerattestor` | `bondYec <` the module's floor for a join in the next block (`params.attest.bondMinZat`, D-Q-28; 10 YEC on regtest before arming): register with 9 |
-| `lock-below-min` | `yed_registerattestor` | `lockBlocks < BOND_MIN_LOCK` (200 on regtest), or the resulting `bondLocktime ≥ LOCKTIME_THRESHOLD` |
-| `bond-locked` | `yed_withdrawbond` | tip `< bondLocktime`: withdraw right after registering |
+| `lock-below-min` | `yed_registerattestor` | `lockBlocks < BOND_MIN_LOCK` (0 since the bond exit delay: a negative `lockBlocks`), or the resulting `bondLocktime ≥ LOCKTIME_THRESHOLD` |
+| `bond-locked` | `yed_withdrawbond` | still a member, a frozen bond, or within `BOND_MATURITY` of leaving (the bond exit delay): withdraw right after registering |
 | `bond-spent` | `yed_withdrawbond` | the bond outpoint is already spent (`bondSpentHeight` set): withdraw twice |
 | `not-dormant` | `yed_revive` | the record's status is not DORMANT: revive an ELIGIBLE attestor |
 | `not-equivocation` | `yed_reportequivocation` | any EQV-1 condition fails — different `seq`s, different `citedHeight`s, equal prices, a bad signature, a `seq` whose bond is spent or already frozen (P4-b), or a `citedHeight` whose hash is not in the index (two sides of a fork): report the same attestation twice |

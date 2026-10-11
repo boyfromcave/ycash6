@@ -194,6 +194,22 @@ Result: `{"txid": hash, "memberkey": key}`
 
 A `SET_HEARTBEAT` for a current member key of this wallet (default: the first), broadcast.
 
+### `set_leave "setid" ( "memberkey" )`
+Params: `["setid": hash, "memberkey"?: key]`
+
+Result: `{"txid": hash, "memberkey": key, "exitheight": height, "bondspendableat": height}`
+
+**The bond exit delay (owner 2026-10-11).** A member bond is spendable only after its member has left
+the set without a freeze and the set's `maturity` has passed since: from `exitHeight + maturity`
+(`bad-vault-bond-locked` before; a frozen bond never). A member leaves by its own `SET_REMOVE`
+(signed by its key alone, `burn` 0, no cosigners: the one removal a member can do alone), by a
+`SET_REMOVE` of the set without burn, or by the module displacement hook (`set_join`); each records
+`exitHeight` on the bond. During the delay the member is still slashable (`SET_EQUIVOCATION`, the
+module ejection hook) and the bond is then frozen. `set_leave` builds, signs and broadcasts the
+member's own `SET_REMOVE` for an ACTIVE member key of this wallet (default the first one);
+`exitheight` is the next block, `bondspendableat` = `exitheight + maturity`. The bond script's CLTV
+(`bondlockmin`) still applies on top, so a set may keep it at 0.
+
 ### `set_buildact "type" {params}`
 Params: `["type": ActType, "params": {"setid"?: hash, "memberkey"?: key, "bondamount"?: yec, "bondlocktime"?: height, "burn"?: bool, "prevout"?: outpoint, "rolea"?: int, "sighasha"?: hash, "siga"?: hex, "roleb"?: int, "sighashb"?: hash, "sigb"?: hex, "seats"?: int, "unlockthreshold"?: int, "cancelthreshold"?: int, "slashthreshold"?: int, "open"?: bool, "ratelimitbps"?: int, "ratewindow"?: int, "livenesswindow"?: int, "bondmin"?: yec, "bondlockmin"?: int, "maturity"?: int, "admitkey"?: key}]`
 
@@ -360,6 +376,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the set parameters are out of range` | `set_create`, `set_buildact` | `seats` 16 |
 | -5 | `unknown set` | `set_getinfo`, `set_join`, `set_heartbeat`, `set_buildact`, `vault_lock` | `set_getinfo` of a random id |
 | -4 | `this wallet holds no current member key of the set` | `set_heartbeat` | a heartbeat for a set with no members |
+| -26 | `bad-vault-bond-locked` | `sendrawtransaction`, `vault_send` | a member bond spent before its member left, or before `exitHeight + maturity` (the bond exit delay) |
 | -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set (a set a registered module governs may instead displace a member, below) |
 | -8 | `unknown act type` | `set_buildact` | type `"bogus"` |
 | -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |

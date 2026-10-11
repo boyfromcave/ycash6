@@ -1147,6 +1147,55 @@ UniValue set_heartbeat(const UniValue& params, bool fHelp)
     return o;
 }
 
+UniValue set_leave(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "set_leave \"setid\" ( \"memberkey\" )\n"
+            "\nLeave a set (owner 2026-10-11, the bond exit delay): broadcast the SET_REMOVE of an ACTIVE member key of this\n"
+            "wallet (default: the first one), signed by that key alone, without burn. The member is REMOVED from the block it\n"
+            "confirms in, and its bond becomes spendable the set's maturity later (bad-vault-bond-locked before).\n"
+            "\nResult: {\"txid\", \"memberkey\", \"exitheight\" (the next block), \"bondspendableat\"}\n"
+            + HelpExampleCli("set_leave", "\"setid\"") + HelpExampleRpc("set_leave", "\"setid\""));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureVaultActive();
+    auto snap = Snapshot();
+    const SetId id = ParseSetId(params[0], "setid");
+    auto s = snap->GetSet(id);
+    if (!s) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "unknown set " + id.GetHex());
+    CPubKey key;
+    if (params.size() > 1 && !params[1].isNull()) {
+        key = WalletKeyParam(params[1], "memberkey");
+    } else {
+        for (const auto& m : snap->GetMembers(id)) {
+            if (m.second.status == MEMBER_ACTIVE && pwalletMain->HaveKey(m.first.GetID())) { key = m.first; break; }
+        }
+        if (!key.IsValid()) throw JSONRPCError(RPC_WALLET_ERROR, "this wallet holds no active member key of the set");
+    }
+    Act act;
+    act.type = ACT_SET_REMOVE;
+    act.remove.setId = id;
+    act.remove.memberKey = key;
+    act.remove.burn = 0;
+    CMutableTransaction mtx = BuildActTx(act, {});
+    Act decoded;
+    size_t ai = FindAct(mtx, decoded);
+    CKey priv;
+    if (!pwalletMain->GetKey(key.GetID(), priv)) throw JSONRPCError(RPC_WALLET_ERROR, "the member key is not in this wallet");
+    std::vector<unsigned char> sig;
+    if (!SignRecoverable(priv, ActMsg(EncodePayload(decoded), mtx.vin[0].prevout), sig)) throw JSONRPCError(RPC_WALLET_ERROR, "signing failed");
+    decoded.sigs = { sig };
+    mtx.vout[ai].scriptPubKey = EncodeAct(decoded);
+    SignWalletInputs(mtx);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", Broadcast(CTransaction(mtx)).GetHex());
+    o.pushKV("memberkey", HexStr(key.begin(), key.end()));
+    o.pushKV("exitheight", NextHeight());
+    o.pushKV("bondspendableat", NextHeight() + (int64_t)s->params.maturity);
+    return o;
+}
+
 UniValue set_buildact(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 2)
@@ -1837,6 +1886,7 @@ static const CRPCCommand commands[] =
     { "vault",   "set_create",          &set_create,           false },
     { "vault",   "set_join",            &set_join,             false },
     { "vault",   "set_heartbeat",       &set_heartbeat,        false },
+    { "vault",   "set_leave",           &set_leave,            false },
     { "vault",   "set_buildact",        &set_buildact,         false },
     { "vault",   "set_signact",         &set_signact,          false },
     { "vault",   "set_sendact",         &set_sendact,          false },
