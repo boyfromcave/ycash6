@@ -22,6 +22,7 @@
 #include "main.h"
 #include "net.h"
 #include "policy/policy.h"
+#include "support/cleanse.h"
 #include "random.h"
 #include "rpc/protocol.h"
 #include "rpc/server.h"
@@ -44,6 +45,8 @@
 #include <variant>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <fstream>
 #include <boost/thread.hpp>
 
 using namespace std;
@@ -6629,7 +6632,9 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         }
                     }
 
-                    if (txout.IsDust())
+                    // A post-quantum (TX_PQPKH) recipient's dust is priced with its real spend size, as policy does
+                    // (6.20.0: the fixed dust rate, policy.cpp IsStandardTx).
+                    if (txout.nValue < GetPQDustThreshold(txout, CFeeRate(ONE_THIRD_DUST_THRESHOLD_RATE)))
                     {
                         if (recipient.fSubtractFeeFromAmount && nFeeRet > 0)
                         {
@@ -7679,6 +7684,7 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     strUsage += HelpMessageOpt("-upgradewallet", _("Upgrade wallet to latest format on startup"));
     strUsage += HelpMessageOpt("-wallet=<file>", _("Specify wallet file absolute path or a path relative to the data directory") + " " + strprintf(_("(default: %s)"), DEFAULT_WALLET_DAT));
     strUsage += HelpMessageOpt("-walletbroadcast", _("Make the wallet broadcast transactions") + " " + strprintf(_("(default: %u)"), DEFAULT_WALLETBROADCAST));
+    strUsage += HelpMessageOpt("-hdseedfile=<file>", _("When creating a new wallet, take its seed from the recovery phrase in <file> (the phrase on one line, or a z_exportwallet file's recovery_phrase= and language= lines) instead of a random one, and rescan from genesis: a seed-only restore of the seed's Sapling and post-quantum keys (keys imported into the backed-up wallet are not restored). Refused for an existing wallet with another seed"));
     strUsage += HelpMessageOpt("-walletnotify=<cmd>", _("Execute command when a wallet transaction changes (%s in cmd is replaced by TxID)"));
     strUsage += HelpMessageOpt("-zapwallettxes=<mode>", _("Delete all wallet transactions and only recover those parts of the blockchain through -rescan on startup") +
                                " " + _("(1 = keep tx meta data e.g. account owner and payment request information, 2 = drop tx meta data)"));
@@ -7695,6 +7701,49 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     }
 
     return strUsage;
+}
+
+// -hdseedfile (6.20.0): the wallet seed is a BIP39 mnemonic, so the file holds its recovery phrase (bare, or as
+// z_exportwallet's "# - recovery_phrase=\"…\"" line with its "# - language=…" line; English when none is given).
+static bool ReadRecoveryPhraseFile(const std::string& path, std::optional<MnemonicSeed>& seedOut, std::string& err)
+{
+    std::ifstream file(path.c_str());
+    if (!file.is_open()) {
+        err = "cannot open " + path;
+        return false;
+    }
+    SecureString phrase;
+    Language language = English;
+    bool haveLanguage = false;
+    std::string line;
+    static const std::string PHRASE_KEY = "recovery_phrase=\"", LANGUAGE_KEY = "# - language=";
+    while (std::getline(file, line)) {
+        boost::algorithm::trim(line);
+        const size_t at = line.find(PHRASE_KEY);
+        if (at != std::string::npos) {
+            const size_t begin = at + PHRASE_KEY.size(), end = line.find('"', begin);
+            if (end != std::string::npos) phrase.assign(line.begin() + begin, line.begin() + end);
+        } else if (line.compare(0, LANGUAGE_KEY.size(), LANGUAGE_KEY) == 0) {
+            const std::string name = line.substr(LANGUAGE_KEY.size());
+            for (uint32_t l = English; l <= Spanish; l++) {
+                if (MnemonicSeed::LanguageName((Language)l) == name) { language = (Language)l; haveLanguage = true; }
+            }
+            if (!haveLanguage) {
+                err = strprintf("%s names an unknown phrase language '%s'", path, name);
+                return false;
+            }
+        } else if (phrase.empty() && !line.empty() && line[0] != '#') {
+            phrase.assign(line.begin(), line.end());
+        }
+        memory_cleanse(&line[0], line.size());
+    }
+    std::optional<MnemonicSeed> seed = phrase.empty() ? std::nullopt : MnemonicSeed::ForPhrase(language, phrase);
+    if (!seed.has_value()) {
+        err = strprintf("%s does not hold a valid %s recovery phrase", path, MnemonicSeed::LanguageName(language));
+        return false;
+    }
+    seedOut = seed;
+    return true;
 }
 
 bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches)
@@ -7766,6 +7815,33 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
         walletInstance->SetMaxVersion(nMaxVersion);
     }
 
+    // Seed-only restore (-hdseedfile): a NEW wallet takes the seed of the given recovery phrase instead of a random
+    // one, so its Sapling (ZIP 32) and post-quantum (DerivePQSeed) keys are the backed-up wallet's. Set exactly
+    // once, as GenerateNewSeed would set a random seed: no wallet record is replaced. (ycash-dd: the 32-byte HD
+    // seed in hex; 6.20.0: the mnemonic phrase, which z_exportwallet prints and no RPC reads back.)
+    bool fRestoredSeed = false;
+    if (mapArgs.count("-hdseedfile")) {
+        std::optional<MnemonicSeed> restoredOpt;
+        std::string err;
+        if (!ReadRecoveryPhraseFile(GetArg("-hdseedfile", ""), restoredOpt, err))
+            return UIError(strprintf(_("-hdseedfile: %s"), err));
+        const MnemonicSeed& restored = restoredOpt.value();
+        if (!fFirstRun || walletInstance->HaveMnemonicSeed()) {
+            std::optional<MnemonicSeed> current = walletInstance->GetMnemonicSeed();
+            if (!current.has_value() || current.value().Fingerprint() != restored.Fingerprint())
+                return UIError(_("-hdseedfile applies only when creating a new wallet, and this wallet has another seed"));
+        } else {
+            LOCK(walletInstance->cs_wallet);
+            if (!walletInstance->SetMnemonicSeed(restored))
+                return UIError(_("-hdseedfile: cannot set the seed"));
+            CHDChain newHdChain(restored.Fingerprint(), 1);   // unknown birthday: the restore rescans from genesis
+            walletInstance->SetMnemonicHDChain(newHdChain, false);
+            walletInstance->NewKeyPool();                     // as GenerateNewSeed: internal keys of this seed
+            fRestoredSeed = true;
+            LogPrintf("Wallet created from the recovery phrase in -hdseedfile (fingerprint %s)\n", restored.Fingerprint().GetHex());
+        }
+    }
+
     if (!walletInstance->HaveMnemonicSeed())
     {
         // We can't set the new HD seed until the wallet is decrypted.
@@ -7814,7 +7890,12 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
                 return UIError(_("Cannot write default address") += "\n");
         }
 
-        walletInstance->SetBestChain(chainActive.GetLocator());
+        // A restored wallet has history: leave its best block unset so the rescan below starts at genesis, and
+        // drop the key birthday the fresh keys gave it.
+        if (fRestoredSeed)
+            walletInstance->nTimeFirstKey = 1;
+        else
+            walletInstance->SetBestChain(chainActive.GetLocator());
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);

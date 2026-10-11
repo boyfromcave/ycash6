@@ -28,8 +28,12 @@ checks live answers against it. Edit this document, then regenerate.
 - **Owners**: a vault's owner is a post-quantum key (docs/plans/yellowback-quantum-plan.md §4.3),
   named by its `pqkeyid` (`scheme || SHA256(scheme || pk)`, scheme 1 SLH-DSA-SHA2-128s or 2
   FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`yb…`/`yt…`/`yr…`, 53
-  characters). Until the node wallet holds post-quantum keys the owner is named explicitly and
-  owner spends are signed outside the node.
+  characters) or its plain-YEC PQ address (`sq…`/`tq…`/`rq…`, 53 characters, D-Q-20). The node
+  wallet holds post-quantum keys (`vault_getnewowner`, `getnewaddress "" "pq"`, or one imported
+  with `z_importpqkey`) and signs owner spends; an external owner is named explicitly.
+- **Addresses**: every `address` parameter (recipients, `vault_release`, `vault_ownerspend`) takes
+  a transparent `s1…`/`t…` address or a plain-YEC PQ address `sq…`/`tq…`/`rq…` (a `TX_PQPKH`
+  output, the same script as the PQ `yb…` of that key).
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields
   (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
   the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
@@ -293,7 +297,9 @@ Result: `hash`
 The RELEASE (selector 1, `nSequence = delay`) of a matured intent, paying its value to the
 recipient (an address or a script in hex), fee from this wallet. The intent commits only
 `SHA256(recipient script)`, so the recipient is the argument, or a script this node built the
-intent for, or one of this wallet's P2PKH scripts. Error `-1` "matures at height h" before
+intent for, or one of this wallet's P2PKH scripts, or the `TX_PQPKH` script of a post-quantum
+key this wallet holds — so an owner releases its own residual (quantum spec F-3) without passing
+the script, e.g. after a restart. Error `-1` "matures at height h" before
 `coinHeight + delay`. Result: the txid.
 
 ### `vault_ownerspend "outpoint" "address"`

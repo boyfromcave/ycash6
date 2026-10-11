@@ -6,13 +6,17 @@
 
 #include "chain.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
+#include "crypto/pq/sign.h"
 #include "deprecation.h"
 #include "key_io.h"
 #include "rpc/server.h"
 #include "init.h"
 #include "main.h"
+#include "pqkey.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "support/cleanse.h"
 #include "sync.h"
 #include "util/system.h"
 #include "util/match.h"
@@ -101,6 +105,35 @@ struct YellowbackReconcileOnExit
         if (yellowback::g_yellowbackWallet) yellowback::g_yellowbackWallet->Reconcile();
     }
 };
+
+/** The outcome of ImportPQKeySeed. */
+enum class PQImport { BAD, PRESENT, ADDED, FAILED };
+
+/**
+ * Import the post-quantum key of scheme made from seed (CPQKey::Set), the one place importwallet's "pqseed=" lines
+ * and z_importpqkey store a PQ key. index is the HD index the key claims (PQ_INDEX_NONE when unknown); quantum review
+ * F-1: a key that is not this wallet's own derivation at that index is stored with PQ_INDEX_NONE, so it never moves
+ * the issued index. A key already held is marked used (6.20.0 (review B I-2)) and reported PRESENT. Needs cs_wallet, unlocked.
+ */
+static PQImport ImportPQKeySeed(int64_t scheme, int64_t index, const CPQKey::Secret& seed, int64_t nTime, CPQKeyID& idOut)
+{
+    AssertLockHeld(pwalletMain->cs_wallet);
+    CPQKey pqkey;
+    if (scheme < 0 || scheme > 255 || index < 0 || index > (int64_t)CPQKey::PQ_INDEX_NONE ||
+        !pqkey.Set((uint8_t)scheme, seed, (uint32_t)index))
+        return PQImport::BAD;
+    if (!pwalletMain->IsOwnPQKey(pqkey) && !pqkey.Set(pqkey.Scheme(), seed, CPQKey::PQ_INDEX_NONE))
+        return PQImport::BAD;
+    idOut = pqkey.GetID();
+    if (pwalletMain->HavePQKey(pqkey.GetID())) {
+        pwalletMain->MarkPQKeyUsed(pqkey.GetID());   // 6.20.0 (review B I-2): never issued again
+        return PQImport::PRESENT;
+    }
+    if (!pwalletMain->AddPQKeyWithTime(pqkey, nTime))
+        return PQImport::FAILED;
+    pwalletMain->MarkPQKeyUsed(pqkey.GetID());       // 6.20.0 (review B I-2): an imported key of this seed is in use
+    return PQImport::ADDED;
+}
 
 UniValue importprivkey(const UniValue& params, bool fHelp)
 {
@@ -369,6 +402,94 @@ UniValue z_importwallet(const UniValue& params, bool fHelp)
 	return importwallet_impl(params, true);
 }
 
+UniValue z_importpqkey(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+
+    if (fHelp || params.size() < 1 || params.size() > 3)
+        throw runtime_error(
+            "z_importpqkey \"pqseed\" ( rescan \"label\" )\n"
+            "\nAdds one post-quantum key to the wallet from its 48-byte keygen seed (e.g. a vault owner or holder key made\n"
+            "by another wallet such as YEW). The public key is re-derived from the seed. A key this wallet derives from its\n"
+            "own HD seed keeps its index; any other key is stored without one (it never moves the wallet's issued index).\n"
+            "The key's plain-YEC address (sq…/tq…/rq…) goes into the address book.\n"
+            "\nArguments:\n"
+            "1. \"pqseed\"     (string, required) \"<scheme>:<seed hex>\", or dumpwallet's \"<scheme>:<index>:<seed hex>\"\n"
+            "                (an optional \"pqseed=\" prefix is accepted). scheme 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512.\n"
+            "2. rescan       (boolean, optional, default=true) Rescan the chain for the key's transactions\n"
+            "3. \"label\"      (string, optional, default=\"\") The address book label\n"
+            "\nResult:\n"
+            "{ \"scheme\": n, \"keyhash\": \"hex\", \"pqkeyid\": \"hex (scheme || keyhash)\", \"address\": \"sq…\",\n"
+            "  \"index\": n|null (the HD index when the key is this wallet's own), \"added\": true|false (false: already held) }\n"
+            "\nExamples:\n"
+            + HelpExampleCli("z_importpqkey", "\"1:<96 hex digits>\"")
+            + HelpExampleCli("z_importpqkey", "\"1:<96 hex digits>\" false")
+            + HelpExampleRpc("z_importpqkey", "\"1:<96 hex digits>\", true")
+        );
+
+    if (fPruneMode)
+        throw JSONRPCError(RPC_WALLET_ERROR, "Importing keys is disabled in pruned mode");
+
+    YellowbackReconcileOnExit yellowbackReconcile;   // H8: lock imported YED once the wallet lock is gone
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    EnsureWalletIsUnlocked();
+
+    std::string arg = params[0].get_str();
+    if (boost::algorithm::starts_with(arg, "pqseed="))
+        arg = arg.substr(7);
+    std::vector<std::string> f;
+    boost::split(f, arg, boost::is_any_of(":"));
+    int64_t scheme = 0, index = CPQKey::PQ_INDEX_NONE;
+    if ((f.size() != 2 && f.size() != 3) || !ParseInt64(f[0], &scheme) || (f.size() == 3 && !ParseInt64(f[1], &index)))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "pqseed must be \"<scheme>:<seed hex>\" or \"<scheme>:<index>:<seed hex>\"");
+    if (scheme < 0 || scheme > 255 || !pq::IsKnownScheme((uint8_t)scheme))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "unknown post-quantum scheme (1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512)");
+    const std::string& hex = f.back();
+    if (!IsHex(hex) || hex.size() != 2 * pq::SeedSize((uint8_t)scheme))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("the seed must be %u bytes of hex", (unsigned)pq::SeedSize((uint8_t)scheme)));
+    std::vector<unsigned char> seedBytes = ParseHex(hex);
+    const CPQKey::Secret seed(seedBytes.begin(), seedBytes.end());
+    memory_cleanse(seedBytes.data(), seedBytes.size());
+
+    const bool fRescan = params.size() > 1 && !params[1].isNull() ? params[1].get_bool() : true;
+    const std::string strLabel = params.size() > 2 && !params[2].isNull() ? params[2].get_str() : "";
+
+    CPQKeyID id;
+    const PQImport r = ImportPQKeySeed(scheme, index, seed, 1, id);   // creation time 1: the key's age is unknown
+    if (r == PQImport::BAD)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid post-quantum key seed or index");
+    if (r == PQImport::FAILED)
+        throw JSONRPCError(RPC_WALLET_ERROR, "Error adding the post-quantum key to the wallet");
+    pwalletMain->SetAddressBook(id, strLabel, "receive");
+
+    std::vector<unsigned char> pk;
+    uint32_t storedIndex = CPQKey::PQ_INDEX_NONE;
+    pwalletMain->GetPQKeyInfo(id, pk, storedIndex);
+    if (r == PQImport::ADDED && storedIndex == CPQKey::PQ_INDEX_NONE) {
+        // 6.20.0: a key not derived from the mnemonic seed; getwalletinfo reports a partial-backup warning.
+        pwalletMain->SetHasExternalImports();
+        MaybeAutoExportAfterImport("z_importpqkey");
+    }
+
+    if (r == PQImport::ADDED && fRescan) {
+        pwalletMain->MarkDirty();
+        pwalletMain->ScanForWalletTransactions(chainActive.Genesis(), true, false);
+        pwalletMain->ReacceptWalletTransactions();
+    }
+    std::vector<unsigned char> raw(1, id.scheme);
+    raw.insert(raw.end(), id.hash.begin(), id.hash.end());
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("scheme", (int)id.scheme);
+    o.pushKV("keyhash", HexStr(id.hash.begin(), id.hash.end()));
+    o.pushKV("pqkeyid", HexStr(raw));
+    o.pushKV("address", KeyIO(Params()).EncodeDestination(id));
+    o.pushKV("index", storedIndex == CPQKey::PQ_INDEX_NONE ? UniValue() : UniValue((int64_t)storedIndex));
+    o.pushKV("added", r == PQImport::ADDED);
+    return o;
+}
+
 UniValue importwallet(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -471,37 +592,29 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
         if (boost::algorithm::starts_with(vstr[0], "pqseed=")) {
             std::vector<std::string> f;
             boost::split(f, vstr[0].substr(7), boost::is_any_of(":"));
-            CPQKey pqkey;
             if (f.size() != 3 || !IsHex(f[2])) {
                 fGood = false;
                 continue;
             }
-            const std::vector<unsigned char> seedBytes = ParseHex(f[2]);
+            std::vector<unsigned char> seedBytes = ParseHex(f[2]);
             const CPQKey::Secret seed(seedBytes.begin(), seedBytes.end());
+            memory_cleanse(seedBytes.data(), seedBytes.size());
             int64_t scheme = 0, index = 0;
-            if (!ParseInt64(f[0], &scheme) || !ParseInt64(f[1], &index) || scheme < 0 || scheme > 255 ||
-                index < 0 || index > (int64_t)CPQKey::PQ_INDEX_NONE || !pqkey.Set((uint8_t)scheme, seed, (uint32_t)index)) {
+            if (!ParseInt64(f[0], &scheme) || !ParseInt64(f[1], &index)) {
                 fGood = false;
                 continue;
             }
-            // Quantum review F-1: the dump's index belongs to the seed the key came from. A key of another seed is
-            // stored with PQ_INDEX_NONE, so it never moves this wallet's issued index (nor its fallback).
-            if (!pwalletMain->IsOwnPQKey(pqkey) && !pqkey.Set(pqkey.Scheme(), seed, CPQKey::PQ_INDEX_NONE)) {
-                fGood = false;
-                continue;
-            }
-            if (pwalletMain->HavePQKey(pqkey.GetID())) {
-                LogPrintf("Skipping import of a post-quantum key (key already present)\n");
-                pwalletMain->MarkPQKeyUsed(pqkey.GetID());   // 6.20.0 (review B I-2): never issued again
-                continue;
-            }
+            // Quantum review F-1: the dump's index belongs to the seed the key came from (ImportPQKeySeed).
             const int64_t nTime = DecodeDumpTime(vstr[1]);
-            if (!pwalletMain->AddPQKeyWithTime(pqkey, nTime)) {
+            CPQKeyID id;
+            const PQImport r = ImportPQKeySeed(scheme, index, seed, nTime, id);
+            if (r == PQImport::PRESENT) {
+                LogPrintf("Skipping import of a post-quantum key (key already present)\n");
+            } else if (r == PQImport::ADDED) {
+                nTimeBegin = std::min(nTimeBegin, nTime);
+            } else {
                 fGood = false;
-                continue;
             }
-            pwalletMain->MarkPQKeyUsed(pqkey.GetID());       // 6.20.0 (review B I-2): an imported key is in use
-            nTimeBegin = std::min(nTimeBegin, nTime);
             continue;
         }
 
@@ -597,6 +710,9 @@ UniValue dumpprivkey(const UniValue& params, bool fHelp)
     CTxDestination dest = keyIO.DecodeDestination(strAddress);
     if (!IsValidDestination(dest)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Ycash address");
+    }
+    if (IsPQKeyDestination(dest)) {
+        throw JSONRPCError(RPC_TYPE_ERROR, "A post-quantum address has no WIF key; dumpwallet / z_exportwallet write its pqseed line");
     }
     const CKeyID *keyID = std::get_if<CKeyID>(&dest);
     if (!keyID) {
@@ -725,9 +841,10 @@ static void WriteWalletDumpToFile(const fs::path& exportfilepath)
             const int64_t nTime = pwalletMain->mapPQKeyCreateTime.count(id) ? pwalletMain->mapPQKeyCreateTime[id] : 0;
             std::vector<unsigned char> idBytes(1, id.scheme);
             idBytes.insert(idBytes.end(), id.hash.begin(), id.hash.end());
-            file << strprintf("pqseed=%d:%u:%s %s # owner=%s addr=%s\n", (int)id.scheme, pqkey.Index(),
+            file << strprintf("pqseed=%d:%u:%s %s # owner=%s addr=%s yecaddr=%s\n", (int)id.scheme, pqkey.Index(),
                               HexStr(seed.begin(), seed.end()), EncodeDumpTime(nTime),
-                              HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp));
+                              HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp),
+                              keyIO.EncodeDestination(id));   // the plain-YEC sq…/tq…/rq… form (D-Q-20)
         }
         file << "\n";
     }

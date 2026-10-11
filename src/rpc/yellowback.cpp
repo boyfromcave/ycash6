@@ -1167,7 +1167,9 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 3)
         throw std::runtime_error(
             "yed_listvaults ( \"status\" count skip )\n"
-            "\nVaults in outpoint order, optionally filtered by status (ACTIVE|CLAIMING|CLOSED|CLAIMED; VOID is accepted and never matches since the vault upgrade); paged (default count 100).\n");
+            "\nVaults in outpoint order, optionally filtered by status (ACTIVE|CLAIMING|CLOSED|CLAIMED; VOID is accepted and never matches since the vault upgrade); paged (default count 100).\n"
+            "Index-wide: every indexed Yellowback vault, whoever owns it (a node-context call; no wallet needed). The wallet's own\n"
+            "vaults are yed_listpositions.\n");
 
     YellowbackIndex& index = EnsureIndex();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
@@ -1205,7 +1207,8 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
             "\nThe YED outputs (Tokens records) paying the given addresses, whoever holds the keys: the node-context\n"
             "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (yb/yt/yr)\n"
             "or transparent P2PKH (s1/sm) forms of the same key hash, or post-quantum YED addresses (53 characters, a\n"
-            "TX_PQPKH holder; transparentAddress \"\" for them); 1..100 of them. minHeight (default 0) keeps\n"
+            "TX_PQPKH holder) or their plain-YEC forms (sq/tq/rq, D-Q-20; transparentAddress is that form for them);\n"
+            "1..100 of them. minHeight (default 0) keeps\n"
             "only tokens created at or above that height. Sorted by (height, txid, vout); paged by count (default 1000)\n"
             "and skip (default 0) over that order.\n");
 
@@ -1229,9 +1232,11 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
         if (!DecodeAddress(str, p, holder)) {
             KeyIO keyIO(::Params());
             CTxDestination dest = keyIO.DecodeDestination(str);
-            const CKeyID* id = std::get_if<CKeyID>(&dest);
-            if (!id) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid-address: " + str + " is not a YED or transparent P2PKH address of this network");
-            holder = *id;
+            // A transparent P2PKH (s1…) or plain-YEC post-quantum (sq…, D-Q-20) address names the same holder key
+            // as its YED form.
+            if (!std::get_if<CKeyID>(&dest) && !std::get_if<CPQKeyID>(&dest))
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid-address: " + str + " is not a YED, transparent P2PKH or post-quantum address of this network");
+            holder = dest;
         }
         wanted.insert(holder);
     }
@@ -1271,7 +1276,7 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
             o.pushKV("transparentAddress", P2PKHAddress(*id));
         } else {
             o.pushKV("address", EncodeAddress(std::get<CPQKeyID>(r.holder), p));
-            o.pushKV("transparentAddress", "");
+            o.pushKV("transparentAddress", KeyIO(::Params()).EncodeDestination(r.holder));   // sq…/tq…/rq… (D-Q-20)
         }
         list.push_back(o);
     }

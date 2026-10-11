@@ -26,6 +26,7 @@
 #include "util/strencodings.h"
 #include "util/time.h"
 #ifdef ENABLE_WALLET
+#include "wallet/rpcwallet.h"
 #include "wallet/wallet.h"
 #endif
 
@@ -657,6 +658,7 @@ UniValue claimswap(const UniValue& params, bool fHelp)
         if (!IsValidDestination(claimDest)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid recipient address");
         }
+        EnsurePQRecipientPayable(claimDest);   // an sq… address is a TX_PQPKH output (vault upgrade, Falcon for scheme 2)
     } else {
         claimDest = CTxDestination(contract.recipientPubKeyHash);
     }
@@ -813,6 +815,7 @@ UniValue refundswap(const UniValue& params, bool fHelp)
         if (!IsValidDestination(refundDest)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid refund address");
         }
+        EnsurePQRecipientPayable(refundDest);   // an sq… address is a TX_PQPKH output (vault upgrade, Falcon for scheme 2)
     } else {
         refundDest = CTxDestination(contract.initiatorPubKeyHash);
     }

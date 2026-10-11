@@ -96,11 +96,13 @@ TRANSFER builder is unchanged and a v3 MINT is non-Yellowback); `yed_mint`'s `ow
 SLH-DSA owner's address; the arguments are unchanged, A-3; the examples below show the example `ownerHash`
 in its 53-character mainnet `yb…` form); `yed_validateaddress`'s `type` (`p2pkh` |
 `pq`) and, for a PQ address, `pqscheme` (`keyid` is then the 66-hex `scheme ‖ keyHash` and
-`transparentAddress` is `""`); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
+`transparentAddress` is the key's plain-YEC PQ address `sq…`/`tq…`/`rq…` — D-Q-20, Base58Check
+`4DD9`/`4F61`/`4C51` ‖ scheme ‖ keyHash, 53 characters; it was `""` before the SQ task); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
 holder, `pqowner` an SLH-DSA key; the default follows the holder policy: `p2pkh` until Falcon is active,
 `pq` after). Addresses: a post-quantum YED address is Base58Check(`56AB`/`571E`/`5710` ‖ scheme ‖
 keyHash), `yb…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
-`yed_listtokens` and `yed_validateaddress` take either. The owner's residual intent of a claim pays the
+`yed_listtokens` and `yed_validateaddress` take either (`yed_listtokens` also takes the plain-YEC
+`sq…`/`tq…`/`rq…` form of a PQ holder, as it takes `s1…` for a P2PKH one). The owner's residual intent of a claim pays the
 owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must
 be a Falcon `TX_PQPKH` (TOK-PQ, `bad-yed-holder`: the transaction is refused, never burned); the
 wallet then draws its token and change outputs from Falcon keys. A YED transaction built before that height with a
@@ -707,6 +709,9 @@ Arguments: `status` (string, optional; `""` or absent = every status, else one o
 Paged, in ascending outpoint order; the result is a **list** of `yed_getvault` rows (an empty
 list past the end). The prototype's `rosterIndex` argument and its `{height, total, vaults}`
 envelope are gone (the `client.cpp` row is now `1,2`).
+**Index-wide:** the list is every Yellowback vault the index holds, whoever owns it (a node-context
+call, no wallet needed, as a light client or explorer wants it). The wallet's own vaults are
+`yed_listpositions`.
 
 Result of `yed_listvaults`:
 
@@ -745,8 +750,9 @@ Result of `yed_listvaults`:
 
 ### `yed_listtokens <addresses> [minHeight] [count] [skip]`
 
-Arguments: `addresses` (array of strings, 1..100; each a YED address `yb…`/`yt…`/`yr…` or the
-transparent P2PKH form `s1…`/`sm…` of the same key hash — the two name one script), `minHeight`
+Arguments: `addresses` (array of strings, 1..100; each a YED address `yb…`/`yt…`/`yr…`, the
+transparent P2PKH form `s1…`/`sm…` of the same key hash — the two name one script — or, for a
+post-quantum holder, its plain-YEC form `sq…`/`tq…`/`rq…`), `minHeight`
 (number, default `0`: only tokens created at or above it), `count` (number, default `1000`) and
 `skip` (number, default `0`): a page of the sorted result — a client that needs every token of
 a busy address pages until a short page comes back. **Node context**: the `Tokens` records
@@ -754,7 +760,8 @@ a busy address pages until a short page comes back. **Node context**: the `Token
 YED UTXO set of an address, which `yed_listunspent` gives only for the node's own wallet. This is
 the RPC a light-client server proxies for a wallet it has never seen (lightwalletd plan D-L-7,
 `GetAddressTokens`). A full scan of the live token set (spent tokens are erased by IN-1), sorted
-by `(height, txid, vout)`; `address` is the YED form, `transparentAddress` the `s…` form. Refuses
+by `(height, txid, vout)`; `address` is the YED form, `transparentAddress` the `s…` form (the
+`sq…`/`tq…`/`rq…` form for a post-quantum holder; `""` before the SQ task). Refuses
 with `too-many-addresses` (none, or more than 100) and `invalid-address` (a string that is neither
 form on this network).
 
@@ -1386,7 +1393,8 @@ with `not-a-yellowback-address` in `reason` when the string is not a `yb…`/`yt
 this network (the command itself does not throw, so the wallet can validate as the user types;
 `yed_send` throws the same identifier). `transparentAddress` is the same key hash as an `s1…`/
 `sm…` address. rpcversion 7: `type` is `p2pkh` or `pq`; for a post-quantum (53-character)
-address `keyid` is the 66-hex `scheme ‖ keyHash`, `transparentAddress` is `""` and `pqscheme`
+address `keyid` is the 66-hex `scheme ‖ keyHash`, `transparentAddress` is the plain-YEC PQ address
+of the same key (`sq…`/`tq…`/`rq…`, D-Q-20) and `pqscheme`
 (**optional**, present only for `pq`) is the scheme.
 
 Result of `yed_validateaddress`:
@@ -2114,7 +2122,7 @@ what `yellowback_rpc_contract.py` uses.
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |
-| `invalid-address` | `yed_listtokens` | a string that is neither a YED nor a transparent P2PKH address of this network |
+| `invalid-address` | `yed_listtokens` | a string that is neither a YED, a transparent P2PKH nor a plain-YEC post-quantum address of this network |
 | `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
 | `vault-locked` | `yed_redeem` | tip below the vault's `ownerHeight` (`refHeight + 1` since IT-1; `lockHeight` for a VOID vault and a vault minted before the in-term rule) |
 | `claim-not-yet` | `yed_claim` | tip below the vault's `appHeight` (`refHeight + 1` since IT-1; `claimHeight` for a vault minted before the in-term rule) |

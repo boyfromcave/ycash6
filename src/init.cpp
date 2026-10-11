@@ -1558,6 +1558,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (chainparams.NetworkIDString() == "regtest") {
             height = std::max(height, maxUpgradeHeight);
         }
+        if (!addr.has_value() && IsPQKeyDestination(keyIO.DecodeDestination(mapArgs["-mineraddress"]))) {
+            // The miner pays a P2PKH script; a post-quantum (sq…) address is no PaymentAddress (D-Q-20), so name it.
+            return InitError(strprintf(
+                _("Invalid address for -mineraddress=<addr>: '%s' (a transparent address must be P2PKH; P2SH and post-quantum addresses are not supported)"),
+                mapArgs["-mineraddress"]));
+        }
         if (!addr.has_value()) {
             return InitError(strprintf(
                 _("Invalid address for -mineraddress=<addr>: Unable to parse '%s' as a Ycash address.)"),
