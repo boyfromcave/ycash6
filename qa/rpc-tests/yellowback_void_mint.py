@@ -41,7 +41,6 @@ from test_framework.yellowback_util import (
     fee_zat,
     mine_block_raw,
     new_pq_owner,
-    node_pubkey,
     set_quote,
     term_class_of,
     yed_params,

@@ -43,7 +43,6 @@ from test_framework.vault_harness import (
     MEMPOOL_BIP68,
     MEMPOOL_NONFINAL,
     OUTSIDER,
-    OWNER,
     OWNER_KEY,
     OWNER_OUTSIDER,
     SCRIPT_FALSE,

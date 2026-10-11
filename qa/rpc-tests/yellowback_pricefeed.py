@@ -23,7 +23,7 @@ The price feed (plan §3.7 PRICE-1/2, SIGMA-1, HALT-1..3, REG-1..4, FEE-W; L1, L
 Nodes: 0 user, 1 stock (forges tags in the L9 case), 2-4 pools, 5 observer.
 """
 
-from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes
+from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str
 from test_framework.yellowback_util import (
     ACCURACY_WINDOW,
     COIN,
@@ -43,7 +43,6 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     fee_zat,
     mine_block_raw,
-    pubkey_to_address,
     round_robin_schedule,
     set_quote,
     template_coinbase,
