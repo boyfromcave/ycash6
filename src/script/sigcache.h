@@ -48,7 +48,14 @@ public:
     CachingTransactionSignatureChecker(const CTransaction* txToIn, PrecomputedTransactionData& txdataIn, unsigned int nInIn, const CAmount& amount, bool storeIn) : TransactionSignatureChecker(txToIn, txdataIn, nInIn, amount), store(storeIn) {}
 
     bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
+    // OP_CHECKPQSIG (quantum plan §6): memoizes pq::Verify in the same cache, under the same store
+    // rule, keyed on its whole input (scheme, key, signature and sighash) in a separate key space.
+    bool VerifyPQSignature(uint8_t scheme, const std::vector<unsigned char>& vchSig, const std::vector<unsigned char>& vchPubKey, const uint256& sighash) const;
 };
+
+// The number of OP_CHECKPQSIG verifications answered from the signature cache since startup
+// (unit tests; it never affects a verdict).
+uint64_t GetPQSigCacheHits();
 
 void InitSignatureCache(size_t nMaxCacheSize);
 

@@ -227,6 +227,9 @@ private:
 
 protected:
     virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
+    // pq::Verify(scheme, vchPubKey, vchSig, sighash) for CheckPQSig (vchSig without the hashtype
+    // byte); virtual so that CachingTransactionSignatureChecker can memoize it, as VerifySignature.
+    virtual bool VerifyPQSignature(uint8_t scheme, const std::vector<unsigned char>& vchSig, const std::vector<unsigned char>& vchPubKey, const uint256& sighash) const;
 
 public:
     TransactionSignatureChecker(const CTransaction* txToIn, const PrecomputedTransactionData& txdataIn, unsigned int nInIn, const CAmount& amountIn) : txTo(txToIn), nIn(nInIn), amount(amountIn), txdata(txdataIn) {}
