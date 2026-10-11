@@ -871,6 +871,43 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
     BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 2910383047LL);
 }
 
+// Rule: RED-5'
+// D-Q-23a: the residual threshold is $0.48 at the vault's mint price, never below RESIDUAL_MIN_ZAT.
+BOOST_AUTO_TEST_CASE(red5_residual_threshold_in_dollars)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK_EQUAL(m.residualMinCents, 48);
+    BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
+    BOOST_CHECK_EQUAL(ResidualMinZat(18000, m), 2666666667LL);                   // $0.48 at $0.018 = 26.67 YEC (ceil)
+    BOOST_CHECK_EQUAL(ResidualMinZat(50000, m), 960000000LL);                    // 9.6 YEC at $0.05
+    BOOST_CHECK_EQUAL(ResidualMinZat(PRICE_MAX, m), m.residualMinZat);           // $0.48 at $4,294.97 = 11,176 zat < the floor: the floor binds
+    BOOST_CHECK_EQUAL(ResidualMinZat(480000000, m), 100000);                     // exactly $0.48 x 10^12 / 4.8e8 = the floor
+    BOOST_CHECK_EQUAL(ResidualMinZat(479999999, m), 100001);                     // one µUSD below: ceil, above the floor
+    BOOST_CHECK_EQUAL(ResidualMinZat(0, m), m.residualMinZat);                   // no price: the floor
+    BOOST_CHECK_EQUAL(ResidualMinZat(PRICE_MIN, m), 480000000000LL);             // 4,800 YEC at $0.0001, in MoneyRange
+    Params t = m;
+    t.residualMinCents = 0;
+    BOOST_CHECK_EQUAL(ResidualMinZat(18000, t), m.residualMinZat);
+}
+
+// Rule: MINT-6b
+// D-Q-23a: one mint's debt <= max(maxVaultShareBps of the MINT-6 cap, vaultShareFloorCents); no cap, no bound.
+BOOST_AUTO_TEST_CASE(mint6b_max_vault_cents)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK_EQUAL(m.maxVaultShareBps, 1000);
+    BOOST_CHECK_EQUAL(m.vaultShareFloorCents, 1000000);
+    BOOST_CHECK(!MaxVaultCents(std::nullopt, m.maxVaultShareBps, m.vaultShareFloorCents).has_value());
+    BOOST_CHECK(!MaxVaultCents(100000000, 0, m.vaultShareFloorCents).has_value());
+    BOOST_CHECK_EQUAL(MaxVaultCents(100000000, m.maxVaultShareBps, m.vaultShareFloorCents).value(), 10000000);     // 10 % of a $1 M cap
+    BOOST_CHECK_EQUAL(MaxVaultCents(5000000, m.maxVaultShareBps, m.vaultShareFloorCents).value(), 1000000);        // the $10,000 floor
+    BOOST_CHECK_EQUAL(MaxVaultCents(10000000, m.maxVaultShareBps, m.vaultShareFloorCents).value(), 1000000);       // exactly at the floor
+    BOOST_CHECK_EQUAL(MaxVaultCents(10000010, m.maxVaultShareBps, m.vaultShareFloorCents).value(), 1000001);
+    BOOST_CHECK_EQUAL(MaxVaultCents(0, m.maxVaultShareBps, m.vaultShareFloorCents).value(), 1000000);
+    // the largest cap that fits int64 (MAX_MONEY x PRICE_MAX / (COIN x 10^4)) stays in range
+    BOOST_CHECK_EQUAL(MaxVaultCents(CapCents(MAX_MONEY, PRICE_MAX).value(), m.maxVaultShareBps, m.vaultShareFloorCents).value(), 901943131950LL);
+}
+
 // Rule: AFEE-1
 // attestFeeZat = feeZat * ATTEST_FEE_BPS / 10^4 (floor), out of FEE-1's fee.
 BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_half_of_the_pool_fee)

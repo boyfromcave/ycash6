@@ -1029,6 +1029,41 @@ class MintTests(unittest.TestCase):
         self.assertEqual(c.void_reason(txid_of(raw)), '')
         self.assertGreater(c.model.totals.supply_cents, cap)
 
+    # Rule: MINT-6b
+    def test_mint6b_vault_share(self):
+        # D-Q-23a: one mint's debt <= max(max_vault_share_bps of the cap, vault_share_floor_cents); silent without a cap.
+        # D-Q-25: the cap's base is the circulating supply, here 50,000 YEC below the start plus the chain's blocks.
+        p = ym.Params.regtest(1, supply_cap_bps=10_000)
+        p.vault_share_floor_cents = 10_000
+        c = activated_chain(p, issued_before_start=50_000 * ym.COIN)
+        self.assertEqual(ym.max_vault_cents(None, 1_000, 1_000_000), None)
+        self.assertEqual(ym.max_vault_cents(100_000_000, 1_000, 1_000_000), 10_000_000)
+        self.assertEqual(ym.max_vault_cents(5_000_000, 1_000, 1_000_000), 1_000_000)
+        self.assertEqual(ym.max_vault_cents(100_000_000, 0, 1_000_000), None)
+
+        def max_vault(ref):
+            s = c.model.snapshot(ref)
+            return ym.max_vault_cents(ym.supply_cap_cents(s.issued_zat, s.p_mint, 10_000), p.max_vault_share_bps, p.vault_share_floor_cents)
+        ref = c.height - 1
+        self.assertTrue(10_000 < max_vault(ref) < p.max_mint)
+        raw = c.mint_tx(max_vault(ref), 145, ref, collateral_for(c, max_vault(ref), ref, 2), fee_key=KEY1, term_class=2)
+        c.mine((1, 50_000, 0, KEY1), [raw])
+        self.assertEqual(c.void_reason(txid_of(raw)), '')
+        ref = c.height - 1
+        raw = c.mint_tx(max_vault(ref) + 1, 145, ref, collateral_for(c, max_vault(ref) + 1, ref, 2), fee_key=KEY1, term_class=2)
+        c.mine((1, 50_000, 0, KEY1), [raw])
+        self.assertEqual(c.void_reason(txid_of(raw)), 'mint-vault-share')
+
+    # Rule: RED-5'
+    def test_red5_residual_threshold(self):
+        p = ym.Params.regtest(1)
+        self.assertEqual(ym.residual_min_zat(18_000, p), 2_666_666_667)        # $0.48 at $0.018 (ceil)
+        self.assertEqual(ym.residual_min_zat(50_000, p), 960_000_000)
+        self.assertEqual(ym.residual_min_zat(480_000_000, p), 100_000)          # exactly the floor
+        self.assertEqual(ym.residual_min_zat(4_294_967_295, p), 100_000)        # below the floor: the floor
+        self.assertEqual(ym.residual_min_zat(None, p), 100_000)
+        self.assertEqual(ym.residual_min_zat(100, p), 480_000_000_000)
+
     # Rule: MINT-7
     def test_mint7_token_output_is_opreturn(self):
         self.assertVoid(self.mint(opret_at=1, fee_vout=3), 'bad-mint-token-output')

@@ -299,6 +299,32 @@ inline std::optional<CAmount> ClaimantMaxZat(Cents mintedCents, int marginBps, M
     return z;
 }
 
+/**
+ * RED-5' (D-Q-23a): the residual threshold, max(residualMinZat, ceil(residualMinCents x 10^4 x COIN / pMint)) — $0.48 at
+ * the vault's mint price (cents x 10^12 / pMint zat, RequiredCollateral's arithmetic at ratio 10^4) with the 100,000-zat
+ * floor; the floor alone when pMint is undefined (<= 0) or the quotient does not fit.
+ */
+inline CAmount ResidualMinZat(MicroUsd pMint, const Params& P)
+{
+    const CAmount floor = std::max<CAmount>(0, P.residualMinZat);
+    if (pMint <= 0 || P.residualMinCents <= 0) return floor;
+    arith_uint256 z = CeilDiv(arith_uint256(P.residualMinCents) * arith_uint256(BPS) * arith_uint256(COIN), arith_uint256(pMint));
+    if (!FitsInt64(z) || !MoneyRange((CAmount)z.GetLow64())) return floor;
+    return std::max(floor, (CAmount)z.GetLow64());
+}
+
+/**
+ * MINT-6b (D-Q-23a): the largest debt one mint may create, max(capCents x maxVaultShareBps / 10^4, vaultShareFloorCents);
+ * nullopt (no limit) when the cap is undefined or the share is 0.
+ */
+inline std::optional<Cents> MaxVaultCents(std::optional<Cents> capCents, int maxVaultShareBps, Cents vaultShareFloorCents)
+{
+    if (!capCents.has_value() || maxVaultShareBps <= 0) return std::nullopt;
+    arith_uint256 s = arith_uint256(std::max<Cents>(0, capCents.value())) * arith_uint256(maxVaultShareBps) / arith_uint256(BPS);
+    const Cents share = FitsInt64(s) ? (Cents)s.GetLow64() : std::numeric_limits<int64_t>::max();
+    return std::max(share, std::max<Cents>(0, vaultShareFloorCents));
+}
+
 /** residualZat = max(0, collateralZat - claimantMaxZat); a claimantMax over MAX_MONEY (nullopt) leaves nothing (RED-5). */
 inline CAmount ResidualZat(CAmount collateralZat, std::optional<CAmount> claimantMaxZat)
 {

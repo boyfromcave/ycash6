@@ -41,6 +41,7 @@ const char* const MINT_HALTED_UNARMED = "mint-halted-unarmed";
 const char* const BAD_MINT_COLLATERAL = "bad-mint-collateral";
 const char* const MINT_UNSATISFIABLE = "mint-unsatisfiable";
 const char* const MINT_SUPPLY_CAP = "mint-supply-cap";
+const char* const MINT_VAULT_SHARE = "mint-vault-share";
 const char* const BAD_MINT_TOKEN_OUTPUT = "bad-mint-token-output";
 const char* const BAD_MINT_FEE = "bad-mint-fee";
 const char* const BAD_TRANSFER_ASSIGNMENT = "bad-transfer-assignment";
@@ -395,6 +396,10 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
     if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()
         && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
+    // MINT-6b (D-Q-23a): one mint's debt may not exceed max(maxVaultShareBps of the MINT-6 cap, vaultShareFloorCents),
+    // every class alike; with the cap undefined (no price, supplyCapBps 0) the rule is silent like MINT-6
+    std::optional<Cents> maxVault = MaxVaultCents(cap, P.maxVaultShareBps, P.vaultShareFloorCents);
+    if (maxVault.has_value() && (Cents)p.cents > maxVault.value()) return verdict::MINT_VAULT_SHARE;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
     // TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH.
@@ -664,7 +669,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
         facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
-        if (facts.residualZat >= P.residualMinZat) {
+        if (facts.residualZat >= ResidualMinZat(vault.pMint, P)) {     // RED-5': $0.48 at the vault's pMint, at least RESIDUAL_MIN_ZAT
             const CPQKeyID owner = vault.Owner();
             if (!vault::IsOwnerValid(owner) || intents.size() != 2) return verdict::RED5_RESIDUAL;
             const uint256 ownerHash = vault::ScriptHash256(GetScriptForDestination(owner));   // the owner's PQPKH (quantum spec F-3)

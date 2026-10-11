@@ -1602,6 +1602,37 @@ BOOST_AUTO_TEST_CASE(recap_floor_is_the_class_minimum_with_sigma)
     BOOST_CHECK(MinRatioBps(30000, 13000) < 50000);
 }
 
+// Rule: MINT-6b
+// D-Q-23a: the debt of one mint may not exceed max(maxVaultShareBps of the cap, vaultShareFloorCents), every class
+// alike, right after MINT-6; with no cap (supplyCapBps 0) the rule is silent.
+BOOST_AUTO_TEST_CASE(mint6b_vault_share)
+{
+    Fixture f(1, 0, 10000, 0);                              // cap = 100 % of market cap ...
+    f.P.issuedBeforeStart = 50000 * COIN;                   // ... of 50,000 YEC circulating below the start (D-Q-25) plus the fixture's blocks
+    f.Activate(1000000);                                    // $1/YEC: the cap is ~$50,800, 10 % of it ~$5,080
+    f.P.vaultShareFloorCents = 10000;                       // the floor at minMint so the share binds
+    // the cap (and so the bound) grows with every block's issuance: read it at the mint's own R
+    auto maxVaultAt = [&](int ref) {
+        const Snapshot s = f.Snap(ref);
+        return MaxVaultCents(SupplyCapCents(s.issuedZat, s.PMint(), f.P.supplyCapBps), f.P.maxVaultShareBps, f.P.vaultShareFloorCents).value();
+    };
+    BOOST_REQUIRE(maxVaultAt(f.tip - 1) > 10000 && maxVaultAt(f.tip - 1) < f.P.maxMint);
+    MintOpts c; c.termClass = 2;                            // class C (500 %) passes MINT-6's soft cap: MINT-6b is the one that binds
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(maxVaultAt(f.tip - 1), 145, f.tip - 1, c)), "");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(maxVaultAt(f.tip - 1) + 1, 145, f.tip - 1, c)), verdict::MINT_VAULT_SHARE);
+    MintOpts a;                                             // class A too: every class alike
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(maxVaultAt(f.tip - 1) + 1, 48, f.tip - 1, a)), verdict::MINT_VAULT_SHARE);
+    f.P.vaultShareFloorCents = f.P.maxMint;                 // the floor always lets the debt through (here up to maxMint itself)
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(f.P.maxMint, 145, f.tip - 1, c)), "");
+    f.P.maxVaultShareBps = 0;                               // the parameter off: no bound
+    f.P.vaultShareFloorCents = 1;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(600000, 145, f.tip - 1, c)), "");
+    Fixture g;                                              // no cap on regtest: silent
+    g.Activate();
+    g.P.vaultShareFloorCents = 1; g.P.maxVaultShareBps = 1000;
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
+}
+
 // Rule: MINT-6 (D-Q-25)
 // The virtual snapshot's issuedZat is Params::issuedBeforeStart (the circulating YEC below the start height), so every
 // snapshot's issuedZat is the circulating supply at its height and the cap is supplyCapBps of market capitalisation.
@@ -1622,6 +1653,16 @@ BOOST_AUTO_TEST_CASE(mint6_issued_seeded_with_the_circulating_supply)
     Fixture g;                                              // the default seed is 0: issuedZat counts from the start, as before
     g.Activate();
     BOOST_CHECK_EQUAL(g.Snap(g.tip).issuedZat, (CAmount)g.tip * SUBSIDY);
+}
+
+// Rule: RED-5'
+// D-Q-23a: a residual below $0.48 at the vault's pMint (at least RESIDUAL_MIN_ZAT) is not due: the claim has one intent.
+BOOST_AUTO_TEST_CASE(red5_residual_threshold_at_p_mint)
+{
+    Fixture f;
+    f.Activate(1000000);                                    // $1/YEC: the threshold is 0.48 YEC = 48,000,000 zat (> the 100,000-zat floor)
+    BOOST_CHECK_EQUAL(ResidualMinZat(1000000, f.P), 48000000);
+    BOOST_CHECK_EQUAL(ResidualMinZat(PRICE_MAX, f.P), f.P.residualMinZat);
 }
 
 // Rule: MINT-5

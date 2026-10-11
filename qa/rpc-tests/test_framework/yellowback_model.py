@@ -189,7 +189,8 @@ class Params(object):
                  price_min=100, price_max=4_294_967_295, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
                  attest=None,
                  recap_ratio_bps=50_000, mint_requires_armed=False, claim_delay=576, early_redeem_fee_bps=(500, 250, 100),
-                 fee_bands=((100_000, 100), (1_000_000, 50), (0, 10)), fee_floor_cents=100):
+                 fee_bands=((100_000, 100), (1_000_000, 50), (0, 10)), fee_floor_cents=100,
+                 max_vault_share_bps=1_000, vault_share_floor_cents=1_000_000, residual_min_cents=48):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -213,6 +214,11 @@ class Params(object):
         # last band unbounded (uptoCents 0), at least fee_floor_cents per action; converted to zat at the vault's p_mint
         self.fee_bands = tuple((int(u), int(b)) for u, b in fee_bands)
         self.fee_floor_cents = fee_floor_cents
+        # MINT-6b (D-Q-23a): one mint's debt <= max(max_vault_share_bps of the MINT-6 cap, vault_share_floor_cents)
+        self.max_vault_share_bps = max_vault_share_bps
+        self.vault_share_floor_cents = vault_share_floor_cents
+        # RED-5' (D-Q-23a): the residual threshold is max(residual_min_zat, residual_min_cents at the vault's p_mint)
+        self.residual_min_cents = residual_min_cents
         self.grace = grace
         self.claim_threshold_bps = claim_threshold_bps
         self.global_ratio_halt_bps = global_ratio_halt_bps
@@ -473,6 +479,22 @@ def claimant_max_zat(minted_cents, margin_bps, p_claim):
         return None
     z = ceil_div(minted_cents * margin_bps * COIN, p_claim)
     return z if z <= MAX_MONEY else None
+
+
+def residual_min_zat(p_mint, p):
+    """RED-5' (D-Q-23a): max(residual_min_zat, ceil(residual_min_cents x COIN / pMint)); the zat floor alone without a price."""
+    floor = max(0, p.residual_min_zat)
+    if p_mint is None or p_mint <= 0 or p.residual_min_cents <= 0:
+        return floor
+    z = ceil_div(p.residual_min_cents * BPS * COIN, p_mint)        # cents x 10^12 / pMint zat
+    return floor if z > MAX_MONEY else max(floor, z)
+
+
+def max_vault_cents(cap_cents, max_vault_share_bps, vault_share_floor_cents):
+    """MINT-6b (D-Q-23a): max(cap x share / 10^4, floor); None (no limit) without a cap or with share 0."""
+    if cap_cents is None or max_vault_share_bps <= 0:
+        return None
+    return max(u256(max(0, cap_cents) * max_vault_share_bps) // BPS, max(0, vault_share_floor_cents))
 
 
 def residual_zat(collateral_zat, claimant_max):
@@ -2858,6 +2880,10 @@ class YellowbackModel(object):
         if (cap is not None and self.totals.supply_cents + pl.cents > cap
                 and p.base_ratio_bps[pl.term_class] < p.recap_ratio_bps):
             return 'mint-supply-cap'
+        # MINT-6b (D-Q-23a): one mint's debt <= max(share of the cap, the floor), every class alike; silent without a cap
+        max_vault = max_vault_cents(cap, p.max_vault_share_bps, p.vault_share_floor_cents)
+        if max_vault is not None and pl.cents > max_vault:
+            return 'mint-vault-share'
         # MINT-7
         if opret == 1:
             return 'bad-mint-token-output'
@@ -3100,7 +3126,7 @@ class YellowbackModel(object):
             margin = p.claim_threshold_bps if facts['claim_path'] == 'a' else BPS
             residual = residual_zat(vault.collateral_zat, claimant_max_zat(vault.minted_cents, margin, p_claim))
             facts['residual_zat'] = residual
-            if residual >= p.residual_min_zat:
+            if residual >= residual_min_zat(vault.p_mint, p):      # RED-5': $0.48 at the vault's p_mint, at least RESIDUAL_MIN_ZAT
                 if not is_pq_owner(vault.owner_pubkey) or len(intents) != 2:
                     return 'red5-residual'
                 owner_hash = sha256(pqpkh_script(vault.owner_pubkey))      # the owner's PQPKH (quantum spec F-3)

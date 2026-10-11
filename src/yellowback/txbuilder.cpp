@@ -1219,7 +1219,7 @@ ClaimFacts ClaimAt(const Context& ctx, const COutPoint& vaultOut, const VaultRec
     if (!c.pClaim.has_value()) throw std::runtime_error("claim-not-underwater: pClaim is undefined at the reference height");
     const int marginBps = c.claimPath == "a" ? p.claimThresholdBps : (int)BPS;   // R1: no margin under (b) alone
     const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, c.pClaim.value()));
-    c.residualZat = residual >= p.residualMinZat ? residual : 0;
+    c.residualZat = residual >= ResidualMinZat(vault.pMint, p) ? residual : 0;   // RED-5'
     return c;
 }
 

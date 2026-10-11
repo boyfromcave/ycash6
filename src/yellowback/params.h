@@ -185,6 +185,8 @@ struct Params
 
     // Amounts
     Cents minMint;                       //!< MINT-2
+    int maxVaultShareBps;                //!< MINT-6b (D-Q-23a): a mint's debt may not exceed max(this share of the MINT-6 cap, vaultShareFloorCents); 1,000 = 10 %; 0 = off
+    Cents vaultShareFloorCents;          //!< MINT-6b: 1,000,000 = $10,000, the debt every mint may reach whatever the cap
     CAmount issuedBeforeStart;           //!< MINT-6 (D-Q-25): the YEC circulating below startHeight (the closed-form subsidy sum, CirculatingSupplyAt(startHeight - 1)),
                                          //!< the virtual snapshot's issuedZat so Snapshots[h].issuedZat is the circulating supply at h; set by the index from the chain
                                          //!< parameters, never hashed (derived from startHeight and the emission schedule)
@@ -221,8 +223,9 @@ struct Params
     int emergencyRatioBps;               //!< EMERGENCY_RATIO_BPS 10,500 (NOT-1, RED-4(b))
     int emergencyPersist;                //!< EMERGENCY_PERSIST 48
     int emergencyNoticeTtl;              //!< EMERGENCY_NOTICE_TTL 1,152
-    CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5)
-    int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1, H-4; regtest 2,500)
+    CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5): the zat floor of the residual threshold
+    Cents residualMinCents;              //!< RED-5' (D-Q-23a): the residual threshold is max(residualMinZat, residualMinCents at the vault's pMint); 48 = $0.48
+    int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1', H-4; regtest 2,500): the attestor share of the protocol fee (never of the early fee)
     CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
     int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
     int bondMaturity;                    //!< BOND_MATURITY 16,128

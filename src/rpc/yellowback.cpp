@@ -694,13 +694,17 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("supplyCapBps", p.supplyCapBps);
     {
         // rpcversion 8 (D-Q-25): the cap's base at the tip: the circulating YEC (the subsidy sum from genesis), the
-        // cross-section xMint it is valued at (MINT-6's price) and the resulting cap
+        // cross-section xMint it is valued at (MINT-6's price), the resulting cap and MINT-6b's per-vault bound
         const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
         std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), p.supplyCapBps);
+        std::optional<Cents> maxVault = MaxVaultCents(cap, p.maxVaultShareBps, p.vaultShareFloorCents);
         UniValue sc(UniValue::VOBJ);
         sc.pushKV("circulatingZat", s.issuedZat);
         sc.pushKV("priceMicroUsd", PriceOrNull(s.PMint()));
         sc.pushKV("capCents", cap.has_value() ? UniValue(cap.value()) : NullUniValue);
+        sc.pushKV("maxVaultShareBps", p.maxVaultShareBps);
+        sc.pushKV("vaultShareFloorCents", p.vaultShareFloorCents);
+        sc.pushKV("maxVaultCents", maxVault.has_value() ? UniValue(maxVault.value()) : NullUniValue);
         prm.pushKV("supplyCap", sc);
     }
     prm.pushKV("refLag", g_yellowbackMintLag);
@@ -2097,7 +2101,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
         e.claimable = mature && IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
         e.claimPath = e.claimable ? "a" : "";
         if (e.claimable) e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, p.claimThresholdBps, e.pClaim.value()));
-        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
+        if (e.residualZat < ResidualMinZat(v.pMint, p)) e.residualZat = 0;   // RED-5''s threshold ($0.48 at pMint, floor RESIDUAL_MIN_ZAT), as the builder's ClaimAt applies it
         return e;
     }
     std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)r);
@@ -2127,7 +2131,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     if (e.claimable && e.pClaim.has_value()) {
         const int marginBps = underA ? p.claimThresholdBps : (int)BPS;
         e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, e.pClaim.value()));
-        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
+        if (e.residualZat < ResidualMinZat(v.pMint, p)) e.residualZat = 0;   // RED-5''s threshold ($0.48 at pMint, floor RESIDUAL_MIN_ZAT), as the builder's ClaimAt applies it
     }
     const bool standing = notice.has_value() && (int64_t)tip - notice->height <= p.emergencyNoticeTtl;
     e.canNotice = v.Status() == VaultStatus::ACTIVE && !standing && !e.claimable &&

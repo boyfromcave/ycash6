@@ -14,6 +14,8 @@ namespace {
 void SetCommon(Params& p)
 {
     p.minMint   = 10000;      // $100
+    p.maxVaultShareBps = 1000;        // MINT-6b (D-Q-23a): one vault may hold at most 10 % of the MINT-6 cap ...
+    p.vaultShareFloorCents = 1000000; // ... but always $10,000 (mint-vault-share)
     p.issuedBeforeStart = 0;          // MINT-6 (D-Q-25): set by the index to CirculatingSupplyAt(startHeight - 1)
     p.maxMint   = 250000;     // $2,500 (H-12: guarded issuance for the first parameter lifetime; DigiByte $100,000)
     p.minOutput = 100;        // $1.00 (DigiByte minOutputAmount)
@@ -86,7 +88,8 @@ void SetCommon(Params& p)
     p.emergencyRatioBps   = 10500;  // NOT-1, RED-4(b)
     p.emergencyPersist    = 48;
     p.emergencyNoticeTtl  = 1152;
-    p.residualMinZat      = 100000; // RED-5
+    p.residualMinZat      = 100000; // RED-5: the zat floor
+    p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
     p.bondMin             = 20000 * COIN;
     p.bondMinLock         = 420480; // one year
@@ -111,12 +114,12 @@ Params::Params()
       feeFloorCents(0),
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), recapRatioBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
-      minMint(0), issuedBeforeStart(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
+      minMint(0), maxVaultShareBps(0), vaultShareFloorCents(0), issuedBeforeStart(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
       nPenalty(0), accuracyWindow(0), payeeTiltBps(0),
       attestArmMin(0), attestArmDelay(0), attestRequired(true), bundleCarrier(BundleCarrier::SCRIPTSIG),
       nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
-      emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), attestFeeBps(0),
+      emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
       bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
