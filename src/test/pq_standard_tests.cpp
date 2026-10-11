@@ -77,7 +77,7 @@ BOOST_AUTO_TEST_CASE(pqpkh_solver_success)
         BOOST_CHECK(std::get<CPQKeyID>(dests[0]) == id);
         BOOST_CHECK_EQUAL(nRequired, 1);
 
-        // the plain-YEC PQ address (D-Q-20): "sq…" on mainnet, 53 characters, encode only (no decode yet)
+        // the plain-YEC PQ address (D-Q-20): "sq…" on mainnet, 53 characters, decoded back chain-wide (SQ task)
         KeyIO keyIO(Params());
         const std::string enc = keyIO.EncodeDestination(dest);
         std::vector<unsigned char> raw = {0x4D, 0xD9, id.scheme};
@@ -85,7 +85,7 @@ BOOST_AUTO_TEST_CASE(pqpkh_solver_success)
         BOOST_CHECK_EQUAL(enc, EncodeBase58Check(raw));
         BOOST_CHECK_EQUAL(enc.substr(0, 2), "sq");
         BOOST_CHECK_EQUAL(enc.size(), 53U);
-        BOOST_CHECK(std::holds_alternative<CNoDestination>(keyIO.DecodeDestination(enc)));
+        BOOST_CHECK(keyIO.DecodeDestination(enc) == dest);
     }
 }
 

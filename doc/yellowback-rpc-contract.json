@@ -209,7 +209,7 @@
       "raisedBy": [
         "yed_listtokens"
       ],
-      "when": "a string that is neither a YED nor a transparent P2PKH address of this network"
+      "when": "a string that is neither a YED, a transparent P2PKH nor a plain-YEC post-quantum address of this network"
     },
     "keypool-empty": {
       "raisedBy": [
