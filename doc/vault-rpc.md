@@ -33,7 +33,12 @@ checks live answers against it. Edit this document, then regenerate.
   with `z_importpqkey`) and signs owner spends; an external owner is named explicitly.
 - **Addresses**: every `address` parameter (recipients, `vault_release`, `vault_ownerspend`) takes
   a transparent `s1…`/`t…` address or a plain-YEC PQ address `sq…`/`tq…`/`rq…` (a `TX_PQPKH`
-  output, the same script as the PQ `yb…` of that key).
+  output, the same script as the PQ `yb…` of that key). A 66-hex `pqkeyid` is not an address:
+  `vault_release` refuses one as its recipient ("pass the address or the script, not a pqkeyid").
+  Inputs spending such outputs carry no address in `getblockdeltas`/`getspentinfo`/
+  `getrawtransaction` (the insight index keys spends by Hash160; `getaddressdeltas` names them), and
+  a `-insightexplorer`/`-lightwalletd` node synced before this build needs one `-reindex` to index
+  them (doc/yellowback-rpc.md, "Plain-YEC PQ addresses").
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields
   (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
   the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
@@ -300,7 +305,8 @@ recipient (an address or a script in hex), fee from this wallet. The intent comm
 intent for, or one of this wallet's P2PKH scripts, or the `TX_PQPKH` script of a post-quantum
 key this wallet holds — so an owner releases its own residual (quantum spec F-3) without passing
 the script, e.g. after a restart. Error `-1` "matures at height h" before
-`coinHeight + delay`. Result: the txid.
+`coinHeight + delay`; error `-8` "pass the address or the script, not a pqkeyid" when the argument
+is a 66-hex pqkeyid that is not the recipient script. Result: the txid.
 
 ### `vault_ownerspend "outpoint" "address"`
 Params: `["outpoint": outpoint, "address": address]`

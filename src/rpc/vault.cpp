@@ -1647,7 +1647,8 @@ UniValue vault_release(const UniValue& params, bool fHelp)
             "\nRelease a matured intent to its recipient (RELEASE, selector 1, nSequence = delay; U-15: anyone may). The\n"
             "intent commits only SHA256 of the recipient script, so the recipient is the argument, or a script this node\n"
             "built the intent for, or a P2PKH / P2SH script of this wallet, or the TX_PQPKH script of a post-quantum key\n"
-            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sq…/tq…/rq…. Fee from this wallet.\n"
+            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sq…/tq…/rq…; a pqkeyid is refused\n"
+            "(pass the address or the script). Fee from this wallet.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_release", "\"txid:0\"") + HelpExampleRpc("vault_release", "\"txid:0\", \"address\""));
     EnsureWallet(fHelp);
@@ -1668,6 +1669,9 @@ UniValue vault_release(const UniValue& params, bool fHelp)
         if (IsValidDestination(d)) dest = GetScriptForDestination(d);
         else if (IsHex(a)) { std::vector<unsigned char> b = ParseHex(a); dest = CScript(b.begin(), b.end()); }
         else throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "not an address or a script: " + a);
+        // A 33-byte pqkeyid (scheme || keyhash, as vault_list and z_importpqkey print it) is not a script.
+        if (ScriptHash256(*dest) != ip.recipientHash && a.size() == 66 && IsHex(a) && pq::IsKnownScheme(ParseHex(a)[0]))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "that looks like a pqkeyid: pass the address or the script, not a pqkeyid");
     } else if (g_recipients.count(ip.recipientHash)) {
         dest = g_recipients[ip.recipientHash];
     } else {

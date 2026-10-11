@@ -18,7 +18,11 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
 - vault_release of an intent paying the wallet's PQ key: by a third party with the address (the owner finds it in
   the index), and by the owner after a restart without the script;
 - z_importpqkey (own and foreign keys, refusals); a seed-only restore with -mnemonicfile (and its refusal for an
-  existing wallet with another seed). (yed_validateaddress / yed_listtokens transparentAddress = the rq… form is
+  existing wallet with another seed); the review follow-ups: the restore derives the first Sapling address and finds
+  its note (B-1), an encrypted wallet starts with the restore option still configured and a mismatched seed is still
+  refused while it is locked (B-2), z_importpqkey takes a dump's whole pqseed= line and refuses one whose yecaddr=/
+  addr= does not name the seed's key under its scheme (B-3), -sendchangeback=1 prices a PQ change output's dust at
+  the PQ spend size (B-4), and vault_release names a pqkeyid passed as the recipient. (yed_validateaddress / yed_listtokens transparentAddress = the rq… form is
   checked in yellowback_pq.py, where the YED module is live.)
 
 6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): the z_* RPCs take a libzcash::PaymentAddress, which has no
@@ -40,12 +44,14 @@ from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
     assert_start_raises_init_error,
+    bitcoind_processes,
     connect_nodes_bi,
     nuparams,
     start_node,
     start_nodes,
     stop_node,
     sync_blocks,
+    wait_and_assert_operationid_status,
 )
 from test_framework.yellowback_model import base58check_decode, base58check_encode
 
@@ -85,13 +91,16 @@ class WalletPQAddressTest(BitcoinTestFramework):
 
     def node_args(self, i):
         a = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=vault']
+        a += ['-exportdir=%s' % os.path.join(self.options.tmpdir, 'export%d' % i)]
         if i == 0:
-            a += ['-txindex', '-experimentalfeatures', '-insightexplorer',
-                  '-exportdir=%s' % os.path.join(self.options.tmpdir, 'export0')]
+            a += ['-txindex', '-experimentalfeatures', '-insightexplorer']
+        if i == 2:
+            a += ['-experimentalfeatures', '-developerencryptwallet']
         return a
 
     def setup_network(self, split=False):
-        os.makedirs(os.path.join(self.options.tmpdir, 'export0'), exist_ok=True)
+        for i in range(self.num_nodes):
+            os.makedirs(os.path.join(self.options.tmpdir, 'export%d' % i), exist_ok=True)
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir,
                                  extra_args=[self.node_args(i) + (['-reindex'] if i == 0 else []) for i in range(self.num_nodes)])
         self.connect_all()
@@ -153,7 +162,8 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('Transaction amount too small', n1.sendtoaddress, a, Decimal('0.00001'))
         assert_raises_rpc('no WIF key', n0.dumpprivkey, a)
         assert_raises_rpc('does not refer to key', n0.signmessage, a, 'hello')
-        zaddr = n0.z_getnewaddress('sapling')
+        assert_equal(n0.z_listaddresses(), [])
+        zaddr = n0.z_getnewaddress('sapling')   # node 0's first Sapling key (m/32'/coin'/0'): restored by B-1
         assert_raises_rpc('z_sendmany cannot spend from a post-quantum address', n0.z_sendmany, a, [{'address': zaddr, 'amount': 1}])
         assert_raises_rpc('z_shieldcoinbase cannot spend from a post-quantum address', n0.z_shieldcoinbase, a, zaddr)
         assert_raises_rpc('z_mergetoaddress cannot spend from a post-quantum address', n0.z_mergetoaddress, [a], zaddr)
@@ -238,9 +248,10 @@ class WalletPQAddressTest(BitcoinTestFramework):
             cur = [x for x in n0.vault_list({'kind': 'vault', 'setid': setid})][0]['outpoint']
         self.mine(DELAY)
         assert_raises_rpc('recipient script is unknown', n1.vault_release, intents[0])   # n1 holds no key of b
+        _, sb, hb = pq_parts(b)
+        assert_raises_rpc('pass the address or the script, not a pqkeyid', n1.vault_release, intents[0], '%02x' % sb + hb.hex())
         r1 = n1.vault_release(intents[0], b)                                                # a third party, with the address
         self.mine(1)
-        _, _, hb = pq_parts(b)
         u = n0.getaddressutxos({'addresses': [b]})
         assert_equal([(x['txid'], x['satoshis']) for x in u], [(r1, zat(2))])
         self.restart(0)
@@ -249,6 +260,27 @@ class WalletPQAddressTest(BitcoinTestFramework):
         self.mine(1)
         assert_equal(n0.getrawtransaction(r2, 1)['vout'][0]['scriptPubKey']['hex'], pqpkh_script(1, hb).hex())
         assert_equal(sorted(x['txid'] for x in n0.listunspent(1, 9999999, [b])), sorted([r1, r2]))
+
+        print('-sendchangeback=1 with a PQ input: the change to its rq… address is priced at the PQ dust threshold (B-4)')
+        self.restart(0, ['-sendchangeback=1'])
+        n0 = self.nodes[0]
+        pq_coin = [u for u in n0.listunspent(0) if u['txid'] == r2 and u['address'] == b]
+        assert_equal(len(pq_coin), 1)
+        v = pq_coin[0]['amount']
+        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not (u['txid'] == r2 and u['address'] == b)]
+        n0.lockunspent(False, others)
+        dest = n1.getnewaddress()
+        # subtractfeefromamount: the change is exactly 1,000 zat, above the P2PKH dust threshold but below the
+        # TX_PQPKH one (an SLH-DSA spend is ~8 kB); the wallet raises it to the PQ threshold, from the recipient.
+        cb = n0.sendtoaddress(dest, v - Decimal('0.00001'), '', '', True)
+        n0.lockunspent(True, others)
+        cbtx = n0.getrawtransaction(cb, 1)
+        change = [o for o in cbtx['vout'] if o['scriptPubKey']['hex'] == pqpkh_script(1, hb).hex()]
+        assert_equal(len(change), 1)
+        assert zat(change[0]['value']) > 1000, change
+        self.mine(1)
+        assert_equal(n0.gettransaction(cb)['confirmations'], 1)
+        assert_equal(n1.getreceivedbyaddress(dest), v - change[0]['value'] - (-n0.gettransaction(cb)['fee']))
 
         print('z_importpqkey')
         export = n0.z_exportwallet('pqexport')
@@ -267,10 +299,29 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n1.validateaddress(a2)['ismine'], True)
         assert_equal([x['txid'] for x in n1.listunspent(1, 9999999, [a2])], [tx_m] if (tx_m, utx[tx_m]['vout']) not in spent else [])
         assert_equal(n1.z_importpqkey('pqseed=1:0:' + seed_hex, False)['added'], False)   # already held; a foreign index is dropped
+        # B-3: a dump's whole line is accepted, and refused when its yecaddr=/addr= does not name the seed's key
+        dump_line = [l for l in lines if l.startswith('pqseed=') and ('yecaddr=%s' % a2) in l][0]
+        assert_equal(n1.z_importpqkey(dump_line, False)['address'], a2)
+        assert_raises_rpc('does not match the key its seed makes', n1.z_importpqkey,
+                          dump_line.replace('yecaddr=%s' % a2, 'yecaddr=%s' % a), False)
+        other_scheme = '2' + dump_line[len('pqseed=1'):].replace('pqseed=', '')
+        assert_raises_rpc('under scheme 2', n1.z_importpqkey, 'pqseed=' + other_scheme, False)   # same seed, Falcon key
+        falcon_key = n1.z_importpqkey('2:' + seed_hex, False)   # the scheme decides the key: another address
+        assert_equal(falcon_key['scheme'], 2)
+        assert falcon_key['address'] != a2
         # the owner's own key (already held, as the lookahead): index kept
         own = n0.z_importpqkey('1:' + seed_hex, False)
         assert_equal(own['added'], False)
         assert own['index'] is not None
+
+        print('a Sapling note for node 0\'s first z-address (the seed-only restore finds it, B-1)')
+        t2 = n1.getnewaddress()
+        n1.sendtoaddress(t2, 2)
+        self.mine(1)
+        op = n1.z_sendmany(t2, [{'address': zaddr, 'amount': Decimal('0.5')}], 1, None, 'AllowFullyTransparent')
+        wait_and_assert_operationid_status(n1, op)
+        self.mine(1)
+        export1 = n1.z_exportwallet('n1export')   # another seed, for the B-2 refusal
 
         print('-mineraddress=rq… is refused at init')
         stop_node(self.nodes[1], 1)
@@ -301,7 +352,24 @@ class WalletPQAddressTest(BitcoinTestFramework):
         # the restored wallet is ordinary afterwards: a restart keeps it (no -mnemonicfile needed, and the same file is accepted)
         stop_node(self.nodes[2], 2)
         self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-mnemonicfile=%s' % export])
-        assert_equal(self.nodes[2].validateaddress(a)['ismine'], True)
+        n2 = self.nodes[2]
+        assert_equal(n2.validateaddress(a)['ismine'], True)
+        # B-1: the restored wallet holds node 0's first Sapling address and found its note in the startup rescan
+        assert_equal(n2.z_listaddresses(), [zaddr])
+        assert_equal(sum(Decimal(u['amount']) for u in n2.z_listunspent(1, 9999999, False, [zaddr])), Decimal('0.5'))
+
+        print('-mnemonicfile: an encrypted (locked) wallet starts with the option still configured (B-2)')
+        n2.encryptwallet('sqfix-pass')
+        bitcoind_processes[2].wait()
+        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-mnemonicfile=%s' % export])
+        n2 = self.nodes[2]
+        assert_equal(n2.getwalletinfo()['unlocked_until'], 0)
+        assert_equal(n2.validateaddress(a)['ismine'], True)
+        stop_node(self.nodes[2], 2)
+        # a seed that is not the wallet's is still refused while the wallet is locked (checked by fingerprint)
+        assert_start_raises_init_error(2, self.options.tmpdir, self.node_args(2) + ['-mnemonicfile=%s' % export1],
+                                       'and this wallet has another')
+        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2))
 
 
 if __name__ == '__main__':

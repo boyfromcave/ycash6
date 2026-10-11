@@ -117,6 +117,35 @@ that actually receive YED: a TRANSFER with no YED input, or one XFER-1..3 burns,
 as implemented"). A hybrid channel output (`TX_PQCHANNEL`, D-Q-19) holds YED from the Falcon height when its
 client is a Falcon key; `yed_listtokens` lists it under the client's address.
 
+**Plain-YEC PQ addresses (`sq…`/`tq…`/`rq…`, D-Q-20): what node operators and clients should know.**
+
+- **Inputs spending PQ coins carry no address** in `getblockdeltas`, `getspentinfo` and
+  `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
+  Hash160, and a `TX_PQPKH` key hash is 32 bytes, so the index cannot name it from the input side.
+  `getaddressdeltas` (and `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as
+  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form.
+- **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` that synced before this
+  build: the address index of earlier blocks holds no `TX_PQPKH` outputs until it is rebuilt.
+- **`createrawtransaction` takes an `sq…` output** without the wallet's payability checks (Falcon
+  activation, the PQ dust threshold); relay policy still refuses a non-standard or dust output. Prefer `sendtoaddress`/`sendmany`, which check.
+- **`yed_getnewaddress "pq"` now files holder keys in the address book** (under the `sq…` form, so
+  the YEC their token outputs carry is not taken for change); holder keys issued by an earlier build
+  are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
+  out).
+- **`z_sendmany` / `z_mergetoaddress` refuse an `sq…` recipient** on this line (their recipients are `libzcash::PaymentAddress`, which has no post-quantum alternative): pay an `sq…` address with `sendtoaddress` or `sendmany`.
+- **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
+  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
+  unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap
+  (`getnewaddress "" "pq"`) and running `rescanblockchain`; further Sapling addresses likewise with
+  `z_getnewaddress` before `rescanblockchain`. On an existing wallet the option is ignored when the
+  seed matches (checked by fingerprint, so a locked wallet starts too) and refused when it does not.
+- **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check
+  uses the PQ spend size (`GetPQDustThreshold`), as relay policy does.
+- **`z_importpqkey`** takes a dump's whole `pqseed=` line and refuses it when its `owner=`/`addr=`/
+  `yecaddr=` do not name the key the seed makes under the line's scheme (the scheme decides the key;
+  both schemes take a 48-byte seed). **`vault_release`** refuses a 66-hex pqkeyid as the recipient
+  (pass the address or the script).
+
 **P4-b: the attestor registry is the attestor set** (upgrade plan §15.10; additions only, so
 `rpcversion` stays 5). An attestor is a member of the vault primitive's set `attestorSetId`: it
 joins with a `SET_JOIN` (`set_join`, or `yed_registerattestor`, which is that join with a fresh
@@ -1371,7 +1400,9 @@ an offline copy of `wallet.dat`.
 Arguments: `type` (string, optional; rpcversion 7): `"p2pkh"` a fresh keypool key (35 characters),
 `"pq"` a fresh post-quantum holder key (FN-DSA-512 once Falcon is active, SLH-DSA-SHA2-128s before),
 `"pqowner"` a fresh SLH-DSA key, as `vault_getnewowner` (53 characters each); PQ keys derive from the HD
-seed (the wallet must be unlocked) and stay out of the address book; the default
+seed (the wallet must be unlocked); a `"pq"` holder key goes into the address book under its plain-YEC
+`sq…`/`tq…`/`rq…` form (keys issued by a build before the SQ follow-ups are not added retroactively), a
+`"pqowner"` key stays out of it; the default
 follows the holder policy (quantum plan D-Q-2, A-13): `"p2pkh"` while `params.pq.falconActive` is
 false, `"pq"` once it is true. A Yellowback address string (`yb…` mainnet, `yt…` testnet, `yr…`
 regtest). The result is a bare string.

@@ -6737,13 +6737,16 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                     }
 
                     CTxOut newTxOut(nChange, scriptChange);
+                    // Review B-4: -sendchangeback returns change to the largest input's address, which may be a
+                    // post-quantum (TX_PQPKH) one; its dust is priced with its real spend size, as policy does.
+                    const CAmount nChangeDust = GetPQDustThreshold(newTxOut, CFeeRate(ONE_THIRD_DUST_THRESHOLD_RATE));
 
                     // We do not move dust-change to fees, because the sender would end up paying more than requested.
                     // This would be against the purpose of the all-inclusive feature.
                     // So instead we raise the change and deduct from the recipient.
-                    if (nSubtractFeeFromAmount > 0 && newTxOut.IsDust())
+                    if (nSubtractFeeFromAmount > 0 && newTxOut.nValue < nChangeDust)
                     {
-                        CAmount nDust = newTxOut.GetDustThreshold() - newTxOut.nValue;
+                        CAmount nDust = nChangeDust - newTxOut.nValue;
                         newTxOut.nValue += nDust; // raise change until no more dust
                         for (unsigned int i = 0; i < vecSend.size(); i++) // subtract from first recipient
                         {
@@ -6762,7 +6765,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
 
                     // Never create dust outputs; if we would, just
                     // add the dust to the fee.
-                    if (newTxOut.IsDust())
+                    if (newTxOut.nValue < nChangeDust)
                     {
                         nFeeRet += nChange;
                         reservekey.ReturnKey();
@@ -7678,13 +7681,13 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     strUsage += HelpMessageOpt("-forcebirthday=<n>", strprintf(_("Override the wallet birthday with the given Unix timestamp when scanning for wallet transactions; clamped to the genesis block time (default: %u, meaning use the wallet's own birthday)"), 0));
     strUsage += HelpMessageOpt("-ignorespam", strprintf(_("Blunt anti-spam shield: drop any transaction with at least -spamoutputslimit shielded outputs before the wallet trial-decrypts it. Unconditional (a large shielded send/receive will be missed until this is disabled and the wallet rescanned). Complementary to the per-Sapling-output mempool fee floor (default: %u)"), DEFAULT_IGNORE_SPAM));
     strUsage += HelpMessageOpt("-spamoutputslimit=<n>", strprintf(_("Shielded-output count (Sapling outputs + Orchard actions) at or above which a transaction is treated as spam when -ignorespam is set; minimum 3 (default: %u)"), DEFAULT_SPAM_OUTPUTS_LIMIT));
-    strUsage += HelpMessageOpt("-sendchangeback", strprintf(_("Return transparent change to the address of the largest-value input being spent, instead of a newly generated address, when no coin-control change address is set (default: %u)"), DEFAULT_SEND_CHANGE_BACK));
+    strUsage += HelpMessageOpt("-sendchangeback", strprintf(_("Return transparent change to the address of the largest-value input being spent, instead of a newly generated address, when no coin-control change address is set; a post-quantum (sq…) input's change goes back to its sq… address, its dust priced at the PQ spend size (default: %u)"), DEFAULT_SEND_CHANGE_BACK));
     strUsage += HelpMessageOpt("-spendzeroconfchange", strprintf(_("Spend unconfirmed change when sending transactions (default: %u)"), DEFAULT_SPEND_ZEROCONF_CHANGE));
     strUsage += HelpMessageOpt("-txexpirydelta", strprintf(_("Set the number of blocks after which a transaction that has not been mined will become invalid (min: %u, default: %u (pre-Blossom) or %u (post-Blossom))"), TX_EXPIRING_SOON_THRESHOLD + 1, DEFAULT_PRE_BLOSSOM_TX_EXPIRY_DELTA, DEFAULT_POST_BLOSSOM_TX_EXPIRY_DELTA));
     strUsage += HelpMessageOpt("-upgradewallet", _("Upgrade wallet to latest format on startup"));
     strUsage += HelpMessageOpt("-wallet=<file>", _("Specify wallet file absolute path or a path relative to the data directory") + " " + strprintf(_("(default: %s)"), DEFAULT_WALLET_DAT));
     strUsage += HelpMessageOpt("-walletbroadcast", _("Make the wallet broadcast transactions") + " " + strprintf(_("(default: %u)"), DEFAULT_WALLETBROADCAST));
-    strUsage += HelpMessageOpt("-mnemonicfile=<file>", _("When creating a new wallet, take its seed from the recovery phrase in <file> (the phrase on one line, or a z_exportwallet file's recovery_phrase= and language= lines) instead of a random one, and rescan from genesis: a seed-only restore of the seed's Sapling and post-quantum keys (keys imported into the backed-up wallet are not restored). Refused for an existing wallet with another seed"));
+    strUsage += HelpMessageOpt("-mnemonicfile=<file>", strprintf(_("When creating a new wallet, take its seed from the recovery phrase in <file> (the phrase on one line, or a z_exportwallet file's recovery_phrase= and language= lines) instead of a random one, and rescan from genesis. Restores the first legacy Sapling address and the post-quantum keys up to a gap of %u unused keys per scheme; re-derive further Sapling addresses with z_getnewaddress, and PQ keys past the gap with getnewaddress \"\" \"pq\", then rescanblockchain. Keys imported into the backed-up wallet are not restored. Ignored for an existing wallet with this seed, refused for one with another"), (unsigned)PQ_KEY_LOOKAHEAD));
     strUsage += HelpMessageOpt("-walletnotify=<cmd>", _("Execute command when a wallet transaction changes (%s in cmd is replaced by TxID)"));
     strUsage += HelpMessageOpt("-zapwallettxes=<mode>", _("Delete all wallet transactions and only recover those parts of the blockchain through -rescan on startup") +
                                " " + _("(1 = keep tx meta data e.g. account owner and payment request information, 2 = drop tx meta data)"));
@@ -7828,9 +7831,15 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
             return UIError(strprintf(_("-mnemonicfile: %s"), err));
         const MnemonicSeed& restored = restoredOpt.value();
         if (!fFirstRun || walletInstance->HaveMnemonicSeed()) {
-            std::optional<MnemonicSeed> current = walletInstance->GetMnemonicSeed();
-            if (!current.has_value() || current.value().Fingerprint() != restored.Fingerprint())
+            // An existing wallet (review B-2): the option is a no-op, checked where it can be. The seed's fingerprint
+            // is stored in clear (the mnemonic CHDChain), so a locked wallet is checked too.
+            if (!walletInstance->HaveMnemonicSeed())
+                return UIError(_("-mnemonicfile applies only when creating a new wallet, and this existing wallet has no mnemonic seed"));
+            const std::optional<CHDChain>& chain = walletInstance->GetMnemonicHDChain();
+            const uint256 currentFp = chain.has_value() ? chain.value().GetSeedFingerprint() : uint256();
+            if (!currentFp.IsNull() && currentFp != restored.Fingerprint())
                 return UIError(_("-mnemonicfile applies only when creating a new wallet, and this wallet has another seed"));
+            LogPrintf("-mnemonicfile ignored: the wallet exists%s\n", currentFp.IsNull() ? " (its seed fingerprint is unknown)" : " and has this seed");
         } else {
             LOCK(walletInstance->cs_wallet);
             if (!walletInstance->SetMnemonicSeed(restored))
@@ -7838,6 +7847,11 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
             CHDChain newHdChain(restored.Fingerprint(), 1);   // unknown birthday: the restore rescans from genesis
             walletInstance->SetMnemonicHDChain(newHdChain, false);
             walletInstance->NewKeyPool();                     // as GenerateNewSeed: internal keys of this seed
+            // Review B-1: derive the first legacy Sapling key (as z_getnewaddress "sapling" would) before the rescan,
+            // so a wallet with one z-address restores without a ritual. Further Sapling keys are re-derived with
+            // z_getnewaddress, then rescanblockchain; PQ keys come from the lookahead (PQ_KEY_LOOKAHEAD).
+            const libzcash::SaplingPaymentAddress first = walletInstance->GenerateNewLegacySaplingZKey();
+            LogPrintf("Restored the first Sapling address %s\n", KeyIO(params).EncodePaymentAddress(first));
             fRestoredSeed = true;
             LogPrintf("Wallet created from the recovery phrase in -mnemonicfile (fingerprint %s)\n", restored.Fingerprint().GetHex());
         }

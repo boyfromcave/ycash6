@@ -416,7 +416,11 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
             "The key's plain-YEC address (sq…/tq…/rq…) goes into the address book.\n"
             "\nArguments:\n"
             "1. \"pqseed\"     (string, required) \"<scheme>:<seed hex>\", or dumpwallet's \"<scheme>:<index>:<seed hex>\"\n"
-            "                (an optional \"pqseed=\" prefix is accepted). scheme 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512.\n"
+            "                (an optional \"pqseed=\" prefix is accepted), or a dump's whole \"pqseed=… # owner=… addr=… yecaddr=…\"\n"
+            "                line. scheme 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512. Both schemes take a 48-byte seed and the\n"
+            "                scheme decides the key: the same seed under the other scheme is another key with another\n"
+            "                address, so check the returned address is the one you expect. A whole dump line is checked:\n"
+            "                when its owner=, addr= or yecaddr= does not name the seed's key, nothing is imported.\n"
             "2. rescan       (boolean, optional, default=true) Rescan the chain for the key's transactions\n"
             "3. \"label\"      (string, optional, default=\"\") The address book label\n"
             "\nResult:\n"
@@ -436,9 +440,25 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
 
     EnsureWalletIsUnlocked();
 
-    std::string arg = params[0].get_str();
+    // Review B-3: a dump's whole line ("pqseed=<s>:<i>:<seed> <time> # owner=<id> addr=<ye…> yecaddr=<sq…>") is accepted;
+    // its owner=/addr=/yecaddr= fields must name the key the seed makes under the line's scheme.
+    std::vector<std::string> words;
+    {
+        std::string line = params[0].get_str();
+        boost::algorithm::trim(line);
+        boost::split(words, line, boost::is_any_of(" \t"), boost::token_compress_on);
+        memory_cleanse(&line[0], line.size());
+    }
+    std::string arg = words[0];
     if (boost::algorithm::starts_with(arg, "pqseed="))
         arg = arg.substr(7);
+    std::map<std::string, std::string> expect;   // owner / addr / yecaddr
+    for (size_t i = 1; i < words.size(); i++) {
+        for (const char* k : {"owner=", "addr=", "yecaddr="}) {
+            if (boost::algorithm::starts_with(words[i], k))
+                expect[std::string(k, strlen(k) - 1)] = words[i].substr(strlen(k));
+        }
+    }
     std::vector<std::string> f;
     boost::split(f, arg, boost::is_any_of(":"));
     int64_t scheme = 0, index = CPQKey::PQ_INDEX_NONE;
@@ -452,6 +472,28 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
     std::vector<unsigned char> seedBytes = ParseHex(hex);
     const CPQKey::Secret seed(seedBytes.begin(), seedBytes.end());
     memory_cleanse(seedBytes.data(), seedBytes.size());
+    for (std::string& w : words) memory_cleanse(&w[0], w.size());
+    for (std::string& w : f) memory_cleanse(&w[0], w.size());
+    memory_cleanse(&arg[0], arg.size());
+
+    if (!expect.empty()) {
+        CPQKey probe;
+        if (!probe.Set((uint8_t)scheme, seed, CPQKey::PQ_INDEX_NONE))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid post-quantum key seed or index");
+        const CPQKeyID pid = probe.GetID();
+        std::vector<unsigned char> pidBytes(1, pid.scheme);
+        pidBytes.insert(pidBytes.end(), pid.hash.begin(), pid.hash.end());
+        const std::map<std::string, std::string> have = {
+            {"owner", HexStr(pidBytes)},
+            {"addr", yellowback::EncodeAddress(pid, yellowback::ParamsForNetwork(Params().NetworkIDString()))},
+            {"yecaddr", KeyIO(Params()).EncodeDestination(pid)}};
+        for (const auto& e : expect) {
+            if (e.second != have.at(e.first))
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf(
+                    "the line's %s=%s does not match the key its seed makes under scheme %d (%s); nothing imported",
+                    e.first, e.second, (int)scheme, have.at("yecaddr")));
+        }
+    }
 
     const bool fRescan = params.size() > 1 && !params[1].isNull() ? params[1].get_bool() : true;
     const std::string strLabel = params.size() > 2 && !params[2].isNull() ? params[2].get_str() : "";
