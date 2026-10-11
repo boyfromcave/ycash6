@@ -518,6 +518,9 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
     if (next < p.startHeight) return std::nullopt;
+    // Owner 2026-10-11: a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid (structural; the relevance
+    // filter below looks at payloads and YED templates only, and an act is neither)
+    if (RefusedAttestorSetAct(tx, p)) return std::string(verdict::ATTESTOR_SET_ACT);
     // Relevance in O(inputs + outputs) (N6): a payload, a token / vault / intent input, or a YED-tagged
     // template output is what the module reads; anything else cannot be invalid under it.
     bool spendsActive = false, relevant = FindPayload(tx).has_value();

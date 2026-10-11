@@ -1461,6 +1461,11 @@ BOOST_AUTO_TEST_CASE(module_displace_hook)
     BOOST_REQUIRE(!c.Block1(JoinTx(c, s, MakeKey(91), {}, 1000)));
     BOOST_CHECK_EQUAL(Member(c, s, keys[0]).status, MEMBER_REMOVED);
     BOOST_CHECK_EQUAL(Member(c, s, MakeKey(91)).status, MEMBER_ACTIVE);
+    // The module's CheckBlock: a block with a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid; of another set, not.
+    BOOST_CHECK_EQUAL(*c.Block({RemoveTx(c, s, keys[1].GetPubKey(), false, {keys[2]})}), "bad-yellowback-attestor-set-act");
+    BOOST_CHECK_EQUAL(*c.Block({WindDownTx(c, s, {keys[2]})}), "bad-yellowback-attestor-set-act");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, keys[1].GetPubKey(), false, {keys[2]})), "OK");   // per transaction the primitive admits it
+    BOOST_CHECK_EQUAL(*c.Block({WindDownTx(c, s1, {MakeKey(69)})}), "OK");
     yellowback::ClearModuleParams();
     // Unconfigured again: no displacement.
     BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(92), {}, 100000)), "bad-vault-act-seats");
