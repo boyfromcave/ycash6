@@ -309,7 +309,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
                      ('redeem', 'claim', 'ok', row['claimPath'], residual, built['aClaim']))
         assert_equal(info['pClaim'], max(info['xClaim'], info['aClaim']))
         return {'txid': txid, 'ref': ref, 'row': row, 'residual': residual, 'info': info, 'claimant': claimant,
-                'vault': vault_txid, 'residualAddress': residual_addr, 'height': user.getblockcount()}
+                'vault': vault_txid, 'residualAddress': bytes_to_hex_str(residual_spk), 'height': user.getblockcount()}
 
     def release_claim(self, claimed, miner):
         """After CLAIM_DELAY: the claimant releases its intent (vout 0) and, when RED-5 was due, the
@@ -321,7 +321,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         node = self.nodes[claimed['claimant']]
         node.vault_release('%s:0' % claimed['txid'])
         if claimed['residual'] > 0:
-            node.vault_release('%s:3' % claimed['txid'], claimed['residualAddress'])
+            node.vault_release('%s:3' % claimed['txid'], claimed['residualAddress'])   # the residual's script (PQPKH(owner), F-3) or a redirect
         self.sync_all()
         self.step(miner, 1, 'release')
         self.assert_vault_everywhere(claimed['vault'], 'CLAIMED')

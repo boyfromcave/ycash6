@@ -663,7 +663,7 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
     carrier input (``carrier`` from ``build_carrier_tx``, confirmed) as ``vin[last]``, signed
     here.  Returns ``(hex, owner_pubkey_hex)``."""
     if owner_pubkey is None:
-        owner_pubkey = bytes_to_hex_str(yu.new_pq_owner())          # a post-quantum owner (quantum plan §4.3)
+        owner_pubkey = node.vault_getnewowner()['owner']            # the node wallet's post-quantum owner (quantum plan §4.3)
     owner = hex_str_to_bytes(owner_pubkey)
     if term_class is None:
         term_class = yu.term_class_of(lock_blocks)
