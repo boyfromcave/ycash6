@@ -789,6 +789,7 @@
           "emergencyNoticeTtl": 64,
           "emergencyPersist": 4,
           "emergencyRatioBps": 10500,
+          "evictMarginBps": 500,
           "foundingWindow": 16,
           "kSlack": 1,
           "mSelect": 2,
@@ -802,7 +803,11 @@
           "qHighBps": 6667,
           "qLowBps": 3333,
           "required": true,
-          "residualMinZat": 100000
+          "residualMinZat": 100000,
+          "seatAgeCap": 420480,
+          "seatAgeUnit": 1152,
+          "seatMarginBps": 500,
+          "seats": 15
         },
         "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
         "claimDelay": 10,
@@ -1176,6 +1181,7 @@
         },
         "bondSpentHeight": null,
         "bondZat": 1000000000,
+        "evicted": false,
         "flags": {
           "pool": false,
           "tier": 0
@@ -1186,6 +1192,7 @@
         "pinned": false,
         "poolFresh": true,
         "registerHeight": 280,
+        "seatWeight": "65801000000000",
         "seated": true,
         "seatedSince": 300,
         "seq": 1,

@@ -180,6 +180,13 @@ admit key while the set has fewer than `slashthreshold` current members, current
 keys after that; none for an open set). Complete → signed and broadcast (`txid` present);
 otherwise the partially signed `hex` is returned.
 
+A join into a set that already has `seats` ACTIVE members is refused (`bad-vault-act-seats`) —
+unless a registered module governs the set (the module displacement hook, owner 2026-10-11) and
+names a member to displace: that member becomes `REMOVED` in `set_getinfo` (its bond **not**
+frozen, still spendable at its locktime) and the join is admitted in the same transaction. Only the
+YED module governs a set (the network's attestor set, when OPEN with 15 seats); its rule is in
+`doc/yellowback-attestor.md`. Every other set refuses a join when full, as before.
+
 ### `set_heartbeat "setid" ( "memberkey" )`
 Params: `["setid": hash, "memberkey"?: key]`
 
@@ -353,7 +360,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the set parameters are out of range` | `set_create`, `set_buildact` | `seats` 16 |
 | -5 | `unknown set` | `set_getinfo`, `set_join`, `set_heartbeat`, `set_buildact`, `vault_lock` | `set_getinfo` of a random id |
 | -4 | `this wallet holds no current member key of the set` | `set_heartbeat` | a heartbeat for a set with no members |
-| -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set |
+| -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set (a set a registered module governs may instead displace a member, below) |
 | -8 | `unknown act type` | `set_buildact` | type `"bogus"` |
 | -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |

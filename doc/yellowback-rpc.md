@@ -477,6 +477,11 @@ Result of `yed_getinfo`:
       "bondMaturity": 8,
       "ageCap": 64,
       "foundingWindow": 16,
+      "seats": 15,
+      "seatAgeUnit": 1152,
+      "seatAgeCap": 420480,
+      "seatMarginBps": 500,
+      "evictMarginBps": 500,
       "dormancyBlocks": 16,
       "dormancyMinBundles": 2,
       "dormancyCheck": 4,
@@ -499,8 +504,14 @@ $8,000; regtest 400) are the parameters; `bondMinZat` is computed: the floor a `
 from the tip's snapshot — `bondMinNoPriceZat` when that snapshot has no `pMint`, is not ARMED, or the join would be a founding
 member's (`tip + 1 ≤ triggerHeight + foundingWindow`); else `min(bondMinNoPriceZat, max(bondMinFloorZat, ⌈bondMinUsdCents ·
 10⁴ · COIN / pMint⌉))`. A record is judged once, against the snapshot before its own join block; a seated or ELIGIBLE record is
-never re-judged when the price moves. Seats rank by `bondZat × age` in YEC (unchanged), so a larger bond outranks a minimum one
-once it has aged.
+never re-judged when the price moves. **Seat ranking and eviction (owner 2026-10-11, rpcversion 8, no bump):** seats rank by
+`seatWeight = bondZat × f(age)` with the log tenure factor `f` from 1.0 (no tenure) to 1.9 at `seatAgeCap` (one year;
+`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))`, `u = seatAgeUnit`, exact Q16 integers), a seated attestor's counting
+×(1 + `seatMarginBps`/10⁴); the price statistic and attestor selection keep `weight = bondZat × min(age, ageCap)`. The attestor set
+is OPEN with `seats` (15) seats: a `SET_JOIN` into the full set evicts the member that is not live (`lastAct < h − livenessWindow`)
+of least seat weight, else the member of least seat weight when the new bond (at age 0) exceeds it by `evictMarginBps`; the evicted
+record becomes `WITHDRAWN` with `evicted: true` in `yed_listattestors`, its bond not frozen. `SET_REMOVE` and `SET_WINDDOWN` of the
+attestor set are invalid (`attestor-set-act`); equivocation is the only removal.
 
 ### `yed_getstatehash [height]`
 
@@ -1196,7 +1207,10 @@ its `ageOrigin`); `seated` and `pinned` membership in `Snapshots[height].seated[
 (`null` when none); `poolFresh` whether this node's pool holds an attestation of this `seq` that
 a bundle for `R = height − REF_LAG` could cite (`R − ATTEST_MAX_AGE < citedHeight ≤ R`, as
 `yed_getinfo`). `founding` is whether the record's age runs from `triggerHeight` (v3 §3.7
-founding cohort; `false` while UNARMED). Empty list before the first registration.
+founding cohort; `false` while UNARMED). `seatWeight` (owner 2026-10-11) is the seat-ranking weight at `height` as a decimal
+string, `bondZat × SeatAgeFactorQ16(height − ageOrigin)` (Q16: divide by 65,536 for zat; without the seated ×1.05 hysteresis);
+`evicted` whether the record was evicted from the full set by a larger bond (status `WITHDRAWN`, bond not frozen). Empty list
+before the first registration.
 
 Result of `yed_listattestors`:
 
@@ -1220,6 +1234,8 @@ Result of `yed_listattestors`:
     "bondFrozen": false,
     "founding": true,
     "weight": "31000000000",
+    "seatWeight": "65801000000000",
+    "evicted": false,
     "seated": true,
     "pinned": false,
     "lastBundleHeight": 330,

@@ -851,6 +851,11 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     attest.pushKV("bondMaturity", p.bondMaturity);
     attest.pushKV("ageCap", p.ageCap);
     attest.pushKV("foundingWindow", p.foundingWindow);
+    attest.pushKV("seats", p.attestorSeats);                           // owner 2026-10-11: the OPEN attestor set's seats
+    attest.pushKV("seatAgeUnit", p.seatAgeUnit);                       // seat ranking and eviction: SeatWeight's u
+    attest.pushKV("seatAgeCap", p.seatAgeCap);                         // ... and its cap (x1.9)
+    attest.pushKV("seatMarginBps", p.seatMarginBps);                   // a seated attestor's hysteresis
+    attest.pushKV("evictMarginBps", p.evictMarginBps);                 // a live member is evicted only above this margin
     attest.pushKV("dormancyBlocks", p.dormancyBlocks);
     attest.pushKV("dormancyMinBundles", p.dormancyMinBundles);
     attest.pushKV("dormancyCheck", p.dormancyCheck);
@@ -1868,6 +1873,9 @@ UniValue yed_listattestors(const UniValue& params, bool fHelp)
         o.pushKV("bondFrozen", rec.bondFrozen);
         o.pushKV("founding", attest.Status() != AttestStatus::UNARMED && AgeOrigin(rec, attest, p) == (int64_t)attest.triggerHeight);
         o.pushKV("weight", DecimalString(AttestorWeight(rec, attest, p, h)));
+        // owner 2026-10-11: the seat weight (bond x the tenure factor, without the seated hysteresis) and an eviction
+        o.pushKV("seatWeight", DecimalString(SeatWeight(rec.bondZat, h - AgeOrigin(rec, attest, p), p.seatAgeUnit, p.seatAgeCap)));
+        o.pushKV("evicted", (rec.flags & ATTESTOR_FLAG_EVICTED) != 0);
         const bool seated = snap.has_value() && std::find(snap->seated.begin(), snap->seated.end(), seq) != snap->seated.end();
         const bool pinned = snap.has_value() && std::find(snap->pinnedSeqs.begin(), snap->pinnedSeqs.end(), seq) != snap->pinnedSeqs.end();
         o.pushKV("seated", seated);

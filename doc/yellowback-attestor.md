@@ -45,8 +45,15 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   `bond-near-min` otherwise), or `bondMinNoPriceZat` (20,000 YEC), which qualifies at any price.
 - **Ejection freezes the bond.** EQV-1 (two prices, one height) ejects the member *and* freezes
   its bond in the set: the bond can never be withdrawn, and the key never becomes ELIGIBLE again.
-  `SET_REMOVE` by the set (with or without burn) ejects too; without burn the bond is returned at
-  its locktime and the key may join again.
+  Equivocation is the **only** removal (owner 2026-10-11): `SET_REMOVE` and `SET_WINDDOWN` of the attestor
+  set are invalid (`attestor-set-act`), so members cannot vote one another out.
+- **The set is open, 15 seats, and a larger bond can evict.** The module adopts the attestor set only
+  when it is OPEN with 15 seats. A join into the full set evicts one member: first a member that is not
+  live (`lastAct < h − livenessWindow`: no heartbeat for the liveness window), the one of least seat
+  weight; else the member of least seat weight, only when the new bond exceeds that seat weight by 5 %
+  (`evictMarginBps`). The evicted record becomes `WITHDRAWN` with `evicted: true`; its bond is **not**
+  frozen and is returned at its locktime, and the key may join again. Otherwise a join into the full set
+  is refused (`bad-vault-act-seats`).
 - `yed_listattestors` rows carry `lastAct` and `bondFrozen`; `set_getinfo <attestorSetId>` shows
   the same members from the primitive's side.
 
@@ -98,14 +105,14 @@ Equivocation is slashed. Two prices signed for one height by one attestor (EQV-1
 conflicting set signatures by one member (`SET_EQUIVOCATION`), eject the member from the YED
 attestor set and **freeze its bond**: the vault primitive refuses every later spend of a frozen
 bond (`bad-vault-bond-frozen`), so the bond is lost even after its time-lock expires. The set can
-also remove a member with a burn (`SET_REMOVE`), which freezes the bond the same way. Every other
+not remove members by vote (`SET_REMOVE` of the attestor set is invalid). Every other
 misbehaviour costs ejection or dormancy and a bond that earns nothing until it unlocks; attestors
 can **grief but not extract** — no direction the price is pushed in pays them (proposal §10.3).
 
 What you need: an upgraded `ycashd` on a network where Yellowback is live (no payout address, no
 mining), outbound connectivity, a bond of at least `params.attest.bondMinZat` (D-Q-28 on mainnet: 20,000 YEC before arming and in the founding
 window, then max(2,000 YEC, $8,000 at the attested price), never above 20,000 YEC; a larger bond outranks smaller ones
-for a seat once it has aged) you can lock
+for a seat, and tenure adds up to ×1.9 over a year) you can lock
 for at least `BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no
 domain, no funded hot wallet beyond the node's own for the rare `yed_revive`.
 
@@ -295,12 +302,20 @@ the trigger) is a **founding member** and accrues age from `triggerHeight`, so n
 having registered a block earlier than the rest. Later registrants age from their own
 `registerHeight`.
 
-**Seating.** At every snapshot the `N_SLOTS` (9) eligible attestors with the greatest
-`weight = bondZat · min(age, AGE_CAP)` are **seated**; a transaction's bundle draws `M_SELECT +
-K_SLACK` (4 + 2) of the seated by a hash of the reference block, and at least `M_SELECT` of the
-selected must be in it. Being seated, bonded and reachable is what earns; latency does not. An
-unseated attestor keeps publishing, keeps its age, and takes the lowest seat when its weight passes
-the holder's.
+**Seating (owner 2026-10-11).** At every snapshot the `N_SLOTS` (9) eligible attestors with the greatest
+**seat weight** are **seated**: `seatWeight = bondZat · f(age)`, where the tenure factor
+`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))` (`u` = `SEAT_AGE_UNIT` 1,152 blocks, one day;
+`cap` = `SEAT_AGE_CAP` 420,480, one year; `a` = age clamped to `[0, cap]`; exact Q16 integer logs) runs from
+1.0 at registration to 1.9 at a year — 1.317 at a week, 1.63 at six months. A currently seated attestor's
+seat weight counts ×1.05 (`SEAT_MARGIN`), so seats do not flap between near-equal bonds. Consequences: a new
+20,000 YEC bond outranks 8,000 YEC at any tenure; a bond 1.5× larger outranks a week-old member but not a
+year-old one. The same seat weight (from the join height) decides eviction from the full 15-seat set (above).
+A transaction's bundle draws `M_SELECT + K_SLACK` (4 + 2) of the seated by a hash of the reference block,
+and at least `M_SELECT` of the selected must be in it; the bundle statistic and that draw still weigh by
+`weight = bondZat · min(age, AGE_CAP)`. Being seated, bonded and reachable is what earns; latency does not.
+An unseated attestor keeps publishing, keeps its age, and takes the lowest seat when its seat weight passes
+the holder's (with the 5 % margin). `yed_listattestors` shows `seatWeight` (in Q16: divide by 65,536 for zat)
+beside `weight`.
 
 ## Dormancy and revival
 
