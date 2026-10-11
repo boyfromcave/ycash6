@@ -37,6 +37,13 @@ from test_framework.util import (
 )
 from test_framework.yellowback_util import (
     COIN,
+    SIGNING_BRANCH_ID,
+    _low_s,
+    _select_funding,
+    _spk_of_address,
+    new_pq_owner,
+    PQ_OWNER_SECRETS,
+    wif_to_secret,
     POOLS,
     REF_LAG,
     YellowbackTestFramework,
@@ -100,6 +107,59 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         payee = node.yed_getfeepayee(r, coll)['default']['payoutAddress']
         return build_mint_tx(node, 10000, lock_blocks, r, coll, fee_addr=payee,
                              owner_pubkey=None if owner is None else bytes_to_hex_str(owner), token_script=token_script)
+
+    def raw_transfer(self, node, vin, vout_spk_value, assignments, extra_fee=10000):
+        """A raw TRANSFER: ``vin`` [(txid, n, value)] then a funding input; outputs ``vout_spk_value`` [(spk, zat)],
+        YEC change, then the payload; the wallet signs what it can (the channel input stays for the caller)."""
+        need = sum(v for _s, v in vout_spk_value) - sum(v for _t, _n, v in vin) + extra_fee
+        utxos, total = _select_funding(node, max(need, 1))
+        vouts = list((v, s) for s, v in vout_spk_value) + [(total - need, _spk_of_address(node.getnewaddress()))]
+        vouts.append((0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer(assignments))))
+        ins = [(t, n, b'', 0xFFFFFFFF) for t, n, _v in vin] + [(u['txid'], u['vout'], b'', 0xFFFFFFFF) for u in utxos]
+        raw = ym.serialize_tx_v4(ins, vouts, 0, node.getblockcount() + 30)
+        return node.signrawtransaction(bytes_to_hex_str(raw))['hex']
+
+    def channel_case(self, user, receiver, p2pkh):
+        """D-Q-19: YED into a hybrid channel (an SLH-DSA client, a secp256k1 server) and out of it cooperatively."""
+        from io import BytesIO
+        from test_framework import pq as _pq
+        from test_framework.key import CECKey
+        from test_framework.mininode import CTransaction
+        from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
+        print('D-Q-19: a TRANSFER into a hybrid channel output, then its cooperative spend (SLH-DSA client + EC server)')
+        client = new_pq_owner()
+        server_addr = user.getnewaddress()
+        server_pk = hex_str_to_bytes(user.validateaddress(server_addr)['pubkey'])
+        refund = user.getblockcount() + 1000
+        spk = (bytes([0x63]) + ym.pq_owner_slot(client)[:-1] + bytes([0xc2, 0x69]) + ym.push(server_pk) + bytes([0xac, 0x67])
+               + ym.push_int(refund) + bytes([0xb1, 0x75]) + ym.pq_owner_slot(client) + bytes([0x68]))
+        coin = [c for c in user.yed_listunspent() if not c['spentUnconfirmed'] and len(c['address']) == 35][0]
+        hex1 = self.raw_transfer(user, [(coin['txid'], coin['vout'], coin['valueZat'])], [(spk, 10000)], [(0, coin['cents'])])
+        txid1 = user.sendrawtransaction(hex1)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(user.getrawtransaction(txid1, 1)['vout'][0]['scriptPubKey']['type'], 'pqchannel')
+        client_addr = ym.base58check_encode(bytes([0x57, 0x10]) + client)
+        rows = user.yed_listtokens([client_addr])
+        assert_equal([(r['txid'], r['vout'], r['cents'], r['address']) for r in rows], [(txid1, 0, coin['cents'], client_addr)])
+        # the cooperative spend to a P2PKH holder (before Falcon any holder shape holds YED)
+        before = receiver.yed_getbalance()['confirmedCents']
+        hex2 = self.raw_transfer(user, [(txid1, 0, 10000)], [(_spk_of_address(receiver.getnewaddress()), 10000)], [(0, coin['cents'])])
+        tx = CTransaction()
+        tx.deserialize(BytesIO(hex_str_to_bytes(hex2)))
+        sighash = SignatureHash(CScript(spk), tx, 0, SIGHASH_ALL, 10000, SIGNING_BRANCH_ID)[0]
+        key = CECKey()
+        key.set_secretbytes(wif_to_secret(user.dumpprivkey(server_addr)))
+        key.set_compressed(True)
+        ec = _low_s(key.sign(sighash)) + bytes([SIGHASH_ALL])
+        pushes = _pq.pq_sign_input(tx, 0, spk, 10000, SIGNING_BRANCH_ID, PQ_OWNER_SECRETS[client])
+        tx.vin[0].scriptSig = ym.push(ec) + _pq.pq_scriptsig_from_pushes(pushes) + bytes([0x51])
+        txid2 = user.sendrawtransaction(bytes_to_hex_str(tx.serialize()))
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(receiver.yed_getbalance()['confirmedCents'], before + coin['cents'])
+        assert_equal(user.yed_listtokens([client_addr]), [])
+        assert_equal(user.yed_gettxinfo(txid2)['type'], 'transfer')
 
     def run_test(self):
         nodes = self.nodes
@@ -188,6 +248,9 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(len(out['hex']), 70)                                                             # 35-byte TX_PQPKH
         assert_equal(out.get('addresses'), [pq_addr])                                                 # EncodeDestination renders the PQ ye… (ruling)
 
+# Rule: XFER-1 TOK-PQ
+        self.channel_case(user, receiver, p2pkh)
+
 # Rule: MINT-3
         print('below the Falcon height a Falcon owner is refused (MINT-3)')
         assert_greater_than(FALCON_HEIGHT, user.getblockcount() + 1)
@@ -264,6 +327,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         vf = receiver.yed_validateaddress(falcon_addr)
         assert_equal((vf['pqscheme'], vf['ismine']), (2, True))
         holder = pqpkh_of(vf['keyid'])
+        held_before = receiver.yed_getbalance()['confirmedCents']
         ok_hex, _ = self.raw_mint(user, token_script=holder)
         ok_txid = user.sendrawtransaction(ok_hex)
         self.sync_all()
@@ -276,7 +340,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
         assert_equal(nodes[3].yed_getvault(ok_txid)['status'], 'ACTIVE')
         assert_equal((nodes[3].yed_getvault(falcon_txid)['status'], nodes[3].yed_getvault(falcon_txid)['ownerScheme']), ('ACTIVE', 2))
-        assert_equal(receiver.yed_getbalance()['confirmedCents'], 26000)
+        assert_equal(receiver.yed_getbalance()['confirmedCents'], held_before + 20000)
 
         print('a wallet transfer to a P2PKH holder is refused; a wallet transfer to a PQ holder has Falcon change')
         assert_rpc_error('bad-yed-holder', user.yed_send, p2pkh, 1000)

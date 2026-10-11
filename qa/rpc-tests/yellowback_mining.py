@@ -521,11 +521,9 @@ class YellowbackMiningTest(YellowbackTestFramework):
         return ym.encode_redeem(ref, fee_vout, [])
 
     def live_vault(self, built):
-        """``yed_getvault`` for a ``vault_from_mint`` dict, with the P2PKH owner address the
-        signer needs (the RPC's ``ownerAddress`` is the Yellowback ``ye...`` form, D10)."""
-        v = dict(self.nodes[0].yed_getvault(built['txid']))
-        v['ownerAddress'] = built['ownerAddress']
-        return v
+        """``yed_getvault`` for a ``vault_from_mint`` dict (the post-quantum owner is ownerScheme / ownerHash, which
+        build_vault_spend_raw reads; its secret is the raw builder's, new_pq_owner)."""
+        return dict(self.nodes[0].yed_getvault(built['txid']))
 
     def block_invalid_vault_spend(self):
         # Rule: TPL-1 MP-1 RED-2
