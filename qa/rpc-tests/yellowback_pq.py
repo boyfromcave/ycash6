@@ -241,7 +241,8 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(receiver.yed_getnewaddress('p2pkh')[:2], 'yr')
         assert_equal((len(p2pkh), len(pq_addr), len(slh_addr)), (35, 53, 53))
         va = receiver.yed_validateaddress(pq_addr)
-        assert_equal((va['isvalid'], va['type'], va['pqscheme'], va['ismine'], va['transparentAddress']), (True, 'pq', 1, True, ''))
+        rq_of = lambda yaddr: ym.base58check_encode(bytes([0x4C, 0x51]) + ym.base58check_decode(yaddr)[2:])   # D-Q-20
+        assert_equal((va['isvalid'], va['type'], va['pqscheme'], va['ismine'], va['transparentAddress']), (True, 'pq', 1, True, rq_of(pq_addr)))
         assert_equal(receiver.yed_validateaddress(slh_addr)['pqscheme'], 1)
         assert_equal(receiver.yed_validateaddress(p2pkh)['type'], 'p2pkh')
         assert_equal(user.yed_validateaddress(pq_addr)['ismine'], False)
@@ -251,8 +252,10 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[2])
         rows = receiver.yed_listtokens([pq_addr, slh_addr, p2pkh])
         by_addr = {r['address']: r for r in rows}
-        assert_equal((by_addr[pq_addr]['cents'], by_addr[pq_addr]['transparentAddress']), (2000, ''))
-        assert_equal((by_addr[slh_addr]['cents'], by_addr[slh_addr]['transparentAddress']), (1000, ''))
+        assert_equal((by_addr[pq_addr]['cents'], by_addr[pq_addr]['transparentAddress']), (2000, rq_of(pq_addr)))
+        assert_equal((by_addr[slh_addr]['cents'], by_addr[slh_addr]['transparentAddress']), (1000, rq_of(slh_addr)))
+        # the rq… form names the same holder (yed_listtokens accepts it, D-Q-20)
+        assert_equal(receiver.yed_listtokens([rq_of(pq_addr)]), [by_addr[pq_addr]])
         assert_equal(by_addr[p2pkh]['cents'], 3000)
         assert_equal(receiver.yed_getbalance()['confirmedCents'], 6000)
         out = receiver.getrawtransaction(by_addr[pq_addr]['txid'], 1)['vout'][by_addr[pq_addr]['vout']]['scriptPubKey']
