@@ -2465,8 +2465,10 @@ SpendableInputs CWallet::FindSpendableInputs(
                 // check to see if the coin conforms to the payment source
                 CTxDestination address;
                 bool hasDestination = ExtractDestination(output.scriptPubKey, address);
+                // A TX_PQPKH coin is spent only by the YED/vault builders, never by WalletTxBuilder
+                // (z_sendmany, z_shieldcoinbase): its signature needs the vault flags (quantum spec A-15).
                 bool isSelectable =
-                    hasDestination && this->SelectorMatchesAddress(selector, address);
+                    hasDestination && !IsPQKeyDestination(address) && this->SelectorMatchesAddress(selector, address);
                 if (isSelectable) {
                     unspent.utxos.emplace_back(
                             &wtx,

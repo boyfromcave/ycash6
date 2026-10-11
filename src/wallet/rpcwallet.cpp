@@ -6152,6 +6152,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             if (!ExtractDestination(scriptPubKey, address)) {
                 continue;
             }
+            // z_mergetoaddress never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
+            if (IsPQKeyDestination(address)) {
+                continue;
+            }
             // If taddr is not wildcard "*", filter utxos
             if (taddrs.size() > 0 && !taddrs.count(address)) {
                 continue;
