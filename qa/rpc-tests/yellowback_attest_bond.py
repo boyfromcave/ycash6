@@ -18,9 +18,10 @@ no-price cap below $0.40/YEC (mainnet 20,000 YEC / 2,000 YEC / $8,000).
    registered at $1 stays PENDING: the price at registration binds for good.
 4. At $0.10: $4 is 40 YEC, capped at 10 YEC (option B); every seated record stays seated: no record is
    re-judged when the price moves.
-5. The bump: seats are N_SLOTS (5) by bondZat x age in YEC. A 10-YEC join takes the seat of the 1-YEC
-   minimum bond at its maturity, and a second 10-YEC join takes the 4-YEC one's at the first block where
-   10 x age > 4 x min(age, AGE_CAP); the bumped records stay ELIGIBLE members.
+5. The bump: seats are N_SLOTS (5) by SeatRank (owner 2026-10-11: bondZat x the log tenure factor, 1.0 to
+   1.9 over a year, a seated record x1.05). A 10-YEC join takes the seat of the 1-YEC minimum bond at its
+   maturity, and a second 10-YEC join takes the 4-YEC one's at the first block where 10 x f(age) exceeds
+   4 x f(age4) x 1.05 (its maturity, at regtest ages); the bumped records stay ELIGIBLE members.
 The Python model replays the chain (the rule is mirrored in yellowback_model.py).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer.
@@ -30,8 +31,8 @@ import os
 from decimal import Decimal
 
 from test_framework.util import assert_equal
+from test_framework.yellowback_model import seat_weight
 from test_framework.yellowback_util import (
-    AGE_CAP,
     BOND_MATURITY,
     BOND_MIN_LOCK,
     COIN,
@@ -158,14 +159,14 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_equal(self.seated(), sorted(founders + [x4, y1]))
         assert_equal((self.status(x4), self.status(y1)), ('ELIGIBLE', 'ELIGIBLE'))
 
-        print('5. the bump: larger YEC bonds outrank minimum ones by bondZat x age')
+        print('5. the bump: larger YEC bonds outrank minimum ones by seat weight')
         z = self.wallet_join('10')
         assert_equal(self.last_reg['warning'], '')                # the no-price bond always qualifies
         reg_z = self.records()[z]['registerHeight']
         while user.getblockcount() < reg_z + BOND_MATURITY - 1:
             self.mine(POOLS[0])
         assert_equal(self.seated(), sorted(founders + [x4, y1]))
-        self.mine(POOLS[0])                              # z ELIGIBLE: 10 x 8 > 1 x 64, the 1-YEC bond loses its seat
+        self.mine(POOLS[0])                              # z ELIGIBLE: 10 x f(8) > 1 x f(age) x 1.05, the 1-YEC bond loses its seat
         assert_equal(self.status(z), 'ELIGIBLE')
         assert_equal(self.seated(), sorted(founders + [x4, z]))
         assert_equal(self.status(y1), 'ELIGIBLE')        # bumped, still a member
@@ -173,11 +174,14 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         recs = self.records()
         reg_w, reg_x = recs[w]['registerHeight'], recs[x4]['registerHeight']
 
-        def weight(bond, age):
-            return bond * max(0, min(age, AGE_CAP))
+        a = user.yed_getinfo()['params']['attest']
+
+        def rank(bond, age, seated):
+            return seat_weight(bond, age, a['seatAgeUnit'], a['seatAgeCap']) * (10000 + (a['seatMarginBps'] if seated else 0))
         h = reg_w + BOND_MATURITY
-        while not weight(10 * COIN, h - reg_w) > weight(4 * COIN, h - reg_x):
+        while not rank(10 * COIN, h - reg_w, False) > rank(4 * COIN, h - reg_x, True):
             h += 1
+        assert_equal(h, reg_w + BOND_MATURITY)
         while user.getblockcount() < h - 1:
             self.mine(POOLS[0])
         assert_equal(self.seated(), sorted(founders + [x4, z]))

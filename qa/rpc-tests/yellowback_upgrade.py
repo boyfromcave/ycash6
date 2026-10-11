@@ -148,7 +148,7 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_raises_rpc('Method not found', n0.yed_getinfo)
         self.mine(ACTIVATION - n0.getblockcount())
         assert_equal(n0.vault_getinfo()['active'], True)
-        created = n0.set_create({'seats': 3, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
+        created = n0.set_create({'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
                                  'open': True, 'maturity': 2})
         self.mine()
         self.set_id = created['setid']
