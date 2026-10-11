@@ -772,6 +772,10 @@ void SignWalletInputs(CMutableTransaction& mtx)
 
 uint256 Broadcast(const CTransaction& tx)
 {
+    // review M-1: submitted below with the absurd-fee check off, so the vault/Yellowback cap is enforced here
+    if (std::optional<CAmount> over = YedFeeOverCap(tx))
+        throw JSONRPCError(RPC_TRANSACTION_REJECTED, strprintf("absurdly-high-fee: %s exceeds the vault/Yellowback cap %s (-maxtxfee, -yellowbackmaxtxfeeusd, -yellowbackmaxtxfee)",
+                                                               FormatMoney(over.value()), FormatMoney(YedMaxTxFee())));
     CValidationState state;
     bool fMissingInputs = false;
     if (!AcceptToMemoryPool(Params(), mempool, state, tx, false, &fMissingInputs, false)) {

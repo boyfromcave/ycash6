@@ -739,8 +739,9 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         fees.pushKV("earlyRedeemFeeBps", early2);
         const AttestedFeePolicy& fp = ::attestedFeePolicy;
         UniValue network(UniValue::VOBJ);
-        network.pushKV("priceMicroUsd", fp.priceMicroUsd.has_value() ? UniValue(fp.priceMicroUsd.value()) : NullUniValue);
-        network.pushKV("priceSource", fp.priceMicroUsd.has_value() ? "tip" : "fallback");
+        const std::optional<int64_t> feePrice = AttestedFeePrice();   // review M-1: the tip's highest window median, none under a halt
+        network.pushKV("priceMicroUsd", feePrice.has_value() ? UniValue(feePrice.value()) : NullUniValue);
+        network.pushKV("priceSource", feePrice.has_value() ? "tip" : "fallback");
         UniValue plain(UniValue::VOBJ);
         plain.pushKV("usdPerKBMicro", fp.plainUsdPerKBMicro);
         plain.pushKV("zatPerKB", PlainPQFeeRate().GetFeePerK());
@@ -749,6 +750,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         yb.pushKV("usdPerKBMicro", fp.yedUsdPerKBMicro);
         yb.pushKV("zatPerKB", YedFeeRate().GetFeePerK());
         yb.pushKV("maxTxFeeUsdMicro", fp.yedMaxTxFeeUsdMicro);      // D-Q-23a: the vault/Yellowback cap is max(-maxtxfee, this at the price)
+        yb.pushKV("maxTxFeeCeilingZat", fp.yedMaxTxFeeZat);          // review M-1: -yellowbackmaxtxfee, the cap's absolute ceiling
         yb.pushKV("maxTxFeeZat", YedMaxTxFee());
         network.pushKV("yellowback", yb);
         network.pushKV("floorZatPerKB", fp.floorZatPerKB);

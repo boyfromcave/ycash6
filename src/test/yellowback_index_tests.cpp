@@ -37,6 +37,7 @@
 #include "hash.h"
 #include "key.h"
 #include "main.h"
+#include "policy/policy.h"
 #include "pow.h"
 #include "primitives/block.h"
 #include "script/standard.h"
@@ -697,6 +698,27 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
 }
 
 // Rule: BLK-3
+// Review M-1: the network-fee price the index publishes is the HIGHEST window median at the tip (pClaim-style), not
+// the min-of-windows xMint; an unhealthy index publishes none (the -pqfeerate fallback).
+BOOST_AUTO_TEST_CASE(fee_price_is_the_highest_window)
+{
+    Live live(pathTemp / "yb-fee-price");
+    live.Activate();
+    BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), 50000);
+    for (int i = 0; i < 12; i++) live.MineQuote(47000);              // the fast window falls first
+    const Snapshot s = live.b->Snap(live.Tip());
+    BOOST_REQUIRE_EQUAL(s.haltMask, 0u);
+    const MicroUsd high = std::max(s.PFast().value(), std::max(s.PMid().value(), s.PSlow().value()));
+    BOOST_CHECK_LT(s.PMint().value(), high);
+    BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), high);
+    // a crash that sets a halt bit (HALT_DIVERGENCE here): no attested fee price, the fallback
+    for (int i = 0; i < 12; i++) live.MineQuote(20000);
+    BOOST_REQUIRE(live.b->Snap(live.Tip()).haltMask != 0u);
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+    live.index->SetUnhealthy("test");
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+}
+
 BOOST_AUTO_TEST_CASE(check_storage_fault_accepts_and_sets_unhealthy)
 {
     // -yellowbacktestfault=storage:check: the fault fires once in CheckConnect. Since the vault upgrade (U-21) a

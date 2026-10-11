@@ -542,7 +542,9 @@ std::string HelpMessage(HelpMessageMode mode)
         (int)DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, "0.02"));
     strUsage += HelpMessageOpt("-yellowbackfeeusdperkb=<usd>", strprintf(_("Dollars per kB the wallet charges a vault or Yellowback transaction at the attested YEC price (floor %d zat/kB; 0 = the -pqfeerate behaviour) (default: %s)"),
         (int)DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, "0.05"));
-    strUsage += HelpMessageOpt("-yellowbackmaxtxfeeusd=<usd>", strprintf(_("The cap of a vault or Yellowback transaction's size-priced fee is max(-maxtxfee, this many dollars at the attested YEC price) (default: %s)"), "2"));
+    strUsage += HelpMessageOpt("-yellowbackmaxtxfeeusd=<usd>", strprintf(_("The cap of a vault or Yellowback transaction's size-priced fee is max(-maxtxfee, this many dollars at the attested YEC price), at most -yellowbackmaxtxfee (default: %s)"), "2"));
+    strUsage += HelpMessageOpt("-yellowbackmaxtxfee=<amt>", strprintf(_("Absolute ceiling (in %s) of a vault or Yellowback transaction's size-priced fee, whatever the attested price (default: %s)"),
+        CURRENCY_UNIT, FormatMoney(DEFAULT_YED_MAX_TX_FEE)));
     strUsage += HelpMessageOpt("-maxtxfee=<amt>", strprintf(_("Maximum total fees (in %s) to use in a single wallet transaction or raw transaction; setting this too low may abort large transactions (default: %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_TRANSACTION_MAXFEE)));
     strUsage += HelpMessageOpt("-printtoconsole", _("Send trace/debug info to console instead of the debug log"));
@@ -1336,6 +1338,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             if (!ParseFixedPoint(mapArgs[a.name], 6, &micro) || micro < 0 || micro > 1000000000000LL)
                 return InitError(strprintf(_("Invalid amount for %s=<usd>: '%s'"), a.name, mapArgs[a.name]));
             *a.out = micro;
+        }
+        if (mapArgs.count("-yellowbackmaxtxfee")) {
+            CAmount n = 0;
+            if (!ParseMoney(mapArgs["-yellowbackmaxtxfee"], n) || n <= 0 || !MoneyRange(n))
+                return InitError(strprintf(_("Invalid amount for -yellowbackmaxtxfee=<amount>: '%s'"), mapArgs["-yellowbackmaxtxfee"]));
+            ::attestedFeePolicy.yedMaxTxFeeZat = n;
         }
     }
 

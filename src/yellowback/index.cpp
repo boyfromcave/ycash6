@@ -307,14 +307,20 @@ bool YellowbackIndex::SyncToChain()
 
 void YellowbackIndex::PublishFeePrice()
 {
-    // D-Q-23 (b): the network-fee policy prices its dollars-per-KB targets at the index tip's cross-section xMint
-    // (the value yed_getinfo reports as pMint); undefined (HALT_NO_PRICE, no tip, unhealthy) = the -pqfeerate fallback.
+    // D-Q-23 (b), review M-1: the network-fee policy prices its dollars-per-KB targets at the HIGHEST of the index
+    // tip's window medians (max(pFast, pMid, pSlow), pClaim-style): the min-of-windows xMint is a collateral price,
+    // and under a falling market it would make the wallet overpay the network in YEC. Any halt bit at the tip (a
+    // stale or diverged price, HALT-3 included), no tip, or an unhealthy index = the -pqfeerate fallback.
     std::optional<int64_t> price;
     if (healthy && !stopped) {
         std::optional<TipRecord> tip = State(*db).GetTip();
         if (tip.has_value() && tip->height >= params.startHeight) {
             std::optional<Snapshot> s = State(*db).GetSnapshot((uint32_t)tip->height);
-            if (s.has_value()) price = s->PMint();
+            if (s.has_value() && s->haltMask == 0) {
+                for (const std::optional<MicroUsd>& w : { s->PFast(), s->PMid(), s->PSlow() }) {
+                    if (w.has_value() && (!price.has_value() || w.value() > price.value())) price = w.value();
+                }
+            }
         }
     }
     SetAttestedFeePrice(price);

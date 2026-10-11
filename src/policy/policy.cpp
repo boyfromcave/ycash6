@@ -18,6 +18,8 @@
 #include "vault/act.h"
 #include "vault/template.h"
 
+#include <atomic>
+
 CAmount PerSaplingOutputFees(const CTransaction& tx)
 {
     // Ycash anti-spam mempool fee floor scaled by Sapling output count.
@@ -404,7 +406,9 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
 
 CFeeRate pqFeeRate = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
 AttestedFeePolicy attestedFeePolicy = { DEFAULT_PQ_FEE_USD_PER_KB_MICRO, DEFAULT_YED_FEE_USD_PER_KB_MICRO,
-                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, std::nullopt };
+                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, DEFAULT_YED_MAX_TX_FEE };
+/** The attested price in force (uUSD per YEC), 0 = none. Written by the index (cs_main), read by any thread. */
+static std::atomic<int64_t> g_attestedFeePriceMicroUsd{0};
 
 CAmount AttestedRateZatPerKB(int64_t usdPerKBMicro, int64_t priceMicroUsd, CAmount floorZatPerKB)
 {
@@ -417,29 +421,45 @@ CAmount AttestedRateZatPerKB(int64_t usdPerKBMicro, int64_t priceMicroUsd, CAmou
 
 void SetAttestedFeePrice(std::optional<int64_t> priceMicroUsd)
 {
-    attestedFeePolicy.priceMicroUsd = priceMicroUsd.has_value() && priceMicroUsd.value() > 0 ? priceMicroUsd : std::nullopt;
+    g_attestedFeePriceMicroUsd.store(priceMicroUsd.has_value() && priceMicroUsd.value() > 0 ? priceMicroUsd.value() : 0);
+}
+
+std::optional<int64_t> AttestedFeePrice()
+{
+    const int64_t v = g_attestedFeePriceMicroUsd.load();
+    return v > 0 ? std::optional<int64_t>(v) : std::nullopt;
+}
+
+CAmount AttestedFeeFloorPerKB()
+{
+    return std::max(attestedFeePolicy.floorZatPerKB, pqFeeRate.GetFeePerK());
 }
 
 CFeeRate PlainPQFeeRate()
 {
     const AttestedFeePolicy& p = attestedFeePolicy;
-    if (!p.priceMicroUsd.has_value() || p.plainUsdPerKBMicro <= 0) return pqFeeRate;     // the fallback
-    return CFeeRate(AttestedRateZatPerKB(p.plainUsdPerKBMicro, p.priceMicroUsd.value(), p.floorZatPerKB));
+    const std::optional<int64_t> price = AttestedFeePrice();
+    if (!price.has_value() || p.plainUsdPerKBMicro <= 0) return pqFeeRate;     // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.plainUsdPerKBMicro, price.value(), AttestedFeeFloorPerKB()));
 }
 
 CFeeRate YedFeeRate()
 {
     const AttestedFeePolicy& p = attestedFeePolicy;
-    if (!p.priceMicroUsd.has_value() || p.yedUsdPerKBMicro <= 0) return pqFeeRate;       // the fallback
-    return CFeeRate(AttestedRateZatPerKB(p.yedUsdPerKBMicro, p.priceMicroUsd.value(), p.floorZatPerKB));
+    const std::optional<int64_t> price = AttestedFeePrice();
+    if (!price.has_value() || p.yedUsdPerKBMicro <= 0) return pqFeeRate;       // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.yedUsdPerKBMicro, price.value(), AttestedFeeFloorPerKB()));
 }
 
 CAmount YedMaxTxFee()
 {
     const AttestedFeePolicy& p = attestedFeePolicy;
-    if (!p.priceMicroUsd.has_value() || p.yedMaxTxFeeUsdMicro <= 0) return maxTxFee;
+    const std::optional<int64_t> price = AttestedFeePrice();
+    CAmount cap = maxTxFee;
     // the dollar cap in zat: uUSD x COIN / price, rounded up; never below -maxtxfee
-    return std::max(maxTxFee, AttestedRateZatPerKB(p.yedMaxTxFeeUsdMicro, p.priceMicroUsd.value(), 0));
+    if (price.has_value() && p.yedMaxTxFeeUsdMicro > 0) cap = std::max(maxTxFee, AttestedRateZatPerKB(p.yedMaxTxFeeUsdMicro, price.value(), 0));
+    // review M-1: the absolute YEC ceiling (-yellowbackmaxtxfee), whatever the price says
+    return p.yedMaxTxFeeZat > 0 ? std::min(cap, p.yedMaxTxFeeZat) : cap;
 }
 
 CAmount PQSizeFee(CAmount floor, size_t nBytes)
@@ -450,4 +470,21 @@ CAmount PQSizeFee(CAmount floor, size_t nBytes)
 CAmount YedSizeFee(CAmount floor, size_t nBytes)
 {
     return std::max(floor, YedFeeRate().GetFee(nBytes));
+}
+
+CAmount YedFloorSizeFee(CAmount flat, size_t nBytes)
+{
+    const CFeeRate floor = AttestedFeePrice().has_value() ? CFeeRate(AttestedFeeFloorPerKB()) : pqFeeRate;
+    return std::max(flat, floor.GetFee(nBytes));
+}
+
+std::optional<CAmount> YedFeeOverCap(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return std::nullopt;      // the mempool's own checks decide (missing inputs)
+    const CAmount fee = view.GetValueIn(tx) - tx.GetValueOut();
+    return fee > YedMaxTxFee() ? std::optional<CAmount>(fee) : std::nullopt;
 }

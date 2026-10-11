@@ -168,34 +168,44 @@ extern CFeeRate pqFeeRate;
 /**
  * The network fee policy of post-quantum and Yellowback transactions (quantum plan D-Q-23 (b), the
  * yb-calibration adjustments D-Q-23a; policy only, nothing in consensus): wallets target dollars per
- * KB at the attested price — the cross-section xMint at the Yellowback index tip, the value
- * yed_getinfo reports as pMint — bounded below by floorZatPerKB and, for the vault/Yellowback paths,
- * above by max(-maxtxfee, yedMaxTxFeeUsdMicro at the price). Every number is a parameter (one place
- * here; yed_getinfo.params.fees.network reports them). A transaction with a PQ input takes the plain
- * rate; one built by the YED builder or a vault_* RPC the Yellowback rate; nothing else is touched.
+ * KB at the attested price -- the HIGHEST of the index tip's window medians (max(pFast, pMid, pSlow),
+ * pClaim-style, so a depressed min-of-windows never makes the wallet overpay in YEC; review M-1), and
+ * none while any halt bit is set at the tip -- bounded below by max(floorZatPerKB, -pqfeerate) (review
+ * A-7) and, for the vault/Yellowback paths, above by min(max(-maxtxfee, yedMaxTxFeeUsdMicro at the
+ * price), -yellowbackmaxtxfee) (review M-1: an absolute YEC ceiling). Every number is a parameter (one
+ * place here; yed_getinfo.params.fees.network reports them). A transaction with a PQ input takes the
+ * plain rate; one built by the YED builder or a vault_* RPC the Yellowback rate; nothing else is touched.
  */
 struct AttestedFeePolicy
 {
     int64_t plainUsdPerKBMicro;        //!< -pqfeeusdperkb: 20,000 uUSD/KB ($0.02); 0 = off (the -pqfeerate behaviour)
     int64_t yedUsdPerKBMicro;          //!< -yellowbackfeeusdperkb: 50,000 uUSD/KB ($0.05); 0 = off
-    CAmount floorZatPerKB;             //!< DEFAULT_ATTESTED_FEE_FLOOR_PER_KB: the rate never goes below it (D-Q-23a: 5,000 zat/KB)
+    CAmount floorZatPerKB;             //!< DEFAULT_ATTESTED_FEE_FLOOR_PER_KB: with -pqfeerate, the rate never goes below max(this, -pqfeerate) (D-Q-23a: 5,000 zat/KB)
     int64_t yedMaxTxFeeUsdMicro;       //!< -yellowbackmaxtxfeeusd: the vault/Yellowback cap is max(-maxtxfee, this at the price); 2,000,000 ($2)
-    std::optional<int64_t> priceMicroUsd;   //!< the attested price in force (set by the Yellowback index at every tip change); nullopt = fallback
+    CAmount yedMaxTxFeeZat;            //!< -yellowbackmaxtxfee: the absolute YEC ceiling of that cap (10 YEC)
 };
 static const int64_t DEFAULT_PQ_FEE_USD_PER_KB_MICRO = 20000;
 static const int64_t DEFAULT_YED_FEE_USD_PER_KB_MICRO = 50000;
 static const CAmount DEFAULT_ATTESTED_FEE_FLOOR_PER_KB = 5000;
 static const int64_t DEFAULT_YED_MAX_TX_FEE_USD_MICRO = 2000000;
+static const CAmount DEFAULT_YED_MAX_TX_FEE = 10 * COIN;
+/** The parameters, set once at init (and by unit tests) before any reader runs. The price is not here: see AttestedFeePrice(). */
 extern AttestedFeePolicy attestedFeePolicy;
 
 /** max(floorZatPerKB, ceil(usdPerKBMicro x COIN / priceMicroUsd)): the zat/KB rate of a dollar target at a price. */
 CAmount AttestedRateZatPerKB(int64_t usdPerKBMicro, int64_t priceMicroUsd, CAmount floorZatPerKB);
-/** The Yellowback index publishes the tip price here (nullopt when undefined: the fallback -pqfeerate applies). */
+/** The Yellowback index publishes the tip price here (nullopt when undefined: the fallback -pqfeerate applies).
+ *  An atomic value (review N-3): readers need no lock (the wallet, the RPC threads, the index under cs_main). */
 void SetAttestedFeePrice(std::optional<int64_t> priceMicroUsd);
+/** The attested price in force, nullopt = the fallback. */
+std::optional<int64_t> AttestedFeePrice();
 /** The rate in force for a transaction with a PQ input / for a vault or Yellowback transaction (zat/KB). */
 CFeeRate PlainPQFeeRate();
 CFeeRate YedFeeRate();
-/** The cap of a vault/Yellowback transaction's size-priced fee: max(-maxtxfee, yedMaxTxFeeUsdMicro at the price), -maxtxfee without a price. */
+/** The floor rate with a price: max(floorZatPerKB, -pqfeerate) (review A-7: -pqfeerate stays a floor). */
+CAmount AttestedFeeFloorPerKB();
+/** The cap of a vault/Yellowback transaction's size-priced fee: min(max(-maxtxfee, yedMaxTxFeeUsdMicro at the price),
+ *  -yellowbackmaxtxfee); min(-maxtxfee, -yellowbackmaxtxfee) without a price. */
 CAmount YedMaxTxFee();
 
 /** max(floor, PlainPQFeeRate() x nBytes): the fee of a transaction of nBytes with a PQ input (ycash-dd:
@@ -203,5 +213,12 @@ CAmount YedMaxTxFee();
 CAmount PQSizeFee(CAmount floor, size_t nBytes);
 /** max(floor, YedFeeRate() x nBytes): the same for a vault or Yellowback transaction (floor = g_yellowbackFee, VAULT_RPC_FEE). */
 CAmount YedSizeFee(CAmount floor, size_t nBytes);
+/** max(flat, the floor rate x nBytes): the least a vault/Yellowback transaction pays (review L-1: the owner-path
+ *  fee of a vault smaller than its dollar-priced fee; the floor rate with a price, -pqfeerate without one). */
+CAmount YedFloorSizeFee(CAmount flat, size_t nBytes);
+/** Review M-1: the network fee of `tx` (its inputs from the chain tip and the mempool) when it exceeds YedMaxTxFee(),
+ *  nullopt when it does not or its inputs are unknown. The vault/Yellowback broadcast paths submit with the mempool's
+ *  absurd-fee check off (their cap may exceed -maxtxfee), so they enforce this cap themselves. cs_main held. */
+std::optional<CAmount> YedFeeOverCap(const CTransaction& tx);
 
 #endif // BITCOIN_POLICY_POLICY_H
