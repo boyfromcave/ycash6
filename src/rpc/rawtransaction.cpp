@@ -1345,6 +1345,17 @@ UniValue sendrawtransaction(const UniValue& params, bool fHelp)
         bool fMissingInputs;
         if (!AcceptToMemoryPool(chainparams, mempool, state, tx, true, &fMissingInputs, !fOverrideFees)) {
             if (state.IsInvalid()) {
+                if (state.GetRejectCode() == REJECT_HIGHFEE) {
+                    // Parity with ycash-dd (v4.5.0 states "absurdly high fees <txid>, <fee> > <maxtxfee>", which
+                    // lightwalletd parses): the refusal names the fee and the cap, after 6.20.0's code and reason.
+                    LOCK(mempool.cs);
+                    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+                    CCoinsViewCache feeView(&viewMemPool);
+                    if (feeView.HaveInputs(tx)) {
+                        throw JSONRPCError(RPC_TRANSACTION_REJECTED, strprintf("%i: %s, absurdly high fees %s, %d > %d", state.GetRejectCode(), state.GetRejectReason(),
+                                                                                hashTx.ToString(), feeView.GetValueIn(tx) - tx.GetValueOut(), maxTxFee));
+                    }
+                }
                 throw JSONRPCError(RPC_TRANSACTION_REJECTED, strprintf("%i: %s", state.GetRejectCode(), state.GetRejectReason()));
             } else {
                 if (fMissingInputs) {
