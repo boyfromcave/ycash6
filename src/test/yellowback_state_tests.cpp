@@ -2732,6 +2732,60 @@ BOOST_AUTO_TEST_CASE(p4b_seats_bound_nslots)
     BOOST_CHECK_EQUAL(Seated(f.view, f.P, f.tip).size(), 2u);
 }
 
+// Rule: D-Q-28: the module's bond floor reads Snapshots[registerHeight - 1]: the no-price bond below START, before ARMED
+// and inside the founding window; then min(no-price, max(floor, $ at pMint)); judged once, for PENDING records only.
+BOOST_AUTO_TEST_CASE(dq28_bond_min_regimes_and_registration_price)
+{
+    const MicroUsd ONE = 1000000;                             // $1: regtest's $4 is 4 YEC
+    Fixture f;
+    auto quote = [&](MicroUsd p) { f.Mine(Fixture::Quote(p, (f.tip + 1) % 3)); };
+    auto bondMin = [&]() { return BondMinZat(State(f.view), f.P, f.tip + 1); };
+    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, f.P.startHeight), 10 * COIN);    // the virtual snapshot below START
+    f.Activate(ONE);
+    BOOST_REQUIRE(f.Snap(f.tip).PMint().has_value());
+    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // a price, but UNARMED: no attested price
+    f.Arm(3, ONE);                                            // founders 0..2 at 10 YEC
+    const int trigger = f.Attest().triggerHeight;
+    BOOST_REQUIRE(f.tip + 1 <= trigger + f.P.foundingWindow);
+    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // ARMED, but a join now is a founding member's
+    while (f.tip + 1 <= trigger + f.P.foundingWindow) quote(ONE);
+    BOOST_CHECK_EQUAL(bondMin(), 4 * COIN);                   // the first non-founding join: $4 at $1
+    // the boundary at $1: 4 YEC - 1 zat stays PENDING, 4 YEC matures (seq 3, 4; seq 5, 6 for the bump below)
+    f.Mine(Fixture::Quote(ONE, (f.tip + 1) % 3), { f.RegisterTx(3, 4 * COIN - 1), f.RegisterTx(4, 4 * COIN), f.RegisterTx(5, 4 * COIN), f.RegisterTx(6, 4 * COIN) });
+    const int reg = f.tip;
+    BOOST_REQUIRE(f.Attestor(6).has_value());
+    while (f.tip < reg + f.P.bondMaturity) quote(ONE);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // the price at registration binds for good: at $5 the floor (1 YEC) would admit seq 3, but it stays PENDING
+    for (int i = 0; i < 70; i++) quote(5 * ONE);
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 5 * ONE);
+    BOOST_CHECK_EQUAL(bondMin(), 1 * COIN);                   // $5: $4 is 0.8 YEC, the 1-YEC floor binds
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
+    // and an ELIGIBLE record is never re-judged: at $0.05 the minimum is the 10-YEC cap, seq 4 (4 YEC) stays ELIGIBLE
+    for (int i = 0; i < 70; i++) quote(50000);
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 50000);
+    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // $4 at $0.05 is 80 YEC, capped at the no-price bond (option B)
+    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
+    // seats (N_SLOTS 5): founders 0..2 (10 YEC), then 4 and 5 (4 YEC, same block: ties by seq), 6 unseated
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
+    // the bump: seq 7 posts 10 YEC (the cap) and, by YEC bond x age, outranks seq 5 once 10 x age > 4 x min(age5, AGE_CAP)
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(7, 10 * COIN) });
+    const int reg7 = f.tip;
+    BOOST_REQUIRE(f.Attestor(7).has_value());
+    int expected = -1;
+    for (int64_t h = reg7 + f.P.bondMaturity; expected < 0; h++) {
+        if (BondWeight(10 * COIN, h - reg7, f.P.ageCap) > BondWeight(4 * COIN, h - reg, f.P.ageCap)) expected = (int)h;
+    }
+    while (f.tip < expected - 1) quote(50000);
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
+    quote(50000);
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 7 }));
+    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // bumped from its seat, still a member
+    BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);
+}
+
 // Rule: ARM-1
 BOOST_AUTO_TEST_CASE(arm1_triggers_at_exact_block)
 {

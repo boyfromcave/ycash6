@@ -227,7 +227,12 @@ struct Params
     CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5): the zat floor of the residual threshold
     Cents residualMinCents;              //!< RED-5' (D-Q-23a): the residual threshold is max(residualMinZat, residualMinCents at the vault's pMint); 48 = $0.48
     int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1', H-4; regtest 2,500): the attestor share of the protocol fee (never of the early fee)
-    CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
+    CAmount bondMinNoPriceZat;           //!< D-Q-28: the bond floor with no attested price at registration (founding window, unarmed,
+                                         //!< no price): 20,000 YEC (regtest 10 YEC). Was BOND_MIN; see BondMinZat (state.h)
+    CAmount bondMinFloorZat;             //!< D-Q-28: the floor under the priced bond minimum, 2,000 YEC (regtest 1 YEC)
+    Cents bondMinUsdCents;               //!< D-Q-28: the priced bond minimum in cents, $8,000 = 800,000 (regtest $4 = 400) at the
+                                         //!< attested price at registration; min(bondMinNoPriceZat, max(bondMinFloorZat, that in
+                                         //!< YEC)): capped at the no-price bond (owner option B; binds below $0.40/YEC)
     int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
     int bondMaturity;                    //!< BOND_MATURITY 16,128
     int ageCap;                          //!< AGE_CAP 207,360 (bond weight)

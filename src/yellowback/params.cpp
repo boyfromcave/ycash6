@@ -93,7 +93,9 @@ void SetCommon(Params& p)
     p.residualMinZat      = 100000; // RED-5: the zat floor
     p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
-    p.bondMin             = 20000 * COIN;
+    p.bondMinNoPriceZat   = 20000 * COIN;   // D-Q-28: no attested price at registration
+    p.bondMinFloorZat     = 2000 * COIN;    // D-Q-28: the floor under the priced minimum
+    p.bondMinUsdCents     = 800000;         // D-Q-28: $8,000 at the attested price at registration
     p.bondMinLock         = 420480; // one year
     p.bondMaturity        = 16128;  // two weeks
     p.ageCap              = 207360; // 180 d
@@ -122,7 +124,7 @@ Params::Params()
       nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
-      bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
+      bondMinNoPriceZat(0), bondMinFloorZat(0), bondMinUsdCents(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {
@@ -233,7 +235,11 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.pinMinTags          = 2;
     r.emergencyPersist    = 4;
     r.emergencyNoticeTtl  = 64;
-    r.bondMin             = 10 * COIN;
+    // D-Q-28 at 1/2,000 of mainnet (10 YEC / 1 YEC / $4): the regtest suites fund many attestors, and every ratio
+    // (no-price / floor 10, the $ figure meets the floor at $4/YEC and the no-price cap at $0.40/YEC) is mainnet's
+    r.bondMinNoPriceZat   = 10 * COIN;
+    r.bondMinFloorZat     = 1 * COIN;
+    r.bondMinUsdCents     = 400;
     r.bondMinLock         = 200;
     r.bondMaturity        = 8;
     r.ageCap              = 64;

@@ -1342,7 +1342,7 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     std::vector<std::string> attestorBefore;
     for (const auto& r : attestors) attestorBefore.push_back(SerializeRecord(r.second));
     // maturity and the set's member dormancy (P4-b, state.h): PENDING -> ELIGIBLE at registerHeight + max(set
-    // maturity, BOND_MATURITY) over the module's bond floor; ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
+    // maturity, BOND_MATURITY) over the module's bond floor (D-Q-28: BondMinZat at registerHeight); ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
     // DORMANT -> ELIGIBLE after a heartbeat that follows the dormancy
     const std::optional<AttestorSetRecord> aset = st.GetAttestorSet();
     std::set<std::vector<unsigned char>> slashed;      // keys with a frozen bond: barred for good, as v3 barred an ejected key
@@ -1354,10 +1354,11 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
         AttestorRecord& a = r.second;
         if (aset.has_value()) {
             const int64_t matureAt = (int64_t)a.registerHeight + std::max<int64_t>((int64_t)aset->maturity, P.bondMaturity);
-            const bool floorOk = a.bondZat >= P.bondMin && (int64_t)a.bondLocktime >= (int64_t)a.registerHeight + P.bondMinLock &&
+            const bool floorOk = (int64_t)a.bondLocktime >= (int64_t)a.registerHeight + P.bondMinLock &&
                                  !slashed.count(a.attestorPubKey);
             const bool live = (int64_t)a.lastAct >= H - (int64_t)aset->livenessWindow;
-            if (a.Status() == AttestorStatus::PENDING && floorOk && H >= matureAt) {
+            if (a.Status() == AttestorStatus::PENDING && floorOk && H >= matureAt
+                && a.bondZat >= BondMinZat(st, P, a.registerHeight)) {          // D-Q-28: the price at registration, read for PENDING only
                 a.status = (uint8_t)AttestorStatus::ELIGIBLE;
                 a.statusHeight = height;
             }
@@ -1680,6 +1681,14 @@ int64_t AgeOrigin(const AttestorRecord& rec, const AttestState& attest, const Pa
         return attest.triggerHeight;
     }
     return rec.registerHeight;
+}
+
+CAmount BondMinZat(const State& st, const Params& P, int64_t registerHeight)
+{
+    const std::optional<Snapshot> s = SnapshotAt(st, P, registerHeight - 1);
+    if (!s.has_value() || !s->PMint().has_value() || !P.IsArmed(s->attest.IsArmed())) return P.bondMinNoPriceZat;
+    if (registerHeight <= (int64_t)s->attest.triggerHeight + P.foundingWindow) return P.bondMinNoPriceZat;   // a founding member
+    return BondMinPricedZat(s->PMint().value(), P);
 }
 
 arith_uint256 AttestorWeight(const AttestorRecord& rec, const AttestState& attest, const Params& P, int64_t height)
