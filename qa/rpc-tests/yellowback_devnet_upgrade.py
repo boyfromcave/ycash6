@@ -16,6 +16,12 @@ summary that every step passed:
             stopped, goes DORMANT under S15 and revives with a SET_HEARTBEAT
   mint      mints are the primitive's V template (tag YED, the attestor set, CLAIM_DELAY)
   transfer  yed_send; redeem: owner redeem (selector 2) and a renew
+  pq        the post-quantum line: SLH-DSA vault owners (a wallet mint; the primitive's vault_lock /
+            vault_ownerspend, FN-DSA-512 owners too once Falcon is active), PQ holder transfers, the
+            hybrid channel TX_PQCHANNEL
+  falcon    TOK-PQ: P2PKH holders refused by the wallet and every mempool, Falcon holders continue; with
+            --pqfalconheight N the activation at N and a reorg across it (default: Falcon live with the
+            vault upgrade, as mainnet; --no-pqfalcon: the pre-Falcon regime, the step SKIPs)
   claim     an underwater claim into a claimant intent, a reorg across it (ACTIVE, then CLAIMING,
             state hashes equal), the release after CLAIM_DELAY (CLAIMED)
   cancel    a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
@@ -49,7 +55,7 @@ REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 DEVNET = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'yellowback-devnet')
 WALK = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'upgrade-walk')
 CRATE = os.path.join(REPO, 'contrib', 'yellowback', 'attest')
-STEPS = ('members', 'mint', 'transfer', 'redeem', 'claim', 'cancel', 'interm', 'invalid', 'bridge', 'final')
+STEPS = ('members', 'mint', 'transfer', 'pq', 'redeem', 'claim', 'cancel', 'interm', 'invalid', 'bridge', 'falcon', 'final')
 
 
 def find_agent():
@@ -76,6 +82,8 @@ def main():
     parser.add_argument('--nocleanup', '--noshutdown', dest='nocleanup', action='store_true')
     parser.add_argument('--tracerpc', action='store_true')        # accepted for rpc-tests.py; unused
     parser.add_argument('--bridge-shapes', default='guardians,relayer')
+    parser.add_argument('--pqfalconheight', type=int, help='up --pqfalconheight N (the walk\'s falcon step activates Falcon at N and reorgs across it)')
+    parser.add_argument('--no-pqfalcon', action='store_true', help='up --no-pqfalcon: the pre-Falcon regime')
     options, _ = parser.parse_known_args()
     tmpdir = options.tmpdir or tempfile.mkdtemp(prefix='yb-devnet-upgrade-')
     os.makedirs(tmpdir, exist_ok=True)
@@ -103,7 +111,8 @@ def main():
     try:
         say('devnet up --role attestor --no-heartbeat --no-walk --no-sim --no-viz (portseed %d)' % options.portseed)
         rc = run([sys.executable, DEVNET, 'up', '--role', 'attestor', '--no-heartbeat', '--no-walk', '--no-sim', '--no-viz',
-                  '--seed', '480', '--force', '--dir', directory, '--portseed', str(options.portseed), '--bitcoind', bitcoind], 900)
+                  '--seed', '480', '--force', '--dir', directory, '--portseed', str(options.portseed), '--bitcoind', bitcoind]
+                 + (['--no-pqfalcon'] if options.no_pqfalcon else ['--pqfalconheight', str(options.pqfalconheight)] if options.pqfalconheight is not None else []), 900)
         if rc != 0:
             print('FAIL: yellowback-devnet up exited %d; see %s/devnet.log' % (rc, tmpdir))
             return 1
@@ -134,6 +143,18 @@ def main():
             assert ev.get('claim') and ev.get('release') and ev.get('redeemAboveTheta') and ev.get('redeemUnderTheta'), interm
             assert interm['claimedAt'] < interm['claimHeightWouldHaveBeen'], interm
             assert all(fee > 0 for fee in ev.get('earlyRedeemFeeZat', [])) and len(ev['earlyRedeemFeeZat']) == 2, ev   # IT-9 (the walk checks 5 %)
+        for key in ('pq_mint', 'pq_primitive', 'pq_transfer', 'pq_channel'):
+            assert key in evidence, key
+        falcon = summary['steps']['falcon']
+        if options.no_pqfalcon:
+            assert isinstance(falcon, str) and falcon.startswith('SKIP'), falcon
+        else:
+            assert evidence.get('falcon', {}).get('falconSend'), falcon
+            if options.pqfalconheight is not None:
+                assert falcon['activation'] and falcon['reorg'], falcon
+                ev = evidence['falcon']
+                assert ev['statehashBefore'] and ev['statehashAfter'] and ev['afterReorgP2pkh'], ev
+        say('pq: %s; falcon: %s' % (', '.join(sorted(k for k in evidence if k.startswith('pq_'))), falcon))
         for shape in options.bridge_shapes.split(','):
             assert evidence.get('bridge_%s_release' % shape, {}).get('release'), shape
             assert evidence.get('bridge_%s_rogue' % shape, {}).get('cancelled'), shape

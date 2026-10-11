@@ -26,7 +26,7 @@ YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devne
 side; YELLOWBACK_WALLET_BIN, YELLOWBACK_ATTEST_BIN and CHAINVIZ_BIN name the binaries.
 
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
-[--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
+[--seed N] [--stratum [--stratum-text TEXT]] [--pqfalconheight N | --no-pqfalcon] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
@@ -324,6 +324,8 @@ def node_pids(directory):
     except OSError:
         return []
     return [int(x) for x in out.split() if x.isdigit()]
+
+STOP_GRACE = 60   # seconds `down` waits for the RPC stops before terminating what is left
 
 def kill_nodes(directory, grace=30):
     """SIGTERM every remaining node process of this devnet, wait for them, SIGKILL the rest."""
@@ -707,6 +709,8 @@ def up(args):
     role = args.role
     if role != "none" and args.no_attest: sys.exit("--role needs the attestors; drop --no-attest")
     if args.stratum and role != "pool": sys.exit("--stratum is the pool seat's: `up --role pool --stratum`")
+    if args.no_pqfalcon and args.pqfalconheight is not None: sys.exit("--no-pqfalcon and --pqfalconheight contradict each other")
+    if args.pqfalconheight is not None and args.pqfalconheight < 0: sys.exit("--pqfalconheight must be a height (>= 0)")
     if args.stratum and not os.access(YOLO, os.X_OK):
         sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it, or drop --stratum)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
     if os.path.exists(path(directory)):
@@ -738,7 +742,6 @@ def up(args):
     steps = 7 if role != "none" else (6 if attest else 4)
     addresses = [address_of(wif) for wif in POOL_WIFS]
     pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agents_wanted else None
-    falcon_args = [] if args.no_pqfalcon else ["-pqfalcon=1"]
     # node 0 also serves lightwalletd (`lightwalletd` below): the server's getaddresstxids needs the
     # address index, which is experimental and needs -txindex (both are only ever set on a fresh datadir here).
     def build_node_args():
@@ -750,9 +753,16 @@ def up(args):
             node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: no payout
         for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
         # quantum plan D-Q-2 (owner 2026-10-10): the devnet mirrors mainnet, Falcon from the vault activation
-        # (-pqfalcon=1 = -pqfalconheight=0, a consensus parameter: every node); --no-pqfalcon for the P2PKH-holder regime
+        # (-pqfalcon=1 = -pqfalconheight=0, a consensus parameter: every node); --pqfalconheight=N for a later
+        # activation (the walk's falcon step); --no-pqfalcon for the P2PKH-holder regime
         for node in node_args: node_args[node] = node_args[node] + falcon_args
         return node_args
+    # Falcon (FN-DSA-512, quantum spec R-A2): a consensus parameter, so every node -- the stock node too --
+    # gets the same -pqfalconheight. Default 0: the vault upgrade activates with Falcon live, as mainnet does
+    # (owner decision 2026-10-10, Falcon from day one). --pqfalconheight N rehearses a later Falcon activation
+    # (the walk's `falcon` step); --no-pqfalcon passes nothing (the pre-Falcon regime: P2PKH or SLH-DSA holders).
+    falcon_height = None if args.no_pqfalcon else (0 if args.pqfalconheight is None else args.pqfalconheight)
+    falcon_args = [] if falcon_height is None else (["-pqfalcon=1"] if falcon_height == 0 else ["-pqfalconheight=%d" % falcon_height])
     _yu.ATTESTOR_SET[0] = None
     node_args = build_node_args()
     if agents_wanted and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
@@ -769,7 +779,8 @@ def up(args):
              "agents": agents, "attestors": attestors, "auto_attestors": attestors, "attest_agents": attest_agents,
              "attest_seqs": {}, "dir": directory, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
              "role": role, "seat": preset["seat"], "population": population, "liquidator": liquidator,
-             "seed": seed, "node_args": {str(k): v for k, v in node_args.items()}, "pqfalcon": not args.no_pqfalcon,
+             "seed": seed, "node_args": {str(k): v for k, v in node_args.items()}, "pqfalcon": falcon_height is not None,
+             "pq_falcon_height": falcon_height,
              "rpc": {str(n): {"url": rpc_url(n), "port": rpc_port(n), "user": rpc_auth_pair(n)[0], "password": rpc_auth_pair(n)[1]} for n in range(count)},
              "nodes": {str(n): {"zmq": zmq_record(n)} for n in range(count)},
              "heartbeat": {}, "walk": {}, "sim": {}, "session": None,
@@ -840,6 +851,7 @@ def up(args):
         raise
     save(directory, state); check(state, False)
     print("ready at height %d: node0 has %s YEC" % (nodes[USER].getblockcount(), nodes[USER].getbalance()))
+    print(falcon_line(state))
     if attest:
         info = rpc(state, USER).yed_getinfo()["attest"]
         print("attestation %s: %d seated, poolFresh %d" % (info["status"], info["seatedCount"], info["poolFresh"]))
@@ -1067,7 +1079,8 @@ def pool(args):
     if node not in all_pools(state): sys.exit("pool must be one of %s" % ", ".join(str(p) for p in all_pools(state)))
     address = pool_address(state, node)
     extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agent_pids(state) else []
-    if state.get("pqfalcon", False): extra.append("-pqfalcon=1")      # D-Q-2: Falcon from the vault activation
+    if state.get("pq_falcon_height") is not None: extra.append("-pqfalconheight=%d" % state["pq_falcon_height"])   # D-Q-2: the devnet's Falcon height
+    elif state.get("pqfalcon", False): extra.append("-pqfalcon=1")      # a devnet.json written before pq_falcon_height
     if args.action == "configure":
         restart_node(state, node, pool_args(address, extra), "with payout address %s" % address)
         state["pool_signal"][str(node)] = True; save(directory, state)
@@ -1267,6 +1280,16 @@ def chainviz_line(state):
     pid = chainviz_pid(state)
     return "chain-viz: %s (pid %s) %s; log %s" % (record.get("url"), pid, "up" if pid and agent_alive(pid) else "DEAD", record.get("log"))
 
+def falcon_line(state):
+    """One line on the post-quantum holder regime (yed_getinfo.params.pq, quantum spec R-A2 / TOK-PQ)."""
+    try: pq = rpc(state, USER).yed_getinfo()["params"].get("pq") or {}
+    except Exception as error: return "post-quantum: yed_getinfo failed (%s)" % error
+    if not pq: return "post-quantum: not on this node (no params.pq)"
+    height = state.get("pq_falcon_height")
+    return ("post-quantum: Falcon %s (falconHeight %s, -pqfalconheight %s); schemes %s; YED holders %s"
+            % ("ACTIVE" if pq.get("falconActive") else "inactive", pq.get("falconHeight"), "unset" if height is None else height,
+               pq.get("schemes"), "Falcon only (TOK-PQ)" if pq.get("falconActive") else "P2PKH or post-quantum"))
+
 def banner(state):
     role = role_of(state)
     if role == "none": return "seat: none (the fully automated demo); every node is the devnet's"
@@ -1300,6 +1323,7 @@ def status(args):
           % (node.getblockcount(), activation["status"], minting,
              "undefined" if stats.get("globalRatioBps") is None else "%.1f %%" % (stats["globalRatioBps"] / 100),
              Decimal(stats["supplyCents"]) / 100, stats["activeVaults"]))
+    print(falcon_line(state))
     if role_of(state) != "none": print(heartbeat_line(state))
     walk = state.get("walk") or {}
     print("price: $%s%s" % (read_mock(directory), (" walking (pid %d, drift %+.2f %%/min, vol %.2f %%/tick)" % (walk["pid"], walk["drift"], walk["vol"]))
@@ -1497,8 +1521,12 @@ def down(args):
             except Exception as error: print("node%d: %s" % (node, error))
     # By process too: a node whose RPC is broken looks down to alive() and would survive, holding
     # its ports for the next `up` (F-14). Wait for the clean stops, then terminate what is left.
+    # A clean stop takes a few seconds (flushing the chainstate and wallet); poll the pids, bounded,
+    # before counting what is left, so a node still shutting down is not SIGTERMed and misreported.
+    deadline = time.time() + STOP_GRACE
+    while node_pids(directory) and time.time() < deadline: time.sleep(0.5)
     left = kill_nodes(directory)
-    if left: print("%d node process(es) did not stop over RPC and were terminated" % len(left))
+    if left: print("%d node process(es) did not stop over RPC within %ds and were terminated" % (len(left), STOP_GRACE))
     if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
 
 # ---------------------------------------------------------------------------------- the bridge persona (upgrade plan section 4, P3)
@@ -1861,7 +1889,8 @@ def main():
     command = add("up", up); command.add_argument("--portseed", type=int, default=_default_portseed()); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
     command.add_argument("--agents", action="store_true", help="run one real yellowback-quote --mock-price per pool instead of yed_setquote from this script (always on under --role)")
     command.add_argument("--no-attest", action="store_true", help="five nodes: no attestor nodes, no attest agents, never ARMED")
-    command.add_argument("--no-pqfalcon", action="store_true", help="Falcon inactive (P2PKH YED holders); default: Falcon from the vault activation, as on mainnet (quantum plan D-Q-2)")
+    command.add_argument("--no-pqfalcon", "--no-falcon", dest="no_pqfalcon", action="store_true", help="Falcon inactive (P2PKH YED holders); default: Falcon from the vault activation, as on mainnet (quantum plan D-Q-2)")
+    command.add_argument("--pqfalconheight", "--falcon-height", dest="pqfalconheight", type=int, metavar="N", help="-pqfalconheight=N on every node: Falcon (and TOK-PQ) from height N, e.g. above the walk's falcon step to rehearse the activation; default 0 (= -pqfalcon=1, from the vault activation)")
     command.add_argument("--role", choices=sorted(ROLES), default="none", help="leave one seat empty for you: user (node 0), attestor (node 8) or pool (node 4); default none = the fully automated demo")
     command.add_argument("--seed", type=int, help="the personas' and the walk's random seed (printed; replay with the same value)")
     command.add_argument("--lean", action="store_true", help="a constrained machine: no price walk, heartbeat at half rate")

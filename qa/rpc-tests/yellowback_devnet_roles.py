@@ -24,7 +24,13 @@ asserts:
   4. the price walk moves both populations together: the pools' mock price and every automated
      attestor's are byte-equal at every sample; nothing is pinned before the shock, and whatever
      the shock pins clears within one pin window of it;
-  5. ``check`` passes before the shock (after it, a halted mint under GLOBAL_RATIO is the correct
+  5. the post-quantum line (quantum plan §4.9, the PQ minter and PQ claimant personas): the devnet runs
+     with Falcon live from the vault activation, as mainnet does (``--no-pqfalcon`` runs the pre-Falcon
+     regime instead); every persona vault's owner is SLH-DSA (ownerScheme 1, a v4 MINT, a 53-character owner
+     address), tokens go to FN-DSA-512 holders (P2PKH before Falcon), a redeem carries an SLH-DSA owner
+     signature, the trader's transfers spend PQ holder coins, and the liquidator's claim burns YED it holds
+     behind FN-DSA-512 keys -- read from the personas' ``pq-*`` tallies and checked on the chain;
+  6. ``check`` passes before the shock (after it, a halted mint under GLOBAL_RATIO is the correct
      state, and ``check`` says so), the heartbeat is still alive at the end, and the state hash
      agrees across every enforcing node.
 
@@ -164,7 +170,7 @@ class Preset:
         viz = [] if os.environ.get('CHAINVIZ_BIN') else ['--no-viz']
         rc = self.devnet('up', '--force', '--role', self.role, '--portseed', str(self.portseed), '--seed', str(self.options.seed),
                          '--heartbeat-rate', str(HEARTBEAT_RATE), '--walk-tick', str(WALK_TICK), '--sim-profile', 'fast',
-                         '--bitcoind', self.bitcoind, *viz, timeout=1200)
+                         '--bitcoind', self.bitcoind, *viz, *(['--no-pqfalcon'] if self.options.no_pqfalcon else []), timeout=1200)
         check(rc == 0, 'up --role %s exited %d (log: %s)' % (self.role, rc, self.log.name))
         self.state = json.load(open(os.path.join(self.directory, 'devnet.json')))
         self.say('up: height %d, session %s' % (self.tip(), os.path.basename(self.state['session'] or '')))
@@ -347,6 +353,46 @@ class Preset:
         summary = ', '.join('%s %s' % (n, sum(r['ok'].values())) for n, r in sorted(tally.items()))
         self.say('tally (successful actions): %s' % summary)
 
+    def assert_pq(self):
+        """The PQ minter, holder and claimant: what the personas' pq-* tallies say, checked against the chain."""
+        pq = self.node(0).yed_getinfo()['params']['pq']
+        falcon = not self.options.no_pqfalcon
+        check(pq['falconActive'] is falcon and pq['schemes'] == ([1, 2] if falcon else [1]), 'params.pq %s (Falcon expected %s)' % (pq, falcon))
+        holder = 'falcon' if falcon else 'p2pkh'
+
+        def ok_count(action, names=None):
+            return sum(r.get('ok', {}).get(action, 0) for n, r in self.stats()['personas'].items() if names is None or n in names)
+
+        def refused(action):
+            return {n: r['refused'][action] for n, r in self.stats()['personas'].items() if action in r.get('refused', {})}
+        self.wait_until(lambda: ok_count('pq-owner-slh') >= 3, 30, 'SLH-DSA owners on the personas\' mints')
+        check(not refused('pq-owner-slh'), 'a persona mint without an SLH-DSA owner: %s' % refused('pq-owner-slh'))
+        tokens = {k: ok_count('pq-token-%s' % k) for k in ('falcon', 'slh', 'p2pkh', 'other')}
+        check(tokens[holder] >= 3 and sum(tokens.values()) == tokens[holder], 'token holders %s, expected %s only' % (tokens, holder))
+        self.wait_until(lambda: ok_count('pq-redeem-slh-owner') >= 1, 30, 'a redeem signed by an SLH-DSA owner')
+        if falcon:
+            self.wait_until(lambda: ok_count('pq-send-falcon', ('trader',)) + ok_count('pq-sendmany-falcon', ('trader',)) >= 1, 40,
+                            'the trader spending FN-DSA-512 holder coins')
+            self.wait_until(lambda: ok_count('pq-claim-falcon', ('liquidator',)) >= 1, 10, 'the liquidator\'s claim burning FN-DSA-512-held YED')
+        # the chain: every persona vault's owner is SLH-DSA
+        vaults = {v for r in self.stats()['personas'].values() for v in (r.get('vaults') or [])}
+        seen = 0
+        for txid in vaults:
+            try:
+                row = self.node(0).yed_getvault(txid)
+            except Exception:
+                continue                    # not yet indexed, or reopened at a cancel's outpoint
+            check(row['ownerScheme'] == 1 and len(row['ownerAddress']) == 53 and 'ownerPubKey' not in row, 'vault %s owner %s' % (txid[:16], row.get('ownerScheme')))
+            seen += 1
+        check(seen >= 3, 'only %d persona vaults on the chain' % seen)
+        residual = ok_count('pq-residual-pqpkh')
+        check(not refused('pq-residual'), 'a residual not paid to the owner\'s TX_PQPKH: %s' % refused('pq-residual'))
+        self.say('post-quantum: Falcon %s; %d persona vaults with SLH-DSA owners; tokens %s; SLH-DSA owner redeems %d; trader PQ spends %d; '
+                 'liquidator PQ claims %d; residuals to the owner\'s TX_PQPKH %d'
+                 % ('active' if falcon else 'inactive', seen, tokens, ok_count('pq-redeem-slh-owner'),
+                    sum(ok_count('pq-%s-%s' % (a, k), ('trader',)) for a in ('send', 'sendmany') for k in ('falcon', 'slh')),
+                    ok_count('pq-claim-falcon', ('liquidator',)) + ok_count('pq-claim-slh', ('liquidator',)), residual))
+
     def assert_check(self):
         result = self.devnet_output('check')
         check(result.returncode == 0, 'check failed: %s%s' % (result.stdout, result.stderr))
@@ -407,6 +453,7 @@ class Preset:
         self.assert_walk()
         self.assert_check()
         self.assert_personas()
+        self.assert_pq()
         self.assert_hash()
 
 
@@ -418,6 +465,7 @@ def main():
     parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--presets', default='user,attestor,pool')
     parser.add_argument('--nocleanup', action='store_true')
+    parser.add_argument('--no-pqfalcon', action='store_true', help='the pre-Falcon regime (up --no-pqfalcon); default: Falcon live with the vault upgrade, as mainnet')
     parser.add_argument('--noshutdown', action='store_true')
     # the runner's other flags, accepted and ignored
     parser.add_argument('--cachedir'); parser.add_argument('--tracerpc', action='store_true'); parser.add_argument('--coveragedir')
