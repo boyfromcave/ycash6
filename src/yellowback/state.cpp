@@ -416,6 +416,13 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         if (const char* v = mint8Amount()) return v;     // MINT-8' (not ARMED: pMint = xMint)
         return verdict::OK;
     }
+    // MINT-8' lower bound (ARMED), before MINT-9's signature work: pMint = min(xMint, aMint) <= xMint and
+    // ProtocolFeeZat is non-increasing in the price, so a fee output below ProtocolFeeZat(cents, xMint) fails
+    // MINT-8' at any pMint. Refusing it here changes no valid verdict; it only spares the bundle verification.
+    if (!eligible.empty() && xMint.has_value()) {
+        const std::optional<CAmount> floorFee = ProtocolFeeZat((Cents)p.cents, xMint.value(), P);
+        if (floorFee.has_value() && tx.vout[p.feeVout].nValue < floorFee.value()) return verdict::BAD_MINT_FEE;
+    }
     // MINT-9 (ARMED at R: BUNDLE-1 with the empty selector, W9; aMint defined)
     {
         facts.bundle = ctx.Bundle(tx, ref, std::vector<unsigned char>(), false);

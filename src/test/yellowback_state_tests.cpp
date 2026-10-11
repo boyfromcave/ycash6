@@ -3661,6 +3661,41 @@ BOOST_AUTO_TEST_CASE(pin1_ignores_undefined_amint)
     BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_NO_PRICE));
 }
 
+// Rule: MINT-8
+// Rule: MINT-9
+// MINT-8' lower bound (review fix-up): an ARMED mint whose fee output is below ProtocolFeeZat(cents, xMint) is
+// refused bad-mint-fee before MINT-9 verifies the bundle (pMint <= xMint, so it fails MINT-8' at any pMint).
+BOOST_AUTO_TEST_CASE(mint8_lower_bound_before_mint9)
+{
+    Fixture f;
+    f.Arm(4);
+    BOOST_REQUIRE(f.Armed());
+    // a 1-zat fee with a well-signed bundle: bad-mint-fee, and the bundle was never verified (no TxLog bundle fields)
+    { MintOpts o; o.feeValue = 1;
+      CMutableTransaction m = f.MintV3(10000, 50000, o);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, m), verdict::BAD_MINT_FEE);
+      std::optional<TxLogRecord> log = f.Log(CTransaction(m).GetHash());
+      BOOST_REQUIRE(log.has_value());
+      BOOST_CHECK(log->bundleSeqs.empty());
+      BOOST_CHECK_EQUAL(log->aMint, 0); }
+    // a 1-zat fee and no bundle at all: bad-mint-fee, not mint9-no-bundle (MINT-9 not reached)
+    { MintOpts o; o.feeValue = 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), verdict::BAD_MINT_FEE); }
+    // one zat under the xMint fee: refused before MINT-9 as well
+    { MintOpts o; o.feeValue = f.MintFee(10000, f.tip - 1) - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), verdict::BAD_MINT_FEE); }
+    // exactly the xMint fee and no bundle: the bound holds, MINT-9 runs and refuses
+    { MintOpts o; o.feeValue = f.MintFee(10000, f.tip - 1); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), verdict::MINT9_NO_BUNDLE); }
+    // aMint below xMint: a fee at xMint passes the bound, the bundle is verified, and MINT-8' at pMint = aMint refuses it
+    { const MicroUsd a = f.PMintAt(f.tip - 1) * 9 / 10;
+      MintOpts o; o.feeValue = f.MintFee(10000, f.tip - 1);
+      CMutableTransaction m = f.MintV3(10000, a, o);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, m), verdict::BAD_MINT_FEE);
+      std::optional<TxLogRecord> log = f.Log(CTransaction(m).GetHash());
+      BOOST_REQUIRE(log.has_value());
+      BOOST_CHECK(!log->bundleSeqs.empty()); }
+    // the honest mint still holds
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000)), "");
+}
+
 // Rule: AFEE-1
 // Rule: MINT-8
 // Rule: RED-3
