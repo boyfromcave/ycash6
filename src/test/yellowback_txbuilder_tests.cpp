@@ -1463,7 +1463,7 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     maxTxFee = savedMax;
 }
 
-// Review B L-1 (ycash6 port finding): the funding follower reprices with the owner's PQ spend when the vault
+// Review B L-1 (the 6.20.0 port finding): the funding follower reprices with the owner's PQ spend when the vault
 // spend was priced with it, so a PQ fee coin never prices the transaction below the fee already set.
 BOOST_AUTO_TEST_CASE(pq_fee_follower_keeps_the_owner_spend)
 {
