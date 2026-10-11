@@ -216,6 +216,30 @@ class Walk:
     def all_nodes(self):
         return [self.node(i) for i in range(self.n)]
 
+    def refresh_peer_views(self, timeout=60):
+        """Drop and re-make every peer link of the devnet's mesh, so each node starts a fresh per-peer download
+        state. Needed after an invalidateblock that rewinds every node below a branch all of them had announced:
+        6.20.0 fetches blocks only toward a peer's best known block (headers-first), which stays pinned on the
+        invalidated higher-work branch, so a new shorter-chain block is never fetched (yellowback_util
+        refresh_peer_views, mapping section 19). Harmless on v4.5.0."""
+        from test_framework import util as _fw
+        _fw.PortSeed.n = self.state["portseed"]
+        nodes = self.all_nodes()
+        pairs = [(a, b) for a in range(self.n) for b in range(a + 1, self.n)]
+        def linked(x, y):
+            return any(p["addr"] == "127.0.0.1:%d" % _fw.p2p_port(y) for p in nodes[x].getpeerinfo())
+        for a, b in pairs:
+            for x, y in ((a, b), (b, a)):
+                try: nodes[x].disconnectnode("127.0.0.1:%d" % _fw.p2p_port(y))
+                except Exception: pass                                  # not an outbound link of x
+        deadline = time.time() + timeout
+        for a, b in pairs:
+            while linked(a, b) or linked(b, a):
+                if time.time() > deadline: raise WalkFailure("nodes %d and %d did not disconnect" % (a, b))
+                time.sleep(0.1)
+        for a, b in pairs:
+            _fw.connect_nodes_bi(nodes, a, b)
+
     def wait_mempool(self, txid, nodes=POOLS, timeout=60):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -1356,6 +1380,7 @@ class Walk:
         # the reorg across the Falcon height: disconnect falconHeight - 1 and everything after on every node
         self.note("a reorg across the Falcon height: invalidateblock %s (height %d = falconHeight - 1) on every node" % (block_pre[:16], pre))
         for i in range(self.n): self.node(i).invalidateblock(block_pre)
+        self.refresh_peer_views()                                     # 6.20.0: fetch the new branch's blocks
         sync_blocks(self.all_nodes())
         self.ok(self.tip() == h - 2 and not self.falcon_active(), "every node back at %d: Falcon inactive again for the next block" % self.tip())
         pools = {i: sorted(self.node(i).getrawmempool()) for i in self.yed_nodes}
