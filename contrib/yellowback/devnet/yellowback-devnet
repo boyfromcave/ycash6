@@ -325,6 +325,8 @@ def node_pids(directory):
         return []
     return [int(x) for x in out.split() if x.isdigit()]
 
+STOP_GRACE = 60   # seconds `down` waits for the RPC stops before terminating what is left
+
 def kill_nodes(directory, grace=30):
     """SIGTERM every remaining node process of this devnet, wait for them, SIGKILL the rest."""
     pids = node_pids(directory)
@@ -1512,8 +1514,12 @@ def down(args):
             except Exception as error: print("node%d: %s" % (node, error))
     # By process too: a node whose RPC is broken looks down to alive() and would survive, holding
     # its ports for the next `up` (F-14). Wait for the clean stops, then terminate what is left.
+    # A clean stop takes a few seconds (flushing the chainstate and wallet); poll the pids, bounded,
+    # before counting what is left, so a node still shutting down is not SIGTERMed and misreported.
+    deadline = time.time() + STOP_GRACE
+    while node_pids(directory) and time.time() < deadline: time.sleep(0.5)
     left = kill_nodes(directory)
-    if left: print("%d node process(es) did not stop over RPC and were terminated" % len(left))
+    if left: print("%d node process(es) did not stop over RPC within %ds and were terminated" % (len(left), STOP_GRACE))
     if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
 
 # ---------------------------------------------------------------------------------- the bridge persona (upgrade plan section 4, P3)
