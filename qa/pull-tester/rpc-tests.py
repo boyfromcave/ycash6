@@ -224,7 +224,10 @@ BASE_SCRIPTS= [
 ZMQ_SCRIPTS = [
     # ZMQ test can only be run if bitcoin was built with zmq-enabled.
     # call rpc_tests.py with --nozmq to explicitly exclude these tests.
-    "zmq_test.py"]
+    "zmq_test.py",
+    # The publishers are driven from several threads on one socket; the test keeps a subscriber
+    # attached while blocks and transactions churn (src/zmq/zmqpublishnotifier.cpp cs_zmqSend).
+    "zmq_concurrent_test.py"]
 
 EXTENDED_SCRIPTS = [
     # Needs a release build of contrib/yellowback/attest (Rust); SKIPs without one.
