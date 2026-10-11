@@ -120,7 +120,8 @@ std::string PQKeyIdHex(const CPQKeyID& id)
     return HexStr(b.begin(), b.end());
 }
 
-/** A pqkeyid (66 hex) or a PQ Yellowback address of this network ("yb…"/"yt…"/"yr…", 53 characters). */
+/** A pqkeyid (66 hex), a PQ Yellowback address of this network ("yb…"/"yt…"/"yr…", 53 characters) or a plain-YEC
+ *  PQ address ("sq…"/"tq…"/"rq…", D-Q-20). */
 CPQKeyID ParsePQKeyId(const UniValue& v, const std::string& name)
 {
     const std::string s = v.get_str();
@@ -129,7 +130,10 @@ CPQKeyID ParsePQKeyId(const UniValue& v, const std::string& name)
         std::vector<unsigned char> b = ParseHex(s);
         id = CPQKeyID(b[0], uint256(std::vector<unsigned char>(b.begin() + 1, b.end())));
     } else if (!yellowback::DecodeAddress(s, yellowback::ParamsForNetwork(Params().NetworkIDString()), id)) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, name + " must be a pqkeyid (66 hex digits, scheme || keyhash) or a PQ address");
+        const CTxDestination d = KeyIO(Params()).DecodeDestination(s);
+        const CPQKeyID* pq = std::get_if<CPQKeyID>(&d);
+        if (!pq) throw JSONRPCError(RPC_INVALID_PARAMETER, name + " must be a pqkeyid (66 hex digits, scheme || keyhash) or a PQ address");
+        id = *pq;
     }
     if (!IsOwnerValid(id)) throw JSONRPCError(RPC_INVALID_PARAMETER, name + ": unregistered post-quantum scheme");
     return id;
@@ -1642,7 +1646,8 @@ UniValue vault_release(const UniValue& params, bool fHelp)
             "vault_release \"intentoutpoint\" ( \"address\"|\"script\" )\n"
             "\nRelease a matured intent to its recipient (RELEASE, selector 1, nSequence = delay; U-15: anyone may). The\n"
             "intent commits only SHA256 of the recipient script, so the recipient is the argument, or a script this node\n"
-            "built the intent for, or a P2PKH / P2SH script of this wallet. Fee from this wallet.\n"
+            "built the intent for, or a P2PKH / P2SH script of this wallet, or the TX_PQPKH script of a post-quantum key\n"
+            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sq…/tq…/rq…. Fee from this wallet.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_release", "\"txid:0\"") + HelpExampleRpc("vault_release", "\"txid:0\", \"address\""));
     EnsureWallet(fHelp);
@@ -1669,6 +1674,14 @@ UniValue vault_release(const UniValue& params, bool fHelp)
         for (const CKeyID& id : pwalletMain->GetKeys()) {
             CScript s = GetScriptForDestination(id);
             if (ScriptHash256(s) == ip.recipientHash) { dest = s; break; }
+        }
+        // The owner's own residual (quantum spec F-3: SHA256(PQPKH(owner))) or any TX_PQPKH recipient whose PQ
+        // key this wallet holds, so the owner can release without passing the script (e.g. after a restart).
+        if (!dest) {
+            for (const CPQKeyID& id : pwalletMain->GetPQKeys()) {
+                CScript s = GetScriptForPQKey(id);
+                if (ScriptHash256(s) == ip.recipientHash) { dest = s; break; }
+            }
         }
     }
     if (!dest) throw JSONRPCError(RPC_INVALID_PARAMETER, "the recipient script is unknown here; pass it");

@@ -615,6 +615,7 @@ public:
         P2PKH = 1,
         P2SH = 2,
         P2PK = 3,
+        P2PQPKH = 4, //!< TX_PQPKH (quantum spec §2.1); index-only, no consensus meaning (D-Q-20 SQ task; 3 on v4.5.0, where P2PK is absent)
     };
     bool IsPayToPublicKeyHash() const;
     bool IsPayToScriptHash() const;

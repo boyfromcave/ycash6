@@ -696,12 +696,14 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
     const bool falcon = IsPQFalconActive(::Params().GetConsensus(), chainActive.Height() + 1);
     std::string type = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : (falcon ? "pq" : "p2pkh");
     if (type == "pq" || type == "pqowner") {
-        // PQ keys come from the HD seed (quantum plan §4.6); they are not in the transparent address book
-        // (no plain-YEC encoding, D-Q-11).
+        // PQ keys come from the HD seed (quantum plan §4.6). A holder key ("pq") goes into the address book under
+        // its plain-YEC form (sq…, D-Q-20), as a P2PKH holder does, so the YEC its token outputs carry is not taken
+        // for change; an owner key ("pqowner") receives no coins and stays out of it.
         EnsureWalletIsUnlocked();
         const uint8_t scheme = type == "pq" && falcon ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
         CPQKeyID id;
         if (!pwalletMain->GetNewPQKey(scheme, id)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
+        if (type == "pq") pwalletMain->SetAddressBook(id, "", "receive");
         return EncodeAddress(id, yw.Index()->GetParams());
     }
     if (type != "p2pkh") throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqowner\"");
@@ -734,14 +736,14 @@ UniValue yed_validateaddress(const UniValue& params, bool fHelp)
             o.pushKV("transparentAddress", keyIO.EncodeDestination(*id));
         } else if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest)) {
             // quantum spec §4: a 53-character PQ address; keyid is the pqkeyid (scheme || keyHash, 66 hex), and
-            // there is no transparent (s1…) form (D-Q-11 defers a plain-YEC PQ encoding).
+            // transparentAddress is the plain-YEC PQ form of the same key (sq…/tq…/rq…, D-Q-20).
             std::vector<unsigned char> raw(1, pq->scheme);
             raw.insert(raw.end(), pq->hash.begin(), pq->hash.end());
             o.pushKV("type", "pq");
             o.pushKV("keyid", HexStr(raw));
             o.pushKV("pqscheme", (int)pq->scheme);
             o.pushKV("ismine", pwalletMain->HavePQKey(*pq));
-            o.pushKV("transparentAddress", "");
+            o.pushKV("transparentAddress", KeyIO(::Params()).EncodeDestination(*pq));
         }
     }
     o.pushKV("reason", valid ? "" : "not-a-yellowback-address");

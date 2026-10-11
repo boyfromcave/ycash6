@@ -56,9 +56,8 @@ public:
 
     // A PQ destination renders as its plain-YEC PQ address (owner decision D-Q-20): Base58Check(version ||
     // scheme || keyHash), versions 0x4DD9 "sq…" / 0x4F61 "tq…" / 0x4C51 "rq…", 53 characters, the same
-    // TX_PQPKH script a PQ "yb…" names. Encode only, for now: DecodeDestination does not take it (the
-    // chain-wide decode and the RPCs that would accept it are a later task), and the wallet keeps PQ keys
-    // out of the address book, so no walletdb name record carries one. "" for an unknown network or scheme.
+    // TX_PQPKH script a PQ "yb…" names. DecodeDestination takes it back (chain-wide since the SQ task), and
+    // a wallet name record of a PQ address round-trips through these two. "" for an unknown network or scheme.
     std::string operator()(const CPQKeyID& id) const
     {
         const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
@@ -317,10 +316,26 @@ CTxDestination DecodeTransparentDestination(
 
 CTxDestination KeyIO::DecodeDestination(const std::string& str) const
 {
-    return DecodeTransparentDestination(
+    CTxDestination dest = DecodeTransparentDestination(
             keyConstants, str,
             KeyConstants::PUBKEY_ADDRESS,
             KeyConstants::SCRIPT_ADDRESS);
+    if (IsValidDestination(dest)) return dest;
+    // A plain-YEC post-quantum address (D-Q-20): version (2 bytes) || scheme || keyHash (32 bytes), a
+    // registered scheme only. 35 bytes, so it never collides with the 22-byte P2PKH/P2SH forms above
+    // (founders' reward and funding stream strings decode exactly as before). Canonical prefixes only:
+    // there is no legacy (Zcash-era) form, so DecodeLegacyDestination never yields one.
+    std::vector<unsigned char> data;
+    const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
+    const std::vector<unsigned char> pq_prefix = chain ? PlainPQAddressVersion(chain->NetworkIDString()) : std::vector<unsigned char>();
+    if (!pq_prefix.empty() && DecodeBase58Check(str, data) && data.size() == pq_prefix.size() + 1 + 32 &&
+        std::equal(pq_prefix.begin(), pq_prefix.end(), data.begin())) {
+        const uint8_t scheme = data[pq_prefix.size()];
+        if (pq::IsKnownScheme(scheme)) {
+            return CPQKeyID(scheme, uint256(std::vector<unsigned char>(data.begin() + pq_prefix.size() + 1, data.end())));
+        }
+    }
+    return CNoDestination();
 }
 
 CTxDestination KeyIO::DecodeLegacyDestination(const std::string& str) const
@@ -554,7 +569,8 @@ std::optional<libzcash::PaymentAddress> KeyIO::DecodePaymentAddress(const std::s
             return result;
         },
         [](const CPQKeyID&) {
-            // A post-quantum key is no PaymentAddress (quantum spec A-15; DecodeDestination never yields one).
+            // A post-quantum key is no PaymentAddress (quantum spec A-15): the z_* RPCs that take one refuse an
+            // sq… address explicitly (rpcwallet.cpp), the others report it as an unknown address format.
             std::optional<libzcash::PaymentAddress> result = std::nullopt;
             return result;
         }

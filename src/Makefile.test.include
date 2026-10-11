@@ -102,6 +102,7 @@ BITCOIN_TESTS =\
   test/pq_channel_tests.cpp \
   test/pq_script_tests.cpp \
   test/pq_sigcache_tests.cpp \
+  test/pq_address_tests.cpp \
   test/pq_standard_tests.cpp \
   test/prevector_tests.cpp \
   test/raii_event_tests.cpp \

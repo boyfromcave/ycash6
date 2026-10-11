@@ -204,6 +204,8 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
                 dest = CScriptID(addrhash);
             } else if (out.scriptPubKey.IsPayToPublicKeyHash()) {
                 dest = CKeyID(addrhash);
+            } else if (out.scriptPubKey.GetType() == CScript::P2PQPKH) {
+                ExtractDestination(out.scriptPubKey, dest);   // the sq…/tq…/rq… address (D-Q-20)
             }
             if (IsValidDestination(dest)) {
                 delta.pushKV("address", keyIO.EncodeDestination(dest));

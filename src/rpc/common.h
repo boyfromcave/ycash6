@@ -128,6 +128,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "importaddress",               {{s}, {s, o, o}} },
     { "importpubkey",                {{s}, {s, o}} },
     { "z_importwallet",              {{s}, {}} },
+    { "z_importpqkey",               {{s}, {o, s}} },
     { "importwallet",                {{s}, {}} },
     { "dumpprivkey",                 {{s}, {}} },
     { "z_exportwallet",              {{s}, {}} },
@@ -141,7 +142,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "z_getnewdiversifiedaddress",  {{s}, {}} },
     // rpcwallet
     { "z_converttex",                {{s}, {}} },
-    { "getnewaddress",               {{}, {s}} },
+    { "getnewaddress",               {{}, {s, s}} },
     { "getrawchangeaddress",         {{}, {}} },
     { "sendtoaddress",               {{s, o}, {s, s, o}} },
     { "listaddresses",               {{}, {}} },
