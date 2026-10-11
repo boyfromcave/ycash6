@@ -479,6 +479,11 @@ extern int g_yellowbackMintLag;
  */
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out);
 
+/** Quantum spec A-5: the module's mirror of the consensus Falcon activation, Params::pqFalconHeight, such that
+ *  Params::IsPQFalconActive(h) == ::IsPQFalconActive(consensus, h) at every h: max(UPGRADE_VAULT height,
+ *  pqFalconHeight), -1 (never) when either has no activation height. */
+int PQFalconHeightOf(const Consensus::Params& consensus);
+
 } // namespace yellowback
 
 #endif // YCASH_YELLOWBACK_INDEX_H

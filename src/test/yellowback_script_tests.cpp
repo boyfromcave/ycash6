@@ -9,6 +9,7 @@
 // IsStandardTx / AreInputsStandard (regtest sets fRequireStandard = false, so
 // functional tests never execute them).
 
+#include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/params.h"
 #include "yellowback/payload.h"
@@ -1114,6 +1115,27 @@ BOOST_AUTO_TEST_CASE(holderkey_pq_holder_recognition)
     p.pqFalconHeight = 0;                                                               // -pqfalcon=1
     BOOST_CHECK(!HolderAllowed(p, 0, p2pkh));
     BOOST_CHECK(HolderAllowed(p, 0, falconSpk));
+}
+
+// Rule: TOK-PQ
+// The A-5 mirror (review A m-3): yellowback::Params::IsPQFalconActive(h) == ::IsPQFalconActive(consensus, h) at every
+// height, for a Falcon height below, at and above the UPGRADE_VAULT height and for either never activating.
+BOOST_AUTO_TEST_CASE(pq_falcon_mirror_equals_consensus)
+{
+    const int NEVER = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+    for (int vaultH : { NEVER, 0, 10, 50 }) {
+        for (int falconH : { NEVER, 0, 5, 10, 30, 50, 70 }) {
+            Consensus::Params c = ::Params(CBaseChainParams::REGTEST).GetConsensus();
+            c.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = vaultH;
+            c.pqFalconHeight = falconH;
+            yellowback::Params p = RegtestParams(1, 0, 0, uint256S("5e75"));
+            p.pqFalconHeight = yellowback::PQFalconHeightOf(c);
+            for (int h = 0; h < 100; h++) {
+                BOOST_CHECK_MESSAGE(p.IsPQFalconActive(h) == ::IsPQFalconActive(c, h),
+                                    strprintf("vault %d falcon %d height %d", vaultH, falconH, h));
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

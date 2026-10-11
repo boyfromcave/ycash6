@@ -26,6 +26,7 @@
 
 #include <univalue.h>
 
+#include <algorithm>
 #include <csignal>
 
 #include <boost/algorithm/string.hpp>
@@ -938,13 +939,16 @@ std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vec
 
 // ---------------------------------------------------------------------------
 
-namespace {
-/** Quantum spec A-5: the module mirrors the consensus Falcon height, the one source of truth (-1 = never). */
 int PQFalconHeightOf(const Consensus::Params& consensus)
 {
-    return consensus.pqFalconHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || consensus.pqFalconHeight < 0 ? -1 : consensus.pqFalconHeight;
+    // ::IsPQFalconActive(consensus, h) = UPGRADE_VAULT active at h && h >= pqFalconHeight (review A m-3): the
+    // mirror is the later of the two heights, -1 when either never activates.
+    const int vault = consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    const int falcon = consensus.pqFalconHeight;
+    if (vault == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || vault < 0) return -1;
+    if (falcon == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || falcon < 0) return -1;
+    return std::max(vault, falcon);
 }
-} // namespace
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out)
 {
