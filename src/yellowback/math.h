@@ -314,18 +314,18 @@ inline CAmount ResidualMinZat(MicroUsd pMint, const Params& P)
 }
 
 /**
- * D-Q-28: the bond minimum at an attested price p (micro-USD per YEC), max(bondMinFloorZat, ceil(bondMinUsdCents x 10^4 x
- * COIN / p)) capped at bondMinNoPriceZat (owner, option B) — $8,000 in YEC with the 2,000-YEC floor, never above the
- * no-price bond (below $0.40 the minimum stays 20,000 YEC). bondMinNoPriceZat when p is undefined (<= 0) or the quotient does not fit.
+ * D-Q-28 (revised): the attestor bond minimum from the YEC locked in YED vaults, clamp(ceil(collateralZat x bondShareBps /
+ * (10^4 x N_SLOTS)), bondMinFloorZat, bondMinCapZat) -- BOND_SHARE_BPS of all vault collateral backs the N_SLOTS seats
+ * together. No price is read. A negative collateral counts as zero; N_SLOTS <= 0 gives the cap.
  */
-inline CAmount BondMinPricedZat(MicroUsd p, const Params& P)
+inline CAmount BondMinFromCollateralZat(CAmount collateralZat, const Params& P)
 {
-    if (p <= 0) return P.bondMinNoPriceZat;
-    const CAmount floor = std::max<CAmount>(0, P.bondMinFloorZat);
-    if (P.bondMinUsdCents <= 0) return std::min(floor, P.bondMinNoPriceZat);
-    arith_uint256 z = CeilDiv(arith_uint256(P.bondMinUsdCents) * arith_uint256(BPS) * arith_uint256(COIN), arith_uint256(p));
-    if (!FitsInt64(z) || !MoneyRange((CAmount)z.GetLow64())) return P.bondMinNoPriceZat;
-    return std::min(P.bondMinNoPriceZat, std::max(floor, (CAmount)z.GetLow64()));
+    const CAmount floor = std::max<CAmount>(0, P.bondMinFloorZat), cap = std::max(floor, P.bondMinCapZat);
+    if (P.nSlots <= 0) return cap;
+    arith_uint256 z = CeilDiv(arith_uint256(std::max<CAmount>(0, collateralZat)) * arith_uint256(std::max(0, P.bondShareBps)),
+                              arith_uint256(BPS) * arith_uint256(P.nSlots));
+    if (!FitsInt64(z) || (CAmount)z.GetLow64() > cap) return cap;
+    return std::max(floor, (CAmount)z.GetLow64());
 }
 
 /**

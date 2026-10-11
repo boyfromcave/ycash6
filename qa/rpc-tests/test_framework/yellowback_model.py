@@ -254,7 +254,7 @@ class Params(object):
                  q_low_bps=3_333, q_high_bps=6_667, attest_max_age=20, pin_window=288, pin_delta_bps=500,
                  pin_min_tags=3, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                  emergency_persist=48, emergency_notice_ttl=1_152, residual_min_zat=100_000, attest_fee_bps=2_500,
-                 bond_min_no_price_zat=20_000 * COIN, bond_min_floor_zat=2_000 * COIN, bond_min_usd_cents=800_000,
+                 bond_min_floor_zat=5_000 * COIN, bond_min_cap_zat=20_000 * COIN, bond_share_bps=500,
                  bond_min_lock=420_480, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48)
         a.update(attest or {})
@@ -266,7 +266,7 @@ class Params(object):
                           q_low_bps=3_333, q_high_bps=6_667, attest_max_age=8, pin_window=16, pin_delta_bps=500,
                           pin_min_tags=2, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
-                          bond_min_no_price_zat=10 * COIN, bond_min_floor_zat=1 * COIN, bond_min_usd_cents=400,   # D-Q-28 at 1/2,000
+                          bond_min_floor_zat=COIN * 5 // 2, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-28 at 1/2,000
                           bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4)
 
@@ -492,18 +492,14 @@ def residual_min_zat(p_mint, p):
     return floor if z > MAX_MONEY else max(floor, z)
 
 
-def bond_min_priced_zat(price, p):
-    """D-Q-28 (owner option B): min(no-price bond, max(floor, ceil(bond_min_usd_cents x 10^4 x COIN / price))); the
-    no-price bond without a price or when the quotient leaves MoneyRange."""
-    if price is None or price <= 0:
-        return p.bond_min_no_price_zat
+def bond_min_from_collateral_zat(collateral_zat, p):
+    """D-Q-28 (revised): clamp(ceil(collateral x bond_share_bps / (10^4 x N_SLOTS)), floor, cap); no price is read."""
     floor = max(0, p.bond_min_floor_zat)
-    if p.bond_min_usd_cents <= 0:
-        return min(floor, p.bond_min_no_price_zat)
-    z = ceil_div(p.bond_min_usd_cents * BPS * COIN, price)
-    if z > MAX_MONEY:
-        return p.bond_min_no_price_zat
-    return min(p.bond_min_no_price_zat, max(floor, z))
+    cap = max(floor, p.bond_min_cap_zat)
+    if p.n_slots <= 0:
+        return cap
+    z = ceil_div(max(0, collateral_zat) * max(0, p.bond_share_bps), BPS * p.n_slots)
+    return cap if z > cap else max(floor, z)
 
 
 def max_vault_cents(cap_cents, max_vault_share_bps, vault_share_floor_cents):
@@ -2034,18 +2030,10 @@ class YellowbackModel(object):
         return rec.register_height
 
     def bond_min_zat(self, register_height):
-        """D-Q-28: the module's bond floor for a join in block register_height, from Snapshots[register_height - 1] alone:
-        the no-price bond when that snapshot is missing or virtual, has no pMint, is not ARMED, or the join is a founding
-        member's (register_height <= triggerHeight + FOUNDING_WINDOW); else bond_min_priced_zat(pMint)."""
-        p = self.params
+        """D-Q-28 (revised): the module's bond floor for a join in block register_height, from Snapshots[register_height - 1]
+        alone: bond_min_from_collateral_zat(its collateral_zat, the YEC in ACTIVE vaults); a missing snapshot counts zero."""
         s = self.snapshot(register_height - 1)
-        if s is None or s.virtual or s.p_mint is None or s.p_mint <= 0 or not p.is_armed(s.attest.status):
-            return p.bond_min_no_price_zat
-        if s.halt_mask & HALT_DIVERGENCE:                    # owner ruling A1/B1: a diverging price is no price
-            return p.bond_min_no_price_zat
-        if register_height <= s.attest.trigger_height + p.founding_window:
-            return p.bond_min_no_price_zat
-        return bond_min_priced_zat(s.p_mint, p)
+        return bond_min_from_collateral_zat(0 if s is None else s.collateral_zat, self.params)
 
     def weight(self, rec, attest, height):
         """weight(seq, H) = bondZat * clamp(H - ageOrigin, 0, AGE_CAP)."""

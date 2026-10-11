@@ -1054,59 +1054,36 @@ class MintTests(unittest.TestCase):
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-vault-share')
 
-    # Rule: D-Q-28
-    def test_dq28_bond_min_priced(self):
-        m = ym.Params.mainnet(1)
-        for price, yec in ((None, 20_000), (0, 20_000), (100_000, 20_000), (399_999, 20_000), (400_000, 20_000),
-                           (1_000_000, 8_000), (4_000_000, 2_000), (5_000_000, 2_000), (10_000_000, 2_000)):
-            self.assertEqual(ym.bond_min_priced_zat(price, m), yec * ym.COIN)
-        self.assertEqual(ym.bond_min_priced_zat(400_001, m), 1_999_995_000_013)   # ceil(8e17 / 400001)
-        self.assertEqual(ym.bond_min_priced_zat(3_999_999, m), 200_000_050_001)
-        self.assertEqual(ym.bond_min_priced_zat(1, m), 20_000 * ym.COIN)          # outside MoneyRange: the cap
-        r = ym.Params.regtest(1)
-        self.assertEqual(ym.bond_min_priced_zat(50_000, r), 10 * ym.COIN)
-        self.assertEqual(ym.bond_min_priced_zat(1_000_000, r), 4 * ym.COIN)
-        self.assertEqual(ym.bond_min_priced_zat(5_000_000, r), 1 * ym.COIN)
+    # Rule: D-Q-28 (revised)
+    def test_dq28_bond_min_from_collateral(self):
+        m, r = ym.Params.mainnet(1), ym.Params.regtest(1)
+        f = ym.bond_min_from_collateral_zat
+        for coll, yec in ((0, 5_000), (-1, 5_000), (900_000, 5_000), (1_800_000, 10_000), (3_600_000, 20_000), (10_000_000, 20_000)):
+            self.assertEqual(f(coll * ym.COIN, m), yec * ym.COIN)
+        self.assertEqual(f(900_000 * ym.COIN + 1, m), 5_000 * ym.COIN + 1)
+        self.assertEqual(f(3_600_000 * ym.COIN - 180, m), 20_000 * ym.COIN - 1)
+        self.assertEqual(f(0, r), ym.COIN * 5 // 2)
+        self.assertEqual(f(300 * ym.COIN, r), 3 * ym.COIN)
+        self.assertEqual(f(1_300 * ym.COIN, r), 10 * ym.COIN)
 
-    # Rule: D-Q-28 (the model's SNAP mirrors yellowback_state_tests dq28_bond_min_regimes_and_registration_price)
-    def test_dq28_bond_min_regimes(self):
-        one = 1_000_000
-        c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id()))
-        tag = lambda: (1, one, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
-        self.assertEqual(c.model.bond_min_zat(1), 10 * ym.COIN)                 # the virtual snapshot below START
-        c.mine_n(135, price_fn=lambda h: one)
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)      # a price, not ARMED
+    # Rule: D-Q-28 (revised): the model's SNAP mirrors yellowback_state_tests dq28_bond_min_from_collateral
+    def test_dq28_bond_min_from_snapshot_collateral(self):
+        c = activated_chain(ym.Params.regtest(1, 0, 0, attestor_set_id(), attest_arm_min=0), )
+        tag = lambda: (1, 50_000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), ym.COIN * 5 // 2)
         c.mine(tag(), [attestor_set_create()])
-        for i in range(3):
-            c.mine(tag(), [c.register_tx(ATTESTORS[i], c.height + 1 + 200, 10 * ym.COIN)])
-        while c.model.attest.status != ym.ARMED:
-            c.mine(tag())
-        trigger = c.model.attest.trigger_height
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)      # a founding member's join
-        while c.height + 1 <= trigger + c.params.founding_window:
-            c.mine(tag())
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 4 * ym.COIN)       # $4 at $1
-        c.mine(tag(), [c.register_tx(ATTESTORS[3], c.height + 1 + 200, 4 * ym.COIN - 1),
-                       c.register_tx(ATTESTORS[4], c.height + 1 + 200, 4 * ym.COIN)])
-        c.mine_n(c.params.bond_maturity, price_fn=lambda h: one)
-        self.assertEqual(c.model.attestors[3].status, ym.A_PENDING)
-        self.assertEqual(c.model.attestors[4].status, ym.A_ELIGIBLE)
-        c.mine_n(70, price_fn=lambda h: 5 * one)                                 # registration price binds for good
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 1 * ym.COIN)
-        self.assertEqual(c.model.attestors[3].status, ym.A_PENDING)
-        n = 0                                                                    # owner ruling A1/B1: divergence = no price
-        while not (c.model.snapshots[c.height].halt_mask & ym.HALT_DIVERGENCE) and n < 40:
-            c.mine_n(1, price_fn=lambda h: 1_500_000)
-            n += 1
-        self.assertTrue(c.model.snapshots[c.height].halt_mask & ym.HALT_DIVERGENCE)
-        self.assertLess(ym.bond_min_priced_zat(c.model.snapshots[c.height].p_mint, c.params), 10 * ym.COIN)
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)
-        c.mine_n(70, price_fn=lambda h: 1_500_000)
-        self.assertEqual(c.model.snapshots[c.height].halt_mask, 0)
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 266_666_667)
-        c.mine_n(70, price_fn=lambda h: 50_000)                                  # never re-judged
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)      # $4 at $0.05 = 80 YEC, capped
-        self.assertEqual(c.model.attestors[4].status, ym.A_ELIGIBLE)
+        c.mine(tag(), [c.register_tx(ATTESTORS[0], c.height + 1 + 200, ym.COIN * 5 // 2 - 1),
+                       c.register_tx(ATTESTORS[1], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        ref = c.height - 1
+        raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)     # $100 at 300 % and $0.05 = 6,000 YEC
+        c.mine(tag(), [raw])
+        self.assertEqual(c.model.snapshots[c.height].collateral_zat, collateral_for(c, 10_000, ref))
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)                # far above 1,000 YEC: the cap
+        c.mine(tag(), [c.register_tx(ATTESTORS[2], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        c.mine_n(c.params.bond_maturity, price_fn=lambda h: 50_000)
+        self.assertEqual(c.model.attestors[0].status, ym.A_PENDING)
+        self.assertEqual(c.model.attestors[1].status, ym.A_ELIGIBLE)     # judged at its own snapshot, before the mint
+        self.assertEqual(c.model.attestors[2].status, ym.A_PENDING)
 
     # Rule: RED-5'
     def test_red5_residual_threshold(self):
