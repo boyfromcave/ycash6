@@ -17,14 +17,15 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
 - the insight address index: getaddressbalance / utxos / txids / deltas / mempool by rq… and by the yr… YED form;
 - vault_release of an intent paying the wallet's PQ key: by a third party with the address (the owner finds it in
   the index), and by the owner after a restart without the script;
-- z_importpqkey (own and foreign keys, refusals); a seed-only restore with -hdseedfile (and its refusal for an
+- z_importpqkey (own and foreign keys, refusals); a seed-only restore with -mnemonicfile (and its refusal for an
   existing wallet with another seed). (yed_validateaddress / yed_listtokens transparentAddress = the rq… form is
   checked in yellowback_pq.py, where the YED module is live.)
 
 6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): the z_* RPCs take a libzcash::PaymentAddress, which has no
 post-quantum alternative, so z_sendmany and z_mergetoaddress refuse an rq… recipient by name (v4.5.0 pays it from
-z_sendmany) and z_getbalance does not take one (getreceivedbyaddress stands in); -hdseedfile holds the wallet's
-recovery phrase (z_exportwallet's recovery_phrase= line), not a 32-byte HD seed.
+z_sendmany) and z_getbalance does not take one (getreceivedbyaddress stands in); the seed-only restore is
+-mnemonicfile, the wallet's recovery phrase (z_exportwallet's recovery_phrase= line), where ycash-dd's -hdseedfile
+takes a 32-byte HD seed (two names, two file formats).
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_pq_address.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -276,16 +277,16 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_start_raises_init_error(1, self.options.tmpdir, self.node_args(1) + ['-mineraddress=%s' % a],
                                        'P2SH and post-quantum addresses are not supported')
 
-        print('-hdseedfile: refused for an existing wallet with another seed')
-        assert_start_raises_init_error(1, self.options.tmpdir, self.node_args(1) + ['-hdseedfile=%s' % export],
-                                       '-hdseedfile applies only when creating a new wallet')
+        print('-mnemonicfile: refused for an existing wallet with another seed')
+        assert_start_raises_init_error(1, self.options.tmpdir, self.node_args(1) + ['-mnemonicfile=%s' % export],
+                                       '-mnemonicfile applies only when creating a new wallet')
         self.nodes[1] = start_node(1, self.options.tmpdir, self.node_args(1))
         connect_nodes_bi(self.nodes, 0, 1)
 
-        print('-hdseedfile: a new wallet from node 0\'s seed recovers its PQ coins (rescan from genesis)')
+        print('-mnemonicfile: a new wallet from node 0\'s seed recovers its PQ coins (rescan from genesis)')
         stop_node(self.nodes[2], 2)
         os.remove(os.path.join(self.options.tmpdir, 'node2', 'regtest', 'wallet.dat'))
-        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-hdseedfile=%s' % export])
+        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-mnemonicfile=%s' % export])
         n2 = self.nodes[2]
         connect_nodes_bi(self.nodes, 0, 2)
         connect_nodes_bi(self.nodes, 1, 2)
@@ -297,9 +298,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n2_pq, n0_pq)
         fresh = n2.getnewaddress('', 'pq')
         assert fresh not in (a, a2, a3, b)
-        # the restored wallet is ordinary afterwards: a restart keeps it (no -hdseedfile needed, and the same file is accepted)
+        # the restored wallet is ordinary afterwards: a restart keeps it (no -mnemonicfile needed, and the same file is accepted)
         stop_node(self.nodes[2], 2)
-        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-hdseedfile=%s' % export])
+        self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + ['-mnemonicfile=%s' % export])
         assert_equal(self.nodes[2].validateaddress(a)['ismine'], True)
 
 

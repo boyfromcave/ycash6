@@ -95,7 +95,7 @@ BASE_SCRIPTS= [
     # The PQ key lookahead and quantum review F-1: a restored wallet re-finds its PQ keys; foreign keys never move the index.
     'vault_pq_wallet_restore.py',
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
-    # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -hdseedfile.
+    # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -mnemonicfile.
     'wallet_pq_address.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
