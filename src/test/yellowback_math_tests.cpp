@@ -188,22 +188,33 @@ BOOST_AUTO_TEST_CASE(mint5_min_ratio_and_required_collateral_worked_example)
 }
 
 // Rule: MINT-5
-// K14: class A at the 3x cap is 150,000 bps; a $10,000 mint (the regtest MAX_MINT, mainnet's
-// before H-12) * 150,000 * COIN = 1.5e19 exceeds int64 before the division, and at PRICE_MIN the
-// quotient (1.5e17 zat) exceeds MAX_MONEY: "unsatisfiable", never a wrapped number.
+// K14: a $100,000 mint (MAX_MINT, D-Q-24) * 150,000 bps (the v2 worst case) * COIN = 1.5e20 exceeds int64 before
+// the division, and at PRICE_MIN the quotient (1.5e18 zat) exceeds MAX_MONEY: "unsatisfiable", never a wrapped
+// number. With the live ratios the $100,000 mint is unsatisfiable below the fees spec §2.1 thresholds: class A
+// (300 %) under 14,286 uUSD, B (400 %) under 19,048, C (500 %) under 23,810 — more YEC than can exist, not a defect.
 BOOST_AUTO_TEST_CASE(mint5_required_collateral_overflow_at_max_mint_and_price_min)
 {
     const Params& m = MainParams();
-    const Cents bigMint = RegtestParams(1, 0, 0, TestSet()).maxMint;
-    BOOST_CHECK_EQUAL(bigMint, 1000000);
+    const Cents bigMint = m.maxMint;
+    BOOST_CHECK_EQUAL(bigMint, 10000000);
+    BOOST_CHECK_EQUAL(RegtestParams(1, 0, 0, TestSet()).maxMint, bigMint);      // the same on every network (D-Q-24)
+    BOOST_CHECK_EQUAL(bigMint, m.maxOutput);                                     // one $100,000 mint is one $100,000 token
     const int worst = MinRatioBps(50000, SIGMA_MAX_V2);     // the v2 worst case (500 % x 3x); the live set's worst is class C's 500 % (D-IT-5)
     BOOST_CHECK_EQUAL(worst, 150000);
     BOOST_CHECK_EQUAL(MinRatioBps(m.baseRatioBps[2], m.sigmaMultMaxBps), 50000);
     BOOST_CHECK(!RequiredCollateral(bigMint, worst, PRICE_MIN).has_value());
     BOOST_CHECK(!RequiredCollateralRounded(bigMint, worst, PRICE_MIN).has_value());
-    BOOST_CHECK(!RequiredCollateral(m.maxMint, worst, PRICE_MIN).has_value());   // H-12's $2,500: 3.75e16 zat, still > MAX_MONEY
-    // At $0.05 the same mint needs 3e14 zat = 3,000,000 YEC: satisfiable (< MAX_MONEY).
-    auto r = RequiredCollateral(bigMint, worst, 50000);
+    BOOST_CHECK(!RequiredCollateral(bigMint, m.baseRatioBps[0], PRICE_MIN).has_value());   // class A at PRICE_MIN: 3e17 zat > MAX_MONEY
+    // the satisfiability thresholds, exact to the micro-dollar
+    BOOST_CHECK(RequiredCollateral(bigMint, 30000, 14286).has_value());
+    BOOST_CHECK(!RequiredCollateral(bigMint, 30000, 14285).has_value());
+    BOOST_CHECK(RequiredCollateral(bigMint, 40000, 19048).has_value());
+    BOOST_CHECK(!RequiredCollateral(bigMint, 40000, 19047).has_value());
+    BOOST_CHECK(RequiredCollateral(bigMint, 50000, 23810).has_value());
+    BOOST_CHECK(!RequiredCollateral(bigMint, 50000, 23809).has_value());
+    // At $0.05 the worst-case mint needs 3e15 zat = 30,000,000 YEC: unsatisfiable; at $0.50, 3,000,000 YEC: satisfiable.
+    BOOST_CHECK(!RequiredCollateral(bigMint, worst, 50000).has_value());
+    auto r = RequiredCollateral(bigMint, worst, 500000);
     BOOST_REQUIRE(r.has_value());
     BOOST_CHECK_EQUAL(r.value(), 300000000000000LL);
     // Exactly MAX_MONEY is satisfiable; one zat above is not.
@@ -389,13 +400,8 @@ BOOST_AUTO_TEST_CASE(it9_early_fee_of_the_debt_and_k14_bound)
             }
         }
     }
-    // The satisfiability thresholds at maxMint (fees spec §2.1): class A from 14,286 uUSD, B from 19,048, C from 23,810.
-    BOOST_CHECK(RequiredCollateral(10000000, 30000, 14286).has_value());
-    BOOST_CHECK(!RequiredCollateral(10000000, 30000, 14285).has_value());
-    BOOST_CHECK(RequiredCollateral(10000000, 40000, 19048).has_value());
-    BOOST_CHECK(!RequiredCollateral(10000000, 40000, 19047).has_value());
-    BOOST_CHECK(RequiredCollateral(10000000, 50000, 23810).has_value());
-    BOOST_CHECK(!RequiredCollateral(10000000, 50000, 23809).has_value());
+    // The satisfiability thresholds at maxMint are mint5_required_collateral_overflow_at_max_mint_and_price_min's.
+    BOOST_CHECK_EQUAL(m.maxMint, 10000000);
 }
 
 namespace {
@@ -552,7 +558,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.sigmaRefBps, 0);                      // D-IT-5: multiplier pinned at 1
     BOOST_CHECK_EQUAL(m.sigmaMultMaxBps, 10000);
     BOOST_CHECK_EQUAL(m.minMint, 10000);
-    BOOST_CHECK_EQUAL(m.maxMint, 250000);                     // H-12: $2,500
+    BOOST_CHECK_EQUAL(m.maxMint, 10000000);                   // D-Q-24: $100,000 (H-12's $2,500 reversed)
     BOOST_CHECK_EQUAL(m.minOutput, 100);
     BOOST_CHECK_EQUAL(m.maxOutput, 10000000);
     BOOST_CHECK_EQUAL(m.tokenValue, TOKEN_VALUE);
@@ -589,7 +595,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     // The regtest column keeps the v3 values the hardening plan changed on mainnet (H-11, H-12).
     BOOST_CHECK_EQUAL(r.globalRatioHaltBps, 25000);
     BOOST_CHECK_EQUAL(r.recapRatioBps, 50000);
-    BOOST_CHECK_EQUAL(r.maxMint, 1000000);
+    BOOST_CHECK_EQUAL(r.maxMint, m.maxMint);                  // D-Q-24: no regtest override
     BOOST_CHECK(!RegtestParams(0, 0, 0, TestSet()).IsConfigured());
     BOOST_CHECK(!RegtestParams(150, 0, 0, uint256()).IsConfigured());   // U-22: no attestor set, no YED
     BOOST_CHECK(!ParamsForNetwork("regtest").IsConfigured());
@@ -849,7 +855,7 @@ BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
 }
 
 // Rule: RED-5
-// Overflow at PRICE_MIN: MAX_MINT ($2,500, H-12) * 12,500 * COIN / 100 = 3.125e15 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
+// Overflow at PRICE_MIN: MAX_MINT ($100,000, D-Q-24) * 12,500 * COIN / 100 = 1.25e17 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
 BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
 {
     const Params& m = MainParams();

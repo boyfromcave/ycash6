@@ -17,7 +17,9 @@ void SetCommon(Params& p)
     p.maxVaultShareBps = 1000;        // MINT-6b (D-Q-23a): one vault may hold at most 10 % of the MINT-6 cap ...
     p.vaultShareFloorCents = 1000000; // ... but always $10,000 (mint-vault-share)
     p.issuedBeforeStart = 0;          // MINT-6 (D-Q-25): set by the index to CirculatingSupplyAt(startHeight - 1)
-    p.maxMint   = 250000;     // $2,500 (H-12: guarded issuance for the first parameter lifetime; DigiByte $100,000)
+    p.maxMint   = 10000000;   // $100,000 (D-Q-24: DigiByte's maxMintAmount restored, = maxOutput; reverses hardening H-12's $2,500 launch guard
+                              // on this line only — H-12's depth argument (a $100,000 vault's liquidation at θ ≈ $125,000, beyond the measured
+                              // bid depth) is given up; the aggregate stays bounded by supplyCapBps, MINT-6b's per-vault share and HALT-2)
     p.minOutput = 100;        // $1.00 (DigiByte minOutputAmount)
     p.maxOutput = 10000000;   // $100,000 (param; DigiByte's maxMintAmount)
     p.tokenValue = TOKEN_VALUE;
@@ -210,9 +212,8 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.claimDelay = 10;
     // The hardening plan's mainnet values (H-4, H-11, H-12) stay out of the regtest column: its
     // scripts' cap and recapitalisation arithmetic is written against the v3 values. The protocol fee
-    // bands and floor are mainnet's on every network (fees spec §4.3 ambiguity 8).
+    // bands, the floor and maxMint are mainnet's on every network (fees spec §4.3 ambiguity 8, D-Q-24).
     r.attestFeeBps       = 2500;
-    r.maxMint            = 1000000;
     r.globalRatioHaltBps = 25000;   // (below class A's 300 % base, the §1.4 invariant; the in-term plan's §3 brackets leave it)
     r.recapRatioBps      = 50000;
     r.classMin[0] = 48;  r.classMax[0] = 96;

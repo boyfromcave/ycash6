@@ -200,9 +200,11 @@ as `earlyRedeemFeeZat`); `yed_getinfo.params` says `inTermClaims: true`.
 **Launch parameters.** Three flat tiers, the longer the term the higher the collateral ratio:
 class A 30–90 days at 300 %, B 91–180 days at 400 %, C 181–365 days at 500 %
 (`yed_getinfo.params.classes`); the volatility multiplier is pinned at 1 (`SIGMA_REF_BPS` 0). The
-largest single mint is $2,500 (`MAX_MINT`), the pool fee 15 bps of the collateral (`FEE_BPS`,
-minimum 0.5 YEC) with half of it again to the attestor (`ATTEST_FEE_BPS` 5,000), the global-ratio
-halt 200 % and the recapitalisation floor 500 %. Regtest uses 25 bps, 2,500 bps, $10,000,
+largest single mint is $100,000 (`MAX_MINT`, D-Q-24; one vault may also hold at most 10 % of the
+supply cap, never less than $10,000, MINT-6b), the protocol fee a dollar amount of the debt (1.0 % of
+the first $1,000, 0.5 % to $10,000, 0.1 % above, at least $1, FEE-1') converted to YEC at the vault's
+mint price, with half of it again to the attestor (`ATTEST_FEE_BPS` 5,000), the global-ratio halt
+200 % and the recapitalisation floor 500 %. Regtest uses the same fees and `MAX_MINT`, 2,500 bps,
 48–96 / 97–144 / 145–240 blocks and 250 % / 500 %.
 
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks

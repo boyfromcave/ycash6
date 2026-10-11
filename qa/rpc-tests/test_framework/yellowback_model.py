@@ -323,7 +323,7 @@ class Params(object):
             # class A [48, 96], B (96, 144], C (144, 240]  (section 3.1 regtest column); flat ratios 300/400/500 % (D-IT-4)
             class_min=[48, 97, 145], class_max=[96, 144, 240], base_ratio_bps=[30_000, 40_000, 50_000],
             vol_window=64, vol_step=8, vol_periods_per_year=8_760, sigma_mult_max_bps=10_000,
-            min_mint=10_000, max_mint=1_000_000, min_output=100, max_output=10_000_000,
+            min_mint=10_000, max_mint=10_000_000, min_output=100, max_output=10_000_000,   # D-Q-24: $100,000 everywhere
             token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2, attest=cls.REGTEST_ATTEST)
 
     @classmethod
@@ -342,7 +342,7 @@ class Params(object):
             class_min=[34_560, 103_681, 207_361], class_max=[103_680, 207_360, 420_480],
             base_ratio_bps=[30_000, 40_000, 50_000],
             vol_window=2_016, vol_step=48, vol_periods_per_year=8_760, sigma_mult_max_bps=10_000,
-            min_mint=10_000, max_mint=250_000, min_output=100, max_output=10_000_000,   # H-12
+            min_mint=10_000, max_mint=10_000_000, min_output=100, max_output=10_000_000,   # D-Q-24 ($100,000; H-12's $2,500 reversed)
             token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2,
             attest_arm_min=7, attest={'attest_fee_bps': 5_000}, mint_requires_armed=True)   # H-2, H-4, H-1
 

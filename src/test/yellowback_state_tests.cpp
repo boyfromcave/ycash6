@@ -1305,7 +1305,8 @@ BOOST_AUTO_TEST_CASE(mint2_every_clause_voids)
     { MintOpts o; o.termClass = 3; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o), &invalid), "bad-mint-class"); }
     BOOST_CHECK(invalid);                                   // U-21: a failing mint is an invalid transaction
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(5000, 48, f.tip - 1)), "bad-mint-amount");
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(1000001, 48, f.tip - 1)), "bad-mint-amount");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000001, 48, f.tip - 1)), "bad-mint-amount");   // D-Q-24: $100,000 + one cent
+    BOOST_CHECK_EQUAL(f.P.maxMint, 10000000);
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, (int)LOCKTIME_THRESHOLD - f.P.grace - (f.tip - 1), f.tip - 1)), "bad-mint-lock-height");
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 47, f.tip - 1)), "bad-mint-lock-height");     // below class A
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1)), "bad-mint-lock-height");     // class A, 97 blocks

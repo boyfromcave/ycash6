@@ -803,7 +803,7 @@ class MintTests(unittest.TestCase):
         coll = kw.pop('collateral', None)
         if coll is None:
             tc = kw.get('term_class', 0)
-            coll = collateral_for(c, cents if 10_000 <= cents <= 1_000_000 else 10_000, ref, tc if tc in (0, 1, 2) else 0)
+            coll = collateral_for(c, cents if 10_000 <= cents <= 10_000_000 else 10_000, ref, tc if tc in (0, 1, 2) else 0)
         fee_key = kw.pop('fee_key', KEY1)
         raw = c.mint_tx(cents, lock_blocks, ref, coll, fee_key=fee_key, **kw)
         c.mine((1, 50_000, 0, KEY2), [raw])
@@ -867,7 +867,7 @@ class MintTests(unittest.TestCase):
     def test_mint2_verdicts(self):
         self.assertVoid(self.mint(term_class=3), 'bad-mint-class')
         self.assertVoid(self.mint(cents=9_999), 'bad-mint-amount')
-        self.assertVoid(self.mint(cents=1_000_001), 'bad-mint-amount')
+        self.assertVoid(self.mint(cents=10_000_001), 'bad-mint-amount')      # D-Q-24: $100,000 + one cent
         self.assertVoid(self.mint(lock_height=ym.LOCKTIME_THRESHOLD - 24), 'bad-mint-lock-height')
         self.assertVoid(self.mint(ref_height=self.c.height + 1, collateral=10 ** 12), 'bad-mint-ref-height')   # ref = H
         self.assertVoid(self.mint(ref_height=self.c.height - 40), 'bad-mint-ref-height')          # ref = H - 41
