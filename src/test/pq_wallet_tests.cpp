@@ -365,7 +365,10 @@ BOOST_AUTO_TEST_CASE(wallet_derivation_and_walletdb)
         BOOST_CHECK(k0 == WalletDerived(1, 0).GetID());   // 6.20.0: IKM = the mnemonic raw seed (the HD-seed vector is ycash-dd's)
         BOOST_CHECK(k1 == WalletDerived(1, 1).GetID());
         BOOST_CHECK(f0 == WalletDerived(2, 0).GetID());
-        BOOST_CHECK_EQUAL(w.GetPQKeys().size(), 3U);
+        // 6.20.0 (review B I-2): the issued keys and PQ_KEY_LOOKAHEAD more per scheme
+        BOOST_CHECK_EQUAL(w.mapPQIssued[1], 2U);
+        BOOST_CHECK_EQUAL(w.mapPQIssued[2], 1U);
+        BOOST_CHECK_EQUAL(w.GetPQKeys().size(), 2U + PQ_KEY_LOOKAHEAD + 1U + PQ_KEY_LOOKAHEAD);
         BOOST_CHECK(w.mapPQKeyCreateTime.count(k0));
     }
     {
@@ -406,7 +409,8 @@ BOOST_AUTO_TEST_CASE(wallet_derivation_and_walletdb)
         bool fFirstRun;
         BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
         LOCK(w.cs_wallet);
-        BOOST_CHECK_EQUAL(w.GetPQKeys().size(), 5U);
+        BOOST_CHECK_EQUAL(w.GetPQKeys().size(), 4U + PQ_KEY_LOOKAHEAD + 1U + PQ_KEY_LOOKAHEAD);   // 6.20.0: + lookahead
+        BOOST_CHECK_EQUAL(w.mapPQIssued[1], 4U);                                                  // "pqissued" reloaded
         BOOST_REQUIRE(w.Unlock(SecureString("pq-pass")));
         CPQKey key;
         BOOST_CHECK(w.GetPQKey(WalletDerived(1, 3).GetID(), key));
@@ -416,6 +420,55 @@ BOOST_AUTO_TEST_CASE(wallet_derivation_and_walletdb)
     // EncryptWallet's CDB::Rewrite writes the file beside the mock environment (the working directory)
     boost::system::error_code ec;
     fs::remove(fs::current_path() / file, ec);
+}
+
+BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
+{
+    // 6.20.0 (review B I-2): wallet B, restored from wallet A's seed alone, holds A's issued PQ keys through the
+    // lookahead, marks them used when it sees them on chain (a TX_PQPKH holder, a vault owner), moves the
+    // lookahead past them and never issues them again.
+    CWallet a(Params()), b(Params());
+    LOCK2(a.cs_wallet, b.cs_wallet);
+    BOOST_REQUIRE(a.SetMnemonicSeed(TestMnemonicSeed()));
+    CPQKeyID o0, o1, o2, h0;
+    BOOST_REQUIRE(a.GetNewPQKey(1, o0) && a.GetNewPQKey(1, o1) && a.GetNewPQKey(1, o2) && a.GetNewPQKey(2, h0));
+    BOOST_REQUIRE(b.SetMnemonicSeed(TestMnemonicSeed()));
+    BOOST_CHECK(!b.HavePQKey(o0));
+    b.TopUpPQKeys();
+    BOOST_CHECK(b.HavePQKey(o0) && b.HavePQKey(o1) && b.HavePQKey(o2) && b.HavePQKey(h0));
+    BOOST_CHECK_EQUAL(b.mapPQIssued[1], 0U);
+    BOOST_CHECK_EQUAL(b.GetPQKeys().size(), 2U * PQ_KEY_LOOKAHEAD);
+    const CPQKeyID beyond = WalletDerived(1, PQ_KEY_LOOKAHEAD).GetID();
+    BOOST_CHECK(!b.HavePQKey(beyond));
+    BOOST_CHECK(IsMine(b, GetScriptForDestination(o2)) == ISMINE_SPENDABLE);
+
+    // B sees a TX_PQPKH output to o2: index 2 is used, the next issued is 3, the lookahead reaches index 22.
+    b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(o2), 1000)));
+    BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+    BOOST_CHECK(b.HavePQKey(beyond));
+    // and a vault V whose owner is the Falcon key h0 (index 0 of scheme 2)
+    vault::VaultParams vp;
+    vp.tag = {'T', 'E', 'S', 'T'};
+    vp.setId = vp.cancelSetId = uint256S("0x80");
+    vp.delay = 5;
+    vp.ownerHeight = 1000;
+    vp.owner = h0;
+    const CScript v = vault::BuildVault(vp);
+    BOOST_REQUIRE(!v.empty());
+    b.NotePQKeysUsed(CTransaction(SpendTx(v, 1000)));
+    BOOST_CHECK_EQUAL(b.mapPQIssued[2], 1U);
+    // a key below the issued index changes nothing; an output to a key B does not hold changes nothing
+    b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(o0), 1000)));
+    b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForDestination(CPQKeyID(1, uint256S("0x99"))), 1000)));
+    BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+    CPQKeyID next, nextF;
+    BOOST_REQUIRE(b.GetNewPQKey(1, next) && b.GetNewPQKey(2, nextF));
+    BOOST_CHECK(next == WalletDerived(1, 3).GetID());
+    BOOST_CHECK(nextF == WalletDerived(2, 1).GetID());
+    // A issues the same next keys (the two wallets agree)
+    CPQKeyID an;
+    BOOST_REQUIRE(a.GetNewPQKey(1, an));
+    BOOST_CHECK(an == next);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -12,6 +12,7 @@
 #include "coincontrol.h"
 #include "core_io.h"
 #include "crypto/pq/scheme.h"
+#include "vault/template.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "consensus/consensus.h"
@@ -519,20 +520,113 @@ bool CWallet::GetNewPQKey(uint8_t scheme, CPQKeyID& idOut)
     if (!seed.has_value())
         return false;
     const RawHDSeed raw = seed.value().RawSeed();
-    uint32_t index = mapPQNextIndex.count(scheme) ? mapPQNextIndex[scheme] : 0;
-    CPQKey key;
-    for (;; index++) {
-        if (index == CPQKey::PQ_INDEX_NONE)
-            return false;
-        if (!key.Set(scheme, DerivePQSeed(raw.data(), raw.size(), scheme, index), index))
-            return false;
-        if (!HavePQKey(key.GetID()))
-            break;
-    }
-    if (!AddPQKeyWithTime(key, GetTime()))
+    // 6.20.0 (review B I-2): the next index is the next one *issued* (or seen in use, MarkPQKeyUsed), not the
+    // next one held: the wallet holds PQ_KEY_LOOKAHEAD keys beyond it (TopUpPQKeys), and hands those out in
+    // order. ycash-dd has no lookahead and issues the lowest index above every held key.
+    const uint32_t index = mapPQIssued.count(scheme) ? mapPQIssued[scheme] : 0;
+    if (index == CPQKey::PQ_INDEX_NONE)
         return false;
+    CPQKey key;
+    if (!key.Set(scheme, DerivePQSeed(raw.data(), raw.size(), scheme, index), index))
+        return false;
+    if (!HavePQKey(key.GetID()) && !AddPQKeyWithTime(key, GetTime()))
+        return false;
+    if (!SetPQIssued(scheme, index + 1))
+        return false;
+    TopUpPQKeys(scheme);
     idOut = key.GetID();
     return true;
+}
+
+bool CWallet::SetPQIssued(uint8_t scheme, uint32_t next)
+{
+    AssertLockHeld(cs_wallet);
+    mapPQIssued[scheme] = next;
+    if (!fFileBacked)
+        return true;
+    return CWalletDB(strWalletFile).WritePQIssued(scheme, next);
+}
+
+bool CWallet::LoadPQIssued(uint8_t scheme, uint32_t next)
+{
+    AssertLockHeld(cs_wallet);
+    mapPQIssued[scheme] = next;
+    return true;
+}
+
+void CWallet::TopUpPQKeys(std::optional<uint8_t> only)
+{
+    LOCK(cs_wallet);
+    if (IsLocked())
+        return;
+    const std::optional<MnemonicSeed> seed = GetMnemonicSeed();
+    if (!seed.has_value())
+        return;
+    const RawHDSeed raw = seed.value().RawSeed();
+    // The (scheme, index) pairs held now (readable while locked; here the wallet is unlocked anyway).
+    std::set<std::pair<uint8_t, uint32_t>> held;
+    for (const CPQKeyID& id : GetPQKeys()) {
+        std::vector<unsigned char> pk;
+        uint32_t index;
+        if (GetPQKeyInfo(id, pk, index) && index != CPQKey::PQ_INDEX_NONE) held.insert(std::make_pair(id.scheme, index));
+    }
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        if (only.has_value() && only.value() != scheme)
+            continue;
+        if (!mapPQIssued.count(scheme) && !SetPQIssued(scheme, 0))   // the record a reloaded wallet starts from
+            return;
+        const uint32_t issued = mapPQIssued[scheme];
+        const uint32_t end = issued > CPQKey::PQ_INDEX_NONE - PQ_KEY_LOOKAHEAD ? CPQKey::PQ_INDEX_NONE : issued + PQ_KEY_LOOKAHEAD;
+        for (uint32_t index = issued; index < end; index++) {
+            if (held.count(std::make_pair(scheme, index)))
+                continue;
+            CPQKey key;
+            if (!key.Set(scheme, DerivePQSeed(raw.data(), raw.size(), scheme, index), index) || !AddPQKeyWithTime(key, GetTime())) {
+                LogPrintf("TopUpPQKeys: cannot derive post-quantum key %d:%u\n", (int)scheme, index);
+                return;
+            }
+        }
+    }
+}
+
+void CWallet::MarkPQKeyUsed(const CPQKeyID& id)
+{
+    AssertLockHeld(cs_wallet);
+    std::vector<unsigned char> pk;
+    uint32_t index;
+    if (!GetPQKeyInfo(id, pk, index) || index == CPQKey::PQ_INDEX_NONE)
+        return;
+    if (mapPQIssued.count(id.scheme) && index < mapPQIssued[id.scheme])
+        return;
+    if (!SetPQIssued(id.scheme, index + 1))
+        return;
+    TopUpPQKeys(id.scheme);   // a locked wallet tops up at walletpassphrase
+}
+
+void CWallet::NotePQKeysUsed(const CTransaction& tx)
+{
+    AssertLockHeld(cs_wallet);
+    for (const CTxOut& out : tx.vout) {
+        txnouttype type;
+        std::vector<std::vector<unsigned char>> sol;
+        if (!Solver(out.scriptPubKey, type, sol))
+            continue;
+        std::optional<CPQKeyID> id;
+        if (type == TX_PQPKH) {
+            id = CPQKeyID(sol[0][0], uint256(sol[1]));
+        } else if (type == TX_VAULT) {
+            vault::VaultParams vp;
+            if (vault::ParseVault(out.scriptPubKey, vp)) id = vp.owner;
+        } else if (type == TX_VAULT_INTENT) {
+            vault::IntentParams ip;
+            if (vault::ParseIntent(out.scriptPubKey, ip)) id = ip.owner;
+        } else if (type == TX_PQCHANNEL) {
+            PQChannelParams cp;
+            if (MatchPQChannel(out.scriptPubKey, cp)) id = cp.client;
+        }
+        if (id.has_value() && HavePQKey(id.value()))
+            MarkPQKeyUsed(id.value());
+    }
 }
 
 bool CWallet::AddPQKey(const CPQKey& key)
@@ -1451,6 +1545,7 @@ bool CWallet::Unlock(const SecureString& strWalletPassphrase)
                 if (!this->HaveMnemonicSeed()) {
                     this->GenerateNewSeed();
                 }
+                TopUpPQKeys();   // 6.20.0 (review B I-2): the lookahead a locked wallet could not derive
                 return true;
             }
         }
@@ -4230,6 +4325,11 @@ bool CWallet::AddToWalletIfInvolvingMe(
 {
     { // extra scope left in place for backport whitespace compatibility
         AssertLockHeld(cs_wallet);
+
+        // 6.20.0 (review B I-2): an output paying (or owned by) a PQ key the wallet holds ahead of its next index
+        // marks that key used, so the lookahead moves past it and GetNewPQKey never hands it out again. Rescans
+        // see every block's transactions here, so a wallet restored from its seed re-finds its PQ keys.
+        NotePQKeysUsed(tx);
 
         // Check whether the transaction is already known by the wallet.
         bool fExisted = mapWallet.count(tx.GetHash()) != 0;
@@ -7621,6 +7721,8 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
             walletInstance->GenerateNewSeed();
         }
     }
+    // 6.20.0 (review B I-2): the post-quantum key lookahead (an encrypted wallet derives it at walletpassphrase).
+    walletInstance->TopUpPQKeys();
 
     // Set sapling migration status
     walletInstance->fSaplingMigrationEnabled = GetBoolArg("-migration", false);

@@ -486,6 +486,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
             }
             if (pwalletMain->HavePQKey(pqkey.GetID())) {
                 LogPrintf("Skipping import of a post-quantum key (key already present)\n");
+                pwalletMain->MarkPQKeyUsed(pqkey.GetID());   // 6.20.0 (review B I-2): never issued again
                 continue;
             }
             const int64_t nTime = DecodeDumpTime(vstr[1]);
@@ -493,6 +494,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
                 fGood = false;
                 continue;
             }
+            pwalletMain->MarkPQKeyUsed(pqkey.GetID());       // 6.20.0 (review B I-2): an imported key is in use
             nTimeBegin = std::min(nTimeBegin, nTime);
             continue;
         }

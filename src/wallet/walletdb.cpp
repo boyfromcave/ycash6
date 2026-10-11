@@ -163,6 +163,12 @@ bool CWalletDB::WritePQKey(const CPQKeyID& id, const CPQKeyRecord& rec)
     return Write(std::make_pair(std::string("pqkey"), id), rec, false);
 }
 
+bool CWalletDB::WritePQIssued(uint8_t scheme, uint32_t next)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("pqissued"), scheme), next);
+}
+
 bool CWalletDB::WriteCryptedPQKey(const CPQKeyID& id, const CPQKeyRecord& rec)
 {
     nWalletDBUpdateCounter++;
@@ -875,6 +881,14 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         else if (strType == "witnesscachesize")
         {
             ssValue >> pwallet->nWitnessCacheSize;
+        }
+        else if (strType == "pqissued")
+        {
+            uint8_t scheme;
+            uint32_t next;
+            ssKey >> scheme;
+            ssValue >> next;
+            pwallet->LoadPQIssued(scheme, next);
         }
         else if (strType == "pqkey" || strType == "cpqkey")
         {

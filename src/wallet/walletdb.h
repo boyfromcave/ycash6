@@ -465,6 +465,8 @@ public:
     //! Post-quantum keys: "pqkey" (plain seed) and "cpqkey" (encrypted seed, which erases "pqkey").
     bool WritePQKey(const CPQKeyID& id, const CPQKeyRecord& rec);
     bool WriteCryptedPQKey(const CPQKeyID& id, const CPQKeyRecord& rec);
+    //! 6.20.0 (review B I-2): "pqissued", the next PQ key index to issue per scheme.
+    bool WritePQIssued(uint8_t scheme, uint32_t next);
 
     bool WriteCScript(const uint160& hash, const CScript& redeemScript);
 
