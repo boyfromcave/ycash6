@@ -48,12 +48,12 @@ Steps (each can be skipped with --skip NAME[,NAME]):
              every Yellowback node
   bridge     the WYEC bridge persona (bridge-sim) in both shapes: lock -> mock burn -> intent ->
              release; a rogue intent cancelled; owner recovery when the guardians fall silent
-  falcon     TOK-PQ at the Falcon height (quantum spec R-A2, F-7). With `up --falcon-height N` (N above this step's start):
+  falcon     TOK-PQ at the Falcon height (quantum spec R-A2, F-7). With `up --pqfalconheight N` (N above this step's start):
              a P2PKH transfer mined at N-1; at N the default holder address is FN-DSA-512, yed_send to P2PKH and a raw P2PKH
              transfer are refused by every Yellowback mempool (bad-yed-holder), a Falcon transfer mines at N, a P2PKH coin
              migrates to a Falcon holder; then invalidateblock at N-1 on every node: Falcon inactive again, the P2PKH
              transfer back in the mempool, a new P2PKH transfer accepted, the chain re-crosses N, one state hash. On the
-             default devnet (Falcon from the vault activation, as mainnet) only the TOK-PQ rows; `up --no-falcon`: SKIP
+             default devnet (Falcon from the vault activation, as mainnet) only the TOK-PQ rows; `up --no-pqfalcon`: SKIP
   final      one state hash on every node (YED and vault), chain-viz and lightwalletd agree
 
     ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk [--dir DIR] [--transcript PATH] [--skip ...] [--summary PATH]
@@ -1265,13 +1265,13 @@ class Walk:
         h = self.pq_params().get("falconHeight")
         self.step("falcon", "Falcon (FN-DSA-512) activation and TOK-PQ: P2PKH holders stop, Falcon holders continue; a reorg across the Falcon height")
         if h is None or h < 0:
-            self.note("SKIP: no Falcon height on this devnet (`up --no-falcon`); `up --falcon-height N` walks the activation")
+            self.note("SKIP: no Falcon height on this devnet (`up --no-pqfalcon`); `up --pqfalconheight N` walks the activation")
             self.summary["steps"]["falcon"] = "SKIP: no -pqfalconheight"
             return
         self.ensure_yed()
         if h <= self.tip() + 2:
             self.note("Falcon has been active since height %d (the default devnet mirrors mainnet: Falcon live with the vault upgrade); "
-                      "the activation and the reorg across it need `up --falcon-height N` with N above this step's start height (%d)" % (h, self.tip()))
+                      "the activation and the reorg across it need `up --pqfalconheight N` with N above this step's start height (%d)" % (h, self.tip()))
             t = self.tok_pq_rows("Falcon active since %d" % h)
             self.mine(1)
             self.statehashes("TOK-PQ")

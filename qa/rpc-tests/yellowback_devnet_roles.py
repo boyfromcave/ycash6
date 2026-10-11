@@ -25,7 +25,7 @@ asserts:
      attestor's are byte-equal at every sample; nothing is pinned before the shock, and whatever
      the shock pins clears within one pin window of it;
   5. the post-quantum line (quantum plan §4.9, the PQ minter and PQ claimant personas): the devnet runs
-     with Falcon live from the vault activation, as mainnet does (``--no-falcon`` runs the pre-Falcon
+     with Falcon live from the vault activation, as mainnet does (``--no-pqfalcon`` runs the pre-Falcon
      regime instead); every persona vault's owner is SLH-DSA (ownerScheme 1, a v4 MINT, a 53-character owner
      address), tokens go to FN-DSA-512 holders (P2PKH before Falcon), a redeem carries an SLH-DSA owner
      signature, the trader's transfers spend PQ holder coins, and the liquidator's claim burns YED it holds
@@ -170,7 +170,7 @@ class Preset:
         viz = [] if os.environ.get('CHAINVIZ_BIN') else ['--no-viz']
         rc = self.devnet('up', '--force', '--role', self.role, '--portseed', str(self.portseed), '--seed', str(self.options.seed),
                          '--heartbeat-rate', str(HEARTBEAT_RATE), '--walk-tick', str(WALK_TICK), '--sim-profile', 'fast',
-                         '--bitcoind', self.bitcoind, *viz, *(['--no-falcon'] if self.options.no_falcon else []), timeout=1200)
+                         '--bitcoind', self.bitcoind, *viz, *(['--no-pqfalcon'] if self.options.no_pqfalcon else []), timeout=1200)
         check(rc == 0, 'up --role %s exited %d (log: %s)' % (self.role, rc, self.log.name))
         self.state = json.load(open(os.path.join(self.directory, 'devnet.json')))
         self.say('up: height %d, session %s' % (self.tip(), os.path.basename(self.state['session'] or '')))
@@ -356,7 +356,7 @@ class Preset:
     def assert_pq(self):
         """The PQ minter, holder and claimant: what the personas' pq-* tallies say, checked against the chain."""
         pq = self.node(0).yed_getinfo()['params']['pq']
-        falcon = not self.options.no_falcon
+        falcon = not self.options.no_pqfalcon
         check(pq['falconActive'] is falcon and pq['schemes'] == ([1, 2] if falcon else [1]), 'params.pq %s (Falcon expected %s)' % (pq, falcon))
         holder = 'falcon' if falcon else 'p2pkh'
 
@@ -465,7 +465,7 @@ def main():
     parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--presets', default='user,attestor,pool')
     parser.add_argument('--nocleanup', action='store_true')
-    parser.add_argument('--no-falcon', action='store_true', help='the pre-Falcon regime (up --no-falcon); default: Falcon live with the vault upgrade, as mainnet')
+    parser.add_argument('--no-pqfalcon', action='store_true', help='the pre-Falcon regime (up --no-pqfalcon); default: Falcon live with the vault upgrade, as mainnet')
     parser.add_argument('--noshutdown', action='store_true')
     # the runner's other flags, accepted and ignored
     parser.add_argument('--cachedir'); parser.add_argument('--tracerpc', action='store_true'); parser.add_argument('--coveragedir')

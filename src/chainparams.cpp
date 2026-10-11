@@ -153,6 +153,10 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
+        // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
+        // from the vault upgrade's first block.
+        consensus.pqFalconHeight = 0;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -453,6 +457,10 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
+        // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
+        // from the vault upgrade's first block.
+        consensus.pqFalconHeight = 0;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

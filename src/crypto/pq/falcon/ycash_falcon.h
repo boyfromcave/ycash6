@@ -32,13 +32,17 @@ extern "C" {
 
 /*
  * Verify a padded Falcon-512 signature (sig, siglen) on (m, mlen) under pk
- * (YCASH_FALCON512_PUBLICKEYBYTES bytes). Verbatim the logic of PQClean's
- * crypto_sign_verify / do_verify: integer arithmetic only (vrfy.c, codec.c,
- * common.c, fips202.c). Returns 0 on success, -1 on failure. The caller
- * enforces the exact signature length.
+ * (pk, pklen). The logic of PQClean's crypto_sign_verify / do_verify: integer
+ * arithmetic only (vrfy.c, codec.c, common.c, fips202.c). Returns 0 on
+ * success, -1 on failure. YCASH LOCAL PATCH (Falcon consensus audit
+ * 2026-10-10, F-1): siglen must be exactly YCASH_FALCON512_SIGBYTES and pklen
+ * exactly YCASH_FALCON512_PUBLICKEYBYTES, so the unpadded "compact" form
+ * PQClean's verifier accepts at its own length is refused here as well as by
+ * pq::Verify's gate (two independent length checks on the consensus path).
  */
 int ycash_falcon512_verify(const uint8_t *sig, size_t siglen,
-                           const uint8_t *m, size_t mlen, const uint8_t *pk);
+                           const uint8_t *m, size_t mlen,
+                           const uint8_t *pk, size_t pklen);
 
 /*
  * Key generation from a caller-supplied seed: SHAKE256(seed) drives

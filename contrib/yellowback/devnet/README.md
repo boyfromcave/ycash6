@@ -41,8 +41,8 @@ yellowback-devnet up                # ~6 min on 6.20.0: 8 nodes, node 0 funded, 
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
 yellowback-devnet up --no-attest    # five nodes, no attestors: never ARMED
 yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
-yellowback-devnet up --falcon-height N   # Falcon (FN-DSA-512) from height N instead of from the vault activation (section 8)
-yellowback-devnet up --no-falcon    # the pre-Falcon regime: YED holders P2PKH or SLH-DSA, TOK-PQ never binds (section 8)
+yellowback-devnet up --pqfalconheight N   # Falcon (FN-DSA-512) from height N instead of from the vault activation (section 8)
+yellowback-devnet up --no-pqfalcon  # the pre-Falcon regime: YED holders P2PKH or SLH-DSA, TOK-PQ never binds (section 8)
 yellowback-devnet status | check | mine N [node] [--untagged] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
 yellowback-devnet lightwalletd [start|stop|status] [--baseline] [--port 9067] [--extra=-yellowback]   # lightwalletd-dd against node0 (docs/plans/yellowback-lightwalletd-plan.md)
@@ -51,8 +51,8 @@ yellowback-devnet vectors [--out DIR] [--seed N] [--count N]   # JSON signing/ad
 
 `vectors` writes four JSON files (default `DIR/vectors`) that `yew/core/tests/vectors/` carries: `transparent.json` (N transparent v4 transactions with `unsignedHex`, `prevouts`, per-input `keys`, `branchId`, `sighashPerInput`, the node's `signedHex`, `txid` and `pythonMatches`: whether pure-Python RFC 6979 signing reproduces the node's bytes), `addresses.json` (WIF, pubkey, HASH160, the `sm…`/`s1…` and `yr…`/`yb…` renderings of ~5 keys), `templates.json` (a node-built MINT with its carrier when ARMED, TRANSFER and REDEEM: `hex`, `decoded`, `yed_gettxinfo`, `payloadHex`, `yed_decodepayload`) and `params.json` (`yed_getinfo`, upgrades and branch ids, fees, the protocol constants, the address version bytes of all three networks). `--seed` fixes the structure; the keys come from node 0's keypool. It mines on the automated pools round-robin (blocks node 0 mines carry no quote tag and would drain the price windows) and needs node 0 to hold ~5x the minimum mint in YEC (`--fund-from N` tops it up from node N).
 
-On the post-quantum line (`upgrade/quantum-vaults`) every `up` passes `-pqfalconheight` to **every** node, the stock
-node included (it is a consensus parameter): by default `0`, so Falcon is live from the vault activation exactly as
+On the post-quantum line (`upgrade/quantum-vaults`) every `up` passes the Falcon height to **every** node, the stock
+node included (it is a consensus parameter): by default `-pqfalcon=1` (= `-pqfalconheight=0`), so Falcon is live from the vault activation exactly as
 on mainnet (owner decision 2026-10-10, Falcon from day one), and `up` and `status` print one line on the regime
 (`post-quantum: Falcon ACTIVE (falconHeight 103, ...)`). Section 8 has the rest.
 
@@ -281,9 +281,9 @@ else is `bad-yed-holder`). Falcon's activation is the consensus parameter `pqFal
 
 | `up` flag | `-pqfalconheight` | regime |
 |---|---|---|
-| (default) | `0` | **Falcon live from the vault activation, as mainnet**: `params.pq.falconHeight` reads the vault height (103), `schemes [1, 2]`, `yed_getnewaddress` returns 53-character FN-DSA-512 holder addresses, a wallet mint's token goes to a Falcon key, P2PKH holders are refused |
-| `--falcon-height N` | `N` | P2PKH (or SLH-DSA) holders until `N - 1`, TOK-PQ from `N`: the walk's activation rows |
-| `--no-falcon` | none | the pre-Falcon regime throughout (SLH-DSA owners, P2PKH or SLH-DSA holders, `schemes [1]`) |
+| (default) | `-pqfalcon=1` (= `0`) | **Falcon live from the vault activation, as mainnet**: `params.pq.falconHeight` reads the vault height (103), `schemes [1, 2]`, `yed_getnewaddress` returns 53-character FN-DSA-512 holder addresses, a wallet mint's token goes to a Falcon key, P2PKH holders are refused |
+| `--pqfalconheight N` | `N` | P2PKH (or SLH-DSA) holders until `N - 1`, TOK-PQ from `N`: the walk's activation rows |
+| `--no-pqfalcon` | none | the pre-Falcon regime throughout (SLH-DSA owners, P2PKH or SLH-DSA holders, `schemes [1]`) |
 
 Nothing else changes for a person at the GUI: `yed_mint` keeps its arguments and draws a fresh SLH-DSA owner
 (`ownerAddress`, 53 characters, `yr…` on regtest); the owner's redeem carries a ~7.9 KB SLH-DSA signature; the
@@ -308,8 +308,8 @@ export YELLOWBACK_LWD_REPO=<that lightwalletd-dd tree>                          
 
 `--role user` keeps the world moving (heartbeat, price walk, personas); `up --role attestor --no-heartbeat
 --no-walk --no-sim` is the still devnet the walk needs. A client that must see the activation itself starts with
-`--falcon-height N` and mines across it (`mine N`); one that must see the old regime uses `--no-falcon`.
-`devnet.json` records the choice as `pq_falcon_height` (`null` for `--no-falcon`).
+`--pqfalconheight N` and mines across it (`mine N`); one that must see the old regime uses `--no-pqfalcon`.
+`devnet.json` records the choice as `pq_falcon_height` (`null` for `--no-pqfalcon`).
 
 ### The walk's PQ rows (`upgrade-walk` steps `pq` and `falcon`)
 
@@ -320,7 +320,7 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
 
 # Falcon activated mid-walk: the steps up to `bridge` run before Falcon (P2PKH holders, an SLH-DSA channel
 # closed cooperatively); `falcon` mines to N-2 and walks the activation and a reorg across it
-yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 480 --falcon-height 700
+yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 480 --pqfalconheight 700
 ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk
 ```
 
@@ -333,13 +333,13 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
   `TX_PQCHANNEL` (D-Q-19): before Falcon an SLH-DSA client is funded and closed cooperatively (the Python SLH-DSA
   signer plus the server's ECDSA), after it an SLH-DSA client is refused by every Yellowback mempool and a Falcon
   client is funded (not closed: no Falcon signer outside the node wallet, and the wallet does not sign channels).
-- `falcon`: with `--falcon-height N` (N at least 10 above the step's start; the walk reaches it near height
+- `falcon`: with `--pqfalconheight N` (N at least 10 above the step's start; the walk reaches it near height
   620): a P2PKH transfer mined at `N - 1`; at `N` the default holder address is FN-DSA-512, `yed_send` to a P2PKH
   holder and a raw P2PKH transfer are refused (`bad-yed-holder`) by every Yellowback mempool, a Falcon transfer
   mines at `N`, a P2PKH coin migrates to a Falcon holder (TOK-PQ binds outputs, not inputs); then
   `invalidateblock` of block `N - 1` on every node: Falcon inactive again for the next block, the P2PKH transfer
   back in the mempool, a fresh P2PKH transfer accepted, the chain re-crosses `N`, one state hash everywhere. On
-  the default devnet only the TOK-PQ rows run; under `--no-falcon` the step SKIPs.
+  the default devnet only the TOK-PQ rows run; under `--no-pqfalcon` the step SKIPs.
 - The invalid mint (`invalid`) and the bridge's locks (`bridge-sim lock`) use post-quantum owners
   (`vault_getnewowner`): an EC-owner V is not a vault on this line (`Shape::NONE`), only a non-standard output.
 
@@ -361,5 +361,5 @@ tallied in `sim stats` next to the action:
 | `pq-residual-pqpkh` | a claim's residual intent released to the owner's SLH-DSA `TX_PQPKH` (RED-5, F-3) |
 
 `yellowback_devnet_roles.py` asserts them (step 5 of its docstring) on the default, Falcon-live devnet;
-`--no-falcon` runs the pre-Falcon regime. `yellowback_devnet_upgrade.py` asserts the walk's `pq` and `falcon`
-evidence and takes `--falcon-height N` / `--no-falcon` the same way.
+`--no-pqfalcon` runs the pre-Falcon regime. `yellowback_devnet_upgrade.py` asserts the walk's `pq` and `falcon`
+evidence and takes `--pqfalconheight N` / `--no-pqfalcon` the same way.

@@ -223,7 +223,8 @@ struct Params
                                          //!< (default false), hashed in the Params record (M13)
     int pqFalconHeight;                  //!< the Falcon (scheme 0x02) activation height, a mirror of the consensus
                                          //!< pqFalconHeight (quantum spec R-A2, A-5) set by ParamsFromArgs; -1 = never
-                                         //!< (NO_ACTIVATION_HEIGHT: mainnet/testnet). MINT-3 admits a Falcon owner and
+                                         //!< (either height unset). Mainnet/testnet: consensus pqFalconHeight 0 (D-Q-2,
+                                         //!< Falcon from day one), so the UPGRADE_VAULT height. MINT-3 admits a Falcon owner and
                                          //!< TOK-PQ binds from it. Not in the Params record (spec §3.4: no schema change)
 
     Params();

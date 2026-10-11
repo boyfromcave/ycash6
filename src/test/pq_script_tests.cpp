@@ -701,10 +701,28 @@ BOOST_AUTO_TEST_CASE(pq_error_order)
 BOOST_AUTO_TEST_CASE(pq_flag_plumbing)
 {
     const int NONE = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-    // pqFalconHeight is unset on mainnet and testnet, and on regtest without -pqfalcon / -pqfalconheight.
-    BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetConsensus().pqFalconHeight, NONE);
-    BOOST_CHECK_EQUAL(Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconHeight, NONE);
+    // Falcon from day one (quantum plan D-Q-2, owner 2026-10-10): pqFalconHeight is 0 on mainnet and
+    // testnet, so Falcon is active exactly with UPGRADE_VAULT; regtest leaves it unset without
+    // -pqfalcon / -pqfalconheight, so a test chooses the regime.
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetConsensus().pqFalconHeight, 0);
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconHeight, 0);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).GetConsensus().pqFalconHeight, NONE);
+    for (const std::string& net : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET}) {
+        // No vault height is set on a public network yet (P8): no Falcon, no vault flags, at any height.
+        Consensus::Params pub = Params(net).GetConsensus();
+        BOOST_CHECK_EQUAL(pub.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight, NONE);
+        BOOST_CHECK(!IsPQFalconActive(pub, 0));
+        BOOST_CHECK(!IsPQFalconActive(pub, 10000000));
+        BOOST_CHECK_EQUAL(GetVaultScriptFlags(10000000, pub), 0U);
+        // Once P8 sets the vault height, Falcon (SCRIPT_VERIFY_PQ_FALCON) comes with it, at the same block.
+        pub.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 3000000;
+        BOOST_CHECK(!IsPQFalconActive(pub, 2999999));
+        BOOST_CHECK_EQUAL(GetVaultScriptFlags(2999999, pub), 0U);
+        BOOST_CHECK(IsPQFalconActive(pub, 3000000));
+        BOOST_CHECK(GetVaultScriptFlags(3000000, pub) & SCRIPT_VERIFY_VAULT);
+        BOOST_CHECK(GetVaultScriptFlags(3000000, pub) & SCRIPT_VERIFY_PQ_FALCON);
+        BOOST_CHECK(GetVaultScriptFlags(3000001, pub) & SCRIPT_VERIFY_PQ_FALCON);
+    }
 
     // IsPQFalconActive and GetVaultScriptFlags: the vault upgrade at 100, Falcon from pqFalconHeight
     // (quantum spec R-A2); a Falcon height below the upgrade's waits for the upgrade.
@@ -736,7 +754,11 @@ BOOST_AUTO_TEST_CASE(pq_flag_plumbing)
     SelectParams(CBaseChainParams::REGTEST);
     BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 0);
     SelectParams(CBaseChainParams::MAIN);
-    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, NONE);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 0);                // mainnet's own value
+    mapArgs["-pqfalconheight"] = "250";
+    SelectParams(CBaseChainParams::MAIN);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 0);                // regtest flags never reach it
+    mapArgs.erase("-pqfalconheight");
     mapArgs["-pqfalconheight"] = "250";
     SelectParams(CBaseChainParams::REGTEST);
     BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 250);
