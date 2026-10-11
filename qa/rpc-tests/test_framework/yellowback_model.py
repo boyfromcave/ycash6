@@ -2041,6 +2041,8 @@ class YellowbackModel(object):
         s = self.snapshot(register_height - 1)
         if s is None or s.virtual or s.p_mint is None or s.p_mint <= 0 or not p.is_armed(s.attest.status):
             return p.bond_min_no_price_zat
+        if s.halt_mask & HALT_DIVERGENCE:                    # owner ruling A1/B1: a diverging price is no price
+            return p.bond_min_no_price_zat
         if register_height <= s.attest.trigger_height + p.founding_window:
             return p.bond_min_no_price_zat
         return bond_min_priced_zat(s.p_mint, p)

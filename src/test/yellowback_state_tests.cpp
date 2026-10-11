@@ -2762,6 +2762,20 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_regimes_and_registration_price)
     BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 5 * ONE);
     BOOST_CHECK_EQUAL(bondMin(), 1 * COIN);                   // $5: $4 is 0.8 YEC, the 1-YEC floor binds
     BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
+    // owner ruling A1/B1: HALT_DIVERGENCE at the snapshot is no price. A fall to $1.50 trips HALT-3 (the fast median more
+    // than DIVERGENCE_BPS below the mid) while pMint is still defined; the priced minimum there would be 4 YEC x 2/3 = 2.67
+    // YEC, the rule gives the no-price 10 YEC; once the windows settle at $1.50 the bit clears and the priced value returns
+    {
+        int n = 0;
+        while (!(f.Snap(f.tip).haltMask & HALT_DIVERGENCE) && n++ < 40) quote(1500000);
+        BOOST_REQUIRE(f.Snap(f.tip).haltMask & HALT_DIVERGENCE);
+        BOOST_REQUIRE(f.Snap(f.tip).PMint().has_value());
+        BOOST_CHECK(BondMinPricedZat(f.Snap(f.tip).pMint, f.P) < 10 * COIN);
+        BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);
+        for (int i = 0; i < 70; i++) quote(1500000);
+        BOOST_REQUIRE_EQUAL(f.Snap(f.tip).haltMask, 0u);
+        BOOST_CHECK_EQUAL(bondMin(), 266666667);                  // ceil(4e14 / 1.5e6)
+    }
     // and an ELIGIBLE record is never re-judged: at $0.05 the minimum is the 10-YEC cap, seq 4 (4 YEC) stays ELIGIBLE
     for (int i = 0; i < 70; i++) quote(50000);
     BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 50000);

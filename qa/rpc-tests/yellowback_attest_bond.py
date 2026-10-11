@@ -21,6 +21,9 @@ no-price cap below $0.40/YEC (mainnet 20,000 YEC / 2,000 YEC / $8,000).
 5. The bump: seats are N_SLOTS (5) by bondZat x age in YEC. A 10-YEC join takes the seat of the 1-YEC
    minimum bond at its maturity, and a second 10-YEC join takes the 4-YEC one's at the first block where
    10 x age > 4 x min(age, AGE_CAP); the bumped records stay ELIGIBLE members.
+6. Owner ruling A1/B1: a snapshot with HALT_DIVERGENCE is "no price". Two of three pools inflate $1 -> $5: bondMin
+   walks down to the 1-YEC floor and HALT-3 (which fires on a fall only) never trips; when the inflation stops the
+   fast median falls below the mid, DIVERGENCE trips and bondMin is the no-price 10 YEC.
 The Python model replays the chain (the rule is mirrored in yellowback_model.py).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer.
@@ -185,6 +188,34 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_equal(user.getblockcount(), h)
         assert_equal(self.seated(), sorted(founders + [z, w]))
         assert_equal(self.status(x4), 'ELIGIBLE')
+        print('6. owner ruling A1/B1: pool inflation, and HALT_DIVERGENCE as "no price"')
+        self.reprice('1')
+        assert_equal(self.bond_min(), 4 * COIN)
+        for i in POOLS[:2]:
+            self.quote(i, '5')                           # two of three pools inflate to $5, one stays honest at $1
+        ramp, floor_at, diverged = [], None, False
+        for n in range(1, REPRICE_BLOCKS + 1):
+            self.mine_round_robin(POOLS, 1)
+            halts = user.yed_getstats()['haltMask']
+            diverged = diverged or 'DIVERGENCE' in halts
+            ramp.append(self.bond_min())
+            if floor_at is None and ramp[-1] == COIN:
+                floor_at = n
+        print('   inflation: bondMin per block %s; the 1-YEC floor after %s blocks; DIVERGENCE seen: %s'
+              % ([b / COIN for b in ramp[:floor_at or len(ramp)]], floor_at, diverged))
+        assert floor_at is not None
+        assert not diverged                              # HALT-3 fires on a fall only: the rise never trips it
+        for i in POOLS[:2]:
+            self.quote(i, '1')                           # the inflation stops: the fast median falls below the mid
+        tripped = None
+        for n in range(1, REPRICE_BLOCKS + 1):
+            self.mine_round_robin(POOLS, 1)
+            if 'DIVERGENCE' in user.yed_getstats()['haltMask']:
+                tripped = n
+                break
+        assert tripped is not None
+        print('   the fall trips DIVERGENCE after %d blocks; bondMin is then the no-price %s YEC' % (tripped, self.bond_min() / COIN))
+        assert_equal(self.bond_min(), 10 * COIN)
         assert_same_statehash(self.enforcing_nodes(), 'D-Q-28')
         model_check(self.nodes[POOLS[0]])
 

@@ -37,7 +37,8 @@ Read this first; where the sections below disagree, this section wins (upgrade p
 - **Revival is a `SET_HEARTBEAT`** (`yed_revive <seq> <priceMicroUsd>` sends it and still returns a
   freshly signed attestation): the record is ELIGIBLE again at that block.
 - **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-28: 20,000 YEC with no attested price at
-  registration — before arming and in the founding window — else max(2,000 YEC, $8,000 at the attested price), never
+  registration — before arming, in the founding window, or while the pools' medians diverge (`DIVERGENCE` halt, owner
+  ruling) — else max(2,000 YEC, $8,000 at the attested price), never
   above 20,000 YEC; `yed_getinfo` `params.attest.bondMinZat` is the floor for a join in the next block) or locked for less than `BOND_MIN_LOCK` is recorded but never becomes ELIGIBLE.
   **Post headroom:** the floor is judged at the snapshot before the join's own block, so a bond sized at
   exactly today's `bondMinZat` can fall short if the price drops before it confirms — and then sits PENDING,

@@ -1094,6 +1094,16 @@ class MintTests(unittest.TestCase):
         c.mine_n(70, price_fn=lambda h: 5 * one)                                 # registration price binds for good
         self.assertEqual(c.model.bond_min_zat(c.height + 1), 1 * ym.COIN)
         self.assertEqual(c.model.attestors[3].status, ym.A_PENDING)
+        n = 0                                                                    # owner ruling A1/B1: divergence = no price
+        while not (c.model.snapshots[c.height].halt_mask & ym.HALT_DIVERGENCE) and n < 40:
+            c.mine_n(1, price_fn=lambda h: 1_500_000)
+            n += 1
+        self.assertTrue(c.model.snapshots[c.height].halt_mask & ym.HALT_DIVERGENCE)
+        self.assertLess(ym.bond_min_priced_zat(c.model.snapshots[c.height].p_mint, c.params), 10 * ym.COIN)
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)
+        c.mine_n(70, price_fn=lambda h: 1_500_000)
+        self.assertEqual(c.model.snapshots[c.height].halt_mask, 0)
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 266_666_667)
         c.mine_n(70, price_fn=lambda h: 50_000)                                  # never re-judged
         self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)      # $4 at $0.05 = 80 YEC, capped
         self.assertEqual(c.model.attestors[4].status, ym.A_ELIGIBLE)

@@ -289,7 +289,8 @@ int64_t AgeOrigin(const AttestorRecord& rec, const AttestState& attest, const Pa
  * last snapshot before the join; never re-read as the price moves). With no attested price there --
  * the snapshot is missing or virtual (below START_HEIGHT), its pMint (xMint, MINT-5's price when not ARMED and its upper
  * bound when ARMED) is undefined (HALT_NO_PRICE), it is not ARMED (UNARMED or TRIGGERED: the attestation layer prices
- * nothing yet), or the join is a founding member's (registerHeight <= Attest.triggerHeight + FOUNDING_WINDOW, AgeOrigin's
+ * nothing yet), has HALT_DIVERGENCE set (owner ruling A1/B1: HALT-3, the pools' fast median more than DIVERGENCE_BPS below the
+ * mid, or the mid below the slow; HALT_GLOBAL_RATIO keeps the price), or the join is a founding member's (registerHeight <= Attest.triggerHeight + FOUNDING_WINDOW, AgeOrigin's
  * test) -- bondMinNoPriceZat (20,000 YEC); else BondMinPricedZat(pMint): min(20,000 YEC, max(2,000 YEC, $8,000 at pMint)). SNAP reads it
  * only for a PENDING record; an ELIGIBLE, DORMANT or seated record is never re-judged.
  */

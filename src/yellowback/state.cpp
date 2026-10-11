@@ -1694,6 +1694,7 @@ CAmount BondMinZat(const State& st, const Params& P, int64_t registerHeight)
 {
     const std::optional<Snapshot> s = SnapshotAt(st, P, registerHeight - 1);
     if (!s.has_value() || !s->PMint().has_value() || !P.IsArmed(s->attest.IsArmed())) return P.bondMinNoPriceZat;
+    if (s->haltMask & HALT_DIVERGENCE) return P.bondMinNoPriceZat;   // owner ruling A1/B1 (D-Q-28): a diverging price is no price
     if (registerHeight <= (int64_t)s->attest.triggerHeight + P.foundingWindow) return P.bondMinNoPriceZat;   // a founding member
     return BondMinPricedZat(s->PMint().value(), P);
 }

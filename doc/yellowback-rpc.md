@@ -496,7 +496,8 @@ lowerCamelCase (`ATTEST_ARM_MIN` → `armMin`, …); `carrierValueZat` is wallet
 only. **rpcversion 8 (D-Q-28):** the attestor bond minimum follows the attested price at registration.
 `bondMinNoPriceZat` (20,000 YEC; regtest 10), `bondMinFloorZat` (2,000 YEC; regtest 1) and `bondMinUsdCents` (800,000 =
 $8,000; regtest 400) are the parameters; `bondMinZat` is computed: the floor a `SET_JOIN` in the **next** block must meet,
-from the tip's snapshot — `bondMinNoPriceZat` when that snapshot has no `pMint`, is not ARMED, or the join would be a founding
+from the tip's snapshot — `bondMinNoPriceZat` when that snapshot has no `pMint`, is not ARMED, has `DIVERGENCE` in its halt mask
+(owner ruling; `GLOBAL_RATIO` keeps the price), or the join would be a founding
 member's (`tip + 1 ≤ triggerHeight + foundingWindow`); else `min(bondMinNoPriceZat, max(bondMinFloorZat, ⌈bondMinUsdCents ·
 10⁴ · COIN / pMint⌉))`. A record is judged once, against the snapshot before its own join block; a seated or ELIGIBLE record is
 never re-judged when the price moves. Seats rank by `bondZat × age` in YEC (unchanged), so a larger bond outranks a minimum one
