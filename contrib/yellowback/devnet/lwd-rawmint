@@ -19,7 +19,9 @@ from anywhere but the gRPC surface. It never broadcasts the mint.
 Without --bundle-hex: the v2 shape (build_mint_tx), what an unarmed regtest devnet accepts.
 With it: the v3 shape — the carrier step first (build_carrier_tx, broadcast by node 0 and
 mined by node 0 so it is confirmed), then build_mint_tx_v3 spending the carrier as vin[last].
-Prints one JSON object: {"hex", "txid", "ownerPubKey", "carrierTxid"|null}.
+Prints one JSON object: {"hex", "txid", "ownerPubKey", "carrierTxid"|null}. On the post-quantum line
+"ownerPubKey" carries the owner's 66-hex pqkeyid (scheme || keyHash), not a secp256k1 key; the key name
+stays because lightwalletd's suite reads it.
 """
 import argparse
 import json
@@ -76,6 +78,7 @@ def main():
                                        fee_addr=args.fee_addr, carrier=carrier, attest_fee=attest_fee)
     else:
         hex_, owner = build_mint_tx(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat, fee_addr=args.fee_addr)
+    # "ownerPubKey": the 66-hex pqkeyid on the post-quantum line (name kept for lightwalletd's suite)
     json.dump({"hex": hex_, "txid": ym.tx_from_hex(hex_).txid, "ownerPubKey": owner, "carrierTxid": carrier_txid}, sys.stdout)
     print()
 

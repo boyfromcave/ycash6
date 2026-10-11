@@ -44,6 +44,8 @@ static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VER
  * PQSizeFee(g_yellowbackFee, size) when it has a post-quantum input -- a TX_PQPKH among `prevScripts` (a YED
  * token or a YEC coin) or the V's owner (`ownerScheme`). The size is estimated before signing: every PQ input
  * at PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
+ * The size-priced fee obeys -maxtxfee as CWallet::CreateTransaction does (wallet.cpp, "always obey the
+ * maximum"): capped, never refused (review B, Y-B sweep); never below the flat g_yellowbackFee.
  */
 CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
 {
@@ -59,7 +61,7 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
     if (schemes.empty()) return g_yellowbackFee;
     size_t bytes = 1000 + 150 * other;
     for (uint8_t scheme : schemes) bytes += PQSpendInputSize(scheme);
-    return PQSizeFee(g_yellowbackFee, bytes);
+    return std::max(g_yellowbackFee, std::min(PQSizeFee(g_yellowbackFee, bytes), maxTxFee));
 }
 
 /** SelectYec's fee follower: the fee grows when the selection takes a PQ coin (YedNetworkFee). */

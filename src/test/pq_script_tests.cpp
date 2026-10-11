@@ -867,7 +867,7 @@ BOOST_AUTO_TEST_CASE(pq_valid_signatures)
 
 BOOST_AUTO_TEST_CASE(pq_hashtype_matrix_real)
 {
-    // 6.20.0 (ycash6 port of q/op): OP_CHECKPQSIG computes the sighash through the C++ SignatureHash
+    // 6.20.0 (the 6.20.0 port of q/op): OP_CHECKPQSIG computes the sighash through the C++ SignatureHash
     // that OP_CHECKSIG uses; for a v4 (Sapling) transaction that is the ZIP-243 branch, which accepts
     // every hashtype byte (ZIP-244's strict hashtype parse applies only to v5). So with real keys and
     // signatures an undefined hashtype (0x00, 0x04, 0x41, 0xff) is consensus-valid and only STRICTENC

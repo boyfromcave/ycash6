@@ -22,6 +22,8 @@ The YED module on the post-quantum line (docs/plans/yellowback-quantum-spec.md Â
   - from the Falcon height: params.pq.falconActive, schemes [1, 2]; TOK-PQ refuses a MINT whose token output is
     P2PKH (bad-yed-holder) and admits a Falcon TX_PQPKH holder, a Falcon owner mints; a wallet mint's token and
     a wallet transfer's change go to Falcon keys, and a wallet transfer to a P2PKH holder is refused;
+  - -pqfeerate=0.01: a send spending Falcon tokens pays rate x size, and -maxtxfee caps it exactly (the wallet's
+    rule, review B of Q4);
   - the index and the Python model agree over the whole chain (model_check), equal state hashes.
 
 Nodes: 0 user, 1 stock (the fork binary without Yellowback), 2-4 pools (2 also takes PQ tokens), 5 the claimant.
@@ -91,6 +93,17 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
 
     def node_args(self, i, extra=None):
         return super().node_args(i, list(extra or []) + ['-pqfalconheight=%d' % FALCON_HEIGHT])
+
+    def send_all_fee(self, node, dest):
+        """yed_send of the node's whole confirmed YED balance (so every token is an input, a Falcon one among
+        them); returns the network fee in zat (inputs minus outputs)."""
+        cents = node.yed_getbalance()['confirmedCents']
+        sent = node.yed_send(dest, cents)
+        raw = node.getrawtransaction(sent['txid'], 1)
+        prev = [node.getrawtransaction(v['txid'], 1)['vout'][v['vout']] for v in raw['vin']]
+        assert any(o['scriptPubKey']['hex'].endswith('52c2') for o in prev), 'no Falcon TX_PQPKH input'
+        spent = sum(o['valueZat'] for o in prev)
+        return spent - sum(o['valueZat'] for o in raw['vout'])
 
     def price(self, usd):
         for i in POOLS:
@@ -358,6 +371,22 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         tok = user.getrawtransaction(m2['txid'], 1)['vout'][1]['scriptPubKey']['hex']
         assert_equal((len(tok), tok[-4:]), (70, '52c2'))
         assert_equal(nodes[4].yed_getvault(m2['txid'])['status'], 'ACTIVE')
+
+        print('-pqfeerate=0.01: a send spending Falcon tokens pays rate x size; -maxtxfee caps it (the wallet\'s rule)')
+        # reviewer B (Y-B sweep): YedNetworkFee obeys -maxtxfee as CWallet::CreateTransaction does: capped, never refused
+        self.restart(2, ['-pqfeerate=0.01'])
+        self.restart(0, ['-pqfeerate=0.01', '-maxtxfee=0.02'])
+        user, receiver = nodes[0], nodes[2]
+        self.sync_all()
+        uncapped = self.send_all_fee(receiver, user.yed_getnewaddress('pq'))
+        assert_greater_than(uncapped, 2000000)                      # rate x size above the 0.02 YEC cap
+        assert_greater_than(10000001, uncapped)                     # and within the default -maxtxfee 0.1
+        self.sync_all()
+        self.mine(POOLS[0])
+        capped = self.send_all_fee(user, receiver.yed_getnewaddress('pq'))
+        assert_equal(capped, 2000000)                               # exactly -maxtxfee
+        self.sync_all()
+        self.mine(POOLS[1])
 
         print('the Python model over the whole chain; equal state hashes')
         self.model_check(nodes[0])

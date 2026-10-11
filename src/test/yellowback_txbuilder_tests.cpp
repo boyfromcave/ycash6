@@ -1439,4 +1439,28 @@ BOOST_AUTO_TEST_CASE(p2_redeem_fee_is_the_conventional_fee)
     BOOST_CHECK_EQUAL(hp.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - 50000 - h.feeZat - TOKEN_VALUE);
 }
 
+// Review B (Y-B sweep, ycash-dd 877e49617): the size-priced fee of a YED transaction with a Falcon token input obeys
+// -maxtxfee as CWallet::CreateTransaction does: capped, never refused, never below the flat fee. On 6.20.0 this is the
+// third argument of P-2's max (the ZIP-317 conventional fee is computed apart, NetworkFee, and is not capped here).
+BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
+{
+    const CFeeRate savedRate = pqFeeRate;
+    const CAmount savedMax = maxTxFee;
+    const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
+    const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
+    pqFeeRate = CFeeRate(COIN / 100);                                       // -pqfeerate=0.01
+    const size_t bytes = 1000 + 150 + PQSpendInputSize(pq::SCHEME_FN_DSA_512);
+    const CAmount uncapped = pqFeeRate.GetFee(bytes);
+    BOOST_CHECK_GT(uncapped, COIN / 50);
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;                                   // 0.1 YEC: not binding
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), uncapped);
+    maxTxFee = COIN / 50;                                                   // -maxtxfee=0.02: capped
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), COIN / 50);
+    maxTxFee = 1;                                                           // below the flat fee: the flat fee
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), g_yellowbackFee);
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // no PQ input: never priced by size
+    pqFeeRate = savedRate;
+    maxTxFee = savedMax;
+}
+
 BOOST_AUTO_TEST_SUITE_END()

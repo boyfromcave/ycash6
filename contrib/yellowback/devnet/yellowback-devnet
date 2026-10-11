@@ -499,7 +499,8 @@ def lightwalletd_check(state):
         except subprocess.CalledProcessError as error: return "lightwalletd yellowback probe failed: %s" % error.stderr.strip()
         bad = {k: v for k, v in yed.items() if "#" not in k and not (v == "ok" or v.startswith("FailedPrecondition"))}
         if bad: return "lightwalletd Yellowback methods not answering: %s" % json.dumps(bad, sort_keys=True)
-        if yed.get("GetYellowbackInfo#rpcversion") not in ("5", "6"): return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
+        # rpcversion 5 (upgrade), 6 (in-term), 7 (the post-quantum line)
+        if yed.get("GetYellowbackInfo#rpcversion") not in ("5", "6", "7"): return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
     return None
 
 def lightwalletd(args):

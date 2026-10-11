@@ -618,9 +618,19 @@ jobs:
         run: |
           rc=0
           base=ycash6-baseline
+          # Vendored third-party code (the quantum line's src/crypto/pq/falcon and src/crypto/pq/slhdsa,
+          # briefing rule 7) keeps its own notices unchanged and is exempt from the added-file rule,
+          # provided src/crypto/pq/README.md records each one's LICENSE (ycash-dd 877e49617).
+          vendored='^src/crypto/pq/(falcon|slhdsa)/'
+          if git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -qE "$vendored"; then
+            for d in falcon slhdsa; do
+              grep -q "$d/LICENSE" src/crypto/pq/README.md 2>/dev/null || { echo "vendored src/crypto/pq/$d without a licence record ($d/LICENSE) in src/crypto/pq/README.md"; rc=1; }
+            done
+            echo "vendored files exempt from the added-file rule (own notices): $(git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -cE "$vendored") under src/crypto/pq/{falcon,slhdsa}/"
+          fi
           while read -r f; do
             grep -q 'The Ycash developers' "$f" || { echo "new file without the Ycash notice: $f"; rc=1; }
-          done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/')
+          done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/' | grep -Ev "$vendored")
           while read -r f; do
             if grep -q 'Copyright' "$f" && ! grep -q 'Ycash developers' "$f"; then echo "modified upstream file without a Ycash line: $f"; rc=1; fi
           done < <(git diff --name-only --diff-filter=M "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$')

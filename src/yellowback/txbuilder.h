@@ -172,6 +172,10 @@ struct MintShape
  */
 std::vector<CTxOut> MintOutputs(const MintShape& shape, int& feeVout, int* attestFeeVout = nullptr);
 
+/** The network fee of a YED transaction with these input scripts and (for a vault spend) owner scheme:
+ *  g_yellowbackFee, or the size-priced PQ fee capped at -maxtxfee (txbuilder.cpp). */
+CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme);
+
 /** A vault spend's fixed inputs (REDEEM, CLAIM, the VOID release and the SWEEP). */
 struct VaultSpendShape
 {
