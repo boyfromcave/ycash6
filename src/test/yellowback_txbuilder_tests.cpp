@@ -1420,10 +1420,15 @@ BOOST_AUTO_TEST_CASE(p2_redeem_fee_is_the_conventional_fee)
     BOOST_CHECK_EQUAL(z.networkFee, CalculateConventionalFee(zActions));
     BOOST_CHECK_EQUAL(zp.collateralOut, f.vaultValue + 3 * TOKEN_VALUE - z.networkFee - z.feeZat - TOKEN_VALUE);
 
-    // A release (one input, one output) is at the 1000-zat floor; a higher -yellowbackfee wins.
+    // A release (one input, one output) pays its conventional fee: on the quantum line the owner's SLH-DSA
+    // spend (7,939 bytes of scriptSig, quantum spec §1.5) is ~53 ZIP-317 logical actions, so it is above the
+    // 1000-zat floor (it was at the floor with an EC owner); a higher -yellowbackfee wins.
     VaultSpendShape r = f.Shape(true, false, true, false, {});
-    PlanPricedVaultSpend(r, ks, std::nullopt);
-    BOOST_CHECK_EQUAL(r.networkFee, DEFAULT_YELLOWBACK_FEE);
+    VaultSpendPlan rp = PlanPricedVaultSpend(r, ks, std::nullopt);
+    BuiltTx rb = f.Built(r, rp);
+    SignOwnerPath(rb, ks, f.branchId, f.owner.GetPubKey());
+    BOOST_CHECK_EQUAL(r.networkFee, CTransaction(rb.tx).GetConventionalFee());
+    BOOST_CHECK_GT(r.networkFee, DEFAULT_YELLOWBACK_FEE);
     const CAmount saved = g_yellowbackFee;
     g_yellowbackFee = 50000;
     VaultSpendShape h = f.Shape(true, true, true, true, yed, 10000);

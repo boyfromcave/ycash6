@@ -99,7 +99,12 @@ keyHash), `ye…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); 
 `yed_listtokens` and `yed_validateaddress` take either. The owner's residual intent of a claim pays the
 owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must
 be a Falcon `TX_PQPKH` (TOK-PQ, `bad-yed-holder`: the transaction is refused, never burned); the
-wallet then draws its token and change outputs from Falcon keys.
+wallet then draws its token and change outputs from Falcon keys. A YED transaction built before that height with a
+P2PKH (or SLH-DSA) token output and still unconfirmed when the tip reaches Falcon height − 1 is evicted from the
+mempool (it would be invalid in the next block, review B I-1): the wallet rebuilds it. TOK-PQ binds only outputs
+that actually receive YED: a TRANSFER with no YED input, or one XFER-1..3 burns, is unaffected (quantum spec, "Q4
+as implemented"). A hybrid channel output (`TX_PQCHANNEL`, D-Q-19) holds YED from the Falcon height when its
+client is a Falcon key; `yed_listtokens` lists it under the client's address.
 
 **P4-b: the attestor registry is the attestor set** (upgrade plan §15.10; additions only, so
 `rpcversion` stays 5). An attestor is a member of the vault primitive's set `attestorSetId`: it

@@ -920,7 +920,10 @@ static UniValue DoSend(YellowbackWallet& yw, const std::vector<std::pair<CScript
 UniValue yed_send(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 2)
-        throw std::runtime_error("yed_send \"yedaddress\" cents\n\nSend YED to a Yellowback address. Refuses other addresses (not-a-yellowback-address) and change below $1.00 (change-floor).\n");
+        throw std::runtime_error("yed_send \"yedaddress\" cents\n\nSend YED to a Yellowback address. Refuses other addresses (not-a-yellowback-address) and change below $1.00 (change-floor).\n"
+            "From the Falcon height (yed_getinfo.params.pq) YED goes to post-quantum (Falcon) holders only (TOK-PQ, bad-yed-holder).\n"
+            "A YED transaction built before that height with a P2PKH token output and still unconfirmed when the tip reaches\n"
+            "Falcon height - 1 is evicted from the mempool (it would be invalid in the next block): rebuild it.\n");
     YellowbackWallet& yw = EnsureYW();
     CScript dest = ParseYedAddress(params[0].get_str(), yw.Index()->GetParams());
     int64_t cents = params[1].get_int64();

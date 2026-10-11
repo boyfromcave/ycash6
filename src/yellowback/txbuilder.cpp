@@ -39,6 +39,37 @@ namespace yellowback {
  *  under STANDARD alone (quantum spec §5.2); PQ_FALCON lets a Falcon holder verify (only past the Falcon height). */
 static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
 
+/**
+ * The network fee of a YED transaction (review B L-1, quantum plan §4.5): g_yellowbackFee, or
+ * PQSizeFee(g_yellowbackFee, size) when it has a post-quantum input -- a TX_PQPKH among `prevScripts` (a YED
+ * token or a YEC coin) or the V's owner (`ownerScheme`). The size is estimated before signing: every PQ input
+ * at PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
+ */
+CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+{
+    std::vector<uint8_t> schemes;
+    size_t other = 0;
+    if (ownerScheme.has_value()) schemes.push_back(ownerScheme.value());
+    for (const CScript& spk : prevScripts) {
+        const std::optional<CTxDestination> h = HolderKey(spk);
+        const CPQKeyID* id = h.has_value() ? std::get_if<CPQKeyID>(&h.value()) : nullptr;
+        if (id && spk == GetScriptForPQKey(*id)) schemes.push_back(id->scheme);
+        else other++;
+    }
+    if (schemes.empty()) return g_yellowbackFee;
+    size_t bytes = 1000 + 150 * other;
+    for (uint8_t scheme : schemes) bytes += PQSpendInputSize(scheme);
+    return PQSizeFee(g_yellowbackFee, bytes);
+}
+
+/** SelectYec's fee follower: the fee grows when the selection takes a PQ coin (YedNetworkFee). */
+struct PQFeeFollower
+{
+    std::vector<CScript> scripts;           //!< the transaction's other inputs' scripts
+    std::optional<uint8_t> ownerScheme;
+    CAmount fee;                            //!< the fee the caller's `needed` includes; raised by SelectYec
+};
+
 // ---------------------------------------------------------------- pure shapes (§3.5)
 
 std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFeeVoutOut)
@@ -258,6 +289,14 @@ CAmount NetworkFee(const CMutableTransaction& probe, size_t saplingSpends, size_
     return std::max(g_yellowbackFee, CalculateConventionalFee(actions));
 }
 
+/** P-2 on the quantum line: the exact-size stand-in of an OP_CHECKPQSIG scriptSig of `scheme` (the chunked
+ *  signature with its hashtype, then the chunked key; quantum spec §2.1). ZIP-317 counts transparent input bytes
+ *  (P2PKH_STANDARD_INPUT_SIZE each), so a PQ input weighs ~53 logical actions (SLH-DSA) or ~11 (Falcon). */
+static CScript PendingPQSig(uint8_t scheme)
+{
+    return PQScriptSig(valtype(pq::SigSize(scheme) + 1, 0), valtype(pq::PubKeySize(scheme), 0));
+}
+
 CScript PendingP2PKHSig(const CScript& spentScript, const CKeyStore& keystore)
 {
     CTxDestination dest;
@@ -265,6 +304,10 @@ CScript PendingP2PKHSig(const CScript& spentScript, const CKeyStore& keystore)
     if (ExtractDestination(spentScript, dest)) {
         if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
             if (keystore.GetPubKey(*id, pk)) return CScript() << valtype(MAX_SIG_SIZE, 0x30) << ToByteVector(pk);
+        }
+        // A TX_PQPKH coin (a Falcon YED token, a PQ YEC coin): its real scriptSig size.
+        if (const CPQKeyID* pqid = std::get_if<CPQKeyID>(&dest)) {
+            if (pq::IsKnownScheme(pqid->scheme)) return PendingPQSig(pqid->scheme);
         }
     }
     return CScript() << valtype(MAX_SIG_SIZE, 0x30) << valtype(CPubKey::PUBLIC_KEY_SIZE, 0x04);   // unknown key: count it uncompressed
@@ -285,7 +328,10 @@ VaultSpendPlan PlanPricedVaultSpend(VaultSpendShape& shape, const CKeyStore& key
     probe.vin = plan.vin;
     probe.vout = plan.vout;
     // U-23: the V's selectors -- owner `<sig> OP_2`, claim `OP_4` (the V is bare: no script push)
-    probe.vin[0].scriptSig = shape.ownerPath ? (CScript() << valtype(MAX_SIG_SIZE, 0x30) << OP_2) : (CScript() << OP_4);
+    // Quantum line: the owner path carries the owner's PQ signature and key (quantum spec §1.5), sized as such.
+    vault::VaultParams ownerVp;
+    const bool pqOwner = shape.ownerPath && vault::ParseVault(shape.vaultScript, ownerVp) && pq::IsKnownScheme(ownerVp.owner.scheme);
+    probe.vin[0].scriptSig = shape.ownerPath ? (pqOwner ? (PendingPQSig(ownerVp.owner.scheme) << OP_2) : (CScript() << valtype(MAX_SIG_SIZE, 0x30) << OP_2)) : (CScript() << OP_4);
     for (size_t i = 0; i < shape.yedInputs.size(); i++) probe.vin[i + 1].scriptSig = PendingP2PKHSig(shape.yedInputs[i].token.scriptPubKey, keystore);
     for (size_t i = 0; i < fundPrevs.size() && 1 + shape.yedInputs.size() + i < probe.vin.size(); i++)
         probe.vin[1 + shape.yedInputs.size() + i].scriptSig = PendingP2PKHSig(fundPrevs[i].first, keystore);
@@ -594,7 +640,7 @@ struct Context
      * `only`: restrict to outputs paying that script (an s1… funding address).
      */
     CAmount SelectYec(CAmount needed, CMutableTransaction& mtx, std::vector<std::pair<CScript, CAmount>>& prevs,
-                      const CScript* only = nullptr, const std::string& onlyText = "") const
+                      const CScript* only = nullptr, const std::string& onlyText = "", PQFeeFollower* follow = nullptr) const
     {
         if (needed <= 0) return 0;
         yw.SettleYecLocks();   // F-1: hand back the inputs of a spender that failed
@@ -618,6 +664,16 @@ struct Context
             mtx.vin.push_back(CTxIn(o));
             prevs.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
             selected += c.Value();
+            if (follow) {
+                // B L-1: a PQ coin raises the size-priced fee; `needed` follows it
+                std::vector<CScript> all = follow->scripts;
+                for (const auto& pv : prevs) all.push_back(pv.first);
+                const CAmount fee = YedNetworkFee(all, follow->ownerScheme);
+                if (fee > follow->fee) {
+                    needed += fee - follow->fee;
+                    follow->fee = fee;
+                }
+            }
             if (selected >= needed) break;
         }
         if (selected < needed) {
@@ -792,7 +848,9 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     shape.ownerPath = ownerPath;
     shape.withPayload = withPayload;
     shape.refHeight = R;
-    shape.networkFee = ctx.fee;
+    // B L-1 (quantum plan §4.5) on 6.20.0: the third max argument -- max(-yellowbackfee and the ZIP-317 conventional
+    // fee (ctx.fee, P-2), the PQ size fee of the owner's spend (YedNetworkFee)).
+    shape.networkFee = std::max(ctx.fee, YedNetworkFee({}, ownerPath ? std::optional<uint8_t>(owner.scheme) : std::nullopt));   // B L-1: the owner's PQ spend
     if (extras) {
         shape.attestPayee = extras->attestKey;
         shape.attestFeeZat = extras->attestFeeZat;
@@ -843,6 +901,11 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
             out.yedInputs.insert(c.outpoint);
             out.yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));
         }
+        {
+            std::vector<CScript> yedScripts;
+            for (const YedCoin& c : sel) yedScripts.push_back(c.token.scriptPubKey);
+            shape.networkFee = std::max(shape.networkFee, YedNetworkFee(yedScripts, ownerPath ? std::optional<uint8_t>(owner.scheme) : std::nullopt));   // B L-1 (6.20.0: with P-2's fee)
+        }
         out.changeCents = change;
         out.payee = shape.payee;
         out.feeZat = shape.feeZat;
@@ -877,7 +940,11 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                                    (shape.changeCents > 0 ? TOKEN_VALUE : 0) - shape.carrierValue - yedValue + (pass > 0 ? 1000 : 0);
             if (needed > 0) {
                 CMutableTransaction scratch;
-                ctx.SelectYec(needed, scratch, out.fundPrevs);
+                PQFeeFollower follow;
+                for (const YedCoin& c : shape.yedInputs) follow.scripts.push_back(c.token.scriptPubKey);
+                follow.fee = shape.networkFee;
+                ctx.SelectYec(needed, scratch, out.fundPrevs, nullptr, "", &follow);
+                shape.networkFee = follow.fee;                                  // B L-1: a PQ fee coin raises it
                 for (size_t i = 0; i < scratch.vin.size(); i++) shape.funding.push_back(std::make_pair(scratch.vin[i].prevout, out.fundPrevs[i].second));
                 if (!fundingChangeKey.IsValid()) fundingChangeKey = ctx.FreshKey("yellowback-change");
                 shape.fundingChange = GetScriptForDestination(fundingChangeKey.GetID());
@@ -1437,8 +1504,9 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     // is no longer the holder: an SLH-DSA holder would cost an 8 KB scriptSig per transfer.
     CPQKeyID vaultOwner;
     if (!ctx.wallet.GetNewPQKey(pq::SCHEME_SLH_DSA_SHA2_128S, vaultOwner)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum owner key");
-    CPubKey owner = ctx.FreshKey("yellowback-vault");
     std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder();
+    CPubKey owner;                                  // the P2PKH token key, drawn only before the Falcon height (review B I-3)
+    if (!pqHolder.has_value()) owner = ctx.FreshKey("yellowback-vault");
     MintShape shape;
     shape.cents = cents;
     shape.termClass = g.termClass;
@@ -1510,9 +1578,12 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
         mtx = ctx.NewTx(expiry);
         mtx.vout = vout;
         prevs.clear();
-        const CAmount needed = outputs + ctx.fee - CARRIER_VALUE;
-        const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
-        const CAmount change = selected - needed;
+        PQFeeFollower follow;
+        follow.fee = std::max(ctx.fee, YedNetworkFee({}, std::nullopt));    // B L-1: raised if a PQ coin funds the mint
+        const CAmount fee0 = follow.fee;
+        const CAmount needed = outputs + fee0 - CARRIER_VALUE;
+        const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text, &follow);
+        const CAmount change = selected - needed - (follow.fee - fee0);
         if (change > 0) {
             CPubKey changeKey;
             if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
@@ -1618,9 +1689,13 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
         mtx = unfunded;
         prevs.clear();
-        const CAmount yecNeeded = tokenOut + ctx.fee - tokenIn;
-        CAmount selectedYec = ctx.SelectYec(yecNeeded, mtx, prevs);
-        CAmount yecChange = selectedYec - yecNeeded;
+        PQFeeFollower follow;
+        for (const YedCoin& c : sel) follow.scripts.push_back(c.token.scriptPubKey);
+        follow.fee = std::max(ctx.fee, YedNetworkFee(follow.scripts, std::nullopt));   // B L-1: PQ YED inputs priced by size
+        const CAmount fee0 = follow.fee;
+        const CAmount yecNeeded = tokenOut + fee0 - tokenIn;
+        CAmount selectedYec = ctx.SelectYec(yecNeeded, mtx, prevs, nullptr, "", &follow);
+        CAmount yecChange = selectedYec - yecNeeded - (follow.fee - fee0);
         if (yecChange > 0) {
             CPubKey changeKey;
             if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
