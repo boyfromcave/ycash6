@@ -76,7 +76,7 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-28; 10 YEC on regtest before arming): register with 9"
+      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-28; 2.5 YEC on regtest with no vaults): register with 2"
     },
     "bond-locked": {
       "raisedBy": [
@@ -774,11 +774,11 @@
           "attestFeeBps": 2500,
           "attestMaxAge": 8,
           "bondMaturity": 8,
-          "bondMinFloorZat": 100000000,
+          "bondMinCapZat": 1000000000,
+          "bondMinFloorZat": 250000000,
           "bondMinLock": 200,
-          "bondMinNoPriceZat": 1000000000,
-          "bondMinUsdCents": 400,
-          "bondMinZat": 1000000000,
+          "bondMinZat": 250000000,
+          "bondShareBps": 500,
           "bundleMax": 6,
           "carrierMode": "scriptsig",
           "carrierValueZat": 10000,
