@@ -56,6 +56,7 @@ BASE_SCRIPTS= [
     'yellowback_rpc_contract.py',
     'yellowback_attest.py',
     'yellowback_attest_wallet.py',
+    'yellowback_attest_bond.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
     'yellowback_void_mint.py',

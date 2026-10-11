@@ -1204,10 +1204,10 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "wallet key as the member key: set_join attestorSetId bondYec (tip + 1 + lockBlocks). vout[0] is the bond\n"
             "P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG); the member key signs price attestations and receives the\n"
             "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
-            "bond-below-min, lock-below-min (the module's floor: BOND_MIN, BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
+            "bond-below-min, lock-below-min (the module's floor: yed_getinfo params.attest.bondMinZat, D-Q-28, and BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
             "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
             "\nArguments:\n"
-            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN and the set's bondmin)\n"
+            "1. bondYec     (numeric, required) the bond in YEC (>= the module's bondMinZat at the next block and the set's bondmin)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
             "3. flags       (numeric, optional, default 0) accepted for compatibility and ignored (no longer recorded)\n"
             "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
@@ -1227,7 +1227,10 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         EnsureHealthy(index);
         const yellowback::Params& p = index.GetParams();
         if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
-        if (bondZat < p.bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
+        // D-Q-28: the module's floor for a join in the next block (the price of the tip's snapshot); a join mined later is
+        // judged at its own block, so a price move in between can leave it PENDING
+        const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)chainActive.Height() + 1);
+        if (bondZat < bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(bondMin)));
         if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
         locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
         if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_VERIFY_REJECTED, "lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
