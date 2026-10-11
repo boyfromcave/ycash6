@@ -21,7 +21,6 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     bytes_to_hex_str,
-    hex_str_to_bytes,
     sync_mempools,
 )
 from test_framework.yellowback_util import (
@@ -39,7 +38,6 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     fee_zat,
     mine_block_raw,
-    pubkey_to_address,
     set_quote,
 )
 from test_framework import yellowback_model as ym

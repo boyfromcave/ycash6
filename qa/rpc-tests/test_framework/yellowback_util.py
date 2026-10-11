@@ -1301,7 +1301,6 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         raw = hex_str_to_bytes(ya.spend_carrier(node, bytes_to_hex_str(raw), carrier_vin, carrier, carrier_wif, branch_id))
     from io import BytesIO
     from .mininode import CTransaction
-    from .script import CScript, SIGHASH_ALL, SignatureHash
     tx = CTransaction()
     tx.deserialize(BytesIO(raw))
     if path == 'owner':

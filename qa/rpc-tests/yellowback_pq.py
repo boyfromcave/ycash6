@@ -38,7 +38,6 @@ from test_framework.util import (
     hex_str_to_bytes,
 )
 from test_framework.yellowback_util import (
-    COIN,
     SIGNING_BRANCH_ID,
     _low_s,
     _select_funding,
