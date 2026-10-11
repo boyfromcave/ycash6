@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'b4a3b75a05d9f5860b18a59e5b7c826f822aee96b6b613231538a41f10027d51'
+GOLDEN_STATE_HASH = '6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -65,7 +65,7 @@ ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
 BONDS = ATTESTORS
 
 
-def attestor_set_create(liveness_window=1_000_000, maturity=1, seats=15):
+def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15):
     """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds), from a fixed input; its txid is the set id."""
     act = va.act_set_create(seats, 1, 1, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
                             liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity)
@@ -1750,7 +1750,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_222_281_478_011, 'activeVaults': 2,   # 300 % collateral (D-IT-4)
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity)
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -1764,7 +1764,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.snapshots[248].seated, [0, 1, 2, 3])
         # P4-b: the AttestorSet record from the SET_CREATE at 224; the joins are its members' mirrors
         z = m.attestor_set_rec
-        self.assertEqual((z.create_height, z.seats, z.maturity, z.liveness_window), (224, 15, 1, GOLDEN_LIVENESS))
+        self.assertEqual((z.create_height, z.seats, z.maturity, z.liveness_window), (224, 15, 8, GOLDEN_LIVENESS))
         self.assertEqual(m.txlog[txid_of(txs_at['setcreate'])].type, 'ATTESTOR_SET_ACT')
         for i in range(4):
             r = m.attestors[i]
@@ -1805,10 +1805,10 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.attestors[e].bond_spent_height, GOLDEN_BLOCKS)     # spent, still EJECTED (the model reads no bond freeze: the primitive refuses that spend)
         self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, GOLDEN_BLOCKS))
         self.assertEqual(m.attestors[w].last_act, GOLDEN_HEARTBEAT)
-        # P4-b: the fourth attestor never heartbeat: its lastAct (join + 1) lapsed at join + 1 + livenessWindow + 1
+        # P4-b: the fourth attestor never heartbeat: its lastAct (join + maturity 8) lapsed at join + 8 + livenessWindow + 1
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
         self.assertEqual(m.attestors[r4].status, ym.A_DORMANT)
-        self.assertEqual(m.attestors[r4].status_height, 225 + r4 + 1 + GOLDEN_LIVENESS + 1)
+        self.assertEqual(m.attestors[r4].status_height, 225 + r4 + 8 + GOLDEN_LIVENESS + 1)
         # the pinned hash, the file on disk and a replay from the file all agree
         self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
         with open(GOLDEN_PATH) as f:

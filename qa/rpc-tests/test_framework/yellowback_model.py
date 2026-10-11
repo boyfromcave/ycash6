@@ -256,7 +256,7 @@ class Params(object):
                  pin_min_tags=3, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                  emergency_persist=48, emergency_notice_ttl=1_152, residual_min_zat=100_000, attest_fee_bps=2_500,
                  bond_min_no_price_zat=20_000 * COIN, bond_min_floor_zat=2_000 * COIN, bond_min_usd_cents=800_000,
-                 bond_min_lock=420_480, bond_maturity=16_128, age_cap=207_360,
+                 bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
         a.update(attest or {})
@@ -269,7 +269,7 @@ class Params(object):
                           pin_min_tags=2, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
                           bond_min_no_price_zat=10 * COIN, bond_min_floor_zat=1 * COIN, bond_min_usd_cents=400,   # D-Q-28 at 1/2,000
-                          bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
+                          bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
                           seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
 
@@ -470,10 +470,19 @@ def refused_attestor_set_act(tx, p):
         if not va.is_act_script(o.script):
             continue
         try:
-            _payload, act, _sigs = va.parse_act_script(o.script)
+            payload, act, sigs = va.parse_act_script(o.script)
         except va.VaultError:
             return False
-        return act['type'] in (va.ACT_SET_REMOVE, va.ACT_SET_WINDDOWN) and bytes.fromhex(act.get('setId', '')) == p.attestor_set_internal
+        if bytes.fromhex(act.get('setId', '')) != p.attestor_set_internal:
+            return False
+        if act['type'] == va.ACT_SET_WINDDOWN:
+            return True
+        if act['type'] != va.ACT_SET_REMOVE:
+            return False
+        # a member's own exit (signed by itself alone, without burn) is not a vote (the bond exit delay)
+        own = (act['burn'] == 0 and len(sigs) == 1 and tx.vin and
+               va.recover_compact(sigs[0], va.act_msg(payload, tx.vin[0].prev_txid, tx.vin[0].prev_n)) == bytes.fromhex(act['memberKey']))
+        return not own
     return False
 
 
@@ -2729,6 +2738,8 @@ class YellowbackModel(object):
                 return False
             if not (act['flags'] & va.SET_FLAG_OPEN) or act['seats'] != p.attestor_seats:
                 return False              # owner 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted
+            if act['maturity'] != p.bond_maturity:
+                return False              # ... whose maturity (the bond exit delay) is BOND_MATURITY
             self.attestor_set_rec = AttestorSetRecord(height, act['seats'], act['maturity'], act['livenessWindow'])
             rec.type = 'ATTESTOR_SET_ACT'
             rec.attestor_seq = 0          # the C++ TxLog's attestorSeq default (yed_gettxinfo shows seq 0)
@@ -2789,6 +2800,10 @@ class YellowbackModel(object):
                 return False
             if t == va.ACT_SET_HEARTBEAT:
                 r.last_act = height
+            elif t == va.ACT_SET_REMOVE and act['burn'] == 0:
+                if r.status not in (A_WITHDRAWN, A_EJECTED):       # a member's own exit: WITHDRAWN, no seat from here
+                    r.status = A_WITHDRAWN
+                    r.status_height = height
             else:
                 self._eject_record(height, r, t == va.ACT_SET_EQUIVOCATION or act['burn'] == 1)
             rec.type = 'ATTESTOR_SET_ACT'

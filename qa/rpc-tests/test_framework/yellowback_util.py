@@ -233,7 +233,7 @@ ATTEST_FEE_BPS = 2_500
 BOND_MIN_ZAT = 10 * COIN       # D-Q-28: the no-price bond (bondMinNoPriceZat), also the cap of the priced minimum
 BOND_MIN_FLOOR_ZAT = 1 * COIN  # D-Q-28: the floor under the priced minimum (regtest 1/2,000 of mainnet)
 BOND_MIN_USD_CENTS = 400       # D-Q-28: $4 at the attested price at registration (mainnet $8,000)
-BOND_MIN_LOCK = 200
+BOND_MIN_LOCK = 0              # the bond exit delay (owner 2026-10-11): the lock is in the vault state
 BOND_MATURITY = 8
 AGE_CAP = 64
 FOUNDING_WINDOW = 16
@@ -298,7 +298,7 @@ def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=
 # case says so, use a window far beyond any run; a suite that tests the set's dormancy creates its own.
 ATTESTOR_SET_LIVENESS = 100000
 ATTESTOR_SET_SPEC = {'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                     'open': True, 'maturity': 1, 'livenesswindow': ATTESTOR_SET_LIVENESS}
+                     'open': True, 'maturity': BOND_MATURITY, 'livenesswindow': ATTESTOR_SET_LIVENESS}   # maturity: the bond exit delay
 
 
 def start_nodes_with_attestor_set(num, tmpdir, args_fn, edges):

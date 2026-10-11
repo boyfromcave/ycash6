@@ -638,8 +638,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.bondMinNoPriceZat, 20000 * COIN);   // D-Q-28
     BOOST_CHECK_EQUAL(m.bondMinFloorZat, 2000 * COIN);
     BOOST_CHECK_EQUAL(m.bondMinUsdCents, 800000);
-    BOOST_CHECK_EQUAL(m.bondMinLock, 420480);
-    BOOST_CHECK_EQUAL(m.bondMinLock, BLOCKS_PER_YEAR);
+    BOOST_CHECK_EQUAL(m.bondMinLock, 0);                     // the bond exit delay (owner 2026-10-11): the lock is in the vault state
     BOOST_CHECK_EQUAL(m.bondMaturity, 16128);
     BOOST_CHECK_EQUAL(m.ageCap, 207360);
     BOOST_CHECK_EQUAL(m.foundingWindow, 8064);
@@ -690,7 +689,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(r.bondMinNoPriceZat, 10 * COIN);      // D-Q-28 at 1/2,000 of mainnet
     BOOST_CHECK_EQUAL(r.bondMinFloorZat, 1 * COIN);
     BOOST_CHECK_EQUAL(r.bondMinUsdCents, 400);
-    BOOST_CHECK_EQUAL(r.bondMinLock, 200);
+    BOOST_CHECK_EQUAL(r.bondMinLock, 0);
     BOOST_CHECK_EQUAL(r.bondMaturity, 8);
     BOOST_CHECK_EQUAL(r.ageCap, 64);
     BOOST_CHECK_EQUAL(r.foundingWindow, 16);

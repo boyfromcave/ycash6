@@ -125,7 +125,9 @@ extern const char* const ATTESTOR_SET_ACT;            //!< a SET_REMOVE or SET_W
 /**
  * Owner, 2026-10-11: the attestor set is open and never shrinks by vote. A transaction whose act is a SET_REMOVE or
  * SET_WINDDOWN naming attestorSetId is invalid (the module's CheckBlock on the primitive side, verdict
- * ATTESTOR_SET_ACT here); equivocation (SET_EQUIVOCATION, EQV-1) is the only removal. Structure only.
+ * ATTESTOR_SET_ACT here); equivocation (SET_EQUIVOCATION, EQV-1) is the only removal by others. Exempt: a member's
+ * own exit, the SET_REMOVE of memberKey with burn 0 carrying exactly one signature, which recovers (over actMsg,
+ * vin[0].prevout) to memberKey (the bond exit delay). Structure and one signature recovery only.
  */
 bool RefusedAttestorSetAct(const CTransaction& tx, const Params& params);
 
@@ -267,7 +269,10 @@ std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, 
  *   Displace hook removed the same member).
  * - SET_HEARTBEAT: lastAct = h on the key's newest record.  SET_EQUIVOCATION and EQV-1: EJECTED and FROZEN.
  *   SET_REMOVE and SET_WINDDOWN of the attestor set are invalid (the module's CheckBlock, and the mirror's
- *   attestor-set-act verdict): equivocation is the only removal, and the set never winds down.
+ *   attestor-set-act verdict): equivocation is the only removal by others, and the set never winds down. The
+ *   one valid SET_REMOVE is a member's own exit (signed by its key alone, burn 0; the bond exit delay, owner
+ *   2026-10-11): its newest record becomes WITHDRAWN at h, and the primitive returns the bond at h + maturity.
+ *   The module adopts the set only when its maturity is BOND_MATURITY (the delay).
  * - A bond spend: WITHDRAWN unless EJECTED or already WITHDRAWN (IN-2, as v3).
  *
  * At SNAP: a PENDING record becomes ELIGIBLE at registerHeight + max(set maturity, BOND_MATURITY) when its bond

@@ -961,6 +961,7 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
         if (txid != P.attestorSetId || ctx.st.GetAttestorSet().has_value()) return false;
         // owner, 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted (else YED has no attestor set)
         if (!act.create.IsOpen() || (int)act.create.seats != P.attestorSeats) return false;
+        if ((int64_t)act.create.maturity != (int64_t)P.bondMaturity) return false;   // the bond exit delay is BOND_MATURITY
         AttestorSetRecord z;
         z.createHeight = ctx.height;
         z.seats = act.create.seats;
@@ -1046,6 +1047,14 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
         if (act.type == vault::ACT_SET_HEARTBEAT) {
             r->second.lastAct = ctx.height;
             ctx.st.Put(keys::Attestor(r->first), r->second);
+        } else if (act.type == vault::ACT_SET_REMOVE && act.remove.burn == 0) {
+            // owner 2026-10-11: the only SET_REMOVE of the attestor set that is valid is a member's own exit: WITHDRAWN
+            // (no seat from this block), the bond returned BOND_MATURITY blocks later by the primitive
+            if (r->second.Status() != AttestorStatus::WITHDRAWN && r->second.Status() != AttestorStatus::EJECTED) {
+                r->second.status = (uint8_t)AttestorStatus::WITHDRAWN;
+                r->second.statusHeight = ctx.height;
+                ctx.st.Put(keys::Attestor(r->first), r->second);
+            }
         } else {
             EjectRecord(ctx, r->first, r->second, act.type == vault::ACT_SET_EQUIVOCATION || act.remove.burn == 1);
         }
@@ -1788,7 +1797,15 @@ bool RefusedAttestorSetAct(const CTransaction& tx, const Params& P)
         if (!vault::IsActOutput(o.scriptPubKey)) continue;
         vault::Act act;
         if (vault::DecodeAct(o.scriptPubKey, act)) return false;          // the primitive refuses it anyway
-        return (act.type == vault::ACT_SET_REMOVE || act.type == vault::ACT_SET_WINDDOWN) && act.TargetSet() == P.attestorSetId;
+        if (act.TargetSet() != P.attestorSetId) return false;
+        if (act.type == vault::ACT_SET_WINDDOWN) return true;
+        if (act.type != vault::ACT_SET_REMOVE) return false;
+        // a member's own exit (the SET_REMOVE of itself, signed by itself alone, without burn) is not a vote
+        CPubKey signer;
+        const bool self = act.remove.burn == 0 && act.sigs.size() == 1 && !tx.vin.empty() &&
+                          vault::RecoverSig(vault::ActMsg(vault::EncodePayload(act), tx.vin[0].prevout), act.sigs[0], signer) &&
+                          signer == act.remove.memberKey;
+        return !self;
     }
     return false;
 }

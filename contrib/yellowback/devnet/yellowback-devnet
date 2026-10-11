@@ -149,7 +149,7 @@ def _yolo_binary():
 
 YOLO = _yolo_binary()
 ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
-ATTEST_LOCK_BLOCKS = 200      # regtest bondMinLock
+ATTEST_LOCK_BLOCKS = 0        # regtest bondMinLock (0 since the bond exit delay: the lock is exit + maturity in the vault state)
 ATTEST_FUND_YEC = 11          # the bond plus room for the fee
 ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
 # P4-b: the attestor registry is the YED attestor set (a vault primitive signer set): its livenesswindow is the
@@ -798,7 +798,7 @@ def up(args):
         # P4-b: the set is the attestor registry: its bond floor is YED's (BOND_MIN, BOND_MIN_LOCK) and its
         # livenesswindow the attestors' member dormancy
         created = nodes[USER].set_create({"seats": 15, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1,
-                                          "open": True, "maturity": 1, "bondmin": ATTEST_BOND_YEC,
+                                          "open": True, "maturity": 8, "bondmin": ATTEST_BOND_YEC,   # BOND_MATURITY: the bond exit delay
                                           "bondlockmin": ATTEST_LOCK_BLOCKS, "livenesswindow": ATTEST_SET_LIVENESS})
         sync_mempools(nodes)
         nodes[USER].generate(1); sync_blocks(nodes)

@@ -99,7 +99,8 @@ std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::Set
     std::shared_ptr<const Params> p = CurrentParams();
     if (!p || !ctx.state || join.setId != p->attestorSetId || join.bondVout >= tx.vout.size()) return std::nullopt;
     std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, join.setId);
-    if (!s || !s->params.IsOpen() || (int)s->params.seats != p->attestorSeats) return std::nullopt;   // a set the module does not adopt
+    if (!s || !s->params.IsOpen() || (int)s->params.seats != p->attestorSeats ||
+        (int64_t)s->params.maturity != (int64_t)p->bondMaturity) return std::nullopt;   // a set the module does not adopt
     std::vector<SeatCandidate> members;
     for (const auto& m : vault::GetMembers(*ctx.state, join.setId)) {
         if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;

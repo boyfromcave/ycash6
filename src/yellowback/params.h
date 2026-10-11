@@ -233,7 +233,7 @@ struct Params
     Cents bondMinUsdCents;               //!< D-Q-28: the priced bond minimum in cents, $8,000 = 800,000 (regtest $4 = 400) at the
                                          //!< attested price at registration; min(bondMinNoPriceZat, max(bondMinFloorZat, that in
                                          //!< YEC)): capped at the no-price bond (owner option B; binds below $0.40/YEC)
-    int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
+    int bondMinLock;                     //!< BOND_MIN_LOCK 0 (was 420,480): the bond is returned BOND_MATURITY after its exit (vault state)
     int bondMaturity;                    //!< BOND_MATURITY 16,128
     int ageCap;                          //!< AGE_CAP 207,360 (bond weight)
     int foundingWindow;                  //!< FOUNDING_WINDOW 8,064

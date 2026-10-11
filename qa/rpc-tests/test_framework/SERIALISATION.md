@@ -19,9 +19,9 @@ system ratio until release) are marked **(IT-n)**.
 
 The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
-SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
+SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`b4a3b75a05d9f5860b18a59e5b7c826f822aee96b6b613231538a41f10027d51`. Four entries are flagged
+`6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,

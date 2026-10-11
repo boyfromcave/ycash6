@@ -69,7 +69,7 @@ static CMutableTransaction AttestorSetCreate()
     a.create.rateWindow = 1000;
     a.create.livenessWindow = 1000000;
     a.create.bondMin = 1;
-    a.create.maturity = 1;
+    a.create.maturity = 8;   // BOND_MATURITY (regtest): the module adopts only that (the bond exit delay)
     unsigned char d[32];
     memset(d, 0x42, 32);
     CKey admit;

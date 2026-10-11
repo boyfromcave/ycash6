@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "b4a3b75a05d9f5860b18a59e5b7c826f822aee96b6b613231538a41f10027d51";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction; 10, D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction; 10, D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -170,7 +170,7 @@ struct Fixture
 
     /** The SET_CREATE of the attestor set (open, 15 seats, 1/1/1 thresholds, maturity, livenessWindow); sets
      *  P.attestorSetId to its txid. Only before anything is mined (P is hashed into the state from the first block). */
-    void RecreateSet(uint32_t livenessWindow = 1000000, uint32_t maturity = 1, uint8_t seats = 15)
+    void RecreateSet(uint32_t livenessWindow = 1000000, uint32_t maturity = 8, uint8_t seats = 15)
     {
         BOOST_REQUIRE(tip < P.startHeight);
         vault::Act a;
@@ -2586,7 +2586,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_REQUIRE(z.has_value());
     BOOST_CHECK_EQUAL(z->createHeight, f.tip);
     BOOST_CHECK_EQUAL(z->seats, 15);
-    BOOST_CHECK_EQUAL(z->maturity, 1u);
+    BOOST_CHECK_EQUAL(z->maturity, 8u);                                // BOND_MATURITY: the bond exit delay
     BOOST_CHECK_EQUAL(f.Log(CTransaction(f.setCreate).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_SET_ACT);
     // a join to another set is not mirrored
     {
@@ -2608,7 +2608,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_CHECK(rec->bondPubKey == rec->attestorPubKey);
     BOOST_CHECK_EQUAL(rec->status, (uint8_t)AttestorStatus::PENDING);
     BOOST_CHECK_EQUAL(rec->registerHeight, f.tip);
-    BOOST_CHECK_EQUAL(rec->lastAct, f.tip + 1);                       // joinHeight + the set's maturity
+    BOOST_CHECK_EQUAL(rec->lastAct, f.tip + 8);                       // joinHeight + the set's maturity
     BOOST_CHECK_EQUAL(rec->bondZat, 10 * COIN);
     BOOST_CHECK_EQUAL(rec->flags, 0);
     BOOST_CHECK(!rec->bondFrozen);
@@ -2617,19 +2617,20 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 1);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_REGISTER);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
-    // below the module's floor: mirrored (the set admitted them) but never ELIGIBLE
+    // below the module's floor: mirrored (the set admitted it) but never ELIGIBLE; BOND_MIN_LOCK is 0 since the bond exit
+    // delay (the lock is in the vault state), so a bond locked for one block qualifies
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN - 1)), verdict::OK);
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, f.P.bondMinLock - 1)), verdict::OK);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, 0)), verdict::OK);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 3);
     const int joined0 = f.Attestor(0)->registerHeight;
     while (f.tip < joined0 + f.P.bondMaturity - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::PENDING);
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));                    // registerHeight + max(maturity 1, BOND_MATURITY 8)
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));                    // registerHeight + max(maturity 8, BOND_MATURITY 8)
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
     BOOST_CHECK_EQUAL(f.Attestor(0)->statusHeight, f.tip);
     for (int i = 0; i < 20; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::PENDING);
-    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::ELIGIBLE);
 }
 
 // Rule: P4-b
@@ -2690,6 +2691,20 @@ BOOST_AUTO_TEST_CASE(p4b_slashed_key_barred_remove_winddown_refused)
     other.remove.memberKey = f.hotKeys[3].GetPubKey();
     BOOST_CHECK(!RefusedAttestorSetAct(CTransaction(f.ActTx(other, { f.hotKeys[1] })), f.P));
     BOOST_CHECK_EQUAL(VerdictOf(f, f.ActTx(other, { f.hotKeys[1] })), "none");      // no TxLog entry: not a YED transaction
+    // the bond exit delay (owner 2026-10-11): a member's own exit (SET_REMOVE of itself, signed by itself alone, no burn)
+    // is valid: WITHDRAWN at once (no seat), not slashed; with burn, or signed by another, it is a vote and refused
+    BOOST_CHECK(RefusedAttestorSetAct(CTransaction(f.RemoveTx(3, 3, true)), f.P));
+    BOOST_CHECK(RefusedAttestorSetAct(CTransaction(f.RemoveTx(3, 1, false)), f.P));
+    CMutableTransaction leave = f.RemoveTx(3, 3, false);
+    BOOST_CHECK(!RefusedAttestorSetAct(CTransaction(leave), f.P));
+    BOOST_CHECK_EQUAL(VerdictOf(f, leave), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->statusHeight, f.tip);
+    BOOST_CHECK(!f.Attestor(3)->bondFrozen);
+    BOOST_CHECK(!(f.Attestor(3)->flags & ATTESTOR_FLAG_EVICTED));
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));                   // the next SNAP no longer seats it
+    const std::vector<uint16_t> seatedNow = f.Snap(f.tip).seated;
+    BOOST_CHECK(std::find(seatedNow.begin(), seatedNow.end(), 3) == seatedNow.end());
     // the slashed key rejoins and stays PENDING for good
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(4, 10 * COIN, -1, 0)), verdict::OK);   // seq 4 = key 0
     for (int i = 0; i < f.P.bondMaturity + 1; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
@@ -2705,7 +2720,7 @@ BOOST_AUTO_TEST_CASE(p4b_set_dormancy_and_heartbeat_revival)
     f.Register(1);
     const int joined = f.tip;
     const int lastAct = f.Attestor(0)->lastAct;
-    BOOST_CHECK_EQUAL(lastAct, joined + 1);
+    BOOST_CHECK_EQUAL(lastAct, joined + 8);                           // the set's maturity (BOND_MATURITY)
     while (f.tip < joined + f.P.bondMaturity) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
     while (f.tip < lastAct + 20) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
@@ -2726,9 +2741,10 @@ BOOST_AUTO_TEST_CASE(p4b_set_dormancy_and_heartbeat_revival)
 // Rule: P4-b: the module adopts only an OPEN attestor set of ATTESTOR_SEATS (15) seats (owner 2026-10-11)
 BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
 {
-    for (int variant = 0; variant < 3; variant++) {
+    // OPEN, 15 seats, maturity BOND_MATURITY (the bond exit delay, 8 on regtest): only variant 3 is adopted
+    for (int variant = 0; variant < 4; variant++) {
         Fixture f;
-        f.RecreateSet(1000000, 1, variant == 0 ? 2 : 15);       // 2 seats; 15 closed; 15 open
+        f.RecreateSet(1000000, variant == 2 ? 1 : 8, variant == 0 ? 2 : 15);   // 2 seats; closed; maturity 1; the one
         if (variant == 1) {
             vault::Act a;
             BOOST_REQUIRE(!vault::DecodeAct(f.setCreate.vout[0].scriptPubKey, a));
@@ -2737,7 +2753,7 @@ BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
             f.P.attestorSetId = CTransaction(f.setCreate).GetHash();
         }
         f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.setCreate });
-        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 2);
+        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 3);
     }
 }
 

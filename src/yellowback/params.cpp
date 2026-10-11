@@ -96,7 +96,7 @@ void SetCommon(Params& p)
     p.bondMinNoPriceZat   = 20000 * COIN;   // D-Q-28: no attested price at registration
     p.bondMinFloorZat     = 2000 * COIN;    // D-Q-28: the floor under the priced minimum
     p.bondMinUsdCents     = 800000;         // D-Q-28: $8,000 at the attested price at registration
-    p.bondMinLock         = 420480; // one year
+    p.bondMinLock         = 0;      // the bond exit delay (owner 2026-10-11): the lock is in the vault state (exit + BOND_MATURITY), not the script
     p.bondMaturity        = 16128;  // two weeks
     p.ageCap              = 207360; // 180 d
     p.foundingWindow      = 8064;   // 7 d
@@ -246,7 +246,7 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.bondMinNoPriceZat   = 10 * COIN;
     r.bondMinFloorZat     = 1 * COIN;
     r.bondMinUsdCents     = 400;
-    r.bondMinLock         = 200;
+    r.bondMinLock         = 0;
     r.bondMaturity        = 8;
     r.ageCap              = 64;
     r.foundingWindow      = 16;
