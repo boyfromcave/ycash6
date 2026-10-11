@@ -34,6 +34,7 @@ from test_framework.yellowback_util import (
     STOCK,
     USER,
     YELLOWBACK_FEE,
+    wallet_network_fee,
     YellowbackTestFramework,
     protocol_fee_cents,
     protocol_fee_zat,
@@ -201,7 +202,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         print('  the network fee of that PQ-owner redeem: the Yellowback rate (the floor at $2,500) x the estimated size')
         yed_rate = user.yed_getinfo()['params']['fees']['network']['yellowback']['zatPerKB']
         assert_equal(yed_rate, FLOOR_ZAT_PER_KB)
-        assert_equal(net_fee, max(YELLOWBACK_FEE, min(yed_rate * estimated_bytes(raw) // 1000, max(MAX_TX_FEE, rate_zat_per_kb(CAP_USD, p_mint, 0)))))
+        assert_equal(net_fee, max(wallet_network_fee(raw), min(yed_rate * estimated_bytes(raw) // 1000, max(MAX_TX_FEE, rate_zat_per_kb(CAP_USD, p_mint, 0)))))
         assert_greater_than(net_fee, YELLOWBACK_FEE)
         self.checkpoint('early redeem')
 
@@ -289,7 +290,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         redeemed = user.yed_redeem(m['txid'])
         assert_equal((redeemed['feeZat'], redeemed['payee']), (0, None))
         net_fee, raw = network_fee_of(user, redeemed['txid'])
-        assert_equal(net_fee, max(YELLOWBACK_FEE, 100 * estimated_bytes(raw) // 1000))                 # -pqfeerate's 100 zat/kB: the flat fee
+        assert_equal(net_fee, max(wallet_network_fee(raw), 100 * estimated_bytes(raw) // 1000))   # -pqfeerate's 100 zat/kB below P-2's fee: max(-yellowbackfee, ZIP-317 conventional) (6.20.0)
         self.sync_all()
         stock.generate(1)
         self.sync_all(blocks_only=True)

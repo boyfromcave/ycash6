@@ -659,7 +659,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         tip, tip_hash = user.getblockcount(), user.getbestblockhash()
         _ref, required, _payee = self.mint_inputs()
-        payee = user.yed_getfeepayee(tip, 2 * required)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(tip)['default']['payoutAddress']
         stale_hex, _o = build_mint_tx(user, CENTS, LOCK, tip, 2 * required, fee_addr=payee)
         stale = send_locked(user, stale_hex)
         self.sync_all()
