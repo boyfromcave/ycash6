@@ -1992,7 +1992,7 @@ change. The member key is `attestorPubKey` and the bond key at once (back up `wa
 afterwards). The bond is **not** `IsMine` (R6): the wallet finds it through `Attestors` by
 `bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in the result — it is assigned
 when the join confirms; read it from `yed_listattestors` by `attestorPubKey`; `flags` is always
-`{tier 0, pool false}`; `warning` is `""`; `maturesAt` is `tip + 1 + max(set maturity,
+`{tier 0, pool false}`; `warning` is `""`, or (D-Q-28 review B2) `"bond-near-min: …"` when `bondYec` is below `bondMinNoPriceZat` and within 10 % of `params.attest.bondMinZat`: the join is judged at the snapshot before its own block, so if the price falls before it confirms it can stay PENDING until `bondLocktime`; post 10 % headroom, or `bondMinNoPriceZat`, which always qualifies; `maturesAt` is `tip + 1 + max(set maturity,
 BOND_MATURITY)`. Refusals: `bond-below-min`, `lock-below-min` (the module's floor; also for
 `bondLocktime ≥ LOCKTIME_THRESHOLD`), `yellowback-no-attestor-set` (the network has none),
 `register-needs-admission` (`RPC_WALLET_ERROR`: the set is not open; the message carries the

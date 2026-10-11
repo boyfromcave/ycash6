@@ -39,6 +39,10 @@ Read this first; where the sections below disagree, this section wins (upgrade p
 - **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-28: 20,000 YEC with no attested price at
   registration — before arming and in the founding window — else max(2,000 YEC, $8,000 at the attested price), never
   above 20,000 YEC; `yed_getinfo` `params.attest.bondMinZat` is the floor for a join in the next block) or locked for less than `BOND_MIN_LOCK` is recorded but never becomes ELIGIBLE.
+  **Post headroom:** the floor is judged at the snapshot before the join's own block, so a bond sized at
+  exactly today's `bondMinZat` can fall short if the price drops before it confirms — and then sits PENDING,
+  locked, until `bondLocktime`. Post at least 10 % above `bondMinZat` (`yed_registerattestor` warns
+  `bond-near-min` otherwise), or `bondMinNoPriceZat` (20,000 YEC), which qualifies at any price.
 - **Ejection freezes the bond.** EQV-1 (two prices, one height) ejects the member *and* freezes
   its bond in the set: the bond can never be withdrawn, and the key never becomes ELIGIBLE again.
   `SET_REMOVE` by the set (with or without burn) ejects too; without burn the bond is returned at

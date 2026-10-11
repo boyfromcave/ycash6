@@ -1206,6 +1206,9 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
             "bond-below-min, lock-below-min (the module's floor: yed_getinfo params.attest.bondMinZat, D-Q-28, and BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
             "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
+            "The minimum is judged at the snapshot before the join's block (D-Q-28), so post headroom: a bond within 10% of\n"
+            "params.attest.bondMinZat (and below bondMinNoPriceZat) returns warning \"bond-near-min\"; if the price falls before it\n"
+            "confirms, the join can stay PENDING until bondLocktime.\n"
             "\nArguments:\n"
             "1. bondYec     (numeric, required) the bond in YEC (>= the module's bondMinZat at the next block and the set's bondmin)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
@@ -1220,6 +1223,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     uint256 setId;
     int64_t locktime = 0;
     int maturesAt = 0;
+    std::string warning;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
@@ -1231,6 +1235,15 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         // judged at its own block, so a price move in between can leave it PENDING
         const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)chainActive.Height() + 1);
         if (bondZat < bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(bondMin)));
+        // D-Q-28 review B2 (policy): the join is judged at the snapshot before its own block, so a bond within 10 % of
+        // today's minimum can fall short if the price drops before it confirms and then sits PENDING until its CLTV.
+        // The no-price bond (bondMinNoPriceZat) always qualifies.
+        if (bondZat < p.bondMinNoPriceZat && bondZat < bondMin + bondMin / 10) {
+            warning = strprintf("bond-near-min: %s YEC is within 10 %% of the minimum for the next block (%s YEC); if the attested price falls "
+                                "before the join confirms it can stay PENDING until bondLocktime. Post at least %s YEC (+10 %%), or %s YEC, "
+                                "which always qualifies", FormatMoney(bondZat), FormatMoney(bondMin),
+                                FormatMoney(std::min(p.bondMinNoPriceZat, bondMin + bondMin / 10)), FormatMoney(p.bondMinNoPriceZat));
+        }
         if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
         locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
         if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_VERIFY_REJECTED, "lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
@@ -1271,7 +1284,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     fl.pushKV("pool", false);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    o.pushKV("warning", "");
+    o.pushKV("warning", warning);
     return o;
 }
 

@@ -95,7 +95,7 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         return self.seq_of(pub)
 
     def wallet_join(self, bond_yec):
-        res = self.nodes[USER].yed_registerattestor(Decimal(bond_yec), BOND_MIN_LOCK)
+        res = self.last_reg = self.nodes[USER].yed_registerattestor(Decimal(bond_yec), BOND_MIN_LOCK)
         self.sync_all()
         self.mine(POOLS[0])
         return self.seq_of(res['attestorPubKey'])
@@ -137,6 +137,7 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('3.99999999'), BOND_MIN_LOCK)
         below_at_1 = self.raw_join(4 * COIN - 1)
         x4 = self.wallet_join('4')                       # the $8,000 minimum's regtest image
+        assert self.last_reg['warning'].startswith('bond-near-min'), self.last_reg['warning']   # B2: no headroom
         self.mine_round_robin(POOLS, BOND_MATURITY)
         assert_equal((self.status(below_at_1), self.status(x4)), ('PENDING', 'ELIGIBLE'))
 
@@ -159,6 +160,7 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
 
         print('5. the bump: larger YEC bonds outrank minimum ones by bondZat x age')
         z = self.wallet_join('10')
+        assert_equal(self.last_reg['warning'], '')                # the no-price bond always qualifies
         reg_z = self.records()[z]['registerHeight']
         while user.getblockcount() < reg_z + BOND_MATURITY - 1:
             self.mine(POOLS[0])
