@@ -47,6 +47,7 @@ from test_framework.yellowback_util import (
     DORMANCY_BLOCKS,
     DORMANCY_CHECK,
     EMERGENCY_PERSIST,
+    FEE_MIN,
     POOLS,
     REF_LAG,
     YellowbackTestFramework,
@@ -92,7 +93,7 @@ NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'par
             'yed_listclaimable': {'underwaterAt', 'pClaim'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
             'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
             'yed_estimateredeem': {'payee'},
-            'yed_estimatecollateral': {'requiredZat', 'pMint'},
+            'yed_estimatecollateral': {'requiredZat', 'requiredZatFloored', 'pMint'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
             'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'}}
@@ -222,6 +223,14 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('verdict-parent-not-tip', user.yed_getblockverdict, user.getblockhash(user.getblockcount() - 2))
         assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
         assert_rpc_error('mint-bad-lock', user.yed_estimatecollateral, 10000, 10)
+        # the price override is range-checked; requiredZatFloored = max(requiredZat, 4 * FEE_MIN) rounded to 1,000 (MINT-5)
+        assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 99)
+        assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 4_294_967_296)
+        top = user.yed_estimatecollateral(10000, 48, 4_294_967_295)
+        assert top['requiredZat'] < 4 * FEE_MIN, top
+        assert_equal(top['requiredZatFloored'], 4 * FEE_MIN)
+        low = user.yed_estimatecollateral(10000, 48, 1_000_000)
+        assert_equal(low['requiredZatFloored'], max(low['requiredZat'], 4 * FEE_MIN))
 
         print('wallet context: addresses, balances')
         addr = c.check('yed_getnewaddress', user.yed_getnewaddress())

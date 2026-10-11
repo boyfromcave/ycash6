@@ -562,6 +562,7 @@
       "pMint": 1985000,
       "refHeight": 329,
       "requiredZat": 251889169000,
+      "requiredZatFloored": 251889169000,
       "sigmaMultBps": 10000,
       "source": "a",
       "termClass": "A",

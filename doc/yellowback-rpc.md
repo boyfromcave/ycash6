@@ -1011,8 +1011,13 @@ Arguments: `cents` (number), `lockBlocks` (number; the class follows from it, V1
 `priceMicroUsd` (number, optional; replaces the snapshot's `pMint`). At the current reference
 snapshot `R = tip − REF_LAG`: `termClass`, `baseRatioBps` for the class, `sigmaMultBps`
 (SIGMA-1), `minRatioBps = MinRatioBps(base, sigma)`, `pMint` (`null` when undefined and no price
-was given — then `requiredZat` is `null` too), `requiredZat` rounded up to 1,000 zat,
-`lockHeight = R + lockBlocks`, `claimHeight = lockHeight + GRACE`, `refHeight = R`. Refuses with
+was given — then `requiredZat` and `requiredZatFloored` are `null` too), `requiredZat` rounded up
+to 1,000 zat, `requiredZatFloored`, `lockHeight = R + lockBlocks`, `claimHeight = lockHeight + GRACE`,
+`refHeight = R`. `requiredZat` is MINT-5's ratio clause only; MINT-5 also requires `vout[0] ≥
+4 · FEE_MIN`, so `requiredZatFloored = max(requiredZat, 4 · FEE_MIN)`, rounded up to 1,000 zat, is what
+a mint locks (and what `yed_mint` puts in `vout[0]`). The two differ only at high prices (on regtest,
+10,000 cents at class A above about $150/YEC); a raw MINT built at `requiredZat` there is VOID
+(`bad-mint-collateral`). `priceMicroUsd` must lie in `[PRICE_MIN, PRICE_MAX]`. Refuses with
 `mint-bad-lock` (`lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD`)
 and `mint-unsatisfiable` (`requiredZat > MAX_MONEY`, K14). It does not apply MINTPOL-1: a halted
 gate still estimates, so the Mint page can show the figure next to the halt reason.
@@ -1034,6 +1039,7 @@ Result of `yed_estimatecollateral`:
 ```json
 {
   "requiredZat": 251889169000,
+  "requiredZatFloored": 251889169000,
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,

@@ -1579,7 +1579,8 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_estimatecollateral cents lockBlocks ( priceMicroUsd )\n"
             "\nThe collateral (zatoshi, rounded up to 1,000) to mint cents with a lock of lockBlocks at the reference snapshot\n"
-            "R = tip - REF_LAG (or at the given P_mint). Does not apply MINTPOL-1.\n");
+            "R = tip - REF_LAG (or at the given P_mint, PRICE_MIN..PRICE_MAX). requiredZat is MINT-5's ratio clause only;\n"
+            "requiredZatFloored = max(requiredZat, 4 * FEE_MIN) rounded up to 1,000 is what a mint locks. Does not apply MINTPOL-1.\n");
 
     YellowbackIndex& index = EnsureIndex();
     if (!params[0].isNum() || !params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "cents and lockBlocks must be numbers");
@@ -1612,7 +1613,12 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     std::optional<int64_t> divergenceBps;
     if (snap.has_value()) xMint = snap->PMint();
     if (override) {
-        pMint = params[2].get_int64();
+        if (!params[2].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "priceMicroUsd must be a number");
+        const int64_t price = params[2].get_int64();
+        if (price < PRICE_MIN || price > PRICE_MAX) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("priceMicroUsd must be between %d and %d (PRICE_MIN, PRICE_MAX)", PRICE_MIN, PRICE_MAX));
+        }
+        pMint = price;
     } else {
         pMint = xMint;
         if (armed) {
@@ -1639,10 +1645,16 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     UniValue o(UniValue::VOBJ);
     if (!pMint.has_value()) {
         o.pushKV("requiredZat", NullUniValue);
+        o.pushKV("requiredZatFloored", NullUniValue);
     } else {
         auto req = RequiredCollateralRounded((Cents)cents, minRatio, pMint.value());
         if (!req.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, "mint-unsatisfiable: the required collateral exceeds MAX_MONEY");
         o.pushKV("requiredZat", req.value());
+        // What a mint locks in vout[0]: MINT-5's other clause, at least 4 * FEE_MIN, rounded up to 1,000 zat as the
+        // wallet builds it (txbuilder.cpp MintCollateral; state.cpp mint5).
+        CAmount floored = std::max(req.value(), 4 * p.feeMin);
+        if (floored % 1000 != 0) floored += 1000 - floored % 1000;
+        o.pushKV("requiredZatFloored", floored);
         if (!bundleSeqs.empty()) attestFeeZat = AttestFeeZat(FeeZat(req.value(), p.feeMin, p.feeBps), p.attestFeeBps);
     }
     o.pushKV("termClass", ClassLetter((uint8_t)termClass));

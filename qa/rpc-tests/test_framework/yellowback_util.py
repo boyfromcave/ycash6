@@ -1377,14 +1377,15 @@ TX_EXPIRING_SOON_THRESHOLD = 3     # ref/ycash/src/consensus/consensus.h; a memp
 
 def mint_vault_raw(test, user, pool, cents=10_000, lock_blocks=48, fee=True):
     """Mint an ACTIVE vault from ``user``'s coins with ``build_mint_tx`` (collateral from
-    ``yed_estimatecollateral``, the fee payee from ``yed_getfeepayee``), broadcast it with
+    ``yed_estimatecollateral``'s ``requiredZatFloored``, valid at any price, the fee payee from ``yed_getfeepayee``), broadcast it with
     ``sendrawtransaction`` on ``user`` and mine it on ``pool``.  Returns ``(txid, yed_getvault)``."""
     est = user.yed_estimatecollateral(cents, lock_blocks)
     ref = int(est['refHeight'])
+    collateral = int(est['requiredZatFloored'])   # what a mint locks: max(requiredZat, 4 * FEE_MIN) (MINT-5)
     fee_addr = None
     if fee:
-        fee_addr = user.yed_getfeepayee(ref, int(est['requiredZat']))['default']['payoutAddress']
-    hex_, _owner = build_mint_tx(user, cents, lock_blocks, ref, int(est['requiredZat']), fee_addr=fee_addr)
+        fee_addr = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
+    hex_, _owner = build_mint_tx(user, cents, lock_blocks, ref, collateral, fee_addr=fee_addr)
     txid = user.sendrawtransaction(hex_)
     test.sync_all()
     test.mine(pool)

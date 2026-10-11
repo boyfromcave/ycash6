@@ -1157,8 +1157,9 @@ def attested_micro(usd, cited_height):
     """The micro-USD price the offline bundles attest for ``usd`` at ``cited_height``: a few
     hundred micro-USD that depend on the height — one price per (seq, height), which the signing
     guard (S16) demands, and a different one at every height, so no attestor repeats one price
-    across bundles and PIN-2 never pins a test attestor."""
-    return yu.usd_to_micro(usd) + ((int(cited_height) * 7) % 9) * 100
+    across bundles and PIN-2 never pins a test attestor. Clamped to PRICE_MAX (the attestation's uint32
+    field): at the maximum the jitter vanishes."""
+    return min(yu.usd_to_micro(usd) + ((int(cited_height) * 7) % 9) * 100, yu.PRICE_MAX)
 
 
 def offline_bundle(test, node, ref_height, selector, prices, cited=None, jitter=True):
@@ -1178,7 +1179,7 @@ def offline_bundle(test, node, ref_height, selector, prices, cited=None, jitter=
     for seq in selected:
         if seq not in prices:
             continue
-        micro = yu.usd_to_micro(prices[seq]) + delta
+        micro = min(yu.usd_to_micro(prices[seq]) + delta, yu.PRICE_MAX)   # the uint32 field (D-Q-22)
         atts.append(_sign_for(node, seq, micro, cited, blockhash))
     return encode_bundle(atts), selected
 
