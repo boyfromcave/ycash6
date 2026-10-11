@@ -15,6 +15,7 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
   default rate, size-priced on a node with -pqfeerate=0.001;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
   wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size);
+- A-15: z_sendmany (ANY_TADDR) and z_mergetoaddress never select a TX_PQPKH coin (they cannot sign it);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
   signs its owner spend;
 - an encrypted wallet: the PQ keys survive encryption, a locked wallet refuses vault_getnewowner, the
@@ -24,6 +25,7 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
 """
 
 import os
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -245,6 +247,21 @@ class VaultPQWalletTest(BitcoinTestFramework):
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n1.listunspent() if not (u['txid'] == pq_txid and u['vout'] == pq_vout)]
         if others:
             assert n1.lockunspent(False, others)
+
+        print('A-15: z_sendmany and z_mergetoaddress never select the TX_PQPKH coin')
+        # 6.20.0 (feca428a2): FindSpendableInputs skips the coin, so the operation fails with no transparent funds
+        # at all (ycash-dd's AsyncRPCOperation_sendmany says "Could not find any non-coinbase UTXOs to spend.").
+        opid = n1.z_sendmany('ANY_TADDR', [{'address': n0.getnewaddress(), 'amount': 1}], 1, None, 'AllowFullyTransparent')
+        res = []
+        for _ in range(60):
+            res = n1.z_getoperationresult([opid])
+            if res:
+                break
+            time.sleep(1)
+        assert_equal(res[0]['status'], 'failed')
+        assert res[0]['error']['message'].startswith('Insufficient funds: have 0.00, need 1.00001;'), res[0]['error']['message']
+        assert_raises_rpc('Could not find any funds to merge', n1.z_mergetoaddress, ['ANY_TADDR'], n0.getnewaddress())
+        assert_equal(len(pq_unspent(n1)), 1)                           # still unspent, still the wallet's
         txid = n1.sendtoaddress(n0.getnewaddress(), 1)
         tx = self.tx_of(txid, 1)
         assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(pq_txid, pq_vout)])
