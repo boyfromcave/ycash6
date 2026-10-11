@@ -729,7 +729,15 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         print('v3 wallet: yed_withdrawbond after the locktime')
         assert_rpc_error('bond-locked', user.yed_withdrawbond, wseq)
         assert_rpc_error('attest-key-not-held', claimant.yed_withdrawbond, wseq)
-        self.mine_round_robin(POOLS, reg['bondLocktime'] - user.getblockcount())
+        # the bond exit delay (owner 2026-10-11): leave (set_leave), then BOND_MATURITY blocks
+        setid = user.yed_getinfo()['upgrade']['attestorSetId']
+        left = user.set_leave(setid, {int(x['seq']): x for x in user.yed_listattestors()}[wseq]['attestorPubKey'])
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_rpc_error('bond-locked', user.yed_withdrawbond, wseq)
+        target = max(reg['bondLocktime'], left['bondspendableat'] - 1)
+        if user.getblockcount() < target:
+            self.mine_round_robin(POOLS, target - user.getblockcount())
         wd = c.check('yed_withdrawbond', user.yed_withdrawbond(wseq))
         assert_equal((wd['seq'], wd['bondZat']), (wseq, 10 * COIN))
         self.sync_all()

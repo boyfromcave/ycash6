@@ -15,8 +15,11 @@ bond joining the full set evicts the member of least seat weight, and the set ne
    seatWeight in yed_listattestors matches the model's SeatWeight.
 4. SET_REMOVE and SET_WINDDOWN naming the attestor set are refused by the mempool (attestor-set-act);
    members cannot vote one another out.
-5. The evicted bond is spent at its locktime (not before): the record stays WITHDRAWN (statusHeight
-   kept), bondSpentHeight set. The evicted key joins again with a new seq.
+5. The bond exit delay (owner 2026-10-11): the evicted bond is refused at exit + BOND_MATURITY - 1
+   (bad-vault-bond-locked) and spent at exit + BOND_MATURITY: the record stays WITHDRAWN (statusHeight kept).
+6. A voluntary leaver (its own SET_REMOVE, signed by itself alone): WITHDRAWN at once, its bond on the same delay.
+7. A leaver that equivocates during the delay is EJECTED and its bond frozen (bad-vault-bond-frozen for good).
+8. The evicted key joins again with a new seq.
 The enforcing nodes agree on the state hash and the Python model replays the chain.
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer.
@@ -26,6 +29,7 @@ from test_framework.util import assert_equal
 from test_framework.yellowback_model import sha256, seat_weight
 from test_framework.yellowback_util import (
     ATTESTOR_SET,
+    BOND_MATURITY,
     BOND_MIN_LOCK,
     COIN,
     POOLS,
@@ -38,7 +42,11 @@ from test_framework.yellowback_util import (
 from test_framework.yellowback_attest import (
     attestor_set_internal,
     build_act_raw,
+    build_carrier_tx,
     build_register_tx,
+    encode_bundle,
+    equivocation_raw,
+    sign_attestation,
     model_check,
     send_and_lock,
     withdraw_bond_raw,
@@ -147,21 +155,65 @@ class YellowbackAttestEvictTest(YellowbackTestFramework):
         wd = build_act_raw(user, va.act_set_winddown(attestor_set_internal()), [secrets[1]])
         assert_rpc_error('attestor-set-act', user.sendrawtransaction, wd)
 
-        print('5. the evicted bond is returned at its locktime; the key may join again')
-        lock = int(v['bondLocktime'])
-        while user.getblockcount() + 1 < lock:
-            self.mine_round_robin(POOLS, min(50, lock - 1 - user.getblockcount()))
-        assert_rpc_error('non-final', user.sendrawtransaction, withdraw_bond_raw(user, v, secrets[youngest]))
+        print('5. the bond exit delay: the evicted bond is returned BOND_MATURITY after the eviction (not before)')
+        spendable = h + BOND_MATURITY                  # exitHeight + the set's maturity (8 on regtest)
+        while user.getblockcount() + 1 < spendable - 1:
+            self.mine(POOLS[0])
+        assert_equal(user.getblockcount() + 1, spendable - 1)
+        assert_rpc_error('bad-vault-bond-locked', user.sendrawtransaction, withdraw_bond_raw(user, v, secrets[youngest]))
         self.mine(POOLS[0])
-        assert user.getblockcount() + 1 > lock
         user.sendrawtransaction(withdraw_bond_raw(user, v, secrets[youngest]))
         self.sync_all()
         self.mine(POOLS[0])
         r = self.records()[seqs[youngest]]
         assert_equal((r['status'], r['statusHeight'], r['bondSpentHeight'], r['evicted']), ('WITHDRAWN', h, user.getblockcount(), True))
-        self.join(secrets[youngest], 50 * COIN)            # evicts again (50 YEC) and rejoins with a new seq
+
+        print('6. a voluntary leaver: its own SET_REMOVE; the bond is locked until exit + BOND_MATURITY')
+        k = 1
+        leave = build_act_raw(user, va.act_set_remove(attestor_set_internal(), secret_to_pubkey(secrets[k]), 0), [secrets[k]])
+        user.sendrawtransaction(leave)
+        self.sync_all()
+        self.mine(POOLS[0])
+        exit_k = user.getblockcount()
+        rk = self.records()[seqs[k]]
+        assert_equal((rk['status'], rk['statusHeight'], rk['evicted'], rk['bondFrozen']), ('WITHDRAWN', exit_k, False, False))
+        assert_equal(self.members()[0][secret_to_pubkey(secrets[k]).hex()]['status'], 'removed')
+        while user.getblockcount() + 1 < exit_k + BOND_MATURITY - 1:
+            self.mine(POOLS[0])
+        assert_equal(user.getblockcount() + 1, exit_k + BOND_MATURITY - 1)
+        assert_rpc_error('bad-vault-bond-locked', user.sendrawtransaction, withdraw_bond_raw(user, rk, secrets[k]))
+        self.mine(POOLS[0])
+        user.sendrawtransaction(withdraw_bond_raw(user, rk, secrets[k]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(self.records()[seqs[k]]['bondSpentHeight'], user.getblockcount())
+
+        print('7. a slash during the delay: a leaver that equivocates is EJECTED and its bond frozen for good')
+        k = 2
+        leave = build_act_raw(user, va.act_set_remove(attestor_set_internal(), secret_to_pubkey(secrets[k]), 0), [secrets[k]])
+        user.sendrawtransaction(leave)
+        self.sync_all()
+        self.mine(POOLS[0])
+        cited = user.getblockcount() - 2
+        a1 = sign_attestation(secrets[k], seqs[k], 50000, cited, user.getblockhash(cited))
+        a2 = sign_attestation(secrets[k], seqs[k], 51000, cited, user.getblockhash(cited))
+        carrier = build_carrier_tx(user, encode_bundle([a1, a2]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        user.sendrawtransaction(equivocation_raw(user, carrier))
+        self.sync_all()
+        self.mine(POOLS[0])
+        rk = self.records()[seqs[k]]
+        assert_equal((rk['status'], rk['bondFrozen']), ('EJECTED', True))
+        mk = self.members()[0][secret_to_pubkey(secrets[k]).hex()]
+        assert_equal((mk['status'], mk['bondfrozen']), ('ejected', True))
+        self.mine_round_robin(POOLS, BOND_MATURITY)
+        assert_rpc_error('bad-vault-bond-frozen', user.sendrawtransaction, withdraw_bond_raw(user, rk, secrets[k]))
+
+        print('8. the evicted key joins again with a new seq (the two departures left room: no eviction)')
+        self.join(secrets[youngest], 50 * COIN)
         assert self.seq_of(secrets[youngest]) != seqs[youngest]
-        assert_equal(self.members()[1]['active'], 15)
+        assert_equal(self.members()[1]['active'], 14)
 
         assert_same_statehash(self.enforcing_nodes(), 'seats')
         model_check(self.nodes[POOLS[0]])
