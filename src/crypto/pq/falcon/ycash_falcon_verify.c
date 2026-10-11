@@ -87,7 +87,15 @@ do_verify(
 
 int
 ycash_falcon512_verify(const uint8_t *sig, size_t siglen,
-                       const uint8_t *m, size_t mlen, const uint8_t *pk) {
+                       const uint8_t *m, size_t mlen,
+                       const uint8_t *pk, size_t pklen) {
+    /* YCASH LOCAL PATCH (Falcon consensus audit 2026-10-10, F-1): exactly the
+     * padded 666-byte signature and the 897-byte key, nothing shorter (the
+     * compact form) or longer, independently of pq::Verify's gate. */
+    if (siglen != YCASH_FALCON512_SIGBYTES ||
+            pklen != YCASH_FALCON512_PUBLICKEYBYTES) {
+        return -1;
+    }
     if (siglen < 1 + NONCELEN) {
         return -1;
     }
