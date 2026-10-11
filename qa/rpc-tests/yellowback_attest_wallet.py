@@ -535,8 +535,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
                          offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
         self.mine_round_robin(POOLS, notice['refHeight'] + EMERGENCY_PERSIST - user.getblockcount())
         assert_equal([p['canClaim'] for p in claimant.yed_listpositions()], [])   # not the claimant's vault
-        owner_addr = user.yed_getvault(v2['txid'])['ownerAddress']
-        owner_t = user.validateaddress(user.yed_validateaddress(owner_addr)['transparentAddress'])['address']
+        vrow = user.yed_getvault(v2['txid'])
+        owner_t = '20' + vrow['ownerHash'] + '%02x' % (0x50 + vrow['ownerScheme']) + 'c2'   # the residual pays PQPKH(owner) (F-3)
         yec_owner_before = user.getbalance()
         to2 = claimant.getnewaddress()                       # U-23: a claim pays an intent, whose recipient is transparent
         c2 = wallet_claim(self, claimant, v2['txid'], to2, prices='20.80')

@@ -34,6 +34,11 @@
 
 namespace yellowback {
 
+/** The self-check flags of every input this builder signs (q/wallet's verify-flags SignSignature): a PQ input (a
+ *  TX_PQPKH token or YEC coin, the V's owner) exists only under UPGRADE_VAULT, and OP_CHECKPQSIG is BAD_OPCODE
+ *  under STANDARD alone (quantum spec §5.2); PQ_FALCON lets a Falcon holder verify (only past the Falcon height). */
+static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
+
 // ---------------------------------------------------------------- pure shapes (§3.5)
 
 std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFeeVoutOut)
@@ -215,7 +220,7 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     // A V spend and a PQPKH holder input exist only under UPGRADE_VAULT: the signer's self-check runs with its
     // flags (OP_CHECKPQSIG is BAD_OPCODE under STANDARD alone, quantum spec §5.2); PQ_FALCON lets a Falcon holder
     // input verify (only a chain past the Falcon height has one).
-    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
+    const unsigned int flags = SIGN_FLAGS;
     if (ownerPath) {
         // The owner is a post-quantum key (quantum plan §4.3): the wallet's PQ signer (q/wallet) pushes the chunked
         // signature and key, then the V's OWNER selector (2); ZIP-243 over the bare V with the vault's value.
@@ -233,7 +238,7 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     }
     for (size_t i = 0; i < out.fundPrevs.size(); i++) {
         const size_t nIn = 1 + out.yedPrevs.size() + i;
-        if (!SignSignature(keystore, out.fundPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), nIn, out.fundPrevs[i].second, SIGHASH_ALL, branchId)) {
+        if (!SignSignature(keystore, out.fundPrevs[i].first, out.tx, V4TxData(CTransaction(out.tx)), nIn, out.fundPrevs[i].second, SIGHASH_ALL, branchId, flags)) {
             throw std::runtime_error(strprintf("failed to sign fee input %u", (unsigned)i));
         }
     }
@@ -670,7 +675,7 @@ struct Context
     {
         for (unsigned int i = first; i < first + prevs.size() && i < mtx.vin.size(); i++) {
             const auto& p = prevs[i - first];
-            if (!SignSignature(wallet, p.first, mtx, V4TxData(CTransaction(mtx)), i, p.second, SIGHASH_ALL, branchId)) {
+            if (!SignSignature(wallet, p.first, mtx, V4TxData(CTransaction(mtx)), i, p.second, SIGHASH_ALL, branchId, SIGN_FLAGS)) {
                 throw std::runtime_error(strprintf("failed to sign input %u", i));
             }
         }
@@ -1626,7 +1631,7 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     } while (ctx.Reprice(ctx.FeeOf(mtx, allPrevs, 0)));
     // Sign YED inputs (P2PKH, mine) then YEC inputs.
     for (size_t i = 0; i < sel.size(); i++) {
-        if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, V4TxData(CTransaction(mtx)), i, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId)) {
+        if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, V4TxData(CTransaction(mtx)), i, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId, SIGN_FLAGS)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
         }
     }
