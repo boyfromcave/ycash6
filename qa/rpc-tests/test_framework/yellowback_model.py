@@ -2400,12 +2400,9 @@ class YellowbackModel(object):
             touched = True
         elif payload is not None and payload.type in (PAYLOAD_TRANSFER, PAYLOAD_REDEEM):
             rec.type = 'TRANSFER' if payload.type == PAYLOAD_TRANSFER else 'REDEEM'
-            # TOK-PQ (quantum spec F-7): from the Falcon height an assignment to any other script makes the
-            # transaction invalid (it is refused, not burned)
-            for vout, _ in payload.assignments:
-                if not self.holder_ok(height, tx.vout[vout].script):
-                    return self._fail(rec, 'bad-yed-holder')
-            self._apply_transfer(tx, height, rec, payload, yed_in)
+            failing = self._apply_transfer(tx, height, rec, payload, yed_in)
+            if failing is not None:
+                return self._fail(rec, failing)
         else:
             # The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog
             # entry; a failing one is non-Yellowback for outputs, like a transaction with no payload.
@@ -2877,12 +2874,18 @@ class YellowbackModel(object):
         if verdict != VERDICT_OK:
             rec.verdict = verdict
             rec.yed_out = 0
-            return
+            return None
+        # TOK-PQ (quantum spec F-7, "Q4 as implemented"): only assignments that actually receive YED are bound;
+        # from the Falcon height a non-holder output makes the transaction invalid (refused, not burned)
+        for vout, _ in pl.assignments:
+            if not self.holder_ok(height, tx.vout[vout].script):
+                return 'bad-yed-holder'
         for vout, cents in pl.assignments:
             self.tokens[(tx.txid, vout)] = Token(cents, tx.vout[vout].value, tx.vout[vout].script, height)
         rec.assigned = list(pl.assignments)
         rec.yed_out = total
         rec.verdict = VERDICT_BURNED if total < yed_in else VERDICT_OK
+        return None
 
     def _apply_vault_spend(self, tx, height, rec, pl, opret, active_spent, outpoints, yed_in, yed_outputs):
         """RED-1..5 over a transaction that spends an ACTIVE vault.  Returns the failing verdict (the

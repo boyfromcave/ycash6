@@ -480,7 +480,8 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
 // ---------------------------------------------------------------------------
 // XFER-1..3 for a TRANSFER, or a REDEEM payload that spends no ACTIVE vault
 
-void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const Payload& p, Cents yedIn, TxLogRecord& log)
+/** Returns nullptr, or TOK-PQ's verdict when an assignment that would receive YED is not a holder (the transaction is invalid). */
+const char* ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const Payload& p, Cents yedIn, TxLogRecord& log)
 {
     const Params& P = ctx.params;
     const char* v = verdict::OK;
@@ -493,7 +494,13 @@ void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid
     if (v != verdict::OK) {
         log.verdict = v;                                                            // everything burns (cenotaph)
         log.yedOut = 0;
-        return;
+        return nullptr;
+    }
+    // TOK-PQ (quantum spec F-7, "Q4 as implemented"): only the assignments that actually receive YED -- after
+    // XFER-1..3 hold -- are bound; from the Falcon height a non-holder output makes the transaction invalid
+    // (refused, not burned: a wallet that missed the activation keeps its YED).
+    for (const Assignment& a : p.assignments) {
+        if (!HolderAllowed(ctx.params, ctx.height, tx.vout[a.vout].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     }
     for (const Assignment& a : p.assignments) {
         const COutPoint out(txid, a.vout);
@@ -511,6 +518,7 @@ void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid
     }
     log.yedOut = total;
     log.verdict = total < yedIn ? verdict::BURNED : verdict::OK;
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,12 +1079,7 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         touched = true;
     } else if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
         log.type = (uint8_t)(fp->payload.type == PayloadType::TRANSFER ? TxLogType::TRANSFER : TxLogType::REDEEM);
-        // TOK-PQ (quantum spec F-7): from the Falcon height an assignment to any other script makes the
-        // transaction invalid (refused, not burned: a wallet that missed the activation keeps its YED).
-        for (const Assignment& a : fp->payload.assignments) {
-            if (!HolderAllowed(ctx.params, ctx.height, tx.vout[a.vout].scriptPubKey)) return fail(verdict::BAD_YED_HOLDER);
-        }
-        ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log);
+        if (const char* holder = ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log)) return fail(holder);   // TOK-PQ
     } else {
         // The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog entry; a
         // failing one is non-Yellowback for outputs, exactly like a transaction with no payload.
