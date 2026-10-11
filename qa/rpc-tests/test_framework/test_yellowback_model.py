@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = '17926ca6311ab27d92ea3ecb10eda2924eae72c133b9668b060b141dd13924a1'
+GOLDEN_STATE_HASH = 'd3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1506,7 +1506,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x08\x00\x00\x00')        # SCHEMA_VERSION 8 (in-term claims)
+        self.assertEqual(pre[37:41], b'\x09\x00\x00\x00')        # SCHEMA_VERSION 9 (VaultRecord.pMint, FEE-1')
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))

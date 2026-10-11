@@ -21,7 +21,7 @@ The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block ent
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc`. Four entries are flagged
+`d3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
@@ -33,11 +33,11 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 8`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 9`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
-| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan; appended last so every earlier field keeps its offset) |
+| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan), `i64 pMint` (FEE-1', quantum plan D-Q-23: MINT-5's price at the mint, micro-USD per YEC, the price every later fee of the vault converts at; schema 9, appended last so every earlier field keeps its offset) |
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |

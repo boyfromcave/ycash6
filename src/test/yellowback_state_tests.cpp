@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "17926ca6311ab27d92ea3ecb10eda2924eae72c133b9668b060b141dd13924a1";   // in-term claims (SCHEMA_VERSION 8), post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "d3e48ac9884b6317f0a5682935a3185b8d6119c5a7266444d937da228688c31f";   // VaultRecord.pMint (SCHEMA_VERSION 9, FEE-1' D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()

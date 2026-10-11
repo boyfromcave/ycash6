@@ -1440,7 +1440,7 @@ class Judgement(object):
 class Vault(object):
     __slots__ = ('owner_pubkey', 'term_class', 'lock_height', 'claim_height', 'collateral_zat',
                  'minted_cents', 'mint_height', 'ref_height', 'status', 'void_reason',
-                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked', 'app_height', 'owner_height')
+                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked', 'app_height', 'owner_height', 'p_mint')
 
     def __init__(self):
         self.owner_pubkey = b''
@@ -1460,6 +1460,7 @@ class Vault(object):
         self.unbacked = False
         self.app_height = 0           # the V's appHeight: ref_height + 1 (IT-1); lock_height + grace before the in-term plan
         self.owner_height = 0         # the V's ownerHeight: ref_height + 1 (IT-1 extended); lock_height before the in-term plan
+        self.p_mint = 0               # FEE-1' (D-Q-23): MINT-5's price at the mint, micro-USD per YEC; every later fee converts at it
 
     def as_dict(self, outpoint):
         return {'txid': outpoint[0], 'vout': outpoint[1], 'status': VAULT_STATUS_NAMES[self.status],
@@ -1469,7 +1470,7 @@ class Vault(object):
                 'mintHeight': self.mint_height, 'refHeight': self.ref_height,
                 'feePaidZat': self.fee_paid_zat, 'closeHeight': self.close_height,
                 'closingTxid': self.closing_txid, 'burnedCents': self.burned_cents,
-                'unbacked': self.unbacked, 'voidReason': self.void_reason}
+                'unbacked': self.unbacked, 'voidReason': self.void_reason, 'pMint': self.p_mint}
 
 
 class IntentRec(object):
@@ -1809,7 +1810,8 @@ def _ser_vault(v):
     return (_bytes(v.owner_pubkey) + _u8(v.term_class) + _i32(v.lock_height) + _i32(v.claim_height)
             + _i64(v.collateral_zat) + _i64(v.minted_cents) + _i32(v.mint_height) + _i32(v.ref_height)
             + _u8(v.status) + _str(v.void_reason) + _i32(v.close_height) + _hash(v.closing_txid)
-            + _i64(v.burned_cents) + _i64(v.fee_paid_zat) + _bool(v.unbacked) + _i32(v.app_height) + _i32(v.owner_height))
+            + _i64(v.burned_cents) + _i64(v.fee_paid_zat) + _bool(v.unbacked) + _i32(v.app_height) + _i32(v.owner_height)
+            + _i64(v.p_mint))
 
 
 def _ser_intent(r):
@@ -1835,7 +1837,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 8        # in-term claims: VaultRecord.appHeight (IT-1); 7 was P4-b (view.h)
+    SCHEMA_VERSION = 9        # VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2715,6 +2717,7 @@ class YellowbackModel(object):
             v.mint_height = height
             v.ref_height = pl.ref_height
             v.status = V_ACTIVE
+            v.p_mint = facts['p_mint']                       # FEE-1' (D-Q-23): the mint price, read by RED-3'/IT-9' instead of a live one
             fee_applies = bool(self.eligible_payees(pl.ref_height))
             if fee_applies:
                 v.fee_paid_zat = tx.vout[pl.fee_vout].value
@@ -2797,6 +2800,7 @@ class YellowbackModel(object):
                 return 'mint-unsatisfiable'
             if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
                 return 'bad-mint-collateral'
+            facts['p_mint'] = p_mint       # the vault's fee price (FEE-1'): exactly the price MINT-5 passed at
             return None
 
         # MINT-5 at its v2 position when not ARMED (pMint = xMint)

@@ -320,8 +320,9 @@ struct MintFacts
     BundleFacts bundle;
     CAmount attestFeeZat;
     std::optional<uint16_t> attestPayee;
+    MicroUsd pMint;                 //!< MINT-5's price (min(xMint, aMint) when ARMED, xMint otherwise), stored in the vault (FEE-1', D-Q-23)
 
-    MintFacts() : attestFeeZat(0) {}
+    MintFacts() : attestFeeZat(0), pMint(0) {}
 };
 
 std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload& p, unsigned int opReturnIndex, const Totals& totals, MintFacts& facts)
@@ -370,6 +371,7 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         std::optional<CAmount> required = RequiredCollateral((Cents)p.cents, MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps), pMint.value());
         if (!required.has_value()) return verdict::MINT_UNSATISFIABLE;
         if (tx.vout[0].nValue < required.value() || tx.vout[0].nValue < 4 * P.feeMin) return verdict::BAD_MINT_COLLATERAL;
+        facts.pMint = pMint.value();     // the vault's fee price (FEE-1'): exactly the price MINT-5 passed at
         return nullptr;
     };
     // MINT-5 at its v2 position when not ARMED (pMint = xMint)
@@ -440,6 +442,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     const COutPoint vaultOut(txid, 0);
     if (v == verdict::OK) {
         vault.status = (uint8_t)VaultStatus::ACTIVE;
+        vault.pMint = facts.pMint;      // FEE-1' (D-Q-23): the mint price, read by RED-3'/IT-9' instead of a live one
         if (!ctx.Eligible((int)p.refHeight).empty()) {
             vault.feePaidZat = tx.vout[p.feeVout].nValue;
             log.feeZat = vault.feePaidZat;
