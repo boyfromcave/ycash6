@@ -161,7 +161,7 @@ struct Fixture
     {
         ownerKey = CKey::TestOnlyRandomKey(true);
         userKey = CKey::TestOnlyRandomKey(true);
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 10; i++) {
             hotKeys.push_back(DeterministicKey("yellowback-state-test-hot", i));
             bondKeys.push_back(hotKeys.back());
         }
@@ -2784,6 +2784,14 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_regimes_and_registration_price)
     BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 7 }));
     BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // bumped from its seat, still a member
     BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);
+    // review A2: outside [min(floor, noPrice), noPrice] SNAP decides without the snapshot, with the same verdicts: below
+    // the 1-YEC floor never ELIGIBLE, at the 10-YEC no-price bond always (here at $0.05, where the minimum is the cap)
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(8, 1 * COIN - 1), f.RegisterTx(9, 10 * COIN) });
+    const int regA2 = f.tip;
+    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, regA2), 10 * COIN);
+    while (f.tip < regA2 + f.P.bondMaturity) quote(50000);
+    BOOST_CHECK_EQUAL(f.Attestor(8)->status, (uint8_t)AttestorStatus::PENDING);    // seq 8 = key 8
+    BOOST_CHECK_EQUAL(f.Attestor(9)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // seq 9 = key 9
 }
 
 // Rule: ARM-1

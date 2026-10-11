@@ -725,6 +725,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
 BOOST_AUTO_TEST_CASE(dq28_bond_min_priced)
 {
     const Params& m = MainParams();
+    const Params r0 = RegtestParams(1, 0, 0, TestSet());
     // no price
     BOOST_CHECK_EQUAL(BondMinPricedZat(0, m), 20000 * COIN);
     BOOST_CHECK_EQUAL(BondMinPricedZat(-1, m), 20000 * COIN);
@@ -744,6 +745,20 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_priced)
     BOOST_CHECK_EQUAL(BondMinPricedZat(3, m), 20000 * COIN);                   // far below PRICE_MIN: the cap
     BOOST_CHECK_EQUAL(BondMinPricedZat(1, m), 20000 * COIN);                   // 8e17 zat does not fit MoneyRange: the cap
     BOOST_CHECK_EQUAL(BondMinPricedZat(std::numeric_limits<int64_t>::max(), m), 2000 * COIN);
+    // review A4: the price bounds -- PRICE_MAX ($4,294.97) is the floor, PRICE_MIN ($0.0001) the cap
+    BOOST_CHECK_EQUAL(BondMinPricedZat(PRICE_MAX, m), 2000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinPricedZat(PRICE_MIN, m), 20000 * COIN);
+    // review A2: SNAP skips the snapshot when the bond is outside [min(floor, noPrice), noPrice]; the priced minimum never
+    // leaves that interval, on either network, at any price in range or out of it
+    for (const Params* q : { &m, &r0 }) {
+        const CAmount lo = std::min(q->bondMinFloorZat, q->bondMinNoPriceZat), hi = q->bondMinNoPriceZat;
+        for (MicroUsd p : { (MicroUsd)-1, (MicroUsd)0, (MicroUsd)1, PRICE_MIN, (MicroUsd)99999, (MicroUsd)400000, (MicroUsd)400001,
+                            (MicroUsd)1000000, (MicroUsd)3999999, (MicroUsd)4000000, (MicroUsd)123456789, PRICE_MAX,
+                            std::numeric_limits<int64_t>::max() }) {
+            const CAmount z = BondMinPricedZat(p, *q);
+            BOOST_CHECK(z >= lo && z <= hi);
+        }
+    }
     // regtest: 1/2,000 of mainnet (10 YEC / 1 YEC / $4)
     Params r = RegtestParams(1, 0, 0, TestSet());
     BOOST_CHECK_EQUAL(BondMinPricedZat(0, r), 10 * COIN);

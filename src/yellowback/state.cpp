@@ -1357,8 +1357,15 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
             const bool floorOk = (int64_t)a.bondLocktime >= (int64_t)a.registerHeight + P.bondMinLock &&
                                  !slashed.count(a.attestorPubKey);
             const bool live = (int64_t)a.lastAct >= H - (int64_t)aset->livenessWindow;
-            if (a.Status() == AttestorStatus::PENDING && floorOk && H >= matureAt
-                && a.bondZat >= BondMinZat(st, P, a.registerHeight)) {          // D-Q-28: the price at registration, read for PENDING only
+            // D-Q-28: the price at registration, read for PENDING only and only when it can decide (review A2): BondMinZat
+            // lies in [min(floor, noPrice), noPrice], so a bond at or above the no-price bond always meets it and one below
+            // that lower bound never does; the snapshot is read only in between
+            auto bondOk = [&]() -> bool {
+                if (a.bondZat >= P.bondMinNoPriceZat) return true;
+                if (a.bondZat < std::min(std::max<CAmount>(0, P.bondMinFloorZat), P.bondMinNoPriceZat)) return false;
+                return a.bondZat >= BondMinZat(st, P, a.registerHeight);
+            };
+            if (a.Status() == AttestorStatus::PENDING && floorOk && H >= matureAt && bondOk()) {
                 a.status = (uint8_t)AttestorStatus::ELIGIBLE;
                 a.statusHeight = height;
             }
