@@ -1214,9 +1214,9 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
     const int count = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : DEFAULT_LIST_COUNT;   // C-6
     const int skip = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : 0;
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
-    // Every accepted address is one holder script (P2PKH, or TX_PQPKH for a PQ address: HolderKey); both forms
-    // of one key hash are the same script.
-    std::map<CScript, CTxDestination> wanted;
+    // Every accepted address is one holder destination (HolderKey: a P2PKH key, or a PQ key whose TX_PQPKH and
+    // TX_PQCHANNEL client outputs it holds, D-Q-19); both forms of one key hash are the same destination.
+    std::set<CTxDestination> wanted;
     for (size_t i = 0; i < addresses.size(); i++) {
         if (!addresses[i].isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid-address: addresses must be strings");
         const std::string str = addresses[i].get_str();
@@ -1228,7 +1228,7 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
             if (!id) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid-address: " + str + " is not a YED or transparent P2PKH address of this network");
             holder = *id;
         }
-        wanted[GetScriptForDestination(holder)] = holder;
+        wanted.insert(holder);
     }
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
@@ -1237,13 +1237,13 @@ UniValue yed_listtokens(const UniValue& params, bool fHelp)
     index.View().Iterate("K", [&](const std::string& k, const std::string& raw) {
         TokenRecord t;
         if (!DeserializeRecord(raw, t)) return true;
-        auto it = wanted.find(t.scriptPubKey);
-        if (it == wanted.end() || t.height < minHeight) return true;
+        const std::optional<CTxDestination> holder = HolderKey(t.scriptPubKey);
+        if (!holder.has_value() || !wanted.count(holder.value()) || t.height < minHeight) return true;
         Row r;
         r.height = t.height;
         r.out = COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         r.owned = t;
-        r.holder = it->second;
+        r.holder = holder.value();
         rows.push_back(r);
         return true;
     });

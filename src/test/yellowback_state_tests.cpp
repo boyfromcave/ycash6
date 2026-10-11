@@ -1316,7 +1316,7 @@ BOOST_AUTO_TEST_CASE(mint3_tokpq_falcon_height_boundary)
 {
     Fixture f;
     f.Activate();
-    const int falconHeight = f.tip + 6;
+    const int falconHeight = f.tip + 7;
     f.P.pqFalconHeight = falconHeight;               // not hashed (spec §3.4): set after the first block is fine
     BOOST_CHECK(!f.P.IsPQFalconActive(falconHeight - 1));
     BOOST_CHECK(f.P.IsPQFalconActive(falconHeight));
@@ -1344,6 +1344,7 @@ BOOST_AUTO_TEST_CASE(mint3_tokpq_falcon_height_boundary)
     BOOST_CHECK_EQUAL(MintVerdictOf(f, below), "");
     const uint256 belowId = CTransaction(below).GetHash();
     { MintOpts o; o.tokenScript = GetScriptForDestination(slhHolder); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+    { MintOpts o; o.tokenScript = GetScriptForPQChannel(slhHolder, f.userKey.GetPubKey(), 1000); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }   // D-Q-19 below
     // A TRANSFER below the height to P2PKH and to an SLH-DSA PQPKH: no shape rule yet.
     {
         CMutableTransaction t = f.TransferTx({ COutPoint(belowId, 1) }, { Assignment(0, 6000), Assignment(1, 4000) });
@@ -1368,6 +1369,13 @@ BOOST_AUTO_TEST_CASE(mint3_tokpq_falcon_height_boundary)
     { MintOpts o; o.tokenScript = falconSpk; slhFalcon = f.MintTx(10000, 48, f.tip - 1, o); BOOST_CHECK_EQUAL(MintVerdictOf(f, slhFalcon), ""); }   // SLH-DSA owner, Falcon holder
     COutPoint okToken;
     BOOST_CHECK(f.Vault(CTransaction(pqMint).GetHash())->Owner() == falconOwner);
+    // D-Q-19: a hybrid channel holds YED from the Falcon height iff its client is a Falcon key.
+    {
+        MintOpts o; o.tokenScript = GetScriptForPQChannel(falconHolder, f.userKey.GetPubKey(), f.tip + 100);
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "");
+        MintOpts o2; o2.tokenScript = GetScriptForPQChannel(slhHolder, f.userKey.GetPubKey(), f.tip + 100);
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o2)), verdict::BAD_YED_HOLDER);
+    }
 
     // The pre-height P2PKH token stays valid and spendable: a TRANSFER of it to a Falcon holder holds...
     {

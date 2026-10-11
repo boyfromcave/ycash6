@@ -430,7 +430,8 @@ bool YellowbackWallet::IsMineScript(const CScript& scriptPubKey) const
     // A post-quantum holder (TX_PQPKH, HolderKey): the wallet's PQ keystore decides (quantum plan §4.4).
     const std::optional<CTxDestination> holder = HolderKey(scriptPubKey);
     if (holder.has_value()) {
-        if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&holder.value())) return wallet->HavePQKey(*pq);
+        // a TX_PQPKH only: a channel output (D-Q-19) needs the server's signature too, so it is not a coin
+        if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&holder.value())) return scriptPubKey == GetScriptForPQKey(*pq) && wallet->HavePQKey(*pq);
     }
     return (::IsMine(*wallet, scriptPubKey) & ISMINE_SPENDABLE) != 0;
 }

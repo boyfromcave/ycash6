@@ -812,6 +812,31 @@ def pqpkh_owner(spk):
     return None
 
 
+def pqchannel_script(client33, server_pk33, refund_height):
+    """TX_PQCHANNEL (quantum spec D-Q-19): OP_IF <client slot> OP_VERIFY <server> OP_CHECKSIG OP_ELSE <refund> CLTV
+    OP_DROP <client slot> OP_ENDIF; None when a field is out of range (the server key's curve check is the node's)."""
+    if not is_pq_owner(client33) or len(server_pk33) != 33 or server_pk33[0] not in (2, 3) or not 1 <= refund_height < LOCKTIME_THRESHOLD:
+        return None
+    slot = pq_owner_slot(client33)
+    return (bytes([OP_IF]) + slot + bytes([OP_VERIFY]) + push(server_pk33) + bytes([OP_CHECKSIG, OP_ELSE]) + push_int(refund_height)
+            + bytes([OP_CHECKLOCKTIMEVERIFY, OP_DROP]) + slot + bytes([OP_ENDIF]))
+
+
+def pqchannel_client(spk):
+    """The client's 33-byte id of an exact TX_PQCHANNEL (rebuild and compare), else None."""
+    spk = bytes(spk)
+    ops = _ops(spk)
+    if ops is None or len(ops) != 15 or ops[1][1] is None or len(ops[1][1]) != 32 or ops[5][1] is None:
+        return None
+    scheme, refund = _num(*ops[2]), _num(*ops[8])
+    if scheme not in PQ_SCHEMES or refund is None or ops[2][1] is not None:
+        return None
+    client = bytes([scheme]) + ops[1][1]
+    if not is_valid_compressed_pubkey(ops[5][1]) or pqchannel_script(client, ops[5][1], refund) != spk:
+        return None
+    return client
+
+
 def vault_template(tag, set_id32, cancel_set_id32, delay, owner_height, owner33, app_height):
     """The V scriptPubKey bytes (bare), or None when a field is out of range (section 15.3); the owner is
     a post-quantum key id (quantum spec section 1: the only owner shape)."""
@@ -2438,7 +2463,7 @@ class YellowbackModel(object):
         TX_PQPKH of scheme 0x02 (Falcon)."""
         if not self.params.pq_falcon_active(height):
             return True
-        owner = pqpkh_owner(spk)
+        owner = pqpkh_owner(spk) or pqchannel_client(spk)     # D-Q-19: a channel's client
         return owner is not None and owner[0] == PQ_SCHEME_FALCON
 
     def _fail(self, rec, verdict):

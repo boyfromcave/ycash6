@@ -122,12 +122,15 @@ std::optional<CTxDestination> HolderKey(const CScript& s)
     if (s.size() == 35 && s[0] == 32 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG) {
         return CTxDestination(CPQKeyID((uint8_t)(s[33] - OP_1 + 1), uint256(std::vector<unsigned char>(s.begin() + 1, s.begin() + 33))));
     }
+    PQChannelParams cp;
+    if (MatchPQChannel(s, cp)) return CTxDestination(cp.client);     // D-Q-19: a channel's YED is the client's
     return std::nullopt;
 }
 
 bool HolderAllowed(const Params& p, int64_t height, const CScript& script)
 {
     if (!p.IsPQFalconActive(height)) return true;
+    // HolderKey: a TX_PQPKH's key or a TX_PQCHANNEL's client (D-Q-19); a P2PKH is a CKeyID and fails here.
     const std::optional<CTxDestination> d = HolderKey(script);
     const CPQKeyID* id = d.has_value() ? std::get_if<CPQKeyID>(&d.value()) : nullptr;
     return id != nullptr && id->scheme == pq::SCHEME_FN_DSA_512;

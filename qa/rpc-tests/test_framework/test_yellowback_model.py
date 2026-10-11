@@ -865,6 +865,14 @@ class MintTests(unittest.TestCase):
         good = self.mint(owner=falcon_owner, token_script=falcon_holder)
         self.assertIn((good, 0), c.model.vaults)
         self.assertIn((good, 1), c.model.tokens)
+        # D-Q-19: a hybrid channel token holds from the Falcon height iff its client is a Falcon key
+        ch = ym.pqchannel_script(bytes([2]) + ym.sha256(b'channel-client'), G2_PUBKEY, 1000)
+        self.assertEqual(ym.pqchannel_client(ch)[0], 2)
+        self.assertEqual(len(ch), 114)
+        self.assertIn((self.mint(token_script=ch), 0), c.model.vaults)
+        slh_ch = ym.pqchannel_script(G_OWNER, G2_PUBKEY, 1000)
+        self.assertEqual(c.refused.get(self.mint(token_script=slh_ch)), 'bad-yed-holder')
+        self.assertIsNone(ym.pqchannel_client(slh_ch[:-1]))
 
     # Rule: MINT-3
     def test_mint3_verdicts(self):
