@@ -99,7 +99,22 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
         LOCK(wallet->cs_wallet);
         known = wallet->mapWallet.count(wtx.GetHash()) != 0;
     }
-    const bool ok = wallet->CommitTransaction(wtx, reservekey, state);
+    // D-Q-23 (b), D-Q-23a: a Yellowback transaction's size-priced network fee is capped at YedMaxTxFee() =
+    // max(-maxtxfee, $2 at the attested price), which may exceed -maxtxfee; the inherited broadcast would then
+    // refuse the wallet's own transaction as an "absurdly high fee" (AcceptToMemoryPool's fRejectAbsurdFee,
+    // which compares with -maxtxfee alone). The builder bounded the fee deliberately, so the commit records the
+    // transaction without the inherited broadcast and submits it itself without that check; relay to peers is
+    // the same RelayWalletTransaction the inherited path uses.
+    const bool broadcast = wallet->GetBroadcastTransactions();
+    wallet->SetBroadcastTransactions(false);
+    bool ok = wallet->CommitTransaction(wtx, reservekey, state);
+    wallet->SetBroadcastTransactions(broadcast);
+    if (ok && broadcast) {
+        LOCK2(cs_main, wallet->cs_wallet);   // as the inherited broadcast holds them (AcceptToMemoryPool asserts cs_main)
+        ok = wtx.AcceptToMemoryPool(state, false, false);
+        if (ok) wtx.RelayWalletTransaction();
+        else LogPrintf("yellowback: CommitTransaction(): the mempool refused %s: %s\n", wtx.GetHash().ToString(), state.GetRejectReason());
+    }
     if (ok) LockSpentYec(wtx);
     else if (!known) RemoveOrphan(wtx.GetHash());   // F-1: no depth -1 entry is left behind
     if (!foreign.empty()) {

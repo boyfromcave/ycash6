@@ -8,6 +8,7 @@
 
 #include "policy/policy.h"
 
+#include "arith_uint256.h"
 #include "crypto/pq/scheme.h"
 #include "main.h"
 #include "primitives/transaction.h"
@@ -402,8 +403,51 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
 }
 
 CFeeRate pqFeeRate = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
+AttestedFeePolicy attestedFeePolicy = { DEFAULT_PQ_FEE_USD_PER_KB_MICRO, DEFAULT_YED_FEE_USD_PER_KB_MICRO,
+                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, std::nullopt };
+
+CAmount AttestedRateZatPerKB(int64_t usdPerKBMicro, int64_t priceMicroUsd, CAmount floorZatPerKB)
+{
+    // uUSD/KB / (uUSD/YEC) = YEC/KB; x COIN = zat/KB, rounded up. usdPerKBMicro x COIN <= ~2e21 for any sane target: arith_uint256.
+    if (usdPerKBMicro <= 0 || priceMicroUsd <= 0) return std::max<CAmount>(0, floorZatPerKB);
+    arith_uint256 r = (arith_uint256((uint64_t)usdPerKBMicro) * arith_uint256((uint64_t)COIN) + arith_uint256((uint64_t)priceMicroUsd) - 1) / arith_uint256((uint64_t)priceMicroUsd);
+    const CAmount rate = r > arith_uint256((uint64_t)MAX_MONEY) ? MAX_MONEY : (CAmount)r.GetLow64();
+    return std::max(rate, std::max<CAmount>(0, floorZatPerKB));
+}
+
+void SetAttestedFeePrice(std::optional<int64_t> priceMicroUsd)
+{
+    attestedFeePolicy.priceMicroUsd = priceMicroUsd.has_value() && priceMicroUsd.value() > 0 ? priceMicroUsd : std::nullopt;
+}
+
+CFeeRate PlainPQFeeRate()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    if (!p.priceMicroUsd.has_value() || p.plainUsdPerKBMicro <= 0) return pqFeeRate;     // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.plainUsdPerKBMicro, p.priceMicroUsd.value(), p.floorZatPerKB));
+}
+
+CFeeRate YedFeeRate()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    if (!p.priceMicroUsd.has_value() || p.yedUsdPerKBMicro <= 0) return pqFeeRate;       // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.yedUsdPerKBMicro, p.priceMicroUsd.value(), p.floorZatPerKB));
+}
+
+CAmount YedMaxTxFee()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    if (!p.priceMicroUsd.has_value() || p.yedMaxTxFeeUsdMicro <= 0) return maxTxFee;
+    // the dollar cap in zat: uUSD x COIN / price, rounded up; never below -maxtxfee
+    return std::max(maxTxFee, AttestedRateZatPerKB(p.yedMaxTxFeeUsdMicro, p.priceMicroUsd.value(), 0));
+}
 
 CAmount PQSizeFee(CAmount floor, size_t nBytes)
 {
-    return std::max(floor, pqFeeRate.GetFee(nBytes));
+    return std::max(floor, PlainPQFeeRate().GetFee(nBytes));
+}
+
+CAmount YedSizeFee(CAmount floor, size_t nBytes)
+{
+    return std::max(floor, YedFeeRate().GetFee(nBytes));
 }

@@ -287,6 +287,8 @@ public:
 
     /** Mark unhealthy (also used by unit tests to exercise the RPC refusal). */
     void SetUnhealthy(const std::string& reason);
+    /** D-Q-23 (b): publish the tip's cross-section xMint to the network-fee policy (policy.h SetAttestedFeePrice); undefined = fallback. */
+    void PublishFeePrice();
 
     // ------------------------------------------------------------------ hooks (cs_main held)
 

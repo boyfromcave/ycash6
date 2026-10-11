@@ -1448,6 +1448,7 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
 {
     const CFeeRate savedRate = pqFeeRate;
     const CAmount savedMax = maxTxFee;
+    SetAttestedFeePrice(std::nullopt);                                      // D-Q-23 (b): no attested price here, the -pqfeerate fallback
     const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
     const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
     pqFeeRate = CFeeRate(COIN / 100);                                       // -pqfeerate=0.01
@@ -1465,10 +1466,78 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     maxTxFee = savedMax;
 }
 
+// D-Q-23 (b), D-Q-23a: with an attested price the rates are dollars per KB (plain $0.02, Yellowback $0.05), never
+// below the 5,000 zat/KB floor; the Yellowback cap is max(-maxtxfee, $2 at the price); no price = the fallback.
+BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
+{
+    const CFeeRate savedRate = pqFeeRate;
+    const CAmount savedMax = maxTxFee;
+    const AttestedFeePolicy saved = attestedFeePolicy;
+    const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
+    const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
+    const size_t bytes = 1000 + 150 + PQSpendInputSize(pq::SCHEME_FN_DSA_512);
+    // the rate arithmetic: ceil(uUSD/KB x COIN / price), floored
+    // $0.02/KB at $0.018/YEC = 1.111 YEC/KB (the fees spec's worked 111,112 zat/KB is off by 10^3: 20,000 x 10^8 / 18,000)
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 18000, 5000), 111111112);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, 18000, 5000), 277777778);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, PRICE_MAX, 5000), 5000);        // 466 zat/KB at PRICE_MAX: the floor binds
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, PRICE_MAX, 5000), 5000);        // 1,165 zat/KB: the floor
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, PRICE_MAX, 0), 1165);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 4000000, 5000), 500000);        // $4/YEC: 0.005 YEC/KB
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 400000000, 5000), 5000);        // $400/YEC: 5,000 exactly, the floor from here up
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 399999999, 5000), 5001);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, PRICE_MIN, 5000), 20000 * COIN / 100);   // 20,000 YEC/KB at $0.0001
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(0, 18000, 5000), 5000);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 0, 5000), 5000);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(2000000, 18000, 0), 11111111112LL);    // $2 at $0.018 = 111.1 YEC (the cap's arithmetic)
+    // with a price: the Yellowback rate, the dollar cap above -maxtxfee
+    pqFeeRate = CFeeRate(100);
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
+    attestedFeePolicy.plainUsdPerKBMicro = DEFAULT_PQ_FEE_USD_PER_KB_MICRO;
+    attestedFeePolicy.yedUsdPerKBMicro = DEFAULT_YED_FEE_USD_PER_KB_MICRO;
+    attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
+    attestedFeePolicy.yedMaxTxFeeUsdMicro = DEFAULT_YED_MAX_TX_FEE_USD_MICRO;
+    SetAttestedFeePrice(18000);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 111111112);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 277777778);
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);                                 // $2 > 0.1 YEC at $0.018
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
+    BOOST_CHECK_EQUAL(PQSizeFee(1000, bytes), PlainPQFeeRate().GetFee(bytes));
+    BOOST_CHECK_GT(YedSizeFee(1000, bytes), PQSizeFee(1000, bytes));
+    maxTxFee = COIN / 50;                                                           // -maxtxfee below $2: the dollar cap stands
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);
+    SetAttestedFeePrice(PRICE_MAX);                                                 // $2 = 46,566,129 zat at PRICE_MAX < 0.1 YEC: -maxtxfee binds
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), DEFAULT_TRANSACTION_MAXFEE);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 5000);                             // the floor
+    attestedFeePolicy.floorZatPerKB = 0;
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 1165);
+    attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
+    maxTxFee = COIN / 50;
+    SetAttestedFeePrice(50000);                                                     // regtest's $0.05: a 2.6 KB Falcon spend
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100000000);                        // 1 YEC/KB
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 40 * COIN);                                    // $2 = 40 YEC
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
+    // the target off (0): the fallback even with a price; no price: the fallback
+    attestedFeePolicy.yedUsdPerKBMicro = 0;
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    attestedFeePolicy.yedUsdPerKBMicro = DEFAULT_YED_FEE_USD_PER_KB_MICRO;
+    SetAttestedFeePrice(std::nullopt);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 100);
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), COIN / 50);
+    SetAttestedFeePrice(0);                                                         // an undefined price (0) is no price
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    attestedFeePolicy = saved;
+    pqFeeRate = savedRate;
+    maxTxFee = savedMax;
+}
+
 // Review B L-1 (the 6.20.0 port finding): the funding follower reprices with the owner's PQ spend when the vault
 // spend was priced with it, so a PQ fee coin never prices the transaction below the fee already set.
 BOOST_AUTO_TEST_CASE(pq_fee_follower_keeps_the_owner_spend)
 {
+    SetAttestedFeePrice(std::nullopt);                                      // D-Q-23 (b): the -pqfeerate fallback
     const CFeeRate savedRate = pqFeeRate;
     const CAmount savedMax = maxTxFee;
     pqFeeRate = CFeeRate(COIN / 100);                                       // size pricing binds

@@ -12,6 +12,7 @@
 #include "hash.h"
 #include "key_io.h"
 #include "main.h"
+#include "policy/policy.h"
 #include "pow.h"
 #include "txmempool.h"
 #include "util/system.h"
@@ -66,6 +67,7 @@ YellowbackIndex::~YellowbackIndex() {}
 
 void YellowbackIndex::SetUnhealthy(const std::string& reason)
 {
+    SetAttestedFeePrice(std::nullopt);      // D-Q-23 (b): no trusted price, the fee fallback applies
     if (healthy) LogPrintf("yellowback: index unhealthy: %s; restart with -reindex-yellowback\n", reason);
     healthy = false;
     unhealthyReason = reason;
@@ -299,7 +301,23 @@ bool YellowbackIndex::SyncToChain()
     db->Commit(true);
     std::optional<TipRecord> finalTip = State(*db).GetTip();
     LogPrintf("yellowback: index at height %d\n", finalTip.has_value() ? finalTip->height : -1);
+    PublishFeePrice();
     return true;
+}
+
+void YellowbackIndex::PublishFeePrice()
+{
+    // D-Q-23 (b): the network-fee policy prices its dollars-per-KB targets at the index tip's cross-section xMint
+    // (the value yed_getinfo reports as pMint); undefined (HALT_NO_PRICE, no tip, unhealthy) = the -pqfeerate fallback.
+    std::optional<int64_t> price;
+    if (healthy && !stopped) {
+        std::optional<TipRecord> tip = State(*db).GetTip();
+        if (tip.has_value() && tip->height >= params.startHeight) {
+            std::optional<Snapshot> s = State(*db).GetSnapshot((uint32_t)tip->height);
+            if (s.has_value()) price = s->PMint();
+        }
+    }
+    SetAttestedFeePrice(price);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +435,7 @@ bool YellowbackIndex::CommitConnect(const CBlock& block, const CBlockIndex* pind
             return false;
         }
         cache.valid = false;
+        PublishFeePrice();
         LogPrint("yellowback", "applied block %d %s\n", h, blockHash.ToString());
         return true;
     } catch (const std::exception& e) {
@@ -452,6 +471,7 @@ bool YellowbackIndex::UndoDisconnect(const CBlockIndex* pindex)
             return false;
         }
         cache.valid = false;
+        PublishFeePrice();
         return true;
     } catch (const std::exception& e) {
         db->Discard();

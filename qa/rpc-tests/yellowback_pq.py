@@ -374,17 +374,24 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal((len(tok), tok[-4:]), (70, '52c2'))
         assert_equal(nodes[4].yed_getvault(m2['txid'])['status'], 'ACTIVE')
 
-        print('-pqfeerate=0.01: a send spending Falcon tokens pays rate x size; -maxtxfee caps it (the wallet\'s rule)')
-        # reviewer B (Y-B sweep): YedNetworkFee obeys -maxtxfee as CWallet::CreateTransaction does: capped, never refused
+        print('a send spending Falcon tokens pays the Yellowback $/KB rate x size (D-Q-23 (b)); the cap max(-maxtxfee, $2 at the price) binds (the wallet\'s rule)')
+        # reviewer B (Y-B sweep): YedNetworkFee obeys its cap as CWallet::CreateTransaction obeys -maxtxfee: capped, never refused.
+        # D-Q-23 (b): with an attested price the rate is $0.05/KB at it (-pqfeerate is only the fallback); D-Q-23a: the cap is
+        # max(-maxtxfee, -yellowbackmaxtxfeeusd at the price), so node 0 lowers the dollar cap below its -maxtxfee to see it bind.
         self.restart(2, ['-pqfeerate=0.01'])
-        self.restart(0, ['-pqfeerate=0.01', '-maxtxfee=0.02'])
+        self.restart(0, ['-pqfeerate=0.01', '-maxtxfee=0.02', '-yellowbackmaxtxfeeusd=0.05'])
         user, receiver = nodes[0], nodes[2]
         self.sync_all()
+        net = receiver.yed_getinfo()['params']['fees']['network']
+        rate = net['yellowback']['zatPerKB']
+        assert_equal((net['priceSource'], rate), ('tip', max(5000, -(-50000 * COIN // usd_to_micro(PRICE)))))   # 1,250,000 zat/KB at $4
+        assert_equal(net['yellowback']['maxTxFeeZat'], max(10000000, -(-2000000 * COIN // usd_to_micro(PRICE))))   # $2 at $4 = 0.5 YEC
         uncapped = self.send_all_fee(receiver, user.yed_getnewaddress('pq'))
-        assert_greater_than(uncapped, 2000000)                      # rate x size above the 0.02 YEC cap
-        assert_greater_than(10000001, uncapped)                     # and within the default -maxtxfee 0.1
+        assert_greater_than(uncapped, 2000000)                      # rate x size above 0.02 YEC
+        assert_greater_than(net['yellowback']['maxTxFeeZat'] + 1, uncapped)   # and within the receiver's $2 cap
         self.sync_all()
         self.mine(POOLS[0])
+        assert_equal(user.yed_getinfo()['params']['fees']['network']['yellowback']['maxTxFeeZat'], 2000000)   # max(0.02 YEC, $0.05 at $4 = 0.0125)
         capped = self.send_all_fee(user, receiver.yed_getnewaddress('pq'))
         assert_equal(capped, 2000000)                               # exactly -maxtxfee
         self.sync_all()

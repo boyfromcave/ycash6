@@ -40,12 +40,14 @@ namespace yellowback {
 static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
 
 /**
- * The network fee of a YED transaction (review B L-1, quantum plan §4.5): g_yellowbackFee, or
- * PQSizeFee(g_yellowbackFee, size) when it has a post-quantum input -- a TX_PQPKH among `prevScripts` (a YED
- * token or a YEC coin) or the V's owner (`ownerScheme`). The size is estimated before signing: every PQ input
- * at PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
- * The size-priced fee obeys -maxtxfee as CWallet::CreateTransaction does (wallet.cpp, "always obey the
- * maximum"): capped, never refused (review B, Y-B sweep); never below the flat g_yellowbackFee.
+ * The network fee of a YED transaction (review B L-1, quantum plan §4.5; D-Q-23 (b)): g_yellowbackFee, or
+ * YedSizeFee(g_yellowbackFee, size) -- the Yellowback dollars-per-KB rate at the attested tip price, -pqfeerate
+ * without one (policy.h AttestedFeePolicy) -- when it has a post-quantum input: a TX_PQPKH among `prevScripts`
+ * (a YED token or a YEC coin) or the V's owner (`ownerScheme`). The size is estimated before signing: every PQ
+ * input at PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
+ * The size-priced fee obeys the cap as CWallet::CreateTransaction obeys -maxtxfee (wallet.cpp, "always obey
+ * the maximum") -- here YedMaxTxFee(), max(-maxtxfee, $2 at the price) (D-Q-23a): capped, never refused
+ * (review B, Y-B sweep); never below the flat g_yellowbackFee.
  */
 CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
 {
@@ -61,7 +63,7 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
     if (schemes.empty()) return g_yellowbackFee;
     size_t bytes = 1000 + 150 * other;
     for (uint8_t scheme : schemes) bytes += PQSpendInputSize(scheme);
-    return std::max(g_yellowbackFee, std::min(PQSizeFee(g_yellowbackFee, bytes), maxTxFee));
+    return std::max(g_yellowbackFee, std::min(YedSizeFee(g_yellowbackFee, bytes), YedMaxTxFee()));
 }
 
 CAmount PQFeeFollower::Follow(const std::vector<std::pair<CScript, CAmount>>& selected)

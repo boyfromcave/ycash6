@@ -1746,7 +1746,8 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
     }
     if (coin.nValue <= VAULT_RPC_FEE) throw JSONRPCError(RPC_INVALID_PARAMETER, "the output does not cover the fee");
     // The owner is a post-quantum key (quantum plan §4.3): the wallet signs with it (scheme-dispatched,
-    // quantum spec §1.5) and the fee is max(VAULT_RPC_FEE, -pqfeerate x size) (quantum plan §4.5).
+    // quantum spec §1.5) and the fee is max(VAULT_RPC_FEE, the vault/Yellowback $/KB rate x size) capped at
+    // YedMaxTxFee() (quantum plan §4.5, D-Q-23 (b): policy.h AttestedFeePolicy; -pqfeerate without a price).
     if (!pwalletMain->HavePQKey(owner)) throw JSONRPCError(RPC_WALLET_ERROR, strprintf("owner %s is not a post-quantum key of this wallet", PQKeyIdHex(owner)));
     mtx.vin.push_back(CTxIn(op, CScript(), seq));
     mtx.vout.push_back(CTxOut(coin.nValue - VAULT_RPC_FEE, GetScriptForDestination(d)));
@@ -1762,7 +1763,7 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
         const SetSigChecker checker(&txc, 0, coin.nValue, false, txdata, snap, next);   // selector 3 reads the set state
         if (!SignPQOwnerSpend(*pwalletMain, owner, coin.scriptPubKey, mtx, 0, coin.nValue, selector, branch, flags, &serror, &checker))
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("cannot sign the owner spend (selector %d): %s", selector, ScriptErrorString(serror)));
-        const CAmount sized = PQSizeFee(VAULT_RPC_FEE, ::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION));
+        const CAmount sized = std::min(YedSizeFee(VAULT_RPC_FEE, ::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION)), YedMaxTxFee());
         if (sized <= fee) break;
         fee = sized;   // the size does not change with the output's value: one more pass signs it
     }

@@ -6836,8 +6836,9 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 }
 
                 CAmount nFeeNeeded = GetMinimumFee(txNew, nBytes);
-                // quantum plan §4.5: a transaction with a PQ input pays max(this policy's fee, the flat
-                // LEGACY_DEFAULT_FEE, -pqfeerate x size) (on 6.20.0 the policy fee is the per-output
+                // quantum plan §4.5, D-Q-23 (b): a transaction with a PQ input pays max(this policy's fee, the flat
+                // LEGACY_DEFAULT_FEE, the plain PQ $/KB rate at the attested price x size) (-pqfeerate without a price;
+                // policy.h AttestedFeePolicy), capped at -maxtxfee (on 6.20.0 the policy fee is the per-output
                 // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee).
                 if (fPQInput)
                     nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), maxTxFee);

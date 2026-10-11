@@ -469,12 +469,13 @@ UniValue TagToJSON(const std::optional<CoinbaseTag>& tag)
 }
 
 /**
- * yed_getinfo.params.pq.feeRateZatPerKB (quantum spec C-5): the rate wallets charge as max(DEFAULT_FEE, rate × size).
- * -pqfeerate (quantum plan §4.5, Q5's policy pqFeeRate; default 1× the per-KB relay floor).
+ * yed_getinfo.params.pq.feeRateZatPerKB (quantum spec C-5): the rate wallets charge as max(DEFAULT_FEE, rate × size) —
+ * since D-Q-23 (b) the plain PQ dollars-per-KB target at the attested tip price (= params.fees.network.plain.zatPerKB),
+ * -pqfeerate while no price exists.
  */
 static int64_t PQFeeRateZatPerKB()
 {
-    return ::pqFeeRate.GetFeePerK();
+    return PlainPQFeeRate().GetFeePerK();
 }
 
 UniValue PayloadToJSON(const Payload& p)
