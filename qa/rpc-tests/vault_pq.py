@@ -19,9 +19,9 @@ F. Falcon (scheme 2): a scheme-2 V is valid by consensus whatever the Falcon act
    node 1 (-pqfalcon=1) relays and mines it, node 0 (no -pqfalcon) accepts the block. Regtest does
    not require standard transactions (fRequireStandard = false), so the policy refusal of a
    scheme-2 output before Falcon and the 9,000 / 1,650-byte scriptSig split are unit-tested
-   (src/test/vault_policy_tests.cpp), not here. A Falcon owner spend is not exercised here: the framework has no Falcon signer (Falcon
-   signatures come from vectors); src/test/vault_template_tests.cpp's owner_branch_real_signatures
-   covers it with crypto/pq/sign.h.
+   (src/test/vault_policy_tests.cpp), not here. A Falcon owner spend is not exercised here (vault_pq_reorg.py spends Falcon coins with the
+   framework's optional Falcon signer, pq.falcon_sign); src/test/vault_template_tests.cpp's
+   owner_branch_real_signatures covers it with crypto/pq/sign.h.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """

@@ -32,7 +32,8 @@ Steps (each can be skipped with --skip NAME[,NAME]):
              Falcon is active); PQ holder transfers (user -> holder's PQ address -> claimant's PQ address, a PQ holder
              signature on the chain); the hybrid channel TX_PQCHANNEL (D-Q-19): before Falcon an SLH-DSA client funded and
              closed cooperatively (Python SLH signer + the server's ECDSA), after it an SLH-DSA client refused everywhere
-             (TOK-PQ) and a Falcon client funded (no Falcon signer outside the wallet: not closed)
+             (TOK-PQ) and a Falcon client funded and closed cooperatively (the framework's optional Falcon signer, pq.falcon_sign,
+             + the server's ECDSA), its YED released to node 0's Falcon holder
   redeem     the owner redeems at lockHeight (selector 2; in term it is open too, quoted with the
              early-redeem fee, IT-9); renew = redeem + mint the same debt
   claim      $5 crash: an underwater claim -> claimant intent (CLAIMING); a reorg across it; release
@@ -805,17 +806,55 @@ class Walk:
             bad = self.channel_fund(c, self.channel_script(slh, server_pk, refund))
             for i in self.yed_nodes:
                 self.fails(i, "sendrawtransaction", bad, expect="bad-yed-holder")
-            fal = self.node(USER).yed_validateaddress(self.node(USER).yed_getnewaddress("pq"))
-            client = hex_str_to_bytes(fal["keyid"])
-            good = self.channel_fund(c, self.channel_script(client, server_pk, refund))
-            t1 = self.call(USER, "sendrawtransaction", good)
-            self.wait_mempool(t1); self.mine(1)
-            rows = self.node(USER).yed_listtokens([fal["address"]])
-            self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [min(self.CHANNEL_CENTS, c["cents"])],
-                    "TRANSFER %s into a hybrid channel with a Falcon client: type pqchannel, %d cents listed under the client's address (TOK-PQ admits it)" % (t1[:16], min(self.CHANNEL_CENTS, c["cents"])))
-            self.note("the channel is not closed here: the Python framework has no Falcon signer and the node wallet does not sign TX_PQCHANNEL "
-                      "(sign.cpp: 'signed by the channel's own builders'); its %d cents stay in the channel on this devnet" % min(self.CHANNEL_CENTS, c["cents"]))
-            self.evidence("pq_channel", {"fund": t1, "refusedSlhClient": True, "client": "falcon"})
+            from test_framework import pq as _pq
+            if not _pq.falcon_signer_available():
+                # no C compiler for the framework's optional Falcon signer: a wallet-held Falcon client, funded only
+                fal = self.node(USER).yed_validateaddress(self.node(USER).yed_getnewaddress("pq"))
+                client = hex_str_to_bytes(fal["keyid"])
+                good = self.channel_fund(c, self.channel_script(client, server_pk, refund))
+                t1 = self.call(USER, "sendrawtransaction", good)
+                self.wait_mempool(t1); self.mine(1)
+                rows = self.node(USER).yed_listtokens([fal["address"]])
+                self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [min(self.CHANNEL_CENTS, c["cents"])],
+                        "TRANSFER %s into a hybrid channel with a Falcon client: type pqchannel, %d cents listed under the client's address (TOK-PQ admits it)" % (t1[:16], min(self.CHANNEL_CENTS, c["cents"])))
+                self.note("the channel is not closed here: no C compiler for the framework's optional Falcon signer (pq.falcon_signer_available) "
+                          "and the node wallet does not sign TX_PQCHANNEL; its %d cents stay in the channel on this devnet" % min(self.CHANNEL_CENTS, c["cents"]))
+                self.evidence("pq_channel", {"fund": t1, "refusedSlhClient": True, "client": "falcon", "closed": False})
+            else:
+                # a Falcon client funded and closed cooperatively: the client's FN-DSA-512 signature by the framework's
+                # Falcon signer (the tree's vendored PQClean C through ctypes), the server's ECDSA by node 0's key
+                from test_framework.key import CECKey
+                from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
+                import hashlib
+                fpk, fsk = _pq.falcon_keygen(hashlib.sha384(b"devnet-walk-channel-client-falcon %d" % refund).digest())
+                client = bytes([_pq.SCHEME_FN_DSA_512]) + _pq.key_hash(_pq.SCHEME_FN_DSA_512, fpk)
+                client_addr = ym.base58check_encode(bytes.fromhex(self.yed_params()["pqAddressVersion"]) + client)
+                spk = self.channel_script(client, server_pk, refund)
+                cents = min(self.CHANNEL_CENTS, c["cents"])
+                good = self.channel_fund(c, spk)
+                t1 = self.call(USER, "sendrawtransaction", good)
+                self.wait_mempool(t1); self.mine(1)
+                rows = self.node(USER).yed_listtokens([client_addr])
+                self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [cents],
+                        "TRANSFER %s into a hybrid channel with a Falcon client: type pqchannel, %d cents listed under the client's address (TOK-PQ admits it)" % (t1[:16], cents))
+                before = self.node(USER).yed_getbalance()["confirmedCents"]
+                hex2 = self.raw_transfer(USER, [(t1, 0, 10_000)], [(self.holder_script(self.node(USER)), 10_000)], [(0, cents)])
+                tx = CTransaction(); tx.deserialize(BytesIO(hex_str_to_bytes(hex2)))
+                sighash = SignatureHash(CScript(spk), tx, 0, SIGHASH_ALL, 10_000, SIGNING_BRANCH_ID)[0]
+                key = CECKey(); key.set_secretbytes(wif_to_secret(self.node(USER).dumpprivkey(server_addr))); key.set_compressed(True)
+                ec = _low_s(key.sign(sighash)) + bytes([SIGHASH_ALL])
+                pushes = _pq.pq_sign_input(tx, 0, spk, 10_000, SIGNING_BRANCH_ID, fsk, scheme=_pq.SCHEME_FN_DSA_512, pk=fpk)
+                tx.vin[0].scriptSig = ym.push(ec) + _pq.pq_scriptsig_from_pushes(pushes) + bytes([0x51])
+                t2 = self.call(USER, "sendrawtransaction", bytes_to_hex_str(tx.serialize()))
+                self.wait_mempool(t2); self.mine(1)
+                after = self.node(USER).yed_getbalance()["confirmedCents"]
+                close = self.node(USER).getrawtransaction(t2, 1)
+                self.ok(self.node(USER).yed_listtokens([client_addr]) == [] and self.node(USER).yed_gettxinfo(t2)["type"] == "transfer"
+                        and close["confirmations"] >= 1 and after - before == cents
+                        and self.holder_kind(close["vout"][0]["scriptPubKey"]["hex"]) == "falcon",
+                        "the cooperative close %s (server ECDSA + client FN-DSA-512, selector OP_1, scriptSig %d bytes) released the channel's "
+                        "%d cents to node 0's Falcon holder (yed_getbalance +%d)" % (t2[:16], len(tx.vin[0].scriptSig), cents, after - before))
+                self.evidence("pq_channel", {"fund": t1, "close": t2, "refusedSlhClient": True, "client": "falcon", "closed": True})
         self.statehashes("pq")
 
 

@@ -90,7 +90,7 @@ def _pq_owner():
     return seed, pk, sk, v.pq_owner_id(v.pq.SCHEME_SLH_DSA_SHA2_128S, pk)
 
 
-# The Falcon (FN-DSA-512) owner. Python has no Falcon signer (test_framework/pq.py verifies only), so its
+# The Falcon (FN-DSA-512) owner. The generator stays stdlib-only (pq.py's optional Falcon signer is C), so its
 # public key and its one signature are recorded here, made by the node's library: pq::KeyGen(2, FALCON_SEED)
 # and pq::SignWithEntropy(2, sk, sighash, FALCON_ENTROPY) over the 'owner-falcon-selector-2' spend's sighash.
 # src/test/vault_vectors_tests.cpp recomputes both byte for byte (and prints them on a mismatch, which is how

@@ -19,18 +19,13 @@ drops the next block below Falcon's height, and evicts failures with their desce
 - A mined Falcon spend resurrected by a reorg stays while the next block is at Falcon's height
   and is evicted one block lower; re-mining over the height includes it again.
 
-There is no Python Falcon signer (test_framework/pq.py), so the test builds a small signer from the
-tree's own vendored PQClean code (src/crypto/pq/falcon, the wallet's signer) with the C compiler
-(``$CC``, default ``cc``) and calls it through ctypes; the framework's independent Python verifier
-checks every signature.
+Falcon signatures come from the framework's optional Falcon signer (``pq.falcon_keygen`` /
+``pq.falcon_sign``: the tree's own vendored PQClean code, the wallet's signer, compiled once with
+``$CC`` into the tmpdir and called through ctypes); the framework's independent Python verifier
+checks every signature. Without a C compiler the test prints SKIP and passes.
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_reorg.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
-
-import ctypes
-import os
-import subprocess
-import sys
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
@@ -52,34 +47,17 @@ FALCON = 130              # -pqfalconheight (below regtest's first halving, 150)
 VALUE = 100000000
 FEE = 30000
 CHILD_FEE = 10000
-FALCON_SOURCES = ['codec.c', 'common.c', 'fft.c', 'fips202.c', 'fpr.c', 'keygen.c', 'rng.c',
-                  'sign.c', 'vrfy.c', 'ycash_falcon_sign.c', 'ycash_falcon_verify.c']
-
-
-def build_falcon_signer(tmpdir):
-    src = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        '..', '..', 'src', 'crypto', 'pq', 'falcon'))
-    out = os.path.join(tmpdir, 'libfalconsigner' + ('.dylib' if sys.platform == 'darwin' else '.so'))
-    cc = os.environ.get('CC', 'cc').split()
-    subprocess.check_call(cc + ['-O2', '-shared', '-fPIC', '-o', out] +
-                          [os.path.join(src, f) for f in FALCON_SOURCES])
-    return ctypes.CDLL(out)
 
 
 class FalconSigner:
-    def __init__(self, lib, seed48):
-        self.lib = lib
-        pk = ctypes.create_string_buffer(pq.FALCON_PK_BYTES)
-        sk = ctypes.create_string_buffer(1281)
-        assert_equal(lib.ycash_falcon512_keygen_from_seed(pk, sk, seed48, ctypes.c_size_t(len(seed48))), 0)
-        self.pk, self.sk = pk.raw, sk.raw
+    """A Falcon key from a 48-byte seed (pq.falcon_keygen), signing with fresh entropy."""
+    def __init__(self, seed48):
+        self.pk, self.sk = pq.falcon_keygen(seed48)
 
     def sign(self, msg32):
-        sig = ctypes.create_string_buffer(pq.FALCON_SIG_BYTES)
-        assert_equal(self.lib.ycash_falcon512_sign(sig, msg32, ctypes.c_size_t(32), self.sk,
-                                                   os.urandom(40), os.urandom(48)), 0)
-        assert pq.verify(pq.SCHEME_FN_DSA_512, self.pk, sig.raw, msg32)   # the independent verifier
-        return sig.raw
+        sig = pq.falcon_sign(self.sk, msg32)
+        assert pq.verify(pq.SCHEME_FN_DSA_512, self.pk, sig, msg32)   # the independent verifier
+        return sig
 
 
 class VaultPQReorgTest(BitcoinTestFramework):
@@ -140,7 +118,11 @@ class VaultPQReorgTest(BitcoinTestFramework):
     def run_test(self):
         self.node = n = self.nodes[0]
         self.next_coinbase = 10
-        self.falcon = FalconSigner(build_falcon_signer(self.options.tmpdir), bytes(range(48)))
+        pq.falcon_set_build_dir(self.options.tmpdir)
+        if not pq.falcon_signer_available():
+            print('SKIP: no C compiler for the optional Falcon signer (pq.falcon_signer_available)')
+            return
+        self.falcon = FalconSigner(bytes(range(48)))
 
         n.generate(120)
         f1 = self.fund(pq.pqpkh_script(pq.SCHEME_FN_DSA_512, pq.key_hash(pq.SCHEME_FN_DSA_512, self.falcon.pk)))
