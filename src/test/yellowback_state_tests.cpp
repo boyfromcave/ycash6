@@ -758,6 +758,16 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     BOOST_CHECK_EQUAL((int)t.closedVaults, doc["totals"]["closedVaults"].get_int());
     BOOST_CHECK_EQUAL((int)t.claimedVaults, doc["totals"]["claimedVaults"].get_int());
     BOOST_CHECK_EQUAL(t.unbackedCents, doc["totals"]["unbackedCents"].get_int64());
+    // FEE-1': every vault record the vector leaves -- the attestor cancel's re-created one included -- carries its mint price
+    int vaults = 0;
+    view.Iterate("V", [&](const std::string&, const std::string& raw) {
+        VaultRecord v;
+        BOOST_REQUIRE(DeserializeRecord(raw, v));
+        BOOST_CHECK(v.pMint > 0 && v.pMint <= PRICE_MAX);
+        vaults++;
+        return true;
+    });
+    BOOST_CHECK_GT(vaults, 0);
     // UNDO: undoing the whole vector restores the empty view byte for byte.
     for (auto it = undos.rbegin(); it != undos.rend(); ++it) UndoBlock(view, *it);
     BOOST_CHECK(view == empty);
@@ -2221,6 +2231,38 @@ BOOST_AUTO_TEST_CASE(apply_undo_identity_over_sequences)
     const uint256 v2 = g.MintActive(10000);
     BOOST_CHECK(v2 == v || true);
     (void)full;
+}
+
+// Rule: FEE-1'
+// The stored mint price survives an undo and a re-apply byte for byte (the undo log restores the record), and
+// every vault the golden vector leaves behind -- the attestor cancel's re-created one included -- carries one.
+BOOST_AUTO_TEST_CASE(p_mint_persists_through_undo_and_reapply)
+{
+    Fixture f;
+    f.Activate();
+    CBlock block;
+    block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
+    const CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1);
+    block.vtx.push_back(CTransaction(m));
+    const uint256 txid = CTransaction(m).GetHash();
+    const MemoryStateView before = f.view;
+    UndoRecord undo;
+    BOOST_REQUIRE(!ApplyBlock(f.view, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, undo).has_value());
+    std::optional<VaultRecord> v = f.Vault(txid);
+    BOOST_REQUIRE(v.has_value());
+    BOOST_CHECK_EQUAL(v->pMint, 50000);
+    BOOST_CHECK_EQUAL(v->pMint, f.PMintAt(f.tip - 1));
+    UndoBlock(f.view, undo);
+    BOOST_CHECK(!f.Vault(txid).has_value());
+    BOOST_CHECK(f.view == before);
+    UndoRecord undo2;
+    BOOST_REQUIRE(!ApplyBlock(f.view, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, undo2).has_value());
+    BOOST_CHECK_EQUAL(f.Vault(txid)->pMint, 50000);
+    BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(undo2));
+    // the record round-trips through its serialisation with the field last (SERIALISATION.md row 5)
+    VaultRecord copy;
+    BOOST_REQUIRE(DeserializeRecord(SerializeRecord(f.Vault(txid).value()), copy));
+    BOOST_CHECK_EQUAL(copy.pMint, 50000);
 }
 
 // Rule: SNAP

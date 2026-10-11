@@ -31,6 +31,7 @@ Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; stopped by the storage 
 """
 
 import json
+import re
 import os
 from decimal import Decimal
 
@@ -88,13 +89,17 @@ OPTIONAL = {
 }
 
 # Fields the text marks *null when …* although the example shows a value (by path suffix).
-NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor'},
+NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor',
+                            # rpcversion 8: the last fee band is unbounded (null); the network price and the supply cap are null without a price / a cap
+                            'params.fees.protocol.bands.uptoCents', 'params.fees.network.priceMicroUsd',
+                            'params.supplyCap.priceMicroUsd', 'params.supplyCap.capCents', 'params.supplyCap.maxVaultCents'},
+            'yed_estimatefee': {'pMint', 'feeZat', 'attestFeeZat'},
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
             'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
             'yed_listclaimable': {'underwaterAt', 'pClaim'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
             'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
-            'yed_estimateredeem': {'payee'},
             'yed_estimatecollateral': {'requiredZat', 'requiredZatFloored', 'pMint'},
+            'yed_estimateredeem': {'payee', 'pMint'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
             'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'}}
@@ -176,7 +181,7 @@ class Contract(object):
         want = json_type(example)
         if got == 'null':
             suffix = path.split('.', 1)[1] if '.' in path else ''
-            suffix = suffix.replace('[0]', '').replace('[1]', '')
+            suffix = re.sub(r'\[\d+\]', '', suffix)
             assert any(suffix.endswith(n) for n in NULLABLE.get(cmd, ())), '%s: null where the contract has a %s' % (path, want)
             return
         assert got == want, '%s: expected %s, got %s (%r)' % (path, want, got, value)
@@ -188,7 +193,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 7)
+        assert_equal(c.doc['rpcversion'], 8)   # the fee structure (D-Q-23/24/25)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
@@ -231,7 +236,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 99)
         assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 4_294_967_296)
         top = user.yed_estimatecollateral(10000, 48, 4_294_967_295)
-        assert_equal((top['requiredZat'], top['requiredZatFloored']), (6_984_920, 6_984_920))
+        assert_equal((top['requiredZat'], top['requiredZatFloored']), (6_985_000, 6_985_000))   # 6,984,920 rounded up to 1,000
         assert_equal((top['protocolFeeCents'], top['protocolFeeZat']), (100, 23_284))                       # $1 at PRICE_MAX
         low = user.yed_estimatecollateral(10000, 48, 1_000_000)
         assert_equal(low['requiredZatFloored'], low['requiredZat'])

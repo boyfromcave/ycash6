@@ -1691,6 +1691,9 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(cancel.reopened_vaults, [(txid_of(txs_at['cancel5']), 0)])
         v5 = m.vaults[(txid_of(txs_at['cancel5']), 0)]
         self.assertEqual((v5.status, v5.minted_cents, v5.mint_height, v5.burned_cents), (ym.V_ACTIVE, 10_000, 250, 0))
+        # FEE-1': the re-created record keeps the mint price (min(xMint(248), the bundle's 9,000)): every later fee strikes at it
+        self.assertEqual(v5.p_mint, min(m.snapshots[248].p_mint, 9_000))
+        self.assertEqual(v5.p_mint, 9_000)
         self.assertEqual(claim5.burned, 10_000)
         self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
         self.assertEqual(m.intents, {})

@@ -63,6 +63,7 @@ BASE_SCRIPTS= [
     'yellowback_wallet_restore.py',
     'yellowback_claim.py',
     'yellowback_fee.py',
+    'yellowback_fees.py',
     'yellowback_mempool_limits.py',
     'yellowback_interm.py',
     'yellowback_pq.py',

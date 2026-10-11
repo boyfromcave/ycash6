@@ -1294,6 +1294,8 @@ BOOST_AUTO_TEST_CASE(buildbundle_missing_set)
     std::optional<VaultRecord> v = b.Vault(CTransaction(m).GetHash());
     BOOST_REQUIRE(v.has_value());
     BOOST_CHECK_MESSAGE(v->Status() == VaultStatus::ACTIVE, v->voidReason);
+    BOOST_CHECK_EQUAL(v->pMint, 49000);                                                  // FEE-1': the stored price is MINT-5's min(xMint, aMint)
+    BOOST_CHECK_EQUAL(v->feePaidZat, ProtocolFeeZat(10000, 49000, live.P).value());
     // A selector changes the draw (a different vault outpoint) but never the pool.
     BuiltBundle sel = index.BuildBundleInfo(R, OutPointSelector(COutPoint(CTransaction(m).GetHash(), 0)));
     BOOST_CHECK_EQUAL(sel.selected.size(), 3u);

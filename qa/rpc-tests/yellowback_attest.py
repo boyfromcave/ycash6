@@ -350,7 +350,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 7)   # post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
+        assert_equal(user.yed_getinfo()['rpcversion'], 8)   # the fee structure (D-Q-23, rpcversion 8); 7 was post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
 
         print('activation at $%s, then the attestor wallets are funded' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)

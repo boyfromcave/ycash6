@@ -103,7 +103,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         print('initial synchronous index state')
         for node in self.enforcing_nodes():
             info = wait_yed_healthy(node)
-            assert_equal(info['rpcversion'], 7)   # post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
+            assert_equal(info['rpcversion'], 8)   # the fee structure (D-Q-23, rpcversion 8); 7 was post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
             assert_equal(info['network'], 'regtest')
             assert_equal(info['height'], node.getblockcount())
             assert_equal(info['startHeight'], START_HEIGHT)

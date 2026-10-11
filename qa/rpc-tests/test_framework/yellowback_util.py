@@ -1437,10 +1437,10 @@ def redeem_vault_raw(test, user, pool, vault, token_outpoints):
     with ``sendrawtransaction`` on ``user`` (MP-1 admits it) and mined on ``pool``.  Returns the
     txid."""
     ref = user.getblockcount() - REF_LAG
-    payee = user.yed_getfeepayee(ref, int(vault['collateralZat']))
+    payee = user.yed_getfeepayee(ref)
     payload = ym.encode_redeem(ref, 1, [])
     hex_ = build_vault_spend_raw(user, vault, 'owner', token_outpoints, payload=payload,
-                                 fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                 fee=(payee['default']['payoutAddress'], vault_fee_zat(vault)),   # RED-3': the debt at the vault's pMint
                                  ref_height=ref)
     check = user.yed_validaterawtransaction(hex_)
     assert_equal(check['blockValid'], True)
