@@ -699,6 +699,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("feeBps", p.feeBps);
     prm.pushKV("tokenValueZat", p.tokenValue);
     prm.pushKV("feeZat", g_yellowbackFee);
+    // the Base58Check version bytes of this network's YED addresses (hex), so clients need not hard-code them:
+    // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the 33-byte PQ form (quantum spec §4; 56ab)
+    prm.pushKV("addressVersion", HexStr(p.addressVersion));
+    prm.pushKV("pqAddressVersion", HexStr(p.pqAddressVersion));
     UniValue windows(UniValue::VOBJ);
     windows.pushKV("fast", p.pFastWindow);
     windows.pushKV("mid", p.pMidWindow);
@@ -742,6 +746,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         pqo.pushKV("falconActive", falcon);
         pqo.pushKV("falconHeight", p.pqFalconHeight);
         pqo.pushKV("feeRateZatPerKB", PQFeeRateZatPerKB());
+        pqo.pushKV("plainAddressVersion", HexStr(PlainPQAddressVersion(::Params().NetworkIDString())));   // D-Q-20: sq/tq/rq
         prm.pushKV("pq", pqo);
     }
     UniValue policy(UniValue::VOBJ);

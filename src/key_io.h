@@ -17,6 +17,10 @@
 #include <vector>
 #include <string>
 
+/** The plain-YEC PQ address version (D-Q-20) of a network ID: 4dd9 "sq…" main, 4f61 "tq…" test, 4c51 "rq…"
+ *  regtest; empty for any other network. */
+std::vector<unsigned char> PlainPQAddressVersion(const std::string& networkID);
+
 class KeyIO {
 private:
     const KeyConstants& keyConstants;

@@ -85,9 +85,12 @@ FN-DSA-512, the latter from the Falcon height only). Removed: `ownerPubKey` and 
 `yed_getvault`, `yed_listvaults` and `yed_listpositions` rows, and `ownerPubKey` on a MINT's
 `yed_decodepayload` (no public key is on chain; hence the bump). Added: `ownerScheme` (number) and
 `ownerHash` (64 hex, the 32 bytes as the V pushes them) in their place; `yed_getinfo.params.pq`
-`{schemes, falconActive, falconHeight, feeRateZatPerKB}` (`schemes` = the owner schemes MINT-3 admits at
+`{schemes, falconActive, falconHeight, feeRateZatPerKB, plainAddressVersion}` (`schemes` = the owner schemes MINT-3 admits at
 the next block; `falconHeight` `-1` = never; `feeRateZatPerKB` = the size-priced rate wallets charge as
-`max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
+`max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`; `plainAddressVersion` = the hex Base58Check version of
+the plain-YEC PQ address, `4dd9`/`4f61`/`4c51` for `sq…`/`tq…`/`rq…`, D-Q-20); `yed_getinfo.params.addressVersion` and
+`pqAddressVersion` (hex, the YED address versions of this network: mainnet `1fdd`/`56ab`, testnet `2007`/`571e`,
+regtest `2002`/`5710`; clients read them instead of hard-coding the prefixes); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
 is payload version 4, every other type stays `payloadVersion` 3 — quantum spec C-1, so a client's
 TRANSFER builder is unchanged and a v3 MINT is non-Yellowback); `yed_mint`'s `ownerAddress` (the fresh
 SLH-DSA owner's address; the arguments are unchanged, A-3; the examples below show the example `ownerHash`
@@ -316,6 +319,8 @@ Result of `yed_getinfo`:
     "feeBps": 25,
     "tokenValueZat": 10000,
     "feeZat": 1000,
+    "addressVersion": "2002",
+    "pqAddressVersion": "5710",
     "windows": { "fast": 8, "mid": 24, "slow": 64 },
     "minFill": { "fast": 4, "mid": 16, "slow": 43 },
     "classes": [
@@ -331,7 +336,8 @@ Result of `yed_getinfo`:
       "schemes": [ 1 ],
       "falconActive": false,
       "falconHeight": -1,
-      "feeRateZatPerKB": 100
+      "feeRateZatPerKB": 100,
+      "plainAddressVersion": "4c51"
     },
     "policy": {
       "penaltyBlocks": 12,

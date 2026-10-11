@@ -28,8 +28,9 @@ published by each on one endpoint (C-F-1), then the ``chain-viz`` binary on ``--
      ``/api/health.seq``.
 
 Needs the chain-viz binary: ``CHAINVIZ_BIN`` names it (the fork's CI builds boyfromcave/chain-viz
-and sets it; ``<workspace>/chain-viz/target/release/chain-viz`` is the fallback); without one the
-script SKIPs (exit 0 with a message) so the inherited matrix does not break.  chain-viz is
+and sets it, and a CHAINVIZ_BIN that is not executable FAILS; ``$CARGO_TARGET_DIR/release/chain-viz``
+then ``<workspace>/chain-viz/target/release/chain-viz`` are the fallbacks); without one the script SKIPs
+(exit 0, the SKIP line names the paths it tried) so the inherited matrix does not break.  chain-viz is
 stopped (SIGTERM) on every exit path.
 
 Ports follow ``--portseed`` the way ``contrib/yellowback/devnet/yellowback-devnet`` lays them out
@@ -82,13 +83,25 @@ MODEL_TIMEOUT = 15                                           # (c)/(d): the 1 s 
 
 
 def find_chainviz():
-    """CHAINVIZ_BIN, else the workspace build beside the fork; None means SKIP."""
+    """(path, None) for the binary to run, or (None, reason) to SKIP. CHAINVIZ_BIN names it; set but missing or
+    not executable is a FAIL (raised), never a silent SKIP. Otherwise $CARGO_TARGET_DIR/release/chain-viz (a
+    global CARGO_TARGET_DIR, e.g. from ~/.zshrc, moves cargo's output there), then the workspace build beside
+    the fork."""
     override = os.environ.get('CHAINVIZ_BIN')
     if override:
         path = os.path.expanduser(override)
-        return path if os.access(path, os.X_OK) else None
-    candidate = os.path.join(WORKSPACE, 'chain-viz', 'target', 'release', 'chain-viz')
-    return candidate if os.access(candidate, os.X_OK) else None
+        if not os.access(path, os.X_OK):
+            raise AssertionError('CHAINVIZ_BIN=%s is not an executable file' % override)
+        return path, None
+    candidates = []
+    if os.environ.get('CARGO_TARGET_DIR'):
+        candidates.append(os.path.join(os.path.expanduser(os.environ['CARGO_TARGET_DIR']), 'release', 'chain-viz'))
+    candidates.append(os.path.join(WORKSPACE, 'chain-viz', 'target', 'release', 'chain-viz'))
+    for candidate in candidates:
+        if os.access(candidate, os.X_OK):
+            return candidate, None
+    return None, 'no chain-viz binary at %s (set CHAINVIZ_BIN, or build <workspace>/chain-viz with cargo build ' \
+                 '--release; a global CARGO_TARGET_DIR moves its output)' % ' or '.join(candidates)
 
 
 def zmq_url(n):
@@ -358,9 +371,9 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         print('(g) session %s: header seq %d, %d lines up to seq %d' % (path, rows[0]['seq'], len(rows), seq))
 
     def run_test(self):
-        self.chainviz = find_chainviz()
+        self.chainviz, reason = find_chainviz()
         if not self.chainviz:
-            print('SKIP: no chain-viz binary (set CHAINVIZ_BIN, or build <workspace>/chain-viz with cargo build --release)')
+            print('SKIP: %s' % reason)
             return
         print('chain-viz: %s' % self.chainviz)
         print('activate: every node quotes $%d and the three mine %d blocks round-robin' % (QUOTE_USD, ACTIVATION_BLOCKS))

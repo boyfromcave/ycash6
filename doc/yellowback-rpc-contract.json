@@ -745,6 +745,7 @@
       "mintRequiresArmed": false,
       "network": "regtest",
       "params": {
+        "addressVersion": "2002",
         "attest": {
           "ageCap": 64,
           "armDelay": 8,
@@ -819,10 +820,12 @@
           "falconActive": false,
           "falconHeight": -1,
           "feeRateZatPerKB": 100,
+          "plainAddressVersion": "4c51",
           "schemes": [
             1
           ]
         },
+        "pqAddressVersion": "5710",
         "recapRatioBps": 50000,
         "refLag": 2,
         "refWindow": 40,
