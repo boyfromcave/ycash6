@@ -123,9 +123,53 @@ class FalconPadded512(unittest.TestCase):
         self.assertFalse(pq.verify(pq.SCHEME_FN_DSA_512, pk, sig + b'\x00', m))
         self.assertTrue(pq.verify(pq.SCHEME_FN_DSA_512, pk, sig, m))
 
-    def test_no_python_signer(self):
-        with self.assertRaises(NotImplementedError):
-            pq.sign(pq.SCHEME_FN_DSA_512, b'', b'\x00' * 32)
+    def test_dispatch_rejections(self):
+        with self.assertRaises(ValueError):
+            pq.keygen(0x03, bytes(48))
+        with self.assertRaises(ValueError):
+            pq.sign(0x03, b'', b'\x00' * 32)
+        with self.assertRaises(ValueError):                       # SLH-DSA is deterministic here
+            pq.sign(pq.SCHEME_SLH_DSA_SHA2_128S, bytes(64), b'\x00' * 32, entropy=bytes(16))
+        with self.assertRaises(ValueError):                       # sizes are checked before the C is built
+            pq.falcon_keygen(bytes(32))
+        with self.assertRaises(ValueError):
+            pq.falcon_sign(b'', b'\x00' * 32)
+        with self.assertRaises(ValueError):
+            pq.falcon_sign(bytes(pq.FALCON_SK_BYTES), b'\x00' * 32, entropy=bytes(40))
+
+
+@unittest.skipUnless(pq.falcon_signer_available(), 'no C compiler: the optional Falcon signer is skipped')
+class FalconSigner(unittest.TestCase):
+    """The optional C signer (the tree's vendored PQClean code through ctypes), checked by the
+    pure-Python verifier; GoldenVectors.test_keys reproduces pq_vectors.json's Falcon keys and
+    signatures with it byte for byte."""
+
+    def test_keygen_sign_verify(self):
+        pk, sk = pq.keygen(pq.SCHEME_FN_DSA_512, bytes(range(48)))
+        self.assertEqual((len(pk), len(sk)), (pq.FALCON_PK_BYTES, pq.FALCON_SK_BYTES))
+        self.assertEqual(pq.falcon_keygen(bytes(range(48))), (pk, sk))             # deterministic in the seed
+        msg = hashlib.sha256(b'falcon').digest()
+        sig = pq.sign(pq.SCHEME_FN_DSA_512, sk, msg)
+        self.assertEqual(len(sig), pq.FALCON_SIG_BYTES)
+        self.assertTrue(pq.verify(pq.SCHEME_FN_DSA_512, pk, sig, msg))
+        self.assertFalse(pq.verify(pq.SCHEME_FN_DSA_512, pk, sig, msg[::-1]))
+        self.assertNotEqual(pq.falcon_sign(sk, msg), sig)                            # os.urandom entropy
+        e = bytes(range(88))
+        self.assertEqual(pq.falcon_sign(sk, msg, e), pq.falcon_sign(sk, msg, e))     # fixed entropy: fixed bytes
+        self.assertEqual(pq.falcon_sign(sk, msg, e)[1:41], e[:40])                   # the nonce follows the header
+
+    def test_sign_input(self):
+        pk, sk = pq.falcon_keygen(bytes(range(1, 49)))
+        spk = pq.pqpkh_script_of(pq.SCHEME_FN_DSA_512, pk)
+        tx = v.make_tx([('22' * 32, 0, 0xffffffff)], [(9000, spk)])
+        pushes = pq.pq_sign_input(tx, 0, spk, 10000, v.VAULT_BRANCH_ID, sk, scheme=pq.SCHEME_FN_DSA_512, pk=pk)
+        self.assertEqual(len(pushes), 2 + 1 + 2 + 1)                                 # s=2, p=2
+        sig = b''.join(pushes[:2])
+        self.assertEqual((len(sig), sig[-1]), (pq.FALCON_SIG_BYTES + 1, pq.SIGHASH_ALL))
+        self.assertEqual(b''.join(pushes[3:5]), pk)
+        self.assertTrue(pq.verify(pq.SCHEME_FN_DSA_512, pk, sig[:-1], pq.pq_sighash(tx, 0, spk, 10000, v.VAULT_BRANCH_ID)))
+        with self.assertRaises(ValueError):
+            pq.pq_sign_input(tx, 0, spk, 10000, v.VAULT_BRANCH_ID, sk, scheme=pq.SCHEME_FN_DSA_512)   # pk= required
 
 
 class ScriptHelpers(unittest.TestCase):
@@ -215,6 +259,10 @@ class GoldenVectors(unittest.TestCase):
                 pk2, sk = pq.keygen(scheme, H(k['seed']))
                 self.assertEqual(pk2, pk, k['label'])
                 self.assertEqual(pq.sign(scheme, sk, msg), sig, k['label'])       # deterministic: byte for byte
+            elif pq.falcon_signer_available():
+                pk2, sk = pq.keygen(scheme, H(k['seed']))                          # the optional C signer
+                self.assertEqual(pk2, pk, k['label'])
+                self.assertEqual(pq.sign(scheme, sk, msg, entropy=H(k['entropy'])), sig, k['label'])   # byte for byte
             self.assertTrue(pq.verify(scheme, pk, sig, msg), k['label'])
             self.assertFalse(pq.verify(scheme, pk, sig, msg[::-1]), k['label'])
 

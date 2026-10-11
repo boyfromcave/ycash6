@@ -332,7 +332,9 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
   `yed_getnewaddress pq` → the claimant's, a PQ holder signature on the chain); the hybrid channel
   `TX_PQCHANNEL` (D-Q-19): before Falcon an SLH-DSA client is funded and closed cooperatively (the Python SLH-DSA
   signer plus the server's ECDSA), after it an SLH-DSA client is refused by every Yellowback mempool and a Falcon
-  client is funded (not closed: no Falcon signer outside the node wallet, and the wallet does not sign channels).
+  client is funded and closed cooperatively (the framework's optional Falcon signer `pq.falcon_sign`, the tree's
+  vendored PQClean C compiled with `$CC` and called through ctypes, plus the server's ECDSA), its 10 YED released to
+  node 0's Falcon holder; without a C compiler the walk funds the Falcon channel only and says so.
 - `falcon`: with `--pqfalconheight N` (N at least 10 above the step's start; the walk reaches it near height
   620): a P2PKH transfer mined at `N - 1`; at `N` the default holder address is FN-DSA-512, `yed_send` to a P2PKH
   holder and a raw P2PKH transfer are refused (`bad-yed-holder`) by every Yellowback mempool, a Falcon transfer

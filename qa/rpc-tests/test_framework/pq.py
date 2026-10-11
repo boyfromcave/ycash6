@@ -13,8 +13,11 @@ the vendored C in ``src/crypto/pq/``.
   empty context, ``M' = 0x00 || 0x00 || M`` (``ctx`` is a parameter for the ACVP vectors only).
   The ``*_internal`` functions are FIPS 205 Algorithms 18-20 (ACVP's ``internal`` interface).
 - **FN-DSA-512, PQClean ``falcon-padded-512``** (scheme ``0x02``): ``falcon_verify(pk, msg, sig)``
-  only, integer arithmetic (897-byte key, 666-byte padded signature). Falcon signatures in tests come
-  from vectors (plan §4.7): there is no Python Falcon signer.
+  in pure Python, integer arithmetic (897-byte key, 666-byte padded signature). Signing is optional
+  and not Python: ``falcon_keygen(seed48)`` / ``falcon_sign(sk, msg, entropy=None)`` compile the
+  tree's vendored PQClean C (``src/crypto/pq/falcon``, the wallet's signer) with ``$CC`` once per run
+  and call it through ctypes, byte-identical to ``pq::KeyGen`` / ``pq::SignWithEntropy``; without a
+  C compiler they raise ``FalconSignerUnavailable`` (``falcon_signer_available()`` to skip).
 - **Script helpers**: ``key_hash``, ``chunk``, ``pq_scriptsig_pushes`` / ``pq_scriptsig``,
   ``pqpkh_script`` (``TX_PQPKH``) and ``pq_sign_input`` (ZIP-243 sighash, the same
   ``SignatureHash`` the framework signs vault spends with, hashtype byte appended to the signature).
@@ -508,6 +511,132 @@ def falcon_verify(pk, m, sig):
 
 
 # ---------------------------------------------------------------------------
+# FN-DSA-512 signing (optional): the tree's own vendored PQClean code, compiled with $CC
+#
+# Falcon signing needs a floating-point Gaussian sampler, which this module does not re-implement
+# in Python; the signer is the wallet's own C (``src/crypto/pq/falcon``, ``ycash_falcon.h``),
+# compiled once into a shared library and called through ctypes. It is optional: the verify path
+# above stays pure Python (stdlib only), and a caller without a C compiler checks
+# ``falcon_signer_available()`` (or catches ``FalconSignerUnavailable``, a ``NotImplementedError``)
+# and skips. The library is cached by a hash of its sources and the compiler command line, in
+# ``falcon_set_build_dir(dir)`` (a test's tmpdir) or else ``$TMPDIR/ycash-pq-falcon``.
+
+FALCON_SK_BYTES = 1281
+FALCON_SEED_BYTES = 48             # pq::KeyGen's Falcon seed: SHAKE256 keygen RNG seed
+FALCON_SIGN_ENTROPY_BYTES = 88     # pq::SignWithEntropy: nonce(40) || sampler seed(48)
+FALCON_SOURCES = ('codec.c', 'common.c', 'fft.c', 'fips202.c', 'fpr.c', 'keygen.c', 'rng.c',
+                  'sign.c', 'vrfy.c', 'ycash_falcon_sign.c', 'ycash_falcon_verify.c')
+FALCON_HEADERS = ('fips202.h', 'fpr.h', 'inner.h', 'ycash_falcon.h')
+FALCON_SRC_DIR = None              # default: <tree>/src/crypto/pq/falcon, beside qa/rpc-tests
+
+_falcon = {'dir': None, 'lib': None, 'error': None}
+
+
+class FalconSignerUnavailable(NotImplementedError):
+    """No C compiler (or the vendored sources are missing): Falcon signing is skipped."""
+
+
+def _falcon_src_dir():
+    import os
+    if FALCON_SRC_DIR:
+        return FALCON_SRC_DIR
+    return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         '..', '..', '..', 'src', 'crypto', 'pq', 'falcon'))
+
+
+def falcon_set_build_dir(path):
+    """Build (or reuse) the signer library in ``path``, e.g. the test's ``--tmpdir``. Call before the
+    first ``falcon_keygen`` / ``falcon_sign``; a library already loaded stays loaded."""
+    _falcon['dir'] = path
+
+
+def _falcon_load():
+    import ctypes
+    import os
+    import shlex
+    import subprocess
+    import sys
+    import tempfile
+    if _falcon['lib'] is not None:
+        return _falcon['lib']
+    if _falcon['error'] is not None:
+        raise FalconSignerUnavailable(_falcon['error'])
+    try:
+        src = _falcon_src_dir()
+        cc = shlex.split(os.environ.get('CC', 'cc')) or ['cc']
+        flags = ['-O2', '-shared', '-fPIC']
+        h = hashlib.sha256(' '.join(cc + flags).encode() + b'\0')
+        for name in FALCON_SOURCES + FALCON_HEADERS:
+            with open(os.path.join(src, name), 'rb') as f:
+                h.update(name.encode() + b'\0' + hashlib.sha256(f.read()).digest())
+        build = _falcon['dir'] or os.path.join(tempfile.gettempdir(), 'ycash-pq-falcon')
+        os.makedirs(build, exist_ok=True)
+        out = os.path.join(build, 'libycashfalcon-%s%s' % (h.hexdigest()[:16], '.dylib' if sys.platform == 'darwin' else '.so'))
+        if not os.path.exists(out):
+            tmp = '%s.%d.tmp' % (out, os.getpid())
+            subprocess.run(cc + flags + ['-o', tmp] + [os.path.join(src, n) for n in FALCON_SOURCES],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            os.replace(tmp, out)
+        lib = ctypes.CDLL(out)
+        u8p, size = ctypes.c_char_p, ctypes.c_size_t
+        lib.ycash_falcon512_keygen_from_seed.argtypes = [ctypes.c_void_p, ctypes.c_void_p, u8p, size]
+        lib.ycash_falcon512_keygen_from_seed.restype = ctypes.c_int
+        lib.ycash_falcon512_sign.argtypes = [ctypes.c_void_p, u8p, size, u8p, u8p, u8p]
+        lib.ycash_falcon512_sign.restype = ctypes.c_int
+    except (OSError, subprocess.CalledProcessError) as e:
+        detail = getattr(e, 'stdout', None)
+        _falcon['error'] = 'the Falcon signer could not be built with $CC: %s%s' % (
+            e, (' -- ' + detail.decode(errors='replace')[-500:]) if detail else '')
+        raise FalconSignerUnavailable(_falcon['error'])
+    _falcon['lib'] = lib
+    return lib
+
+
+def falcon_signer_available():
+    """True when the Falcon signer builds (or is already built); never raises."""
+    try:
+        _falcon_load()
+        return True
+    except FalconSignerUnavailable:
+        return False
+
+
+def falcon_keygen(seed48):
+    """``pq::KeyGen`` for FN-DSA-512: SHAKE256(seed48) drives PQClean's keygen. Returns ``(pk, sk)``
+    (897 and 1281 bytes), byte for byte the node wallet's key for that seed."""
+    import ctypes
+    seed48 = bytes(seed48)
+    if len(seed48) != FALCON_SEED_BYTES:
+        raise ValueError('a Falcon keygen seed is %d bytes' % FALCON_SEED_BYTES)
+    lib = _falcon_load()
+    pk = ctypes.create_string_buffer(FALCON_PK_BYTES)
+    sk = ctypes.create_string_buffer(FALCON_SK_BYTES)
+    if lib.ycash_falcon512_keygen_from_seed(pk, sk, seed48, len(seed48)) != 0:
+        raise ValueError('Falcon keygen failed')
+    return pk.raw, sk.raw
+
+
+def falcon_sign(sk, msg, entropy=None):
+    """``pq::SignWithEntropy`` for FN-DSA-512: a 666-byte padded signature over ``msg`` (the 32
+    sighash bytes on the chain). ``entropy`` is nonce(40) || sampler seed(48); None draws it from
+    ``os.urandom`` (``pq::Sign``). ``pq_sign_input`` checks the result with the pure-Python
+    verifier."""
+    import ctypes
+    import os
+    sk, msg = bytes(sk), bytes(msg)
+    if len(sk) != FALCON_SK_BYTES:
+        raise ValueError('a Falcon secret key is %d bytes' % FALCON_SK_BYTES)
+    entropy = os.urandom(FALCON_SIGN_ENTROPY_BYTES) if entropy is None else bytes(entropy)
+    if len(entropy) != FALCON_SIGN_ENTROPY_BYTES:
+        raise ValueError('Falcon signing entropy is %d bytes (nonce || seed)' % FALCON_SIGN_ENTROPY_BYTES)
+    lib = _falcon_load()
+    sig = ctypes.create_string_buffer(FALCON_SIG_BYTES)
+    if lib.ycash_falcon512_sign(sig, msg, len(msg), sk, entropy[:FALCON_NONCE], entropy[FALCON_NONCE:]) != 0:
+        raise ValueError('Falcon signing failed')
+    return sig.raw
+
+
+# ---------------------------------------------------------------------------
 # Scheme dispatch (the pq::Verify / pq::KeyGen / pq::Sign contract)
 
 def verify(scheme, pk, sig, msg32):
@@ -521,16 +650,25 @@ def verify(scheme, pk, sig, msg32):
 
 
 def keygen(scheme, seed):
-    """``pq::KeyGen`` for SLH-DSA (Falcon keys come from vectors). Returns ``(pk, sk)``."""
-    if scheme != SCHEME_SLH_DSA_SHA2_128S:
-        raise NotImplementedError('only SLH-DSA has a Python keygen; Falcon keys come from vectors')
-    return slh_keygen(seed)
+    """``pq::KeyGen``: SLH-DSA in Python; FN-DSA-512 through the optional C signer
+    (``FalconSignerUnavailable`` without a C compiler). Returns ``(pk, sk)``."""
+    if scheme == SCHEME_SLH_DSA_SHA2_128S:
+        return slh_keygen(seed)
+    if scheme == SCHEME_FN_DSA_512:
+        return falcon_keygen(seed)
+    raise ValueError('unknown scheme %r' % scheme)
 
 
-def sign(scheme, sk, msg32, processes=1):
-    if scheme != SCHEME_SLH_DSA_SHA2_128S:
-        raise NotImplementedError('only SLH-DSA has a Python signer; Falcon signatures come from vectors')
-    return slh_sign(sk, msg32, processes=processes)
+def sign(scheme, sk, msg32, processes=1, entropy=None):
+    """``pq::Sign`` / ``pq::SignWithEntropy``: SLH-DSA deterministic (``entropy`` must be None);
+    FN-DSA-512 through the optional C signer (``entropy`` = nonce || seed, None for os.urandom)."""
+    if scheme == SCHEME_SLH_DSA_SHA2_128S:
+        if entropy is not None:
+            raise ValueError('SLH-DSA signs deterministically here (opt_rand = PK.seed)')
+        return slh_sign(sk, msg32, processes=processes)
+    if scheme == SCHEME_FN_DSA_512:
+        return falcon_sign(sk, msg32, entropy)
+    raise ValueError('unknown scheme %r' % scheme)
 
 
 # ---------------------------------------------------------------------------
@@ -615,8 +753,10 @@ def pq_sign_input(tx, n_in, script_code, amount, branch_id, sk, scheme=SCHEME_SL
     """Sign input ``n_in`` and return the scriptSig push list
     ``[sig_1..sig_s, s, pk_1..pk_p, p]`` with the hashtype byte appended to the signature.
 
-    SLH-DSA: ``sk`` is the 64-byte secret key (``pk`` is read from it). Falcon: ``sk`` is ignored
-    and ``sig`` (a 666-byte vector signature over this very sighash) and ``pk`` must be given.
+    SLH-DSA: ``sk`` is the 64-byte secret key (``pk`` is read from it). Falcon: ``pk`` must be given,
+    and either ``sk`` (the 1281-byte key of ``falcon_keygen``; the optional C signer signs) or ``sig``
+    (a 666-byte vector signature over this very sighash). A Falcon signature is checked by the
+    pure-Python verifier either way.
     Serialise with ``pq_scriptsig_from_pushes`` (or ``pq_scriptsig(pk, sig)``)."""
     msg = pq_sighash(tx, n_in, script_code, amount, branch_id, hashtype)
     if scheme == SCHEME_SLH_DSA_SHA2_128S:
@@ -624,10 +764,12 @@ def pq_sign_input(tx, n_in, script_code, amount, branch_id, sk, scheme=SCHEME_SL
         pk = sk[32:64]
         sig = slh_sign(sk, msg, processes=processes)
     else:
-        if sig is None or pk is None:
-            raise NotImplementedError('Falcon signatures come from vectors: pass sig= and pk=')
+        if pk is None or (sig is None and sk is None):
+            raise ValueError('a Falcon input needs pk= and either sk= (the C signer) or sig= (a vector)')
+        if sig is None:
+            sig = falcon_sign(sk, msg)
         if not falcon_verify(pk, msg, sig):
-            raise ValueError('the Falcon vector signature does not verify over this sighash')
+            raise ValueError('the Falcon signature does not verify over this sighash')
     return pq_scriptsig_pushes(pk, bytes(sig) + bytes([hashtype]))
 
 

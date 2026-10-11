@@ -145,6 +145,12 @@ def main():
             assert all(fee > 0 for fee in ev.get('earlyRedeemFeeZat', [])) and len(ev['earlyRedeemFeeZat']) == 2, ev   # IT-9 (the walk checks 5 %)
         for key in ('pq_mint', 'pq_primitive', 'pq_transfer', 'pq_channel'):
             assert key in evidence, key
+        # the hybrid channel is closed cooperatively: an SLH-DSA client before Falcon, a Falcon client after it
+        # (the framework's optional Falcon signer; without a C compiler the walk only funds it)
+        from test_framework import pq as _pq
+        channel = evidence['pq_channel']
+        if channel.get('client') == 'slh' or _pq.falcon_signer_available():
+            assert channel.get('close'), channel
         falcon = summary['steps']['falcon']
         if options.no_pqfalcon:
             assert isinstance(falcon, str) and falcon.startswith('SKIP'), falcon
