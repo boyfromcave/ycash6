@@ -41,7 +41,6 @@ from test_framework.yellowback_util import (
     RESIDUAL_MIN_ZAT,
     REF_LAG,
     STOCK,
-    USER,
     YellowbackTestFramework,
     assert_best_hash,
     assert_same_statehash,
