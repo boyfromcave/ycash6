@@ -1,63 +1,98 @@
-Ycash 6.22.0-rc1 with the vault upgrade and Ycash Yellowback (YED)
+Ycash 6.22.0-rc1 with post-quantum vaults and Ycash Yellowback (YED)
 <img align="right" width="100" height="100" src="doc/imgs/logo.png">
 ===========
 
-This is the Ycash node on the Zcash 6.20.0 code base, plus a proposed network upgrade. Everything
-below up to [What is Ycash?](#what-is-ycash) is about that upgrade; the rest is the Ycash README.
+This is the Ycash node on the Zcash 6.20.0 code base, plus a proposed network upgrade: a
+**post-quantum vault system** for Ycash, with the applications built on it. Everything above
+[What is Ycash?](#what-is-ycash) is about that upgrade; the rest is the Ycash README.
 
-## What this is
+> **Status: in development.** Everything runs on regtest and on a one-laptop devnet. No activation
+> height is set on mainnet or testnet, and the upgrade has not been adopted by the Ycash
+> Foundation.
 
-This branch adds a proposed **Ycash network upgrade, the vault upgrade**. It gives Ycash one new,
-general-purpose feature: **vaults**, YEC locked under rules that every node enforces, released
-only with the approval of a bonded **signer set**, after a delay during which the release can be
-cancelled, and always recoverable by its owner if the signers go silent. Two applications are
-built on it: **Ycash Yellowback (YED)**, a dollar token backed by YEC in vaults, and **wYEC**,
-wrapped YEC for Ethereum, backed by YEC in vaults.
+## Which repository is which
 
-The Ycash v4.5.0 line ([boyfromcave/ycash-dd](https://github.com/boyfromcave/ycash-dd)) carries the
-same upgrade with the same rules.
+The upgrade is built on two node lines that carry the same rules and must stay in step:
 
-## Status
+| Repository | Node | Role |
+|---|---|---|
+| **ycash6** (this one) | `ycashd` 6.20.0 (Zcash 6.x code base) | the **release line**: tagged releases are built here |
+| [ycash-dd](https://github.com/boyfromcave/ycash-dd) | `ycashd` 4.5.0 | where changes land first |
 
-**Status: proposed, not live.** It runs on a local test network (regtest) only. It has not been
-adopted by the Ycash Foundation, has not been audited, and has no activation height on mainnet
-or testnet.
-
-The vault upgrade is a **hard fork**: every node must upgrade before the activation height; a node
-that does not stops following the chain.
+The project workspace, with the plans, the specs and every other component (wallets,
+lightwalletd, the bridge attestor, the pool), is
+[boyfromcave/yellowback](https://github.com/boyfromcave/yellowback).
 
 ## What the upgrade adds
 
-- **Vaults.** YEC (Ycash's coin) locked on chain under rules that every Ycash node enforces.
-  Taking YEC out of a vault is a **release**. A release approved by a signer set first becomes a
-  **pending release** that waits for a fixed delay and can be cancelled during it. The vault's
-  **owner** can always recover the YEC if the signer set goes silent.
-- **Signer sets.** A group of bonded members (they lock YEC as a bond) that can approve releasing
-  a vault. Members who cheat lose their bond; a set whose members go silent is treated as gone.
-  The upgrade is general-purpose: it knows nothing about dollars or Ethereum.
-- **Ycash Yellowback (YED)**, a dollar token built on vaults. Lock YEC in a vault to mint YED
-  (`1 YED = 1 US dollar`); return the YED to get the YEC back (always, even if the attestors go silent: a
-  YED vault is only ever released by burning its YED). If a vault's YEC becomes worth less
-  than the YED it backs, others can claim it; the claim waits as a pending release that
-  Yellowback's signer set can cancel if it is wrong. The YEC/USD price comes from mining pools and
-  from **attestors** (members of Yellowback's signer set who sign prices). YED moves in ordinary
-  transparent Ycash transactions, and its rules are enforced by every upgraded node.
-- **wYEC (wrapped YEC)**, YEC represented as a token on Ethereum, backed 1:1 by YEC locked in
-  Ycash vaults; a signer set releases the YEC when wYEC is burned. Ycash never reads Ethereum.
-  This repository holds only the Ycash side of the bridge.
+```text
+  Yellowback          wYEC bridge         nYEC bridge
+  (YED, a dollar)    (to Ethereum)       (to NEAR, coming)
+        │                  │                   │
+  ┌─────┴──────────────────┴───────────────────┴─────┐
+  │  Post-quantum vault system                       │
+  │  lock / unlock, signer sets, owner recovery      │
+  │  a network upgrade, checked by every node        │
+  └──────────────────────────────────────────────────┘
+```
+
+### The vault system
+
+- **Vaults** lock YEC under rules that every node enforces, not just miners. Taking YEC out is a
+  **release**: a signer set approves it, it waits as a **pending release** for a fixed delay, and
+  it can be cancelled during that delay.
+- **Signer sets** are groups of members who post a YEC bond. A member who cheats loses the bond;
+  a member who leaves stays slashable through an exit window of at least 14 days on mainnet.
+- **Owner recovery:** a vault's owner can always reclaim the YEC if its signer set goes silent.
+- **Post-quantum signatures:** one new opcode, `OP_CHECKPQSIG`, checks hash-committed
+  post-quantum keys. Every vault owner signs with **SLH-DSA** (FIPS 205); YED holders and
+  transfers use **Falcon-512** from the first block of the upgrade. Plain YEC can use
+  post-quantum addresses too (`sq…` on mainnet). The shielded (Sapling) pool is unchanged.
+
+The vault system is general-purpose: it knows nothing about dollars or other chains.
+
+### Applications
+
+- **Ycash Yellowback (YED)**, a dollar backed by YEC locked in vaults (`1 YED = $1`). Lock YEC
+  to mint YED; burn the YED to get the YEC back, which the owner can always do, even if the
+  attestors go silent. A vault whose YEC falls below 125 % of the YED it backs can be claimed by
+  others, through a pending release that Yellowback's signer set can cancel if it is wrong. The
+  YEC/USD price comes from mining pools and from **attestors**, bonded members of an open signer
+  set (bond 10,000–20,000 YEC, scaling with the collateral locked in YED vaults). YED is the one
+  registered rule module on the vault system; mainnet YED addresses start with `yb…`.
+- **wYEC**, wrapped YEC on Ethereum, backed 1:1 by YEC in vaults. Ycash never reads Ethereum;
+  this repository holds only the Ycash side, which needs nothing beyond the vault system.
+- **nYEC**, wrapped YEC on NEAR with the same design, is coming.
+
+**Naming:** Yellowback is the system, YED is the unit: "250 YED", "Yellowback is a dollar on
+Ycash".
+
+### Status
+
+| | |
+|---|---|
+| Vault upgrade | Built on both node lines, running on regtest and the devnet |
+| Post-quantum layer | Built on the `upgrade/quantum-vaults` branch; it joins `upgrade/vault` at release |
+| Mainnet / testnet | **No activation height set.** The vault upgrade is a **hard fork**: once a height is set, every node must upgrade before it |
+| Reviews | Internal security and consensus audits (in the workspace's `docs/audits/`). No external audit yet |
+
+Attestor and bridge signer keys are still secp256k1; a post-quantum design for them is being
+studied.
 
 ## Try it
 
-This brings up a local test network of eight regtest nodes on one machine, mints YED, and makes a
-wYEC bridge round trip with a mock Ethereum. You need `src/ycashd` and `src/ycash-cli` built (see
-[Building](#building)), the attestor agent built (`cargo build --release` in
-`contrib/yellowback/attest`), and Python 3 (on Python 3.12 or later with `pyasyncore` installed).
-From the repository root:
+This brings up a local test network of eight regtest nodes on one machine (upgrade active,
+Falcon active as on mainnet), mints YED, and makes a wYEC bridge round trip with a mock
+Ethereum. You need `src/ycashd` and `src/ycash-cli` built (see
+[Build and test](#build-and-test)), the attestor agent built (`cargo build --release` in
+`contrib/yellowback/attest`), and the project workspace's Python venv (the scripts need
+`simplejson`). From the repository root inside the workspace:
 
 ```bash
+source ../.venv/bin/activate
 export PATH="$PWD/contrib/yellowback/devnet:$PATH"
 
-yellowback-devnet up                                     # ~2 min: 8 nodes, upgrade active, prices flowing
+yellowback-devnet up                                     # ~6 min: 8 nodes, upgrade active, prices flowing
 yellowback-devnet cli -- yed_mint 10000 48 "" "" false   # mint 100 YED (amounts in cents), YEC locked 48 blocks
 yellowback-devnet mine 30                                # confirms the mint; matures coins the bridge needs
 yellowback-devnet cli -- yed_getbalance                  # "confirmedCents": 10000
@@ -73,73 +108,92 @@ yellowback-devnet bridge status                          # the burn, its pending
 yellowback-devnet bridge down && yellowback-devnet down --wipe
 ```
 
-`yellowback-devnet --help` lists every command. `contrib/yellowback/devnet/upgrade-walk` walks
-the whole system end to end (claims, cancels, a reorg, both bridge shapes); see
-[contrib/yellowback/devnet/README.md](contrib/yellowback/devnet/README.md), section 6.
+The mint's owner is a fresh SLH-DSA key and its YED goes to a Falcon holder address, both
+chosen by the wallet. `yellowback-devnet --help` lists every command;
+[contrib/yellowback/devnet/README.md](contrib/yellowback/devnet/README.md) covers the end-to-end
+walk (section 6) and the post-quantum regimes (section 8).
 
 ## For developers
 
-- **The upgrade:** `Consensus::UPGRADE_VAULT`, consensus branch ID `0x6d5b7a31` ("Vault"),
-  in `src/consensus/upgrades.cpp`; `src/chainparams.cpp` gives it no height on mainnet or testnet.
-- **Script:** BIP68 relative lock-times (height-based) with `OP_CHECKSEQUENCEVERIFY` (`0xb2`),
-  and two new opcodes, `OP_CHECKSETSIG` (`0xc0`) and `OP_CHECKSETDORMANT` (`0xc1`). A vault is
-  the output template **V**; a pending release is the template **I** (the code calls it an
-  *intent*). Signer-set acts (`SET_CREATE`, `SET_JOIN`, `SET_HEARTBEAT`, …) travel in a `YV`
-  `OP_RETURN`; set state lives in `<datadir>/vaults/` with per-block undo.
-- **YED** is the one registered rule module on the primitive (tag `YED\0`). Its ledger is an index
-  under `<datadir>/yellowback/`; because its rules are consensus, a node whose index is unhealthy
-  stops. The bridge needs no module.
-- **RPCs:** 21 `set_*` / `vault_*` calls on every node ([doc/vault-rpc.md](doc/vault-rpc.md),
-  machine-readable in `doc/vault-rpc-contract.json`); the `yed_*` calls, `rpcversion` 5
+- **The upgrade:** `Consensus::UPGRADE_VAULT`, consensus branch ID `0x6d5b7a31` ("Vault"), in
+  `src/consensus/upgrades.cpp`; `src/chainparams.cpp` gives it no height on mainnet or testnet.
+  The post-quantum layer rides the same upgrade: no new branch ID.
+- **Script:** BIP68 relative lock-times with `OP_CHECKSEQUENCEVERIFY` (`0xb2`), and three new
+  opcodes: `OP_CHECKSETSIG` (`0xc0`), `OP_CHECKSETDORMANT` (`0xc1`) and `OP_CHECKPQSIG` (`0xc2`;
+  scheme `0x01` SLH-DSA-SHA2-128s, `0x02` Falcon-512). A vault is the output template **V**, a
+  pending release the template **I** (an *intent* in the code). Signer-set acts (`SET_CREATE`,
+  `SET_JOIN`, …) travel in a `YV` `OP_RETURN`; set state lives in `<datadir>/vaults/`.
+- **Post-quantum crypto:** verification only in consensus, from vendored C libraries under
+  `src/crypto/pq/` (its `README.md` records sources, commits and licences).
+- **YED** is the rule module tagged `YED\0`. Its ledger is an index under
+  `<datadir>/yellowback/`; because its rules are consensus, a node whose index is unhealthy stops.
+- **Fees:** the YED protocol fee is priced in dollars and tiered by debt; wallets price network
+  fees in dollars per KB at the attested price, with `-pqfeerate` as the fallback when no price
+  exists.
+- **RPCs:** 23 `set_*` / `vault_*` calls ([doc/vault-rpc.md](doc/vault-rpc.md), machine-readable
+  in `doc/vault-rpc-contract.json`) and the `yed_*` calls at `rpcversion` 8
   ([doc/yellowback-rpc.md](doc/yellowback-rpc.md)).
-- **Regtest by hand:** `-nuparams=6d5b7a31:<height>` activates the upgrade; YED also needs
-  `-yellowbackattestorset=<setid>`, the txid of its signer set's `SET_CREATE` (sendable only after
-  activation, so start with the first option, create the set, restart with both). Both go on top
-  of the `-nuparams` for Ycash's earlier upgrades (`yellowback_node_args` in
-  `qa/rpc-tests/test_framework/yellowback_util.py`).
+- **Wallet keys:** post-quantum keys derive from the wallet's seed; `-mnemonicfile=<file>`
+  restores a new wallet from its recovery phrase alone.
 - **librustzcash:** `Cargo.toml`'s `[patch.crates-io]` points every `zcash_*` crate at
   [boyfromcave/librustzcash6](https://github.com/boyfromcave/librustzcash6), which adds
   `NetworkUpgrade::Vault` / `BranchId::Vault = 0x6d5b7a31` so the Rust side knows the new epoch.
-- **Releases** of this line are tagged 6.22.x by `.github/workflows/yellowback-release.yml`
-  ([doc/yellowback-release.md](doc/yellowback-release.md)).
-- **The fork delta:** `git diff ycash6-legacy...upgrade/vault` (`ycash6-legacy` is ycashd 6.20.0
-  as published). Host build notes are in [doc/yellowback.md](doc/yellowback.md), *Build and test
-  baseline (ycashd 6.20.0)*, and [doc/yellowback-baseline.md](doc/yellowback-baseline.md).
+  The post-quantum layer needs no change there.
+- **Releases** of this line are tagged by `.github/workflows/yellowback-release.yml`
+  ([doc/yellowback-release.md](doc/yellowback-release.md)): 6.22.x for the vault upgrade,
+  6.21.x for the `harden/yellowback` fallback. The version the post-quantum layer ships under is
+  chosen at its release.
+- **Regtest by hand:** `-nuparams=6d5b7a31:<height>` activates the upgrade, `-pqfalcon=1` (or
+  `-pqfalconheight=<h>`) activates Falcon, and YED also needs `-yellowbackattestorset=<setid>`,
+  the txid of its signer set's `SET_CREATE`. They go on top of the `-nuparams` for Ycash's earlier
+  upgrades (`yellowback_node_args` in `qa/rpc-tests/test_framework/yellowback_util.py`).
+- **The fork delta:** `git diff ycash6-legacy...upgrade/quantum-vaults` (`ycash6-legacy` is
+  ycashd 6.20.0 as published).
 
 | Path | Contents |
 |---|---|
 | `src/vault/` | The primitive: acts, set-signature checker, set state and its database, V / I templates, module table, block and mempool glue |
-| `src/script/`, `src/primitives/transaction.h` | The opcodes, the V and I standard templates, BIP68 sequence locks |
+| `src/crypto/pq/` | SLH-DSA and Falcon-512 (vendored), the scheme table, wallet-side signing |
+| `src/script/`, `src/primitives/transaction.h` | The opcodes, the V, I and post-quantum standard templates, BIP68 sequence locks |
 | `src/main.cpp`, `src/txmempool.cpp`, `src/miner.cpp`, `src/rpc/mining.cpp` | Block connect / disconnect, mempool acceptance, block templates (built against a running copy of the set state, `vault::TemplateRun`) |
 | `src/yellowback/` | YED: parameters, payload, prices and attestation, index, the rule module, wallet glue |
 | `src/rpc/vault.cpp`, `src/rpc/yellowback.cpp`, `src/rpc/yellowbackwallet.cpp` | The RPCs |
 | `contrib/yellowback/` | The pool quote agent, the attestor agent (`attest/`), the devnet (`devnet/`) |
 
-Tests:
+### Build and test
 
+The full recipe, including the macOS host conditions, is in [doc/yellowback.md](doc/yellowback.md),
+*Build and test baseline (ycashd 6.20.0)*, and what the 6.20.0 pin needed is in
+[doc/yellowback-baseline.md](doc/yellowback-baseline.md). In short:
+
+```bash
+./zcutil/build.sh -j8                                       # cold: ~35 min (depends builds clang and Rust)
+make -C src -j8 ycashd ycash-cli test/test_bitcoin          # incremental
+
+src/test/test_bitcoin --run_test='vault_*,pq_*,yellowback_*'
+qa/pull-tester/rpc-tests.py -j4 --nozmq vault_upgrade vault_primitive vault_pq vault_bridge \
+    yellowback_upgrade yellowback_lifecycle yellowback_claim yellowback_pq yellowback_fees
 ```
-src/test/test_bitcoin --run_test='vault_*'
-src/test/test_bitcoin --run_test='yellowback_*'
-qa/pull-tester/rpc-tests.py -j4 --nozmq vault_upgrade vault_primitive vault_bridge yellowback_upgrade \
-    yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_wallet_restore yellowback_sapling
-python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
-```
+
+Use the workspace venv's Python for the functional tests and the devnet; a single functional
+script reads the node binary from `ZCASHD` (not `BITCOIND` as on the 4.5 line).
 
 ## Documentation
 
 | Document | What it covers |
 |---|---|
-| [doc/yellowback.md](doc/yellowback.md) | Using YED from `ycash-cli`, backups, how activation works (*Activation and enforcement since the vault upgrade*) |
+| [doc/yellowback.md](doc/yellowback.md) | Using YED from `ycash-cli`, configuration, backups, the build |
 | [doc/vault-rpc.md](doc/vault-rpc.md) | The vault and signer-set RPCs |
 | [doc/yellowback-rpc.md](doc/yellowback-rpc.md) | The `yed_*` RPCs |
 | [doc/yellowback-attestor.md](doc/yellowback-attestor.md), [doc/yellowback-mining.md](doc/yellowback-mining.md) | Running an attestor; mining pools |
-| [contrib/yellowback/devnet/README.md](contrib/yellowback/devnet/README.md) | The local test network in full |
 | [doc/yellowback-spec.md](doc/yellowback-spec.md) | The YED protocol and its trust statement |
 | [doc/yellowback-review.md](doc/yellowback-review.md) | A review guide to the fork's changes |
-| [doc/yellowback-release.md](doc/yellowback-release.md) | How releases are built and tagged |
+| [doc/yellowback-release.md](doc/yellowback-release.md) | How releases are built and tagged, and what their notes must say |
+| [contrib/yellowback/devnet/README.md](contrib/yellowback/devnet/README.md) | The local test network in full |
 
-Earlier designs: the `harden/yellowback` branch keeps a version of Yellowback that needs no
-network upgrade; the design history is in the project workspace.
+The design documents (the upgrade plan, the quantum plan and spec, the fees spec) are in the
+[project workspace](https://github.com/boyfromcave/yellowback). The `harden/yellowback` branch
+keeps an earlier version of Yellowback that needs no network upgrade, as a fallback.
 
 What is Ycash?
 --------------
