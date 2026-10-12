@@ -39,12 +39,27 @@ else
         # YED is live once the network's attestor set exists (a vault primitive set id) and the
         # node is restarted with it; see doc/yellowback-devnet.md.
         [ -n "${YCASHD_YELLOWBACK_ATTESTOR_SET:-}" ] && echo "yellowbackattestorset=${YCASHD_YELLOWBACK_ATTESTOR_SET}"
+        # OP_CHECKPQSIG scheme 0x02 (FN-DSA-512): mainnet and testnet admit it from the vault
+        # activation (pqFalconHeight 0, D-Q-2); regtest only with -pqfalconheight. The default
+        # mirrors mainnet; "off" leaves Falcon inactive (the SLH-DSA-only regime).
+        PQF="${YCASHD_PQ_FALCON_HEIGHT:-0}"
+        [ "$PQF" != off ] && echo "pqfalconheight=$PQF"
         ;;
       *) echo "unknown YCASHD_NETWORK=$NET (mainnet|testnet|regtest)" >&2; exit 2 ;;
     esac
     [ -n "${YCASHD_RPC_PORT:-}" ] && [ "$NET" != regtest ] && echo "rpcport=${YCASHD_RPC_PORT}"
+    # The wallet's fallback fee rate for a post-quantum input (default: the relay floor).
+    [ -n "${YCASHD_PQ_FEERATE:-}" ] && echo "pqfeerate=${YCASHD_PQ_FEERATE}"
     [ -n "${YCASHD_CONF_EXTRA:-}" ] && printf '%s\n' "${YCASHD_CONF_EXTRA}"
+    true
   } > "$CONF"
+fi
+# Seed-only wallet restore: -mnemonicfile reads the secret from a file the operator MOUNTS (a Docker or
+# Kubernetes secret, e.g. /run/secrets/ycash-mnemonic). The image never contains one, and the path, not
+# the secret, is passed on the command line; it is never written into ycash.conf.
+if [ -n "${YCASHD_MNEMONIC_FILE:-}" ]; then
+  [ -r "$YCASHD_MNEMONIC_FILE" ] || { echo "YCASHD_MNEMONIC_FILE=$YCASHD_MNEMONIC_FILE is not a readable file (mount the secret)" >&2; exit 2; }
+  set -- "$@" "-mnemonicfile=$YCASHD_MNEMONIC_FILE"
 fi
 # shellcheck disable=SC2086
 exec ycashd -datadir="$DATADIR" -conf="$CONF" ${YCASHD_EXTRA_ARGS:-} "$@"

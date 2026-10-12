@@ -8,6 +8,7 @@ services:
       YCASHD_RPC_USER: ycash
       YCASHD_RPC_PASSWORD: ycash-regtest
       YCASHD_VAULT_HEIGHT: "1"
+      YCASHD_PQ_FALCON_HEIGHT: "0"   # Falcon from the vault activation, as on mainnet
       YCASHD_LISTEN: "0"
     ports:
       - "127.0.0.1:${YCASHD_HOST_PORT:-18832}:18832"
