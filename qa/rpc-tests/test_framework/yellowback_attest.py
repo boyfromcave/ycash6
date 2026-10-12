@@ -656,7 +656,7 @@ def _carrier_vin(carrier):
 
 def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=None, carrier=None,
                      attest_fee=None, owner_pubkey=None, fee_zat_override=None, term_class=None, expiry=None,
-                     carrier_wif=None):
+                     carrier_wif=None, p_mint=None):
     """``build_mint_tx`` with the v3 shape: vault ``vout[0]``, token ``vout[1]``, payload
     ``vout[2]`` (version 3), pool fee ``vout[3]`` when ``fee_addr``, attestor fee (``attest_fee
     = (address, zat)``, ``P2PKH(bondPubKey)`` of a selected attestor) next, change last; the
@@ -679,7 +679,12 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
     needed = collateral_zat + TOKEN_VALUE
     fee_vout = FEE_VOUT_NONE
     if fee_addr:
-        enforcement_fee = yu.fee_zat(collateral_zat) if fee_zat_override is None else fee_zat_override
+        if fee_zat_override is None:
+            if p_mint is None:
+                p_mint = int(node.yed_getprice(ref_height)['pMint'])     # FEE-1': the cross-section xMint at R (= pMint when the attestors track it)
+            enforcement_fee = yu.protocol_fee_zat(cents, p_mint)
+        else:
+            enforcement_fee = fee_zat_override
         fee_vout = len(vout)
         vout.append((enforcement_fee, yu._spk_of_address(fee_addr)))
         needed += enforcement_fee
@@ -1240,9 +1245,16 @@ def armed_raw_mint(test, node, cents, lock_blocks, ref_height, collateral_zat, p
     test.mine(POOLS[0] if miner is None else miner)
     _seq, addr = _attest_payee(selected, prices)
     fee = kw.pop('fee_zat_override', None)
-    afee = attest_fee_zat(yu.fee_zat(collateral_zat) if fee is None else fee)
+    p_mint = kw.pop('p_mint', None)
+    if fee is None:
+        if p_mint is None:
+            x = int(node.yed_getprice(ref_height)['pMint'])
+            a = min(int(p) for p in prices.values()) if isinstance(prices, dict) and prices else None   # the bundle's lowest price bounds aMint
+            p_mint = x if a is None else min(x, a)                                                       # FEE-1': the fee at min(xMint, aMint) (an overpayment is valid)
+        fee = yu.protocol_fee_zat(cents, p_mint)
+    afee = attest_fee_zat(fee)
     return build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=fee_addr, carrier=carrier,
-                            attest_fee=(addr, afee) if fee_addr else None, fee_zat_override=fee, **kw)
+                            attest_fee=(addr, afee) if fee_addr else None, fee_zat_override=fee, p_mint=p_mint, **kw)
 
 
 def armed_raw_claim(test, node, vault, burn_inputs, ref_height, prices, fee, miner=None, expiry=None):

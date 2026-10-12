@@ -37,6 +37,7 @@
 #include "hash.h"
 #include "key.h"
 #include "main.h"
+#include "policy/policy.h"
 #include "pow.h"
 #include "primitives/block.h"
 #include "script/standard.h"
@@ -287,7 +288,7 @@ struct Builder
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
-        m.vout.push_back(CTxOut(FeeZat(collateral, P.feeMin, P.feeBps), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
+        m.vout.push_back(CTxOut(ProtocolFeeZat(cents, Snap(refHeight).PMint().value(), P).value(), GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));   // FEE-1' at xMint(R)
         return m;
     }
 
@@ -306,8 +307,8 @@ struct Builder
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 0), CScript() << valtype(71, 0x30) << OP_2, 0xFFFFFFFE));   // U-23: the V's owner selector
         for (const COutPoint& o : yed) m.vin.push_back(CTxIn(o));
         m.vout.push_back(CTxOut(v->collateralZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
-        CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
-        if ((int64_t)refHeight + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->collateralZat, P.earlyRedeemFeeBps[v->termClass]);   // IT-9: an owner redeem mined before lockHeight
+        CAmount fee = ProtocolFeeZat(v->mintedCents, v->pMint, P).value();   // RED-3': the debt at the vault's pMint
+        if ((int64_t)refHeight + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->mintedCents, P.earlyRedeemFeeBps[v->termClass], v->pMint);   // IT-9': an owner redeem mined before lockHeight
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         if (wellFormed) {
             m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {})))));
@@ -422,7 +423,7 @@ struct Builder
         const int payee = FirstSeq(bundle);
         Payload p = Payload::Mint(0, (uint32_t)cents, lock, (uint32_t)refHeight, TestPQOwner(owner), 3, payee >= 0 ? 4 : FEE_VOUT_NONE);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
-        const CAmount fee = FeeZat(collateral, P.feeMin, P.feeBps);
+        const CAmount fee = ProtocolFeeZat(cents, pMint, P).value();   // FEE-1' at min(xMint, aMint)
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         if (payee >= 0) m.vout.push_back(CTxOut(AttestFeeZat(fee, P.attestFeeBps), GetScriptForDestination(bondKeys[payee].GetPubKey().GetID())));
         m.vin.push_back(CarrierIn(bundle));
@@ -444,7 +445,7 @@ struct Builder
         m.vin.push_back(CTxIn(COutPoint(vaultTxid, 1)));
         m.vin.push_back(CTxIn(FakeInput()));
         m.vout.push_back(CTxOut(v->collateralZat - residual.value_or(0), vault::BuildIntent(vault::IntentFor(vp, vs, GetScriptForDestination(userKey.GetPubKey().GetID())))));
-        const CAmount fee = FeeZat(v->collateralZat, P.feeMin, P.feeBps);
+        const CAmount fee = ProtocolFeeZat(v->mintedCents, v->pMint, P).value();   // RED-3': the claimant pays the redeem fee at the vault's pMint
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(refHeight % 3)))));
         const int payee = FirstSeq(bundle);
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem((uint32_t)refHeight, 1, {}, payee >= 0 ? 3 : FEE_VOUT_NONE)))));
@@ -697,6 +698,27 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
 }
 
 // Rule: BLK-3
+// Review M-1: the network-fee price the index publishes is the HIGHEST window median at the tip (pClaim-style), not
+// the min-of-windows xMint; an unhealthy index publishes none (the -pqfeerate fallback).
+BOOST_AUTO_TEST_CASE(fee_price_is_the_highest_window)
+{
+    Live live(pathTemp / "yb-fee-price");
+    live.Activate();
+    BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), 50000);
+    for (int i = 0; i < 12; i++) live.MineQuote(47000);              // the fast window falls first
+    const Snapshot s = live.b->Snap(live.Tip());
+    BOOST_REQUIRE_EQUAL(s.haltMask, 0u);
+    const MicroUsd high = std::max(s.PFast().value(), std::max(s.PMid().value(), s.PSlow().value()));
+    BOOST_CHECK_LT(s.PMint().value(), high);
+    BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), high);
+    // a crash that sets a halt bit (HALT_DIVERGENCE here): no attested fee price, the fallback
+    for (int i = 0; i < 12; i++) live.MineQuote(20000);
+    BOOST_REQUIRE(live.b->Snap(live.Tip()).haltMask != 0u);
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+    live.index->SetUnhealthy("test");
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+}
+
 BOOST_AUTO_TEST_CASE(check_storage_fault_accepts_and_sets_unhealthy)
 {
     // -yellowbacktestfault=storage:check: the fault fires once in CheckConnect. Since the vault upgrade (U-21) a
@@ -1294,6 +1316,8 @@ BOOST_AUTO_TEST_CASE(buildbundle_missing_set)
     std::optional<VaultRecord> v = b.Vault(CTransaction(m).GetHash());
     BOOST_REQUIRE(v.has_value());
     BOOST_CHECK_MESSAGE(v->Status() == VaultStatus::ACTIVE, v->voidReason);
+    BOOST_CHECK_EQUAL(v->pMint, 49000);                                                  // FEE-1': the stored price is MINT-5's min(xMint, aMint)
+    BOOST_CHECK_EQUAL(v->feePaidZat, ProtocolFeeZat(10000, 49000, live.P).value());
     // A selector changes the draw (a different vault outpoint) but never the pool.
     BuiltBundle sel = index.BuildBundleInfo(R, OutPointSelector(COutPoint(CTransaction(m).GetHash(), 0)));
     BOOST_CHECK_EQUAL(sel.selected.size(), 3u);
@@ -1557,6 +1581,50 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
         BOOST_CHECK_EQUAL(log->residualZat, residual);
         BOOST_CHECK(!st.GetNotice(COutPoint(vault, 0)).has_value());      // IN-2: the record went with the vault
     }
+}
+
+// Rule: MINT-6 (D-Q-25)
+// CirculatingSupplyAt is the closed form of the brute-force subsidy sum from genesis: checked at every segment
+// boundary of each emission schedule (the slow-start ramps, the Blossom activation, the halvings) and far beyond.
+BOOST_AUTO_TEST_CASE(circulating_supply_closed_form_matches_the_subsidy_sum)
+{
+    auto brute = [](int height, const Consensus::Params& c) {
+        arith_uint256 t = 0;
+        for (int h = 1; h <= height; h++) t += arith_uint256((uint64_t)c.GetBlockSubsidy(h));   // genesis excluded
+        return (CAmount)t.GetLow64();
+    };
+    // regtest (as this suite configures it: no slow start, the 150-block halving interval): every height to 2,000
+    const Consensus::Params& r = ::Params().GetConsensus();
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(-1, r), 0);
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(0, r), 0);                                      // genesis: nothing circulates
+    CAmount running = 0;
+    for (int h = 1; h <= 2000; h++) {
+        running += r.GetBlockSubsidy(h);
+        BOOST_REQUIRE_EQUAL(CirculatingSupplyAt(h, r), running);
+    }
+    // mainnet: the slow start (20,000 blocks, the shift at 10,000), Blossom at 1,100,000 and the first two halvings
+    const Consensus::Params& m = ::Params(CBaseChainParams::MAIN).GetConsensus();
+    const int shift = m.SubsidySlowStartShift(), interval = m.nSubsidySlowStartInterval;
+    const int blossom = m.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight;
+    const int h1 = m.HalvingHeight(0, 1), h2 = m.HalvingHeight(blossom, 2);     // the first halving before Blossom (850,000), the second after
+    BOOST_CHECK_EQUAL(interval, 20000);
+    BOOST_CHECK_EQUAL(blossom, 1100000);
+    BOOST_CHECK_EQUAL(h1, 850000);
+    BOOST_CHECK(h1 < blossom && blossom < h2);
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(h1 - 1), 2 * m.GetBlockSubsidy(h1));
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(blossom - 1), 2 * m.GetBlockSubsidy(blossom));   // Blossom halves the per-block subsidy (twice the blocks)
+    BOOST_CHECK_EQUAL(m.GetBlockSubsidy(h2 - 1), 2 * m.GetBlockSubsidy(h2));
+    std::vector<int> heights = { 0, 1, shift - 1, shift, shift + 1, interval - 1, interval, interval + 1,
+                                 blossom - 1, blossom, blossom + 1, h1 - 1, h1, h1 + 1, h2 - 1, h2, h2 + 1 };
+    for (int h : heights) BOOST_CHECK_EQUAL(CirculatingSupplyAt(h, m), brute(h, m));
+    BOOST_CHECK_EQUAL(CirculatingSupplyAt(interval - 1, m), 1250000000LL * (interval / 2));    // the ramps sum to half an interval of full subsidies (zip208)
+    BOOST_CHECK(MoneyRange(CirculatingSupplyAt(h2 + 1, m)));
+    BOOST_CHECK_LT(CirculatingSupplyAt(100000000, m), MAX_MONEY);               // the whole schedule stays below MAX_MONEY
+    // the index seeds the virtual snapshot with it: at a regtest start height every later snapshot's issuedZat is the
+    // circulating supply at its height (MINT-6's base, D-Q-25)
+    yellowback::Params p;
+    BOOST_REQUIRE(!ParamsFromArgs("regtest", r, p).has_value());
+    BOOST_CHECK_EQUAL(p.issuedBeforeStart, p.startHeight > 0 ? CirculatingSupplyAt(p.startHeight - 1, r) : 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

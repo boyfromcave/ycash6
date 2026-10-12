@@ -188,7 +188,8 @@ struct Fixture
         s.withPayload = withPayload;
         s.refHeight = 250;
         if (withPayee) s.payee = payeeKey.GetPubKey().GetID();
-        s.feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps) + (ownerPath ? EarlyRedeemFeeZat(vaultValue, params.earlyRedeemFeeBps[0]) : 0);   // IT-9: judged at H = R + 3 < lockHeight 300
+        // FEE-1' / IT-9': a nominal $100 debt minted at $10: $1 protocol fee = 0.1 YEC, early fee 5 % of $100 = 0.5 YEC (judged at H = R + 3 < lockHeight 300)
+        s.feeZat = ProtocolFeeZat(10000, 10000000, params).value() + (ownerPath ? EarlyRedeemFeeZat(10000, params.earlyRedeemFeeBps[0], 10000000) : 0);
         s.yedInputs = yed;
         s.changeCents = change;
         s.changeScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
@@ -366,12 +367,11 @@ CMutableTransaction ArmedMint(const Armed& a, Cents cents, const std::vector<uns
     s.vaultOwner = TestPQOwner(s.owner);
     s.vaultScript = YedVaultScript(a.P, s.vaultOwner, a.R);     // U-23, IT-1
     const MicroUsd pMint = aMint.has_value() ? std::min(a.x, aMint.value()) : a.x;
-    CAmount collateral = std::max(RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value(), 4 * a.P.feeMin);
-    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
+    const CAmount collateral = RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value();   // MINT-5': no 4 x FEE_MIN floor
     s.collateralZat = collateral;
     s.payee = DefaultPayee(a.view, a.P, a.R, std::vector<unsigned char>(s.owner.begin(), s.owner.end()), PayeePolicy::Defaults(a.P));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(collateral, a.P.feeMin, a.P.feeBps);
+    s.feeZat = ProtocolFeeZat(cents, pMint, a.P).value();   // FEE-1' at min(xMint, aMint)
     std::vector<uint16_t> sel;
     BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, std::vector<unsigned char>(), &sel);
     if (withAttestFee && v.ok) {
@@ -420,7 +420,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     int feeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(s, feeVout);
@@ -495,10 +495,10 @@ BOOST_AUTO_TEST_CASE(mint_shape_passes_the_state_machine)
     s.vaultScript = YedVaultScript(f.params, s.vaultOwner, R);
     std::optional<CAmount> required = RequiredCollateralRounded(s.cents, MinRatioBps(f.params.baseRatioBps[0], S.sigmaMultBps), pMint);
     BOOST_REQUIRE(required.has_value());
-    s.collateralZat = std::max(required.value(), 4 * f.params.feeMin);
+    s.collateralZat = required.value();
     s.payee = DefaultPayee(view, f.params, R, std::vector<unsigned char>(s.owner.begin(), s.owner.end()), PayeePolicy::Defaults(f.params));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, pMint, f.params).value();   // FEE-1'
     int feeVout = -1;
     CMutableTransaction mtx = Shell(R + REF_WINDOW);
     mtx.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
@@ -569,6 +569,13 @@ BOOST_AUTO_TEST_CASE(redeem_layout_transparent_destination)
     VaultSpendShape tiny = f.Shape(true, true, true, true, {});
     tiny.vaultValue = tiny.feeZat;
     BOOST_CHECK_THROW(PlanVaultSpend(tiny), std::runtime_error);
+    // q/fees review: nor one that leaves a dust collateral output; exactly the dust threshold is built.
+    const CAmount dust = CTxOut(0, s0.collateralScript.value()).GetDustThreshold();
+    VaultSpendShape dusty = s0;
+    dusty.vaultValue = s0.vaultValue - p0.collateralOut + dust - 1;
+    BOOST_CHECK_THROW(PlanVaultSpend(dusty), std::runtime_error);
+    dusty.vaultValue += 1;
+    BOOST_CHECK_EQUAL(PlanVaultSpend(dusty).collateralOut, dust);
 }
 
 // Rule: RED-3
@@ -717,6 +724,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         v.ownerHeight = f.appHeight;
         v.collateralZat = f.vaultValue;
         v.mintedCents = 10000;   // $100 against 5 YEC
+        v.pMint = 20000000;      // minted at $20 (FEE-1': the $1 fee = 0.05 YEC, payable from 5 YEC)
         v.mintHeight = 200;
         v.refHeight = 197;
         v.status = (uint8_t)status;
@@ -863,7 +871,7 @@ BOOST_AUTO_TEST_CASE(v3_mint_layout_places_the_attestor_fee_after_the_pool_fee)
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
     s.payee = f.payeeKey.GetPubKey().GetID();
-    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     const CKey bondKey = NewKey();
     s.attestPayee = bondKey.GetPubKey().GetID();
@@ -1059,7 +1067,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
     BOOST_CHECK_EQUAL(o.log.verdict, verdict::OK);
     BOOST_CHECK_EQUAL(o.log.bundleSeqs.size(), 3u);
     BOOST_CHECK_EQUAL(o.log.aMint, aPrice);
-    BOOST_CHECK_EQUAL(o.log.attestFeeZat, AttestFeeZat(FeeZat(collateral, a.P.feeMin, a.P.feeBps), a.P.attestFeeBps));
+    BOOST_CHECK_EQUAL(o.log.attestFeeZat, AttestFeeZat(ProtocolFeeZat(100000, std::min(a.x, aPrice), a.P).value(), a.P.attestFeeBps));   // AFEE-1' on FEE-1' at min(x, aMint)
     BOOST_CHECK(o.log.hasAttestPayee);
     // The same collateral sized at xMint alone would be short under the combined pMint (MINT-5).
     {
@@ -1126,6 +1134,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     vault.ownerHeight = a.R - 81;
     vault.collateralZat = 50 * COIN;
     vault.mintedCents = 10000;
+    vault.pMint = 2600000;           // minted at the pools' $2.60 (FEE-1')
     vault.mintHeight = a.R - 80;
     vault.refHeight = a.R - 82;
     vault.status = (uint8_t)VaultStatus::ACTIVE;
@@ -1166,7 +1175,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     s.refHeight = a.R;
     s.payee = DefaultPayee(a.view, a.P, a.R, selector, PayeePolicy::Defaults(a.P));
     BOOST_REQUIRE(s.payee.has_value());
-    s.feeZat = FeeZat(vault.collateralZat, a.P.feeMin, a.P.feeBps);
+    s.feeZat = ProtocolFeeZat(vault.mintedCents, vault.pMint, a.P).value();   // RED-3'
     s.yedInputs = { coin };
     s.collateralScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
     s.networkFee = DEFAULT_YELLOWBACK_FEE;
@@ -1354,7 +1363,7 @@ BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
         m.vaultScript = YedVaultScript(a.P, m.vaultOwner, m.refHeight); // U-23, IT-1
         m.collateralZat = 251 * COIN;
         m.payee = NewKey().GetPubKey().GetID();
-        m.feeZat = FeeZat(m.collateralZat, a.P.feeMin, a.P.feeBps);
+        m.feeZat = ProtocolFeeZat(m.cents, a.x, a.P).value();       // FEE-1' at the pools' price
         m.attestPayee = a.bond[0].GetPubKey().GetID();
         m.attestFeeZat = AttestFeeZat(m.feeZat, a.P.attestFeeBps);
         int feeVout = -1, attestFeeVout = -1;
@@ -1446,6 +1455,7 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
 {
     const CFeeRate savedRate = pqFeeRate;
     const CAmount savedMax = maxTxFee;
+    SetAttestedFeePrice(std::nullopt);                                      // D-Q-23 (b): no attested price here, the -pqfeerate fallback
     const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
     const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
     pqFeeRate = CFeeRate(COIN / 100);                                       // -pqfeerate=0.01
@@ -1456,17 +1466,128 @@ BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), uncapped);
     maxTxFee = COIN / 50;                                                   // -maxtxfee=0.02: capped
     BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), COIN / 50);
-    maxTxFee = 1;                                                           // below the flat fee: the flat fee
-    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), g_yellowbackFee);
-    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // no PQ input: never priced by size
+    maxTxFee = 1;                                                           // below the flat fees: the cap's floor, minCapZat
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), attestedFeePolicy.minCapZat);           // review: a low -maxtxfee never blocks the flat fees
+    BOOST_CHECK_EQUAL(attestedFeePolicy.minCapZat, VAULT_RPC_FEE);
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), std::max(g_yellowbackFee, VAULT_RPC_FEE));
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), std::max(g_yellowbackFee, VAULT_RPC_FEE));
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;                                   // review A-2: no PQ input is priced by size too
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), pqFeeRate.GetFee(1000 + 150));
+    BOOST_CHECK_EQUAL(YedNetworkFee({}, std::nullopt), pqFeeRate.GetFee(1000));
     pqFeeRate = savedRate;
     maxTxFee = savedMax;
+}
+
+// D-Q-23 (b), D-Q-23a: with an attested price the rates are dollars per KB (plain $0.02, Yellowback $0.05), never
+// below the 5,000 zat/KB floor (nor -pqfeerate, review A-7); the Yellowback cap is min(max(-maxtxfee, $2 at the price),
+// -yellowbackmaxtxfee) (review M-1); no price = the fallback.
+BOOST_AUTO_TEST_CASE(yed_network_fee_dollars_per_kb_at_the_attested_price)
+{
+    const CFeeRate savedRate = pqFeeRate;
+    const CAmount savedMax = maxTxFee;
+    const AttestedFeePolicy saved = attestedFeePolicy;
+    const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
+    const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
+    const size_t bytes = 1000 + 150 + PQSpendInputSize(pq::SCHEME_FN_DSA_512);
+    // the rate arithmetic: ceil(uUSD/KB x COIN / price), floored
+    // $0.02/KB at $0.018/YEC = 1.111 YEC/KB (the fees spec's worked 111,112 zat/KB is off by 10^3: 20,000 x 10^8 / 18,000)
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 18000, 5000), 111111112);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, 18000, 5000), 277777778);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, PRICE_MAX, 5000), 5000);        // 466 zat/KB at PRICE_MAX: the floor binds
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, PRICE_MAX, 5000), 5000);        // 1,165 zat/KB: the floor
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(50000, PRICE_MAX, 0), 1165);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 4000000, 5000), 500000);        // $4/YEC: 0.005 YEC/KB
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 400000000, 5000), 5000);        // $400/YEC: 5,000 exactly, the floor from here up
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 399999999, 5000), 5001);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, PRICE_MIN, 5000), 20000 * COIN / 100);   // 20,000 YEC/KB at $0.0001
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(0, 18000, 5000), 5000);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(20000, 0, 5000), 5000);
+    BOOST_CHECK_EQUAL(AttestedRateZatPerKB(2000000, 18000, 0), 11111111112LL);    // $2 at $0.018 = 111.1 YEC (the cap's arithmetic)
+    // with a price: the Yellowback rate, the dollar cap above -maxtxfee
+    pqFeeRate = CFeeRate(100);
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
+    attestedFeePolicy.plainUsdPerKBMicro = DEFAULT_PQ_FEE_USD_PER_KB_MICRO;
+    attestedFeePolicy.yedUsdPerKBMicro = DEFAULT_YED_FEE_USD_PER_KB_MICRO;
+    attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
+    attestedFeePolicy.yedMaxTxFeeUsdMicro = DEFAULT_YED_MAX_TX_FEE_USD_MICRO;
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
+    SetAttestedFeePrice(18000);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 111111112);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 277777778);
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 10 * COIN);                                     // review M-1: $2 = 111 YEC, the 10-YEC ceiling binds
+    BOOST_CHECK_EQUAL(PQMaxTxFee(), YedMaxTxFee());                                 // D-Q-26: plain PQ transfers share the cap
+    attestedFeePolicy.yedMaxTxFeeZat = 1000 * COIN;                                  // -yellowbackmaxtxfee=1000: the dollar cap stands
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);                                 // $2 > 0.1 YEC at $0.018
+    // review A-2: a transaction without a PQ input is priced at the Yellowback rate by its estimated size too
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), YedFeeRate().GetFee(1000 + 150));
+    BOOST_CHECK_EQUAL(YedEstimatedSize({falcon, p2pkh}, std::nullopt), bytes);
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
+    BOOST_CHECK_EQUAL(PQSizeFee(1000, bytes), PlainPQFeeRate().GetFee(bytes));
+    BOOST_CHECK_GT(YedSizeFee(1000, bytes), PQSizeFee(1000, bytes));
+    maxTxFee = COIN / 50;                                                           // -maxtxfee below $2: the dollar cap stands
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 11111111112LL);
+    SetAttestedFeePrice(PRICE_MAX);                                                 // $2 = 46,566,129 zat at PRICE_MAX < 0.1 YEC: -maxtxfee binds
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), DEFAULT_TRANSACTION_MAXFEE);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 5000);                             // the floor
+    attestedFeePolicy.floorZatPerKB = 0;
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 1165);
+    attestedFeePolicy.floorZatPerKB = DEFAULT_ATTESTED_FEE_FLOOR_PER_KB;
+    // review A-7: with a price the floor is max(floorZatPerKB, -pqfeerate), so -pqfeerate stays a floor
+    pqFeeRate = CFeeRate(8000);
+    BOOST_CHECK_EQUAL(AttestedFeeFloorPerKB(), 8000);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 8000);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 8000);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 2000), 16000);                         // review L-1's clamp: the floor rate x size
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(100000, 2000), 100000);                      // never below the flat fee
+    pqFeeRate = CFeeRate(100);
+    BOOST_CHECK_EQUAL(AttestedFeeFloorPerKB(), DEFAULT_ATTESTED_FEE_FLOOR_PER_KB);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 2000), 10000);
+    maxTxFee = COIN / 50;
+    SetAttestedFeePrice(50000);                                                     // regtest's $0.05: a 2.6 KB Falcon spend
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100000000);                        // 1 YEC/KB
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 40 * COIN);                                    // $2 = 40 YEC
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), 10 * COIN);                                    // the ceiling
+    attestedFeePolicy.yedMaxTxFeeZat = 1000 * COIN;
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), YedFeeRate().GetFee(bytes));
+    // the target off (0): the fallback even with a price; no price: the fallback
+    attestedFeePolicy.yedUsdPerKBMicro = 0;
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    attestedFeePolicy.yedUsdPerKBMicro = DEFAULT_YED_FEE_USD_PER_KB_MICRO;
+    SetAttestedFeePrice(std::nullopt);
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    BOOST_CHECK_EQUAL(PlainPQFeeRate().GetFeePerK(), 100);
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), COIN / 50);
+    BOOST_CHECK_EQUAL(YedFloorSizeFee(1000, 20000), 2000);                         // no price: -pqfeerate x size
+    attestedFeePolicy.yedMaxTxFeeZat = COIN / 100;
+    BOOST_CHECK_EQUAL(YedMaxTxFee(), COIN / 100);                                   // the ceiling binds without a price too
+    attestedFeePolicy.yedMaxTxFeeZat = DEFAULT_YED_MAX_TX_FEE;
+    SetAttestedFeePrice(0);                                                         // an undefined price (0) is no price
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+    BOOST_CHECK_EQUAL(YedFeeRate().GetFeePerK(), 100);
+    attestedFeePolicy = saved;
+    pqFeeRate = savedRate;
+    maxTxFee = savedMax;
+}
+
+// Review L-1: the small-vault clamp triggers when the owner output would be dust, not only when the fee eats the vault.
+BOOST_AUTO_TEST_CASE(owner_fee_clamp_keeps_a_non_dust_output)
+{
+    const CAmount dust = 546, floorFee = 45000;
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 10000000, dust, floorFee), 100000);        // room to spare: the priced fee
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000 + dust, dust, floorFee), 100000);   // exactly a non-dust output left
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000 + dust - 1, dust, floorFee), floorFee);   // dust left: the floor
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 50000, dust, floorFee), floorFee);         // the fee would eat the vault
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(10000, 10100, dust, floorFee), 10000);            // never raised above the priced fee
+    BOOST_CHECK_EQUAL(ClampOwnerNetworkFee(100000, 100000, 0, floorFee), floorFee);           // Sapling (no dust): nothing left still clamps
 }
 
 // Review B L-1 (the 6.20.0 port finding): the funding follower reprices with the owner's PQ spend when the vault
 // spend was priced with it, so a PQ fee coin never prices the transaction below the fee already set.
 BOOST_AUTO_TEST_CASE(pq_fee_follower_keeps_the_owner_spend)
 {
+    SetAttestedFeePrice(std::nullopt);                                      // D-Q-23 (b): the -pqfeerate fallback
     const CFeeRate savedRate = pqFeeRate;
     const CAmount savedMax = maxTxFee;
     pqFeeRate = CFeeRate(COIN / 100);                                       // size pricing binds

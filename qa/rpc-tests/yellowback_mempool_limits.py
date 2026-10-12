@@ -56,7 +56,7 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     conventional_fee,
     debug_log_contains,
-    fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     mint_vault_raw,
     wait_yed_healthy,
@@ -211,7 +211,7 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         soon = tip + 1 + TX_EXPIRING_SOON_THRESHOLD - 1          # next height + 2: expiring soon
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref = int(est['refHeight'])
-        payee = user.yed_getfeepayee(ref, int(est['requiredZat']))['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         mint_hex, _owner = build_mint_tx(user, CENTS, LOCK, ref, int(est['requiredZat']), fee_addr=payee, expiry=soon)
         expected = 'tx-expiring-soon: expiryheight is %d but should be at least %d' % (soon, soon + 1)
         msgs = [rpc_refusal(node.sendrawtransaction, mint_hex) for node in (user, stock)]
@@ -220,8 +220,7 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         print('  mint, both nodes: %d %s' % msgs[0])
 
         vault = user.yed_getvault(self.v_txid)
-        collateral = int(vault['collateralZat'])
-        fee = (user.yed_getfeepayee(tip, collateral)['default']['payoutAddress'], fee_zat(collateral))
+        fee = (user.yed_getfeepayee(tip)['default']['payoutAddress'], vault_fee_zat(vault))   # RED-3': the debt at the vault's pMint
         spend_hex = build_vault_spend_raw(user, vault, 'owner', [(self.v_txid, 1)], payload=self.redeem_payload(tip),
                                           fee=fee, expiry=soon)
         check = user.yed_validaterawtransaction(spend_hex)
@@ -271,10 +270,9 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         vault = user.yed_getvault(self.v_txid)
         assert_equal(vault['status'], 'ACTIVE')
         assert_greater_than(ref, int(vault['lockHeight']))
-        collateral = int(vault['collateralZat'])
-        payee = user.yed_getfeepayee(ref, collateral)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         s_hex = build_vault_spend_raw(user, vault, 'owner', [(self.v_txid, 1)], payload=self.redeem_payload(ref),
-                                      fee=(payee, fee_zat(collateral)), expiry=expiry)
+                                      fee=(payee, vault_fee_zat(vault)), expiry=expiry)
         assert_equal(user.yed_validaterawtransaction(s_hex)['wouldBeRejected'], False)
         s_txid = user.sendrawtransaction(s_hex)
         s_raw = user.getrawtransaction(s_txid, 1)

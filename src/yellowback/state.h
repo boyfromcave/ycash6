@@ -81,6 +81,7 @@ extern const char* const BAD_MINT_COLLATERAL;
 extern const char* const MINT_UNSATISFIABLE;
 // MINT-6
 extern const char* const MINT_SUPPLY_CAP;
+extern const char* const MINT_VAULT_SHARE;       //!< MINT-6b (D-Q-23a): the debt exceeds max(maxVaultShareBps of the cap, vaultShareFloorCents)
 // MINT-7
 extern const char* const BAD_MINT_TOKEN_OUTPUT;
 // MINT-8

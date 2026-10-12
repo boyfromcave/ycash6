@@ -81,7 +81,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 8;   //!< 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 9;   //!< 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -232,9 +232,11 @@ struct VaultRecord
     bool unbacked;                            //!< always false since the vault upgrade (a failing spend is invalid)
     int32_t appHeight;                        //!< the V's appHeight: refHeight + 1 (IT-1); lockHeight + GRACE for a vault minted before the in-term plan
     int32_t ownerHeight;                      //!< the V's ownerHeight: refHeight + 1 (IT-1 extended: the owner redeems in term); lockHeight for a pre-plan vault
+    int64_t pMint;                            //!< FEE-1' (D-Q-23): MINT-5's price at the mint, micro-USD per YEC (min(xMint, aMint) when ARMED,
+                                              //!< xMint otherwise; 1..PRICE_MAX); the fee price of every later spend. Appended last (SERIALISATION.md §1 row 5)
 
     VaultRecord() : termClass(0), lockHeight(0), claimHeight(0), collateralZat(0), mintedCents(0), mintHeight(0), refHeight(0),
-                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false), appHeight(0), ownerHeight(0) {}
+                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false), appHeight(0), ownerHeight(0), pMint(0) {}
 
     VaultStatus Status() const { return (VaultStatus)status; }
     bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
@@ -266,6 +268,7 @@ struct VaultRecord
         READWRITE(unbacked);
         READWRITE(appHeight);
         READWRITE(ownerHeight);
+        READWRITE(pMint);
     }
 };
 

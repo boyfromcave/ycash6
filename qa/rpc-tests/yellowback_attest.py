@@ -89,7 +89,8 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     assert_same_statehash,
     build_vault_spend_raw,
-    fee_zat,
+    protocol_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     pubkey_to_address,
     usd_to_micro,
@@ -183,8 +184,9 @@ class YellowbackAttestTest(YellowbackTestFramework):
     def bond_key_address(self, seq):
         return self.attestors()[seq]['bondKeyAddress']
 
-    def attest_fee(self, collateral_zat):
-        return fee_zat(collateral_zat) * ATTEST_FEE_BPS // BPS
+    def attest_fee(self, cents, p_mint):
+        """AFEE-1': half of FEE-1' (the debt at the mint price)."""
+        return protocol_fee_zat(cents, p_mint) * ATTEST_FEE_BPS // BPS
 
     def assert_vault_everywhere(self, txid, status, void_reason=None):
         for node in self.enforcing_nodes() + [self.nodes[OBSERVER]]:
@@ -214,10 +216,12 @@ class YellowbackAttestTest(YellowbackTestFramework):
         atts = decode_bundle(bundle)
         seqs = sorted(parse_attestation(a)[0] for a in atts) if seqs is None else seqs
         carrier = self.carrier_step(owner, bundle, miner if carrier_miner is None else carrier_miner)
-        payee = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         attest_payee = self.bond_key_address(seqs[0])
+        # FEE-1': the fee at min(xMint, aMint) (the bundle's lowest price bounds aMint; overpaying is valid)
+        p_mint = min([int(user.yed_getprice(ref)['pMint'])] + [parse_attestation(a)[1] for a in atts])
         hex_, owner_pub = build_mint_tx_v3(owner_node, CENTS, LOCK, ref, required, fee_addr=payee, carrier=carrier,
-                                           attest_fee=(attest_payee, self.attest_fee(required)))
+                                           attest_fee=(attest_payee, self.attest_fee(CENTS, p_mint)), p_mint=p_mint)
         if expect == 'VOID':
             # the vault upgrade (U-23): a failing mint is an invalid transaction, not a VOID vault. Every
             # Yellowback mempool refuses it, and a block carrying it is rejected, with the MINT verdict.
@@ -229,7 +233,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
             for node in self.enforcing_nodes() + [self.nodes[OBSERVER]]:
                 rpc_error('vault-not-found', node.yed_getvault, txid)
             return {'txid': txid, 'ref': ref, 'owner': owner_pub, 'token': None, 'required': required, 'seqs': seqs,
-                    'payee': payee, 'attestPayee': attest_payee, 'attestFeeZat': self.attest_fee(required), 'invalid': True}
+                    'payee': payee, 'attestPayee': attest_payee, 'attestFeeZat': self.attest_fee(CENTS, p_mint), 'invalid': True}
         txid = owner_node.sendrawtransaction(hex_)
         self.sync_all()
         self.step(miner, 1, 'mint')
@@ -240,7 +244,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_greater_than(info['carrierVin'], -1)
         assert_equal(info['bundleSource'], 'scriptsig')
         return {'txid': txid, 'ref': ref, 'owner': owner_pub, 'token': (txid, 1), 'required': required, 'seqs': seqs,
-                'payee': payee, 'attestPayee': attest_payee, 'attestFeeZat': self.attest_fee(required)}
+                'payee': payee, 'attestPayee': attest_payee, 'attestFeeZat': self.attest_fee(CENTS, p_mint), 'pMint': p_mint}
 
     def mint_fresh(self, owner, prices, miner, price_step=Decimal('0')):
         """Feed node 0's pool at ``prices`` (+ ``price_step``), estimate, build the node's bundle for
@@ -285,9 +289,8 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(len(rows), 1)
         row = rows[0]
         carrier = self.carrier_step(claimant, hex_str_to_bytes(built['hex']), miner)
-        collateral = int(live['collateralZat'])
-        payee = user.yed_getfeepayee(ref, collateral)
-        extra = [(self.attest_fee(collateral), spk(self.bond_key_address(built['seqs'][0])))]
+        payee = user.yed_getfeepayee(ref)
+        extra = [(self.attest_fee(int(live['mintedCents']), int(live['pMint'])), spk(self.bond_key_address(built['seqs'][0])))]
         residual = int(row['residualZat'])
         owner = vault_owner(live)
         # RED-5 (quantum spec F-3): the owner's residual intent pays the owner's PQPKH unless a test redirects it
@@ -296,7 +299,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
             extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), residual_spk)))
         hex_ = build_vault_spend_raw(node, live, 'claim', [token],
                                      payload=ym.encode_redeem(ref, 1, [], attest_fee_vout=2),
-                                     fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                     fee=(payee['default']['payoutAddress'], vault_fee_zat(live)),
                                      ref_height=ref, extra_outputs=extra, charge_extra=True, carrier=carrier)
         check = user.yed_validaterawtransaction(hex_)
         assert_equal((check['blockValid'], check['wouldBeRejected'], check['verdict']), (True, False, 'ok'))
@@ -347,7 +350,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 7)   # post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
+        assert_equal(user.yed_getinfo()['rpcversion'], 8)   # the fee structure (D-Q-23, rpcversion 8); 7 was post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
 
         print('activation at $%s, then the attestor wallets are funded' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)
@@ -438,7 +441,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal(sorted(int(a['seq']) for a in pool), seqs)
         info = user.yed_gettxinfo(a0['txid'])
         assert_equal((info['verdict'], info['aMint'], info['xMint']), ('ok', usd_to_micro(PRICE), info['xMint']))
-        assert_equal(info['attestFeeZat'], self.attest_fee(a0['required']))
+        assert_equal(info['attestFeeZat'], self.attest_fee(CENTS, a0['pMint']))
         row = user.yed_getvault(a0['txid'])
         assert_equal((row['status'], row['noticed'], row['noticeHeight'], row['emergencyOpenAt']), ('ACTIVE', False, None, None))
         lb = self.attestors()
@@ -571,7 +574,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert p['xMint'] in (usd_to_micro(PRICE), usd_to_micro(PRICE + Decimal('0.01'))), p
         assert_equal(p['pMint'], p['xMint'])
         tip = user.getblockcount()
-        payees = user.yed_getfeepayee(tip, 25 * COIN)
+        payees = user.yed_getfeepayee(tip)
         assert_equal(payees['eligible'], [self.pool_addresses[2]])                 # E(R) shrinks to the unpinned pool
         recs = self.attestors()
         assert all(recs[seq]['pinned'] is False for seq in seqs)
@@ -582,7 +585,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.pools_step(20, 'unpin')
         p = user.yed_getprice()
         assert_equal((p['pinnedKeys'], p['pinnedSeqs']), ([], []))
-        assert_equal(len(user.yed_getfeepayee(user.getblockcount(), 25 * COIN)['eligible']), 3)
+        assert_equal(len(user.yed_getfeepayee(user.getblockcount())['eligible']), 3)
 
         # ---------------------------------------------------------------- pinning (PIN-2, audit A-2)
 # Rule: PIN-2
@@ -682,7 +685,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.release_claim(claimed, POOLS[1])
         after = nodes[ATTESTOR_A].getbalance()
         # node 6 also holds the bond keys of attestors 0-2: the attestor fee lands there when the bundle's first seq is one of them
-        fee_to_owner = self.attest_fee(int(live['collateralZat'])) if nodes[ATTESTOR_A].validateaddress(
+        fee_to_owner = self.attest_fee(int(live['mintedCents']), int(live['pMint'])) if nodes[ATTESTOR_A].validateaddress(
             self.bond_key_address(claimed['info']['bundleSeqs'][0]))['ismine'] else 0
         assert_equal(int((after - before) * COIN), claimed['residual'] + fee_to_owner)
         assert_equal(user.yed_getnotice(v3['txid']), {'found': False})              # IN-2 deleted the record

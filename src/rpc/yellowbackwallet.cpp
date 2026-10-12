@@ -104,7 +104,7 @@ bool StartsWith(const std::string& s, const char* prefix)
                                         "bond-below-min", "lock-below-min", "bond-locked", "bond-spent", "not-dormant", "not-equivocation",
                                         "attest-unknown-seq", "attest-key-not-held", "attest-range", "attest-stale", "equivocation-guard",
                                         "carrier-lapsed", "carrier-unconfirmed", "register-refused", "bad-mint-", "vault-spend-", "vault-claim-",
-                                        "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-dry-run", nullptr };
+                                        "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-vault-share", "mint-dry-run", nullptr };
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
                                          "vault-not-owned", "not-a-yellowback-address", "bad-address",
                                          "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
@@ -218,6 +218,7 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("mintHeight", v.mintHeight);
     o.pushKV("refHeight", v.refHeight);
     o.pushKV("feePaidZat", v.feePaidZat);
+    o.pushKV("pMint", v.pMint);                                // rpcversion 8 (D-Q-23): the mint price every fee of this vault converts at
     o.pushKV("closeHeight", v.IsOpen() ? NullUniValue : UniValue(v.closeHeight));
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
@@ -327,7 +328,7 @@ CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, con
     payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), index.GetPayeePolicy());
     if (v.Status() != VaultStatus::ACTIVE || !payee.has_value() || !p.IsValidClass(v.termClass)) return 0;
     if ((int64_t)tip + 1 >= (int64_t)v.lockHeight) return 0;
-    return EarlyRedeemFeeZat(v.collateralZat, p.earlyRedeemFeeBps[v.termClass]);
+    return EarlyRedeemFeeZat(v.mintedCents, p.earlyRedeemFeeBps[v.termClass], v.pMint);   // IT-9': of the debt at the mint price
 }
 
 // ---------------------------------------------------------------- v3: the two-step flow (W7), shared pieces
@@ -982,7 +983,8 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "\nResult: { \"vault\", \"status\", \"termClass\", \"lockHeight\", \"height\", \"early\", \"burnedCents\",\n"
-            "          \"collateralZat\", \"feeZat\", \"earlyRedeemFeeBps\", \"earlyRedeemFeeZat\", \"payee\", \"canRedeem\", \"error\" }\n");
+            "          \"collateralZat\", \"pMint\", \"protocolFeeCents\", \"protocolFeeZat\", \"feeZat\", \"earlyRedeemFeeBps\",\n"
+            "          \"earlyRedeemFeeCents\", \"earlyRedeemFeeZat\", \"payee\", \"canRedeem\", \"error\" }  (rpcversion 8: the fees in dollars at pMint)\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
@@ -1001,7 +1003,7 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     std::optional<CKeyID> payee;
     const CAmount early = EarlyRedeemFeeAt(index, out, v, tip, payee);
     // FEE-1 on the ACTIVE redeem (FEE-0 without an eligible payee); a VOID release pays nothing (L14).
-    const CAmount fee1 = active && payee.has_value() ? FeeZat(v.collateralZat, p.feeMin, p.feeBps) : 0;
+    const CAmount fee1 = active && payee.has_value() ? ProtocolFeeZat(v.mintedCents, v.pMint, p).value_or(MAX_MONEY) : 0;   // FEE-1' at the vault's pMint
     std::string error;
     if (!v.IsOpen()) error = strprintf("vault-not-active: the vault is %s", VaultStatusName(v.Status()));
     else if (!yw.IsMineVault(v)) error = "vault-not-owned: the vault owner key is not in this wallet";
@@ -1016,8 +1018,13 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     o.pushKV("early", active && (int64_t)tip + 1 < (int64_t)v.lockHeight);
     o.pushKV("burnedCents", active ? v.mintedCents : (int64_t)0);
     o.pushKV("collateralZat", v.collateralZat);
-    o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1 plus the early-redeem fee
+    o.pushKV("pMint", v.pMint);                                 // rpcversion 8: the price every fee below is struck at
+    o.pushKV("protocolFeeCents", active && payee.has_value() ? ProtocolFeeCents(v.mintedCents, p) : (Cents)0);   // 0 under FEE-0: not charged
+    o.pushKV("protocolFeeZat", fee1);                           // 0 under FEE-0 or on a release
+    o.pushKV("feeZat", fee1 + early);                           // as yed_redeem's feeZat: FEE-1' plus the early-redeem fee
     o.pushKV("earlyRedeemFeeBps", p.IsValidClass(v.termClass) ? p.earlyRedeemFeeBps[v.termClass] : 0);
+    // IT-9' in dollars: ceil(debt x bps / 10^4) cents, what a wallet shows (0 when no early fee is due)
+    o.pushKV("earlyRedeemFeeCents", early > 0 && p.IsValidClass(v.termClass) ? (v.mintedCents * p.earlyRedeemFeeBps[v.termClass] + BPS - 1) / BPS : (Cents)0);
     o.pushKV("earlyRedeemFeeZat", early);
     o.pushKV("payee", active ? PayeeToJSON(payee) : NullUniValue);
     o.pushKV("canRedeem", error.empty());

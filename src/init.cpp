@@ -536,8 +536,15 @@ std::string HelpMessage(HelpMessageMode mode)
     }
     strUsage += HelpMessageOpt("-minrelaytxfee=<amt>", strprintf(_("Transactions must have at least this fee rate (in %s per 1000 bytes) for relaying, mining and transaction creation (default: %s). This is not the only fee constraint."),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
-    strUsage += HelpMessageOpt("-pqfeerate=<amt>", strprintf(_("Fee rate (in %s/kB) the wallet charges a transaction with a post-quantum input: max(the flat fee, this rate x size) (default: -minrelaytxfee, %s)"),
+    strUsage += HelpMessageOpt("-pqfeerate=<amt>", strprintf(_("Fallback fee rate (in %s/kB) the wallet charges a transaction with a post-quantum input while no attested YEC price exists: max(the flat fee, this rate x size) (default: -minrelaytxfee, %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
+    strUsage += HelpMessageOpt("-pqfeeusdperkb=<usd>", strprintf(_("Dollars per kB the wallet charges a transaction with a post-quantum input at the attested YEC price (floor %d zat/kB; 0 = the -pqfeerate behaviour) (default: %s)"),
+        (int)DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, "0.02"));
+    strUsage += HelpMessageOpt("-yellowbackfeeusdperkb=<usd>", strprintf(_("Dollars per kB the wallet charges a vault or Yellowback transaction at the attested YEC price (floor %d zat/kB; 0 = the -pqfeerate behaviour) (default: %s)"),
+        (int)DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, "0.05"));
+    strUsage += HelpMessageOpt("-yellowbackmaxtxfeeusd=<usd>", strprintf(_("The cap of a vault or Yellowback transaction's size-priced fee is max(-maxtxfee, this many dollars at the attested YEC price), at most -yellowbackmaxtxfee (default: %s)"), "2"));
+    strUsage += HelpMessageOpt("-yellowbackmaxtxfee=<amt>", strprintf(_("Absolute ceiling (in %s) of a vault or Yellowback transaction's size-priced fee, whatever the attested price (default: %s)"),
+        CURRENCY_UNIT, FormatMoney(DEFAULT_YED_MAX_TX_FEE)));
     strUsage += HelpMessageOpt("-maxtxfee=<amt>", strprintf(_("Maximum total fees (in %s) to use in a single wallet transaction or raw transaction; setting this too low may abort large transactions (default: %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_TRANSACTION_MAXFEE)));
     strUsage += HelpMessageOpt("-printtoconsole", _("Send trace/debug info to console instead of the debug log"));
@@ -1317,6 +1324,30 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         else
             return InitError(strprintf(_("Invalid amount for -pqfeerate=<amount>: '%s'"), mapArgs["-pqfeerate"]));
     }
+    // D-Q-23 (b): the dollars-per-kB targets at the attested price (6 decimals: micro-dollars), the Yellowback
+    // index publishes the price; the floor and the defaults are policy.h's parameters.
+    {
+        struct { const char* name; int64_t* out; } usdArgs[] = {
+            { "-pqfeeusdperkb", &::attestedFeePolicy.plainUsdPerKBMicro },
+            { "-yellowbackfeeusdperkb", &::attestedFeePolicy.yedUsdPerKBMicro },
+            { "-yellowbackmaxtxfeeusd", &::attestedFeePolicy.yedMaxTxFeeUsdMicro },
+        };
+        for (const auto& a : usdArgs) {
+            if (!mapArgs.count(a.name)) continue;
+            int64_t micro = 0;
+            if (!ParseFixedPoint(mapArgs[a.name], 6, &micro) || micro < 0 || micro > 1000000000000LL)
+                return InitError(strprintf(_("Invalid amount for %s=<usd>: '%s'"), a.name, mapArgs[a.name]));
+            *a.out = micro;
+        }
+        if (mapArgs.count("-yellowbackmaxtxfee")) {
+            CAmount n = 0;
+            if (!ParseMoney(mapArgs["-yellowbackmaxtxfee"], n) || n <= 0 || !MoneyRange(n))
+                return InitError(strprintf(_("Invalid amount for -yellowbackmaxtxfee=<amount>: '%s'"), mapArgs["-yellowbackmaxtxfee"]));
+            ::attestedFeePolicy.yedMaxTxFeeZat = n;
+        }
+        if (::attestedFeePolicy.yedMaxTxFeeZat < MIN_YED_MAX_TX_FEE)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least %s, above the fees the wallet must pay"), FormatMoney(MIN_YED_MAX_TX_FEE)));
+    }
 
 #ifdef ENABLE_WALLET
     if (!CWallet::ParameterInteraction(chainparams))
@@ -1532,6 +1563,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (yellowback::g_yellowbackFee < yellowback::DEFAULT_YELLOWBACK_FEE) {
             return InitError(strprintf(_("-yellowbackfee must be at least %d zatoshi."), yellowback::DEFAULT_YELLOWBACK_FEE));
         }
+        // the vault/Yellowback fee cap admits the flat fees: -yellowbackmaxtxfee may not be below them, and the cap never is
+        ::attestedFeePolicy.minCapZat = std::max(yellowback::g_yellowbackFee, VAULT_RPC_FEE);
+        if (::attestedFeePolicy.yedMaxTxFeeZat < ::attestedFeePolicy.minCapZat)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least max(-yellowbackfee, %s): %s"),
+                                       FormatMoney(VAULT_RPC_FEE), FormatMoney(::attestedFeePolicy.minCapZat)));
         yellowback::g_yellowbackMintLag = GetArg("-yellowbackmintlag", yellowback::DEFAULT_REF_LAG);
         if (yellowback::g_yellowbackMintLag < 0 || yellowback::g_yellowbackMintLag > yellowback::MAX_REF_LAG) {
             return InitError(strprintf(_("-yellowbackmintlag must be between 0 and %d."), yellowback::MAX_REF_LAG));

@@ -30,7 +30,7 @@ from test_framework.yellowback_util import (
     TOKEN_VALUE,
     wallet_network_fee,
     YellowbackTestFramework,
-    fee_zat,
+    protocol_fee_zat,
 )
 from test_framework.yellowback_attest import ArmedModeMixin
 from test_framework.yellowback_util import CARRIER_VALUE
@@ -85,7 +85,7 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         vault1 = mint1['txid']
         assert_equal(mint1['fundedFrom'], 'sapling')
         assert_equal(mint1['collateralZat'], 6 * COIN)                     # armed too: the attestors track xMint, pMint = $50
-        assert_equal(mint1['feeZat'], fee_zat(mint1['collateralZat']))
+        assert_equal(mint1['feeZat'], protocol_fee_zat(10000, mint1['pMint']))    # FEE-1': the $1 floor at $50 = 0.02 YEC
         raw = user.getrawtransaction(vault1, 1)
         assert_equal([v['txid'] for v in raw['vin']], [mint1['carrierTxid']])    # v3: the carrier is the one transparent input
         assert_greater_than(len(raw['vShieldedSpend']), 0)
@@ -176,7 +176,11 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         payload = user.yed_decodepayload(rraw['vout'][1]['scriptPubKey']['hex'][4:])
         assert_equal((payload['type'], payload['feeVout']), ('redeem', 2))
         assert_equal(payload['assignments'], [{'vout': 0, 'cents': 9900}])
-        collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - wallet_network_fee(rraw) - red1['feeZat'] - TOKEN_VALUE
+        # D-Q-23 (b): the PQ-owner redeem's network fee is the Yellowback $/KB rate at the tip price x the builder's size
+        # estimate (the SLH-DSA owner input at 7,981 bytes, 150 per other input, 1,000 more), never below the P-2 fee (max(YELLOWBACK_FEE, ZIP-317 conventional))
+        net = user.yed_getinfo()['params']['fees']['network']['yellowback']
+        network_fee = max(wallet_network_fee(rraw), min(net['zatPerKB'] * (1000 + 150 * (len(rraw['vin']) - 1) + 7981) // 1000, net['maxTxFeeZat']))
+        collateral_out = mint1['collateralZat'] + 1 * TOKEN_VALUE - network_fee - red1['feeZat'] - TOKEN_VALUE
         assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
         assert_equal(rraw['locktime'], user.yed_getvault(vault1)['refHeight'] + 1)     # IT-1 (extended): the owner branch's CLTV
@@ -202,7 +206,9 @@ class YellowbackSaplingTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(rraw2['vout'][1]['scriptPubKey']['addresses'], [red2['payee']])
         payload2 = user.yed_decodepayload(rraw2['vout'][0]['scriptPubKey']['hex'][4:])
         assert_equal((payload2['type'], payload2['feeVout'], payload2['assignments']), ('redeem', 1, []))
-        collateral_out2 = mint2['collateralZat'] + 2 * TOKEN_VALUE - wallet_network_fee(rraw2) - red2['feeZat']
+        net = user.yed_getinfo()['params']['fees']['network']['yellowback']
+        network_fee2 = max(wallet_network_fee(rraw2), min(net['zatPerKB'] * (1000 + 150 * (len(rraw2['vin']) - 1) + 7981) // 1000, net['maxTxFeeZat']))
+        collateral_out2 = mint2['collateralZat'] + 2 * TOKEN_VALUE - network_fee2 - red2['feeZat']
         assert_equal(red2['collateralOut'], collateral_out2)
         assert_equal(zat(rraw2['valueBalance']), -collateral_out2)
         self.sync_all()

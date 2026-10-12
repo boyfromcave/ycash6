@@ -41,7 +41,7 @@ from test_framework.yellowback_util import (
     STOCK,
     YellowbackTestFramework,
     build_vault_spend_raw,
-    fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     round_robin_schedule,
     set_quote,
@@ -291,7 +291,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(len(rows), 3)
         for row in rows:
             assert_equal((row['registered'], row['eligible']), (False, False))
-        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount(), 10 * COIN)
+        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount())
         assert_equal(user.yed_listminers(), [])
         self.mine_round_robin(POOLS, MIN_FILL[2] + 5)       # the slow window needs 43 quotes of 64 again
         assert_equal(user.yed_getstats()['haltMask'], [])
@@ -314,26 +314,26 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(rows[liar_addr]['inBand'] < rows[liar_addr]['quoted'], True)
         r = user.getblockcount()
         vault = user.yed_getvault(mint['txid'])
-        payees = user.yed_getfeepayee(r, vault['collateralZat'], outpoint_selector(mint['txid']))
+        payees = user.yed_getfeepayee(r, outpoint_selector(mint['txid']))
         assert liar_addr in payees['eligible']
         chosen = set()
         for i in range(200):
             sel = bytes_to_hex_str(b'\x02' + i.to_bytes(32, 'little'))
-            chosen.add(user.yed_getfeepayee(r, vault['collateralZat'], sel)['default']['payoutAddress'])
+            chosen.add(user.yed_getfeepayee(r, sel)['default']['payoutAddress'])
         assert liar_addr not in chosen
         assert_equal(len(chosen), 2)
         assert_greater_than(r + 1, vault['lockHeight'])
         coin = [c for c in user.yed_listunspent() if c['cents'] == 10000][0]
         owner_wif = None   # a post-quantum owner: build_vault_spend_raw signs with the wallet's seed
         hex_ = build_vault_spend_raw(user, vault, 'owner', [(coin['txid'], coin['vout'])], payload=ym.encode_redeem(r, 1, []),
-                                     fee=(liar_addr, fee_zat(vault['collateralZat'])), ref_height=r, owner_wif=owner_wif)
+                                     fee=(liar_addr, vault_fee_zat(vault)), ref_height=r, owner_wif=owner_wif)
         v = nodes[3].yed_validaterawtransaction(hex_)
         assert_equal((v['verdict'], v['blockValid'], v['wouldBeRejected'], v['payee']), ('ok', True, False, liar_addr))
         result, _ = mine_block_raw(nodes[3], [hex_])
         assert_equal(result, None)
         self.sync_all(blocks_only=True)
         closed = nodes[2].yed_getvault(mint['txid'])
-        assert_equal((closed['status'], closed['feePaidZat']), ('CLOSED', fee_zat(vault['collateralZat'])))
+        assert_equal((closed['status'], closed['feePaidZat']), ('CLOSED', vault_fee_zat(vault)))
         self.checkpoint('raw redemption paying the penalised pool')
 
 # Rule: REG-3 REG-4 FEE-W
@@ -352,7 +352,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(rows[inaccurate]['penalizedUntil'], 0)
         assert_equal(rows[inaccurate]['inBand'], 0)
         assert_greater_than(rows[inaccurate]['quoted'], 0)
-        payees = user.yed_getfeepayee(r, 10 * COIN)
+        payees = user.yed_getfeepayee(r)
         assert_equal(sorted(payees['eligible']), sorted([accurate, inaccurate]))
         assert_equal(payees['policy']['tiltBps'], 10000)
         # DefaultPayee weights one candidate entry per *quote tag* in the last PAYEE_WINDOW
@@ -372,7 +372,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         counts = {accurate: 0, inaccurate: 0}
         for i in range(200):
             sel = bytes_to_hex_str(b'\x02' + i.to_bytes(32, 'little'))
-            d = user.yed_getfeepayee(r, 10 * COIN, sel)['default']
+            d = user.yed_getfeepayee(r, sel)['default']
             counts[d['payoutAddress']] += 1
             assert_equal(d['weight'], 20000 if d['payoutAddress'] == accurate else 10000)
         share = counts[accurate] / 200.0

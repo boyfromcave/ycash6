@@ -8,14 +8,19 @@
 
 #include "policy/policy.h"
 
+#include "arith_uint256.h"
 #include "crypto/pq/scheme.h"
 #include "main.h"
 #include "primitives/transaction.h"
+#include "script/sign.h"
 #include "tinyformat.h"
 #include "util/system.h"
 #include "util/strencodings.h"
 #include "vault/act.h"
 #include "vault/template.h"
+#include "yellowback/payload.h"
+
+#include <atomic>
 
 CAmount PerSaplingOutputFees(const CTransaction& tx)
 {
@@ -402,8 +407,134 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
 }
 
 CFeeRate pqFeeRate = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
+AttestedFeePolicy attestedFeePolicy = { DEFAULT_PQ_FEE_USD_PER_KB_MICRO, DEFAULT_YED_FEE_USD_PER_KB_MICRO,
+                                        DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, DEFAULT_YED_MAX_TX_FEE_USD_MICRO, DEFAULT_YED_MAX_TX_FEE,
+                                        VAULT_RPC_FEE };
+/** The attested price in force (uUSD per YEC), 0 = none. Written by the index (cs_main), read by any thread. */
+static std::atomic<int64_t> g_attestedFeePriceMicroUsd{0};
+
+CAmount AttestedRateZatPerKB(int64_t usdPerKBMicro, int64_t priceMicroUsd, CAmount floorZatPerKB)
+{
+    // uUSD/KB / (uUSD/YEC) = YEC/KB; x COIN = zat/KB, rounded up. usdPerKBMicro x COIN <= ~2e21 for any sane target: arith_uint256.
+    if (usdPerKBMicro <= 0 || priceMicroUsd <= 0) return std::max<CAmount>(0, floorZatPerKB);
+    arith_uint256 r = (arith_uint256((uint64_t)usdPerKBMicro) * arith_uint256((uint64_t)COIN) + arith_uint256((uint64_t)priceMicroUsd) - 1) / arith_uint256((uint64_t)priceMicroUsd);
+    const CAmount rate = r > arith_uint256((uint64_t)MAX_MONEY) ? MAX_MONEY : (CAmount)r.GetLow64();
+    return std::max(rate, std::max<CAmount>(0, floorZatPerKB));
+}
+
+void SetAttestedFeePrice(std::optional<int64_t> priceMicroUsd)
+{
+    g_attestedFeePriceMicroUsd.store(priceMicroUsd.has_value() && priceMicroUsd.value() > 0 ? priceMicroUsd.value() : 0);
+}
+
+std::optional<int64_t> AttestedFeePrice()
+{
+    const int64_t v = g_attestedFeePriceMicroUsd.load();
+    return v > 0 ? std::optional<int64_t>(v) : std::nullopt;
+}
+
+CAmount AttestedFeeFloorPerKB()
+{
+    return std::max(attestedFeePolicy.floorZatPerKB, pqFeeRate.GetFeePerK());
+}
+
+CFeeRate PlainPQFeeRate()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    const std::optional<int64_t> price = AttestedFeePrice();
+    if (!price.has_value() || p.plainUsdPerKBMicro <= 0) return pqFeeRate;     // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.plainUsdPerKBMicro, price.value(), AttestedFeeFloorPerKB()));
+}
+
+CFeeRate YedFeeRate()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    const std::optional<int64_t> price = AttestedFeePrice();
+    if (!price.has_value() || p.yedUsdPerKBMicro <= 0) return pqFeeRate;       // the fallback
+    return CFeeRate(AttestedRateZatPerKB(p.yedUsdPerKBMicro, price.value(), AttestedFeeFloorPerKB()));
+}
+
+CAmount YedMaxTxFee()
+{
+    const AttestedFeePolicy& p = attestedFeePolicy;
+    const std::optional<int64_t> price = AttestedFeePrice();
+    CAmount cap = maxTxFee;
+    // the dollar cap in zat: uUSD x COIN / price, rounded up; never below -maxtxfee
+    if (price.has_value() && p.yedMaxTxFeeUsdMicro > 0) cap = std::max(maxTxFee, AttestedRateZatPerKB(p.yedMaxTxFeeUsdMicro, price.value(), 0));
+    // review M-1: the absolute YEC ceiling (-yellowbackmaxtxfee), whatever the price says
+    if (p.yedMaxTxFeeZat > 0) cap = std::min(cap, p.yedMaxTxFeeZat);
+    return std::max(cap, p.minCapZat);
+}
+
+CAmount PQMaxTxFee()
+{
+    return YedMaxTxFee();
+}
 
 CAmount PQSizeFee(CAmount floor, size_t nBytes)
 {
-    return std::max(floor, pqFeeRate.GetFee(nBytes));
+    return std::max(floor, PlainPQFeeRate().GetFee(nBytes));
+}
+
+CAmount YedSizeFee(CAmount floor, size_t nBytes)
+{
+    return std::max(floor, YedFeeRate().GetFee(nBytes));
+}
+
+CAmount YedFloorSizeFee(CAmount flat, size_t nBytes)
+{
+    const CFeeRate floor = AttestedFeePrice().has_value() ? CFeeRate(AttestedFeeFloorPerKB()) : pqFeeRate;
+    return std::max(flat, floor.GetFee(nBytes));
+}
+
+std::optional<CAmount> YedFeeOverCap(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return std::nullopt;      // the mempool's own checks decide (missing inputs)
+    const CAmount fee = view.GetValueIn(tx) - tx.GetValueOut();
+    return fee > YedMaxTxFee() ? std::optional<CAmount>(fee) : std::nullopt;
+}
+
+bool PQFeeWithinCap(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return false;
+    bool pq = false;
+    for (const CTxIn& in : tx.vin) {
+        if (IsPQInputScript(view.GetOutputFor(in).scriptPubKey)) { pq = true; break; }
+    }
+    return pq && view.GetValueIn(tx) - tx.GetValueOut() <= PQMaxTxFee();
+}
+
+bool OwnTxFeeWithinCeiling(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return false;
+    auto vaultish = [](const CScript& spk) {
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        return vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE;
+    };
+    bool ours = yellowback::FindPayload(tx).has_value();
+    for (const CTxIn& in : tx.vin) {
+        if (ours) break;
+        const CScript& prev = view.GetOutputFor(in).scriptPubKey;
+        ours = IsPQInputScript(prev) || vaultish(prev);
+    }
+    for (const CTxOut& out : tx.vout) {
+        if (ours) break;
+        ours = vaultish(out.scriptPubKey);
+    }
+    if (!ours) return false;
+    const CAmount ceiling = attestedFeePolicy.yedMaxTxFeeZat > 0 ? attestedFeePolicy.yedMaxTxFeeZat : MAX_MONEY;
+    return view.GetValueIn(tx) - tx.GetValueOut() <= std::max(ceiling, attestedFeePolicy.minCapZat);
 }

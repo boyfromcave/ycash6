@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2014-2016 The Bitcoin Core developers
 # Copyright (c) 2016-2024 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -117,7 +118,8 @@ class WalletTest (BitcoinTestFramework):
             self.nodes[2].sendrawtransaction(signed_tx["hex"])
         except JSONRPCException as e:
             errorString = e.error['message']
-        assert_equal(errorString, "256: absurdly-high-fee")
+        # Ycash (parity with v4.5.0, which lightwalletd parses): the refusal names the fee and -maxtxfee
+        assert errorString.startswith("256: absurdly-high-fee, absurdly high fees %s, 900000000 > " % self.nodes[2].decoderawtransaction(signed_tx["hex"])["txid"]), errorString
 
         # create both transactions
         txns_to_send = []

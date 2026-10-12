@@ -330,6 +330,7 @@ BOOST_AUTO_TEST_CASE(pq_size_fee)
 {
     // max(floor, -pqfeerate x size) (quantum plan §4.5); the default rate is 1x the 100 zat/kB relay floor.
     const CFeeRate saved = pqFeeRate;
+    SetAttestedFeePrice(std::nullopt);                                  // D-Q-23 (b): no attested price, the -pqfeerate fallback
     pqFeeRate = CFeeRate(100);
     BOOST_CHECK_EQUAL(PQSizeFee(LEGACY_DEFAULT_FEE, 8100), LEGACY_DEFAULT_FEE);     // 810 < 1,000 (C-5)
     pqFeeRate = CFeeRate(1000);

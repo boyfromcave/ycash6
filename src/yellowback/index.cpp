@@ -12,6 +12,7 @@
 #include "hash.h"
 #include "key_io.h"
 #include "main.h"
+#include "policy/policy.h"
 #include "pow.h"
 #include "txmempool.h"
 #include "util/system.h"
@@ -66,6 +67,7 @@ YellowbackIndex::~YellowbackIndex() {}
 
 void YellowbackIndex::SetUnhealthy(const std::string& reason)
 {
+    SetAttestedFeePrice(std::nullopt);      // D-Q-23 (b): no trusted price, the fee fallback applies
     if (healthy) LogPrintf("yellowback: index unhealthy: %s; restart with -reindex-yellowback\n", reason);
     healthy = false;
     unhealthyReason = reason;
@@ -299,7 +301,29 @@ bool YellowbackIndex::SyncToChain()
     db->Commit(true);
     std::optional<TipRecord> finalTip = State(*db).GetTip();
     LogPrintf("yellowback: index at height %d\n", finalTip.has_value() ? finalTip->height : -1);
+    PublishFeePrice();
     return true;
+}
+
+void YellowbackIndex::PublishFeePrice()
+{
+    // D-Q-23 (b), review M-1: the network-fee policy prices its dollars-per-KB targets at the HIGHEST of the index
+    // tip's window medians (max(pFast, pMid, pSlow), pClaim-style): the min-of-windows xMint is a collateral price,
+    // and under a falling market it would make the wallet overpay the network in YEC. Any halt bit at the tip (a
+    // stale or diverged price, HALT-3 included), no tip, or an unhealthy index = the -pqfeerate fallback.
+    std::optional<int64_t> price;
+    if (healthy && !stopped) {
+        std::optional<TipRecord> tip = State(*db).GetTip();
+        if (tip.has_value() && tip->height >= params.startHeight) {
+            std::optional<Snapshot> s = State(*db).GetSnapshot((uint32_t)tip->height);
+            if (s.has_value() && s->haltMask == 0) {
+                for (const std::optional<MicroUsd>& w : { s->PFast(), s->PMid(), s->PSlow() }) {
+                    if (w.has_value() && (!price.has_value() || w.value() > price.value())) price = w.value();
+                }
+            }
+        }
+    }
+    SetAttestedFeePrice(price);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +441,7 @@ bool YellowbackIndex::CommitConnect(const CBlock& block, const CBlockIndex* pind
             return false;
         }
         cache.valid = false;
+        PublishFeePrice();
         LogPrint("yellowback", "applied block %d %s\n", h, blockHash.ToString());
         return true;
     } catch (const std::exception& e) {
@@ -452,6 +477,7 @@ bool YellowbackIndex::UndoDisconnect(const CBlockIndex* pindex)
             return false;
         }
         cache.valid = false;
+        PublishFeePrice();
         return true;
     } catch (const std::exception& e) {
         db->Discard();
@@ -972,6 +998,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
         out = ParamsForNetwork(networkId);
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         out.pqFalconHeight = PQFalconHeightOf(consensus);
+        out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25
         return std::nullopt;
     }
     uint256 setId;
@@ -992,7 +1019,47 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
     const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
     out = RegtestParams(setId.IsNull() ? 0 : startHeight, (int)sigmaRef, (int)capBps, setId, (int)armMin, carrier.value(), requireArmed);
     out.pqFalconHeight = PQFalconHeightOf(consensus);
+    out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25
     return std::nullopt;
+}
+
+CAmount CirculatingSupplyAt(int height, const Consensus::Params& c)
+{
+    // The sum of GetBlockSubsidy(h) over 1 <= h <= height, in closed form: the two slow-start ramps as arithmetic
+    // series, then one product per segment of constant subsidy, whose boundaries are the slow-start end, the Blossom
+    // activation and every halving height. The genesis block is excluded (its coinbase is unspendable by construction,
+    // and GetBlockSubsidy(0) is 0 on mainnet anyway; getblocksubsidy, which the Python model sums block by block to
+    // check this, refuses height 0). The whole subsidy counts (miner plus founders' reward / funding streams: both
+    // circulate); nothing is subtracted for lost coins or fees. Equal to Σ GetBlockSubsidy by construction
+    // (yellowback_index_tests checks it against the brute-force sum across every boundary).
+    if (height < 1) return 0;
+    arith_uint256 total = 0;
+    const int interval = c.nSubsidySlowStartInterval;
+    const int shift = c.SubsidySlowStartShift();
+    if (interval > 0) {
+        const uint64_t rate = (uint64_t)((CAmount)(12.5 * COIN) / interval);                 // GetBlockSubsidy's integer rate
+        // h in [0, shift): rate * h;  h in [shift, interval): rate * (h + 1)
+        const int64_t a = std::min(height, shift - 1);                                     // the last ramp-1 height
+        if (a >= 0) total += arith_uint256(rate) * arith_uint256((uint64_t)a * (uint64_t)(a + 1) / 2);
+        if (height >= shift) {
+            const int64_t b = std::min(height, interval - 1);
+            const uint64_t n = (uint64_t)(b - shift + 1);                                  // blocks shift..b, each rate * (h + 1)
+            total += arith_uint256(rate) * arith_uint256(n * (uint64_t)(shift + 1 + b + 1) / 2);
+        }
+    }
+    int h = std::max(interval, 1);                                                         // the first full-subsidy block (never genesis)
+    const int blossom = c.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight;
+    while (h <= height) {
+        const CAmount subsidy = c.GetBlockSubsidy(h);
+        int next = height + 1;                                                             // the segment [h, next)
+        const int nextHalving = c.HalvingHeight(h, c.Halving(h) + 1);                      // valid within h's regime
+        if (nextHalving > h && nextHalving < next) next = nextHalving;
+        if (blossom != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT && blossom > h && blossom < next) next = blossom;
+        if (subsidy == 0) break;                                                           // beyond the 64th halving
+        total += arith_uint256((uint64_t)subsidy) * arith_uint256((uint64_t)(next - h));
+        h = next;
+    }
+    return FitsInt64(total) && MoneyRange((CAmount)total.GetLow64()) ? (CAmount)total.GetLow64() : MAX_MONEY;
 }
 
 } // namespace yellowback

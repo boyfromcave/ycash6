@@ -410,7 +410,7 @@ class BuilderTests(unittest.TestCase):
         bond_addr = yu.pubkey_to_address(bytes.fromhex(ya.bond_keys(1)[0][1]))
         owner33 = yu.new_pq_owner()                    # a post-quantum owner (the node wallet's vault_getnewowner live)
         hex_, owner = ya.build_mint_tx_v3(node, 10_000, 48, 190, collateral, fee_addr=pool_addr, carrier=carrier,
-                                          attest_fee=(bond_addr, 12_500_000), owner_pubkey=owner33.hex())
+                                          attest_fee=(bond_addr, 12_500_000), owner_pubkey=owner33.hex(), p_mint=1_000_000)
         self.assertEqual(owner, owner33.hex())
         tx = ym.tx_from_hex(hex_)
         self.assertEqual(len(tx.vout), 6)
@@ -420,13 +420,14 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(p[:4], b'YB\x04\x01')
         self.assertEqual(p[17:50], owner33)                      # the v4 MINT's owner field, scheme || keyHash
         self.assertEqual(p[-2:], b'\x03\x04')
-        self.assertEqual(tx.vout[3].value, yu.fee_zat(collateral))
+        self.assertEqual(tx.vout[3].value, yu.protocol_fee_zat(10_000, 1_000_000))     # FEE-1': $1 at $1 = 1 YEC
+        self.assertEqual(tx.vout[3].value, yu.COIN)
         self.assertEqual(tx.vout[4].value, 12_500_000)
         self.assertEqual(tx.vout[4].script, ym.p2pkh_script(ym.hash160(bytes.fromhex(ya.bond_keys(1)[0][1]))))
         self.assertEqual(tx.vin[-1].prev_txid, carrier['txid'])
         self.assertEqual(ym.parse_pushes(tx.vin[-1].script_sig)[0], bundle)
         self.assertEqual(tx.vout[5].value, 30 * yu.COIN + yu.CARRIER_VALUE - collateral - yu.TOKEN_VALUE
-                         - yu.fee_zat(collateral) - 12_500_000 - yu.YELLOWBACK_FEE)
+                         - yu.protocol_fee_zat(10_000, 1_000_000) - 12_500_000 - yu.YELLOWBACK_FEE)
         # without carrier and fees: the v2 layout with a v3 payload
         hex2, _o = ya.build_mint_tx_v3(self.node(), 10_000, 48, 190, collateral, owner_pubkey=yu.new_pq_owner().hex())
         tx2 = ym.tx_from_hex(hex2)

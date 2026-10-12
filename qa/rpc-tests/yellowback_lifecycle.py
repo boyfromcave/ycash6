@@ -25,7 +25,6 @@ from test_framework.util import (
 )
 from test_framework.yellowback_util import (
     COIN,
-    FEE_MIN,
     PAYEE_WINDOW,
     POOLS,
     REF_LAG,
@@ -36,7 +35,8 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     assert_banscore_zero,
     build_vault_spend_raw,
-    fee_zat,
+    protocol_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     set_quote,
 )
@@ -105,18 +105,19 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         mint_a = self.mint(user, 10700, 48)          # v3: two transactions (the carrier step, W7)
         assert_equal(mint_a['termClass'], 'A')
         assert_equal(mint_a['vault'], mint_a['txid'] + ':0')
-        assert_equal(mint_a['collateralZat'], max(est['requiredZat'], 4 * FEE_MIN))
+        assert_equal(mint_a['collateralZat'], est['requiredZatFloored'])                 # MINT-5': requiredZat rounded to 1,000, no 4 x FEE_MIN floor (D-Q-23)
+        assert_equal(est['requiredZatFloored'], est['requiredZat'])
         assert_equal(mint_a['claimHeight'], mint_a['lockHeight'] + 24)
-        assert_equal(mint_a['feeZat'], fee_zat(mint_a['collateralZat']))
+        assert_equal(mint_a['feeZat'], protocol_fee_zat(10700, mint_a['pMint']))       # FEE-1': $1.07 at the mint price
+        assert_equal(mint_a['feeZat'], est['protocolFeeZat'])
         assert_equal(mint_a['fundedFrom'], 'transparent')
         # the wallet's default choice is the FEE-W choice for the owner key as selector
         raw = user.getrawtransaction(mint_a['txid'], 1)
         dec = user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:])
         owner_hex = '%02x' % dec['ownerScheme'] + dec['ownerHash']          # the 33 owner bytes, FEE-W's selector
-        payee = user.yed_getfeepayee(ref, mint_a['collateralZat'], owner_hex)
+        payee = user.yed_getfeepayee(ref, owner_hex)
         assert mint_a['payee'] in payee['eligible']
         assert_equal(mint_a['payee'], payee['default']['payoutAddress'])
-        assert_equal(mint_a['feeZat'], payee['feeZat'])
         assert_equal(raw['vout'][3]['scriptPubKey']['addresses'], [mint_a['payee']])
         assert_equal(raw['expiryheight'], ref + REF_WINDOW)
 # Rule: MINT-4
@@ -258,8 +259,8 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_listpositions()[0]['canRedeem'], True)
         r = user.getblockcount()          # the spend's refHeight: the index tip
         vault_a = user.yed_getvault(mint_a['txid'])
-        fee = fee_zat(vault_a['collateralZat'])
-        payees = user.yed_getfeepayee(r, vault_a['collateralZat'], outpoint_selector(mint_a['txid']))
+        fee = vault_fee_zat(vault_a)                                                     # RED-3': the debt at the vault's pMint
+        payees = user.yed_getfeepayee(r, outpoint_selector(mint_a['txid']))
         assert_greater_than(len(payees['eligible']), 1)
         default = payees['default']['payoutAddress']
         other = [a for a in payees['eligible'] if a != default][0]
@@ -300,11 +301,11 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         print('one_step_redeem: yed_redeem burns the debt, pays the fee to the default payee')
         r = user.getblockcount()
         vault_b = user.yed_getvault(mint_b['txid'])
-        payees = user.yed_getfeepayee(r, vault_b['collateralZat'], outpoint_selector(mint_b['txid']))
+        payees = user.yed_getfeepayee(r, outpoint_selector(mint_b['txid']))
         yec_before = user.getbalance()
         redeemed = user.yed_redeem(mint_b['txid'])
         assert_equal(redeemed['burnedCents'], 10000)
-        assert_equal(redeemed['feeZat'], payees['feeZat'])
+        assert_equal(redeemed['feeZat'], vault_fee_zat(vault_b))                       # RED-3': the debt at the vault's pMint
         assert_equal(redeemed['payee'], payees['default']['payoutAddress'])
         assert redeemed['payee'] in payees['eligible']
         assert_greater_than(redeemed['collateralOut'], vault_b['collateralZat'] - COIN)
@@ -357,7 +358,7 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
         stock.generate(PAYEE_WINDOW + 1)
         self.sync_all(blocks_only=True)
         r = user.getblockcount()
-        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, r, 10 * COIN)
+        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, r)
         redeemed_c = user.yed_redeem(mint_c['txid'])
         assert_equal(redeemed_c['feeZat'], 0)
         assert_equal(redeemed_c['payee'], None)

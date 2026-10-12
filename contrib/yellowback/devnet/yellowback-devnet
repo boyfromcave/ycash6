@@ -501,8 +501,8 @@ def lightwalletd_check(state):
         except subprocess.CalledProcessError as error: return "lightwalletd yellowback probe failed: %s" % error.stderr.strip()
         bad = {k: v for k, v in yed.items() if "#" not in k and not (v == "ok" or v.startswith("FailedPrecondition"))}
         if bad: return "lightwalletd Yellowback methods not answering: %s" % json.dumps(bad, sort_keys=True)
-        # rpcversion 5 (upgrade), 6 (in-term), 7 (the post-quantum line)
-        if yed.get("GetYellowbackInfo#rpcversion") not in ("5", "6", "7"): return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
+        # rpcversion 5 (upgrade), 6 (in-term), 7 (the post-quantum line), 8 (its fee structure, D-Q-23..26)
+        if yed.get("GetYellowbackInfo#rpcversion") not in ("5", "6", "7", "8"): return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
     return None
 
 def lightwalletd(args):
@@ -1785,7 +1785,7 @@ def vectors(args):
     chain = node.getblockchaininfo(); branch_id = chain["consensus"]["nextblock"]
     assert int(branch_id, 16) == SIGNING_BRANCH_ID, "node signs under %s, the framework expects %08x" % (branch_id, SIGNING_BRANCH_ID)
     from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
-    from test_framework.yellowback_util import (CLASS_RANGES, FEE_BPS, FEE_MIN, GRACE, MAX_LOCK, MAX_MINT, MAX_OUTPUT, MIN_MINT,
+    from test_framework.yellowback_util import (CLASS_RANGES, FEE_BANDS, FEE_FLOOR_CENTS, GRACE, MAX_LOCK, MAX_MINT, MAX_OUTPUT, MIN_MINT,
                                                 MIN_OUTPUT, REF_WINDOW, TOKEN_VALUE, YELLOWBACK_FEE, wif_to_secret)
     from test_framework.yellowback_attest import ecdsa_sign
     COIN = Decimal(10 ** 8)
@@ -1876,7 +1876,7 @@ def vectors(args):
               "txVersion": {"header": "80000004", "versionGroupId": "892f2085", "nVersion": 4},
               "constants": {"TOKEN_VALUE": TOKEN_VALUE, "CARRIER_VALUE": info["params"]["attest"]["carrierValueZat"], "REF_WINDOW": REF_WINDOW, "REF_LAG": REF_LAG,
                             "MIN_OUTPUT": MIN_OUTPUT, "MAX_OUTPUT": MAX_OUTPUT, "MIN_MINT": MIN_MINT, "MAX_MINT": MAX_MINT, "YELLOWBACK_FEE": YELLOWBACK_FEE,
-                            "FEE_MIN": FEE_MIN, "FEE_BPS": FEE_BPS, "GRACE": GRACE, "MAX_LOCK": MAX_LOCK, "CLASS_RANGES": CLASS_RANGES},
+                            "FEE_BANDS": FEE_BANDS, "FEE_FLOOR_CENTS": FEE_FLOOR_CENTS, "GRACE": GRACE, "MAX_LOCK": MAX_LOCK, "CLASS_RANGES": CLASS_RANGES},
               "addressVersions": ADDRESS_VERSIONS}
     with open(os.path.join(out, "params.json"), "w") as f: json.dump(params, f, indent=1, default=str)
     print("params.json; vectors in %s" % out)

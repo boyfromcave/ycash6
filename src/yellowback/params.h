@@ -101,6 +101,19 @@ static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
 static const uint8_t FEE_VOUT_NONE = 0xFF;
 
 /**
+ * FEE-1' (quantum plan D-Q-23, fees spec §1.1): the protocol fee is tiered by the vault's debt, in cents, like
+ * tax brackets. A band covers (the previous band's uptoCents, uptoCents]; the last band has uptoCents = 0 =
+ * unbounded. The values are parameters (yb-calibration's fee study may change them before activation): read
+ * them from Params, never restate them.
+ */
+static const int FEE_BANDS = 3;
+struct FeeBand
+{
+    Cents uptoCents;   //!< the band's upper edge in cents (inclusive); 0 = unbounded (the last band only)
+    int bps;           //!< the rate inside the band, basis points of the debt
+};
+
+/**
  * Where a transaction carries its attestation bundle (v3 plan §3.1 BUNDLE_CARRIER, W2):
  * the scriptSig of a P2SH carrier input (shipped), the OP_RETURN payload tail
  * (unshipped), or either. Regtest-only override -yellowbackbundlecarrier.
@@ -147,9 +160,9 @@ struct Params
     int accuracyBandBps;                 //!< 300
     int payeeWindow;                     //!< 100
 
-    // Enforcement fee (FEE-1)
-    CAmount feeMin;                      //!< 0.5 YEC
-    int feeBps;                          //!< 15 (H-4; regtest 25)
+    // Protocol fee (FEE-1', D-Q-23): dollars, converted to YEC at the vault's stored mint price (VaultRecord.pMint)
+    FeeBand feeBands[FEE_BANDS];         //!< { {100000, 100}, {1000000, 50}, {0, 10} }: the first $1,000 at 1.0 %, $1,000-$10,000 at 0.5 %, above at 0.1 %
+    Cents feeFloorCents;                 //!< 100: $1 per action (mint, redeem, claim); the early fee has no floor
 
     // Vaults
     int grace;                           //!< claimHeight = lockHeight + grace
@@ -161,7 +174,7 @@ struct Params
     int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive;
     int classMax[NUM_CLASSES];           //!< classMin > classMax = the class is disabled (H-5; none is since D-IT-9)
     int baseRatioBps[NUM_CLASSES];       //!< 30,000 / 40,000 / 50,000 (D-IT-4)
-    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9: 500 / 250 / 100 bps of the collateral, charged on an owner redeem before lockHeight on top of FEE-1
+    int earlyRedeemFeeBps[NUM_CLASSES];  //!< IT-9': 500 / 250 / 100 bps of the DEBT at pMint (D-Q-23; was of the collateral), charged on an owner redeem before lockHeight on top of FEE-1'
 
     // Volatility (SIGMA-1, V17)
     int volWindow;                       //!< 2,016
@@ -172,7 +185,13 @@ struct Params
 
     // Amounts
     Cents minMint;                       //!< MINT-2
-    Cents maxMint;                       //!< MINT-2: $2,500 (H-12; regtest $10,000)
+    int maxVaultShareBps;                //!< MINT-6b (D-Q-23a): a mint's debt may not exceed max(this share of the MINT-6 cap, vaultShareFloorCents); 1,000 = 10 %; 0 = off
+    Cents vaultShareFloorCents;          //!< MINT-6b: 1,000,000 = $10,000, the debt every mint may reach whatever the cap
+    CAmount issuedBeforeStart;           //!< MINT-6 (D-Q-25): the YEC circulating below startHeight (the closed-form subsidy sum, CirculatingSupplyAt(startHeight - 1)),
+                                         //!< which ComputeSnapshot uses as the previous issuedZat at startHeight (Snapshot::Virtual() keeps issuedZat 0), so
+                                         //!< Snapshots[h].issuedZat is the circulating supply at h for h >= startHeight; set by the index from the chain
+                                         //!< parameters, never hashed (derived from startHeight and the emission schedule)
+    Cents maxMint;                       //!< MINT-2: $100,000 (D-Q-24, = maxOutput; H-12's $2,500 reversed on the quantum line); every network
     Cents minOutput;                     //!< XFER-1
     Cents maxOutput;                     //!< XFER-1
     CAmount tokenValue;                  //!< TOKEN_VALUE
@@ -205,8 +224,9 @@ struct Params
     int emergencyRatioBps;               //!< EMERGENCY_RATIO_BPS 10,500 (NOT-1, RED-4(b))
     int emergencyPersist;                //!< EMERGENCY_PERSIST 48
     int emergencyNoticeTtl;              //!< EMERGENCY_NOTICE_TTL 1,152
-    CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5)
-    int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1, H-4; regtest 2,500)
+    CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5): the zat floor of the residual threshold
+    Cents residualMinCents;              //!< RED-5' (D-Q-23a): the residual threshold is max(residualMinZat, residualMinCents at the vault's pMint); 48 = $0.48
+    int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1', H-4; regtest 2,500): the attestor share of the protocol fee (never of the early fee)
     CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
     int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
     int bondMaturity;                    //!< BOND_MATURITY 16,128

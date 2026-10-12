@@ -14,7 +14,12 @@ namespace {
 void SetCommon(Params& p)
 {
     p.minMint   = 10000;      // $100
-    p.maxMint   = 250000;     // $2,500 (H-12: guarded issuance for the first parameter lifetime; DigiByte $100,000)
+    p.maxVaultShareBps = 1000;        // MINT-6b (D-Q-23a): one vault may hold at most 10 % of the MINT-6 cap ...
+    p.vaultShareFloorCents = 1000000; // ... but always $10,000 (mint-vault-share)
+    p.issuedBeforeStart = 0;          // MINT-6 (D-Q-25): set by the index to CirculatingSupplyAt(startHeight - 1)
+    p.maxMint   = 10000000;   // $100,000 (D-Q-24: DigiByte's maxMintAmount restored, = maxOutput; reverses hardening H-12's $2,500 launch guard
+                              // on this line only — H-12's depth argument (a $100,000 vault's liquidation at θ ≈ $125,000, beyond the measured
+                              // bid depth) is given up; the aggregate stays bounded by supplyCapBps, MINT-6b's per-vault share and HALT-2)
     p.minOutput = 100;        // $1.00 (DigiByte minOutputAmount)
     p.maxOutput = 10000000;   // $100,000 (param; DigiByte's maxMintAmount)
     p.tokenValue = TOKEN_VALUE;
@@ -31,8 +36,12 @@ void SetCommon(Params& p)
     p.accuracyBandBps = 300;
     p.payeeWindow     = 100;
 
-    p.feeMin = 50000000;            // 0.5 YEC (V10)
-    p.feeBps = 15;                  // H-4 (was 25)
+    // FEE-1' (D-Q-23, fees spec §1.1): the protocol fee in dollars at the vault's mint price, tiered by the debt
+    // (replaces max(0.5 YEC, 15 bps of the collateral)); yb-calibration's fee study (D-Q-23a) confirmed these values
+    p.feeBands[0].uptoCents = 100000;   p.feeBands[0].bps = 100;   // the first $1,000 at 1.0 %
+    p.feeBands[1].uptoCents = 1000000;  p.feeBands[1].bps = 50;    // $1,000 - $10,000 at 0.5 %
+    p.feeBands[2].uptoCents = 0;        p.feeBands[2].bps = 10;    // above $10,000 at 0.1 % (unbounded)
+    p.feeFloorCents = 100;              // $1 per action
 
     p.grace              = 34560;   // 30 d
     p.claimDelay         = 576;     // CLAIM_DELAY 12 h (U-23; owner 2026-10-07, was 1,152): the window in which one attestor can cancel a claim
@@ -48,8 +57,8 @@ void SetCommon(Params& p)
     p.classMin[0] = 34560;  p.classMax[0] = 103680;  p.baseRatioBps[0] = 30000;   // A: 30-90 d, 300 %
     p.classMin[1] = 103681; p.classMax[1] = 207360;  p.baseRatioBps[1] = 40000;   // B: 91-180 d, 400 %
     p.classMin[2] = 207361; p.classMax[2] = 420480;  p.baseRatioBps[2] = 50000;   // C: 181-365 d, 500 %
-    // IT-9 (owner, 2026-10-07): an owner redeem before lockHeight pays, on top of FEE-1, this share of the collateral
-    p.earlyRedeemFeeBps[0] = 500; p.earlyRedeemFeeBps[1] = 250; p.earlyRedeemFeeBps[2] = 100;
+    // IT-9 (owner, 2026-10-07): an owner redeem before lockHeight pays, on top of FEE-1', this share of the debt
+    p.earlyRedeemFeeBps[0] = 500; p.earlyRedeemFeeBps[1] = 250; p.earlyRedeemFeeBps[2] = 100;   // IT-9' (D-Q-23): of the debt at pMint
 
     p.volWindow         = 2016;
     p.volStep           = 48;
@@ -81,7 +90,8 @@ void SetCommon(Params& p)
     p.emergencyRatioBps   = 10500;  // NOT-1, RED-4(b)
     p.emergencyPersist    = 48;
     p.emergencyNoticeTtl  = 1152;
-    p.residualMinZat      = 100000; // RED-5
+    p.residualMinZat      = 100000; // RED-5: the zat floor
+    p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
     p.bondMin             = 20000 * COIN;
     p.bondMinLock         = 420480; // one year
@@ -103,21 +113,24 @@ Params::Params()
     : startHeight(0), claimDelay(0),
       pFastWindow(0), pMidWindow(0), pSlowWindow(0), pFastMinFill(0), pMidMinFill(0), pSlowMinFill(0),
       nReg(0), peerLag(0), peerMin(0), deviationBps(0), accuracyBandBps(0), payeeWindow(0),
-      feeMin(0), feeBps(0),
+      feeFloorCents(0),
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), recapRatioBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
-      minMint(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
+      minMint(0), maxVaultShareBps(0), vaultShareFloorCents(0), issuedBeforeStart(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
       nPenalty(0), accuracyWindow(0), payeeTiltBps(0),
       attestArmMin(0), attestArmDelay(0), attestRequired(true), bundleCarrier(BundleCarrier::SCRIPTSIG),
       nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
-      emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), attestFeeBps(0),
+      emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
       bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = earlyRedeemFeeBps[i] = 0;
+    }
+    for (int i = 0; i < FEE_BANDS; i++) {
+        feeBands[i].uptoCents = 0; feeBands[i].bps = 0;
     }
 }
 
@@ -198,10 +211,9 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.grace = 24;
     r.claimDelay = 10;
     // The hardening plan's mainnet values (H-4, H-11, H-12) stay out of the regtest column: its
-    // scripts' fee, cap and recapitalisation arithmetic is written against the v3 values.
-    r.feeBps             = 25;
+    // scripts' cap and recapitalisation arithmetic is written against the v3 values. The protocol fee
+    // bands, the floor and maxMint are mainnet's on every network (fees spec §4.3 ambiguity 8, D-Q-24).
     r.attestFeeBps       = 2500;
-    r.maxMint            = 1000000;
     r.globalRatioHaltBps = 25000;   // (below class A's 300 % base, the §1.4 invariant; the in-term plan's §3 brackets leave it)
     r.recapRatioBps      = 50000;
     r.classMin[0] = 48;  r.classMax[0] = 96;

@@ -58,7 +58,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 7;   // 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+static const int YELLOWBACK_RPC_VERSION = 8;   // 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
                                                //    the v4 MINT, params.pq, PQ yb… addresses
@@ -248,6 +248,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("mintHeight", v.mintHeight);
     o.pushKV("refHeight", v.refHeight);
     o.pushKV("feePaidZat", v.feePaidZat);
+    o.pushKV("pMint", v.pMint);                                // rpcversion 8 (D-Q-23): the mint price every fee of this vault converts at
     o.pushKV("closeHeight", v.IsOpen() ? NullUniValue : UniValue(v.closeHeight));
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
@@ -468,12 +469,13 @@ UniValue TagToJSON(const std::optional<CoinbaseTag>& tag)
 }
 
 /**
- * yed_getinfo.params.pq.feeRateZatPerKB (quantum spec C-5): the rate wallets charge as max(DEFAULT_FEE, rate × size).
- * -pqfeerate (quantum plan §4.5, Q5's policy pqFeeRate; default 1× the per-KB relay floor).
+ * yed_getinfo.params.pq.feeRateZatPerKB (quantum spec C-5): the rate wallets charge as max(DEFAULT_FEE, rate × size) —
+ * since D-Q-23 (b) the plain PQ dollars-per-KB target at the attested tip price (= params.fees.network.plain.zatPerKB),
+ * -pqfeerate while no price exists.
  */
 static int64_t PQFeeRateZatPerKB()
 {
-    return ::pqFeeRate.GetFeePerK();
+    return PlainPQFeeRate().GetFeePerK();
 }
 
 UniValue PayloadToJSON(const Payload& p)
@@ -691,14 +693,73 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("claimDelay", p.claimDelay);
     prm.pushKV("sigmaRefBps", p.sigmaRefBps);
     prm.pushKV("supplyCapBps", p.supplyCapBps);
+    {
+        // rpcversion 8 (D-Q-25): the cap's base at the tip: the circulating YEC (the subsidy sum from genesis), the
+        // cross-section xMint it is valued at (MINT-6's price), the resulting cap and MINT-6b's per-vault bound
+        const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
+        std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), p.supplyCapBps);
+        std::optional<Cents> maxVault = MaxVaultCents(cap, p.maxVaultShareBps, p.vaultShareFloorCents);
+        UniValue sc(UniValue::VOBJ);
+        sc.pushKV("circulatingZat", s.issuedZat);
+        sc.pushKV("issuedBeforeStartZat", p.issuedBeforeStart);        // CirculatingSupplyAt(startHeight - 1): the seed
+        sc.pushKV("priceMicroUsd", PriceOrNull(s.PMint()));
+        sc.pushKV("capCents", cap.has_value() ? UniValue(cap.value()) : NullUniValue);
+        sc.pushKV("maxVaultShareBps", p.maxVaultShareBps);
+        sc.pushKV("vaultShareFloorCents", p.vaultShareFloorCents);
+        sc.pushKV("maxVaultCents", maxVault.has_value() ? UniValue(maxVault.value()) : NullUniValue);
+        prm.pushKV("supplyCap", sc);
+    }
     prm.pushKV("refLag", g_yellowbackMintLag);
     prm.pushKV("refWindow", p.refWindow);
     prm.pushKV("grace", p.grace);
     prm.pushKV("payeeWindow", p.payeeWindow);
-    prm.pushKV("feeMinZat", p.feeMin);
-    prm.pushKV("feeBps", p.feeBps);
     prm.pushKV("tokenValueZat", p.tokenValue);
     prm.pushKV("feeZat", g_yellowbackFee);
+    prm.pushKV("maxMintCents", p.maxMint);                 // rpcversion 8 (D-Q-24): $100,000
+    {
+        // rpcversion 8 (D-Q-23, fees spec §3.4): the protocol fee's bands and floor (FEE-1', struck at the vault's stored
+        // pMint), the early fee (IT-9', of the debt) and the network-fee policy (dollars per KB at the tip's attested
+        // price, policy.h AttestedFeePolicy; the -pqfeerate fallback without one)
+        UniValue fees(UniValue::VOBJ);
+        UniValue protocol(UniValue::VOBJ);
+        UniValue bands(UniValue::VARR);
+        for (int i = 0; i < FEE_BANDS; i++) {
+            UniValue b(UniValue::VOBJ);
+            b.pushKV("uptoCents", p.feeBands[i].uptoCents > 0 ? UniValue(p.feeBands[i].uptoCents) : NullUniValue);   // null = unbounded
+            b.pushKV("bps", p.feeBands[i].bps);
+            bands.push_back(b);
+        }
+        protocol.pushKV("bands", bands);
+        protocol.pushKV("floorCents", p.feeFloorCents);
+        protocol.pushKV("attestFeeBps", p.attestFeeBps);
+        protocol.pushKV("priceSource", "pMint");
+        fees.pushKV("protocol", protocol);
+        UniValue early2(UniValue::VARR);
+        for (int i = 0; i < NUM_CLASSES; i++) early2.push_back(p.earlyRedeemFeeBps[i]);
+        fees.pushKV("earlyRedeemFeeBps", early2);
+        const AttestedFeePolicy& fp = ::attestedFeePolicy;
+        UniValue network(UniValue::VOBJ);
+        const std::optional<int64_t> feePrice = AttestedFeePrice();   // review M-1: the tip's highest window median, none under a halt
+        network.pushKV("priceMicroUsd", feePrice.has_value() ? UniValue(feePrice.value()) : NullUniValue);
+        network.pushKV("priceSource", feePrice.has_value() ? "tip" : "fallback");
+        UniValue plain(UniValue::VOBJ);
+        plain.pushKV("usdPerKBMicro", fp.plainUsdPerKBMicro);
+        plain.pushKV("zatPerKB", PlainPQFeeRate().GetFeePerK());
+        network.pushKV("plain", plain);
+        UniValue yb(UniValue::VOBJ);
+        yb.pushKV("usdPerKBMicro", fp.yedUsdPerKBMicro);
+        yb.pushKV("zatPerKB", YedFeeRate().GetFeePerK());
+        yb.pushKV("maxTxFeeUsdMicro", fp.yedMaxTxFeeUsdMicro);      // D-Q-23a: the vault/Yellowback cap is max(-maxtxfee, this at the price)
+        yb.pushKV("maxTxFeeCeilingZat", fp.yedMaxTxFeeZat);          // review M-1: -yellowbackmaxtxfee, the cap's absolute ceiling
+        yb.pushKV("maxTxFeeZat", YedMaxTxFee());
+        network.pushKV("yellowback", yb);
+        network.pushKV("floorZatPerKB", fp.floorZatPerKB);
+        network.pushKV("fallbackZatPerKB", ::pqFeeRate.GetFeePerK());   // -pqfeerate
+        network.pushKV("flatZat", g_yellowbackFee);
+        network.pushKV("maxTxFeeZat", maxTxFee);
+        fees.pushKV("network", network);
+        prm.pushKV("fees", fees);
+    }
     // the Base58Check version bytes of this network's YED addresses (hex), so clients need not hard-code them:
     // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the 33-byte PQ form (quantum spec §4; 56ab)
     prm.pushKV("addressVersion", HexStr(p.addressVersion));
@@ -726,7 +787,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     prm.pushKV("classes", classes);
     UniValue early(UniValue::VARR);
     for (int i = 0; i < NUM_CLASSES; i++) early.push_back(p.earlyRedeemFeeBps[i]);
-    prm.pushKV("earlyRedeemFeeBps", early);                    // IT-9: per class, bps of the collateral on a redeem before lockHeight
+    prm.pushKV("earlyRedeemFeeBps", early);                    // IT-9': per class, bps of the debt at pMint on a redeem before lockHeight (D-Q-23)
     prm.pushKV("globalRatioHaltBps", p.globalRatioHaltBps);
     prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16, IT-5: the class base ratio a mint needs to pass a global-ratio halt or the cap
     prm.pushKV("claimThresholdBps", p.claimThresholdBps);  // θ (D-IT-2)
@@ -1093,20 +1154,20 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
 
 UniValue yed_getfeepayee(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 2 || params.size() > 3)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "yed_getfeepayee refHeight collateralZat ( \"selectorHex\" )\n"
-            "\nE(refHeight) (FEE-2), the FEE-1 fee for the collateral and the FEE-W default choice for the selector.\n");
+            "yed_getfeepayee refHeight ( \"selectorHex\" )\n"
+            "\nE(refHeight) (FEE-2) and the FEE-W default choice for the selector. The fee itself is a dollar amount of the\n"
+            "vault's debt at its mint price (FEE-1', rpcversion 8): yed_estimatefee / yed_estimatecollateral quote a mint's,\n"
+            "yed_estimateredeem and yed_listclaimable a spend's.\n");
 
     YellowbackIndex& index = EnsureIndex();
-    if (!params[0].isNum() || !params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "refHeight and collateralZat must be numbers");
+    if (!params[0].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "refHeight must be a number");
     const int refHeight = params[0].get_int();
-    const int64_t collateral = params[1].get_int64();
-    if (collateral < 0 || collateral > MAX_MONEY) throw JSONRPCError(RPC_INVALID_PARAMETER, "collateralZat out of range");
     std::vector<unsigned char> selector;
-    if (params.size() > 2 && !params[2].isNull()) {
-        if (!IsHex(params[2].get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, "selectorHex must be hex");
-        selector = ParseHex(params[2].get_str());
+    if (params.size() > 1 && !params[1].isNull()) {
+        if (!IsHex(params[1].get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, "selectorHex must be hex");
+        selector = ParseHex(params[1].get_str());
     }
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
@@ -1119,7 +1180,6 @@ UniValue yed_getfeepayee(const UniValue& params, bool fHelp)
     UniValue el(UniValue::VARR);
     for (const CKeyID& k : eligible) el.push_back(P2PKHAddress(k));
     o.pushKV("eligible", el);
-    o.pushKV("feeZat", FeeZat(collateral, p.feeMin, p.feeBps));
     PayeePolicy noPref = pp;
     noPref.preferred = std::nullopt;
     std::optional<CKeyID> pick = DefaultPayee(index.View(), p, refHeight, selector, noPref);
@@ -1331,7 +1391,8 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         o.pushKV("ownerAddress", EncodeAddress(v.Owner(), p));    // the PQ owner's address ("" when unregistered)
         o.pushKV("collateralZat", v.collateralZat);
         o.pushKV("mintedCents", v.mintedCents);
-        o.pushKV("feeZat", FeeZat(v.collateralZat, p.feeMin, p.feeBps));
+        o.pushKV("pMint", v.pMint);                                                           // rpcversion 8 (D-Q-23): the fee price
+        o.pushKV("feeZat", ProtocolFeeZat(v.mintedCents, v.pMint, p).value_or(MAX_MONEY));   // RED-3': the claimant pays the redeem fee at the vault's pMint
         o.pushKV("claimHeight", (int64_t)v.claimHeight);
         o.pushKV("lockHeight", (int64_t)v.lockHeight);
         o.pushKV("claimable", claimable);
@@ -1586,7 +1647,9 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
             "yed_estimatecollateral cents lockBlocks ( priceMicroUsd )\n"
             "\nThe collateral (zatoshi, rounded up to 1,000) to mint cents with a lock of lockBlocks at the reference snapshot\n"
             "R = tip - REF_LAG (or at the given P_mint, PRICE_MIN..PRICE_MAX). requiredZat is MINT-5's ratio clause only;\n"
-            "requiredZatFloored = max(requiredZat, 4 * FEE_MIN) rounded up to 1,000 is what a mint locks. Does not apply MINTPOL-1.\n");
+            "requiredZatFloored = requiredZat rounded up to 1,000 is what a mint locks (MINT-5': the 4 * FEE_MIN floor went with\n"
+            "D-Q-23). protocolFeeCents / protocolFeeZat (FEE-1' at the estimate's pMint) and attestFeeZat (half of it when ARMED)\n"
+            "are the mint's fees. Does not apply MINTPOL-1.\n");
 
     YellowbackIndex& index = EnsureIndex();
     if (!params[0].isNum() || !params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "cents and lockBlocks must be numbers");
@@ -1654,14 +1717,16 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
         o.pushKV("requiredZatFloored", NullUniValue);
     } else {
         auto req = RequiredCollateralRounded((Cents)cents, minRatio, pMint.value());
-        if (!req.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, "mint-unsatisfiable: the required collateral exceeds MAX_MONEY");
+        if (!req.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, "mint-unsatisfiable: the required collateral exceeds MAX_MONEY (more YEC than can exist; lower the amount or the term class)");
         o.pushKV("requiredZat", req.value());
-        // What a mint locks in vout[0]: MINT-5's other clause, at least 4 * FEE_MIN, rounded up to 1,000 zat as the
-        // wallet builds it (txbuilder.cpp MintCollateral; state.cpp mint5).
-        CAmount floored = std::max(req.value(), 4 * p.feeMin);
-        if (floored % 1000 != 0) floored += 1000 - floored % 1000;
-        o.pushKV("requiredZatFloored", floored);
-        if (!bundleSeqs.empty()) attestFeeZat = AttestFeeZat(FeeZat(req.value(), p.feeMin, p.feeBps), p.attestFeeBps);
+        // What a mint locks in vout[0]: requiredZat rounded up to 1,000 zat as the wallet builds it (txbuilder.cpp
+        // MintCollateral; MINT-5' has no other clause since D-Q-23).
+        o.pushKV("requiredZatFloored", req.value());
+        // FEE-1' at this estimate's pMint (the mint stores it; every later fee of the vault converts at it)
+        const CAmount protocolFee = ProtocolFeeZat((Cents)cents, pMint.value(), p).value_or(MAX_MONEY);
+        o.pushKV("protocolFeeCents", ProtocolFeeCents((Cents)cents, p));
+        o.pushKV("protocolFeeZat", protocolFee);
+        if (!bundleSeqs.empty()) attestFeeZat = AttestFeeZat(protocolFee, p.attestFeeBps);
     }
     o.pushKV("termClass", ClassLetter((uint8_t)termClass));
     o.pushKV("lockHeight", lockHeight);
@@ -1683,20 +1748,40 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
 
 UniValue yed_estimatefee(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "yed_estimatefee collateralZat\n"
-            "\nFEE-1: max(FEE_MIN, collateralZat * FEE_BPS / 10^4).\n");
+            "yed_estimatefee mintedCents ( priceMicroUsd )\n"
+            "\nFEE-1' (rpcversion 8, D-Q-23): the protocol fee of a debt of mintedCents, tiered by params.fees.protocol.bands with\n"
+            "the floor, in cents (feeCents) and in zat (feeZat = ceil(fee x COIN / pMint)) at pMint = priceMicroUsd when given\n"
+            "(PRICE_MIN..PRICE_MAX), else the cross-section xMint at R = tip - REF_LAG (a mint's; a redeem converts at the\n"
+            "vault's own pMint, yed_getvault). attestFeeZat is AFEE-1''s half of feeZat. feeZat and attestFeeZat are null without a price.\n");
 
     YellowbackIndex& index = EnsureIndex();
-    if (!params[0].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "collateralZat must be a number");
-    const int64_t collateral = params[0].get_int64();
-    if (collateral < 0 || collateral > MAX_MONEY) throw JSONRPCError(RPC_INVALID_PARAMETER, "collateralZat out of range");
+    if (!params[0].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "mintedCents must be a number");
+    const int64_t cents = params[0].get_int64();
+    if (cents < 0 || cents > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "mintedCents out of range");
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const yellowback::Params& p = index.GetParams();
+    std::optional<MicroUsd> pMint;
+    if (params.size() > 1 && !params[1].isNull()) {
+        if (!params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "priceMicroUsd must be a number");
+        const int64_t price = params[1].get_int64();
+        if (price < PRICE_MIN || price > PRICE_MAX) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("priceMicroUsd must be between %d and %d (PRICE_MIN, PRICE_MAX)", PRICE_MIN, PRICE_MAX));
+        }
+        pMint = price;
+    } else {
+        State st(index.View());
+        std::optional<Snapshot> snap = SnapshotAt(st, p, IndexHeight(index) - g_yellowbackMintLag);
+        if (snap.has_value()) pMint = snap->PMint();
+    }
     UniValue o(UniValue::VOBJ);
-    o.pushKV("feeZat", FeeZat(collateral, p.feeMin, p.feeBps));
+    o.pushKV("feeCents", ProtocolFeeCents((Cents)cents, p));
+    o.pushKV("pMint", PriceOrNull(pMint));
+    const std::optional<CAmount> feeZat = pMint.has_value() ? ProtocolFeeZat((Cents)cents, pMint.value(), p) : std::nullopt;
+    o.pushKV("feeZat", feeZat.has_value() ? UniValue(feeZat.value()) : NullUniValue);
+    o.pushKV("attestFeeZat", feeZat.has_value() ? UniValue(AttestFeeZat(feeZat.value(), p.attestFeeBps)) : NullUniValue);
     return o;
 }
 
@@ -2063,7 +2148,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
         e.claimable = mature && IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
         e.claimPath = e.claimable ? "a" : "";
         if (e.claimable) e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, p.claimThresholdBps, e.pClaim.value()));
-        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
+        if (e.residualZat < ResidualMinZat(v.pMint, p)) e.residualZat = 0;   // RED-5''s threshold ($0.48 at pMint, floor RESIDUAL_MIN_ZAT), as the builder's ClaimAt applies it
         return e;
     }
     std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)r);
@@ -2073,7 +2158,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     // AFEE-1: every claim under ARMED carries a bundle and pays the attestor fee, whether or not the
     // pool can build one at this instant; reporting it only with a sufficient bundle under-stated the
     // fee a wallet prices its minOutZat floor from (audit V-5, found by the YecWallet devnet cases).
-    e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
+    e.attestFeeZat = AttestFeeZat(ProtocolFeeZat(v.mintedCents, v.pMint, p).value_or(MAX_MONEY), p.attestFeeBps);   // AFEE-1' on RED-3'
     if (e.bundleOk) {
         e.aClaim = built.aClaim;
         e.bundleSeqs = built.seqs;
@@ -2093,7 +2178,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     if (e.claimable && e.pClaim.has_value()) {
         const int marginBps = underA ? p.claimThresholdBps : (int)BPS;
         e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, e.pClaim.value()));
-        if (e.residualZat < p.residualMinZat) e.residualZat = 0;   // RED-5's floor, as the builder's ClaimAt applies it
+        if (e.residualZat < ResidualMinZat(v.pMint, p)) e.residualZat = 0;   // RED-5''s threshold ($0.48 at pMint, floor RESIDUAL_MIN_ZAT), as the builder's ClaimAt applies it
     }
     const bool standing = notice.has_value() && (int64_t)tip - notice->height <= p.emergencyNoticeTtl;
     e.canNotice = v.Status() == VaultStatus::ACTIVE && !standing && !e.claimable &&

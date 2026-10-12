@@ -5806,7 +5806,10 @@ void CWallet::ReacceptWalletTransactions()
     for (std::pair<const int64_t, CWalletTx*>& item : mapSorted) {
         CWalletTx& wtx = *(item.second);
         CValidationState state;
-        wtx.AcceptToMemoryPool(state, false);
+        // A transaction this wallet already committed is not re-judged against a price-dependent cap that has since
+        // moved (a halt, a price change): a PQ or Yellowback transaction within the absolute -yellowbackmaxtxfee is
+        // reaccepted without the -maxtxfee absurd-fee check (review: D-Q-26 / A-2 reaccept).
+        wtx.AcceptToMemoryPool(state, false, !OwnTxFeeWithinCeiling(wtx));
     }
 }
 
@@ -6836,11 +6839,16 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 }
 
                 CAmount nFeeNeeded = GetMinimumFee(txNew, nBytes);
-                // quantum plan §4.5: a transaction with a PQ input pays max(this policy's fee, the flat
-                // LEGACY_DEFAULT_FEE, -pqfeerate x size) (on 6.20.0 the policy fee is the per-output
-                // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee).
+                // quantum plan §4.5, D-Q-23 (b): a transaction with a PQ input pays max(this policy's fee, the flat
+                // LEGACY_DEFAULT_FEE, the plain PQ $/KB rate at the attested price x size) (-pqfeerate without a price;
+                // policy.h AttestedFeePolicy), capped at PQMaxTxFee() = min(max(-maxtxfee, $2 at the price),
+                // -yellowbackmaxtxfee) (owner D-Q-26: the Yellowback cap) (on 6.20.0 the policy fee is the per-output
+                // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee). Never below the ZIP-317 conventional
+                // fee whatever -feepolicy says (q/fees review): a PQ input is ~53 (SLH-DSA) or ~11 (Falcon) logical
+                // actions, so the per-output floor would leave unpaid actions a -txunpaidactionlimit=0 node refuses.
                 if (fPQInput)
-                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), maxTxFee);
+                    nFeeNeeded = std::max(std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), PQMaxTxFee()),
+                                          CTransaction(txNew).GetConventionalFee());
 
                 // Remove scriptSigs if we used dummy signatures for fee calculation
                 if (!sign) {
@@ -6911,7 +6919,9 @@ bool CWallet::CommitTransaction(CWalletTx& wtxNew, std::optional<std::reference_
         if (fBroadcastTransactions)
         {
             // Broadcast
-            if (!wtxNew.AcceptToMemoryPool(state, false))
+            // D-Q-26: a PQ-input transaction within PQMaxTxFee() may pay more than -maxtxfee; its own wallet submits it
+            // without the absurd-fee check (sendrawtransaction from outside keeps it)
+            if (!wtxNew.AcceptToMemoryPool(state, false, !PQFeeWithinCap(wtxNew)))
             {
                 // This must not fail. The transaction has already been signed and recorded.
                 LogPrintf("CommitTransaction(): Error: Transaction not valid, %s\n", state.GetRejectReason());

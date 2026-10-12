@@ -287,6 +287,8 @@ public:
 
     /** Mark unhealthy (also used by unit tests to exercise the RPC refusal). */
     void SetUnhealthy(const std::string& reason);
+    /** D-Q-23 (b), review M-1: publish the tip's highest window median to the network-fee policy (policy.h SetAttestedFeePrice); a halt bit or no price = fallback. */
+    void PublishFeePrice();
 
     // ------------------------------------------------------------------ hooks (cs_main held)
 
@@ -478,6 +480,17 @@ extern int g_yellowbackMintLag;
  * another network, or a retired flag: -yellowbackstartheight, -yellowbackenforceuntil).
  */
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out);
+
+/**
+ * MINT-6 (quantum plan D-Q-25): the YEC circulating at `height`, the closed-form sum of GetBlockSubsidy over
+ * 1..height (genesis excluded: unspendable; the whole subsidy: miner and founders' reward / funding streams alike; nothing subtracted for fees
+ * or lost coins). Params::issuedBeforeStart = CirculatingSupplyAt(startHeight - 1); Snapshot::Virtual() keeps
+ * issuedZat 0, and ComputeSnapshot substitutes issuedBeforeStart for the previous issuedZat at startHeight, so every
+ * real snapshot's issuedZat is the circulating supply at its height and the supply cap is supplyCapBps of market
+ * capitalisation.
+ * MAX_MONEY if the sum does not fit (it cannot: the schedule sums below MAX_MONEY).
+ */
+CAmount CirculatingSupplyAt(int height, const Consensus::Params& consensus);
 
 /** Quantum spec A-5: the module's mirror of the consensus Falcon activation, Params::pqFalconHeight, such that
  *  Params::IsPQFalconActive(h) == ::IsPQFalconActive(consensus, h) at every h: max(UPGRADE_VAULT height,

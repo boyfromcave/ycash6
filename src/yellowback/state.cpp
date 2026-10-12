@@ -41,6 +41,7 @@ const char* const MINT_HALTED_UNARMED = "mint-halted-unarmed";
 const char* const BAD_MINT_COLLATERAL = "bad-mint-collateral";
 const char* const MINT_UNSATISFIABLE = "mint-unsatisfiable";
 const char* const MINT_SUPPLY_CAP = "mint-supply-cap";
+const char* const MINT_VAULT_SHARE = "mint-vault-share";
 const char* const BAD_MINT_TOKEN_OUTPUT = "bad-mint-token-output";
 const char* const BAD_MINT_FEE = "bad-mint-fee";
 const char* const BAD_TRANSFER_ASSIGNMENT = "bad-transfer-assignment";
@@ -309,10 +310,11 @@ void SetVault(VaultRecord& v, const Payload& p, const Params& params, const CTra
 }
 
 // ---------------------------------------------------------------------------
-// MINT-2..10 (§3.8). Not ARMED at R: the v2 clause order MINT-2..8 exactly (SERIALISATION.md §3 D),
-// so v2 verdicts are unchanged. ARMED: the v3 plan's evaluation order (R15) — MINT-2, 3, 4, 6, 7, 8,
-// then MINT-9, AFEE-1 (the attestor-fee clause of MINT-8, which needs A), MINT-5 (which needs pMint)
-// and MINT-10 — so bundle signatures are verified only for a mint that has paid its pool fee.
+// MINT-2..10 (§3.8). Not ARMED at R: the v2 clause order MINT-2..8 (SERIALISATION.md §3 D) with MINT-8's
+// amount clause right after MINT-5 (it needs pMint, FEE-1'). ARMED: the v3 plan's evaluation order (R15) as
+// amended by the fees spec §1.5 — MINT-2, 3, 4, 6, 7, MINT-8 shape/payee, then MINT-9, MINT-5 (which needs
+// pMint), MINT-8' amount, AFEE-1' (the attestor-fee clause of MINT-8, which needs A and pMint) and MINT-10 —
+// so bundle signatures are verified only for a mint with a well-formed fee output to an eligible pool.
 
 /** What MINT evaluation learns beyond the verdict (TxLog fields). */
 struct MintFacts
@@ -320,8 +322,9 @@ struct MintFacts
     BundleFacts bundle;
     CAmount attestFeeZat;
     std::optional<uint16_t> attestPayee;
+    MicroUsd pMint;                 //!< MINT-5's price (min(xMint, aMint) when ARMED, xMint otherwise), stored in the vault (FEE-1', D-Q-23)
 
-    MintFacts() : attestFeeZat(0) {}
+    MintFacts() : attestFeeZat(0), pMint(0) {}
 };
 
 std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload& p, unsigned int opReturnIndex, const Totals& totals, MintFacts& facts)
@@ -369,10 +372,20 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         if (!pMint.has_value()) return verdict::MINT_HALTED_NO_PRICE;
         std::optional<CAmount> required = RequiredCollateral((Cents)p.cents, MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps), pMint.value());
         if (!required.has_value()) return verdict::MINT_UNSATISFIABLE;
-        if (tx.vout[0].nValue < required.value() || tx.vout[0].nValue < 4 * P.feeMin) return verdict::BAD_MINT_COLLATERAL;
+        // MINT-5' (D-Q-23, fees spec §2.3): the 4 x FEE_MIN floor is gone; every fee is <= 2 % of a valid collateral (K14')
+        if (tx.vout[0].nValue < required.value()) return verdict::BAD_MINT_COLLATERAL;
+        facts.pMint = pMint.value();     // the vault's fee price (FEE-1'): exactly the price MINT-5 passed at
         return nullptr;
     };
-    // MINT-5 at its v2 position when not ARMED (pMint = xMint)
+    // MINT-8' amount clause (FEE-1'): vout[feeVout] >= ProtocolFeeZat(cents, pMint); evaluated right after MINT-5
+    // in both branches (it needs pMint). FEE-0 when E(R) is empty (K11).
+    auto mint8Amount = [&]() -> const char* {
+        if (ctx.Eligible((int)ref).empty()) return nullptr;
+        const std::optional<CAmount> fee = ProtocolFeeZat((Cents)p.cents, facts.pMint, P);
+        if (!fee.has_value() || tx.vout[p.feeVout].nValue < fee.value()) return verdict::BAD_MINT_FEE;
+        return nullptr;
+    };
+    // MINT-5 at its v2 position when not ARMED (pMint = xMint); MINT-8' amount follows once the shape is known
     if (!armed) {
         if (const char* v = mint5()) return v;
     }
@@ -383,20 +396,33 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
     if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()
         && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
+    // MINT-6b (D-Q-23a): one mint's debt may not exceed max(maxVaultShareBps of the MINT-6 cap, vaultShareFloorCents),
+    // every class alike; with the cap undefined (no price, supplyCapBps 0) the rule is silent like MINT-6
+    std::optional<Cents> maxVault = MaxVaultCents(cap, P.maxVaultShareBps, P.vaultShareFloorCents);
+    if (maxVault.has_value() && (Cents)p.cents > maxVault.value()) return verdict::MINT_VAULT_SHARE;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
     // TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH.
     if (!HolderAllowed(P, H, tx.vout[1].scriptPubKey)) return verdict::BAD_YED_HOLDER;
-    // MINT-8 (FEE-0 when E(R) is empty, K11)
+    // MINT-8 shape and payee (FEE-0 when E(R) is empty, K11); the amount clause is MINT-8' below (after MINT-5)
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     if (!eligible.empty()) {
         const uint8_t fv = p.feeVout;
         if (fv == FEE_VOUT_NONE || fv >= tx.vout.size() || fv == 0 || fv == 1 || fv == opReturnIndex) return verdict::BAD_MINT_FEE;
         std::optional<CKeyID> key = P2PKHKey(tx.vout[fv].scriptPubKey);
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::BAD_MINT_FEE;
-        if (tx.vout[fv].nValue < FeeZat(tx.vout[0].nValue, P.feeMin, P.feeBps)) return verdict::BAD_MINT_FEE;
     }
-    if (!armed) return verdict::OK;
+    if (!armed) {
+        if (const char* v = mint8Amount()) return v;     // MINT-8' (not ARMED: pMint = xMint)
+        return verdict::OK;
+    }
+    // MINT-8' lower bound (ARMED), before MINT-9's signature work: pMint = min(xMint, aMint) <= xMint and
+    // ProtocolFeeZat is non-increasing in the price, so a fee output below ProtocolFeeZat(cents, xMint) fails
+    // MINT-8' at any pMint. Refusing it here changes no valid verdict; it only spares the bundle verification.
+    if (!eligible.empty() && xMint.has_value()) {
+        const std::optional<CAmount> floorFee = ProtocolFeeZat((Cents)p.cents, xMint.value(), P);
+        if (floorFee.has_value() && tx.vout[p.feeVout].nValue < floorFee.value()) return verdict::BAD_MINT_FEE;
+    }
     // MINT-9 (ARMED at R: BUNDLE-1 with the empty selector, W9; aMint defined)
     {
         facts.bundle = ctx.Bundle(tx, ref, std::vector<unsigned char>(), false);
@@ -405,16 +431,19 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
             return std::string(verdict::MINT9_BUNDLE_PREFIX) + facts.bundle.reason;
         }
         if (!facts.bundle.aMint.has_value()) return std::string(verdict::MINT9_BUNDLE_PREFIX) + verdict::BUNDLE_STAT;
-        // AFEE-1 (MINT-8's attestor-fee clause; AFEE-0 when not ARMED)
-        facts.attestFeeZat = AttestFeeZat(FeeZat(tx.vout[0].nValue, P.feeMin, P.feeBps), P.attestFeeBps);
-        std::set<unsigned int> excluded = { 0u, 1u, opReturnIndex, (unsigned int)p.feeVout };
-        facts.attestPayee = AttestFeeOk(ctx, tx, p.attestFeeVout, facts.bundle.seqs, excluded, facts.attestFeeZat);
-        if (!facts.attestPayee.has_value()) return verdict::AFEE1_FEE;
         // PRICE-2 (revised): pMint = min(xMint, aMint)
         pMint = PriceCombine(xMint, S->PClaim(), facts.bundle.aMint, facts.bundle.aClaim).pMint;
     }
-    // MINT-5 (ARMED: after MINT-9, with the combined pMint)
+    // MINT-5 (ARMED: after MINT-9, with the combined pMint), then MINT-8' amount and AFEE-1' (both need pMint)
     if (const char* v = mint5()) return v;
+    if (const char* v = mint8Amount()) return v;
+    {
+        // AFEE-1' (MINT-8's attestor-fee clause; AFEE-0 when not ARMED): half the protocol fee, never the early fee
+        facts.attestFeeZat = AttestFeeZat(ProtocolFeeZat((Cents)p.cents, facts.pMint, P).value_or(MAX_MONEY), P.attestFeeBps);
+        std::set<unsigned int> excluded = { 0u, 1u, opReturnIndex, (unsigned int)p.feeVout };
+        facts.attestPayee = AttestFeeOk(ctx, tx, p.attestFeeVout, facts.bundle.seqs, excluded, facts.attestFeeZat);
+        if (!facts.attestPayee.has_value()) return verdict::AFEE1_FEE;
+    }
     // MINT-10 (ARMED, amended W17: |pFast(R) - aMint| * 10^4 <= DIVERGE_BPS_ATTEST * min(pFast(R), aMint)).
     // The agreement test reads the pools' fast median -- the current market -- not the min-of-windows
     // xMint that MINT-5 prices collateral at: an honest rally lags xMint by a whole slow window and
@@ -440,6 +469,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     const COutPoint vaultOut(txid, 0);
     if (v == verdict::OK) {
         vault.status = (uint8_t)VaultStatus::ACTIVE;
+        vault.pMint = facts.pMint;      // FEE-1' (D-Q-23): the mint price, read by RED-3'/IT-9' instead of a live one
         if (!ctx.Eligible((int)p.refHeight).empty()) {
             vault.feePaidZat = tx.vout[p.feeVout].nValue;
             log.feeZat = vault.feePaidZat;
@@ -561,6 +591,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         if (!HolderAllowed(P, H, tx.vout[a.vout].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     }
     const VaultRecord& vault = active[0].record;
+    if (vault.pMint <= 0) return verdict::VAULT_SPEND_MALFORMED;   // RED-1' (FEE-1'): a vault without a mint price cannot exist; the rule is total
     const bool claim = selector.value() == vault::SEL_APP;
     // U-23: a claim moves the whole vault into intents (the primitive's S-2 holds: every I output carries
     // this V's parameters and Σ I >= V.value); the module wants one claimant intent, at most one owner
@@ -586,9 +617,12 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // RED-2
     const int64_t burn = yedIn - p.AssignedCents();
     if (burn < vault.mintedCents) return burn <= 0 ? verdict::VAULT_SPEND_MISSING_BURN : verdict::VAULT_SPEND_SHORT_BURN;
-    // RED-3 (FEE-0 when E(R) is empty, K11). IT-9 (the D-IT-16 hook, decided 2026-10-07): an owner redeem at a
-    // height below lockHeight pays earlyRedeemFeeBps[class] of the collateral on top of FEE-1, through the same
-    // payee output (AFEE-1's rule gives the owner path no attestor share); at or after lockHeight FEE-1 only.
+    // RED-3' (FEE-0 when E(R) is empty, K11): the protocol fee of the vault's debt at its stored mint price (FEE-1',
+    // D-Q-23), owner and claimant alike. IT-9' (the D-IT-16 hook, decided 2026-10-07; D-Q-23): an owner redeem at a
+    // height below lockHeight pays earlyRedeemFeeBps[class] of the debt at pMint on top, through the same payee
+    // output (AFEE-1's rule gives the owner path no attestor share); at or after lockHeight the protocol fee only.
+    // The redeem reads V.pMint only: never a snapshot, never a bundle (the owner's path reads no live price).
+    const CAmount protocolFee = ProtocolFeeZat(vault.mintedCents, vault.pMint, P).value_or(MAX_MONEY);
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     std::set<unsigned int> assignedVouts;
     for (const Assignment& a : p.assignments) assignedVouts.insert(a.vout);
@@ -597,15 +631,15 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         if (fv == FEE_VOUT_NONE || fv >= tx.vout.size() || fv == fp->opReturnIndex || assignedVouts.count(fv)) return verdict::VAULT_SPEND_BAD_FEE;
         std::optional<CKeyID> key = P2PKHKey(tx.vout[fv].scriptPubKey);
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::VAULT_SPEND_BAD_PAYEE;
-        if (tx.vout[fv].nValue < FeeZat(vault.collateralZat, P.feeMin, P.feeBps)) return verdict::VAULT_SPEND_BAD_FEE;
+        if (tx.vout[fv].nValue < protocolFee) return verdict::VAULT_SPEND_BAD_FEE;
         if (!claim && H < (int64_t)vault.lockHeight && P.IsValidClass(vault.termClass)
-            && tx.vout[fv].nValue < FeeZat(vault.collateralZat, P.feeMin, P.feeBps) + EarlyRedeemFeeZat(vault.collateralZat, P.earlyRedeemFeeBps[vault.termClass])) {
-            return verdict::BAD_REDEEM_EARLY_FEE;     // IT-9
+            && tx.vout[fv].nValue < protocolFee + EarlyRedeemFeeZat(vault.mintedCents, P.earlyRedeemFeeBps[vault.termClass], vault.pMint)) {
+            return verdict::BAD_REDEEM_EARLY_FEE;     // IT-9'
         }
     }
-    // AFEE-1 (RED-3's attestor-fee clause; AFEE-0 when not ARMED or on the owner path)
+    // AFEE-1' (RED-3's attestor-fee clause; AFEE-0 when not ARMED or on the owner path): half the protocol fee
     if (armed) {
-        facts.attestFeeZat = AttestFeeZat(FeeZat(vault.collateralZat, P.feeMin, P.feeBps), P.attestFeeBps);
+        facts.attestFeeZat = AttestFeeZat(protocolFee, P.attestFeeBps);
         std::set<unsigned int> excluded = assignedVouts;
         excluded.insert(0u);
         excluded.insert(1u);
@@ -642,7 +676,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
         if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
         facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
-        if (facts.residualZat >= P.residualMinZat) {
+        if (facts.residualZat >= ResidualMinZat(vault.pMint, P)) {     // RED-5': $0.48 at the vault's pMint, at least RESIDUAL_MIN_ZAT
             const CPQKeyID owner = vault.Owner();
             if (!vault::IsOwnerValid(owner) || intents.size() != 2) return verdict::RED5_RESIDUAL;
             const uint256 ownerHash = vault::ScriptHash256(GetScriptForDestination(owner));   // the owner's PQPKH (quantum spec F-3)
@@ -1453,7 +1487,10 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     // Issuance, totals, global ratio
     std::optional<Snapshot> prevOpt = SnapshotAt(st, P, H - 1);
     const Snapshot prev = prevOpt.has_value() ? prevOpt.value() : Snapshot();
-    s.issuedZat = (CAmount)((uint64_t)prev.issuedZat + (uint64_t)subsidyZat);       // wraps rather than overflows (total)
+    // D-Q-25: issuedZat is the circulating supply at H: the virtual snapshot below startHeight carries the subsidy sum
+    // from genesis (Params::issuedBeforeStart, CirculatingSupplyAt(startHeight - 1)), every later one adds its subsidy
+    const CAmount issuedBefore = prevOpt.has_value() && H - 1 >= P.startHeight ? prev.issuedZat : P.issuedBeforeStart;
+    s.issuedZat = (CAmount)((uint64_t)issuedBefore + (uint64_t)subsidyZat);          // wraps rather than overflows (total)
     const Totals totals = st.GetTotals();
     s.supplyCents = totals.supplyCents;
     s.collateralZat = totals.collateralZat;

@@ -31,6 +31,7 @@ Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; stopped by the storage 
 """
 
 import json
+import re
 import os
 from decimal import Decimal
 
@@ -47,12 +48,15 @@ from test_framework.yellowback_util import (
     DORMANCY_BLOCKS,
     DORMANCY_CHECK,
     EMERGENCY_PERSIST,
-    FEE_MIN,
+    MAX_MINT,
     POOLS,
     REF_LAG,
     YellowbackTestFramework,
     build_mint_tx,
     mine_block_raw,
+    protocol_fee_zat,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     set_quote,
     usd_to_micro,
 )
@@ -87,13 +91,17 @@ OPTIONAL = {
 }
 
 # Fields the text marks *null when …* although the example shows a value (by path suffix).
-NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor'},
+NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor',
+                            # rpcversion 8: the last fee band is unbounded (null); the network price and the supply cap are null without a price / a cap
+                            'params.fees.protocol.bands.uptoCents', 'params.fees.network.priceMicroUsd',
+                            'params.supplyCap.priceMicroUsd', 'params.supplyCap.capCents', 'params.supplyCap.maxVaultCents'},
+            'yed_estimatefee': {'pMint', 'feeZat', 'attestFeeZat'},
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
             'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
             'yed_listclaimable': {'underwaterAt', 'pClaim'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
             'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
-            'yed_estimateredeem': {'payee'},
             'yed_estimatecollateral': {'requiredZat', 'requiredZatFloored', 'pMint'},
+            'yed_estimateredeem': {'payee', 'pMint'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
             'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'}}
@@ -175,7 +183,7 @@ class Contract(object):
         want = json_type(example)
         if got == 'null':
             suffix = path.split('.', 1)[1] if '.' in path else ''
-            suffix = suffix.replace('[0]', '').replace('[1]', '')
+            suffix = re.sub(r'\[\d+\]', '', suffix)
             assert any(suffix.endswith(n) for n in NULLABLE.get(cmd, ())), '%s: null where the contract has a %s' % (path, want)
             return
         assert got == want, '%s: expected %s, got %s (%r)' % (path, want, got, value)
@@ -187,12 +195,12 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 7)
+        assert_equal(c.doc['rpcversion'], 8)   # the fee structure (D-Q-23/24/25)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
         assert_rpc_error('index-below-start', user.yed_mint, 10000, 48)
-        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount(), 10 * COIN)   # no tag yet
+        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, user.getblockcount())   # no tag yet
 
         print('activate at $50; fund the claimant')
         self.activate(POOLS, quote_usd=50)
@@ -216,21 +224,25 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('quote-out-of-range', nodes[POOLS[0]].yed_setquote, 1, 1)
         assert_rpc_error('no-payout-address', user.yed_setquote, 50_000_000, 1)
         r = user.yed_getinfo()['height'] - REF_LAG
-        c.check('yed_getfeepayee', user.yed_getfeepayee(r, 10 * COIN))
+        c.check('yed_getfeepayee', user.yed_getfeepayee(r))
         c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
-        c.check('yed_estimatefee', user.yed_estimatefee(10 * COIN))
+        fee = c.check('yed_estimatefee', user.yed_estimatefee(10000))
+        assert_equal((fee['feeCents'], fee['feeZat']), (100, protocol_fee_zat(10000, fee['pMint'])))      # FEE-1': the $1 floor
+        assert_equal(user.yed_estimatefee(1_000_000, 18_000)['feeZat'], 305_555_555_556)                   # $55 at $0.018
+        assert_rpc_error('priceMicroUsd must be between', user.yed_estimatefee, 10000, 99)
         c.check('yed_gethistory', user.yed_gethistory(r - 3, r))
         assert_rpc_error('verdict-parent-not-tip', user.yed_getblockverdict, user.getblockhash(user.getblockcount() - 2))
-        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
+        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, MAX_MINT, 48, 100)
         assert_rpc_error('mint-bad-lock', user.yed_estimatecollateral, 10000, 10)
-        # the price override is range-checked; requiredZatFloored = max(requiredZat, 4 * FEE_MIN) rounded to 1,000 (MINT-5)
+        # the price override is range-checked; requiredZatFloored = requiredZat (rounded to 1,000): MINT-5' has no 4 x FEE_MIN floor (D-Q-23)
         assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 99)
         assert_rpc_error('priceMicroUsd must be between', user.yed_estimatecollateral, 10000, 48, 4_294_967_296)
         top = user.yed_estimatecollateral(10000, 48, 4_294_967_295)
-        assert top['requiredZat'] < 4 * FEE_MIN, top
-        assert_equal(top['requiredZatFloored'], 4 * FEE_MIN)
+        assert_equal((top['requiredZat'], top['requiredZatFloored']), (6_985_000, 6_985_000))   # 6,984,920 rounded up to 1,000
+        assert_equal((top['protocolFeeCents'], top['protocolFeeZat']), (100, 23_284))                       # $1 at PRICE_MAX
         low = user.yed_estimatecollateral(10000, 48, 1_000_000)
-        assert_equal(low['requiredZatFloored'], max(low['requiredZat'], 4 * FEE_MIN))
+        assert_equal(low['requiredZatFloored'], low['requiredZat'])
+        assert_equal(low['protocolFeeZat'], protocol_fee_zat(10000, 1_000_000))
 
         print('wallet context: addresses, balances')
         addr = c.check('yed_getnewaddress', user.yed_getnewaddress())
@@ -246,7 +258,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
 
         print('yed_mint (three times) and a raw invalid mint (U-23: no VOID vault)')
         assert_rpc_error('mint-bad-lock', user.yed_mint, 10000, 10)
-        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
+        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, MAX_MINT, 48, 100)
         # audit F-1: maxCollateralZat bounds vout[0]; refused at preflight, so no carrier is ever built
         assert_rpc_error('collateral-above-max', user.yed_mint, 10000, 48, '', '', False, 1)
         assert_equal(user.yed_sweepcarriers()['outstanding'], 0)
@@ -377,10 +389,14 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         vault_b = user.yed_getvault(mint_b['txid'])
         fee_bps = user.yed_getinfo()['params']['classes'][0]['earlyRedeemFeeBps']
         assert_equal(fee_bps, user.yed_getinfo()['params']['earlyRedeemFeeBps'][0])
-        early_fee = vault_b['collateralZat'] * fee_bps // 10000
+        early_fee = vault_early_redeem_fee_zat(vault_b)          # IT-9' (D-Q-23): of the debt at the vault's pMint, ceil
+        assert_equal(early_fee, -(-vault_b['mintedCents'] * fee_bps * COIN // vault_b['pMint']))
         quote = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_b['txid']))
         assert_equal((quote['early'], quote['earlyRedeemFeeBps'], quote['earlyRedeemFeeZat'], quote['canRedeem'], quote['error']),
                      (True, 500, early_fee, True, ''))
+        assert_equal((quote['pMint'], quote['protocolFeeZat'], quote['protocolFeeCents'], quote['earlyRedeemFeeCents']),
+                     (vault_b['pMint'], vault_fee_zat(vault_b), 100, 500))    # rpcversion 8: $1 at pMint, 5 % of $100
+        assert_equal(quote['feeZat'], vault_fee_zat(vault_b) + early_fee)
         assert_equal((quote['burnedCents'], quote['collateralZat'], quote['height']), (10000, vault_b['collateralZat'], user.getblockcount() + 1))
         pos_b = [x for x in c.check('yed_listpositions', user.yed_listpositions()) if x['txid'] == mint_b['txid']][0]
         assert_equal((pos_b['canRedeem'], pos_b['earlyRedeemFeeZat']), (True, early_fee))

@@ -38,6 +38,7 @@ from test_framework.util import (
     hex_str_to_bytes,
 )
 from test_framework.yellowback_util import (
+    COIN,
     SIGNING_BRANCH_ID,
     _low_s,
     _select_funding,
@@ -52,8 +53,8 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
-    early_redeem_fee_zat,
-    fee_zat,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     mine_block_raw,
     set_quote,
     usd_to_micro,
@@ -116,7 +117,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
     def raw_mint(self, node, owner=None, token_script=None, lock_blocks=48):
         r = node.yed_getinfo()['height'] - REF_LAG
         coll = node.yed_estimatecollateral(10000, lock_blocks)['requiredZat']
-        payee = node.yed_getfeepayee(r, coll)['default']['payoutAddress']
+        payee = node.yed_getfeepayee(r)['default']['payoutAddress']
         return build_mint_tx(node, 10000, lock_blocks, r, coll, fee_addr=payee,
                              owner_pubkey=None if owner is None else bytes_to_hex_str(owner), token_script=token_script)
 
@@ -185,9 +186,9 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
 
 # Rule: MINT-1 MINT-3
-        print('rpcversion 7: params.pq and the v4 MINT')
+        print('rpcversion 8 (7 added params.pq and the v4 MINT; 8 the fee structure)')
         info = user.yed_getinfo()
-        assert_equal(info['rpcversion'], 7)
+        assert_equal(info['rpcversion'], 8)
         pq = info['params']['pq']
         assert_equal((pq['schemes'], pq['falconActive'], pq['falconHeight']), ([1], False, FALCON_HEIGHT))
         assert_greater_than(pq['feeRateZatPerKB'], 0)
@@ -221,7 +222,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_validateaddress(vault['ownerAddress'])['ismine'], True)
         print("the owner's redeem from the wallet: an SLH-DSA owner signature (q/wallet's signer), the early-redeem fee")
         redeemed = user.yed_redeem(m['txid'])
-        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, early_redeem_fee_zat(vault['collateralZat'], 'A')))
+        assert_equal((redeemed['burnedCents'], redeemed['earlyRedeemFeeZat']), (10000, vault_early_redeem_fee_zat(vault)))
         sig_hex = user.getrawtransaction(redeemed['txid'], 1)['vin'][0]['scriptSig']['hex']
         assert_greater_than(len(sig_hex) // 2, 7900)                                                  # 7,938 + the OP_2 selector
         assert sig_hex.endswith('52')
@@ -285,8 +286,8 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         pv = user.yed_getvault(mint_txid)
         assert_equal((pv['status'], pv['ownerScheme'], pv['ownerHash']), ('ACTIVE', 1, owner_hex[2:]))
         r = user.getblockcount()
-        payee = user.yed_getfeepayee(r, pv['collateralZat'])['default']['payoutAddress']
-        fee = fee_zat(pv['collateralZat']) + early_redeem_fee_zat(pv['collateralZat'], 'A')            # IT-9: before lockHeight
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']
+        fee = vault_fee_zat(pv) + vault_early_redeem_fee_zat(pv)                                       # IT-9': before lockHeight
         coin = coin_of(user, 10000)
         spend_hex = build_vault_spend_raw(user, pv, 'owner', [(coin['txid'], coin['vout'])],
                                           payload=ym.encode_redeem(r, 1, []), fee=(payee, fee), ref_height=r)
@@ -374,17 +375,24 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal((len(tok), tok[-4:]), (70, '52c2'))
         assert_equal(nodes[4].yed_getvault(m2['txid'])['status'], 'ACTIVE')
 
-        print('-pqfeerate=0.01: a send spending Falcon tokens pays rate x size; -maxtxfee caps it (the wallet\'s rule)')
-        # reviewer B (Y-B sweep): YedNetworkFee obeys -maxtxfee as CWallet::CreateTransaction does: capped, never refused
+        print('a send spending Falcon tokens pays the Yellowback $/KB rate x size (D-Q-23 (b)); the cap max(-maxtxfee, $2 at the price) binds (the wallet\'s rule)')
+        # reviewer B (Y-B sweep): YedNetworkFee obeys its cap as CWallet::CreateTransaction obeys -maxtxfee: capped, never refused.
+        # D-Q-23 (b): with an attested price the rate is $0.05/KB at it (-pqfeerate is only the fallback); D-Q-23a: the cap is
+        # max(-maxtxfee, -yellowbackmaxtxfeeusd at the price), so node 0 lowers the dollar cap below its -maxtxfee to see it bind.
         self.restart(2, ['-pqfeerate=0.01'])
-        self.restart(0, ['-pqfeerate=0.01', '-maxtxfee=0.02'])
+        self.restart(0, ['-pqfeerate=0.01', '-maxtxfee=0.02', '-yellowbackmaxtxfeeusd=0.05'])
         user, receiver = nodes[0], nodes[2]
         self.sync_all()
+        net = receiver.yed_getinfo()['params']['fees']['network']
+        rate = net['yellowback']['zatPerKB']
+        assert_equal((net['priceSource'], rate), ('tip', max(5000, -(-50000 * COIN // usd_to_micro(PRICE)))))   # 1,250,000 zat/KB at $4
+        assert_equal(net['yellowback']['maxTxFeeZat'], max(10000000, -(-2000000 * COIN // usd_to_micro(PRICE))))   # $2 at $4 = 0.5 YEC
         uncapped = self.send_all_fee(receiver, user.yed_getnewaddress('pq'))
-        assert_greater_than(uncapped, 2000000)                      # rate x size above the 0.02 YEC cap
-        assert_greater_than(10000001, uncapped)                     # and within the default -maxtxfee 0.1
+        assert_greater_than(uncapped, 2000000)                      # rate x size above 0.02 YEC
+        assert_greater_than(net['yellowback']['maxTxFeeZat'] + 1, uncapped)   # and within the receiver's $2 cap
         self.sync_all()
         self.mine(POOLS[0])
+        assert_equal(user.yed_getinfo()['params']['fees']['network']['yellowback']['maxTxFeeZat'], 2000000)   # max(0.02 YEC, $0.05 at $4 = 0.0125)
         capped = self.send_all_fee(user, receiver.yed_getnewaddress('pq'))
         assert_equal(capped, 2000000)                               # exactly -maxtxfee
         self.sync_all()

@@ -52,7 +52,11 @@ class YellowbackFeeTest(ArmedModeMixin, YellowbackTestFramework):
     limits = False      # set once the harness's own raw transactions (1000 zat, --armed registrations) are mined
 
     def node_args(self, i, extra=None):
-        args = super().node_args(i, extra)
+        # The fee structure (D-Q-23 (b), review A-2) prices every YED-builder transaction at the Yellowback $/KB rate
+        # by its estimated size; this suite isolates P-2's term -- max(-yellowbackfee, the ZIP-317 conventional fee) --
+        # so the dollar target is off (-pqfeerate's fallback, far below the conventional fee). yellowback_fees.py covers
+        # the $/KB term and its interplay with P-2.
+        args = super().node_args(i, extra) + ['-yellowbackfeeusdperkb=0']
         if not self.limits:
             return args
         if i in POOLS:
