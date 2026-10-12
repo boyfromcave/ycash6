@@ -329,7 +329,11 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
     }
 
     int64_t start = activation;
-    if (haveTip) {
+    if (haveTip && g_vaultdb->GetVersion() != VAULT_DB_VERSION) {
+        LogPrintf("vault: set-state database format %u, this node writes %u; rebuilding from height %d\n",
+                  g_vaultdb->GetVersion(), VAULT_DB_VERSION, activation);
+        g_vaultdb->Wipe();
+    } else if (haveTip) {
         BlockMap::iterator mi = mapBlockIndex.find(tipHash);
         CBlockIndex* pindex = mi == mapBlockIndex.end() ? nullptr : mi->second;
         if (!pindex) {

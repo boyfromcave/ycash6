@@ -42,6 +42,15 @@ struct RawKey
 
 static const char KEY_TIP = 'T';
 static const char KEY_UNDO = 'u';
+static const char KEY_VERSION = 'V';
+
+/**
+ * The set-state database's format version ('V', u32), written with every connected block. A database
+ * with a tip whose version differs (or is absent: version 1) is wiped and rebuilt from the activation
+ * height on start (Reconcile). 2: the seats review fixes (owner 2026-10-11 -- bond exitHeight, one unspent
+ * bond per key, the liveness hook, D-Q-31) change what replay derives from the same blocks (review A3).
+ */
+static const uint32_t VAULT_DB_VERSION = 2;
 
 class VaultDB : public KVReader
 {
@@ -50,6 +59,9 @@ public:
 
     bool Read(const std::string& key, std::string& value) const override;
     void Iterate(const std::string& prefix, const std::function<bool(const std::string&, const std::string&)>& fn) const override;
+
+    /** The stored format version (VAULT_DB_VERSION); 1 when the key is absent (a database from before it). */
+    uint32_t GetVersion() const;
 
     /** The block the state is at; false when the DB is empty (no block connected yet). */
     bool GetTip(uint256& hash, int64_t& height) const;
