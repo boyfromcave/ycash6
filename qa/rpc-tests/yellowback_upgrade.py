@@ -154,7 +154,7 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         self.set_id = created['setid']
         joined = n1.set_join(self.set_id, 1, n0.getblockcount() + 300)
         assert 'txid' in joined, joined
-        self.mine(3)
+        self.mine(9)                        # past the set maturity (8): the member is current
         info = n0.set_getinfo(self.set_id)
         assert_equal((info['members'], info['current']), (1, 1))
 
