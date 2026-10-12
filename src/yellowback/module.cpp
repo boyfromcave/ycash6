@@ -144,7 +144,9 @@ std::vector<std::pair<CPubKey, int64_t>> Module::Liveness(const CTransaction& tx
         return std::nullopt;
     };
     std::vector<std::pair<CPubKey, int64_t>> out;
-    for (const auto& sc : AttestationLiveness(tx, *p, ctx.height, liveMember, [&](int64_t h) { return ctx.blockHashAt(h); }, nullptr)) {
+    // the node's index cache (focused review): BUNDLE-1 already verified these signatures under the same keys
+    SigCache* cache = static_cast<SigCache*>(ctx.moduleCache);
+    for (const auto& sc : AttestationLiveness(tx, *p, ctx.height, liveMember, [&](int64_t h) { return ctx.blockHashAt(h); }, cache)) {
         out.push_back({ liveMember(sc.first)->first, sc.second });
     }
     return out;

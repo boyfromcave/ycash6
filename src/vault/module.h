@@ -44,7 +44,14 @@ struct ModuleContext
     const KVReader* state = nullptr;
     /** Ancestor block hashes (may be empty: a module then finds nothing that needs them). */
     BlockHashFn blockHashAt;
+    /** The node-local verification cache the module asked for (vault::SetModuleCache; YED: its yellowback::SigCache),
+     *  opaque to the primitive; nullptr = none. Never state: a hit and a cold verification always agree. */
+    void* moduleCache = nullptr;
 };
+
+/** Set once at init (the node's YED index), read by every ModuleContext the primitive builds. */
+void SetModuleCache(void* cache);
+void* ModuleCache();
 
 class Module
 {

@@ -833,6 +833,8 @@ BOOST_AUTO_TEST_CASE(seat_weight_log_tenure_factor)
     BOOST_CHECK_EQUAL(r.evictMarginBps, 500);
     BOOST_CHECK_EQUAL(r.attestorSeats, 15);
     BOOST_CHECK_EQUAL(r.attestorLivenessMin, 16);                        // seats review B3 at regtest scale
+    BOOST_CHECK(r.bondMaturity >= r.attestMaxAge);                       // the liveness invariant (params.cpp)
+    BOOST_CHECK(TestParams().bondMaturity >= TestParams().attestMaxAge);
     BOOST_CHECK_EQUAL(TestParams().attestorLivenessMin, 1152);           // one day
 }
 

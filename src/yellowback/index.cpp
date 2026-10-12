@@ -777,6 +777,7 @@ size_t AttestationPool::Size() const
 
 std::optional<bool> LruSigCache::Lookup(const uint256& key) const
 {
+    std::lock_guard<std::mutex> lock(cs);
     std::map<uint256, Entry>::iterator it = entries.find(key);
     if (it == entries.end()) {
         misses++;
@@ -789,6 +790,7 @@ std::optional<bool> LruSigCache::Lookup(const uint256& key) const
 
 void LruSigCache::Insert(const uint256& key, bool valid)
 {
+    std::lock_guard<std::mutex> lock(cs);
     std::map<uint256, Entry>::iterator it = entries.find(key);
     if (it != entries.end()) {
         it->second.valid = valid;
@@ -809,6 +811,7 @@ void LruSigCache::Insert(const uint256& key, bool valid)
 
 void LruSigCache::Clear()
 {
+    std::lock_guard<std::mutex> lock(cs);
     entries.clear();
     order.clear();
     hits = misses = 0;
@@ -833,7 +836,7 @@ std::optional<uint256> YellowbackIndex::BlockHashAtLocked(int64_t height) const
 bool YellowbackIndex::AttestationValidLocked(const Attestation& att, const CPubKey& pk, const uint256& blockHash)
 {
     AssertLockHeld(cs_yellowback);
-    const uint256 key = SigCacheKey(att, blockHash);
+    const uint256 key = SigCacheKey(att, blockHash, pk);
     std::optional<bool> cached = sigCache.Lookup(key);
     if (cached.has_value()) return cached.value();
     const bool valid = VerifyCompactSig(pk, AttestMessage(att.seq, att.priceMicroUsd, att.citedHeight, blockHash), att.sig);

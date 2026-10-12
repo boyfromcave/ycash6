@@ -19,6 +19,7 @@
 #include <functional>
 #include <list>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <set>
@@ -163,10 +164,11 @@ private:
 static const size_t SIG_CACHE_ENTRIES = 16384;
 
 /**
- * The LRU implementation of bundle.h's SigCache, keyed by SHA256(attestation74 || blockHash(citedHeight))
- * -> valid. Node-local, never state: a hit and a cold verification always agree because the key
- * covers every input of the verification. Filled by MP-1, FilterTemplate, ConnectBlock, the dry
- * runs and yed_addattestation, all under cs_yellowback.
+ * The LRU implementation of bundle.h's SigCache, keyed by SHA256(attestation74 || blockHash(citedHeight) ||
+ * pubkey33) -> valid. Node-local, never state: a hit and a cold verification always agree because the key
+ * covers every input of the verification (the message's fields and block hash, and the key). Filled by
+ * MP-1, FilterTemplate, ConnectBlock, the dry runs and yed_addattestation under cs_yellowback, and by the
+ * vault primitive's liveness hook (ModuleContext::moduleCache) under cs_main: an internal mutex guards it.
  */
 class LruSigCache : public SigCache
 {
@@ -174,10 +176,10 @@ public:
     explicit LruSigCache(size_t capacityIn = SIG_CACHE_ENTRIES) : capacity(capacityIn), hits(0), misses(0) {}
     std::optional<bool> Lookup(const uint256& key) const override;
     void Insert(const uint256& key, bool valid) override;
-    size_t Size() const { return entries.size(); }
+    size_t Size() const { std::lock_guard<std::mutex> lock(cs); return entries.size(); }
     size_t Capacity() const { return capacity; }
-    uint64_t Hits() const { return hits; }
-    uint64_t Misses() const { return misses; }
+    uint64_t Hits() const { std::lock_guard<std::mutex> lock(cs); return hits; }
+    uint64_t Misses() const { std::lock_guard<std::mutex> lock(cs); return misses; }
     void Clear();
 
 private:
@@ -190,6 +192,7 @@ private:
     mutable std::list<uint256> order;              //!< most recently used at the front
     mutable std::map<uint256, Entry> entries;
     mutable uint64_t hits, misses;
+    mutable std::mutex cs;                         //!< the vault primitive's liveness hook reads it outside cs_yellowback
 };
 
 /** What BuildBundle assembled for (R, selector) (W6, W9; yed_buildbundle's shape). */

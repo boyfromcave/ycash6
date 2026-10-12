@@ -607,7 +607,11 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
 // The same effect and condition as SET_EQUIVOCATION's (ApplyAct above), for the module hook.
 namespace {
 std::atomic<uint32_t> g_minSetMaturity{MIN_SET_MATURITY};
+std::atomic<void*> g_moduleCache{nullptr};
 } // namespace
+
+void SetModuleCache(void* cache) { g_moduleCache.store(cache); }
+void* ModuleCache() { return g_moduleCache.load(); }
 
 uint32_t MinSetMaturity() { return g_minSetMaturity.load(); }
 void SetMinSetMaturity(uint32_t blocks) { g_minSetMaturity.store(blocks); }
@@ -639,6 +643,7 @@ void VaultState::ApplyEjectionsOf(const Module& module, const CTransaction& tx, 
     ctx.height = h;
     ctx.state = this;
     ctx.blockHashAt = blockHashes;
+    ctx.moduleCache = ModuleCache();
     for (const CPubKey& key : module.Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
     // the module liveness hook (seats review B2): a member's proven act at height raises its lastAct to it
     for (const auto& kh : module.Liveness(tx, ctx)) {

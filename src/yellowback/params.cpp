@@ -4,6 +4,8 @@
 
 #include "yellowback/params.h"
 
+#include <cassert>
+
 #include <stdexcept>
 
 namespace yellowback {
@@ -163,6 +165,10 @@ const Params& MainParams()
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
         m.startHeight = 0;
+        // Invariant (focused review): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct starts at joinHeight + the set's
+        // maturity (BOND_MATURITY) and liveness credit needs citedHeight > lastAct with citedHeight in (R - ATTEST_MAX_AGE, R]:
+        // so no attestation that a key signed before it joined can ever refresh its lastAct.
+        assert(m.bondMaturity >= m.attestMaxAge);
         return m;
     }();
     return p;
@@ -263,6 +269,10 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.attestArmMin       = attestArmMin;
     r.bundleCarrier      = bundleCarrier;
     r.mintRequiresArmed  = mintRequiresArmed;
+    // Invariant (focused review): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct starts at joinHeight + the set's
+    // maturity (BOND_MATURITY) and liveness credit needs citedHeight > lastAct with citedHeight in (R - ATTEST_MAX_AGE, R]:
+    // so no attestation that a key signed before it joined can ever refresh its lastAct.
+    assert(r.bondMaturity >= r.attestMaxAge);
     return r;
 }
 
