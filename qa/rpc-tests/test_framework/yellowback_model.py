@@ -255,7 +255,7 @@ class Params(object):
                  q_low_bps=3_333, q_high_bps=6_667, attest_max_age=20, pin_window=288, pin_delta_bps=500,
                  pin_min_tags=3, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                  emergency_persist=48, emergency_notice_ttl=1_152, residual_min_zat=100_000, attest_fee_bps=2_500,
-                 bond_min_floor_zat=5_000 * COIN, bond_min_cap_zat=20_000 * COIN, bond_share_bps=500,
+                 bond_min_floor_zat=10_000 * COIN, bond_min_cap_zat=20_000 * COIN, bond_share_bps=500,
                  bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
@@ -269,7 +269,7 @@ class Params(object):
                           q_low_bps=3_333, q_high_bps=6_667, attest_max_age=8, pin_window=16, pin_delta_bps=500,
                           pin_min_tags=2, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
-                          bond_min_floor_zat=COIN * 5 // 2, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-30 at 1/2,000
+                          bond_min_floor_zat=5 * COIN, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-30 at 1/2,000
                           bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
                           seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,

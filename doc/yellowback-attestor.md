@@ -39,7 +39,7 @@ Read this first; where the sections below disagree, this section wins (upgrade p
 - **Revival is a `SET_HEARTBEAT`** (`yed_revive <seq> <priceMicroUsd>` sends it and still returns a
   freshly signed attestation): the record is ELIGIBLE again at that block.
 - **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-30: 5 % of all YEC locked
-  in YED vaults spread over the 9 seats, never below 5,000 YEC nor above 20,000 YEC; `yed_getinfo`
+  in YED vaults spread over the 9 seats, never below 10,000 YEC nor above 20,000 YEC; `yed_getinfo`
   `params.attest.bondMinZat` is the floor for a join in the next block) is **invalid** (`attestor-bond-below-min`,
   seats re-review 2026-10-11: no member that can never become ELIGIBLE holds a seat); a join at or above it becomes
   ELIGIBLE at maturity. It is judged once, at registration; a seated attestor is never re-judged.
@@ -55,7 +55,7 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   when it is OPEN with 15 seats. A join into the full set evicts one member: first a member that is not
   live (`lastAct < h − livenessWindow`: no heartbeat and no carried attestation for the liveness window), the
   one of least seat weight; else the member of least seat weight, only when the new bond exceeds that seat
-  weight by 5 % (`evictMarginBps`). No join evicts with a bond below `bondMinFloorZat` (5,000 YEC; seats review
+  weight by 5 % (`evictMarginBps`). No join evicts with a bond below `bondMinFloorZat` (10,000 YEC; seats review
   B2: no dust evictions; the floor, not the collateral-based minimum, because the primitive's displacement hook
   reads no module state). The module adopts the set only when its `livenesswindow` is at least
   `ATTESTOR_LIVENESS_MIN` (1,152 blocks, one day; regtest 16; review B3). The evicted record becomes `WITHDRAWN`

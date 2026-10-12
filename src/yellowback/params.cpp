@@ -93,7 +93,7 @@ void SetCommon(Params& p)
     p.residualMinZat      = 100000; // RED-5: the zat floor
     p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
-    p.bondMinFloorZat     = 5000 * COIN;    // D-Q-30: binds below ~900,000 YEC of vault collateral
+    p.bondMinFloorZat     = 10000 * COIN;   // D-Q-30 (owner 2026-10-11: 10,000 YEC, was 5,000): binds below ~1.8 M YEC of vault collateral
     p.bondMinCapZat       = 20000 * COIN;   // D-Q-30: binds above ~3.6 M YEC
     p.bondShareBps        = 500;            // D-Q-30: 5 % of all YED vault collateral backs the N_SLOTS seats
     p.bondMinLock         = 0;      // the bond exit delay (owner 2026-10-11): the lock is in the vault state (exit + BOND_MATURITY), not the script
@@ -242,8 +242,8 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.pinMinTags          = 2;
     r.emergencyPersist    = 4;
     r.emergencyNoticeTtl  = 64;
-    // D-Q-30 at 1/2,000 of mainnet (2.5 YEC / 10 YEC, share 500 bps): the suites' 10-YEC bonds sit at the cap
-    r.bondMinFloorZat     = COIN * 5 / 2;
+    // D-Q-30 at 1/2,000 of mainnet (5 YEC / 10 YEC, share 500 bps): the suites' 10-YEC bonds sit at the cap
+    r.bondMinFloorZat     = 5 * COIN;
     r.bondMinCapZat       = 10 * COIN;
     r.bondMinLock         = 0;
     r.attestorLivenessMin = 16;     // seats review B3 at regtest scale (two ATTEST_MAX_AGE windows)

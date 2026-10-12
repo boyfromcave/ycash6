@@ -126,7 +126,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
 
 # Rule: REG-A1
         print('yed_registerattestor on nodes 6 and 7 (refusals first), one per block: seq 0 and 1')
-        assert_rpc_error('bond-below-min', wa.yed_registerattestor, 2, BOND_MIN_LOCK)   # D-Q-30: below the 2.5-YEC floor (no vaults yet)
+        assert_rpc_error('bond-below-min', wa.yed_registerattestor, 2, BOND_MIN_LOCK)   # D-Q-30: below the 5-YEC floor (no vaults yet)
         assert_rpc_error('lock-below-min', wa.yed_registerattestor, 10, BOND_MIN_LOCK - 1)
         reg = {}
         for node, name in ((wa, 'A'), (wb, 'B')):

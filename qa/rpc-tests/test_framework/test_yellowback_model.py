@@ -1058,30 +1058,30 @@ class MintTests(unittest.TestCase):
     def test_dq28_bond_min_from_collateral(self):
         m, r = ym.Params.mainnet(1), ym.Params.regtest(1)
         f = ym.bond_min_from_collateral_zat
-        for coll, yec in ((0, 5_000), (-1, 5_000), (900_000, 5_000), (1_800_000, 10_000), (3_600_000, 20_000), (10_000_000, 20_000)):
+        for coll, yec in ((0, 10_000), (-1, 10_000), (900_000, 10_000), (1_800_000, 10_000), (3_600_000, 20_000), (10_000_000, 20_000)):
             self.assertEqual(f(coll * ym.COIN, m), yec * ym.COIN)
-        self.assertEqual(f(900_000 * ym.COIN + 1, m), 5_000 * ym.COIN + 1)
+        self.assertEqual(f(1_800_000 * ym.COIN + 1, m), 10_000 * ym.COIN + 1)
         self.assertEqual(f(3_600_000 * ym.COIN - 180, m), 20_000 * ym.COIN - 1)
-        self.assertEqual(f(0, r), ym.COIN * 5 // 2)
-        self.assertEqual(f(300 * ym.COIN, r), 3 * ym.COIN)
+        self.assertEqual(f(0, r), 5 * ym.COIN)
+        self.assertEqual(f(700 * ym.COIN, r), 7 * ym.COIN)
         self.assertEqual(f(1_300 * ym.COIN, r), 10 * ym.COIN)
 
     # Rule: D-Q-30: the model's SNAP mirrors yellowback_state_tests dq28_bond_min_from_collateral
     def test_dq28_bond_min_from_snapshot_collateral(self):
         c = activated_chain(ym.Params.regtest(1, 0, 0, attestor_set_id(), attest_arm_min=0), )
         tag = lambda: (1, 50_000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
-        self.assertEqual(c.model.bond_min_zat(c.height + 1), ym.COIN * 5 // 2)
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 5 * ym.COIN)
         c.mine(tag(), [attestor_set_create()])
         # seats re-review: a join below the minimum at its block is invalid (never recorded)
-        below = c.register_tx(ATTESTORS[0], c.height + 1 + 200, ym.COIN * 5 // 2 - 1)
-        c.mine(tag(), [below, c.register_tx(ATTESTORS[1], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        below = c.register_tx(ATTESTORS[0], c.height + 1 + 200, 5 * ym.COIN - 1)
+        c.mine(tag(), [below, c.register_tx(ATTESTORS[1], c.height + 1 + 200, 5 * ym.COIN)])
         self.assertEqual(c.refused[txid_of(below)], 'attestor-bond-below-min')
         ref = c.height - 1
         raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)     # $100 at 300 % and $0.05 = 6,000 YEC
         c.mine(tag(), [raw])
         self.assertEqual(c.model.snapshots[c.height].collateral_zat, collateral_for(c, 10_000, ref))
         self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)                # far above 1,000 YEC: the cap
-        late = c.register_tx(ATTESTORS[2], c.height + 1 + 200, ym.COIN * 5 // 2)
+        late = c.register_tx(ATTESTORS[2], c.height + 1 + 200, 5 * ym.COIN)
         c.mine(tag(), [late])
         self.assertEqual(c.refused[txid_of(late)], 'attestor-bond-below-min')
         c.mine_n(c.params.bond_maturity, price_fn=lambda h: 50_000)
@@ -1630,8 +1630,8 @@ class SeatTests(unittest.TestCase):
         self.assertIsNone(ym.eviction_victim(m, H, 8 * C, LW, p))
         self.assertEqual(ym.eviction_victim(m, H, 9 * C, LW, p), k(2))
         self.assertIsNone(ym.eviction_victim(m, H, 8 * C * 105 // 100, LW, p))
-        self.assertIsNotNone(ym.eviction_victim([(k(0), 2 * C, H - 8064, H)], H, 3 * C, LW, p))
-        self.assertIsNone(ym.eviction_victim([(k(0), 2 * C, H - 420480, H)], H, 3 * C, LW, p))
+        self.assertIsNotNone(ym.eviction_victim([(k(0), 6 * C, H - 8064, H)], H, 9 * C, LW, p))
+        self.assertIsNone(ym.eviction_victim([(k(0), 6 * C, H - 420480, H)], H, 9 * C, LW, p))
         self.assertIsNotNone(ym.eviction_victim([(k(0), 8000 * C, H - 10 * 420480, H)], H, 20000 * C, LW, p))
         m.append((k(3), 1000 * C, H - 420480, H - LW - 1))
         self.assertEqual(ym.eviction_victim(m, H, p.bond_min_floor_zat, LW, p), k(3))

@@ -635,7 +635,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.emergencyNoticeTtl, 1152);
     BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(m.attestFeeBps, 5000);                  // H-4 (D-3 had 2,500)
-    BOOST_CHECK_EQUAL(m.bondMinFloorZat, 5000 * COIN);      // D-Q-30
+    BOOST_CHECK_EQUAL(m.bondMinFloorZat, 10000 * COIN);     // D-Q-30 (owner 2026-10-11: 10,000 YEC)
     BOOST_CHECK_EQUAL(m.bondMinCapZat, 20000 * COIN);
     BOOST_CHECK_EQUAL(m.bondShareBps, 500);
     BOOST_CHECK_EQUAL(m.bondMinLock, 0);                     // the bond exit delay (owner 2026-10-11): the lock is in the vault state
@@ -686,7 +686,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(r.emergencyNoticeTtl, 64);
     BOOST_CHECK_EQUAL(r.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(r.attestFeeBps, 2500);
-    BOOST_CHECK_EQUAL(r.bondMinFloorZat, COIN * 5 / 2);     // D-Q-30 at 1/2,000 of mainnet
+    BOOST_CHECK_EQUAL(r.bondMinFloorZat, 5 * COIN);         // D-Q-30 at 1/2,000 of mainnet
     BOOST_CHECK_EQUAL(r.bondMinCapZat, 10 * COIN);
     BOOST_CHECK_EQUAL(r.bondShareBps, 500);
     BOOST_CHECK_EQUAL(r.bondMinLock, 0);
@@ -725,13 +725,12 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
 {
     const Params& m = MainParams();
     const Params r = RegtestParams(1, 0, 0, TestSet());
-    // mainnet (N_SLOTS 9): the floor binds to 900,000 YEC, the cap from 3.6 M YEC
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, m), 5000 * COIN);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(-1, m), 5000 * COIN);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(100000 * COIN, m), 5000 * COIN);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(900000 * COIN, m), 5000 * COIN);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(900000 * COIN + 1, m), 5000 * COIN + 1);       // ceil
+    // mainnet (N_SLOTS 9): the floor binds to 1.8 M YEC, the cap from 3.6 M YEC
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(-1, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(900000 * COIN, m), 10000 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1800000 * COIN, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1800000 * COIN + 1, m), 10000 * COIN + 1);     // ceil
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(2700000 * COIN, m), 15000 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(3600000 * COIN - 1, m), 20000 * COIN);       // ceil reaches the cap
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(3600000 * COIN - 180, m), 20000 * COIN - 1);
@@ -739,10 +738,10 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(10000000 * COIN, m), 20000 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(MAX_MONEY, m), 20000 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(std::numeric_limits<int64_t>::max(), m), 20000 * COIN);
-    // regtest (N_SLOTS 5, 2.5 / 10 YEC): the floor to 250 YEC, the cap from 1,000 YEC
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, r), COIN * 5 / 2);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(250 * COIN, r), COIN * 5 / 2);
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(300 * COIN, r), 3 * COIN);
+    // regtest (N_SLOTS 5, 5 / 10 YEC): the floor to 500 YEC, the cap from 1,000 YEC
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, r), 5 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(500 * COIN, r), 5 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(700 * COIN, r), 7 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1000 * COIN, r), 10 * COIN);
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1300 * COIN, r), 10 * COIN);
     // degenerate parameters: no slots gives the cap; a share of 0 gives the floor
@@ -751,7 +750,7 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
     BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, z), 20000 * COIN);
     z = m;
     z.bondShareBps = 0;
-    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(MAX_MONEY, z), 5000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(MAX_MONEY, z), 10000 * COIN);
     // review A2: SNAP skips the snapshot when the bond is outside [floor, cap]; the minimum never leaves that interval
     for (const Params* q : { &m, &r }) {
         for (CAmount c : { (CAmount)-1, (CAmount)0, (CAmount)1, 250 * COIN, 900000 * COIN, 900000 * COIN + 1, 2000000 * COIN,

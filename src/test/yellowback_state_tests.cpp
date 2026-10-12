@@ -2620,7 +2620,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     // below the module's floor at its block: invalid since the seats re-review (no never-eligible member can hold a
     // seat); BOND_MIN_LOCK is 0 since the bond exit delay (the lock is in the vault state), so a bond locked for one
     // block qualifies
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, COIN * 5 / 2 - 1)), verdict::ATTESTOR_BOND_BELOW_MIN);   // D-Q-30: below the 2.5-YEC floor
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 5 * COIN - 1)), verdict::ATTESTOR_BOND_BELOW_MIN);   // D-Q-30: below the 5-YEC floor
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 1);
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, 0)), verdict::OK);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 2);
@@ -2772,9 +2772,9 @@ BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
     BOOST_CHECK(EvictionVictim(m, H, 9 * COIN, LW, P) == std::optional<CPubKey>(key(2)));   // the youngest 8 YEC
     BOOST_CHECK(!EvictionVictim(m, H, 8 * COIN * 105 / 100, LW, P).has_value());     // not above x1.05 (and f(10) > 1)
     // 1.5x beats a one-week member, loses to a one-year member
-    std::vector<SeatCandidate> week = { cand(0, 2 * COIN, H - 8064, H) }, year = { cand(0, 2 * COIN, H - 420480, H) };
-    BOOST_CHECK(EvictionVictim(week, H, 3 * COIN, LW, P).has_value());
-    BOOST_CHECK(!EvictionVictim(year, H, 3 * COIN, LW, P).has_value());
+    std::vector<SeatCandidate> week = { cand(0, 6 * COIN, H - 8064, H) }, year = { cand(0, 6 * COIN, H - 420480, H) };
+    BOOST_CHECK(EvictionVictim(week, H, 9 * COIN, LW, P).has_value());
+    BOOST_CHECK(!EvictionVictim(year, H, 9 * COIN, LW, P).has_value());
     // a new 20,000 YEC bond beats 8,000 YEC at any tenure
     std::vector<SeatCandidate> old8k = { cand(0, 8000 * COIN, H - 10 * 420480LL, H) };
     BOOST_CHECK(EvictionVictim(old8k, H, 20000 * COIN, LW, P).has_value());
@@ -2843,31 +2843,31 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
         f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { m });
         BOOST_REQUIRE(f.Vault(CTransaction(m).GetHash()).has_value());
     };
-    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, f.P.startHeight), COIN * 5 / 2);   // the virtual snapshot: no collateral
+    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, f.P.startHeight), 5 * COIN);   // the virtual snapshot: no collateral
     f.Activate(FIVE);
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 0);
-    BOOST_CHECK_EQUAL(bondMin(), COIN * 5 / 2);               // empty vaults: the 2.5-YEC floor
+    BOOST_CHECK_EQUAL(bondMin(), 5 * COIN);                   // empty vaults: the 5-YEC floor
     // the floor's boundary (seats re-review: a join below the minimum at its block is invalid, so it is never recorded):
-    // 2.5 YEC - 1 zat is refused, 2.5 YEC is seq 0
+    // 5 YEC - 1 zat is refused, 5 YEC is seq 0
     auto refusedAs = [&](const CMutableTransaction& m) {
         auto it = f.refused.find(CTransaction(m).GetHash());
         return it == f.refused.end() ? std::string("none") : it->second.verdict;
     };
-    const CMutableTransaction below0 = f.RegisterTx(0, COIN * 5 / 2 - 1);
-    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { below0, f.RegisterTx(1, COIN * 5 / 2) });
+    const CMutableTransaction below0 = f.RegisterTx(0, 5 * COIN - 1);
+    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { below0, f.RegisterTx(1, 5 * COIN) });
     BOOST_CHECK_EQUAL(refusedAs(below0), verdict::ATTESTOR_BOND_BELOW_MIN);
-    // the minimum rises with collateral: 300 YEC locked -> ceil(300 x 500 / 10^4 / 5) = 3 YEC
-    mint(300 * COIN);
-    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 300 * COIN);
-    BOOST_CHECK_EQUAL(bondMin(), 3 * COIN);
-    const CMutableTransaction below2 = f.RegisterTx(2, 3 * COIN - 1);
-    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { below2, f.RegisterTx(3, 3 * COIN) });   // seq 1
+    // the minimum rises with collateral: 700 YEC locked -> ceil(700 x 500 / 10^4 / 5) = 7 YEC
+    mint(700 * COIN);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 700 * COIN);
+    BOOST_CHECK_EQUAL(bondMin(), 7 * COIN);
+    const CMutableTransaction below2 = f.RegisterTx(2, 7 * COIN - 1);
+    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { below2, f.RegisterTx(3, 7 * COIN) });   // seq 1
     BOOST_CHECK_EQUAL(refusedAs(below2), verdict::ATTESTOR_BOND_BELOW_MIN);
     const int reg1 = f.tip;
     while (f.tip < reg1 + f.P.bondMaturity) quote();
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // judged at its own (empty) snapshot
     BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);
-    // the cap: 1,300 YEC locked would ask 13 YEC; the minimum stops at 10 YEC
+    // the cap: 1,700 YEC locked would ask 17 YEC; the minimum stops at 10 YEC
     mint(1000 * COIN);
     BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);
     const CMutableTransaction below4 = f.RegisterTx(4, 10 * COIN - 1);
@@ -2876,7 +2876,7 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
     const int reg2 = f.tip;
     while (f.tip < reg2 + f.P.bondMaturity) quote();
     BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::ELIGIBLE);
-    // checked once: the 2.5-YEC and 3-YEC records stay ELIGIBLE under a 10-YEC minimum, and a price move (which the
+    // checked once: the 5-YEC and 7-YEC records stay ELIGIBLE under a 10-YEC minimum, and a price move (which the
     // rule never reads) changes nothing
     for (int i = 0; i < 70; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
     BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
@@ -2889,13 +2889,13 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
     while (f.tip < reg34 + f.P.bondMaturity) quote();
     BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 3, 4 }));
     // the bump: seq 5 posts 10 YEC and, by SeatRank (bond x the tenure factor; seq 0 seated, x1.05), outranks seq 0
-    // (2.5 YEC) at the first SNAP where seq 5 is ELIGIBLE (the tenure factor is near 1.0 at regtest ages)
+    // (5 YEC) at the first SNAP where seq 5 is ELIGIBLE (the tenure factor is near 1.0 at regtest ages)
     f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(8, 10 * COIN) });
     const int reg5 = f.tip;
     BOOST_REQUIRE(f.Attestor(5).has_value());
     const int reg0 = f.Attestor(0)->registerHeight;
     BOOST_CHECK(SeatWeight(10 * COIN, f.P.bondMaturity, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10000) >
-                SeatWeight(COIN * 5 / 2, reg5 + f.P.bondMaturity - reg0, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10500));
+                SeatWeight(5 * COIN, reg5 + f.P.bondMaturity - reg0, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10500));
     while (f.tip < reg5 + f.P.bondMaturity - 1) quote();
     BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 3, 4 }));
     quote();
