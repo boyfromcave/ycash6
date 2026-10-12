@@ -90,7 +90,7 @@ Undocumented result fields are a contract violation; so is a missing field not m
 
 - `SetParams` = `{"seats": int, "unlockthreshold": int, "cancelthreshold": int, "slashthreshold": int, "open": bool, "ratelimitbps": int, "ratewindow": int, "livenesswindow": int, "bondmin": yec, "bondlockmin": int, "maturity": int, "admitkey": key}`
 - `Set` = `{"setid": hash, "height": height, ...SetParams, "createheight": height, "winddownheight": height, "lockedvalue": yec, "epoch": int, "epochbasis": yec, "epochused": yec, "unlockavailable"?: yec, "members": int, "active": int, "current": int, "dormant": bool, "released": bool}`
-- `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "wallet": bool}`
+- `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "exitheight"?: height, "unlockheight"?: height, "wallet": bool}`
 - `VaultFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerheight": height, "appheight": height, "owner": pqkeyid, "ownerscheme": int}`
 - `IntentFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "owner": pqkeyid, "ownerscheme": int, "recipienthash": hash, "vaulthash": hash}`
 - `TemplateOut` = `{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "vault", "value": yec, "valuezat": zat, "height": height, "script": hex, ...VaultFields, "wallet": bool}|{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "intent", "value": yec, "valuezat": zat, "height": height, "script": hex, ...IntentFields, "matureheight": height, "mature": bool, "cancellable": bool, "origin": hex, "wallet": bool}`
@@ -130,7 +130,9 @@ Result: `{...Set, "memberlist": [Member]}`
 The set's `SET_CREATE` parameters, `createheight`, `winddownheight` (0 = none), the rate fields
 (`lockedvalue`, `epoch`, `epochbasis`, `epochused`, and `unlockavailable` only when the set is
 rate limited), counts (`members`, `active`, `current`), the §15.4 predicates `dormant` and
-`released`, and `memberlist` (`wallet`: this wallet holds the key). Predicates are evaluated at
+`released`, and `memberlist` (`wallet`: this wallet holds the key; `exitheight` and `unlockheight` =
+`exitheight + maturity`, the first block its bond may be spent in, only while the member has left and its bond is
+unspent -- the bond exit delay). Predicates are evaluated at
 `height` (default: the next block) over the state at the tip. Error `-5` for an unknown set.
 
 ### `vault_list ( {"tag", "setid", "owner", "kind": "vault"|"intent", "mine": bool} )`

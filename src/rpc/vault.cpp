@@ -270,7 +270,7 @@ uint8_t ParseActType(const UniValue& v)
     throw JSONRPCError(RPC_INVALID_PARAMETER, "unknown act type " + s + " (create, join, heartbeat, remove, equivocation, winddown)");
 }
 
-UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers);
+UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers, const KVReader* kv = nullptr);
 
 #ifdef ENABLE_WALLET
 bool WalletHasKey(const CPubKey& k) { return pwalletMain && pwalletMain->HaveKey(k.GetID()); }
@@ -284,7 +284,7 @@ bool WalletHasPQKey(const CPQKeyID& id) { return pwalletMain && pwalletMain->Hav
 bool WalletHasPQKey(const CPQKeyID&) { return false; }
 #endif
 
-UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers)
+UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers, const KVReader* kv)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("setid", id.GetHex());
@@ -335,6 +335,15 @@ UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members,
             mo.pushKV("bondvalue", ValueFromAmount(m.second.bondValue));
             mo.pushKV("bondlocktime", (int64_t)m.second.bondLocktime);
             mo.pushKV("bondfrozen", m.second.bondFrozen);
+            // the bond exit delay (seats re-review): when the member's bond is still indexed and its member has left
+            if (kv) {
+                if (auto b = GetBond(*kv, m.second.bondOutpoint)) {
+                    if (b->exitHeight != 0) {
+                        mo.pushKV("exitheight", b->exitHeight);
+                        mo.pushKV("unlockheight", b->exitHeight + (int64_t)s.params.maturity);
+                    }
+                }
+            }
             mo.pushKV("wallet", WalletHasKey(m.first));
             arr.push_back(mo);
         }
@@ -465,7 +474,7 @@ UniValue set_getinfo(const UniValue& params, bool fHelp)
     }
     auto s = snap->GetSet(id);
     if (!s) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "unknown set " + id.GetHex());
-    return SetJSON(id, *s, snap->GetMembers(id), h, true);
+    return SetJSON(id, *s, snap->GetMembers(id), h, true, &snap->Base());
 }
 
 UniValue vault_list(const UniValue& params, bool fHelp)
