@@ -564,11 +564,39 @@ class ModelTests(unittest.TestCase):
         c.mine_to(left + s.p["maturity"])
         c.block(m1_spend)
         self.assertEqual(c.m.get_set(sid).members[MKEYS[1]].status, v.MEMBER_REMOVED)
-        # a burned member rejoins with a fresh bond: the old bond stays frozen
-        c.block(c.join_tx(sid, 3))            # one current member left (< slashThreshold): admitKey admits
-        self.assertEqual(c.m.get_set(sid).members[MKEYS[3]].status, v.MEMBER_ACTIVE)
+        # a burned member cannot rejoin: its frozen bond is never spent (one unspent bond per (set, key), review B1)
+        self.assertEqual(c.reject(c.join_tx(sid, 3)), 'bad-vault-act-join')
         self.assertEqual(c.reject(v.build_bond_spend_tx(m3.bond_outpoint, MEMBERS[3], m3.bond_value,
                                                         m3.bond_locktime, c.dest)), 'bad-vault-bond-frozen')
+        # the member that left and withdrew rejoins with a fresh bond (one current member left: admitKey admits)
+        c.block(c.join_tx(sid, 1))
+        self.assertEqual(c.m.get_set(sid).members[MKEYS[1]].status, v.MEMBER_ACTIVE)
+
+    def test_exit_delay_no_slash_escape(self):
+        # review B1/A1 (2026-10-11), a bridge-shaped (closed) set: no rejoin while the old bond is unspent; a cosigned
+        # burn reaches a bond in its exit delay; no self-exit on a set with maturity 0
+        c = Chain()
+        sid = c.setup(members=(0, 1, 2, 3))
+        s = c.m.get_set(sid)
+        m0 = s.members[MKEYS[0]]
+        leave, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[0]], burn=0)
+        c.block(leave)
+        self.assertEqual(c.reject(c.join_tx(sid, 0, admit=[MEMBERS[1], MEMBERS[2]])), 'bad-vault-act-join')
+        nob, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1], MEMBERS[2]], burn=0)
+        self.assertEqual(c.reject(nob), 'bad-vault-act-remove')
+        few, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1]], burn=1)
+        self.assertEqual(c.reject(few), 'bad-vault-act-sig')
+        burn, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1], MEMBERS[2]], burn=1)
+        c.block(burn)
+        m0 = c.m.get_set(sid).members[MKEYS[0]]
+        self.assertEqual((m0.status, m0.bond_frozen, c.m.bonds[m0.bond_outpoint][2]), (v.MEMBER_REMOVED, True, True))
+        c.mine_to(c.h + 10)
+        self.assertEqual(c.reject(v.build_bond_spend_tx(m0.bond_outpoint, MEMBERS[0], m0.bond_value, m0.bond_locktime,
+                                                        c.dest)), 'bad-vault-bond-frozen')
+        sid0 = c.create_set(maturity=0, flags=v.SET_FLAG_OPEN)
+        c.block(c.join_tx(sid0, 4, admit=[]))
+        own, _p = v.build_set_remove_tx(c.coin(), sid0, MKEYS[4], [MEMBERS[4]], burn=0)
+        self.assertEqual(c.reject(own), 'bad-vault-act-remove')
 
     def test_join_admission_and_seats(self):
         c = Chain()

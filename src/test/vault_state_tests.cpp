@@ -633,6 +633,55 @@ BOOST_AUTO_TEST_CASE(exit_delay_slash_during_delay)
     BOOST_CHECK_EQUAL(ps.size(), 67u);
 }
 
+BOOST_AUTO_TEST_CASE(exit_delay_no_slash_escape)
+{
+    // Review B1/A1 (2026-10-11), on a bridge-shaped (closed, ungoverned) set: a member that left cannot rejoin while
+    // its old bond is unspent, and a cosigned SET_REMOVE with burn still reaches a bond in its exit delay.
+    Chain c;
+    const CKey admit = MakeKey(200);
+    CKey k1 = MakeKey(1), k2 = MakeKey(2), k3 = MakeKey(3), k4 = MakeKey(4);
+    SetId s = CreateSet(c, Params(false));
+    for (const CKey& k : {k1, k2, k3, k4}) BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k, {admit})));
+    c.Empty(5);
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    // A1: k1 signs something fraudulent, then exits on its own before the burn vote lands
+    const int64_t left = c.h;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    BOOST_CHECK_EQUAL(GetBond(c.kv, bond1)->exitHeight, left);
+    // B1: no rejoin during the delay (the old bond is unspent), whatever the new bond
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k1, {k2, k3})), "bad-vault-act-join");
+    // a burn = 0 vote on a member that already left stays refused; a burn by too few or by the target too
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), false, {k2, k3})), "bad-vault-act-remove");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k2})), "bad-vault-act-sigs");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k1, k2})), "bad-vault-act-sigs");
+    // the cosigned burn freezes the bond in its delay; the member stays REMOVED
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), true, {k2, k3})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_REMOVED);
+    BOOST_CHECK(Member(c, s, k1).bondFrozen);
+    BOOST_CHECK(GetBond(c.kv, bond1)->frozen);
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k2, k3})), "bad-vault-act-remove");   // already frozen
+    c.Empty(10);
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, bond1, 1, {CTxOut(900, Recipient(7))}, false)), "bad-vault-bond-frozen");
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k1, {k2, k3})), "bad-vault-act-join");   // a frozen bond never leaves
+    // k2 exits; its rejoin waits for its old bond's spend at exit + maturity, then succeeds
+    const COutPoint bond2 = Member(c, s, k2).bondOutpoint;
+    const int64_t left2 = c.h;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k2.GetPubKey(), false, {k2})));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k2, {k3, k4})), "bad-vault-act-join");
+    c.Empty((int)(left2 + 5 - c.h));
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, bond2, 1, {CTxOut(900, Recipient(7))}, false)));
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k2, {k3, k4})));
+    BOOST_CHECK_EQUAL(Member(c, s, k2).status, MEMBER_ACTIVE);
+    // equivocation evidence also reaches a bond in its exit delay (it already did; with the rejoin refused it is
+    // always the bond the evidence's key posted)
+    // A1: no self-exit on a set with maturity 0 (no slash window)
+    SetCreateBody z = Params(true);
+    z.maturity = 0;
+    SetId s0 = CreateSet(c, z);
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s0, k3, {})));
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s0, k3.GetPubKey(), false, {k3})), "bad-vault-act-remove");
+}
+
 BOOST_AUTO_TEST_CASE(vault_create_rules)
 {
     Chain c;

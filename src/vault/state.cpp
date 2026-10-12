@@ -718,6 +718,10 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         }
         auto existing = GetMember(*this, j.setId, j.memberKey);
         if (existing && existing->status == MEMBER_ACTIVE) return std::string("bad-vault-act-join");
+        // One unspent bond per (set, key) (review B1, 2026-10-11): a key whose previous bond in this set is still unspent
+        // -- in its exit delay, or frozen -- cannot join again, so the member record always names the key's only unspent
+        // bond and every slash (SET_REMOVE burn, SET_EQUIVOCATION, the ejection hook) reaches it until it is spent.
+        if (existing && GetBond(*this, existing->bondOutpoint)) return std::string("bad-vault-act-join");
         if (j.bondVout >= tx.vout.size()) return std::string("bad-vault-act-bond");
         const CTxOut& bond = tx.vout[j.bondVout];
         const CScript bondSpk = BondScriptPubKey(j.bondLocktime, j.memberKey);
@@ -768,10 +772,28 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         auto s = GetSet(*this, r.setId);
         if (!s) return std::string("bad-vault-act-noset");
         auto m = GetMember(*this, r.setId, r.memberKey);
-        if (!m || m->status != MEMBER_ACTIVE) return std::string("bad-vault-act-remove");
+        if (!m) return std::string("bad-vault-act-remove");
         const MemberList members = GetMembers(*this, r.setId);
+        if (m->status != MEMBER_ACTIVE) {
+            // A slash after the exit (review A1, 2026-10-11): a cosigned SET_REMOVE with burn of a member that already
+            // left (REMOVED: its own exit or a displacement) whose bond is in its exit delay -- unspent, unfrozen --
+            // freezes that bond; the member stays REMOVED. Anything else of a member that is not ACTIVE is refused.
+            auto b = GetBond(*this, m->bondOutpoint);
+            if (m->status != MEMBER_REMOVED || r.burn != 1 || !b || b->frozen || b->exitHeight == 0 ||
+                b->setId != r.setId || b->memberKey != r.memberKey) {
+                return std::string("bad-vault-act-remove");
+            }
+            if (!cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
+            m->bondFrozen = true;
+            b->frozen = true;
+            PutRecord(KeyBond(m->bondOutpoint), *b);
+            PutRecord(KeyMember(r.setId, r.memberKey), *m);
+            return std::nullopt;
+        }
         // A member's voluntary exit (owner 2026-10-11): the SET_REMOVE of itself, signed by itself alone, without burn.
         const bool self = keys.size() == 1 && keys[0] == r.memberKey && r.burn == 0;
+        // ... not on a set with maturity 0: the exit delay is the set's slash window (review A1)
+        if (self && s->params.maturity == 0) return std::string("bad-vault-act-remove");
         if (!self && !cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
         m->status = MEMBER_REMOVED;
         if (r.burn) {

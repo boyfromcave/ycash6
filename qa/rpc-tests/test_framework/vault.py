@@ -1933,6 +1933,8 @@ class VaultModel(object):
             old = s.members.get(mk)
             if old is not None and old.status == MEMBER_ACTIVE:
                 raise VaultError('bad-vault-act-join', 'already active')
+            if old is not None and old.bond_outpoint in self.bonds:     # one unspent bond per (set, key) (review B1)
+                raise VaultError('bad-vault-act-join', 'previous bond unspent')
             if not keys or keys[0] != mk:
                 raise VaultError('bad-vault-act-sig', 'S_1 must be the member')
             admit = keys[1:]
@@ -1966,9 +1968,20 @@ class VaultModel(object):
         elif t == ACT_SET_REMOVE:
             mk = bytes.fromhex(a['memberKey'])
             m = s.members.get(mk)
-            if m is None or m.status != MEMBER_ACTIVE:
-                raise VaultError('bad-vault-act-remove', 'target not active')
+            if m is None:
+                raise VaultError('bad-vault-act-remove', 'target not a member')
+            if m.status != MEMBER_ACTIVE:
+                # a slash after the exit (review A1): a cosigned burn of a REMOVED member whose bond is in its exit delay
+                b = self.bonds.get(m.bond_outpoint)
+                if m.status != MEMBER_REMOVED or a['burn'] != 1 or b is None or b[2] or not b[3]:
+                    raise VaultError('bad-vault-act-remove', 'target not active')
+                if len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys):
+                    raise VaultError('bad-vault-act-sig', 'removal signers')
+                m.bond_frozen = b[2] = True
+                return
             own = keys == [mk] and not a['burn']        # a member's voluntary exit (owner 2026-10-11)
+            if own and s.p['maturity'] == 0:
+                raise VaultError('bad-vault-act-remove', 'no exit on a set with maturity 0')
             if not own and (len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys)):
                 raise VaultError('bad-vault-act-sig', 'removal signers')
             m.status = MEMBER_REMOVED
