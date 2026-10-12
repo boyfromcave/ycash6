@@ -1080,7 +1080,17 @@ BundleFactsW BundleAt(const Context& ctx, int R, const std::vector<unsigned char
 {
     BundleFactsW f;
     f.armed = ArmedAt(ctx.st.View(), ctx.params, R);
-    if (!f.armed) return f;
+    if (!f.armed) {
+        // final review B-3: the builders attach a bundle only when ARMED (prepare leaves pf.bundle empty). An explicit
+        // carrier bundle while unarmed is still carried, and a bundle that refreshes liveness must pass the whole
+        // BUNDLE-1 (selection included) or the transaction is invalid: refuse it here rather than at relay.
+        if (bundle.has_value() && !bundle->empty()) {
+            std::vector<uint16_t> selected;
+            if (!VerifyBundleBytes(ctx.st.View(), ctx.params, bundle.value(), R, selector, &selected).ok)
+                throw std::runtime_error(strprintf("liveness-unheld: the layer is not ARMED at %d and the carrier's bundle fails BUNDLE-1; build the carrier without a bundle", R));
+        }
+        return f;
+    }
     std::vector<unsigned char> bytes;
     if (bundle.has_value() && !bundle->empty()) {
         bytes = bundle.value();                       // bundleHex overrides the pool
@@ -1303,6 +1313,9 @@ void DryRunOrThrow(Context& ctx, const BuiltTx& out)
 {
     const int H = ctx.indexHeight + 1;
     std::optional<TxLogRecord> log = DryRun(ctx.index.MutableView(), ctx.index.ParamsAt(H), CTransaction(out.tx), H);
+    // final review A-2: a liveness refusal is reported as itself, whatever the kind
+    if (log.has_value() && log->verdict == verdict::LIVENESS_UNHELD)
+        throw std::runtime_error(std::string(verdict::LIVENESS_UNHELD) + ": the bundle would refresh liveness but this transaction is not a held act at height " + std::to_string(H));
     switch (out.kind) {
     case BuiltKind::MINT:
         if (!log.has_value() || log->Type() != TxLogType::MINT) throw std::runtime_error("mint-dry-run: the dry run saw no mint");
