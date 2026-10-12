@@ -24,6 +24,17 @@ std::shared_ptr<const Params> CurrentParams()
     return g_moduleParams;
 }
 
+/** The parameter set in force at `height`, chosen as the index's mirror chooses it (SelectParams over the sets the
+ *  module holds, YellowbackIndex::ParamsAt): a release that adds a set at a later start height changes both alike
+ *  (final review B-2). Today the module and the index each hold the one set init configured. */
+std::shared_ptr<const Params> ParamsAtHeight(int64_t height)
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p) return p;
+    const std::vector<Params> sets{ *p };
+    return std::make_shared<const Params>(SelectParams(sets, (int)std::max<int64_t>(0, std::min<int64_t>(height, 0x7FFFFFFF))));
+}
+
 /** The attestor set when it has the shape the module adopts (ApplySetAct, state.cpp): OPEN, ATTESTOR_SEATS seats,
  *  maturity BOND_MATURITY, livenessWindow >= ATTESTOR_LIVENESS_MIN; else nullopt (the module's mirror has no set). */
 std::optional<vault::SetRecord> AdoptedSet(const Params& p, const vault::ModuleContext& ctx)
@@ -129,7 +140,7 @@ std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::Set
 
 std::vector<std::pair<CPubKey, int64_t>> Module::Liveness(const CTransaction& tx, const vault::ModuleContext& ctx) const
 {
-    std::shared_ptr<const Params> p = CurrentParams();
+    std::shared_ptr<const Params> p = ParamsAtHeight(ctx.height);   // as the mirror's ParamsAt(height)
     if (!p || !ctx.state || !ctx.blockHashAt || !AdoptedSet(*p, ctx)) return {};
     const vault::MemberList all = vault::GetMembers(*ctx.state, p->attestorSetId);
     // seq -> the member whose join ordinal is seq + 1 (the module numbers the set's joins from 0, one seq per SET_JOIN)
