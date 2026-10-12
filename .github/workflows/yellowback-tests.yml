@@ -829,6 +829,8 @@ jobs:
           want=5; if grep -q '"inTermClaims"' src/rpc/yellowback.cpp; then want=6; fi
           # rpcversion 7 on the post-quantum line (quantum spec §6.2).
           if [ "$want" = 6 ] && grep -q '"falconActive"' src/rpc/yellowback.cpp; then want=7; fi
+          # rpcversion 8 on the fee line (quantum fees spec §3.4: params.fees, maxMintCents, supplyCap).
+          if [ "$want" = 7 ] && grep -q '"maxMintCents"' src/rpc/yellowback.cpp; then want=8; fi
           export want
           test -f doc/yellowback-rpc.md && grep -q "rpcversion $want" doc/yellowback-rpc.md
           # rpcversion 5 (the vault upgrade, upgrade plan §15.10): yed_getinfo carries the upgrade object
