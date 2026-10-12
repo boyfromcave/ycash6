@@ -54,7 +54,8 @@ def holder_of(node):
         sys.exit("lwd-rawmint: yed_validateaddress refused the wallet's own %s: %s" % (addr, v.get("reason")))
     if v["type"] == "pq":
         return addr, ym.pqpkh_script(hex_str_to_bytes(v["keyid"]))    # TX_PQPKH: 20 <keyHash> OP_scheme OP_CHECKPQSIG
-    return addr, ym.p2pkh_script(hex_str_to_bytes(v["keyid"]))        # P2PKH (Falcon inactive)
+    # P2PKH (Falcon inactive): from the plain transparent form, since a P2PKH "keyid" is CKeyID::GetHex(), byte-reversed
+    return addr, _yu._spk_of_address(v["transparentAddress"])
 
 
 def main():
