@@ -177,8 +177,9 @@ env:
   # (scripts/extract_spec.py --check-in-term, `make spec-check-in-term`).
   # On upgrade/quantum-vaults: d992997, the workspace commit with the generator's quantum mode
   # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
-  # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md).
-  YB_WORKSPACE_COMMIT: d9929976647757750b0c97d1c4276547b448e0d1
+  # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md). Since the fee merge: 26ae6b7, which adds the
+  # generator's fees mode (--check-fees, rpcversion 8) and docs/plans/yellowback-quantum-fees-rpc-delta.md.
+  YB_WORKSPACE_COMMIT: 26ae6b7fdd29aba5d3163fc21ec6c7b6d3c304ab
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -532,6 +533,12 @@ jobs:
           if [ "$interm" = 1 ] && grep -q '"falconActive"' src/rpc/yellowback.cpp; then quantum=1; fi
           echo "quantum=$quantum" >> "$GITHUB_OUTPUT"
           echo "post-quantum: $quantum"
+          # The fees line (the quantum line after D-Q-23/24/25, quantum fees spec §3.4): the rpc doc's title
+          # states rpcversion 8; the contract comes from the workspace's fees mode, as ycash-dd's audit decides it.
+          fees=0
+          if [ "$quantum" = 1 ] && head -1 doc/yellowback-rpc.md | grep -Eq 'rpcversion ([89]|[1-9][0-9])$'; then fees=1; fi
+          echo "fees=$fees" >> "$GITHUB_OUTPUT"
+          echo "fees line: $fees"
 
       - name: Frozen set at zero delta and the line budgets (plan §2)
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
@@ -686,7 +693,7 @@ jobs:
           done
           exit $rc
 
-      - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum) through the workspace generator (findings (39), (44))
+      - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees) through the workspace generator (findings (39), (44))
         # The upgrade line's doc/yellowback-rpc-contract.json must be exactly what the workspace's
         # scripts/extract_spec.py produces from this tree's doc/yellowback-rpc.md in its upgrade
         # mode (the doc is the whole contract there), at the workspace commit pinned in env.
@@ -698,6 +705,7 @@ jobs:
         env:
           INTERM: ${{ steps.line.outputs.interm }}
           QUANTUM: ${{ steps.line.outputs.quantum }}
+          FEES: ${{ steps.line.outputs.fees }}
         run: |
           git init -q "$RUNNER_TEMP/ws"
           git -C "$RUNNER_TEMP/ws" fetch -q --depth 1 "https://github.com/$YB_WORKSPACE_REPO.git" "$YB_WORKSPACE_COMMIT"
@@ -709,6 +717,7 @@ jobs:
           doc = os.path.join(os.environ["GITHUB_WORKSPACE"], "doc", "yellowback-rpc.md")
           line, ver = ("interm", 6) if os.environ.get("INTERM") == "1" else ("upgrade", 5)
           if os.environ.get("QUANTUM") == "1": line, ver = ("quantum", 7)
+          if os.environ.get("FEES") == "1": line, ver = ("fees", 8)
           if x.doc_line(doc) != line:
               sys.exit("doc/yellowback-rpc.md is rpcversion %s; the %s line is rpcversion %d" % (x.rpcdoc_version(doc), line, ver))
           want = x.contract_text(x.read_plan(), x.read_plan_v3(), doc, x.RPCDOC6_REL)
@@ -717,7 +726,7 @@ jobs:
               sys.exit("contract rpcversion is not %d" % ver)
           if have != want:
               sys.stdout.writelines(difflib.unified_diff(have.splitlines(True), want.splitlines(True), "committed", "generated"))
-              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum"}.get(line, "-upgrade")))
+              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees"}.get(line, "-upgrade")))
           print("contract: rpcversion %d, identical to the generator's output (%d bytes)" % (ver, len(have)))
           PY
 

@@ -13,7 +13,7 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
   z_shieldcoinbase / z_mergetoaddress from an rq… (A-15), -mineraddress=rq…;
 - pay to rq… with sendtoaddress and sendmany (z_sendmany refuses it, below); receive (listunspent,
   getreceivedbyaddress, listreceivedbyaddress); spend through coin selection (sendtoaddress) at
-  max(the wallet's fee, LEGACY_DEFAULT_FEE, -pqfeerate x size);
+  max(the wallet's fee, LEGACY_DEFAULT_FEE, -pqfeerate x size, the ZIP-317 conventional fee);
 - the insight address index: getaddressbalance / utxos / txids / deltas / mempool by rq… and by the yr… YED form;
 - vault_release of an intent paying the wallet's PQ key: by a third party with the address (the owner finds it in
   the index), and by the owner after a restart without the script;
@@ -54,6 +54,7 @@ from test_framework.util import (
     wait_and_assert_operationid_status,
 )
 from test_framework.yellowback_model import base58check_decode, base58check_encode
+from test_framework.yellowback_util import MARGINAL_FEE, conventional_fee
 
 ACTIVATION = 210
 DELAY = 3
@@ -206,7 +207,7 @@ class WalletPQAddressTest(BitcoinTestFramework):
         both = n0.getaddressbalance({'addresses': [a, a2]})
         assert_equal(both['balance'], zat(3))
 
-        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size)')
+        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]
         n0.lockunspent(False, others)
         dest = n1.getnewaddress()
@@ -218,8 +219,11 @@ class WalletPQAddressTest(BitcoinTestFramework):
         fee = -n0.gettransaction(spend)['fee']
         # At least max(DEFAULT_FEE, -pqfeerate x size) (-pqfeerate defaults to -minrelaytxfee, 100 zat/kB); the
         # wallet's own minimum (-mintxfee, 1000 zat/kB) prices this large transaction above it, by size.
-        assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000), (fee, size)
-        assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000), (fee, size)
+        # 6.20.0 (q/fees review): a PQ-input transaction never pays below its ZIP-317 conventional fee (an SLH-DSA
+        # input is ~53 logical actions); the wallet prices the last coin-selection pass, so allow two actions' slack.
+        conv = conventional_fee(tx)
+        assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000, conv), (fee, size, conv)
+        assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000, conv + 2 * MARGINAL_FEE), (fee, size, conv)
         n0.lockunspent(True, others)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))
