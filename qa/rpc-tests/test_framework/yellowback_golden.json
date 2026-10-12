@@ -1,5 +1,5 @@
 {
- "description": "Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId 0eeebe67c4bc64cf5deb624972629c92b09e3362e126a3702443b192dca80f4a (the txid of the SET_CREATE at 224; livenessWindow 150, maturity 1), attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 % tiers, theta 125 %); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); 440 synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults (a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other lapses (the set's member dormancy) and two bond spends. txs[0] of every block is the coinbase. Blocks flagged \"invalid\" (137 bad-mint-amount, 217 vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied (U-21); the next entry is the same height mined again without the offending transaction.",
+ "description": "Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId 0eeebe67c4bc64cf5deb624972629c92b09e3362e126a3702443b192dca80f4a (the txid of the SET_CREATE at 224; livenessWindow 150, maturity 1), attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 % tiers, theta 125 %); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); 440 synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults (a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other lapses (the set's member dormancy), a member's own exit (SET_REMOVE, burn 0) and two bond spends (the leaver's at exit + BOND_MATURITY). txs[0] of every block is the coinbase. Blocks flagged \"invalid\" (137 bad-mint-amount, 217 vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied (U-21); the next entry is the same height mined again without the offending transaction.",
  "params": {
   "startHeight": 1,
   "sigmaRefBps": 0,
@@ -9,7 +9,7 @@
   "bundleCarrier": 0,
   "mintRequiresArmed": false
  },
- "stateHash": "6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7",
+ "stateHash": "aacf3c29f4e360faa1cc8985094cece29bec8ce5c91ab416949a597027c801a2",
  "tip": {
   "height": 440,
   "hash": "ca6c02a81b1fd42c9bf7775ace41f9b5224b700ad25acf0ccf48e86a979d1831"
@@ -3539,7 +3539,8 @@
    "hash": "836abcb650eb38b91faa29ee31367173310c3bede538439f7e5d9656cdf2ef4a",
    "subsidyZat": 312500000,
    "txs": [
-    "0400008085202f89010000000000000000000000000000000000000000000000000000000000000000ffffffff2802b00124594544210101d80e00000000000000001fb8390030a64841c3bf8be8c701b2e060e30b4bffffffff01205fa012000000001976a9141fb8390030a64841c3bf8be8c701b2e060e30b4b88ac00000000000000000000000000000000000000"
+    "0400008085202f89010000000000000000000000000000000000000000000000000000000000000000ffffffff2802b00124594544210101d80e00000000000000001fb8390030a64841c3bf8be8c701b2e060e30b4bffffffff01205fa012000000001976a9141fb8390030a64841c3bf8be8c701b2e060e30b4b88ac00000000000000000000000000000000000000",
+    "0400008085202f8901b2efeabd83649ac28abcc1e9054b6cc21d9f03f682047a2e855cbed7b67f67570000000000ffffffff0200000000000000008a6a46595601044a0fa8dc92b1432470a326e162339eb0929c62724962eb5dcf64bcc467beee0e03713f177e57bd5a923cffa08e9dcc64229e02271e7a780e522f839ad79112acf20041209d715eefdc4e88dc4ef53047331aced915d707157cd5b3bd15b86860cb994c967cdc8b7b98342efcc35acb919c89479dc9361e4f7cd029815618ec26b3c719a6e8030000000000001976a9149e3698c9e2fa3c9a7129ad288d7a3bd66d354f0188ac00000000000000000000000000000000000000"
    ]
   },
   {

@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = '6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7'
+GOLDEN_STATE_HASH = 'aacf3c29f4e360faa1cc8985094cece29bec8ce5c91ab416949a597027c801a2'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1405,7 +1405,7 @@ def build_golden():
     lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
     mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
     intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
-    release, dormancy, an equivocation, a revival and two bond spends.  Three blocks are rejected and
+    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Three blocks are rejected and
     mined again without the offending transaction (U-21): 137 (a mint of $50), 217 (an owner spend
     with no payload) and 251 (an armed mint without a bundle)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
@@ -1549,10 +1549,15 @@ def build_golden():
             w = max(q for q in range(4) if q not in (v3['lazy'], e))
             txs_at['heartbeat_w'] = c.heartbeat_tx(ATTESTORS[w])
             txs.append(txs_at['heartbeat_w'])
-        elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (one WITHDRAWN, the EJECTED one stays EJECTED)
+        elif h == GOLDEN_BLOCKS - params.bond_maturity:        # the bond exit delay: w leaves by its own SET_REMOVE (WITHDRAWN)
             e = v3['ejected']
             w = max(q for q in range(4) if q not in (v3['lazy'], e))
             v3['withdrawn'] = w
+            v3['exit_height'] = h
+            txs_at['leave_w'] = c.remove_tx(ATTESTORS[w][1], ATTESTORS[w])
+            txs.append(txs_at['leave_w'])
+        elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (w's at exit + BOND_MATURITY; the EJECTED one stays EJECTED)
+            e, w = v3['ejected'], v3['withdrawn']
             for name, q in (('spend_e', e), ('spend_w', w)):
                 rec = c.model.attestors[q]
                 txs_at[name] = c.bond_spend_tx(rec.bond_outpoint, ya.bond_script(BONDS[q][1], rec.bond_locktime), rec.bond_locktime)
@@ -1585,7 +1590,8 @@ def golden_document(c):
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
                        'cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other lapses '
-                       '(the set\'s member dormancy) and two bond spends. '
+                       '(the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
+                       'at exit + BOND_MATURITY). '
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
                        'vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied '
                        '(U-21); the next entry is the same height mined again without the offending transaction.'
@@ -1790,7 +1796,9 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.attestors[e].status, ym.A_EJECTED)
         self.assertTrue(m.attestors[e].bond_frozen)                            # P4-b: EQV-1 freezes the bond
         self.assertEqual(m.attestors[e].bond_spent_height, GOLDEN_BLOCKS)     # spent, still EJECTED (the model reads no bond freeze: the primitive refuses that spend)
-        self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, GOLDEN_BLOCKS))
+        self.assertEqual(v3['exit_height'], GOLDEN_BLOCKS - 8)                 # the bond exit delay: spent at exit + BOND_MATURITY
+        self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, v3['exit_height']))
+        self.assertEqual(m.attestors[w].bond_spent_height, GOLDEN_BLOCKS)
         self.assertEqual(m.attestors[w].last_act, GOLDEN_HEARTBEAT)
         # P4-b: the fourth attestor never heartbeat: its lastAct (join + maturity 8) lapsed at join + 8 + livenessWindow + 1
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
