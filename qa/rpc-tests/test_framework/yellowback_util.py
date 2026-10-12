@@ -591,6 +591,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
             extra.append('-pqfalconheight=%d' % falcon)
         kw = {'sigma_ref': self.sigma_ref}
         if not self.yellowback_enabled or i == STOCK:
+            # the stock node runs without -yellowbackattestorset: it forks from the others on a block whose
+            # validity the module's hooks decide (displacement, liveness, EQV-1 ejection, attestor-set acts;
+            # doc/yellowback.md "Regtest caveat", seats review B5) -- restart it with the flag before such a block
             return yellowback_node_args(extra, yellowback=False)
         if i in POOLS:
             return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw)

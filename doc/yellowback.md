@@ -118,6 +118,16 @@ flag can name it, so a regtest node starts with the vault upgrade alone, creates
 (`doc/yellowback-devnet.md` §2 walks through it). Without the attestor set the `yed_*` commands
 are not registered.
 
+**Regtest caveat: a node without `-yellowbackattestorset` can fork.** The module decides parts of the
+primitive's consensus for its attestor set through hooks — which member a join into the full set displaces,
+the liveness an attestation proves, the ejection EQV-1 makes, and the refusal of a `SET_REMOVE` / `SET_WINDDOWN`
+of the set (seats review B5). A regtest node that has the vault upgrade but not the flag runs none of these
+and rejects (or accepts) blocks the other nodes accept (or reject) once such a transaction is mined. On
+mainnet and testnet the set is compiled in with the activation, so every upgraded node runs them. Give every
+regtest node the flag once the set exists — the test harness and the devnet do, except the harness's and the
+devnet's "stock" node 1, which models a node without Yellowback and must not be driven through those
+transactions (restart it with the flag first, as `yellowback_attest_rejoin.py` does).
+
 Where Yellowback is live the node refuses `-prune` (the index rebuilds from blocks on disk), and a
 node whose index is unhealthy stops rather than validate blocks without it (*Rebuilding the
 index*). Options:
