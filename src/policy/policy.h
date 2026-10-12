@@ -192,6 +192,12 @@ static const int64_t DEFAULT_YED_FEE_USD_PER_KB_MICRO = 50000;
 static const CAmount DEFAULT_ATTESTED_FEE_FLOOR_PER_KB = 5000;
 static const int64_t DEFAULT_YED_MAX_TX_FEE_USD_MICRO = 2000000;
 static const CAmount DEFAULT_YED_MAX_TX_FEE = 10 * COIN;
+/** The least -yellowbackmaxtxfee may be (q/fees review): above the fees the wallet must pay. The largest single-PQ-input
+ *  spend, an SLH-DSA vault owner spend (a 7,939-byte scriptSig), has a ZIP-317 conventional fee of ~26,500 zat (53
+ *  logical actions x 500); a YED owner spend adds token, carrier and payload actions (~30,000-35,000 zat). 100,000 zat
+ *  (200 logical actions, 0.001 YEC) is ~3x that, so a lowered ceiling never caps a fee below what relay demands. */
+static const CAmount MIN_YED_MAX_TX_FEE = 100000;
+static_assert(MIN_YED_MAX_TX_FEE >= VAULT_RPC_FEE, "the ceiling's floor admits the vault RPCs' flat fee");
 /** The parameters, set once at init (and by unit tests) before any reader runs. The price is not here: see AttestedFeePrice(). */
 extern AttestedFeePolicy attestedFeePolicy;
 

@@ -12,7 +12,7 @@
 #     node's own mempool after a restart (it was dropped as "absurd" before the fix);
 #   - a plain post-quantum send committed under a raised dollar cap (above -maxtxfee) is still in the mempool after
 #     a restart whose cap is back at -maxtxfee (the cap moved, as under a halt or a price rise);
-#   - -yellowbackmaxtxfee below the flat fees is refused at init.
+#   - -yellowbackmaxtxfee below MIN_YED_MAX_TX_FEE (0.001 YEC) is refused at init.
 #
 #     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/yellowback_fees_reaccept.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 
@@ -83,10 +83,10 @@ class YellowbackFeesReacceptTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
         assert_greater_than(user.gettransaction(txid)['confirmations'], 0)
 
-        print('-yellowbackmaxtxfee below the flat fees is refused at init')
+        print('-yellowbackmaxtxfee below MIN_YED_MAX_TX_FEE (100,000 zat, above the fees the wallet must pay) is refused at init')
         stop_node(self.nodes[USER], USER)
         self.nodes[USER] = None
-        assert_start_raises_init_error(USER, self.options.tmpdir, self.node_args(USER, ['-yellowbackmaxtxfee=0.00009']),
+        assert_start_raises_init_error(USER, self.options.tmpdir, self.node_args(USER, ['-yellowbackmaxtxfee=0.00099']),
                                        '-yellowbackmaxtxfee must be at least')
         user = self.restart(USER, [])
         self.sync_all(blocks_only=True)

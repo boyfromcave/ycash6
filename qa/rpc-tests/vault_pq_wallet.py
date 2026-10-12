@@ -11,10 +11,13 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
 - vault_lock with no owner draws a new SLH-DSA wallet owner; owner as a PQ address, a pqkeyid and
   {scheme, keyhash}; vault_list's "wallet" flag on the owner's node only;
 - vault_ownerspend selector 3 on a released set (no members) and selector 2 after ownerHeight, each a
-  7,939-byte SLH-DSA owner scriptSig; the fee is max(VAULT_RPC_FEE, -pqfeerate x size): 10,000 at the
-  default rate, size-priced on a node with -pqfeerate=0.001;
+  7,939-byte SLH-DSA owner scriptSig; the fee is max(VAULT_RPC_FEE, -pqfeerate x size, the ZIP-317
+  conventional fee): ~27,000 (54 logical actions) at the default rate, size-priced on a node with -pqfeerate=0.001;
+  node 0 runs -txunpaidactionlimit=0 (q/fees review) and mines every block, so nothing with an unpaid action
+  confirms; a vault the conventional fee would leave a dust output is refused;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
-  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size);
+  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size), and at the
+  default rate (node 0) never below the ZIP-317 conventional fee;
 - A-15: z_sendmany (ANY_TADDR) and z_mergetoaddress never select a TX_PQPKH coin (they cannot sign it);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
   signs its owner spend;
@@ -31,6 +34,7 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.pq import pqpkh_script
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_util import conventional_fee
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
@@ -75,6 +79,8 @@ class VaultPQWalletTest(BitcoinTestFramework):
 
     def node_args(self, i):
         a = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=vault']
+        if i == 0:
+            a += ['-txunpaidactionlimit=0']   # q/fees review: the ZIP-317 opt-in (zip317.h); node 0 mines every block
         if i == 1:
             a += ['-pqfeerate=0.001', '-exportdir=%s' % os.path.join(self.options.tmpdir, 'export1')]
         if i == 2:
@@ -167,15 +173,27 @@ class VaultPQWalletTest(BitcoinTestFramework):
         mine = n0.vault_list({'mine': True})
         assert {near['outpoint'], far['outpoint'], by_id['outpoint'], by_obj['outpoint']} <= {r['outpoint'] for r in mine}
 
-        print('vault_ownerspend selector 3 (released set), fee 10,000 at the default rate')
+        print('vault_ownerspend selector 3 (released set), the ZIP-317 conventional fee at the default rate')
         dest = n0.getnewaddress()
         r = n0.vault_ownerspend(far['outpoint'], dest)
         assert_equal(r['selector'], 3)
         self.mine(1)
         fee, size, tx = self.fee_of(r['txid'], zat(4))
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_OWNER_SCRIPTSIG)
-        assert_equal(fee, VAULT_RPC_FEE)
+        conv = conventional_fee(tx)
+        assert conv > VAULT_RPC_FEE, conv                                # ~54 logical actions: 27,000 zat
+        assert_equal(fee, conv)
         assert size > 8000, size
+        assert tx['confirmations'] >= 1
+
+        print('a vault the conventional fee would leave a dust output is refused; one zat-for-zat above it is spent')
+        tiny = self.lock(n0, setid, h + 1000, Decimal(conv + 20) / 100000000)
+        assert_raises_rpc('non-dust output', n0.vault_ownerspend, tiny['outpoint'], dest)
+        enough = self.lock(n0, setid, h + 1000, Decimal(conv + 1000) / 100000000)
+        r = n0.vault_ownerspend(enough['outpoint'], dest)
+        self.mine(1)
+        fee, size, tx = self.fee_of(r['txid'], conv + 1000)
+        assert_equal((fee, zat(tx['vout'][0]['value'])), (conv, 1000))
         assert tx['confirmations'] >= 1
 
         print('vault_ownerspend selector 2 after ownerHeight')
@@ -187,7 +205,8 @@ class VaultPQWalletTest(BitcoinTestFramework):
         fee, size, tx = self.fee_of(r['txid'], zat(5))
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_OWNER_SCRIPTSIG)
         assert_equal(tx['locktime'], h + 6)
-        assert_equal(fee, VAULT_RPC_FEE)
+        assert_equal(fee, conventional_fee(tx))
+        assert tx['confirmations'] >= 1
 
         print('a vault owned by node 1 (-pqfeerate=0.001): its owner spend is priced by size')
         o1 = n1.vault_getnewowner()
@@ -209,7 +228,11 @@ class VaultPQWalletTest(BitcoinTestFramework):
         p2pkh = n0.validateaddress(placeholder)['scriptPubKey']
         assert p2pkh in raw
         raw = raw.replace('19' + p2pkh, '23' + spk)
+        # node 0 runs -txunpaidactionlimit=0: its per-output default fee leaves this 3-action funding transaction
+        # short (a non-PQ 6.20.0 wallet behaviour, not this test's subject), so it pays a per-kB fee here only
+        assert n0.settxfee(Decimal('0.0001'))
         funded = n0.fundrawtransaction(raw)['hex']
+        assert n0.settxfee(0)
         pq_txid = n0.sendrawtransaction(n0.signrawtransaction(funded)['hex'])
         self.mine(1)
         pq_vout = [o for o in self.tx_of(pq_txid)['vout'] if o['scriptPubKey']['hex'] == spk][0]['n']
@@ -273,6 +296,24 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert_equal(pq_unspent(n1), [])
         if others:
             n1.lockunspent(True, others)
+
+        print('node 0 (default rate, -txunpaidactionlimit=0) spends a PQPKH coin: never below the ZIP-317 conventional fee')
+        n0 = self.nodes[0]
+        pq0 = n0.getnewaddress('', 'pqslh')
+        assert n0.settxfee(Decimal('0.0001'))                              # the funding is not PQ: as above
+        n0.sendtoaddress(pq0, 2)
+        assert n0.settxfee(0)
+        self.mine(1)
+        locked0 = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u.get('address') != pq0]
+        assert n0.lockunspent(False, locked0)
+        txid = n0.sendtoaddress(n1.getnewaddress(), 1)
+        assert n0.lockunspent(True, locked0)
+        tx = self.tx_of(txid)
+        assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
+        fee = -zat(n0.gettransaction(txid)['fee'])
+        assert fee >= conventional_fee(tx), (fee, conventional_fee(tx))      # ~27,000, where the size rate gives ~8,100
+        self.mine(1)
+        assert self.tx_of(txid)['confirmations'] >= 1
 
         print('an encrypted wallet: keys survive, a locked wallet refuses, walletpassphrase unlocks')
         n2 = self.nodes[2]

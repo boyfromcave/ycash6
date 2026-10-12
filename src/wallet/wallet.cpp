@@ -6843,9 +6843,12 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 // LEGACY_DEFAULT_FEE, the plain PQ $/KB rate at the attested price x size) (-pqfeerate without a price;
                 // policy.h AttestedFeePolicy), capped at PQMaxTxFee() = min(max(-maxtxfee, $2 at the price),
                 // -yellowbackmaxtxfee) (owner D-Q-26: the Yellowback cap) (on 6.20.0 the policy fee is the per-output
-                // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee).
+                // floor or, under -feepolicy=zip317, the ZIP-317 conventional fee). Never below the ZIP-317 conventional
+                // fee whatever -feepolicy says (q/fees review): a PQ input is ~53 (SLH-DSA) or ~11 (Falcon) logical
+                // actions, so the per-output floor would leave unpaid actions a -txunpaidactionlimit=0 node refuses.
                 if (fPQInput)
-                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), PQMaxTxFee());
+                    nFeeNeeded = std::max(std::min(std::max(nFeeNeeded, PQSizeFee(LEGACY_DEFAULT_FEE, nBytes)), PQMaxTxFee()),
+                                          CTransaction(txNew).GetConventionalFee());
 
                 // Remove scriptSigs if we used dummy signatures for fee calculation
                 if (!sign) {

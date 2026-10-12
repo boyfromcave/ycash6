@@ -1345,8 +1345,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(strprintf(_("Invalid amount for -yellowbackmaxtxfee=<amount>: '%s'"), mapArgs["-yellowbackmaxtxfee"]));
             ::attestedFeePolicy.yedMaxTxFeeZat = n;
         }
-        if (::attestedFeePolicy.yedMaxTxFeeZat < VAULT_RPC_FEE)
-            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least the vault RPCs' flat fee, %s"), FormatMoney(VAULT_RPC_FEE)));
+        if (::attestedFeePolicy.yedMaxTxFeeZat < MIN_YED_MAX_TX_FEE)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least %s, above the fees the wallet must pay"), FormatMoney(MIN_YED_MAX_TX_FEE)));
     }
 
 #ifdef ENABLE_WALLET

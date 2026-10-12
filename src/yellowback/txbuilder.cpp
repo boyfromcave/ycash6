@@ -190,6 +190,11 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
     plan.collateralOut = s.vaultValue + s.carrierValue + yedValue - s.networkFee - (fee ? s.feeZat : 0) - (attest ? s.attestFeeZat : 0)
                          - (residual ? s.residualZat : 0) - (change ? TOKEN_VALUE : 0);
     if (plan.collateralOut <= 0) throw std::runtime_error("vault-value-too-small: the vault does not cover the fees");
+    // q/fees review: a transparent owner/collateral output must not be dust either -- on 6.20.0 PlanPricedVaultSpend
+    // raises the network fee to the ZIP-317 conventional fee after the small-vault clamp, which can leave less than the
+    // dust threshold; refuse it here rather than build a transaction the mempool rejects as dust.
+    if (s.collateralScript.has_value() && CTxOut(plan.collateralOut, s.collateralScript.value()).IsDust())
+        throw std::runtime_error("vault-value-too-small: the vault does not cover the fees and a non-dust output");
     plan.burnCents = s.withPayload ? yedIn - s.changeCents : yedIn;
 
     // Slots in order; indices are fixed before the payload is encoded (feeVout / attestFeeVout / assignments).
@@ -945,7 +950,11 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
         const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
                              : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold();   // 6.20.0: a fixed dust threshold
-        // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional)
+        // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional), a floor
+        // the clamp does not lower (relay demands it): an SLH-DSA owner spend is ~53 logical actions (~26.5k zat) and a
+        // YED owner spend with its token, payload and fee outputs more, so on 6.20.0 a vault whose value does not cover
+        // that, the protocol fees and a non-dust owner output (about 0.003 YEC and below) is refused vault-value-too-small
+        // (PlanVaultSpend), where ycash-dd's clamp to the floor rate still spends it.
         shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
                                                 YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme))));
     }

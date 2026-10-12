@@ -569,6 +569,13 @@ BOOST_AUTO_TEST_CASE(redeem_layout_transparent_destination)
     VaultSpendShape tiny = f.Shape(true, true, true, true, {});
     tiny.vaultValue = tiny.feeZat;
     BOOST_CHECK_THROW(PlanVaultSpend(tiny), std::runtime_error);
+    // q/fees review: nor one that leaves a dust collateral output; exactly the dust threshold is built.
+    const CAmount dust = CTxOut(0, s0.collateralScript.value()).GetDustThreshold();
+    VaultSpendShape dusty = s0;
+    dusty.vaultValue = s0.vaultValue - p0.collateralOut + dust - 1;
+    BOOST_CHECK_THROW(PlanVaultSpend(dusty), std::runtime_error);
+    dusty.vaultValue += 1;
+    BOOST_CHECK_EQUAL(PlanVaultSpend(dusty).collateralOut, dust);
 }
 
 // Rule: RED-3
