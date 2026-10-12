@@ -1544,7 +1544,7 @@ BOOST_AUTO_TEST_CASE(module_liveness_hook)
     BOOST_CHECK_EQUAL(Member(c, s, k1).joinOrdinal, 1u);   // seq 0
     BOOST_CHECK_EQUAL(Member(c, s, k2).joinOrdinal, 2u);   // seq 1
     BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 2u);
-    c.Empty(20);
+    c.Empty(60);
     auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xcd; return x; };
     BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
     auto att = [&](const CKey& k, uint16_t seq, int64_t at, bool forge = false) {
@@ -1593,6 +1593,37 @@ BOOST_AUTO_TEST_CASE(module_liveness_hook)
     tryTx(carrierTx({att(k1, 0, R), att(k2, 1, R - 1)}, notice), a1, a2);
     BOOST_CHECK_EQUAL(a1, R);
     BOOST_CHECK_EQUAL(a2, R - 1);
+    {   // focused review: the hook verifies through the node's cache (vault::SetModuleCache): a second pass is all hits
+        struct CountingCache : public yellowback::SigCache {
+            std::map<uint256, bool> m;
+            mutable int hits = 0;
+            int inserts = 0;
+            std::optional<bool> Lookup(const uint256& k) const override { auto it = m.find(k); if (it == m.end()) return std::nullopt; hits++; return it->second; }
+            void Insert(const uint256& k, bool v) override { m[k] = v; inserts++; }
+        } cc;
+        SetModuleCache(static_cast<yellowback::SigCache*>(&cc));
+        const CMutableTransaction pass = carrierTx({att(k1, 0, R), att(k2, 1, R - 1)}, notice);
+        tryTx(pass, a1, a2);
+        BOOST_CHECK_EQUAL(cc.inserts, 2);
+        BOOST_CHECK_EQUAL(cc.hits, 0);
+        tryTx(pass, a1, a2);
+        BOOST_CHECK_EQUAL(cc.inserts, 2);
+        BOOST_CHECK_EQUAL(cc.hits, 2);
+        BOOST_CHECK_EQUAL(a1, R);
+        SetModuleCache(nullptr);
+    }
+    // focused review: a refHeight older than REF_WINDOW credits nobody (no replay of an old public attestation)
+    {
+        const int64_t old = c.h - p.refWindow - 1;
+        BOOST_REQUIRE(old > before1 && old > before2);
+        const yellowback::Payload oldNotice = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)old);
+        tryTx(carrierTx({att(k1, 0, old), att(k2, 1, old)}, oldNotice), a1, a2);
+        BOOST_CHECK_EQUAL(a1, before1);
+        BOOST_CHECK_EQUAL(a2, before2);
+        const yellowback::Payload edge = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)(old + 1));
+        tryTx(carrierTx({att(k1, 0, old + 1), att(k2, 1, old + 1)}, edge), a1, a2);   // c.h - R = REF_WINDOW: credited
+        BOOST_CHECK_EQUAL(a1, old + 1);
+    }
     // bundles that fail credit nobody: one attestation (count < M_SELECT); a forged signature; a key signing under
     // another member's seq; an unknown seq; an outsider; a stale citation (<= R - ATTEST_MAX_AGE); a duplicate seq;
     // an EQUIVOCATION payload
@@ -1621,6 +1652,37 @@ BOOST_AUTO_TEST_CASE(module_liveness_hook)
         BOOST_CHECK_EQUAL(a1, before1);
     }
     yellowback::ClearModuleParams();
+}
+
+BOOST_AUTO_TEST_CASE(join_ordinal_reorg)
+{
+    // focused review: a disconnected SET_JOIN gives back its ordinal (joinCount restored byte for byte by the undo);
+    // on one chain no two joins share an ordinal
+    Chain c;
+    const CKey k1 = MakeKey(81), k2 = MakeKey(82), k3 = MakeKey(83);
+    SetId s = SetWithMembers(c, {k1, k2});
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 2u);
+    const MemoryKV before = c.kv;
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k3, {})));
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 3u);
+    BOOST_CHECK_EQUAL(Member(c, s, k3).joinOrdinal, 3u);
+    {
+        MemoryKV back = c.kv;
+        VaultState u(back);
+        u.ApplyUndo(c.history.back().second);
+        back.Apply(u.Changes());
+        BOOST_CHECK(back.data == before.data);
+        BOOST_CHECK_EQUAL(GetSet(back, s)->joinCount, 2u);
+        BOOST_CHECK(!GetMember(back, s, k3.GetPubKey()));
+    }
+    // a member that leaves, withdraws and rejoins takes a new ordinal
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    c.Empty(5);
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, bond1, 1, {CTxOut(900, Recipient(7))}, false)));
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k1, {})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).joinOrdinal, 4u);
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 4u);
 }
 
 BOOST_AUTO_TEST_CASE(module_displace_hook)

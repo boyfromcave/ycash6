@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "362f47a8650039b4b2ddb563564ab0b2a42b59d2a0f8b3ab41ee673a2bd14eef";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -2904,6 +2904,50 @@ BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
     BOOST_CHECK_EQUAL(f.Attestor(0)->seatedSince, 0);
 }
 
+// Rule: seats review B2 (focused review): a bundle credits liveness only inside a held YED act, and only within
+// REF_WINDOW of its refHeight
+BOOST_AUTO_TEST_CASE(liveness_needs_held_act_and_fresh_ref)
+{
+    Fixture f;
+    f.Arm();
+    const uint256 noVault = uint256S("11");
+    const valtype sel = OutPointSelector(COutPoint(noVault, 0));
+    // a CLAIM_NOTICE of a vault that does not exist (not held) whose bundle would refresh liveness: invalid
+    const int R = f.tip - 1;
+    const CMutableTransaction bad = f.NoticeTx(noVault, R, f.BundleFor(R, sel, 50000));
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { bad });
+    BOOST_REQUIRE(f.refused.count(CTransaction(bad).GetHash()));
+    BOOST_CHECK_EQUAL(f.refused.at(CTransaction(bad).GetHash()).verdict, verdict::LIVENESS_UNHELD);
+    // the same kind of notice at a refHeight older than REF_WINDOW credits nobody: an ordinary transaction
+    for (int i = 0; i < f.P.refWindow + 2; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    const int old = f.tip + 1 - f.P.refWindow - 1;
+    const std::vector<uint16_t> signers = Selected(f.view, f.P, old, sel);
+    BOOST_REQUIRE(!signers.empty());
+    std::map<uint16_t, int32_t> before;
+    for (uint16_t s : signers) before[s] = f.Attestor(s)->lastAct;
+    const CMutableTransaction replay = f.NoticeTx(noVault, old, f.BundleFor(old, sel, 50000));
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { replay });
+    BOOST_CHECK(!f.refused.count(CTransaction(replay).GetHash()));
+    for (uint16_t s : signers) BOOST_CHECK_EQUAL(f.Attestor(s)->lastAct, before[s]);
+}
+
+// Rule: P4-b (focused review): once the u16 seq space is used up a SET_JOIN of the attestor set is invalid, so the
+// primitive never admits a member the mirror cannot record
+BOOST_AUTO_TEST_CASE(attestor_seq_exhausted)
+{
+    Fixture f;
+    f.MineQuotesTo(20);
+    f.Register(1);                                                     // seq 0
+    AttestorSeqRecord n;
+    n.next = 0xFFFF;
+    State(f.view).Put(keys::AttestorSeq(), n);                         // forced: 65,534 joins later
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN)), verdict::OK);   // the last seq, 65,535
+    BOOST_REQUIRE(f.Attestor(0xFFFF).has_value());
+    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 0);         // wrapped onto seq 0, which exists
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN)), verdict::ATTESTOR_SEQ_EXHAUSTED);
+    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 0);
+}
+
 // Rule: ARM-1
 BOOST_AUTO_TEST_CASE(arm1_triggers_at_exact_block)
 {
@@ -3486,13 +3530,18 @@ BOOST_AUTO_TEST_CASE(not1_standing_notice_not_replaced)
     const NoticeRecord first = g.f.Notice(g.w).value();
     // The reset attack: a second notice inside EMERGENCY_NOTICE_TTL registers nothing and the clock keeps running.
     for (int i = 0; i < 3; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
-    BOOST_REQUIRE(g.PostNotice());
+    const int R2 = g.f.tip - 1;
+    const CMutableTransaction second = g.f.NoticeTx(g.w, R2, g.f.BundleFor(R2, g.Selector(), g.attPrice));
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { second });
     BOOST_CHECK(g.f.evals[g.f.tip].txlogs.empty());
     const NoticeRecord again = g.f.Notice(g.w).value();
     BOOST_CHECK_EQUAL(again.height, first.height);
     BOOST_CHECK_EQUAL(again.refHeight, first.refHeight);
-    // the row for the (verified) bundle is still logged (R12)
-    BOOST_CHECK(g.f.BundleRow(g.f.tip).has_value());
+    // focused review: the unheld notice would refresh its signers' liveness, so it is invalid (liveness-unheld) and
+    // left out of the block -- no BundleRow for it either
+    BOOST_REQUIRE(g.f.refused.count(CTransaction(second).GetHash()));
+    BOOST_CHECK_EQUAL(g.f.refused.at(CTransaction(second).GetHash()).verdict, verdict::LIVENESS_UNHELD);
+    BOOST_CHECK(!g.f.BundleRow(g.f.tip).has_value());
     // Past the TTL a new notice replaces it.
     while (g.f.tip + 1 - first.height <= g.f.P.emergencyNoticeTtl) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
     BOOST_REQUIRE(g.PostNotice());
@@ -4044,13 +4093,13 @@ BOOST_AUTO_TEST_CASE(cache_hit_equals_cold)
     BlockEvaluation a = EvaluateBlock(cold, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, &cache);
     cold.Discard();
     BOOST_CHECK_EQUAL(cache.entries.size(), 3u);
-    BOOST_CHECK_EQUAL(cache.hits, 3);   // seats re-review: the liveness credit re-reads BUNDLE-1's three entries (no new verify)
+    BOOST_CHECK_EQUAL(cache.hits, 6);   // the liveness credit and its whole-BUNDLE-1 check re-read BUNDLE-1's three entries (no new verify)
     for (const auto& e : cache.entries) BOOST_CHECK(e.second);
     // hit: the same block again reads the cache and agrees byte for byte
     OverlayStateView warm(f.view);
     BlockEvaluation b = EvaluateBlock(warm, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, &cache);
     warm.Discard();
-    BOOST_CHECK_EQUAL(cache.hits, 9);   // 3 (cold pass's liveness) + 3 (BUNDLE-1) + 3 (liveness)
+    BOOST_CHECK_EQUAL(cache.hits, 15);  // 6 (cold pass's liveness checks) + 3 (BUNDLE-1) + 6 (liveness checks)
     BOOST_CHECK(SerializeRecord(a.snapshot) == SerializeRecord(b.snapshot));
     BOOST_CHECK(SerializeRecord(a.txlogs[0].second) == SerializeRecord(b.txlogs[0].second));
     BOOST_CHECK_EQUAL(a.txlogs[0].second.verdict, verdict::OK);
@@ -4060,7 +4109,9 @@ BOOST_AUTO_TEST_CASE(cache_hit_equals_cold)
     BOOST_CHECK(SerializeRecord(a.txlogs[0].second) == SerializeRecord(c.txlogs[0].second));
     // the same attestation on two branches keys two entries: the block hash of citedHeight is in the key
     const Attestation att = f.Att(0, 50000, f.tip - 1);
-    BOOST_CHECK(SigCacheKey(att, Fixture::FakeHash(f.tip - 1)) != SigCacheKey(att, Fixture::FakeHash(f.tip)));
+    const CPubKey pk0 = f.hotKeys[0].GetPubKey(), pk1 = f.hotKeys[1].GetPubKey();
+    BOOST_CHECK(SigCacheKey(att, Fixture::FakeHash(f.tip - 1), pk0) != SigCacheKey(att, Fixture::FakeHash(f.tip), pk0));
+    BOOST_CHECK(SigCacheKey(att, Fixture::FakeHash(f.tip - 1), pk0) != SigCacheKey(att, Fixture::FakeHash(f.tip - 1), pk1));   // the key binds the public key
     // a poisoned entry is believed (the cache is trusted node-local state): the invariant is that entries are only ever written by verification
     for (auto& e : cache.entries) e.second = false;
     OverlayStateView poisoned(f.view);

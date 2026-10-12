@@ -34,6 +34,8 @@ Nodes: 0 user, 1 stock, 2-4 pools, 5 observer, 6-7 attestor wallets.
 
 from decimal import Decimal
 
+from test_framework.authproxy import JSONRPCException
+
 from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import (
@@ -68,6 +70,7 @@ from test_framework import vault as va
 from test_framework.yellowback_model import assert_model_matches
 from test_framework.yellowback_util import (
     ATTESTOR_A,
+    ATTESTOR_SET,
     secret_to_pubkey,
     vault_app_height,
     vault_owner,
@@ -273,6 +276,13 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert_equal((info['aMint'], info['attestFeeZat'], info['attestPayee'], info['bundleSeqs']),
                      (built['aMint'], est['attestFeeZat'], r['attestPayee'], sorted(built['seqs'])))
         assert_equal(info['pMint'], min(info['xMint'], info['aMint']))
+        # seats review B2 (bounded): a held mint's bundle is liveness: each signer's lastAct reaches its citation (ref),
+        # in the module's mirror and in the primitive alike
+        recs = dict((int(x['seq']), x) for x in user.yed_listattestors())
+        members = dict((m['key'], m) for m in user.set_getinfo(ATTESTOR_SET[0])['memberlist'])
+        for seq in built['seqs']:
+            assert recs[seq]['lastAct'] >= ref, (seq, recs[seq]['lastAct'], ref)
+            assert_equal(members[recs[seq]['attestorPubKey']]['lastact'], recs[seq]['lastAct'])
         return r
 
     def claim_raw(self, claimant, vault_txid, token, prices, miner, residual_to=None, expect='CLAIMING'):
@@ -665,11 +675,18 @@ class YellowbackAttestTest(YellowbackTestFramework):
         feed_all(user, emerg, cited=ref)
         again = user.yed_buildbundle(ref, bytes_to_hex_str(outpoint_selector(v3['txid'], 0)))
         carrier = self.carrier_step(USER, hex_str_to_bytes(again['hex']))
-        reset_txid = user.sendrawtransaction(post_notice_raw(user, (v3['txid'], 0), ref, carrier))
+        # focused review: a notice that is not held (one stands) but whose bundle would refresh liveness is invalid
+        # (liveness-unheld); one that would credit nobody is an ordinary transaction that registers nothing
+        try:
+            reset_txid = user.sendrawtransaction(post_notice_raw(user, (v3['txid'], 0), ref, carrier))
+        except JSONRPCException as e:
+            assert 'liveness-unheld' in e.error['message'], e.error
+            reset_txid = None
         self.sync_all()
         self.stock_step(1, 'reset attack')
-        assert_equal(user.getrawtransaction(reset_txid, 1)['confirmations'], 1)
-        rpc_error('tx-not-found', user.yed_gettxinfo, reset_txid)
+        if reset_txid is not None:
+            assert_equal(user.getrawtransaction(reset_txid, 1)['confirmations'], 1)
+            rpc_error('tx-not-found', user.yed_gettxinfo, reset_txid)
         assert_equal(user.yed_getnotice(v3['txid'])['height'], n['height'])
         while user.getblockcount() - REF_LAG < r1 + EMERGENCY_PERSIST:
             self.pools_step(1, 'persist')

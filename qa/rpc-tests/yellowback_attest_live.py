@@ -4,18 +4,16 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-Liveness by attestation, bounded (seats review B2 and its re-review, 2026-10-11) on regtest, from reviewer B's probe.
-
-The attestor set has livenessWindow 20. Fifteen 10-YEC members join and never heartbeat, so all go dead.
-1. A CLAIM_NOTICE (for a vault that does not exist: the notice itself holds nothing) carries a bundle of two
-   attestations, by the members of seq 13 and 14, citing recent blocks: it passes BUNDLE-1 at the notice's refHeight in
-   everything but the selection, so both members' lastAct moves to their cited heights -- in the primitive
-   (set_getinfo) and in the module's mirror (yed_listattestors) alike.
-2. A second notice whose bundle fails (seq 12's attestation alone: fewer than M_SELECT) credits nobody, and a third
-   whose second signature is forged credits nobody either (seq 11 stays dead).
+Liveness by attestation, bounded (seats review B2 and its re-reviews, 2026-10-11) on regtest, from reviewer B's probe.
+An attestation counts as liveness only inside a held YED act (a mint, a registered notice, a claim) whose bundle passes
+the whole BUNDLE-1 -- yellowback_attest.py checks that credit on its bundled mints -- and only for a refHeight within
+REF_WINDOW of the block. Here, with livenessWindow 20 and fifteen 10-YEC members that never heartbeat (all dead):
+1. A CLAIM_NOTICE for a vault that does not exist, carrying a bundle that would pass the structural checks (seq 13 and
+   14), is refused by every Yellowback mempool (liveness-unheld): a failing act credits nobody.
+2. The same kind of notice at a refHeight older than REF_WINDOW credits nobody either (no replay of old public
+   attestations): it is an ordinary, non-Yellowback transaction and both members stay dead.
 3. A dust join (below bondMinFloorZat) into the full set is refused; a join at the floor evicts the dead member of
-   least seat weight -- seq 12 (the youngest dead one), not the attesting seq 13 or 14 -- in the primitive and the
-   mirror alike.
+   least seat weight -- seq 14, the youngest -- in the primitive and the mirror alike.
 The enforcing nodes agree on the state hash and the Python model replays the chain.
 
 Nodes: 0 user, 1 stock (restarted with the attestor set: the module's hooks decide these blocks), 2-4 pools,
@@ -32,6 +30,7 @@ from test_framework.yellowback_util import (
     BOND_MIN_LOCK,
     COIN,
     POOLS,
+    REF_WINDOW,
     STOCK,
     YellowbackTestFramework,
     assert_same_statehash,
@@ -108,30 +107,39 @@ class YellowbackAttestLiveTest(YellowbackTestFramework):
         assert_equal(sum(1 for m in self.members().values() if m['live']), 0)
         seqs = [self.seq_of(s[i]) for i in range(15)]
 
-        print('1. a passing bundle in a CLAIM_NOTICE credits its two signers')
+        print('1. a failing CLAIM_NOTICE (no such vault) with a structurally passing bundle is refused: liveness-unheld')
+        before13, before14 = self.last_acts(s[13]), self.last_acts(s[14])
         cited = user.getblockcount() - 1
         a13 = sign_attestation(s[13], seqs[13], 50000, cited, user.getblockhash(cited))
-        a14 = sign_attestation(s[14], seqs[14], 50000, cited + 1, user.getblockhash(cited + 1))
-        self.notice([a13, a14])
-        assert_equal(self.last_acts(s[13]), (cited, cited))
-        assert_equal(self.last_acts(s[14]), (cited + 1, cited + 1))
-        assert self.members()[secret_to_pubkey(s[14]).hex()]['live']
-        assert_same_statehash(self.enforcing_nodes(), 'after a passing bundle')
+        a14 = sign_attestation(s[14], seqs[14], 50000, cited, user.getblockhash(cited))
+        carrier = build_carrier_tx(user, encode_bundle([a13, a14]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        ref = user.getblockcount()
+        try:
+            user.sendrawtransaction(post_notice_raw(user, BOGUS_VAULT, ref, carrier))
+            raise AssertionError('a failing notice that would credit liveness was accepted')
+        except JSONRPCException as e:
+            assert 'liveness-unheld' in e.error['message'], e.error
+        self.mine(POOLS[0])
+        assert_equal((self.last_acts(s[13]), self.last_acts(s[14])), (before13, before14))
 
-        print('2. failing bundles credit nobody')
-        before12, before11 = self.last_acts(s[12]), self.last_acts(s[11])
-        cited = user.getblockcount() - 1
-        a12 = sign_attestation(s[12], seqs[12], 50000, cited, user.getblockhash(cited))
-        self.notice([a12])                                             # fewer than M_SELECT (2)
-        a11 = sign_attestation(s[11], seqs[11], 50000, cited, user.getblockhash(cited))
-        forged = bytearray(sign_attestation(s[10], seqs[10], 50000, cited, user.getblockhash(cited)))
-        forged[20] ^= 1
-        self.notice([a11, bytes(forged)])                              # one signature does not verify
-        assert_equal(self.last_acts(s[12]), before12)
-        assert_equal(self.last_acts(s[11]), before11)
-        assert_same_statehash(self.enforcing_nodes(), 'after failing bundles')
+        print('2. an attestation replayed at a refHeight older than REF_WINDOW credits nobody')
+        old_ref = user.getblockcount() - REF_WINDOW - 1
+        b13 = sign_attestation(s[13], seqs[13], 50000, old_ref, user.getblockhash(old_ref))
+        b14 = sign_attestation(s[14], seqs[14], 50000, old_ref - 1, user.getblockhash(old_ref - 1))
+        carrier = build_carrier_tx(user, encode_bundle([b13, b14]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        old_ref = user.getblockcount() - REF_WINDOW - 2                 # the notice's R: still older than REF_WINDOW
+        user.sendrawtransaction(post_notice_raw(user, BOGUS_VAULT, old_ref + 1, carrier))
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal((self.last_acts(s[13]), self.last_acts(s[14])), (before13, before14))
+        assert not self.members()[secret_to_pubkey(s[14]).hex()]['live']
+        assert_same_statehash(self.enforcing_nodes(), 'after the replay')
 
-        print('3. no dust eviction; a floor bond evicts the youngest dead member, not an attesting one')
+        print('3. no dust eviction; a floor bond evicts the youngest dead member')
         floor = int(user.yed_getinfo()['params']['attest']['bondMinFloorZat'])
         try:
             user.sendrawtransaction(self.join_hex(s[15], floor - 1))
@@ -144,8 +152,8 @@ class YellowbackAttestLiveTest(YellowbackTestFramework):
         members, recs = self.members(), self.records()
         removed = [i for i in range(15) if members[secret_to_pubkey(s[i]).hex()]['status'] != 'active']
         withdrawn = [i for i in range(15) if recs[seqs[i]]['status'] == 'WITHDRAWN']
-        assert_equal(removed, [12])
-        assert_equal(withdrawn, [12])
+        assert_equal(removed, [14])
+        assert_equal(withdrawn, [14])
         assert_same_statehash(self.enforcing_nodes(), 'after the eviction')
         model_check(self.nodes[POOLS[0]])
 

@@ -120,6 +120,8 @@ extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUN
 extern const char* const ATTESTOR_REGISTER_RETIRED;   //!< an ATTESTOR_REGISTER payload (join attestorSetId with SET_JOIN)
 extern const char* const ATTESTOR_REVIVE_RETIRED;     //!< an ATTESTOR_REVIVE payload (revive with SET_HEARTBEAT)
 extern const char* const ATTESTOR_SET_ACT;            //!< a SET_REMOVE or SET_WINDDOWN of the attestor set (owner, 2026-10-11)
+extern const char* const ATTESTOR_SEQ_EXHAUSTED;      //!< a SET_JOIN of the attestor set once the u16 seq space is used up (focused review)
+extern const char* const LIVENESS_UNHELD;             //!< a bundle that credits liveness on a transaction that is not a held YED act, or fails BUNDLE-1 (focused review)
 extern const char* const ATTESTOR_BOND_BELOW_MIN;     //!< a SET_JOIN of the attestor set below BondMinZat at its block (seats re-review)
 } // namespace verdict
 
@@ -348,7 +350,11 @@ std::optional<CPubKey> EvictionVictim(const std::vector<SeatCandidate>& members,
  * BUNDLE_MAX], distinct seqs, freshness and range (VerifyBundle with the bundle's own seqs as the selected list),
  * every seq naming a live member (`liveMember`: its key and lastAct; nullopt = not a live member of the attestor
  * set), and every signature verifying under that seq's key -- one verification per attestation (at most BUNDLE_MAX
- * per transaction), through `cache` when given. Any failure credits nobody. Result: (seq, citedHeight) for each
+ * per transaction), through `cache` when given, and R within REF_WINDOW of `height` (no replay of an old public
+ * attestation). Any failure credits nobody. In the module's mirror a non-empty result further requires the
+ * transaction to be a held YED act whose bundle passes the whole BUNDLE-1 (selection included), else the transaction
+ * is invalid (LIVENESS_UNHELD) -- so in a valid block the primitive's structural credit and the mirror's coincide.
+ * Result: (seq, citedHeight) for each
  * signer whose citedHeight exceeds its lastAct. The primitive's liveness hook (seq -> the member whose joinOrdinal
  * is seq + 1) and the module's mirror (seq -> its Attestors record) call it over the same members.
  */

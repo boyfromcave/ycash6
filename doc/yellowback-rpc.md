@@ -513,8 +513,9 @@ of least seat weight, else the member of least seat weight when the new bond (at
 record becomes `WITHDRAWN` with `evicted: true` in `yed_listattestors`, its bond not frozen. `SET_REMOVE` and `SET_WINDDOWN` of the
 attestor set are invalid (`attestor-set-act`); equivocation is the only removal. **Seats re-review (2026-10-11):** a
 `SET_JOIN` of the attestor set whose bond is below `bondMinZat` at its block is invalid (`attestor-bond-below-min`), so
-every member becomes ELIGIBLE at maturity; an attestor's own attestations count as liveness only from a bundle that
-passes BUNDLE-1 at its refHeight in all but the selection (one signature check per attestation).
+every member becomes ELIGIBLE at maturity; an attestor's own attestations count as liveness only from a held mint,
+notice or claim whose bundle passes BUNDLE-1, with a refHeight within `REF_WINDOW` (one cached signature check per
+attestation); a transaction whose bundle would count but is not such an act is invalid (`liveness-unheld`).
 
 ### `yed_getstatehash [height]`
 

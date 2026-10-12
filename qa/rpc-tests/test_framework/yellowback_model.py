@@ -1987,7 +1987,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 11       # seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 12       # liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2537,9 +2537,10 @@ class YellowbackModel(object):
         if refused_attestor_set_act(tx, self.params):
             rec.type = 'ATTESTOR_SET_ACT'
             return self._fail(rec, 'attestor-set-act')
-        if self._attestor_join_below_min(tx, height):
+        join_refused = self._attestor_join_refused(tx, height)
+        if join_refused:
             rec.type = 'ATTESTOR_REGISTER'
-            return self._fail(rec, 'attestor-bond-below-min')
+            return self._fail(rec, join_refused)
         set_act = self._apply_set_act(tx, height, rec)
         set_act_type = rec.type
         active_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_ACTIVE]
@@ -2553,6 +2554,7 @@ class YellowbackModel(object):
 
         yed_outputs = set()            # the YED-tagged template outputs a rule below created (U-23)
         touched = bool(rec.spent_tokens) or bool(active_spent) or bool(void_spent) or bond_spent or bool(intent_spent) or set_act
+        live_held, live_selector, live_skip = False, b'', False      # focused review: a held YED act may carry liveness
         if intent_spent:
             if len(intent_spent) != 1 or active_spent:
                 return self._fail(rec, 'intent-spend-malformed')
@@ -2567,12 +2569,16 @@ class YellowbackModel(object):
             if failing is not None:
                 return self._fail(rec, failing)
             touched = True
+            if payload is not None and payload.type == PAYLOAD_REDEEM:
+                from . import yellowback_attest as ya
+                live_held, live_selector, live_skip = True, ya.outpoint_selector(*active_spent[0]), True
         elif payload is not None and payload.type == PAYLOAD_MINT:
             rec.type = 'MINT'
             if not self._apply_mint(tx, height, rec, payload, opret):
                 return self._fail(rec, rec.verdict)            # section 15.10: no VOID vault
             yed_outputs.add(0)
             touched = True
+            live_held = True
         elif payload is not None and payload.type in (PAYLOAD_TRANSFER, PAYLOAD_REDEEM):
             rec.type = 'TRANSFER' if payload.type == PAYLOAD_TRANSFER else 'REDEEM'
             failing = self._apply_transfer(tx, height, rec, payload, yed_in)
@@ -2588,6 +2594,9 @@ class YellowbackModel(object):
                     return self._fail(rec, 'attestor-register-retired')          # P4-b: join the set (SET_JOIN)
                 elif payload.type == PAYLOAD_CLAIM_NOTICE:
                     held = self._apply_notice(tx, height, rec, payload)
+                    if held:
+                        from . import yellowback_attest as ya
+                        live_held, live_selector = True, ya.outpoint_selector(payload.vault_txid, payload.vault_vout)
                 elif payload.type == PAYLOAD_EQUIVOCATION:
                     held = self._apply_equivocation(tx, height, rec)
                 elif payload.type == PAYLOAD_ATTESTOR_REVIVE:
@@ -2599,8 +2608,14 @@ class YellowbackModel(object):
                 if yed_in > 0:
                     rec.verdict = VERDICT_BURNED
 
-        # seats review B2: a member's attestation carried here is liveness (the primitive's liveness hook, alike)
-        self._attestation_liveness(tx, height, payload)
+        # seats review B2: a member's attestation carried here is liveness (the primitive's liveness hook, alike); focused
+        # review: only on a held YED act whose bundle passes the whole BUNDLE-1, else the transaction is invalid
+        credits = self._attestation_liveness(tx, height, payload)
+        if credits:
+            if not live_held or not self.verify_bundle(tx, payload.ref_height, live_selector, live_skip)['ok']:
+                return self._fail(rec, 'liveness-unheld')
+            for seq, cited in credits:
+                self.attestors[seq].last_act = cited
 
         # U-23: a YED-tagged vault or intent output exists only as a mint's vault, a claim's intents or a
         # cancel's re-created vault
@@ -2867,25 +2882,30 @@ class YellowbackModel(object):
             return None
         return atts, a[2]
 
-    def _attestor_join_below_min(self, tx, height):
-        """AttestorJoinBelowMin (seats re-review): a SET_JOIN of the adopted attestor set below BondMinZat(height)."""
+    def _attestor_join_refused(self, tx, height):
+        """AttestorJoinRefused: a SET_JOIN of the adopted attestor set once the u16 seq space is used up
+        ('attestor-seq-exhausted') or below BondMinZat(height) ('attestor-bond-below-min'); else None."""
         from . import vault as va
         p = self.params
         if not p.attestor_set or self.attestor_set_rec is None:
-            return False
+            return None
         for o in tx.vout:
             if not va.is_act_script(o.script):
                 continue
             try:
                 _payload, act, _sigs = va.parse_act_script(o.script)
             except va.VaultError:
-                return False
+                return None
             if act['type'] != va.ACT_SET_JOIN or bytes.fromhex(act['setId']) != p.attestor_set_internal:
-                return False
+                return None
             if act['bondVout'] >= len(tx.vout):
-                return False
-            return tx.vout[act['bondVout']].value < self.bond_min_zat(height)
-        return False
+                return None
+            if self.attestor_seq in self.attestors:
+                return 'attestor-seq-exhausted'
+            if tx.vout[act['bondVout']].value < self.bond_min_zat(height):
+                return 'attestor-bond-below-min'
+            return None
+        return None
 
     def _attestation_liveness(self, tx, height, payload):
         """AttestationLiveness (state.h, seats re-review): for a MINT, CLAIM_NOTICE or REDEEM, its carrier bundle credits
@@ -2896,22 +2916,22 @@ class YellowbackModel(object):
         from . import yellowback_attest as ya
         p = self.params
         if self.attestor_set_rec is None or payload is None:
-            return
+            return []
         if payload.type not in (PAYLOAD_MINT, PAYLOAD_CLAIM_NOTICE, PAYLOAD_REDEEM) or p.bundle_carrier == CARRIER_OP_RETURN:
-            return
+            return []
         R = payload.ref_height
-        if R >= height:
-            return
+        if R >= height or height - R > p.ref_window:       # focused review: no replay of an old attestation
+            return []
         found, _why = self._find_carrier(tx, payload.type == PAYLOAD_REDEEM)
         if found is None:
-            return
+            return []
         _i, pushes = found
         _pk, h = ya.parse_carrier_script(pushes[2])
         if sha256(pushes[0]) != h:
-            return
+            return []
         atts = ya.decode_bundle(pushes[0])
         if atts is None or not atts or not (p.m_select <= len(atts) <= p.bundle_max):
-            return
+            return []
         newest = {}
         for seq in sorted(self.attestors):
             newest[self.attestors[seq].attestor_pubkey] = seq
@@ -2921,21 +2941,19 @@ class YellowbackModel(object):
             r = self.attestors.get(seq)
             if r is None or newest[r.attestor_pubkey] != seq or r.status in (A_EJECTED, A_WITHDRAWN) \
                     or r.bond_spent_height or r.bond_frozen:
-                return
+                return []
         if len(set(seqs)) != len(seqs):
-            return
+            return []
         for _seq, price, cited, _r, _s in parsed:
             if not (R - p.attest_max_age < cited <= R) or cited < p.start_height:
-                return
+                return []
             if not (p.price_min <= price <= p.price_max):
-                return
+                return []
         for att, (seq, _price, cited, _r, _s) in zip(atts, parsed):
             bh = self.block_hash_at(cited)
             if bh is None or not ya.verify_attestation(self.attestors[seq].attestor_pubkey, att, bh):
-                return
-        for seq, _price, cited, _r, _s in parsed:
-            if cited > self.attestors[seq].last_act:
-                self.attestors[seq].last_act = cited
+                return []
+        return [(seq, cited) for seq, _price, cited, _r, _s in parsed if cited > self.attestors[seq].last_act]
 
     def _apply_equivocation(self, tx, height, rec):
         """EQV-1 (P4-b): the first record in seq order that is its key's newest, with an unspent, unfrozen bond, under

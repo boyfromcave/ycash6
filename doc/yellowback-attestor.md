@@ -30,9 +30,10 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   longer applies: whoever holds the attestor node's wallet can spend the bond after
   `bondLocktime` (given up for a single registry, upgrade plan §15.10 P4-b).
 - **Heartbeats**: the set's member dormancy makes an attestor DORMANT when its `lastAct` is older
-  than the set's `livenesswindow`. Since the seats review (B2, 2026-10-11) an attestation of yours carried by a
-  MINT, CLAIM_NOTICE or REDEEM also counts: `lastAct` rises to its `citedHeight` (in the primitive and the
-  mirror alike), so an attestor whose prices are used stays live; heartbeats still cover quiet periods. `yellowback-attest attest`
+  than the set's `livenesswindow`. Since the seats review (B2, 2026-10-11) an attestation of yours used in a held
+  mint, registered notice or claim (its bundle passing BUNDLE-1, its refHeight within `REF_WINDOW`) also counts:
+  `lastAct` rises to its `citedHeight` (in the primitive and the mirror alike), so an attestor whose prices are used
+  stays live; heartbeats still cover quiet periods. `yellowback-attest attest`
   sends `set_heartbeat <attestorSetId> <memberKey>` every `heartbeat_blocks` blocks (default
   1,152 ≈ a day; keep it well below the set's `livenesswindow`, `set_getinfo <attestorSetId>`).
   The v3 dormancy (selected and absent, below) still applies on top.

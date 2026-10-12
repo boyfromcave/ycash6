@@ -71,6 +71,8 @@ const char* const ATTESTOR_REGISTER_RETIRED = "attestor-register-retired";
 const char* const ATTESTOR_REVIVE_RETIRED = "attestor-revive-retired";
 const char* const ATTESTOR_SET_ACT = "attestor-set-act";
 const char* const ATTESTOR_BOND_BELOW_MIN = "attestor-bond-below-min";
+const char* const LIVENESS_UNHELD = "liveness-unheld";
+const char* const ATTESTOR_SEQ_EXHAUSTED = "attestor-seq-exhausted";
 } // namespace verdict
 
 // ---------------------------------------------------------------------------
@@ -852,7 +854,7 @@ bool FullyValidKey(const CPubKey& k)
 /** One attestation signature, through the W8 cache when the caller has one. */
 bool AttestationValid(EvalContext& ctx, const Attestation& a, const CPubKey& pk, const uint256& blockHash)
 {
-    const uint256 key = SigCacheKey(a, blockHash);
+    const uint256 key = SigCacheKey(a, blockHash, pk);
     std::optional<bool> cached = ctx.cache ? ctx.cache->Lookup(key) : std::nullopt;
     if (cached.has_value()) return cached.value();
     const bool valid = VerifyCompactSig(pk, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig);
@@ -947,20 +949,24 @@ bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& lo
  * The attestor set's acts on the mirror (P4-b; see state.h). Returns true when the transaction carried an act that
  * changed it (the TxLog entry is then ATTESTOR_REGISTER for a join, ATTESTOR_SET_ACT otherwise).
  */
-/** Seats re-review: a well-formed SET_JOIN of the adopted attestor set whose bond output is below BondMinZat(height). */
-bool AttestorJoinBelowMin(EvalContext& ctx, const CTransaction& tx)
+/** A well-formed SET_JOIN of the adopted attestor set the module makes invalid, or nullptr: its bond below
+ *  BondMinZat(height) (seats re-review), or the u16 seq space exhausted (focused review: the mirror could not record
+ *  the member the primitive admits, so the join is invalid rather than unmirrored). */
+const char* AttestorJoinRefused(EvalContext& ctx, const CTransaction& tx)
 {
     const Params& P = ctx.params;
-    if (P.attestorSetId.IsNull() || !ctx.st.GetAttestorSet().has_value()) return false;
+    if (P.attestorSetId.IsNull() || !ctx.st.GetAttestorSet().has_value()) return nullptr;
     for (const CTxOut& o : tx.vout) {
         if (!vault::IsActOutput(o.scriptPubKey)) continue;
         vault::Act act;
-        if (vault::DecodeAct(o.scriptPubKey, act) || !vault::ActFieldsValid(act)) return false;   // the primitive refuses it
-        if (act.type != vault::ACT_SET_JOIN || act.join.setId != P.attestorSetId) return false;
-        if (act.join.bondVout >= tx.vout.size()) return false;
-        return tx.vout[act.join.bondVout].nValue < BondMinZat(ctx.st, P, ctx.height);
+        if (vault::DecodeAct(o.scriptPubKey, act) || !vault::ActFieldsValid(act)) return nullptr;   // the primitive refuses it
+        if (act.type != vault::ACT_SET_JOIN || act.join.setId != P.attestorSetId) return nullptr;
+        if (act.join.bondVout >= tx.vout.size()) return nullptr;
+        if (ctx.st.GetAttestor(ctx.st.GetAttestorSeq().next).has_value()) return verdict::ATTESTOR_SEQ_EXHAUSTED;
+        if (tx.vout[act.join.bondVout].nValue < BondMinZat(ctx.st, P, ctx.height)) return verdict::ATTESTOR_BOND_BELOW_MIN;
+        return nullptr;
     }
-    return false;
+    return nullptr;
 }
 
 bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, TxLogRecord& log)
@@ -1147,8 +1153,8 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     const bool setActRefused = RefusedAttestorSetAct(tx, ctx.params);
     // seats re-review (2026-10-11): a SET_JOIN of the adopted attestor set whose bond is below BondMinZat at its block
     // is invalid, so every member reaches ELIGIBLE at maturity and no never-eligible member can hold a seat
-    const bool joinBelowMin = !setActRefused && AttestorJoinBelowMin(ctx, tx);
-    const bool setAct = !setActRefused && !joinBelowMin && ApplySetAct(ctx, tx, txid, log);
+    const char* const joinRefused = setActRefused ? nullptr : AttestorJoinRefused(ctx, tx);
+    const bool setAct = !setActRefused && !joinRefused && ApplySetAct(ctx, tx, txid, log);
     const uint8_t setActType = log.type;
 
     // ---- outputs
@@ -1166,10 +1172,14 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         log.type = (uint8_t)TxLogType::ATTESTOR_SET_ACT;
         return fail(verdict::ATTESTOR_SET_ACT);
     }
-    if (joinBelowMin) {
+    if (joinRefused) {
         log.type = (uint8_t)TxLogType::ATTESTOR_REGISTER;
-        return fail(verdict::ATTESTOR_BOND_BELOW_MIN);
+        return fail(joinRefused);
     }
+    // focused review: whether this transaction is a held YED act that may carry liveness, and its BUNDLE-1 inputs
+    bool livenessHeld = false;
+    std::vector<unsigned char> livenessSelector;
+    bool livenessSkipVin0 = false;
     if (!intents.empty()) {
         // U-23: a claim intent's release or cancel (the primitive admits one template input per transaction, S-1)
         if (intents.size() != 1 || !active.empty()) return fail(verdict::INTENT_SPEND_MALFORMED);
@@ -1182,11 +1192,17 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         out.vaultSpend = true;
         if (ApplyVaultSpend(ctx, tx, txid, fp, active, yedIn, log, totals, yedOutputs)) return fail(log.verdict);
         touched = true;
+        if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) {
+            livenessHeld = true;
+            livenessSelector = OutPointSelector(active[0].outpoint);
+            livenessSkipVin0 = true;
+        }
     } else if (fp.has_value() && fp->payload.type == PayloadType::MINT) {
         log.type = (uint8_t)TxLogType::MINT;
         if (!ApplyMint(ctx, tx, txid, fp->payload, fp->opReturnIndex, log, totals)) return fail(log.verdict);   // §15.10: no VOID vault
         yedOutputs.insert(0u);
         touched = true;
+        livenessHeld = true;
     } else if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
         log.type = (uint8_t)(fp->payload.type == PayloadType::TRANSFER ? TxLogType::TRANSFER : TxLogType::REDEEM);
         if (const char* holder = ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log)) return fail(holder);   // TOK-PQ
@@ -1197,7 +1213,14 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         if (fp.has_value()) {
             switch (fp->payload.type) {
             case PayloadType::ATTESTOR_REGISTER: log.type = (uint8_t)TxLogType::ATTESTOR_REGISTER; return fail(verdict::ATTESTOR_REGISTER_RETIRED);   // P4-b
-            case PayloadType::CLAIM_NOTICE: log.type = (uint8_t)TxLogType::CLAIM_NOTICE; held = ApplyNotice(ctx, tx, fp->payload, log); break;
+            case PayloadType::CLAIM_NOTICE:
+                log.type = (uint8_t)TxLogType::CLAIM_NOTICE;
+                held = ApplyNotice(ctx, tx, fp->payload, log);
+                if (held) {
+                    livenessHeld = true;
+                    livenessSelector = OutPointSelector(fp->payload.VaultOutPoint());
+                }
+                break;
             case PayloadType::EQUIVOCATION: log.type = (uint8_t)TxLogType::EQUIVOCATION; held = ApplyEquivocation(ctx, tx, log); break;
             case PayloadType::ATTESTOR_REVIVE: log.type = (uint8_t)TxLogType::ATTESTOR_REVIVE; return fail(verdict::ATTESTOR_REVIVE_RETIRED);      // P4-b
             default: break;
@@ -1228,7 +1251,17 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
             return std::nullopt;
         };
         auto hashAt = [&](int64_t h) { return BlockHashAt(ctx.st.View(), ctx.params, h); };
-        for (const auto& sc : AttestationLiveness(tx, ctx.params, ctx.height, liveMember, hashAt, ctx.cache)) {
+        const std::vector<std::pair<uint16_t, int64_t>> credits = AttestationLiveness(tx, ctx.params, ctx.height, liveMember, hashAt, ctx.cache);
+        // focused review: a transaction whose bundle credits liveness (the primitive's hook credits it structurally) must be
+        // a held YED act whose bundle passes the whole BUNDLE-1 -- selection included -- at its refHeight; else it is
+        // invalid, so in a valid block the primitive's credit and this mirror's coincide and a failing act credits nobody
+        if (!credits.empty()) {
+            if (!livenessHeld || !fp.has_value() ||
+                !VerifyTxBundle(ctx.st.View(), ctx.params, tx, (int)fp->payload.refHeight, livenessSelector, livenessSkipVin0, ctx.cache, nullptr).ok) {
+                return fail(verdict::LIVENESS_UNHELD);
+            }
+        }
+        for (const auto& sc : credits) {
             std::optional<AttestorRecord> rec = ctx.st.GetAttestor(sc.first);
             rec->lastAct = (int32_t)std::min<int64_t>(sc.second, 0x7FFFFFFF);
             ctx.st.Put(keys::Attestor(sc.first), rec.value());
@@ -1842,7 +1875,8 @@ std::vector<std::pair<uint16_t, int64_t>> AttestationLiveness(
     limits.priceMin = PRICE_MIN;
     limits.priceMax = PRICE_MAX;
     const int64_t R = fp->payload.refHeight;
-    if (R < 0 || R >= height) return out;
+    // focused review: R within REF_WINDOW of the block, so an old public attestation cannot be replayed to refresh lastAct
+    if (R < 0 || R >= height || height - R > (int64_t)P.refWindow) return out;
     auto pubkeyOf = [&](uint16_t seq) -> std::optional<CPubKey> { return members.at(seq).first; };
     auto hashAt = [&](int h) -> std::optional<uint256> { return blockHashAt((int64_t)h); };
     BundleVerdict v = VerifyBundle(tx, P.bundleCarrier, skipVin0, std::vector<unsigned char>(), (int)R, seqs, limits, pubkeyOf, hashAt, cache);

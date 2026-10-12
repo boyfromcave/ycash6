@@ -107,6 +107,13 @@ supply churned for about a year and a half at the least (65,536 / 1,700 × 14 da
 item, not a run-time concern. The per-block scan of every attestor record is linear in that
 same count.
 
+**Attestations as liveness are bounded, not priced (focused review, 2026-10-11).** A member's attestation carried by a
+held MINT, CLAIM_NOTICE or REDEEM claim refreshes its `lastAct` in the vault primitive and in the index alike. The
+signature checks this costs are not counted as sigops: they are at most `BUNDLE_MAX` (6) per transaction, the same
+signatures BUNDLE-1 already verifies (both go through the node's signature cache, keyed by attestation, block hash and
+public key), only for a bundle that passes BUNDLE-1, and only for a refHeight within `REF_WINDOW`; a transaction whose
+bundle would refresh liveness without being a held act is invalid (`liveness-unheld`).
+
 ## Configuration
 
 No flag turns Yellowback on or off. It is live wherever `UPGRADE_VAULT` has an activation height
