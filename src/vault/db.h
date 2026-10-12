@@ -50,7 +50,7 @@ static const char KEY_VERSION = 'V';
  * height on start (Reconcile). 2: the seats review fixes (owner 2026-10-11 -- bond exitHeight, one unspent
  * bond per key, the liveness hook, D-Q-31) change what replay derives from the same blocks (review A3).
  */
-static const uint32_t VAULT_DB_VERSION = 2;
+static const uint32_t VAULT_DB_VERSION = 3;   //!< 3: SetRecord.joinCount and MemberRecord.joinOrdinal (seats re-review)
 
 class VaultDB : public KVReader
 {

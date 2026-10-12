@@ -757,7 +757,10 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
             db->exitHeight = h;                      // the bond exit delay starts (owner 2026-10-11)
             PutRecord(KeyBond(dm->bondOutpoint), *db);
         }
+        s->joinCount++;                              // seats re-review: the member's join ordinal
+        PutRecord(KeySet(j.setId), *s);
         MemberRecord m;
+        m.joinOrdinal = s->joinCount;
         m.bondOutpoint = COutPoint(tx.GetHash(), j.bondVout);
         m.bondValue = bond.nValue;
         m.bondLocktime = j.bondLocktime;

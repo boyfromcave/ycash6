@@ -511,7 +511,10 @@ never re-judged as collateral moves. **Seat ranking and eviction (owner 2026-10-
 is OPEN with `seats` (15) seats: a `SET_JOIN` into the full set evicts the member that is not live (`lastAct < h − livenessWindow`)
 of least seat weight, else the member of least seat weight when the new bond (at age 0) exceeds it by `evictMarginBps`; the evicted
 record becomes `WITHDRAWN` with `evicted: true` in `yed_listattestors`, its bond not frozen. `SET_REMOVE` and `SET_WINDDOWN` of the
-attestor set are invalid (`attestor-set-act`); equivocation is the only removal.
+attestor set are invalid (`attestor-set-act`); equivocation is the only removal. **Seats re-review (2026-10-11):** a
+`SET_JOIN` of the attestor set whose bond is below `bondMinZat` at its block is invalid (`attestor-bond-below-min`), so
+every member becomes ELIGIBLE at maturity; an attestor's own attestations count as liveness only from a bundle that
+passes BUNDLE-1 at its refHeight in all but the selection (one signature check per attestation).
 
 ### `yed_getstatehash [height]`
 
@@ -2008,7 +2011,7 @@ change. The member key is `attestorPubKey` and the bond key at once (back up `wa
 afterwards). The bond is **not** `IsMine` (R6): the wallet finds it through `Attestors` by
 `bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in the result — it is assigned
 when the join confirms; read it from `yed_listattestors` by `attestorPubKey`; `flags` is always
-`{tier 0, pool false}`; `warning` is `""`, or (D-Q-30 review B2) `"bond-near-min: …"` when `bondYec` is below `bondMinCapZat` and within 10 % of `params.attest.bondMinZat`: the join is judged at the snapshot before its own block, so if YED vault collateral grows before it confirms it can stay PENDING until `bondLocktime`; post 10 % headroom, or `bondMinCapZat`, which always qualifies; `maturesAt` is `tip + 1 + max(set maturity,
+`{tier 0, pool false}`; `warning` is `""`, or (D-Q-30 review B2) `"bond-near-min: …"` when `bondYec` is below `bondMinCapZat` and within 10 % of `params.attest.bondMinZat`: the join is judged at the snapshot before its own block, so if YED vault collateral grows before it confirms it becomes invalid (`attestor-bond-below-min`) and is not mined; post 10 % headroom, or `bondMinCapZat`, which always qualifies; `maturesAt` is `tip + 1 + max(set maturity,
 BOND_MATURITY)`. Refusals: `bond-below-min`, `lock-below-min` (the module's floor; also for
 `bondLocktime ≥ LOCKTIME_THRESHOLD`), `yellowback-no-attestor-set` (the network has none),
 `register-needs-admission` (`RPC_WALLET_ERROR`: the set is not open; the message carries the

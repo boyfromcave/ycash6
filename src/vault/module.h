@@ -81,8 +81,8 @@ public:
      * The module displacement hook (owner, 2026-10-11). A SET_JOIN into the module's GovernedSet() when that set
      * already has `seats` ACTIVE members is refused (bad-vault-act-seats) unless this names a member to make room:
      * the primitive then checks that the key is an ACTIVE member of the set, not the joining key, whose bond is
-     * unspent (indexed) and not frozen, sets it MEMBER_REMOVED without freezing its bond (it stays spendable at its
-     * locktime) and admits the join, in the same overlay. Any other answer, or nullopt (the default), refuses the
+     * unspent (indexed) and not frozen, sets it MEMBER_REMOVED without freezing its bond (it is spendable from
+     * exitHeight + the set's maturity, the bond exit delay) and admits the join, in the same overlay. Any other answer, or nullopt (the default), refuses the
      * join as before. Asked only for a full governed set; a set no module governs is unchanged. The primitive does
      * not know why the module picks a member (for YED: the eviction rule, a larger bond or a member not live).
      */

@@ -10,9 +10,10 @@ the snapshot before the join's block. Regtest carries it at 1/2,000 of mainnet (
 N_SLOTS 5; mainnet 5,000 / 20,000 YEC, N_SLOTS 9).
 
 1. Empty vaults: bondMinZat is the 2.5-YEC floor; yed_registerattestor refuses 2.49999999 (bond-below-min) and warns
-   bond-near-min at 2.5; a raw SET_JOIN at 2.5 YEC - 1 zat is mirrored but stays PENDING; the 2.5-YEC join matures.
+   bond-near-min at 2.5; a raw SET_JOIN at 2.5 YEC - 1 zat is refused by every Yellowback mempool
+   (attestor-bond-below-min, seats re-review: no never-eligible member); the 2.5-YEC join matures.
 2. The minimum rises with collateral: after a $500 mint at $5 (~300 YEC locked) it is ceil(collateral / 200); a join
-   1 zat below it stays PENDING, one at it matures.
+   1 zat below it is refused, one at it matures.
 3. The cap: past 1,000 YEC locked the minimum stops at 10 YEC; 10 YEC (no warning) always qualifies.
 4. Checked once at registration: the 2.5-YEC and mid-range records stay ELIGIBLE and seated under the 10-YEC minimum,
    and a price move (which the rule never reads) changes nothing.
@@ -94,6 +95,13 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         return self.seq_of(pub)
 
+    def refused_join(self, bond_zat):
+        """A SET_JOIN under a fresh key with bond_zat that the mempool refuses (attestor-bond-below-min)."""
+        user = self.nodes[USER]
+        secret = os.urandom(32)
+        hex_, _lt = build_register_tx(user, secret_to_pubkey(secret), None, bond_zat, BOND_MIN_LOCK, secret=secret)
+        assert_rpc_error('attestor-bond-below-min', user.sendrawtransaction, hex_)
+
     def wallet_join(self, bond_zat):
         res = self.last_reg = self.nodes[USER].yed_registerattestor(Decimal(bond_zat) / COIN, BOND_MIN_LOCK)
         self.sync_all()
@@ -142,11 +150,11 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_equal(self.tip_collateral(), 0)
         assert_equal(self.bond_min(), FLOOR)
         assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('2.49999999'), BOND_MIN_LOCK)
-        below_floor = self.raw_join(FLOOR - 1)
+        self.refused_join(FLOOR - 1)
         at_floor = self.wallet_join(FLOOR)
         assert self.last_reg['warning'].startswith('bond-near-min'), self.last_reg['warning']   # B2: no headroom
         self.mature()
-        assert_equal((self.status(below_floor), self.status(at_floor)), ('PENDING', 'ELIGIBLE'))
+        assert_equal(self.status(at_floor), 'ELIGIBLE')
 
         print('2. the minimum rises with vault collateral')
         self.mint(50_000)                                # $500 at $5, 300 % class A: ~300 YEC locked
@@ -157,10 +165,10 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_equal(self.bond_min(), mid)
         print('   %s YEC locked -> bondMinZat %s YEC' % (Decimal(coll) / COIN, Decimal(mid) / COIN))
         assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal(mid - 1) / COIN, BOND_MIN_LOCK)
-        below_mid = self.raw_join(mid - 1)
+        self.refused_join(mid - 1)
         at_mid = self.raw_join(mid)
         self.mature()
-        assert_equal((self.status(below_mid), self.status(at_mid)), ('PENDING', 'ELIGIBLE'))
+        assert_equal(self.status(at_mid), 'ELIGIBLE')
 
         print('3. the cap: past 1,000 YEC locked the minimum stops at 10 YEC')
         self.mint(150_000)                               # $1,500 more: ~900 YEC
@@ -181,8 +189,6 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         recs = self.records()
         for seq in (at_floor, at_mid, at_cap):
             assert_equal((recs[seq]['status'], recs[seq]['seated']), ('ELIGIBLE', True))
-        for seq in (below_floor, below_mid):
-            assert_equal(recs[seq]['status'], 'PENDING')
 
         print('5. the bump: larger YEC bonds outrank minimum ones by seat weight')
         p1 = self.wallet_join(CAP)

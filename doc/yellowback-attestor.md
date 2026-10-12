@@ -40,11 +40,12 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   freshly signed attestation): the record is ELIGIBLE again at that block.
 - **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-30: 5 % of all YEC locked
   in YED vaults spread over the 9 seats, never below 5,000 YEC nor above 20,000 YEC; `yed_getinfo`
-  `params.attest.bondMinZat` is the floor for a join in the next block) or locked for less than `BOND_MIN_LOCK` is
-  recorded but never becomes ELIGIBLE. It is judged once, at registration; a seated attestor is never re-judged.
+  `params.attest.bondMinZat` is the floor for a join in the next block) is **invalid** (`attestor-bond-below-min`,
+  seats re-review 2026-10-11: no member that can never become ELIGIBLE holds a seat); a join at or above it becomes
+  ELIGIBLE at maturity. It is judged once, at registration; a seated attestor is never re-judged.
   **Post headroom:** the floor is judged at the snapshot before the join's own block, so a bond sized at
-  exactly today's `bondMinZat` can fall short if vault collateral grows before it confirms — and then sits PENDING,
-  locked, until `bondLocktime`. Post at least 10 % above `bondMinZat` (`yed_registerattestor` warns
+  exactly today's `bondMinZat` can fall short if vault collateral grows before it confirms — and the join then
+  leaves the mempool unmined. Post at least 10 % above `bondMinZat` (`yed_registerattestor` warns
   `bond-near-min` otherwise), or `bondMinCapZat` (20,000 YEC), which always qualifies.
 - **Ejection freezes the bond.** EQV-1 (two prices, one height) ejects the member *and* freezes
   its bond in the set: the bond can never be withdrawn, and the key never becomes ELIGIBLE again.

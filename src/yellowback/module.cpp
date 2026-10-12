@@ -131,14 +131,23 @@ std::vector<std::pair<CPubKey, int64_t>> Module::Liveness(const CTransaction& tx
 {
     std::shared_ptr<const Params> p = CurrentParams();
     if (!p || !ctx.state || !ctx.blockHashAt || !AdoptedSet(*p, ctx)) return {};
-    std::vector<std::pair<CPubKey, int64_t>> members;
-    for (const auto& m : vault::GetMembers(*ctx.state, p->attestorSetId)) {
-        if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;
-        std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
-        if (!b || b->frozen) continue;
-        members.push_back({ m.first, m.second.lastAct });
+    const vault::MemberList all = vault::GetMembers(*ctx.state, p->attestorSetId);
+    // seq -> the member whose join ordinal is seq + 1 (the module numbers the set's joins from 0, one seq per SET_JOIN)
+    auto liveMember = [&](uint16_t seq) -> std::optional<std::pair<CPubKey, int64_t>> {
+        for (const auto& m : all) {
+            if (m.second.joinOrdinal != (uint32_t)seq + 1) continue;
+            if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) return std::nullopt;
+            std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+            if (!b || b->frozen) return std::nullopt;
+            return std::make_pair(m.first, m.second.lastAct);
+        }
+        return std::nullopt;
+    };
+    std::vector<std::pair<CPubKey, int64_t>> out;
+    for (const auto& sc : AttestationLiveness(tx, *p, ctx.height, liveMember, [&](int64_t h) { return ctx.blockHashAt(h); }, nullptr)) {
+        out.push_back({ liveMember(sc.first)->first, sc.second });
     }
-    return AttestationLiveness(tx, *p, ctx.height, members, [&](int64_t h) { return ctx.blockHashAt(h); });
+    return out;
 }
 
 const vault::Module* RegisteredModule()

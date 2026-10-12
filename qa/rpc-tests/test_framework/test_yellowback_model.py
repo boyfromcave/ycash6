@@ -1072,18 +1072,21 @@ class MintTests(unittest.TestCase):
         tag = lambda: (1, 50_000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
         self.assertEqual(c.model.bond_min_zat(c.height + 1), ym.COIN * 5 // 2)
         c.mine(tag(), [attestor_set_create()])
-        c.mine(tag(), [c.register_tx(ATTESTORS[0], c.height + 1 + 200, ym.COIN * 5 // 2 - 1),
-                       c.register_tx(ATTESTORS[1], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        # seats re-review: a join below the minimum at its block is invalid (never recorded)
+        below = c.register_tx(ATTESTORS[0], c.height + 1 + 200, ym.COIN * 5 // 2 - 1)
+        c.mine(tag(), [below, c.register_tx(ATTESTORS[1], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        self.assertEqual(c.refused[txid_of(below)], 'attestor-bond-below-min')
         ref = c.height - 1
         raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)     # $100 at 300 % and $0.05 = 6,000 YEC
         c.mine(tag(), [raw])
         self.assertEqual(c.model.snapshots[c.height].collateral_zat, collateral_for(c, 10_000, ref))
         self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)                # far above 1,000 YEC: the cap
-        c.mine(tag(), [c.register_tx(ATTESTORS[2], c.height + 1 + 200, ym.COIN * 5 // 2)])
+        late = c.register_tx(ATTESTORS[2], c.height + 1 + 200, ym.COIN * 5 // 2)
+        c.mine(tag(), [late])
+        self.assertEqual(c.refused[txid_of(late)], 'attestor-bond-below-min')
         c.mine_n(c.params.bond_maturity, price_fn=lambda h: 50_000)
-        self.assertEqual(c.model.attestors[0].status, ym.A_PENDING)
-        self.assertEqual(c.model.attestors[1].status, ym.A_ELIGIBLE)     # judged at its own snapshot, before the mint
-        self.assertEqual(c.model.attestors[2].status, ym.A_PENDING)
+        self.assertEqual(sorted(c.model.attestors), [0])
+        self.assertEqual(c.model.attestors[0].status, ym.A_ELIGIBLE)     # judged at its own snapshot, before the mint
 
     # Rule: RED-5'
     def test_red5_residual_threshold(self):

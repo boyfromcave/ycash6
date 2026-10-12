@@ -1379,7 +1379,7 @@ BOOST_AUTO_TEST_CASE(sigcache_lru_and_hit_equals_cold)
         { OverlayStateView o(index.MutableView()); warm1 = EvaluateBlock(o, live.P, block, live.Tip() + 1, block.GetHash(), 0, index.GetSigCache()); }
         BOOST_CHECK_EQUAL(index.SigCacheStats().Size(), sizeBefore + 3);       // three signatures verified once
         { OverlayStateView o(index.MutableView()); warm2 = EvaluateBlock(o, live.P, block, live.Tip() + 1, block.GetHash(), 0, index.GetSigCache()); }
-        BOOST_CHECK_EQUAL(index.SigCacheStats().Hits(), hitsBefore + 3);       // all three hit the second time
+        BOOST_CHECK_EQUAL(index.SigCacheStats().Hits(), hitsBefore + 9);       // warm1's liveness credit (3), then BUNDLE-1 and liveness (6)
         BOOST_CHECK_EQUAL(index.SigCacheStats().Size(), sizeBefore + 3);
     }
     BOOST_REQUIRE_EQUAL(cold.txlogs.size(), 1u);

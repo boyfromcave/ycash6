@@ -1208,7 +1208,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
             "The minimum follows the YEC locked in YED vaults at the snapshot before the join's block (D-Q-30), so post headroom: a\n"
             "bond within 10% of params.attest.bondMinZat (and below bondMinCapZat) returns warning \"bond-near-min\"; if vault\n"
-            "collateral grows before it confirms, the join can stay PENDING (leave with set_leave; the bond returns after the exit delay).\n"
+            "collateral grows before it confirms, the join becomes invalid (attestor-bond-below-min) and is not mined.\n"
             "\nArguments:\n"
             "1. bondYec     (numeric, required) the bond in YEC (>= the module's bondMinZat at the next block and the set's bondmin)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
@@ -1232,15 +1232,15 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         const yellowback::Params& p = index.GetParams();
         if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
         // D-Q-30: the module's floor for a join in the next block (the vault collateral of the tip's snapshot); a join mined
-        // later is judged at its own block, so collateral growth in between can leave it PENDING
+        // later is judged at its own block, so collateral growth in between makes it invalid (attestor-bond-below-min)
         const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)IndexHeight(index) + 1);   // the index tip, as yed_getinfo
         if (bondZat < bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(bondMin)));
         // D-Q-30 review B2 (policy): the join is judged at the snapshot before its own block, so a bond within 10 % of
-        // today's minimum can fall short if vault collateral grows before it confirms and then sits PENDING until its CLTV.
+        // today's minimum can fall short if vault collateral grows before it confirms and then is never mined.
         // The cap (bondMinCapZat) always qualifies.
         if (bondZat < p.bondMinCapZat && bondZat < bondMin + bondMin / 10) {
             warning = strprintf("bond-near-min: %s YEC is within 10 %% of the minimum for the next block (%s YEC); if YED vault collateral "
-                                "grows before the join confirms it can stay PENDING (leave with set_leave; the bond returns after the exit delay). Post at least %s YEC (+10 %%), or %s YEC, "
+                                "grows before the join confirms it becomes invalid and is not mined. Post at least %s YEC (+10 %%), or %s YEC, "
                                 "which always qualifies", FormatMoney(bondZat), FormatMoney(bondMin),
                                 FormatMoney(std::min(p.bondMinCapZat, bondMin + bondMin / 10)), FormatMoney(p.bondMinCapZat));
         }

@@ -59,6 +59,7 @@ BASE_SCRIPTS= [
     'yellowback_attest_bond.py',
     'yellowback_attest_evict.py',
     'yellowback_attest_rejoin.py',
+    'yellowback_attest_live.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
     'yellowback_void_mint.py',

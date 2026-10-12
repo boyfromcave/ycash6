@@ -2537,6 +2537,9 @@ class YellowbackModel(object):
         if refused_attestor_set_act(tx, self.params):
             rec.type = 'ATTESTOR_SET_ACT'
             return self._fail(rec, 'attestor-set-act')
+        if self._attestor_join_below_min(tx, height):
+            rec.type = 'ATTESTOR_REGISTER'
+            return self._fail(rec, 'attestor-bond-below-min')
         set_act = self._apply_set_act(tx, height, rec)
         set_act_type = rec.type
         active_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_ACTIVE]
@@ -2864,16 +2867,40 @@ class YellowbackModel(object):
             return None
         return atts, a[2]
 
+    def _attestor_join_below_min(self, tx, height):
+        """AttestorJoinBelowMin (seats re-review): a SET_JOIN of the adopted attestor set below BondMinZat(height)."""
+        from . import vault as va
+        p = self.params
+        if not p.attestor_set or self.attestor_set_rec is None:
+            return False
+        for o in tx.vout:
+            if not va.is_act_script(o.script):
+                continue
+            try:
+                _payload, act, _sigs = va.parse_act_script(o.script)
+            except va.VaultError:
+                return False
+            if act['type'] != va.ACT_SET_JOIN or bytes.fromhex(act['setId']) != p.attestor_set_internal:
+                return False
+            if act['bondVout'] >= len(tx.vout):
+                return False
+            return tx.vout[act['bondVout']].value < self.bond_min_zat(height)
+        return False
+
     def _attestation_liveness(self, tx, height, payload):
-        """AttestationLiveness (state.h, seats review B2): for a MINT, CLAIM_NOTICE or REDEEM carrying a bundle (read
-        structurally, BUNDLE-1 not re-checked), each live member record (its key's newest, not EJECTED or WITHDRAWN,
-        bond unspent and unfrozen) whose key signed an attestation citing c in [START_HEIGHT, height) gets
-        lastAct = the highest such c when above its lastAct."""
+        """AttestationLiveness (state.h, seats re-review): for a MINT, CLAIM_NOTICE or REDEEM, its carrier bundle credits
+        its signers only when it passes BUNDLE-1 at the payload's refHeight in everything but the selection (shape,
+        hash, count, distinct seqs, freshness, range), every seq names a live record (its key's newest, not EJECTED or
+        WITHDRAWN, bond unspent and unfrozen) and every signature verifies under that record's key; then each signer's
+        lastAct = its citedHeight when above.  Any failure credits nobody."""
         from . import yellowback_attest as ya
         p = self.params
         if self.attestor_set_rec is None or payload is None:
             return
         if payload.type not in (PAYLOAD_MINT, PAYLOAD_CLAIM_NOTICE, PAYLOAD_REDEEM) or p.bundle_carrier == CARRIER_OP_RETURN:
+            return
+        R = payload.ref_height
+        if R >= height:
             return
         found, _why = self._find_carrier(tx, payload.type == PAYLOAD_REDEEM)
         if found is None:
@@ -2883,33 +2910,32 @@ class YellowbackModel(object):
         if sha256(pushes[0]) != h:
             return
         atts = ya.decode_bundle(pushes[0])
-        if atts is None or len(atts) > p.bundle_max:
+        if atts is None or not atts or not (p.m_select <= len(atts) <= p.bundle_max):
             return
         newest = {}
         for seq in sorted(self.attestors):
             newest[self.attestors[seq].attestor_pubkey] = seq
-        live = [seq for seq in sorted(self.attestors)
-                if newest[self.attestors[seq].attestor_pubkey] == seq
-                and self.attestors[seq].status not in (A_EJECTED, A_WITHDRAWN)
-                and not self.attestors[seq].bond_spent_height and not self.attestors[seq].bond_frozen]
-        best = {seq: self.attestors[seq].last_act for seq in live}
-        for att in atts:
-            cited = ya.parse_attestation(att)[2]
-            if cited < p.start_height or cited >= height:
-                continue
-            bh = None
-            for seq in live:
-                if best[seq] >= cited:
-                    continue
-                if bh is None:
-                    bh = self.block_hash_at(cited)
-                    if bh is None:
-                        break
-                if self._attestation_valid(att, self.attestors[seq].attestor_pubkey, bh):
-                    best[seq] = cited
-        for seq in live:
-            if best[seq] > self.attestors[seq].last_act:
-                self.attestors[seq].last_act = best[seq]
+        parsed = [ya.parse_attestation(a) for a in atts]
+        seqs = [x[0] for x in parsed]
+        for seq in seqs:
+            r = self.attestors.get(seq)
+            if r is None or newest[r.attestor_pubkey] != seq or r.status in (A_EJECTED, A_WITHDRAWN) \
+                    or r.bond_spent_height or r.bond_frozen:
+                return
+        if len(set(seqs)) != len(seqs):
+            return
+        for _seq, price, cited, _r, _s in parsed:
+            if not (R - p.attest_max_age < cited <= R) or cited < p.start_height:
+                return
+            if not (p.price_min <= price <= p.price_max):
+                return
+        for att, (seq, _price, cited, _r, _s) in zip(atts, parsed):
+            bh = self.block_hash_at(cited)
+            if bh is None or not ya.verify_attestation(self.attestors[seq].attestor_pubkey, att, bh):
+                return
+        for seq, _price, cited, _r, _s in parsed:
+            if cited > self.attestors[seq].last_act:
+                self.attestors[seq].last_act = cited
 
     def _apply_equivocation(self, tx, height, rec):
         """EQV-1 (P4-b): the first record in seq order that is its key's newest, with an unspent, unfrozen bond, under

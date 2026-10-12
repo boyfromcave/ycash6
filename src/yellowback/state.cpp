@@ -70,6 +70,7 @@ const char* const BUNDLE_STAT = "stat";
 const char* const ATTESTOR_REGISTER_RETIRED = "attestor-register-retired";
 const char* const ATTESTOR_REVIVE_RETIRED = "attestor-revive-retired";
 const char* const ATTESTOR_SET_ACT = "attestor-set-act";
+const char* const ATTESTOR_BOND_BELOW_MIN = "attestor-bond-below-min";
 } // namespace verdict
 
 // ---------------------------------------------------------------------------
@@ -946,6 +947,22 @@ bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& lo
  * The attestor set's acts on the mirror (P4-b; see state.h). Returns true when the transaction carried an act that
  * changed it (the TxLog entry is then ATTESTOR_REGISTER for a join, ATTESTOR_SET_ACT otherwise).
  */
+/** Seats re-review: a well-formed SET_JOIN of the adopted attestor set whose bond output is below BondMinZat(height). */
+bool AttestorJoinBelowMin(EvalContext& ctx, const CTransaction& tx)
+{
+    const Params& P = ctx.params;
+    if (P.attestorSetId.IsNull() || !ctx.st.GetAttestorSet().has_value()) return false;
+    for (const CTxOut& o : tx.vout) {
+        if (!vault::IsActOutput(o.scriptPubKey)) continue;
+        vault::Act act;
+        if (vault::DecodeAct(o.scriptPubKey, act) || !vault::ActFieldsValid(act)) return false;   // the primitive refuses it
+        if (act.type != vault::ACT_SET_JOIN || act.join.setId != P.attestorSetId) return false;
+        if (act.join.bondVout >= tx.vout.size()) return false;
+        return tx.vout[act.join.bondVout].nValue < BondMinZat(ctx.st, P, ctx.height);
+    }
+    return false;
+}
+
 bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, TxLogRecord& log)
 {
     const Params& P = ctx.params;
@@ -1128,7 +1145,10 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     // P4-b: the attestor set's acts on the Attestors mirror (after the bond spends above, as the primitive orders them);
     // a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid (owner, 2026-10-11), checked below
     const bool setActRefused = RefusedAttestorSetAct(tx, ctx.params);
-    const bool setAct = !setActRefused && ApplySetAct(ctx, tx, txid, log);
+    // seats re-review (2026-10-11): a SET_JOIN of the adopted attestor set whose bond is below BondMinZat at its block
+    // is invalid, so every member reaches ELIGIBLE at maturity and no never-eligible member can hold a seat
+    const bool joinBelowMin = !setActRefused && AttestorJoinBelowMin(ctx, tx);
+    const bool setAct = !setActRefused && !joinBelowMin && ApplySetAct(ctx, tx, txid, log);
     const uint8_t setActType = log.type;
 
     // ---- outputs
@@ -1145,6 +1165,10 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     if (setActRefused) {
         log.type = (uint8_t)TxLogType::ATTESTOR_SET_ACT;
         return fail(verdict::ATTESTOR_SET_ACT);
+    }
+    if (joinBelowMin) {
+        log.type = (uint8_t)TxLogType::ATTESTOR_REGISTER;
+        return fail(verdict::ATTESTOR_BOND_BELOW_MIN);
     }
     if (!intents.empty()) {
         // U-23: a claim intent's release or cancel (the primitive admits one template input per transaction, S-1)
@@ -1190,26 +1214,24 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     // ---- seats review B2: a member's attestation carried here is liveness (the primitive's liveness hook, alike)
     if (ctx.st.GetAttestorSet().has_value()) {
         const std::vector<std::pair<uint16_t, AttestorRecord>> all = ctx.st.Attestors();
-        std::vector<std::pair<CPubKey, int64_t>> members;
-        std::vector<uint16_t> seqs;
-        for (size_t i = 0; i < all.size(); i++) {
-            const AttestorRecord& a = all[i].second;
-            if (a.Status() == AttestorStatus::EJECTED || a.Status() == AttestorStatus::WITHDRAWN) continue;
-            if (a.bondSpentHeight != 0 || a.Frozen()) continue;
-            bool newest = true;
-            for (size_t k = i + 1; k < all.size(); k++) newest = newest && all[k].second.attestorPubKey != a.attestorPubKey;
-            if (!newest) continue;
-            members.push_back({ a.AttestorKey(), (int64_t)a.lastAct });
-            seqs.push_back(all[i].first);
-        }
-        auto hashAt = [&](int64_t h) { return BlockHashAt(ctx.st.View(), ctx.params, h); };
-        for (const auto& kh : AttestationLiveness(tx, ctx.params, ctx.height, members, hashAt)) {
-            for (size_t i = 0; i < members.size(); i++) {
-                if (members[i].first != kh.first) continue;
-                std::optional<AttestorRecord> rec = ctx.st.GetAttestor(seqs[i]);
-                rec->lastAct = (int32_t)std::min<int64_t>(kh.second, 0x7FFFFFFF);
-                ctx.st.Put(keys::Attestor(seqs[i]), rec.value());
+        auto liveMember = [&](uint16_t seq) -> std::optional<std::pair<CPubKey, int64_t>> {
+            for (size_t i = 0; i < all.size(); i++) {
+                if (all[i].first != seq) continue;
+                const AttestorRecord& a = all[i].second;
+                if (a.Status() == AttestorStatus::EJECTED || a.Status() == AttestorStatus::WITHDRAWN) return std::nullopt;
+                if (a.bondSpentHeight != 0 || a.Frozen()) return std::nullopt;
+                for (size_t k = i + 1; k < all.size(); k++) {
+                    if (all[k].second.attestorPubKey == a.attestorPubKey) return std::nullopt;   // not its key's newest
+                }
+                return std::make_pair(a.AttestorKey(), (int64_t)a.lastAct);
             }
+            return std::nullopt;
+        };
+        auto hashAt = [&](int64_t h) { return BlockHashAt(ctx.st.View(), ctx.params, h); };
+        for (const auto& sc : AttestationLiveness(tx, ctx.params, ctx.height, liveMember, hashAt, ctx.cache)) {
+            std::optional<AttestorRecord> rec = ctx.st.GetAttestor(sc.first);
+            rec->lastAct = (int32_t)std::min<int64_t>(sc.second, 0x7FFFFFFF);
+            ctx.st.Put(keys::Attestor(sc.first), rec.value());
         }
     }
 
@@ -1787,37 +1809,46 @@ arith_uint256 SeatRank(const AttestorRecord& rec, const AttestState& attest, con
     return w * arith_uint256((uint64_t)(BPS + (rec.seatedSince != 0 ? std::max(0, P.seatMarginBps) : 0)));
 }
 
-std::vector<std::pair<CPubKey, int64_t>> AttestationLiveness(const CTransaction& tx, const Params& P, int64_t height,
-                                                             const std::vector<std::pair<CPubKey, int64_t>>& members,
-                                                             const std::function<std::optional<uint256>(int64_t)>& blockHashAt)
+std::vector<std::pair<uint16_t, int64_t>> AttestationLiveness(
+    const CTransaction& tx, const Params& P, int64_t height,
+    const std::function<std::optional<std::pair<CPubKey, int64_t>>(uint16_t)>& liveMember,
+    const std::function<std::optional<uint256>(int64_t)>& blockHashAt, SigCache* cache)
 {
-    std::vector<std::pair<CPubKey, int64_t>> out;
-    if (members.empty() || !blockHashAt) return out;
+    std::vector<std::pair<uint16_t, int64_t>> out;
+    if (!liveMember || !blockHashAt) return out;
     std::optional<FoundPayload> fp = FindPayload(tx);
     if (!fp.has_value()) return out;
     const PayloadType t = fp->payload.type;
     if (t != PayloadType::MINT && t != PayloadType::CLAIM_NOTICE && t != PayloadType::REDEEM) return out;
-    auto extracted = ExtractBundle(tx, P.bundleCarrier, t == PayloadType::REDEEM, std::vector<unsigned char>());
+    const bool skipVin0 = t == PayloadType::REDEEM;
+    auto extracted = ExtractBundle(tx, P.bundleCarrier, skipVin0, std::vector<unsigned char>());
     if (!extracted) return out;
     std::optional<Bundle> bundle = DecodeBundle(extracted->first, (size_t)std::max(0, P.bundleMax));
-    if (!bundle) return out;
-    std::vector<int64_t> best;
-    for (const auto& m : members) best.push_back(m.second);
+    if (!bundle || bundle->atts.empty()) return out;
+    // every seq must name a live member before any signature is checked (and before the cache is touched)
+    std::map<uint16_t, std::pair<CPubKey, int64_t>> members;
+    std::vector<uint16_t> seqs;
     for (const Attestation& a : bundle->atts) {
-        const int64_t c = a.citedHeight;
-        if (c < (int64_t)P.startHeight || c >= height) continue;
-        std::optional<uint256> hash;
-        for (size_t i = 0; i < members.size(); i++) {
-            if (best[i] >= c) continue;
-            if (!hash) {
-                hash = blockHashAt(c);
-                if (!hash) break;
-            }
-            if (VerifyCompactSig(members[i].first, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, *hash), a.sig)) best[i] = c;
-        }
+        std::optional<std::pair<CPubKey, int64_t>> m = liveMember(a.seq);
+        if (!m) return out;
+        members[a.seq] = m.value();
+        seqs.push_back(a.seq);
     }
-    for (size_t i = 0; i < members.size(); i++) {
-        if (best[i] > members[i].second) out.push_back({ members[i].first, best[i] });
+    BundleLimits limits;
+    limits.attestMaxAge = P.attestMaxAge;
+    limits.mSelect = (size_t)std::max(0, P.mSelect);
+    limits.bundleMax = (size_t)std::max(0, P.bundleMax);
+    limits.startHeight = P.startHeight;
+    limits.priceMin = PRICE_MIN;
+    limits.priceMax = PRICE_MAX;
+    const int64_t R = fp->payload.refHeight;
+    if (R < 0 || R >= height) return out;
+    auto pubkeyOf = [&](uint16_t seq) -> std::optional<CPubKey> { return members.at(seq).first; };
+    auto hashAt = [&](int h) -> std::optional<uint256> { return blockHashAt((int64_t)h); };
+    BundleVerdict v = VerifyBundle(tx, P.bundleCarrier, skipVin0, std::vector<unsigned char>(), (int)R, seqs, limits, pubkeyOf, hashAt, cache);
+    if (!v.ok) return out;
+    for (const Attestation& a : v.C) {
+        if ((int64_t)a.citedHeight > members.at(a.seq).second) out.push_back({ a.seq, (int64_t)a.citedHeight });
     }
     return out;
 }

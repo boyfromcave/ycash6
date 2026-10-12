@@ -120,6 +120,7 @@ extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUN
 extern const char* const ATTESTOR_REGISTER_RETIRED;   //!< an ATTESTOR_REGISTER payload (join attestorSetId with SET_JOIN)
 extern const char* const ATTESTOR_REVIVE_RETIRED;     //!< an ATTESTOR_REVIVE payload (revive with SET_HEARTBEAT)
 extern const char* const ATTESTOR_SET_ACT;            //!< a SET_REMOVE or SET_WINDDOWN of the attestor set (owner, 2026-10-11)
+extern const char* const ATTESTOR_BOND_BELOW_MIN;     //!< a SET_JOIN of the attestor set below BondMinZat at its block (seats re-review)
 } // namespace verdict
 
 /**
@@ -341,17 +342,20 @@ std::optional<CPubKey> EvictionVictim(const std::vector<SeatCandidate>& members,
                                       int64_t livenessWindow, const Params& params);
 
 /**
- * Seats review B2 (2026-10-11): liveness by attestation. For a transaction whose payload is MINT, CLAIM_NOTICE or
- * REDEEM, the bundle it carries (ExtractBundle at BUNDLE_CARRIER, skipping vin[0] for a REDEEM; decoded up to
- * BUNDLE_MAX attestations; nothing when absent or malformed) is read structurally -- BUNDLE-1 is not re-checked.
- * For each member (key, lastAct), the highest citedHeight c with START_HEIGHT <= c < height of an attestation that
- * verifies under the key over blockHashAt(c), when c > lastAct, gives the pair (key, c): the member signed after
- * block c existed. Order-independent; at most BUNDLE_MAX x members verifications. The primitive's liveness hook
- * and the module's mirror call it over the same members, so both set lastAct = c alike.
+ * Seats review B2 (re-review 2026-10-11): liveness by attestation, bounded. For a transaction whose payload is MINT,
+ * CLAIM_NOTICE or REDEEM, its bundle (BUNDLE_CARRIER, vin[0] skipped for a REDEEM) credits its signers only when it
+ * passes BUNDLE-1 at the payload's refHeight R in everything but the selection: shape, hash, count in [M_SELECT,
+ * BUNDLE_MAX], distinct seqs, freshness and range (VerifyBundle with the bundle's own seqs as the selected list),
+ * every seq naming a live member (`liveMember`: its key and lastAct; nullopt = not a live member of the attestor
+ * set), and every signature verifying under that seq's key -- one verification per attestation (at most BUNDLE_MAX
+ * per transaction), through `cache` when given. Any failure credits nobody. Result: (seq, citedHeight) for each
+ * signer whose citedHeight exceeds its lastAct. The primitive's liveness hook (seq -> the member whose joinOrdinal
+ * is seq + 1) and the module's mirror (seq -> its Attestors record) call it over the same members.
  */
-std::vector<std::pair<CPubKey, int64_t>> AttestationLiveness(const CTransaction& tx, const Params& params, int64_t height,
-                                                             const std::vector<std::pair<CPubKey, int64_t>>& members,
-                                                             const std::function<std::optional<uint256>(int64_t)>& blockHashAt);
+std::vector<std::pair<uint16_t, int64_t>> AttestationLiveness(
+    const CTransaction& tx, const Params& params, int64_t height,
+    const std::function<std::optional<std::pair<CPubKey, int64_t>>(uint16_t)>& liveMember,
+    const std::function<std::optional<uint256>(int64_t)>& blockHashAt, SigCache* cache);
 
 /** AttestorRecord.flags: the record was evicted by a larger bond (WITHDRAWN without slashing; owner, 2026-10-11). */
 static const uint8_t ATTESTOR_FLAG_EVICTED = 0x80;
