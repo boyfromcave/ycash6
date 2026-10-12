@@ -132,7 +132,7 @@ class YellowbackAttestLiveTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
         old_ref = user.getblockcount() - REF_WINDOW - 2                 # the notice's R: still older than REF_WINDOW
-        user.sendrawtransaction(post_notice_raw(user, BOGUS_VAULT, old_ref + 1, carrier))
+        user.sendrawtransaction(post_notice_raw(user, BOGUS_VAULT, old_ref + 1, carrier, expiry=0))   # no expiry: R is old
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal((self.last_acts(s[13]), self.last_acts(s[14])), (before13, before14))
