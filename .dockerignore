@@ -1,0 +1,17 @@
+# The image build copies the source tree only: never a local build's outputs.
+.git
+depends/built
+depends/sources
+depends/work
+depends/x86_64-*
+depends/aarch64-*
+target
+src/*.o
+src/**/*.o
+src/**/*.a
+src/ycashd
+src/ycash-cli
+src/ycash-tx
+src/ycashd-wallet-tool
+qa/rpc-tests/cache
+**/__pycache__
