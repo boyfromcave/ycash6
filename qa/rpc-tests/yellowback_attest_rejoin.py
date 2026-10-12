@@ -144,7 +144,7 @@ class YellowbackAttestRejoinTest(YellowbackTestFramework):
         old_j = self.records()[self.seqs_of(j)[-1]]
         exit_j = self.leave(j)
         assert_refused('bad-vault-act-join', user.sendrawtransaction, self.join_hex(j, 10 * COIN))
-        while user.getblockcount() + 1 < exit_j + BOND_MATURITY:
+        while user.getblockcount() + 2 < exit_j + BOND_MATURITY:   # the next block is exit + maturity - 1
             self.mine(POOLS[0])
         assert_refused('bad-vault-bond-locked', user.sendrawtransaction, withdraw_bond_raw(user, old_j, j))
         self.mine(POOLS[0])
