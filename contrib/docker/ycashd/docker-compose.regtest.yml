@@ -1,0 +1,22 @@
+# A single regtest ycashd with the vault network upgrade active from height 1, the RPC on
+# localhost:18832 (user/password ycash / ycash-regtest). `docker compose -f <this> up -d`.
+services:
+  ycashd:
+    image: ${YCASHD_IMAGE:-ycash/ycashd:local}
+    environment:
+      YCASHD_NETWORK: regtest
+      YCASHD_RPC_USER: ycash
+      YCASHD_RPC_PASSWORD: ycash-regtest
+      YCASHD_VAULT_HEIGHT: "1"
+      YCASHD_LISTEN: "0"
+    ports:
+      - "127.0.0.1:${YCASHD_HOST_PORT:-18832}:18832"
+    volumes:
+      - ycashd_regtest:/var/lib/ycash
+    healthcheck:
+      test: ["CMD", "ycash-cli", "-datadir=/var/lib/ycash", "getblockcount"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+volumes:
+  ycashd_regtest:
