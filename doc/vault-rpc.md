@@ -166,8 +166,14 @@ Result: `{"txid": hash, "setid": hash, "admitkey": key}`
 
 `seats` 1–15; defaults: `cancelthreshold` 1, `slashthreshold` = `unlockthreshold`, `open`
 false, `ratelimitbps` 0 (no limit), `ratewindow` 144, `livenesswindow` 1000, `bondmin` 1,
-`bondlockmin` 0, `maturity` 0, `admitkey` a new wallet key. Funded, signed, broadcast. The set
+`bondlockmin` 0, `maturity` the network's minimum, `admitkey` a new wallet key. Funded, signed, broadcast. The set
 exists from the block after the one it confirms in.
+
+**D-Q-31 (owner, 2026-10-11): every set has at least a 14-day exit window.** `maturity` (the bond exit delay and
+the joiners' wait) must be at least `MIN_SET_MATURITY` = 16,128 blocks on mainnet and testnet (8 on regtest);
+a smaller value is refused here (`RPC_INVALID_PARAMETER`) and a `SET_CREATE` carrying one is
+`bad-vault-act-params`. A bridge set's members therefore wait at least 14 days for their bonds after leaving,
+and stay slashable for those 14 days.
 
 ### `set_join "setid" bondamount bondlocktime ( "memberkey" )`
 Params: `["setid": hash, "bondamount": yec, "bondlocktime": height, "memberkey"?: key]`
@@ -209,6 +215,12 @@ module ejection hook) and the bond is then frozen. `set_leave` builds, signs and
 member's own `SET_REMOVE` for an ACTIVE member key of this wallet (default the first one);
 `exitheight` is the next block, `bondspendableat` = `exitheight + maturity`. The bond script's CLTV
 (`bondlockmin`) still applies on top, so a set may keep it at 0.
+
+**No slash escape through the delay (seats review B1/A1, 2026-10-11).** A key whose previous bond in the set is
+still unspent (in its exit delay, or frozen) cannot join that set again (`bad-vault-act-join`), so the member
+record always names the key's one unspent bond and every slash reaches it. A `SET_REMOVE` with burn, cosigned by
+`slashthreshold` current members, of a member that already left (`REMOVED`) and whose bond is in its exit delay
+freezes that bond (the member stays `REMOVED`); a frozen key never rejoins the set.
 
 ### `set_buildact "type" {params}`
 Params: `["type": ActType, "params": {"setid"?: hash, "memberkey"?: key, "bondamount"?: yec, "bondlocktime"?: height, "burn"?: bool, "prevout"?: outpoint, "rolea"?: int, "sighasha"?: hash, "siga"?: hex, "roleb"?: int, "sighashb"?: hash, "sigb"?: hex, "seats"?: int, "unlockthreshold"?: int, "cancelthreshold"?: int, "slashthreshold"?: int, "open"?: bool, "ratelimitbps"?: int, "ratewindow"?: int, "livenesswindow"?: int, "bondmin"?: yec, "bondlockmin"?: int, "maturity"?: int, "admitkey"?: key}]`
@@ -401,7 +413,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 ## Example flow (regtest, three nodes A, B, C)
 
 ```
-A: set_create '{"seats":3,"unlockthreshold":2,"cancelthreshold":1,"slashthreshold":2,"maturity":2}'
+A: set_create '{"seats":3,"unlockthreshold":2,"cancelthreshold":1,"slashthreshold":2,"maturity":8}'
    -> {"setid": S, "admitkey": K}                                   ; mine 1
 A: set_join S 1 <h+500>                       -> complete (A holds the admit key)
 B: set_join S 1 <h+500>                       -> {"hex": J, "complete": false}

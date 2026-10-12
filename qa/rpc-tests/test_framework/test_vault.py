@@ -289,7 +289,7 @@ class Chain(object):
     """A VaultModel plus a supply of fake funding coins (P2PKH, not script-checked)."""
 
     def __init__(self, activation=100, **set_kw):
-        self.m = v.VaultModel(activation_height=activation)
+        self.m = v.VaultModel(activation_height=activation, min_set_maturity=0)   # the unit cases use small maturities
         self.n = 0
         self.dest = v.p2pkh_script_of_pubkey(v.pubkey_of(v.fixed_secret('vault-test-dest')))
 
@@ -593,10 +593,17 @@ class ModelTests(unittest.TestCase):
         c.mine_to(c.h + 10)
         self.assertEqual(c.reject(v.build_bond_spend_tx(m0.bond_outpoint, MEMBERS[0], m0.bond_value, m0.bond_locktime,
                                                         c.dest)), 'bad-vault-bond-frozen')
-        sid0 = c.create_set(maturity=0, flags=v.SET_FLAG_OPEN)
-        c.block(c.join_tx(sid0, 4, admit=[]))
-        own, _p = v.build_set_remove_tx(c.coin(), sid0, MKEYS[4], [MEMBERS[4]], burn=0)
-        self.assertEqual(c.reject(own), 'bad-vault-act-remove')
+
+    def test_min_set_maturity(self):
+        # D-Q-31: SET_CREATE below the network's exit window is invalid (regtest 8, mainnet 16,128)
+        m = v.VaultModel(activation_height=100)
+        self.assertEqual((v.MIN_SET_MATURITY, v.MIN_SET_MATURITY_REGTEST, m.min_set_maturity), (16128, 8, 8))
+        c = Chain()
+        c.m.min_set_maturity = 8
+        low, _p = v.build_set_create_tx(c.coin(), v.act_set_create(seats=3, unlock_threshold=2, cancel_threshold=1,
+                                        slash_threshold=2, admit_key=v.pubkey_of(ADMIT), maturity=7))
+        self.assertEqual(c.reject(low), 'bad-vault-act-params')
+        c.create_set(maturity=8)
 
     def test_join_admission_and_seats(self):
         c = Chain()

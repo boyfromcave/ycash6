@@ -942,7 +942,10 @@ SetCreateBody ParseCreateParams(const UniValue& p)
     c.livenessWindow = (uint32_t)num("livenesswindow", 1000, false);
     c.bondMin = find_value(o, "bondmin").isNull() ? COIN : AmountFromValue(find_value(o, "bondmin"));
     c.bondLockMin = (uint32_t)num("bondlockmin", 0, false);
-    c.maturity = (uint32_t)num("maturity", 0, false);
+    c.maturity = (uint32_t)num("maturity", MinSetMaturity(), false);   // D-Q-31: at least the network's exit window
+    if (c.maturity < MinSetMaturity()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("maturity must be at least %u blocks (D-Q-31)", MinSetMaturity()));
+    }
     c.admitKey = WalletKeyParam(find_value(o, "admitkey"), "admitkey");
     if (!c.Valid()) throw JSONRPCError(RPC_INVALID_PARAMETER, "the set parameters are out of range (plan §15.5 row 0x01)");
     return c;

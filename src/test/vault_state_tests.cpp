@@ -21,6 +21,7 @@
 #include "vault/template.h"
 
 #include "chain.h"
+#include "consensus/params.h"
 #include "crypto/sha256.h"
 #include "key.h"
 #include "primitives/block.h"
@@ -275,7 +276,13 @@ SetId SetWithMembers(Chain& c, const std::vector<CKey>& members, SetCreateBody p
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(vault_state_tests, BasicTestingSetup)
+/** The unit cases use small set maturities: D-Q-31's floor is lifted for the suite and checked in min_set_maturity. */
+struct VaultTestingSetup : public BasicTestingSetup {
+    VaultTestingSetup() { SetMinSetMaturity(0); }
+    ~VaultTestingSetup() { SetMinSetMaturity(MIN_SET_MATURITY); }
+};
+
+BOOST_FIXTURE_TEST_SUITE(vault_state_tests, VaultTestingSetup)
 
 BOOST_AUTO_TEST_CASE(create_set)
 {
@@ -674,12 +681,28 @@ BOOST_AUTO_TEST_CASE(exit_delay_no_slash_escape)
     BOOST_CHECK_EQUAL(Member(c, s, k2).status, MEMBER_ACTIVE);
     // equivocation evidence also reaches a bond in its exit delay (it already did; with the rejoin refused it is
     // always the bond the evidence's key posted)
-    // A1: no self-exit on a set with maturity 0 (no slash window)
-    SetCreateBody z = Params(true);
-    z.maturity = 0;
-    SetId s0 = CreateSet(c, z);
-    BOOST_REQUIRE(!c.Block1(JoinTx(c, s0, k3, {})));
-    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s0, k3.GetPubKey(), false, {k3})), "bad-vault-act-remove");
+}
+
+BOOST_AUTO_TEST_CASE(min_set_maturity)
+{
+    // D-Q-31 (owner, 2026-10-11): every signer set has at least the network's exit window
+    BOOST_CHECK_EQUAL(MIN_SET_MATURITY, 16128u);
+    BOOST_CHECK_EQUAL(Consensus::Params().nVaultMinSetMaturity, 16128u);
+    Chain c;
+    SetMinSetMaturity(MIN_SET_MATURITY);
+    Act a;
+    a.type = ACT_SET_CREATE;
+    a.create = Params(true);
+    a.create.maturity = MIN_SET_MATURITY - 1;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "bad-vault-act-params");
+    a.create.maturity = MIN_SET_MATURITY;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "OK");
+    SetMinSetMaturity(8);                                  // regtest
+    a.create.maturity = 7;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "bad-vault-act-params");
+    a.create.maturity = 8;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "OK");
+    SetMinSetMaturity(0);
 }
 
 BOOST_AUTO_TEST_CASE(vault_create_rules)

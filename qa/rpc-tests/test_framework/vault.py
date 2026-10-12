@@ -51,6 +51,8 @@ from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
 # ---------------------------------------------------------------------------
 # Constants (15.1 - 15.5)
 
+MIN_SET_MATURITY = 16128                # D-Q-31: the least signer-set maturity (14 days) on mainnet and testnet
+MIN_SET_MATURITY_REGTEST = 8            # ... and on regtest (Consensus::Params::nVaultMinSetMaturity)
 VAULT_BRANCH_ID = 0x6D5B7A31            # also in util.py (15.1); defined here so this module stands alone
 
 OP_0 = 0x00
@@ -1617,8 +1619,10 @@ class VaultModel(object):
     ``check_tx(tx, height)`` predicts the mempool answer at ``height`` (= tip + 1).
     ``disconnect_block()`` undoes the last connected block."""
 
-    def __init__(self, activation_height=1, branch_id=VAULT_BRANCH_ID, check_scripts=True):
+    def __init__(self, activation_height=1, branch_id=VAULT_BRANCH_ID, check_scripts=True,
+                 min_set_maturity=MIN_SET_MATURITY_REGTEST):
         self.activation_height = activation_height
+        self.min_set_maturity = min_set_maturity   # D-Q-31: SET_CREATE maturity floor (mainnet 16,128)
         self.branch_id = branch_id
         self.check_scripts = check_scripts
         self.sets = {}               # setId32 -> SetState
@@ -1902,6 +1906,8 @@ class VaultModel(object):
         if t == ACT_SET_CREATE:
             if sigs:
                 raise VaultError('bad-vault-act-sig', 'SET_CREATE takes none')
+            if a['maturity'] < self.min_set_maturity:
+                raise VaultError('bad-vault-act-params', 'maturity below the exit window (D-Q-31)')
             sid = txid_internal(txid)
             self.sets[sid] = SetState(sid, a, h)
             self.sets[sid].epoch = h // a['rateWindow']
@@ -1980,8 +1986,6 @@ class VaultModel(object):
                 m.bond_frozen = b[2] = True
                 return
             own = keys == [mk] and not a['burn']        # a member's voluntary exit (owner 2026-10-11)
-            if own and s.p['maturity'] == 0:
-                raise VaultError('bad-vault-act-remove', 'no exit on a set with maturity 0')
             if not own and (len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys)):
                 raise VaultError('bad-vault-act-sig', 'removal signers')
             m.status = MEMBER_REMOVED

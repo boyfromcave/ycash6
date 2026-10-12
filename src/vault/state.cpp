@@ -4,6 +4,8 @@
 
 #include "vault/state.h"
 
+#include <atomic>
+
 #include "primitives/block.h"
 #include "streams.h"
 #include "vault/module.h"
@@ -603,6 +605,13 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
 }
 
 // The same effect and condition as SET_EQUIVOCATION's (ApplyAct above), for the module hook.
+namespace {
+std::atomic<uint32_t> g_minSetMaturity{MIN_SET_MATURITY};
+} // namespace
+
+uint32_t MinSetMaturity() { return g_minSetMaturity.load(); }
+void SetMinSetMaturity(uint32_t blocks) { g_minSetMaturity.store(blocks); }
+
 bool EjectAndFreeze(VaultState& st, const SetId& setId, const CPubKey& key)
 {
     auto m = GetMember(st, setId, key);
@@ -670,6 +679,7 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
     case ACT_SET_CREATE: {
         if (!act.sigs.empty()) return std::string("bad-vault-act-sigs");
         if (!act.create.Valid()) return std::string("bad-vault-act-params");
+        if (act.create.maturity < MinSetMaturity()) return std::string("bad-vault-act-params");   // D-Q-31: the exit window
         const SetId setId = tx.GetHash();
         if (GetSet(*this, setId)) return std::string("bad-vault-act-exists");
         SetRecord s;
@@ -792,8 +802,6 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         }
         // A member's voluntary exit (owner 2026-10-11): the SET_REMOVE of itself, signed by itself alone, without burn.
         const bool self = keys.size() == 1 && keys[0] == r.memberKey && r.burn == 0;
-        // ... not on a set with maturity 0: the exit delay is the set's slash window (review A1)
-        if (self && s->params.maturity == 0) return std::string("bad-vault-act-remove");
         if (!self && !cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
         m->status = MEMBER_REMOVED;
         if (r.burn) {

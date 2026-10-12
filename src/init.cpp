@@ -1439,6 +1439,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // D-Q-31: the least signer-set maturity (the exit window) of this network
+    vault::SetMinSetMaturity(chainparams.GetConsensus().nVaultMinSetMaturity);
+
     auto maxUpgradeHeight = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
     if (!mapMultiArgs["-nuparams"].empty()) {
         // Allow overriding network upgrade parameters for testing

@@ -199,6 +199,15 @@ public:
 };
 
 /** Typed reads. A record that fails to deserialize reads as absent. */
+/**
+ * D-Q-31 (owner, 2026-10-11): every signer set has at least a 14-day exit window. SET_CREATE with maturity below
+ * MinSetMaturity() is bad-vault-act-params. MIN_SET_MATURITY 16,128 blocks (14 days) on mainnet and testnet;
+ * regtest takes Consensus::Params::nVaultMinSetMaturity (8), set once at init by SetMinSetMaturity.
+ */
+static const uint32_t MIN_SET_MATURITY = 16128;
+uint32_t MinSetMaturity();
+void SetMinSetMaturity(uint32_t blocks);
+
 std::optional<SetRecord> GetSet(const KVReader& kv, const SetId& setId);
 std::optional<MemberRecord> GetMember(const KVReader& kv, const SetId& setId, const CPubKey& key);
 MemberList GetMembers(const KVReader& kv, const SetId& setId);
