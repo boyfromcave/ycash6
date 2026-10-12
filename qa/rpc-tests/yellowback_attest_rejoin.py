@@ -143,6 +143,9 @@ class YellowbackAttestRejoinTest(YellowbackTestFramework):
         print('6. j leaves, withdraws after the delay, and rejoins with a new seq')
         old_j = self.records()[self.seqs_of(j)[-1]]
         exit_j = self.leave(j)
+        mj = self.member(j)                                            # set_getinfo: the bond exit delay
+        assert_equal((mj['exitheight'], mj['unlockheight']), (exit_j, exit_j + BOND_MATURITY))
+        assert 'exitheight' not in self.member(s[2])                  # a member that has not left
         assert_refused('bad-vault-act-join', user.sendrawtransaction, self.join_hex(j, 10 * COIN))
         while user.getblockcount() + 2 < exit_j + BOND_MATURITY:   # the next block is exit + maturity - 1
             self.mine(POOLS[0])
