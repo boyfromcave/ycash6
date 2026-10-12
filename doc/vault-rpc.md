@@ -327,7 +327,12 @@ the rate is `-yellowbackfeeusdperkb` (default $0.05/KB) at the attested price --
 Yellowback index tip's window medians, none while a halt bit is set -- never below
 max(5,000 zat/KB, `-pqfeerate`); without an attested price (no Yellowback index, below its start,
 under a halt) it is `-pqfeerate` (quantum plan §4.5, D-Q-23 (b), D-Q-26;
-`yed_getinfo.params.fees.network` reports the values in force).
+`yed_getinfo.params.fees.network` reports the values in force). On 6.20.0 the fee is never below
+the transaction's ZIP-317 conventional fee (an SLH-DSA owner spend is ~54 logical actions, 27,000
+zat), so a node with `-txunpaidactionlimit=0` relays it. When the priced fee would leave a dust
+output (a small vault after a price crash), it is clamped to max(10,000 zat, the floor rate × size,
+the conventional fee); an output still dust after that is refused (`-8`). `-yellowbackmaxtxfee`
+may not be set below 0.001 YEC.
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
 Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`

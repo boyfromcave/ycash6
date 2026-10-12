@@ -46,7 +46,7 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
 )
-from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, conventional_fee
 
 ACTIVATION = 205
 DELAY = 5
@@ -309,7 +309,11 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(os_['selector'], 2)
         assert_equal(len(n0.getrawtransaction(os_['txid'], 1)['vin'][0]['scriptSig']['hex']) // 2, 7939)
         self.mine(1)
-        assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal('0.0001'))
+        # 6.20.0 (q/fees review): the fee is max(VAULT_RPC_FEE, rate x size, the ZIP-317 conventional fee) = the
+        # conventional fee of the SLH-DSA owner spend (54 logical actions, 27,000 zat), not the flat 0.0001
+        conv = conventional_fee(n0.getrawtransaction(os_['txid'], 1))
+        assert conv > 10000, conv
+        assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal(conv) / 100000000)
         assert_equal(len(n0.vault_list({'kind': 'vault'})), 1)
         assert_equal(n0.set_getinfo(setid)['lockedvalue'], Decimal('4'))
 
