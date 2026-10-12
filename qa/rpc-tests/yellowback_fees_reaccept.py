@@ -52,6 +52,7 @@ class YellowbackFeesReacceptTest(ArmedModeMixin, YellowbackTestFramework):
         fee = self.fee_of(user, m['txid'])
         assert_greater_than(fee, 5000)
         assert m['txid'] in user.getrawmempool()
+        self.sync_all()      # 6.20.0: relay trickles, and a reaccepted transaction is not relayed again before the resend timer
         user = self.restart(USER, [LOW_MAXTXFEE])
         assert m['txid'] in user.getrawmempool(), 'the wallet dropped its own mint at reaccept'
         self.sync_all()
@@ -74,6 +75,7 @@ class YellowbackFeesReacceptTest(ArmedModeMixin, YellowbackTestFramework):
         assert_greater_than(fee, 10000000)                       # above the default -maxtxfee
         assert_greater_than(10 * COIN, fee)                     # within the 10-YEC ceiling
         assert txid in user.getrawmempool()
+        self.sync_all()      # 6.20.0: as above, the peers hold it before the restart
         user = self.restart(USER, [])                            # the cap is max(0.1 YEC, $2 at $2,500) = 0.1 YEC now
         assert_equal(user.yed_getinfo()['params']['fees']['network']['yellowback']['maxTxFeeZat'], 10000000)
         assert txid in user.getrawmempool(), 'the wallet dropped its own PQ send at reaccept'
