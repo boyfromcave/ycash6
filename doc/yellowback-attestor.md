@@ -311,7 +311,7 @@ having registered a block earlier than the rest. Later registrants age from thei
 **Seating (owner 2026-10-11).** At every snapshot the `N_SLOTS` (9) eligible attestors with the greatest
 **seat weight** are **seated**: `seatWeight = bondZat · f(age)`, where the tenure factor
 `f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))` (`u` = `SEAT_AGE_UNIT` 1,152 blocks, one day;
-`cap` = `SEAT_AGE_CAP` 420,480, one year; `a` = age clamped to `[0, cap]`; exact Q16 integer logs) runs from
+`cap` = `SEAT_AGE_CAP` 420,480, one year; `a` = age clamped to `[0, cap]`; deterministic Q16 integer logs, at most 1/65536 below the true floor) runs from
 1.0 at registration to 1.9 at a year — 1.317 at a week, 1.63 at six months. A currently seated attestor's
 seat weight counts ×1.05 (`SEAT_MARGIN`), so seats do not flap between near-equal bonds. Consequences: a new
 20,000 YEC bond outranks 8,000 YEC at any tenure; a bond 1.5× larger outranks a week-old member but not a

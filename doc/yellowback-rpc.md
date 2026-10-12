@@ -506,7 +506,7 @@ bondShareBps / (10⁴ · nSlots)⌉, bondMinFloorZat, bondMinCapZat)` over the t
 above ≈ 3.6 M YEC. A record is judged once, against the snapshot before its own join block; a seated or ELIGIBLE record is
 never re-judged as collateral moves. **Seat ranking and eviction (owner 2026-10-11, rpcversion 8, no bump):** seats rank by
 `seatWeight = bondZat × f(age)` with the log tenure factor `f` from 1.0 (no tenure) to 1.9 at `seatAgeCap` (one year;
-`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))`, `u = seatAgeUnit`, exact Q16 integers), a seated attestor's counting
+`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))`, `u = seatAgeUnit`, deterministic Q16 integer logs, `Log2Q16` in math.h), a seated attestor's counting
 ×(1 + `seatMarginBps`/10⁴); the price statistic and attestor selection keep `weight = bondZat × min(age, ageCap)`. The attestor set
 is OPEN with `seats` (15) seats: a `SET_JOIN` into the full set evicts the member that is not live (`lastAct < h − livenessWindow`)
 of least seat weight, else the member of least seat weight when the new bond (at age 0) exceeds it by `evictMarginBps`; the evicted

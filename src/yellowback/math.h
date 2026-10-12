@@ -247,10 +247,12 @@ inline arith_uint256 BondWeight(CAmount bondZat, int64_t ageBlocks, int ageCap)
 }
 
 /**
- * log2(x) in Q16 for x >= 1 (0 for x == 0), exactly: the integer part is the bit length - 1; the
- * mantissa m = x / 2^n in [1, 2) is held in Q31 (truncated when x has more than 32 bits) and
- * squared 16 times in uint64 (m^2 < 2^64), each squaring that reaches [2, 4) giving the next
- * fraction bit and halving m. No floating point, no table.
+ * log2(x) in Q16 for x >= 1 (0 for x == 0), deterministic but not exact: the integer part is the bit
+ * length - 1; the mantissa m = x / 2^n in [1, 2) is held in Q31 (truncated when x has more than 32
+ * bits) and squared 16 times in uint64 (m^2 < 2^64), each squaring that reaches [2, 4) giving the next
+ * fraction bit and halving m, and each squaring truncates. The result is floor(log2(x) x 2^16) or one
+ * below it (the review found 6 such inputs); consensus needs only that every node, and the Python model
+ * (seat_age_factor_q16), computes these same bits. No floating point, no table.
  */
 inline uint32_t Log2Q16(uint64_t x)
 {
