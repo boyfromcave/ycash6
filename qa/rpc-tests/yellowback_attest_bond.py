@@ -4,24 +4,21 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-D-Q-28 (owner, option B) on regtest: the module's attestor bond floor follows the attested price at
-registration. Regtest carries the rule at 1/2,000 of mainnet (bondMinNoPriceZat 10 YEC, bondMinFloorZat
-1 YEC, bondMinUsdCents 400 = $4), so every crossover is mainnet's: the floor binds above $4/YEC and the
-no-price cap below $0.40/YEC (mainnet 20,000 YEC / 2,000 YEC / $8,000).
+D-Q-30 (owner, revised) on regtest: the module's attestor bond floor follows the YEC locked in YED vaults, never a
+price: bondMinZat = clamp(ceil(collateralZat x bondShareBps / (10^4 x N_SLOTS)), bondMinFloorZat, bondMinCapZat) over
+the snapshot before the join's block. Regtest carries it at 1/2,000 of mainnet (2.5 YEC floor, 10 YEC cap, 500 bps,
+N_SLOTS 5; mainnet 5,000 / 20,000 YEC, N_SLOTS 9).
 
-1. No attested price (UNARMED at $1): yed_getinfo params.attest.bondMinZat is 10 YEC; yed_registerattestor
-   refuses 9.99999999 (bond-below-min); a raw SET_JOIN at 10 YEC - 1 zat is mirrored but stays PENDING
-   past maturity, the founders at 10 YEC arm the layer.
-2. ARMED, founding window: still 10 YEC; past it at $1: 4 YEC ($4), 3.99999999 refused, a raw join at
-   4 YEC - 1 zat stays PENDING, the wallet's 4-YEC join becomes ELIGIBLE.
-3. At $5: the 1-YEC floor ($4 is 0.8 YEC); 0.99999999 refused, 1 YEC accepted. The 4 YEC - 1 zat join
-   registered at $1 stays PENDING: the price at registration binds for good.
-4. At $0.10: $4 is 40 YEC, capped at 10 YEC (option B); every seated record stays seated: no record is
-   re-judged when the price moves.
-5. The bump: seats are N_SLOTS (5) by SeatRank (owner 2026-10-11: bondZat x the log tenure factor, 1.0 to
-   1.9 over a year, a seated record x1.05). A 10-YEC join takes the seat of the 1-YEC minimum bond at its
-   maturity, and a second 10-YEC join takes the 4-YEC one's at the first block where 10 x f(age) exceeds
-   4 x f(age4) x 1.05 (its maturity, at regtest ages); the bumped records stay ELIGIBLE members.
+1. Empty vaults: bondMinZat is the 2.5-YEC floor; yed_registerattestor refuses 2.49999999 (bond-below-min) and warns
+   bond-near-min at 2.5; a raw SET_JOIN at 2.5 YEC - 1 zat is mirrored but stays PENDING; the 2.5-YEC join matures.
+2. The minimum rises with collateral: after a $500 mint at $5 (~300 YEC locked) it is ceil(collateral / 200); a join
+   1 zat below it stays PENDING, one at it matures.
+3. The cap: past 1,000 YEC locked the minimum stops at 10 YEC; 10 YEC (no warning) always qualifies.
+4. Checked once at registration: the 2.5-YEC and mid-range records stay ELIGIBLE and seated under the 10-YEC minimum,
+   and a price move (which the rule never reads) changes nothing.
+5. The bump: seats are N_SLOTS (5) by SeatRank (owner 2026-10-11: bondZat x the log tenure factor, 1.0 to 1.9
+   over a year, a seated record x1.05). Two 10-YEC joins fill the seats; a third takes the seat of the 2.5-YEC floor
+   bond at its maturity (10 x f(8) > 2.5 x f(age) x 1.05); the bumped record stays an ELIGIBLE member.
 The Python model replays the chain (the rule is mirrored in yellowback_model.py).
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer.
@@ -36,18 +33,18 @@ from test_framework.yellowback_util import (
     BOND_MATURITY,
     BOND_MIN_LOCK,
     COIN,
-    FOUNDING_WINDOW,
     POOLS,
     P_SLOW_WINDOW,
+    REF_LAG,
     YellowbackTestFramework,
     assert_same_statehash,
     secret_to_pubkey,
     wait_yed_healthy,
 )
-from test_framework.yellowback_attest import build_register_tx, model_check, register_and_arm, send_and_lock
+from test_framework.yellowback_attest import build_register_tx, model_check, send_and_lock, wallet_mint
 
 USER = 0
-REPRICE_BLOCKS = P_SLOW_WINDOW + 6          # every window at the new price: pMint (min of windows) follows
+FLOOR, CAP, SHARE_BPS, N_SLOTS = COIN * 5 // 2, 10 * COIN, 500, 5
 
 
 def assert_rpc_error(substr, fn, *args):
@@ -59,11 +56,12 @@ def assert_rpc_error(substr, fn, *args):
     raise AssertionError('expected an error containing %r' % substr)
 
 
-def zat(yec):
-    return int(Decimal(yec) * COIN)
+def expected_min(collateral_zat):
+    z = -(-collateral_zat * SHARE_BPS // (10_000 * N_SLOTS))
+    return min(CAP, max(FLOOR, z))
 
 
-# Rule: D-Q-28
+# Rule: D-Q-30
 class YellowbackAttestBondTest(YellowbackTestFramework):
 
     initial_blocks = 101
@@ -73,16 +71,17 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         assert_equal(len(mins), 1)
         return mins.pop()
 
-    def reprice(self, usd):
-        for i in POOLS:
-            self.quote(i, usd)
-        self.mine_round_robin(POOLS, REPRICE_BLOCKS)
-        self.sync_all(blocks_only=True)
-        assert_equal(self.nodes[USER].yed_getprice(self.nodes[USER].getblockcount())['pMint'], int(Decimal(usd) * 1_000_000))
+    def tip_collateral(self):
+        return int(self.nodes[USER].yed_getstats()['collateralZat'])   # Totals at the tip = Snapshots[tip].collateralZat
 
-    def records(self, node=None):
-        node = node or self.nodes[POOLS[0]]
-        return dict((int(r['seq']), r) for r in node.yed_listattestors())
+    def records(self):
+        return dict((int(r['seq']), r) for r in self.nodes[POOLS[0]].yed_listattestors())
+
+    def seq_of(self, pubkey):
+        pub = pubkey if isinstance(pubkey, str) else pubkey.hex()
+        found = [s for s, r in self.records().items() if r['attestorPubKey'] == pub]
+        assert_equal(len(found), 1)
+        return found[0]
 
     def raw_join(self, bond_zat):
         """A SET_JOIN under a fresh key with bond_zat, mined in its own block; returns its seq."""
@@ -95,20 +94,35 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         return self.seq_of(pub)
 
-    def wallet_join(self, bond_yec):
-        res = self.last_reg = self.nodes[USER].yed_registerattestor(Decimal(bond_yec), BOND_MIN_LOCK)
+    def wallet_join(self, bond_zat):
+        res = self.last_reg = self.nodes[USER].yed_registerattestor(Decimal(bond_zat) / COIN, BOND_MIN_LOCK)
         self.sync_all()
         self.mine(POOLS[0])
         return self.seq_of(res['attestorPubKey'])
 
-    def seq_of(self, pubkey_hex):
-        pub = pubkey_hex if isinstance(pubkey_hex, str) else pubkey_hex.hex()
-        found = [s for s, r in self.records().items() if r['attestorPubKey'] == pub]
-        assert_equal(len(found), 1)
-        return found[0]
-
     def status(self, seq):
         return self.records()[seq]['status']
+
+    def mature(self):
+        self.mine_round_robin(POOLS, BOND_MATURITY)
+
+    def fund_user(self, yec):
+        user = self.nodes[USER]
+        while sum(self.nodes[i].getbalance() for i in POOLS) + user.getbalance() < yec + 10:
+            self.mine_round_robin(POOLS, 30)             # the pools' matured coinbase funds the user's mints
+        for i in POOLS:
+            if user.getbalance() >= yec:
+                break
+            pool = self.nodes[i]
+            amount = min(Decimal(yec) - user.getbalance(), pool.getbalance() - 1)
+            if amount > 0:
+                pool.sendtoaddress(user.getnewaddress(), amount)
+                self.sync_all()
+                self.mine(i)
+
+    def mint(self, cents):
+        wallet_mint(self, self.nodes[USER], cents, 48)
+        self.mine_round_robin(POOLS, REF_LAG + 1)
 
     def seated(self):
         return sorted(s for s, r in self.records().items() if r['seated'])
@@ -118,78 +132,81 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
             a = node.yed_getinfo()['params']['attest']
-            assert_equal((a['bondMinNoPriceZat'], a['bondMinFloorZat'], a['bondMinUsdCents']), (10 * COIN, COIN, 400))
+            assert_equal((a['bondMinFloorZat'], a['bondMinCapZat'], a['bondShareBps']), (FLOOR, CAP, SHARE_BPS))
+            assert 'bondMinUsdCents' not in a and 'bondMinNoPriceZat' not in a
 
-        print('1. no attested price (UNARMED at $1): 10 YEC')
-        self.activate(POOLS, quote_usd=1)
-        assert_equal(self.bond_min(), 10 * COIN)
-        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('9.99999999'), BOND_MIN_LOCK)
-        below_noprice = self.raw_join(10 * COIN - 1)
-        founders = register_and_arm(self)              # three founders at 10 YEC arm the layer
-        assert_equal(len(founders), 3)
-        assert_equal(self.status(below_noprice), 'PENDING')
-        trigger = user.yed_getinfo()['attest']['triggerHeight']
-
-        print('2. ARMED: 10 YEC in the founding window, then $4 at $1 = 4 YEC')
-        if user.getblockcount() + 1 <= trigger + FOUNDING_WINDOW:
-            assert_equal(self.bond_min(), 10 * COIN)
-            self.mine_round_robin(POOLS, trigger + FOUNDING_WINDOW - user.getblockcount())
-        assert_equal(self.bond_min(), 4 * COIN)
-        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('3.99999999'), BOND_MIN_LOCK)
-        below_at_1 = self.raw_join(4 * COIN - 1)
-        x4 = self.wallet_join('4')                       # the $8,000 minimum's regtest image
+        print('1. empty vaults: the 2.5-YEC floor')
+        self.activate(POOLS, quote_usd=5)
+        self.fund_user(1_400)
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        assert_equal(self.tip_collateral(), 0)
+        assert_equal(self.bond_min(), FLOOR)
+        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('2.49999999'), BOND_MIN_LOCK)
+        below_floor = self.raw_join(FLOOR - 1)
+        at_floor = self.wallet_join(FLOOR)
         assert self.last_reg['warning'].startswith('bond-near-min'), self.last_reg['warning']   # B2: no headroom
-        self.mine_round_robin(POOLS, BOND_MATURITY)
-        assert_equal((self.status(below_at_1), self.status(x4)), ('PENDING', 'ELIGIBLE'))
+        self.mature()
+        assert_equal((self.status(below_floor), self.status(at_floor)), ('PENDING', 'ELIGIBLE'))
 
-        print('3. $5: the 1-YEC floor; the $1 registration stays judged at $1')
-        self.reprice('5')
-        assert_equal(self.bond_min(), COIN)
-        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('0.99999999'), BOND_MIN_LOCK)
-        y1 = self.wallet_join('1')
-        self.mine_round_robin(POOLS, BOND_MATURITY)
-        assert_equal(self.status(y1), 'ELIGIBLE')
-        assert_equal(self.status(below_at_1), 'PENDING')   # 4 YEC - 1 zat would pass at $5; judged at $1
-        assert_equal(self.seated(), sorted(founders + [x4, y1]))
+        print('2. the minimum rises with vault collateral')
+        self.mint(50_000)                                # $500 at $5, 300 % class A: ~300 YEC locked
+        coll = self.tip_collateral()
+        assert coll >= 300 * COIN, coll
+        mid = expected_min(coll)
+        assert FLOOR < mid < CAP, mid
+        assert_equal(self.bond_min(), mid)
+        print('   %s YEC locked -> bondMinZat %s YEC' % (Decimal(coll) / COIN, Decimal(mid) / COIN))
+        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal(mid - 1) / COIN, BOND_MIN_LOCK)
+        below_mid = self.raw_join(mid - 1)
+        at_mid = self.raw_join(mid)
+        self.mature()
+        assert_equal((self.status(below_mid), self.status(at_mid)), ('PENDING', 'ELIGIBLE'))
 
-        print('4. $0.10: $4 is 40 YEC, capped at the 10-YEC no-price bond; nothing is re-judged')
-        self.reprice('0.10')
-        assert_equal(self.bond_min(), 10 * COIN)
-        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal('9.99999999'), BOND_MIN_LOCK)
-        assert_equal(self.seated(), sorted(founders + [x4, y1]))
-        assert_equal((self.status(x4), self.status(y1)), ('ELIGIBLE', 'ELIGIBLE'))
+        print('3. the cap: past 1,000 YEC locked the minimum stops at 10 YEC')
+        self.mint(150_000)                               # $1,500 more: ~900 YEC
+        coll = self.tip_collateral()
+        assert coll * SHARE_BPS // (10_000 * N_SLOTS) > CAP, coll
+        assert_equal(self.bond_min(), CAP)
+        assert_rpc_error('bond-below-min', user.yed_registerattestor, Decimal(CAP - 1) / COIN, BOND_MIN_LOCK)
+        at_cap = self.wallet_join(CAP)
+        assert_equal(self.last_reg['warning'], '')       # the cap always qualifies
+        self.mature()
+        assert_equal(self.status(at_cap), 'ELIGIBLE')
+
+        print('4. checked once at registration; the price is never read')
+        for i in POOLS:
+            self.quote(i, '0.50')
+        self.mine_round_robin(POOLS, P_SLOW_WINDOW + 6)
+        assert_equal(self.bond_min(), expected_min(self.tip_collateral()))
+        recs = self.records()
+        for seq in (at_floor, at_mid, at_cap):
+            assert_equal((recs[seq]['status'], recs[seq]['seated']), ('ELIGIBLE', True))
+        for seq in (below_floor, below_mid):
+            assert_equal(recs[seq]['status'], 'PENDING')
 
         print('5. the bump: larger YEC bonds outrank minimum ones by seat weight')
-        z = self.wallet_join('10')
-        assert_equal(self.last_reg['warning'], '')                # the no-price bond always qualifies
-        reg_z = self.records()[z]['registerHeight']
-        while user.getblockcount() < reg_z + BOND_MATURITY - 1:
-            self.mine(POOLS[0])
-        assert_equal(self.seated(), sorted(founders + [x4, y1]))
-        self.mine(POOLS[0])                              # z ELIGIBLE: 10 x f(8) > 1 x f(age) x 1.05, the 1-YEC bond loses its seat
-        assert_equal(self.status(z), 'ELIGIBLE')
-        assert_equal(self.seated(), sorted(founders + [x4, z]))
-        assert_equal(self.status(y1), 'ELIGIBLE')        # bumped, still a member
-        w = self.wallet_join('10')
+        p1 = self.wallet_join(CAP)
+        p2 = self.wallet_join(CAP)
+        self.mature()
+        assert_equal(self.seated(), sorted([at_floor, at_mid, at_cap, p1, p2]))
+        z = self.wallet_join(CAP)
+        assert_equal(self.last_reg['warning'], '')       # the cap always qualifies
         recs = self.records()
-        reg_w, reg_x = recs[w]['registerHeight'], recs[x4]['registerHeight']
-
+        reg_z, reg_f = recs[z]['registerHeight'], recs[at_floor]['registerHeight']
         a = user.yed_getinfo()['params']['attest']
 
         def rank(bond, age, seated):
             return seat_weight(bond, age, a['seatAgeUnit'], a['seatAgeCap']) * (10000 + (a['seatMarginBps'] if seated else 0))
-        h = reg_w + BOND_MATURITY
-        while not rank(10 * COIN, h - reg_w, False) > rank(4 * COIN, h - reg_x, True):
-            h += 1
-        assert_equal(h, reg_w + BOND_MATURITY)
+        h = reg_z + BOND_MATURITY
+        assert rank(CAP, h - reg_z, False) > rank(FLOOR, h - reg_f, True)
         while user.getblockcount() < h - 1:
             self.mine(POOLS[0])
-        assert_equal(self.seated(), sorted(founders + [x4, z]))
+        assert_equal(self.seated(), sorted([at_floor, at_mid, at_cap, p1, p2]))
         self.mine(POOLS[0])
         assert_equal(user.getblockcount(), h)
-        assert_equal(self.seated(), sorted(founders + [z, w]))
-        assert_equal(self.status(x4), 'ELIGIBLE')
-        assert_same_statehash(self.enforcing_nodes(), 'D-Q-28')
+        assert_equal(self.seated(), sorted([at_mid, at_cap, p1, p2, z]))
+        assert_equal(self.status(at_floor), 'ELIGIBLE')  # bumped, still a member
+        assert_same_statehash(self.enforcing_nodes(), 'D-Q-30')
         model_check(self.nodes[POOLS[0]])
 
 

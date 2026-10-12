@@ -1393,7 +1393,7 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     std::vector<std::string> attestorBefore;
     for (const auto& r : attestors) attestorBefore.push_back(SerializeRecord(r.second));
     // maturity and the set's member dormancy (P4-b, state.h): PENDING -> ELIGIBLE at registerHeight + max(set
-    // maturity, BOND_MATURITY) over the module's bond floor (D-Q-28: BondMinZat at registerHeight); ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
+    // maturity, BOND_MATURITY) over the module's bond floor (D-Q-30: BondMinZat at registerHeight, from vault collateral); ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
     // DORMANT -> ELIGIBLE after a heartbeat that follows the dormancy
     const std::optional<AttestorSetRecord> aset = st.GetAttestorSet();
     std::set<std::vector<unsigned char>> slashed;      // keys with a frozen bond: barred for good, as v3 barred an ejected key
@@ -1408,12 +1408,13 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
             const bool floorOk = (int64_t)a.bondLocktime >= (int64_t)a.registerHeight + P.bondMinLock &&
                                  !slashed.count(a.attestorPubKey);
             const bool live = (int64_t)a.lastAct >= H - (int64_t)aset->livenessWindow;
-            // D-Q-28: the price at registration, read for PENDING only and only when it can decide (review A2): BondMinZat
-            // lies in [min(floor, noPrice), noPrice], so a bond at or above the no-price bond always meets it and one below
-            // that lower bound never does; the snapshot is read only in between
+            // D-Q-30: the collateral at registration, read for PENDING only and only when it can decide (review A2): BondMinZat
+            // lies in [floor, max(floor, cap)], so a bond at or above that cap always meets it and one below the floor never
+            // does; the snapshot is read only in between
             auto bondOk = [&]() -> bool {
-                if (a.bondZat >= P.bondMinNoPriceZat) return true;
-                if (a.bondZat < std::min(std::max<CAmount>(0, P.bondMinFloorZat), P.bondMinNoPriceZat)) return false;
+                const CAmount floor = std::max<CAmount>(0, P.bondMinFloorZat);
+                if (a.bondZat >= std::max(floor, P.bondMinCapZat)) return true;
+                if (a.bondZat < floor) return false;
                 return a.bondZat >= BondMinZat(st, P, a.registerHeight);
             };
             if (a.Status() == AttestorStatus::PENDING && floorOk && H >= matureAt && bondOk()) {
@@ -1745,9 +1746,7 @@ int64_t AgeOrigin(const AttestorRecord& rec, const AttestState& attest, const Pa
 CAmount BondMinZat(const State& st, const Params& P, int64_t registerHeight)
 {
     const std::optional<Snapshot> s = SnapshotAt(st, P, registerHeight - 1);
-    if (!s.has_value() || !s->PMint().has_value() || !P.IsArmed(s->attest.IsArmed())) return P.bondMinNoPriceZat;
-    if (registerHeight <= (int64_t)s->attest.triggerHeight + P.foundingWindow) return P.bondMinNoPriceZat;   // a founding member
-    return BondMinPricedZat(s->PMint().value(), P);
+    return BondMinFromCollateralZat(s.has_value() ? s->collateralZat : 0, P);
 }
 
 arith_uint256 AttestorWeight(const AttestorRecord& rec, const AttestState& attest, const Params& P, int64_t height)

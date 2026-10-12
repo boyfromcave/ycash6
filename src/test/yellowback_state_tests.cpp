@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction; 10, D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "6ac18edb852fc0fdb9be063d026608a01a5a30608554cbd039cd993f41061ae7";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -2619,7 +2619,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
     // below the module's floor: mirrored (the set admitted it) but never ELIGIBLE; BOND_MIN_LOCK is 0 since the bond exit
     // delay (the lock is in the vault state), so a bond locked for one block qualifies
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN - 1)), verdict::OK);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, COIN * 5 / 2 - 1)), verdict::OK);   // D-Q-30: below the 2.5-YEC floor (no vaults)
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, 0)), verdict::OK);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 3);
     const int joined0 = f.Attestor(0)->registerHeight;
@@ -2824,69 +2824,73 @@ BOOST_AUTO_TEST_CASE(seat_eviction_mirror)
     BOOST_CHECK(f.Attestor(16)->attestorPubKey == f.Attestor(14)->attestorPubKey);
 }
 
-// Rule: D-Q-28: the module's bond floor reads Snapshots[registerHeight - 1]: the no-price bond below START, before ARMED
-// and inside the founding window; then min(no-price, max(floor, $ at pMint)); judged once, for PENDING records only.
-BOOST_AUTO_TEST_CASE(dq28_bond_min_regimes_and_registration_price)
+// Rule: D-Q-30: the module's bond floor is clamp(ceil(collateral x BOND_SHARE_BPS / 10^4 / N_SLOTS), floor, cap)
+// over the YEC in ACTIVE YED vaults at Snapshots[registerHeight - 1]; no price is read; judged once, for PENDING records only.
+BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
 {
-    const MicroUsd ONE = 1000000;                             // $1: regtest's $4 is 4 YEC
-    Fixture f;
-    auto quote = [&](MicroUsd p) { f.Mine(Fixture::Quote(p, (f.tip + 1) % 3)); };
+    const MicroUsd FIVE = 5000000;                            // $5: a $100 mint needs 60 YEC at 300 %
+    Fixture f(1, 0, 0, 0);                                    // attestArmMin 0: never arms, mints need no bundle
+    auto quote = [&]() { f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3)); };
     auto bondMin = [&]() { return BondMinZat(State(f.view), f.P, f.tip + 1); };
-    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, f.P.startHeight), 10 * COIN);    // the virtual snapshot below START
-    f.Activate(ONE);
-    BOOST_REQUIRE(f.Snap(f.tip).PMint().has_value());
-    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // a price, but UNARMED: no attested price
-    f.Arm(3, ONE);                                            // founders 0..2 at 10 YEC
-    const int trigger = f.Attest().triggerHeight;
-    BOOST_REQUIRE(f.tip + 1 <= trigger + f.P.foundingWindow);
-    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // ARMED, but a join now is a founding member's
-    while (f.tip + 1 <= trigger + f.P.foundingWindow) quote(ONE);
-    BOOST_CHECK_EQUAL(bondMin(), 4 * COIN);                   // the first non-founding join: $4 at $1
-    // the boundary at $1: 4 YEC - 1 zat stays PENDING, 4 YEC matures (seq 3, 4; seq 5, 6 for the bump below)
-    f.Mine(Fixture::Quote(ONE, (f.tip + 1) % 3), { f.RegisterTx(3, 4 * COIN - 1), f.RegisterTx(4, 4 * COIN), f.RegisterTx(5, 4 * COIN), f.RegisterTx(6, 4 * COIN) });
-    const int reg = f.tip;
-    BOOST_REQUIRE(f.Attestor(6).has_value());
-    while (f.tip < reg + f.P.bondMaturity) quote(ONE);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
-    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::ELIGIBLE);
-    // the price at registration binds for good: at $5 the floor (1 YEC) would admit seq 3, but it stays PENDING
-    for (int i = 0; i < 70; i++) quote(5 * ONE);
-    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 5 * ONE);
-    BOOST_CHECK_EQUAL(bondMin(), 1 * COIN);                   // $5: $4 is 0.8 YEC, the 1-YEC floor binds
-    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
-    // and an ELIGIBLE record is never re-judged: at $0.05 the minimum is the 10-YEC cap, seq 4 (4 YEC) stays ELIGIBLE
-    for (int i = 0; i < 70; i++) quote(50000);
-    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).pMint, 50000);
-    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);                  // $4 at $0.05 is 80 YEC, capped at the no-price bond (option B)
-    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::ELIGIBLE);
-    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::PENDING);
-    // seats (N_SLOTS 5): founders 0..2 (10 YEC), then 4 and 5 (4 YEC, same block: ties by seq), 6 unseated
-    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
-    // the bump: seq 7 posts 10 YEC (the cap) and, by SeatRank (bond x the tenure factor; seq 5 seated, x1.05), outranks
-    // seq 5 at the first SNAP where seq 7 is ELIGIBLE (the tenure factor is near 1.0 at regtest ages)
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(7, 10 * COIN) });
-    const int reg7 = f.tip;
-    BOOST_REQUIRE(f.Attestor(7).has_value());
-    int expected = -1;
-    for (int64_t h = reg7 + f.P.bondMaturity; expected < 0; h++) {
-        if (SeatWeight(10 * COIN, h - reg7, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10000) >
-            SeatWeight(4 * COIN, h - reg, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10500)) expected = (int)h;
-    }
-    BOOST_CHECK_EQUAL(expected, reg7 + f.P.bondMaturity);
-    while (f.tip < expected - 1) quote(50000);
-    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 5 }));
-    quote(50000);
-    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 0, 1, 2, 4, 7 }));
-    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // bumped from its seat, still a member
-    BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);
-    // review A2: outside [min(floor, noPrice), noPrice] SNAP decides without the snapshot, with the same verdicts: below
-    // the 1-YEC floor never ELIGIBLE, at the 10-YEC no-price bond always (here at $0.05, where the minimum is the cap)
-    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(8, 1 * COIN - 1), f.RegisterTx(9, 10 * COIN) });
-    const int regA2 = f.tip;
-    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, regA2), 10 * COIN);
-    while (f.tip < regA2 + f.P.bondMaturity) quote(50000);
-    BOOST_CHECK_EQUAL(f.Attestor(8)->status, (uint8_t)AttestorStatus::PENDING);    // seq 8 = key 8
-    BOOST_CHECK_EQUAL(f.Attestor(9)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // seq 9 = key 9
+    auto mint = [&](CAmount collateral) {
+        MintOpts o;
+        o.collateral = collateral;
+        CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1, o);
+        f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { m });
+        BOOST_REQUIRE(f.Vault(CTransaction(m).GetHash()).has_value());
+    };
+    BOOST_CHECK_EQUAL(BondMinZat(State(f.view), f.P, f.P.startHeight), COIN * 5 / 2);   // the virtual snapshot: no collateral
+    f.Activate(FIVE);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 0);
+    BOOST_CHECK_EQUAL(bondMin(), COIN * 5 / 2);               // empty vaults: the 2.5-YEC floor
+    // the floor's boundary: 2.5 YEC - 1 zat never qualifies (A2: decided without the snapshot), 2.5 YEC does
+    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { f.RegisterTx(0, COIN * 5 / 2 - 1), f.RegisterTx(1, COIN * 5 / 2) });
+    // the minimum rises with collateral: 300 YEC locked -> ceil(300 x 500 / 10^4 / 5) = 3 YEC
+    mint(300 * COIN);
+    BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 300 * COIN);
+    BOOST_CHECK_EQUAL(bondMin(), 3 * COIN);
+    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { f.RegisterTx(2, 3 * COIN - 1), f.RegisterTx(3, 3 * COIN) });
+    const int reg23 = f.tip;
+    while (f.tip < reg23 + f.P.bondMaturity) quote();
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // judged at its own (empty) snapshot
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // the cap: 1,300 YEC locked would ask 13 YEC; the minimum stops at 10 YEC (A2: a 10-YEC bond is decided without the snapshot)
+    mint(1000 * COIN);
+    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);
+    f.Mine(Fixture::Quote(FIVE, (f.tip + 1) % 3), { f.RegisterTx(4, 10 * COIN - 1), f.RegisterTx(5, 10 * COIN) });
+    const int reg45 = f.tip;
+    while (f.tip < reg45 + f.P.bondMaturity) quote();
+    BOOST_CHECK_EQUAL(f.Attestor(4)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // checked once: the 2.5-YEC and 3-YEC records stay ELIGIBLE under a 10-YEC minimum, and the 2.5-YEC - 1 zat one
+    // stays PENDING when the price, which the rule never reads, moves
+    for (int i = 0; i < 70; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(3)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(bondMin(), 10 * COIN);
+    // with N_SLOTS 5 and three ELIGIBLE records, every one is seated; seq 6 and 7 (10 YEC, the cap) fill the seats
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 1, 3, 5 }));
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(6, 10 * COIN), f.RegisterTx(7, 10 * COIN) });
+    const int reg67 = f.tip;
+    while (f.tip < reg67 + f.P.bondMaturity) quote();
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 1, 3, 5, 6, 7 }));
+    // the bump: seq 8 posts 10 YEC and, by SeatRank (bond x the tenure factor; seq 1 seated, x1.05), outranks seq 1
+    // (2.5 YEC) at the first SNAP where seq 8 is ELIGIBLE (the tenure factor is near 1.0 at regtest ages)
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.RegisterTx(8, 10 * COIN) });
+    const int reg8 = f.tip;
+    BOOST_REQUIRE(f.Attestor(8).has_value());
+    const int reg01 = f.Attestor(1)->registerHeight;
+    BOOST_CHECK(SeatWeight(10 * COIN, f.P.bondMaturity, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10000) >
+                SeatWeight(COIN * 5 / 2, reg8 + f.P.bondMaturity - reg01, f.P.seatAgeUnit, f.P.seatAgeCap) * arith_uint256(10500));
+    while (f.tip < reg8 + f.P.bondMaturity - 1) quote();
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 1, 3, 5, 6, 7 }));
+    quote();
+    BOOST_CHECK(f.Snap(f.tip).seated == std::vector<uint16_t>({ 3, 5, 6, 7, 8 }));
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);   // bumped from its seat, still a member
+    BOOST_CHECK_EQUAL(f.Attestor(1)->seatedSince, 0);
 }
 
 // Rule: ARM-1

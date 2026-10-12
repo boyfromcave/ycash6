@@ -1204,11 +1204,11 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "wallet key as the member key: set_join attestorSetId bondYec (tip + 1 + lockBlocks). vout[0] is the bond\n"
             "P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG); the member key signs price attestations and receives the\n"
             "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
-            "bond-below-min, lock-below-min (the module's floor: yed_getinfo params.attest.bondMinZat, D-Q-28, and BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
+            "bond-below-min, lock-below-min (the module's floor: yed_getinfo params.attest.bondMinZat, D-Q-30, and BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
             "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
-            "The minimum is judged at the snapshot before the join's block (D-Q-28), so post headroom: a bond within 10% of\n"
-            "params.attest.bondMinZat (and below bondMinNoPriceZat) returns warning \"bond-near-min\"; if the price falls before it\n"
-            "confirms, the join can stay PENDING until bondLocktime.\n"
+            "The minimum follows the YEC locked in YED vaults at the snapshot before the join's block (D-Q-30), so post headroom: a\n"
+            "bond within 10% of params.attest.bondMinZat (and below bondMinCapZat) returns warning \"bond-near-min\"; if vault\n"
+            "collateral grows before it confirms, the join can stay PENDING (leave with set_leave; the bond returns after the exit delay).\n"
             "\nArguments:\n"
             "1. bondYec     (numeric, required) the bond in YEC (>= the module's bondMinZat at the next block and the set's bondmin)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
@@ -1231,18 +1231,18 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         EnsureHealthy(index);
         const yellowback::Params& p = index.GetParams();
         if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
-        // D-Q-28: the module's floor for a join in the next block (the price of the tip's snapshot); a join mined later is
-        // judged at its own block, so a price move in between can leave it PENDING
-        const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)chainActive.Height() + 1);
+        // D-Q-30: the module's floor for a join in the next block (the vault collateral of the tip's snapshot); a join mined
+        // later is judged at its own block, so collateral growth in between can leave it PENDING
+        const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)IndexHeight(index) + 1);   // the index tip, as yed_getinfo
         if (bondZat < bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(bondMin)));
-        // D-Q-28 review B2 (policy): the join is judged at the snapshot before its own block, so a bond within 10 % of
-        // today's minimum can fall short if the price drops before it confirms and then sits PENDING until its CLTV.
-        // The no-price bond (bondMinNoPriceZat) always qualifies.
-        if (bondZat < p.bondMinNoPriceZat && bondZat < bondMin + bondMin / 10) {
-            warning = strprintf("bond-near-min: %s YEC is within 10 %% of the minimum for the next block (%s YEC); if the attested price falls "
-                                "before the join confirms it can stay PENDING until bondLocktime. Post at least %s YEC (+10 %%), or %s YEC, "
+        // D-Q-30 review B2 (policy): the join is judged at the snapshot before its own block, so a bond within 10 % of
+        // today's minimum can fall short if vault collateral grows before it confirms and then sits PENDING until its CLTV.
+        // The cap (bondMinCapZat) always qualifies.
+        if (bondZat < p.bondMinCapZat && bondZat < bondMin + bondMin / 10) {
+            warning = strprintf("bond-near-min: %s YEC is within 10 %% of the minimum for the next block (%s YEC); if YED vault collateral "
+                                "grows before the join confirms it can stay PENDING (leave with set_leave; the bond returns after the exit delay). Post at least %s YEC (+10 %%), or %s YEC, "
                                 "which always qualifies", FormatMoney(bondZat), FormatMoney(bondMin),
-                                FormatMoney(std::min(p.bondMinNoPriceZat, bondMin + bondMin / 10)), FormatMoney(p.bondMinNoPriceZat));
+                                FormatMoney(std::min(p.bondMinCapZat, bondMin + bondMin / 10)), FormatMoney(p.bondMinCapZat));
         }
         if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
         locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
