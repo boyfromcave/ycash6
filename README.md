@@ -27,7 +27,7 @@ lightwalletd, the bridge attestor, the pool), is
 
 ```text
   Yellowback          wYEC bridge         nYEC bridge
-  (YED, a dollar)    (to Ethereum)       (to NEAR, coming)
+  (YED, a dollar)    (to Ethereum)       (to NEAR)
         │                  │                   │
   ┌─────┴──────────────────┴───────────────────┴─────┐
   │  Post-quantum vault system                       │
@@ -58,11 +58,13 @@ The vault system is general-purpose: it knows nothing about dollars or other cha
   attestors go silent. A vault whose YEC falls below 125 % of the YED it backs can be claimed by
   others, through a pending release that Yellowback's signer set can cancel if it is wrong. The
   YEC/USD price comes from mining pools and from **attestors**, bonded members of an open signer
-  set (bond 10,000–20,000 YEC, scaling with the collateral locked in YED vaults). YED is the one
+  set of up to 15 members whose 9 highest-ranked hold the price seats (bond 10,000–20,000 YEC,
+  scaling with the collateral locked in YED vaults; a larger bond can take a seat). YED is the one
   registered rule module on the vault system; mainnet YED addresses start with `yb…`.
 - **wYEC**, wrapped YEC on Ethereum, backed 1:1 by YEC in vaults. Ycash never reads Ethereum;
   this repository holds only the Ycash side, which needs nothing beyond the vault system.
-- **nYEC**, wrapped YEC on NEAR with the same design, is coming.
+- **nYEC**, wrapped YEC on NEAR with the same design; the bridge attestor (hawkeye) supports both
+  bridges. Neither bridge's contracts are deployed yet.
 
 **Naming:** Yellowback is the system, YED is the unit: "250 YED", "Yellowback is a dollar on
 Ycash".
