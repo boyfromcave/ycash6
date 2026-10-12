@@ -19,7 +19,10 @@ from anywhere but the gRPC surface. It never broadcasts the mint.
 Without --bundle-hex: the v2 shape (build_mint_tx), what an unarmed regtest devnet accepts.
 With it: the v3 shape — the carrier step first (build_carrier_tx, broadcast by node 0 and
 mined by node 0 so it is confirmed), then build_mint_tx_v3 spending the carrier as vin[last].
-Prints one JSON object: {"hex", "txid", "ownerPubKey", "carrierTxid"|null}. On the post-quantum line
+The token output pays a fresh holder of node 0's wallet from yed_getnewaddress, which follows the holder
+policy: a Falcon TX_PQPKH once Falcon is active (TOK-PQ; the default devnet mirrors mainnet, Falcon from the
+vault activation, where a P2PKH holder is bad-yed-holder), P2PKH under --no-pqfalcon.
+Prints one JSON object: {"hex", "txid", "ownerPubKey", "holder", "carrierTxid"|null}. On the post-quantum line
 "ownerPubKey" carries the owner's 66-hex pqkeyid (scheme || keyHash), not a secp256k1 key; the key name
 stays because lightwalletd's suite reads it.
 """
@@ -42,6 +45,19 @@ import test_framework.yellowback_model as ym                                    
 import test_framework.yellowback_util as _yu                                             # noqa: E402
 
 
+def holder_of(node):
+    """A fresh YED holder of ``node``'s wallet and its token script. yed_getnewaddress's default follows the
+    holder policy (Falcon once pqFalconActive, else P2PKH), so the token is admissible under either regime."""
+    addr = node.yed_getnewaddress()
+    v = node.yed_validateaddress(addr)
+    if not v.get("isvalid"):
+        sys.exit("lwd-rawmint: yed_validateaddress refused the wallet's own %s: %s" % (addr, v.get("reason")))
+    if v["type"] == "pq":
+        return addr, ym.pqpkh_script(hex_str_to_bytes(v["keyid"]))    # TX_PQPKH: 20 <keyHash> OP_scheme OP_CHECKPQSIG
+    # P2PKH (Falcon inactive): from the plain transparent form, since a P2PKH "keyid" is CKeyID::GetHex(), byte-reversed
+    return addr, _yu._spk_of_address(v["transparentAddress"])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", required=True); ap.add_argument("--node", type=int, default=0)
@@ -56,6 +72,7 @@ def main():
     PortSeed.n = state["portseed"]
     url = state["rpc"][str(args.node)]["url"]
     node = get_rpc_proxy(url, args.node, timeout=60)
+    holder, token_script = holder_of(node)
     carrier_txid = None
     if args.bundle_hex:
         carrier = build_carrier_tx(node, hex_str_to_bytes(args.bundle_hex))
@@ -75,11 +92,14 @@ def main():
             sys.exit("lwd-rawmint: the wallet did not record the carrier %s as confirmed within 30 s" % carrier_txid)
         attest_fee = (args.attest_fee_addr, args.attest_fee_zat) if args.attest_fee_addr else None
         hex_, owner = build_mint_tx_v3(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat,
-                                       fee_addr=args.fee_addr, carrier=carrier, attest_fee=attest_fee)
+                                       fee_addr=args.fee_addr, carrier=carrier, attest_fee=attest_fee,
+                                       token_script=token_script)
     else:
-        hex_, owner = build_mint_tx(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat, fee_addr=args.fee_addr)
+        hex_, owner = build_mint_tx(node, args.cents, args.lock_blocks, args.ref_height, args.collateral_zat, fee_addr=args.fee_addr,
+                                    token_script=token_script)
     # "ownerPubKey": the 66-hex pqkeyid on the post-quantum line (name kept for lightwalletd's suite)
-    json.dump({"hex": hex_, "txid": ym.tx_from_hex(hex_).txid, "ownerPubKey": owner, "carrierTxid": carrier_txid}, sys.stdout)
+    json.dump({"hex": hex_, "txid": ym.tx_from_hex(hex_).txid, "ownerPubKey": owner, "holder": holder,
+               "carrierTxid": carrier_txid}, sys.stdout)
     print()
 
 

@@ -656,12 +656,13 @@ def _carrier_vin(carrier):
 
 def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=None, carrier=None,
                      attest_fee=None, owner_pubkey=None, fee_zat_override=None, term_class=None, expiry=None,
-                     carrier_wif=None, p_mint=None):
+                     carrier_wif=None, p_mint=None, token_script=None):
     """``build_mint_tx`` with the v3 shape: vault ``vout[0]``, token ``vout[1]``, payload
     ``vout[2]`` (version 3), pool fee ``vout[3]`` when ``fee_addr``, attestor fee (``attest_fee
     = (address, zat)``, ``P2PKH(bondPubKey)`` of a selected attestor) next, change last; the
     carrier input (``carrier`` from ``build_carrier_tx``, confirmed) as ``vin[last]``, signed
-    here.  Returns ``(hex, owner_pubkey_hex)``."""
+    here.  The token goes to ``token_script`` (default P2PKH of a fresh ``node`` address; from the Falcon
+    height TOK-PQ wants a Falcon ``TX_PQPKH``).  Returns ``(hex, owner_pubkey_hex)``."""
     if owner_pubkey is None:
         owner_pubkey = node.vault_getnewowner()['owner']            # the node wallet's post-quantum owner (quantum plan §4.3)
     owner = hex_str_to_bytes(owner_pubkey)
@@ -673,7 +674,8 @@ def build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_a
     vault = ym.yed_vault_script(yu.yed_params(), owner, ref_height)     # the YED V template (U-23, IT-1)
     vout = [
         (collateral_zat, vault),
-        (TOKEN_VALUE, yu._spk_of_address(node.getnewaddress())),   # the token: a fresh holder, no longer the owner
+        (TOKEN_VALUE, bytes(token_script) if token_script is not None
+         else yu._spk_of_address(node.getnewaddress())),           # the token: a fresh holder, no longer the owner
         None,   # the payload, once the vout indices are known
     ]
     needed = collateral_zat + TOKEN_VALUE
