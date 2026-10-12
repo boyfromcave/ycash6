@@ -574,14 +574,15 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_same_statehash(self.enforcing_nodes(), 'claims')
 
 # Rule: IN-2 R6
-        print('the bond: never spent by sendtoaddress; withdrawable after the locktime from a wallet that imported the bond key')
+        print('the bond: never spent by sendtoaddress; withdrawable after set_leave + BOND_MATURITY from a wallet that imported the bond key')
         assert_equal([u for u in wa.listunspent(0) if u['scriptPubKey'].startswith('a914')], [])
         wa.sendtoaddress(user.getnewaddress(), Decimal(str(wa.getbalance())) - Decimal('0.01'))
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(wa.gettxout(reg[0]['txid'], 0)['value'], Decimal(10))
         print('  tip %d, bondLocktime %d (LOCK_BLOCKS %d)' % (user.getblockcount(), reg[0]['bondLocktime'], LOCK_BLOCKS))
-        assert reg[0]['bondLocktime'] > user.getblockcount() + 1, 'LOCK_BLOCKS leaves no headroom before the withdrawal refusals: raise it'
+        # the refusals below no longer need the script lock ahead: a member's bond is locked by the vault state
+        # until it leaves and BOND_MATURITY passes (the bond exit delay)
         assert_rpc_error('bond-locked', wa.yed_withdrawbond, 0)
         assert_rpc_error('attest-key-not-held', wb.yed_withdrawbond, 0)
         assert_rpc_error('attest-unknown-seq', wa.yed_withdrawbond, 77)
