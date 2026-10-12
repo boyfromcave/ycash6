@@ -2618,7 +2618,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_REGISTER);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
     // below the module's floor: mirrored (the set admitted them) but never ELIGIBLE
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN - 1)), verdict::OK);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, COIN * 5 / 2 - 1)), verdict::OK);   // D-Q-28: below the 2.5-YEC floor (no vaults)
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, f.P.bondMinLock - 1)), verdict::OK);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 3);
     const int joined0 = f.Attestor(0)->registerHeight;
