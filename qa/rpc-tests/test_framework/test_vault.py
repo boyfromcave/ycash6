@@ -594,6 +594,43 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(c.reject(v.build_bond_spend_tx(m0.bond_outpoint, MEMBERS[0], m0.bond_value, m0.bond_locktime,
                                                         c.dest)), 'bad-vault-bond-frozen')
 
+    def test_join_ordinal_and_reorg(self):
+        # seats re-review: each SET_JOIN takes the set's next ordinal; a disconnected join gives its ordinal back
+        c = Chain()
+        sid = c.setup(members=(0, 1))
+        s = c.m.get_set(sid)
+        self.assertEqual((s.join_count, s.members[MKEYS[0]].join_ordinal, s.members[MKEYS[1]].join_ordinal), (2, 1, 2))
+        c.block(c.join_tx(sid, 2, admit=[MEMBERS[0], MEMBERS[1]]))
+        self.assertEqual((c.m.get_set(sid).join_count, c.m.get_set(sid).members[MKEYS[2]].join_ordinal), (3, 3))
+        c.m.disconnect_block()
+        self.assertEqual(c.m.get_set(sid).join_count, 2)
+        self.assertNotIn(MKEYS[2], c.m.get_set(sid).members)
+        c.block(c.join_tx(sid, 3, admit=[MEMBERS[0], MEMBERS[1]]))
+        self.assertEqual(c.m.get_set(sid).members[MKEYS[3]].join_ordinal, 3)   # the next ordinal on this chain, no gap
+
+    def test_liveness_hook(self):
+        # the module liveness hook (Module::Liveness): an ACTIVE member's lastAct rises to the named height (< h,
+        # > lastAct); a removed member, a height at or above the block and a lower height change nothing
+        c = Chain()
+        sid = c.setup(members=(0, 1, 2))
+        calls = []
+        c.m.liveness_hook = lambda tx, h, m: calls.pop(0) if calls else []
+        s = c.m.get_set(sid)
+        la0, la1 = s.members[MKEYS[0]].last_act, s.members[MKEYS[1]].last_act
+        rm, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[1], [MEMBERS[1]], burn=0)
+        calls.append([])
+        c.block(rm)
+        h = c.h
+        calls.append([(sid, MKEYS[0], h - 1), (sid, MKEYS[1], h - 1), (sid, MKEYS[2], h)])
+        c.block(v.make_tx(c.coin(), [(v.COIN, c.dest)]))
+        s = c.m.get_set(sid)
+        self.assertEqual(s.members[MKEYS[0]].last_act, h - 1)
+        self.assertEqual(s.members[MKEYS[1]].last_act, la1)
+        self.assertEqual(s.members[MKEYS[2]].last_act, la0)
+        calls.append([(sid, MKEYS[0], h - 5)])
+        c.block(v.make_tx(c.coin(), [(v.COIN, c.dest)]))
+        self.assertEqual(c.m.get_set(sid).members[MKEYS[0]].last_act, h - 1)
+
     def test_min_set_maturity(self):
         # D-Q-31: SET_CREATE below the network's exit window is invalid (regtest 2, mainnet 16,128)
         m = v.VaultModel(activation_height=100)

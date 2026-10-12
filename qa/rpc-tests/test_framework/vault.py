@@ -1539,6 +1539,7 @@ class Member(object):
         self.last_act = join_height + maturity
         self.status = MEMBER_ACTIVE
         self.bond_frozen = False
+        self.join_ordinal = 0          # the set's join_count after this member's latest SET_JOIN (MemberRecord.joinOrdinal)
 
     def to_json(self):
         return {'memberKey': self.key.hex(), 'bondOutpoint': {'txid': self.bond_outpoint[0], 'vout': self.bond_outpoint[1]},
@@ -1556,6 +1557,7 @@ class SetState(object):
         self.epoch = 0
         self.epoch_basis = 0
         self.epoch_used = 0
+        self.join_count = 0            # SET_JOINs admitted (SetRecord.joinCount; a module's seq = ordinal - 1)
         self.members = {}              # key33 -> Member (insertion order = join order)
 
     def current(self, h):
@@ -1620,8 +1622,11 @@ class VaultModel(object):
     ``disconnect_block()`` undoes the last connected block."""
 
     def __init__(self, activation_height=1, branch_id=VAULT_BRANCH_ID, check_scripts=True,
-                 min_set_maturity=MIN_SET_MATURITY_REGTEST):
+                 min_set_maturity=MIN_SET_MATURITY_REGTEST, liveness_hook=None):
         self.activation_height = activation_height
+        # the module liveness hook (vault/module.h Module::Liveness): liveness_hook(tx, h, model) -> [(setId32, key33,
+        # height)], applied after each transaction's act; None = no module (the default)
+        self.liveness_hook = liveness_hook
         self.min_set_maturity = min_set_maturity   # D-Q-31: SET_CREATE maturity floor (mainnet 16,128)
         self.branch_id = branch_id
         self.check_scripts = check_scripts
@@ -1731,6 +1736,16 @@ class VaultModel(object):
                 raise VaultError('bad-vault-act-count')
             if acts:
                 self._apply_act(tx, txid, acts[0], h)
+            if self.liveness_hook is not None and not is_coinbase(tx):
+                for sid, key, at in self.liveness_hook(tx, h, self):
+                    s = self.sets.get(bytes(sid))
+                    m = None if s is None else s.members.get(bytes(key))
+                    b = None if m is None else self.bonds.get(m.bond_outpoint)
+                    if m is None or m.status != MEMBER_ACTIVE or m.bond_frozen or b is None or b[2]:
+                        continue
+                    if at >= h or at <= m.last_act:
+                        continue
+                    m.last_act = at
         for _i, key, _c in spent:
             self.coins.pop(key, None)
         for n, o in enumerate(tx.vout):
@@ -1963,6 +1978,8 @@ class VaultModel(object):
             if a['bondLocktime'] < h + s.p['bondLockMin']:
                 raise VaultError('bad-vault-act-bond', 'locktime')
             m = Member(mk, (txid, bv), bo.nValue, a['bondLocktime'], h, s.p['maturity'])
+            s.join_count += 1
+            m.join_ordinal = s.join_count
             s.members.pop(mk, None)
             s.members[mk] = m
             self.bonds[(txid, bv)] = [sid, mk, False, 0]
