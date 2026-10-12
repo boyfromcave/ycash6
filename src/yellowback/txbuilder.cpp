@@ -952,9 +952,9 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                              : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold();   // 6.20.0: a fixed dust threshold
         // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional), a floor
         // the clamp does not lower (relay demands it): an SLH-DSA owner spend is ~53 logical actions (~26.5k zat) and a
-        // YED owner spend with its token, payload and fee outputs more, so on 6.20.0 a vault whose value does not cover
-        // that, the protocol fees and a non-dust owner output (about 0.003 YEC and below) is refused vault-value-too-small
-        // (PlanVaultSpend), where ycash-dd's clamp to the floor rate still spends it.
+        // YED owner spend with its token, payload and fee outputs a few actions more (~0.0003 YEC), so on 6.20.0 a vault
+        // whose value does not cover that, the protocol fees and a non-dust owner output (of the order of 0.003 YEC and
+        // below) is refused vault-value-too-small (PlanVaultSpend), where ycash-dd's clamp to the floor rate spends it.
         shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
                                                 YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme))));
     }
