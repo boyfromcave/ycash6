@@ -153,7 +153,6 @@ class VaultSlashingTest(VaultTestBase):
                     'x5 burns itself alone')
         self.accept(self.act_hex(v.act_set_remove(sid, k[5], 0), [x[5]]), 'x5 leaves (its own SET_REMOVE)')
         self.mine()
-        exit5 = self.node.getblockcount()
         assert_equal(status(5), v.MEMBER_REMOVED)
         self.reject(self.heartbeat_hex(sid, x[5]), 'bad-vault-act-heartbeat', 'bad-vault-act-heartbeat',
                     'HEARTBEAT by the departed x5')
