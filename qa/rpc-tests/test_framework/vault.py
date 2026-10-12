@@ -1939,8 +1939,6 @@ class VaultModel(object):
             old = s.members.get(mk)
             if old is not None and old.status == MEMBER_ACTIVE:
                 raise VaultError('bad-vault-act-join', 'already active')
-            if old is not None and old.bond_outpoint in self.bonds:     # one unspent bond per (set, key) (review B1)
-                raise VaultError('bad-vault-act-join', 'previous bond unspent')
             if not keys or keys[0] != mk:
                 raise VaultError('bad-vault-act-sig', 'S_1 must be the member')
             admit = keys[1:]
@@ -1954,6 +1952,8 @@ class VaultModel(object):
                         raise VaultError('bad-vault-act-sig', 'admitKey')
             elif admit:
                 raise VaultError('bad-vault-act-sig', 'OPEN set takes only S_1')
+            if old is not None and old.bond_outpoint in self.bonds:     # one unspent bond per (set, key) (review B1)
+                raise VaultError('bad-vault-act-join', 'previous bond unspent')
             bv = a['bondVout']
             if bv >= len(tx.vout):
                 raise VaultError('bad-vault-act-bond')

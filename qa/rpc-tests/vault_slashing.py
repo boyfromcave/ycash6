@@ -16,9 +16,9 @@ unlock 2, cancel 1, slash 3):
      proof EJECTs x0 and freezes its bond; x0's signature no longer counts, a second proof,
      a heartbeat and a REMOVE of x0 are refused
   2. SET_REMOVE with burn (the contested-cancel slash): signer count, the target signing, burn 2
-  3. SET_REMOVE without burn (O-6) for x2 and x6; x0 rejoins with a new bond (admission by
-     slashThreshold current members); x2, removed, is then proven to have equivocated and is
-     EJECTED with its bond frozen
+  3. SET_REMOVE without burn (O-6) for x2 and x6; x0 (ejected, its bond frozen) cannot rejoin
+     (bad-vault-act-join: one unspent bond per (set, key), seats review B1); x2, removed, is then
+     proven to have equivocated and is EJECTED with its bond frozen
   4. bonds at their locktime: x0's old bond (A-13), x1's (burned) and x2's (ejected) are frozen
      (mempool and block); x6's is returned
   5. the bond exit delay (owner 2026-10-11): x5's bond is locked while ACTIVE (bad-vault-bond-locked);
@@ -122,9 +122,9 @@ class VaultSlashingTest(VaultTestBase):
         assert_equal(self.info(sid)['current'], 3)
         self.reject(self.join_hex(sid, x[0], [admit])[0], 'bad-vault-act-sigs',
                     'bad-vault-act-sig', 'rejoin of x0 by admitKey while 3 members are current')
-        self.join(sid, x[0], x[3:6], 'x0 rejoins with a new bond (x3, x4, x5)')
-        self.mine()
-        assert_equal(status(0), v.MEMBER_ACTIVE)
+        # seats review B1: one unspent bond per (set, key) -- x0's frozen bond is never spent, so x0 never rejoins
+        self.reject(self.join_hex(sid, x[0], x[3:6])[0], 'bad-vault-act-join', 'bad-vault-act-join',
+                    'rejoin of the ejected x0 (its frozen bond is unspent)')
         # x2 had signed B's unlock while a member: proven now, after its removal
         tx_c = self.unlock_tx(vout, vp, 4 * COIN, [(self.change_spk(), 4 * COIN)])
         sh_c = v.template_sighash(tx_c, 0, spk, 4 * COIN)
@@ -138,7 +138,7 @@ class VaultSlashingTest(VaultTestBase):
         lt = max(b['locktime'] for b in bonds.values())
         self.mine_to(lt)
         self.reject_both(self.bond_spend_hex(bonds[0]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
-                         'x0\'s old bond after its rejoin (A-13)')
+                         'x0\'s frozen bond (ejected; no rejoin, review B1)')
         self.reject_both(self.bond_spend_hex(bonds[1]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
                          'x1\'s burned bond')
         self.reject_both(self.bond_spend_hex(bonds[2]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
@@ -165,9 +165,9 @@ class VaultSlashingTest(VaultTestBase):
         self.mine()
         self.accept(self.bond_spend_hex(bonds[5]), 'x5\'s bond at exit + maturity')
         self.mine()
-        self.mine(2)                        # x0's rejoin is mature
-        self.accept(self.unlock_hex(vout, vp, 4 * COIN, [(ra, 4 * COIN)], [x[3], x[0]]),
-                    'UNLOCK by x3 and the rejoined x0')
+        self.mine(2)
+        self.accept(self.unlock_hex(vout, vp, 4 * COIN, [(ra, 4 * COIN)], [x[3], x[4]]),
+                    'UNLOCK by x3 and x4')
         self.mine()
 
         print('6. undo of a freeze')
