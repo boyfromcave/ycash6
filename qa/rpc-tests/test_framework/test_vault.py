@@ -595,9 +595,9 @@ class ModelTests(unittest.TestCase):
                                                         c.dest)), 'bad-vault-bond-frozen')
 
     def test_min_set_maturity(self):
-        # D-Q-31: SET_CREATE below the network's exit window is invalid (regtest 8, mainnet 16,128)
+        # D-Q-31: SET_CREATE below the network's exit window is invalid (regtest 2, mainnet 16,128)
         m = v.VaultModel(activation_height=100)
-        self.assertEqual((v.MIN_SET_MATURITY, v.MIN_SET_MATURITY_REGTEST, m.min_set_maturity), (16128, 8, 8))
+        self.assertEqual((v.MIN_SET_MATURITY, v.MIN_SET_MATURITY_REGTEST, m.min_set_maturity), (16128, 2, 2))
         c = Chain()
         c.m.min_set_maturity = 8
         low, _p = v.build_set_create_tx(c.coin(), v.act_set_create(seats=3, unlock_threshold=2, cancel_threshold=1,

@@ -52,7 +52,7 @@ from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
 # Constants (15.1 - 15.5)
 
 MIN_SET_MATURITY = 16128                # D-Q-31: the least signer-set maturity (14 days) on mainnet and testnet
-MIN_SET_MATURITY_REGTEST = 8            # ... and on regtest (Consensus::Params::nVaultMinSetMaturity)
+MIN_SET_MATURITY_REGTEST = 2            # ... and on regtest (Consensus::Params::nVaultMinSetMaturity)
 VAULT_BRANCH_ID = 0x6D5B7A31            # also in util.py (15.1); defined here so this module stands alone
 
 OP_0 = 0x00

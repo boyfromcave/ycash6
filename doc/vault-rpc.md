@@ -170,7 +170,7 @@ false, `ratelimitbps` 0 (no limit), `ratewindow` 144, `livenesswindow` 1000, `bo
 exists from the block after the one it confirms in.
 
 **D-Q-31 (owner, 2026-10-11): every set has at least a 14-day exit window.** `maturity` (the bond exit delay and
-the joiners' wait) must be at least `MIN_SET_MATURITY` = 16,128 blocks on mainnet and testnet (8 on regtest);
+the joiners' wait) must be at least `MIN_SET_MATURITY` = 16,128 blocks on mainnet and testnet (2 on regtest);
 a smaller value is refused here (`RPC_INVALID_PARAMETER`) and a `SET_CREATE` carrying one is
 `bad-vault-act-params`. A bridge set's members therefore wait at least 14 days for their bonds after leaving,
 and stay slashable for those 14 days.

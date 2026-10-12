@@ -67,7 +67,7 @@ class VaultRpcContractTest(BitcoinTestFramework):
         # ---- sets ----
         c.error('the set parameters are out of range', n, 'set_create', {'seats': 16, 'unlockthreshold': 1})
         r = c.call(n, 'set_create', {'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                                     'maturity': 1, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})
+                                     'maturity': 2, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})
         setid = r['setid']
         empty = c.call(n, 'set_create', {'seats': 2, 'unlockthreshold': 1, 'ratelimitbps': 5000, 'ratewindow': 10})['setid']
         mine(1)
