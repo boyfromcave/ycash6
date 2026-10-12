@@ -165,9 +165,10 @@ const Params& MainParams()
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
         m.startHeight = 0;
-        // Invariant (focused review): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct starts at joinHeight + the set's
-        // maturity (BOND_MATURITY) and liveness credit needs citedHeight > lastAct with citedHeight in (R - ATTEST_MAX_AGE, R]:
-        // so no attestation that a key signed before it joined can ever refresh its lastAct.
+        // Invariant (focused review; wording per the final review A-4): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct
+        // starts at joinHeight + BOND_MATURITY and a liveness credit needs citedHeight > lastAct, so a member is credited
+        // only for blocks after its maturity; with ATTEST_MAX_AGE <= BOND_MATURITY no attestation stays fresh for longer
+        // than that window -- the relation the liveness rule was reviewed under. Not a consensus rule itself.
         assert(m.bondMaturity >= m.attestMaxAge);
         return m;
     }();
@@ -269,9 +270,10 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.attestArmMin       = attestArmMin;
     r.bundleCarrier      = bundleCarrier;
     r.mintRequiresArmed  = mintRequiresArmed;
-    // Invariant (focused review): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct starts at joinHeight + the set's
-    // maturity (BOND_MATURITY) and liveness credit needs citedHeight > lastAct with citedHeight in (R - ATTEST_MAX_AGE, R]:
-    // so no attestation that a key signed before it joined can ever refresh its lastAct.
+    // Invariant (focused review; wording per the final review A-4): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct
+    // starts at joinHeight + BOND_MATURITY and a liveness credit needs citedHeight > lastAct, so a member is credited
+    // only for blocks after its maturity; with ATTEST_MAX_AGE <= BOND_MATURITY no attestation stays fresh for longer
+    // than that window -- the relation the liveness rule was reviewed under. Not a consensus rule itself.
     assert(r.bondMaturity >= r.attestMaxAge);
     return r;
 }

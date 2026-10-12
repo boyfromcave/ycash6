@@ -192,7 +192,9 @@ private:
     mutable std::list<uint256> order;              //!< most recently used at the front
     mutable std::map<uint256, Entry> entries;
     mutable uint64_t hits, misses;
-    mutable std::mutex cs;                         //!< the vault primitive's liveness hook reads it outside cs_yellowback
+    mutable std::mutex cs;                         //!< the vault primitive's liveness hook reads it outside cs_yellowback.
+                                                   //!< A leaf lock (nothing is taken while held), a plain std::mutex,
+                                                   //!< so outside DEBUG_LOCKORDER's tracking (final review A-3)
 };
 
 /** What BuildBundle assembled for (R, selector) (W6, W9; yed_buildbundle's shape). */

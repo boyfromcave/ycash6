@@ -33,7 +33,7 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 9`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 12`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
@@ -214,6 +214,8 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   **Focused review:** credit only from a bundle passing BUNDLE-1 but for the selection, every seq a live record, R within
   `REF_WINDOW` of H; and a transaction with any credit must be a held MINT, CLAIM_NOTICE or REDEEM claim whose bundle
   passes the whole BUNDLE-1, else it is invalid (`liveness-unheld`). `SCHEMA_VERSION` 12.
+  A notice (or other act) that fails its own rule and whose bundle credits nobody -- no live member's fresh,
+  verifying attestation, or R older than `REF_WINDOW` -- stays a valid no-op, as before (final review A-1).
 - **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
   START_HEIGHT` and `< H`, two prices, the scriptsig carrier); the key is the **first record in seq
   order** that is its key's newest, has `bondSpentHeight = 0` and `bondFrozen = false`, under which

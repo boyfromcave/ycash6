@@ -109,10 +109,20 @@ same count.
 
 **Attestations as liveness are bounded, not priced (focused review, 2026-10-11).** A member's attestation carried by a
 held MINT, CLAIM_NOTICE or REDEEM claim refreshes its `lastAct` in the vault primitive and in the index alike. The
-signature checks this costs are not counted as sigops: they are at most `BUNDLE_MAX` (6) per transaction, the same
-signatures BUNDLE-1 already verifies (both go through the node's signature cache, keyed by attestation, block hash and
-public key), only for a bundle that passes BUNDLE-1, and only for a refHeight within `REF_WINDOW`; a transaction whose
-bundle would refresh liveness without being a held act is invalid (`liveness-unheld`).
+signature checks this costs are not counted as sigops. They are bounded, not free (final review B-1): the structural
+checks run first, then one signature check per attestation whose seq names a live member, before the held-act gate --
+so a junk MINT, CLAIM_NOTICE or REDEEM costs about one uncached verification when it names no seat a signer holds and
+about k + 1 with k such seats (at most `BUNDLE_MAX`, 6), and the gate's whole-BUNDLE-1 check then re-reads the same
+entries. Both go through the node's signature cache (keyed by attestation, block hash and public key), so the primitive
+and the index verify each signature once; past `SIG_CACHE_ENTRIES` (16,384) entries evicted under load are verified
+again, at most doubling that cost. A transaction whose bundle would refresh liveness without being a held act whose
+bundle passes the whole BUNDLE-1 is invalid (`liveness-unheld`); one whose bundle credits nobody is unaffected.
+
+**Known limit: attestor seq exhaustion (final review B-4).** The attestor set's members are numbered by a 16-bit `seq`,
+one per `SET_JOIN` ever admitted, rejoins included. After 65,536 joins every further `SET_JOIN` of the attestor set is
+invalid (`attestor-seq-exhausted`) for good, so the set can no longer admit members (the primitive and the index stay in
+agreement). Each join costs a bond of at least `bondMinFloorZat` held for at least `BOND_MATURITY` after it leaves, so
+reaching the limit is impractical (see the bound above); it is recorded here as a parameter-review item.
 
 ## Configuration
 
