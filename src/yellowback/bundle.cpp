@@ -104,10 +104,11 @@ ExtractBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
     return std::nullopt;
 }
 
-uint256 SigCacheKey(const Attestation& att, const uint256& blockHash)
+uint256 SigCacheKey(const Attestation& att, const uint256& blockHash, const CPubKey& pk)
 {
     std::vector<unsigned char> pre = EncodeAttestation(att);
     pre.insert(pre.end(), blockHash.begin(), blockHash.end());
+    pre.insert(pre.end(), pk.begin(), pk.end());   // focused review: the key binds the public key it was verified under
     return Sha256(pre);
 }
 
@@ -151,14 +152,15 @@ BundleVerdict VerifyBundle(const CTransaction& tx, BundleCarrier mode, bool skip
     for (const Attestation& a : bundle->atts) {
         std::optional<uint256> blockHash = blockHashAt ? blockHashAt((int)a.citedHeight) : std::nullopt;
         if (!blockHash) return Fail("sig");
-        const uint256 key = SigCacheKey(a, *blockHash);
+        std::optional<CPubKey> pk = pubkeyOf ? pubkeyOf(a.seq) : std::nullopt;
+        if (!pk) return Fail("sig");                                    // no key, no cache line
+        const uint256 key = SigCacheKey(a, *blockHash, *pk);
         std::optional<bool> cached = cache ? cache->Lookup(key) : std::nullopt;
         bool valid;
         if (cached) {
             valid = *cached;
         } else {
-            std::optional<CPubKey> pk = pubkeyOf ? pubkeyOf(a.seq) : std::nullopt;
-            valid = pk && VerifyCompactSig(*pk, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, *blockHash), a.sig);
+            valid = VerifyCompactSig(*pk, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, *blockHash), a.sig);
             if (cache) cache->Insert(key, valid);
         }
         if (!valid) return Fail("sig");

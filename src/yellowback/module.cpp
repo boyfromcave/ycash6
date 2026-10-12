@@ -24,6 +24,29 @@ std::shared_ptr<const Params> CurrentParams()
     return g_moduleParams;
 }
 
+/** The parameter set in force at `height`, chosen as the index's mirror chooses it (SelectParams over the sets the
+ *  module holds, YellowbackIndex::ParamsAt): a release that adds a set at a later start height changes both alike
+ *  (final review B-2). Today the module and the index each hold the one set init configured. */
+std::shared_ptr<const Params> ParamsAtHeight(int64_t height)
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p) return p;
+    const std::vector<Params> sets{ *p };
+    return std::make_shared<const Params>(SelectParams(sets, (int)std::max<int64_t>(0, std::min<int64_t>(height, 0x7FFFFFFF))));
+}
+
+/** The attestor set when it has the shape the module adopts (ApplySetAct, state.cpp): OPEN, ATTESTOR_SEATS seats,
+ *  maturity BOND_MATURITY, livenessWindow >= ATTESTOR_LIVENESS_MIN; else nullopt (the module's mirror has no set). */
+std::optional<vault::SetRecord> AdoptedSet(const Params& p, const vault::ModuleContext& ctx)
+{
+    if (!ctx.state) return std::nullopt;
+    std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, p.attestorSetId);
+    if (!s || !s->params.IsOpen() || (int)s->params.seats != p.attestorSeats ||
+        (int64_t)s->params.maturity != (int64_t)p.bondMaturity ||
+        (int64_t)s->params.livenessWindow < (int64_t)p.attestorLivenessMin) return std::nullopt;
+    return s;
+}
+
 } // namespace
 
 void SetModuleParams(const Params& p)
@@ -82,6 +105,62 @@ std::vector<CPubKey> Module::Ejections(const CTransaction& tx, const vault::Modu
         if (EquivocatedBy(e.value(), m.first, blockHash.value())) return { m.first };
     }
     return {};
+}
+
+std::optional<std::string> Module::CheckBlock(const CBlock& block, const CBlockIndex* pindex, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p) return std::nullopt;
+    for (const CTransaction& tx : block.vtx) {
+        if (RefusedAttestorSetAct(tx, *p)) return std::string("bad-yellowback-attestor-set-act");
+    }
+    return std::nullopt;
+}
+
+std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::SetJoinBody& join, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p || !ctx.state || join.setId != p->attestorSetId || join.bondVout >= tx.vout.size()) return std::nullopt;
+    std::optional<vault::SetRecord> s = AdoptedSet(*p, ctx);
+    if (!s) return std::nullopt;   // a set the module does not adopt
+    std::vector<SeatCandidate> members;
+    for (const auto& m : vault::GetMembers(*ctx.state, join.setId)) {
+        if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;
+        std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+        if (!b || b->frozen) continue;
+        SeatCandidate c;
+        c.key = m.first;
+        c.bondZat = m.second.bondValue;
+        c.joinHeight = m.second.joinHeight;
+        c.lastAct = m.second.lastAct;
+        members.push_back(c);
+    }
+    return EvictionVictim(members, ctx.height, tx.vout[join.bondVout].nValue, (int64_t)s->params.livenessWindow, *p);
+}
+
+std::vector<std::pair<CPubKey, int64_t>> Module::Liveness(const CTransaction& tx, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = ParamsAtHeight(ctx.height);   // as the mirror's ParamsAt(height)
+    if (!p || !ctx.state || !ctx.blockHashAt || !AdoptedSet(*p, ctx)) return {};
+    const vault::MemberList all = vault::GetMembers(*ctx.state, p->attestorSetId);
+    // seq -> the member whose join ordinal is seq + 1 (the module numbers the set's joins from 0, one seq per SET_JOIN)
+    auto liveMember = [&](uint16_t seq) -> std::optional<std::pair<CPubKey, int64_t>> {
+        for (const auto& m : all) {
+            if (m.second.joinOrdinal != (uint32_t)seq + 1) continue;
+            if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) return std::nullopt;
+            std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+            if (!b || b->frozen) return std::nullopt;
+            return std::make_pair(m.first, m.second.lastAct);
+        }
+        return std::nullopt;
+    };
+    std::vector<std::pair<CPubKey, int64_t>> out;
+    // the node's index cache (focused review): BUNDLE-1 already verified these signatures under the same keys
+    SigCache* cache = static_cast<SigCache*>(ctx.moduleCache);
+    for (const auto& sc : AttestationLiveness(tx, *p, ctx.height, liveMember, [&](int64_t h) { return ctx.blockHashAt(h); }, cache)) {
+        out.push_back({ liveMember(sc.first)->first, sc.second });
+    }
+    return out;
 }
 
 const vault::Module* RegisteredModule()

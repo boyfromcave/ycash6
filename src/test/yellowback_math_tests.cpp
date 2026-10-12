@@ -635,9 +635,10 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.emergencyNoticeTtl, 1152);
     BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(m.attestFeeBps, 5000);                  // H-4 (D-3 had 2,500)
-    BOOST_CHECK_EQUAL(m.bondMin, 20000 * COIN);
-    BOOST_CHECK_EQUAL(m.bondMinLock, 420480);
-    BOOST_CHECK_EQUAL(m.bondMinLock, BLOCKS_PER_YEAR);
+    BOOST_CHECK_EQUAL(m.bondMinFloorZat, 10000 * COIN);     // D-Q-30 (owner 2026-10-11: 10,000 YEC)
+    BOOST_CHECK_EQUAL(m.bondMinCapZat, 20000 * COIN);
+    BOOST_CHECK_EQUAL(m.bondShareBps, 500);
+    BOOST_CHECK_EQUAL(m.bondMinLock, 0);                     // the bond exit delay (owner 2026-10-11): the lock is in the vault state
     BOOST_CHECK_EQUAL(m.bondMaturity, 16128);
     BOOST_CHECK_EQUAL(m.ageCap, 207360);
     BOOST_CHECK_EQUAL(m.foundingWindow, 8064);
@@ -651,7 +652,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(TestParams().mintRequiresArmed, true);
     BOOST_CHECK_EQUAL(TestParams().attestFeeBps, 5000);
     BOOST_CHECK_EQUAL(TestParams().feeFloorCents, 100);
-    BOOST_CHECK_EQUAL(TestParams().bondMin, 20000 * COIN);
+    BOOST_CHECK_EQUAL(TestParams().bondMinCapZat, 20000 * COIN);
     // "ARMED" means both the snapshot status and ATTEST_REQUIRED (W15).
     BOOST_CHECK(m.IsArmed(true));
     BOOST_CHECK(!m.IsArmed(false));
@@ -685,8 +686,10 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(r.emergencyNoticeTtl, 64);
     BOOST_CHECK_EQUAL(r.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(r.attestFeeBps, 2500);
-    BOOST_CHECK_EQUAL(r.bondMin, 10 * COIN);
-    BOOST_CHECK_EQUAL(r.bondMinLock, 200);
+    BOOST_CHECK_EQUAL(r.bondMinFloorZat, 5 * COIN);         // D-Q-30 at 1/2,000 of mainnet
+    BOOST_CHECK_EQUAL(r.bondMinCapZat, 10 * COIN);
+    BOOST_CHECK_EQUAL(r.bondShareBps, 500);
+    BOOST_CHECK_EQUAL(r.bondMinLock, 0);
     BOOST_CHECK_EQUAL(r.bondMaturity, 8);
     BOOST_CHECK_EQUAL(r.ageCap, 64);
     BOOST_CHECK_EQUAL(r.foundingWindow, 16);
@@ -716,29 +719,123 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK(Params().bundleCarrier == BundleCarrier::SCRIPTSIG);
 }
 
+// Rule: D-Q-30
+// The bond minimum from vault collateral: clamp(ceil(collateral x bondShareBps / (10^4 x N_SLOTS)), floor, cap).
+BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
+{
+    const Params& m = MainParams();
+    const Params r = RegtestParams(1, 0, 0, TestSet());
+    // mainnet (N_SLOTS 9): the floor binds to 1.8 M YEC, the cap from 3.6 M YEC
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(-1, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(900000 * COIN, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1800000 * COIN, m), 10000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1800000 * COIN + 1, m), 10000 * COIN + 1);     // ceil
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(2700000 * COIN, m), 15000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(3600000 * COIN - 1, m), 20000 * COIN);       // ceil reaches the cap
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(3600000 * COIN - 180, m), 20000 * COIN - 1);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(3600000 * COIN, m), 20000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(10000000 * COIN, m), 20000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(MAX_MONEY, m), 20000 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(std::numeric_limits<int64_t>::max(), m), 20000 * COIN);
+    // regtest (N_SLOTS 5, 5 / 10 YEC): the floor to 500 YEC, the cap from 1,000 YEC
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, r), 5 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(500 * COIN, r), 5 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(700 * COIN, r), 7 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1000 * COIN, r), 10 * COIN);
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(1300 * COIN, r), 10 * COIN);
+    // degenerate parameters: no slots gives the cap; a share of 0 gives the floor
+    Params z = m;
+    z.nSlots = 0;
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(0, z), 20000 * COIN);
+    z = m;
+    z.bondShareBps = 0;
+    BOOST_CHECK_EQUAL(BondMinFromCollateralZat(MAX_MONEY, z), 10000 * COIN);
+    // review A2: SNAP skips the snapshot when the bond is outside [floor, cap]; the minimum never leaves that interval
+    for (const Params* q : { &m, &r }) {
+        for (CAmount c : { (CAmount)-1, (CAmount)0, (CAmount)1, 250 * COIN, 900000 * COIN, 900000 * COIN + 1, 2000000 * COIN,
+                           3600000 * COIN, MAX_MONEY, std::numeric_limits<int64_t>::max() }) {
+            const CAmount v = BondMinFromCollateralZat(c, *q);
+            BOOST_CHECK(v >= q->bondMinFloorZat && v <= q->bondMinCapZat);
+        }
+    }
+}
+
 // Rule: BUNDLE-1
 // weight = bondZat * clamp(age, 0, AGE_CAP), in arith_uint256 (R10).
 BOOST_AUTO_TEST_CASE(bundle1_bond_weight_clamps_age)
 {
     const Params& m = MainParams();
-    BOOST_CHECK(BondWeight(m.bondMin, 0, m.ageCap) == arith_uint256(0));
-    BOOST_CHECK(BondWeight(m.bondMin, -5, m.ageCap) == arith_uint256(0));
-    BOOST_CHECK(BondWeight(m.bondMin, 1, m.ageCap) == arith_uint256(m.bondMin));
-    BOOST_CHECK(BondWeight(m.bondMin, 100, m.ageCap) == arith_uint256(m.bondMin) * arith_uint256(100));
-    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap, m.ageCap) == arith_uint256(m.bondMin) * arith_uint256(m.ageCap));
-    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap + 1, m.ageCap) == BondWeight(m.bondMin, m.ageCap, m.ageCap));
-    BOOST_CHECK(BondWeight(m.bondMin, 1000000000LL, m.ageCap) == BondWeight(m.bondMin, m.ageCap, m.ageCap));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, 0, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, -5, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, 1, m.ageCap) == arith_uint256(m.bondMinCapZat));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, 100, m.ageCap) == arith_uint256(m.bondMinCapZat) * arith_uint256(100));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, m.ageCap, m.ageCap) == arith_uint256(m.bondMinCapZat) * arith_uint256(m.ageCap));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, m.ageCap + 1, m.ageCap) == BondWeight(m.bondMinCapZat, m.ageCap, m.ageCap));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, 1000000000LL, m.ageCap) == BondWeight(m.bondMinCapZat, m.ageCap, m.ageCap));
     // R10: 20,000 YEC at AGE_CAP is 4.1e17 -- past 2^58, so a 64-bit sum over nine slots would be at risk.
-    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap, m.ageCap) == arith_uint256(414720000000000000ULL));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, m.ageCap, m.ageCap) == arith_uint256(414720000000000000ULL));
     BOOST_CHECK(BondWeight(MAX_MONEY, m.ageCap, m.ageCap) == arith_uint256(MAX_MONEY) * arith_uint256(m.ageCap));
     BOOST_CHECK(!FitsInt64(BondWeight(MAX_MONEY, m.ageCap, m.ageCap) * arith_uint256(9)));
     // Degenerate inputs: zero, never a throw.
     BOOST_CHECK(BondWeight(0, 10, m.ageCap) == arith_uint256(0));
     BOOST_CHECK(BondWeight(-1, 10, m.ageCap) == arith_uint256(0));
-    BOOST_CHECK(BondWeight(m.bondMin, 10, 0) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMinCapZat, 10, 0) == arith_uint256(0));
     // Regtest: 10 YEC, cap 64.
     Params r = RegtestParams(1, 0, 0, TestSet());
-    BOOST_CHECK(BondWeight(r.bondMin, 100, r.ageCap) == arith_uint256(10 * COIN) * arith_uint256(64));
+    BOOST_CHECK(BondWeight(r.bondMinCapZat, 100, r.ageCap) == arith_uint256(10 * COIN) * arith_uint256(64));
+}
+
+// Rule: seat ranking and eviction (owner 2026-10-11)
+// Log2Q16 is exact integer log2 in Q16; SeatAgeFactorQ16 runs 1.0 .. 1.9 (65,536 .. 124,518) over SEAT_AGE_CAP.
+BOOST_AUTO_TEST_CASE(seat_weight_log_tenure_factor)
+{
+    BOOST_CHECK_EQUAL(Log2Q16(0), 0u);
+    BOOST_CHECK_EQUAL(Log2Q16(1), 0u);
+    BOOST_CHECK_EQUAL(Log2Q16(2), 65536u);
+    BOOST_CHECK_EQUAL(Log2Q16(1024), 10u << 16);
+    BOOST_CHECK_EQUAL(Log2Q16(3), 103872u);                    // 1.58496 x 65536 = 103,872.7: truncated
+    BOOST_CHECK_EQUAL(Log2Q16((uint64_t)1 << 40), 40u << 16);
+    BOOST_CHECK_EQUAL(Log2Q16(UINT64_MAX), (63u << 16) | 0xFFFFu);
+    for (uint64_t x = 1; x < 5000; x++) BOOST_CHECK(Log2Q16(x + 1) >= Log2Q16(x));   // monotone
+
+    const Params& m = MainParams();
+    const int64_t u = m.seatAgeUnit, cap = m.seatAgeCap;
+    BOOST_CHECK_EQUAL(u, 1152);
+    BOOST_CHECK_EQUAL(cap, 420480);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(0, u, cap), 65536u);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(-10, u, cap), 65536u);
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(cap, u, cap), 65536u + 58982u);       // floor(0.9 x 65536): x1.9
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(cap * 3, u, cap), 65536u + 58982u);   // clamped at the cap
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(1152, u, cap), 72462u);               // one day: lg 2 = 1 of lg 366
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(8064, u, cap), 86314u);               // one week: lg 8 = 3 of lg 366, x1.317
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(210240, u, cap), 117619u);            // half a year
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(100, 0, cap), 65536u);                // degenerate: 1.0
+    BOOST_CHECK_EQUAL(SeatAgeFactorQ16(100, u, 0), 65536u);
+    for (int64_t a = 0; a < 20000; a += 7) BOOST_CHECK(SeatAgeFactorQ16(a + 7, u, cap) >= SeatAgeFactorQ16(a, u, cap));
+
+    // 8,000 YEC at one week weighs 10,536.4 YEC; a new 20,000 YEC bond beats 8,000 YEC at any tenure, even with the margin
+    BOOST_CHECK(SeatWeight(8000 * COIN, 8064, u, cap) == arith_uint256((uint64_t)(8000 * COIN)) * arith_uint256(86314));
+    BOOST_CHECK(SeatWeight(8000 * COIN, 8064, u, cap) / arith_uint256(65536) == arith_uint256((uint64_t)1053637695312ULL));
+    BOOST_CHECK(SeatWeight(20000 * COIN, 0, u, cap) * arith_uint256(10000) > SeatWeight(8000 * COIN, cap, u, cap) * arith_uint256(10500));
+    // 1.5x the bond beats a one-week member (by more than EVICT_MARGIN) and loses to a one-year member
+    BOOST_CHECK(SeatWeight(3000 * COIN, 0, u, cap) * arith_uint256(10000) > SeatWeight(2000 * COIN, 8064, u, cap) * arith_uint256(10500));
+    BOOST_CHECK(SeatWeight(3000 * COIN, 0, u, cap) < SeatWeight(2000 * COIN, cap, u, cap));
+    // MAX_MONEY x 1.9 fits arith_uint256 with room (and not int64): the comparison is never truncated
+    BOOST_CHECK(!FitsInt64(SeatWeight(MAX_MONEY, cap, u, cap)));
+    BOOST_CHECK(SeatWeight(0, 10, u, cap) == arith_uint256(0));
+    BOOST_CHECK(SeatWeight(-1, 10, u, cap) == arith_uint256(0));
+    // regtest carries the mainnet values (only the bonds are scaled)
+    Params r = RegtestParams(1, 0, 0, TestSet());
+    BOOST_CHECK_EQUAL(r.seatAgeUnit, 1152);
+    BOOST_CHECK_EQUAL(r.seatAgeCap, 420480);
+    BOOST_CHECK_EQUAL(r.seatMarginBps, 500);
+    BOOST_CHECK_EQUAL(r.evictMarginBps, 500);
+    BOOST_CHECK_EQUAL(r.attestorSeats, 15);
+    BOOST_CHECK_EQUAL(r.attestorLivenessMin, 16);                        // seats review B3 at regtest scale
+    BOOST_CHECK(r.bondMaturity >= r.attestMaxAge);                       // the liveness invariant (params.cpp)
+    BOOST_CHECK(TestParams().bondMaturity >= TestParams().attestMaxAge);
+    BOOST_CHECK_EQUAL(TestParams().attestorLivenessMin, 1152);           // one day
 }
 
 // Rule: PRICE-2

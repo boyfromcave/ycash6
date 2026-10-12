@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = '6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873'
+GOLDEN_STATE_HASH = 'ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -65,7 +65,7 @@ ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
 BONDS = ATTESTORS
 
 
-def attestor_set_create(liveness_window=1_000_000, maturity=1, seats=15):
+def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15):
     """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds), from a fixed input; its txid is the set id."""
     act = va.act_set_create(seats, 1, 1, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
                             liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity)
@@ -1054,6 +1054,40 @@ class MintTests(unittest.TestCase):
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-vault-share')
 
+    # Rule: D-Q-30
+    def test_dq28_bond_min_from_collateral(self):
+        m, r = ym.Params.mainnet(1), ym.Params.regtest(1)
+        f = ym.bond_min_from_collateral_zat
+        for coll, yec in ((0, 10_000), (-1, 10_000), (900_000, 10_000), (1_800_000, 10_000), (3_600_000, 20_000), (10_000_000, 20_000)):
+            self.assertEqual(f(coll * ym.COIN, m), yec * ym.COIN)
+        self.assertEqual(f(1_800_000 * ym.COIN + 1, m), 10_000 * ym.COIN + 1)
+        self.assertEqual(f(3_600_000 * ym.COIN - 180, m), 20_000 * ym.COIN - 1)
+        self.assertEqual(f(0, r), 5 * ym.COIN)
+        self.assertEqual(f(700 * ym.COIN, r), 7 * ym.COIN)
+        self.assertEqual(f(1_300 * ym.COIN, r), 10 * ym.COIN)
+
+    # Rule: D-Q-30: the model's SNAP mirrors yellowback_state_tests dq28_bond_min_from_collateral
+    def test_dq28_bond_min_from_snapshot_collateral(self):
+        c = activated_chain(ym.Params.regtest(1, 0, 0, attestor_set_id(), attest_arm_min=0), )
+        tag = lambda: (1, 50_000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 5 * ym.COIN)
+        c.mine(tag(), [attestor_set_create()])
+        # seats re-review: a join below the minimum at its block is invalid (never recorded)
+        below = c.register_tx(ATTESTORS[0], c.height + 1 + 200, 5 * ym.COIN - 1)
+        c.mine(tag(), [below, c.register_tx(ATTESTORS[1], c.height + 1 + 200, 5 * ym.COIN)])
+        self.assertEqual(c.refused[txid_of(below)], 'attestor-bond-below-min')
+        ref = c.height - 1
+        raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1)     # $100 at 300 % and $0.05 = 6,000 YEC
+        c.mine(tag(), [raw])
+        self.assertEqual(c.model.snapshots[c.height].collateral_zat, collateral_for(c, 10_000, ref))
+        self.assertEqual(c.model.bond_min_zat(c.height + 1), 10 * ym.COIN)                # far above 1,000 YEC: the cap
+        late = c.register_tx(ATTESTORS[2], c.height + 1 + 200, 5 * ym.COIN)
+        c.mine(tag(), [late])
+        self.assertEqual(c.refused[txid_of(late)], 'attestor-bond-below-min')
+        c.mine_n(c.params.bond_maturity, price_fn=lambda h: 50_000)
+        self.assertEqual(sorted(c.model.attestors), [0])
+        self.assertEqual(c.model.attestors[0].status, ym.A_ELIGIBLE)     # judged at its own snapshot, before the mint
+
     # Rule: RED-5'
     def test_red5_residual_threshold(self):
         p = ym.Params.regtest(1)
@@ -1374,7 +1408,7 @@ def build_golden():
     lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
     mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
     intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
-    release, dormancy, an equivocation, a revival and two bond spends.  Three blocks are rejected and
+    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Three blocks are rejected and
     mined again without the offending transaction (U-21): 137 (a mint of $50), 217 (an owner spend
     with no payload) and 251 (an armed mint without a bundle)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
@@ -1518,10 +1552,15 @@ def build_golden():
             w = max(q for q in range(4) if q not in (v3['lazy'], e))
             txs_at['heartbeat_w'] = c.heartbeat_tx(ATTESTORS[w])
             txs.append(txs_at['heartbeat_w'])
-        elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (one WITHDRAWN, the EJECTED one stays EJECTED)
+        elif h == GOLDEN_BLOCKS - params.bond_maturity:        # the bond exit delay: w leaves by its own SET_REMOVE (WITHDRAWN)
             e = v3['ejected']
             w = max(q for q in range(4) if q not in (v3['lazy'], e))
             v3['withdrawn'] = w
+            v3['exit_height'] = h
+            txs_at['leave_w'] = c.remove_tx(ATTESTORS[w][1], ATTESTORS[w])
+            txs.append(txs_at['leave_w'])
+        elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (w's at exit + BOND_MATURITY; the EJECTED one stays EJECTED)
+            e, w = v3['ejected'], v3['withdrawn']
             for name, q in (('spend_e', e), ('spend_w', w)):
                 rec = c.model.attestors[q]
                 txs_at[name] = c.bond_spend_tx(rec.bond_outpoint, ya.bond_script(BONDS[q][1], rec.bond_locktime), rec.bond_locktime)
@@ -1553,8 +1592,9 @@ def golden_document(c):
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
                        'cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
-                       'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other lapses '
-                       '(the set\'s member dormancy) and two bond spends. '
+                       'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
+                       'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
+                       'at exit + BOND_MATURITY). '
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
                        'vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied '
                        '(U-21); the next entry is the same height mined again without the offending transaction.'
@@ -1568,6 +1608,60 @@ def golden_document(c):
     }
 
 
+class SeatTests(unittest.TestCase):
+    """Seat ranking and eviction (owner 2026-10-11), mirroring yellowback_math_tests seat_weight_log_tenure_factor and
+    yellowback_state_tests seat_eviction_victim_rule / seat_eviction_mirror / p4b_slashed_key_barred_remove_winddown_refused."""
+
+    def test_log2_and_factor(self):
+        self.assertEqual([ym.log2_q16(x) for x in (0, 1, 2, 3, 1024, 2**64 - 1)], [0, 0, 65536, 103872, 10 << 16, (63 << 16) | 0xFFFF])
+        u, cap = 1152, 420480
+        self.assertEqual([ym.seat_age_factor_q16(a, u, cap) for a in (0, -10, 1152, 8064, 210240, cap, 3 * cap)],
+                         [65536, 65536, 72462, 86314, 117619, 124518, 124518])
+        self.assertEqual(ym.seat_weight(8000 * ym.COIN, 8064, u, cap) // 65536, 1053637695312)
+        p = ym.Params.regtest(1, 0, 0, '5e' * 32)
+        self.assertEqual((p.seat_age_unit, p.seat_age_cap, p.seat_margin_bps, p.evict_margin_bps, p.attestor_seats),
+                         (1152, 420480, 500, 500, 15))
+
+    def test_eviction_victim(self):
+        p = ym.Params.regtest(1, 0, 0, '5e' * 32)
+        H, LW, C = 100000, 1000, ym.COIN
+        k = lambda i: bytes([2]) + bytes([i]) * 32  # noqa: E731
+        m = [(k(0), 20 * C, H - 8064, H), (k(1), 8 * C, H - 8064, H), (k(2), 8 * C, H - 10, H)]
+        self.assertIsNone(ym.eviction_victim(m, H, 8 * C, LW, p))
+        self.assertEqual(ym.eviction_victim(m, H, 9 * C, LW, p), k(2))
+        self.assertIsNone(ym.eviction_victim(m, H, 8 * C * 105 // 100, LW, p))
+        self.assertIsNotNone(ym.eviction_victim([(k(0), 6 * C, H - 8064, H)], H, 9 * C, LW, p))
+        self.assertIsNone(ym.eviction_victim([(k(0), 6 * C, H - 420480, H)], H, 9 * C, LW, p))
+        self.assertIsNotNone(ym.eviction_victim([(k(0), 8000 * C, H - 10 * 420480, H)], H, 20000 * C, LW, p))
+        m.append((k(3), 1000 * C, H - 420480, H - LW - 1))
+        self.assertEqual(ym.eviction_victim(m, H, p.bond_min_floor_zat, LW, p), k(3))
+        self.assertIsNone(ym.eviction_victim(m, H, p.bond_min_floor_zat - 1, LW, p))   # seats review B2: no dust eviction
+        m[3] = (k(3), 1000 * C, H - 420480, H - LW)
+        self.assertIsNone(ym.eviction_victim(m, H, p.bond_min_floor_zat, LW, p))
+        self.assertEqual(ym.eviction_victim([(k(6), 8 * C, H - 50, H), (k(5), 8 * C, H - 50, H)], H, 100 * C, LW, p), k(5))
+
+    def test_mirror_evicts_and_refuses_remove(self):
+        secrets = [ym.sha256(b'seat-test-%d' % i) for i in range(17)]
+        keys = [(sec, bytes(ya.yu.secret_to_pubkey(sec))) for sec in secrets]
+        c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id()))
+        tag = lambda: (1, 50000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
+        c.mine_n(135)
+        c.mine(tag(), [attestor_set_create()])
+        for i in range(15):
+            c.mine(tag(), [c.register_tx(keys[i], c.height + 1 + 200, 10 * ym.COIN)])
+        # SET_REMOVE of the attestor set: invalid (the block is mined again without it)
+        c.mine(tag(), [c.remove_tx(keys[3][1], keys[1])])
+        self.assertEqual(c.model.last_failed.verdict, 'attestor-set-act')
+        self.assertNotEqual(c.model.attestors[3].status, ym.A_EJECTED)
+        # 11 YEC evicts the youngest 10-YEC member (seq 14)
+        c.mine(tag(), [c.register_tx(keys[15], c.height + 1 + 200, 11 * ym.COIN)])
+        r = c.model.attestors[14]
+        self.assertEqual((r.status, r.status_height, bool(r.flags & ym.ATTESTOR_FLAG_EVICTED), r.bond_frozen, r.bond_spent_height),
+                         (ym.A_WITHDRAWN, c.height, True, False, 0))
+        self.assertEqual(c.model.attestors[15].status, ym.A_PENDING)
+        self.assertTrue(all(c.model.attestors[s].status != ym.A_WITHDRAWN for s in range(14)))
+
+
 class StateHashTests(unittest.TestCase):
 
     # Rule: N18
@@ -1579,7 +1673,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x09\x00\x00\x00')        # SCHEMA_VERSION 9 (VaultRecord.pMint, FEE-1')
+        self.assertEqual(pre[37:41], b'\x0c\x00\x00\x00')        # SCHEMA_VERSION 12 (liveness by attestation, join refusals)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))
@@ -1653,7 +1747,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_222_281_478_011, 'activeVaults': 2,   # 300 % collateral (D-IT-4)
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity)
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -1667,7 +1761,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.snapshots[248].seated, [0, 1, 2, 3])
         # P4-b: the AttestorSet record from the SET_CREATE at 224; the joins are its members' mirrors
         z = m.attestor_set_rec
-        self.assertEqual((z.create_height, z.seats, z.maturity, z.liveness_window), (224, 15, 1, GOLDEN_LIVENESS))
+        self.assertEqual((z.create_height, z.seats, z.maturity, z.liveness_window), (224, 15, 8, GOLDEN_LIVENESS))
         self.assertEqual(m.txlog[txid_of(txs_at['setcreate'])].type, 'ATTESTOR_SET_ACT')
         for i in range(4):
             r = m.attestors[i]
@@ -1706,12 +1800,16 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.attestors[e].status, ym.A_EJECTED)
         self.assertTrue(m.attestors[e].bond_frozen)                            # P4-b: EQV-1 freezes the bond
         self.assertEqual(m.attestors[e].bond_spent_height, GOLDEN_BLOCKS)     # spent, still EJECTED (the model reads no bond freeze: the primitive refuses that spend)
-        self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, GOLDEN_BLOCKS))
+        self.assertEqual(v3['exit_height'], GOLDEN_BLOCKS - 8)                 # the bond exit delay: spent at exit + BOND_MATURITY
+        self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, v3['exit_height']))
+        self.assertEqual(m.attestors[w].bond_spent_height, GOLDEN_BLOCKS)
         self.assertEqual(m.attestors[w].last_act, GOLDEN_HEARTBEAT)
-        # P4-b: the fourth attestor never heartbeat: its lastAct (join + 1) lapsed at join + 1 + livenessWindow + 1
+        # seats review B2: the fourth attestor never heartbeat, but its attestation in claim5's bundle (citing R =
+        # claim height - 2) is liveness: lastAct is that cited height and it stays ELIGIBLE (it was DORMANT at
+        # join + 8 + livenessWindow + 1 before attestations counted)
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
-        self.assertEqual(m.attestors[r4].status, ym.A_DORMANT)
-        self.assertEqual(m.attestors[r4].status_height, 225 + r4 + 1 + GOLDEN_LIVENESS + 1)
+        self.assertEqual(m.attestors[r4].last_act, v3['claim_height'] - 2)
+        self.assertEqual(m.attestors[r4].status, ym.A_ELIGIBLE)
         # the pinned hash, the file on disk and a replay from the file all agree
         self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
         with open(GOLDEN_PATH) as f:

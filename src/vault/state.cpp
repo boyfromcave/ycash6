@@ -4,6 +4,8 @@
 
 #include "vault/state.h"
 
+#include <atomic>
+
 #include "primitives/block.h"
 #include "streams.h"
 #include "vault/module.h"
@@ -445,6 +447,12 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
             const COutPoint& prevout = tx.vin[i].prevout;
             if (auto bond = GetBond(*this, prevout)) {
                 if (bond->frozen) return std::string("bad-vault-bond-frozen");
+                // the bond exit delay (owner 2026-10-11): a bond is spendable only once its member has left the set
+                // without a freeze and the set's maturity has passed since (the lock lives here, not in the script)
+                auto bset = GetSet(*this, bond->setId);
+                if (bond->exitHeight == 0 || !bset || h < bond->exitHeight + (int64_t)bset->params.maturity) {
+                    return std::string("bad-vault-bond-locked");
+                }
                 auto m = GetMember(*this, bond->setId, bond->memberKey);
                 if (m && m->status == MEMBER_ACTIVE && m->bondOutpoint == prevout) {
                     m->status = MEMBER_WITHDRAWN;
@@ -597,6 +605,17 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
 }
 
 // The same effect and condition as SET_EQUIVOCATION's (ApplyAct above), for the module hook.
+namespace {
+std::atomic<uint32_t> g_minSetMaturity{MIN_SET_MATURITY};
+std::atomic<void*> g_moduleCache{nullptr};
+} // namespace
+
+void SetModuleCache(void* cache) { g_moduleCache.store(cache); }
+void* ModuleCache() { return g_moduleCache.load(); }
+
+uint32_t MinSetMaturity() { return g_minSetMaturity.load(); }
+void SetMinSetMaturity(uint32_t blocks) { g_minSetMaturity.store(blocks); }
+
 bool EjectAndFreeze(VaultState& st, const SetId& setId, const CPubKey& key)
 {
     auto m = GetMember(st, setId, key);
@@ -624,7 +643,17 @@ void VaultState::ApplyEjectionsOf(const Module& module, const CTransaction& tx, 
     ctx.height = h;
     ctx.state = this;
     ctx.blockHashAt = blockHashes;
+    ctx.moduleCache = ModuleCache();
     for (const CPubKey& key : module.Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
+    // the module liveness hook (seats review B2): a member's proven act at height raises its lastAct to it
+    for (const auto& kh : module.Liveness(tx, ctx)) {
+        auto m = GetMember(*this, *governed, kh.first);
+        if (!m || m->status != MEMBER_ACTIVE || m->bondFrozen || kh.second >= h || kh.second <= m->lastAct) continue;
+        auto b = GetBond(*this, m->bondOutpoint);
+        if (!b || b->frozen) continue;
+        m->lastAct = kh.second;
+        PutRecord(KeyMember(*governed, kh.first), *m);
+    }
 }
 
 std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Act& act, int64_t h)
@@ -664,6 +693,7 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
     case ACT_SET_CREATE: {
         if (!act.sigs.empty()) return std::string("bad-vault-act-sigs");
         if (!act.create.Valid()) return std::string("bad-vault-act-params");
+        if (act.create.maturity < MinSetMaturity()) return std::string("bad-vault-act-params");   // D-Q-31: the exit window
         const SetId setId = tx.GetHash();
         if (GetSet(*this, setId)) return std::string("bad-vault-act-exists");
         SetRecord s;
@@ -688,9 +718,34 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         } else {
             if (keys.size() != 2 || keys[1] != s->params.admitKey) return std::string("bad-vault-act-sigs");
         }
-        if (CountActive(members) >= (int)s->params.seats) return std::string("bad-vault-act-seats");
+        // A full set refuses the join, unless the module governing the set names a member to displace (owner,
+        // 2026-10-11): an ACTIVE member, not the joining key, with an unspent, unfrozen bond; removed below.
+        std::optional<CPubKey> displaced;
+        if (CountActive(members) >= (int)s->params.seats) {
+            for (const auto& entry : Modules()) {
+                if (entry.second->GovernedSet() != std::optional<SetId>(j.setId)) continue;
+                ModuleContext mctx;
+                mctx.height = h;
+                mctx.state = this;
+                mctx.blockHashAt = blockHashes;
+                displaced = entry.second->Displace(tx, j, mctx);
+                break;
+            }
+            bool room = false;
+            if (displaced && *displaced != j.memberKey) {
+                auto dm = GetMember(*this, j.setId, *displaced);
+                auto db = dm ? GetBond(*this, dm->bondOutpoint) : std::nullopt;
+                room = dm && dm->status == MEMBER_ACTIVE && !dm->bondFrozen &&
+                       db && !db->frozen && db->setId == j.setId && db->memberKey == *displaced;
+            }
+            if (!room) return std::string("bad-vault-act-seats");
+        }
         auto existing = GetMember(*this, j.setId, j.memberKey);
         if (existing && existing->status == MEMBER_ACTIVE) return std::string("bad-vault-act-join");
+        // One unspent bond per (set, key) (review B1, 2026-10-11): a key whose previous bond in this set is still unspent
+        // -- in its exit delay, or frozen -- cannot join again, so the member record always names the key's only unspent
+        // bond and every slash (SET_REMOVE burn, SET_EQUIVOCATION, the ejection hook) reaches it until it is spent.
+        if (existing && GetBond(*this, existing->bondOutpoint)) return std::string("bad-vault-act-join");
         if (j.bondVout >= tx.vout.size()) return std::string("bad-vault-act-bond");
         const CTxOut& bond = tx.vout[j.bondVout];
         const CScript bondSpk = BondScriptPubKey(j.bondLocktime, j.memberKey);
@@ -699,7 +754,18 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         if ((int64_t)j.bondLocktime < h + (int64_t)s->params.bondLockMin || j.bondLocktime >= 500000000) {
             return std::string("bad-vault-act-bond");
         }
+        if (displaced) {
+            auto dm = GetMember(*this, j.setId, *displaced);
+            dm->status = MEMBER_REMOVED;
+            PutRecord(KeyMember(j.setId, *displaced), *dm);
+            auto db = GetBond(*this, dm->bondOutpoint);
+            db->exitHeight = h;                      // the bond exit delay starts (owner 2026-10-11)
+            PutRecord(KeyBond(dm->bondOutpoint), *db);
+        }
+        s->joinCount++;                              // seats re-review: the member's join ordinal
+        PutRecord(KeySet(j.setId), *s);
         MemberRecord m;
+        m.joinOrdinal = s->joinCount;
         m.bondOutpoint = COutPoint(tx.GetHash(), j.bondVout);
         m.bondValue = bond.nValue;
         m.bondLocktime = j.bondLocktime;
@@ -733,9 +799,27 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
         auto s = GetSet(*this, r.setId);
         if (!s) return std::string("bad-vault-act-noset");
         auto m = GetMember(*this, r.setId, r.memberKey);
-        if (!m || m->status != MEMBER_ACTIVE) return std::string("bad-vault-act-remove");
+        if (!m) return std::string("bad-vault-act-remove");
         const MemberList members = GetMembers(*this, r.setId);
-        if (!cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
+        if (m->status != MEMBER_ACTIVE) {
+            // A slash after the exit (review A1, 2026-10-11): a cosigned SET_REMOVE with burn of a member that already
+            // left (REMOVED: its own exit or a displacement) whose bond is in its exit delay -- unspent, unfrozen --
+            // freezes that bond; the member stays REMOVED. Anything else of a member that is not ACTIVE is refused.
+            auto b = GetBond(*this, m->bondOutpoint);
+            if (m->status != MEMBER_REMOVED || r.burn != 1 || !b || b->frozen || b->exitHeight == 0 ||
+                b->setId != r.setId || b->memberKey != r.memberKey) {
+                return std::string("bad-vault-act-remove");
+            }
+            if (!cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
+            m->bondFrozen = true;
+            b->frozen = true;
+            PutRecord(KeyBond(m->bondOutpoint), *b);
+            PutRecord(KeyMember(r.setId, r.memberKey), *m);
+            return std::nullopt;
+        }
+        // A member's voluntary exit (owner 2026-10-11): the SET_REMOVE of itself, signed by itself alone, without burn.
+        const bool self = keys.size() == 1 && keys[0] == r.memberKey && r.burn == 0;
+        if (!self && !cosigners(*s, members, 0, s->params.slashThreshold, &r.memberKey)) return std::string("bad-vault-act-sigs");
         m->status = MEMBER_REMOVED;
         if (r.burn) {
             m->bondFrozen = true;
@@ -743,6 +827,9 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
                 b->frozen = true;
                 PutRecord(KeyBond(m->bondOutpoint), *b);
             }
+        } else if (auto b = GetBond(*this, m->bondOutpoint)) {
+            b->exitHeight = h;                       // the bond exit delay starts (owner 2026-10-11)
+            PutRecord(KeyBond(m->bondOutpoint), *b);
         }
         PutRecord(KeyMember(r.setId, r.memberKey), *m);
         return std::nullopt;

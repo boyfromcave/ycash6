@@ -22,6 +22,7 @@
 #include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
+#include "vault/act.h"
 #include "vault/template.h"
 #include "consensus/params.h"
 
@@ -518,6 +519,9 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
     if (next < p.startHeight) return std::nullopt;
+    // Owner 2026-10-11: a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid (structural; the relevance
+    // filter below looks at payloads and YED templates only, and an act is neither)
+    if (RefusedAttestorSetAct(tx, p)) return std::string(verdict::ATTESTOR_SET_ACT);
     // Relevance in O(inputs + outputs) (N6): a payload, a token / vault / intent input, or a YED-tagged
     // template output is what the module reads; anything else cannot be invalid under it.
     bool spendsActive = false, relevant = FindPayload(tx).has_value();
@@ -530,6 +534,11 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
         vault::VaultParams vp;
         vault::IntentParams ip;
         if ((vault::ParseVault(o.scriptPubKey, vp) && vp.tag == YED_TAG) || (vault::ParseIntent(o.scriptPubKey, ip) && ip.tag == YED_TAG)) relevant = true;
+    }
+    // seats re-review: an act on the attestor set (a SET_JOIN may be below BondMinZat: attestor-bond-below-min)
+    for (const CTxOut& o : tx.vout) {
+        vault::Act act;
+        if (vault::IsActOutput(o.scriptPubKey) && !vault::DecodeAct(o.scriptPubKey, act) && act.TargetSet() == p.attestorSetId) relevant = true;
     }
     if (!relevant) return std::nullopt;
     // The module's validity at the next height by ProcessTx on a discarded overlay, exactly as FilterTemplate
@@ -768,6 +777,7 @@ size_t AttestationPool::Size() const
 
 std::optional<bool> LruSigCache::Lookup(const uint256& key) const
 {
+    std::lock_guard<std::mutex> lock(cs);
     std::map<uint256, Entry>::iterator it = entries.find(key);
     if (it == entries.end()) {
         misses++;
@@ -780,6 +790,7 @@ std::optional<bool> LruSigCache::Lookup(const uint256& key) const
 
 void LruSigCache::Insert(const uint256& key, bool valid)
 {
+    std::lock_guard<std::mutex> lock(cs);
     std::map<uint256, Entry>::iterator it = entries.find(key);
     if (it != entries.end()) {
         it->second.valid = valid;
@@ -800,6 +811,7 @@ void LruSigCache::Insert(const uint256& key, bool valid)
 
 void LruSigCache::Clear()
 {
+    std::lock_guard<std::mutex> lock(cs);
     entries.clear();
     order.clear();
     hits = misses = 0;
@@ -824,7 +836,7 @@ std::optional<uint256> YellowbackIndex::BlockHashAtLocked(int64_t height) const
 bool YellowbackIndex::AttestationValidLocked(const Attestation& att, const CPubKey& pk, const uint256& blockHash)
 {
     AssertLockHeld(cs_yellowback);
-    const uint256 key = SigCacheKey(att, blockHash);
+    const uint256 key = SigCacheKey(att, blockHash, pk);
     std::optional<bool> cached = sigCache.Lookup(key);
     if (cached.has_value()) return cached.value();
     const bool valid = VerifyCompactSig(pk, AttestMessage(att.seq, att.priceMicroUsd, att.citedHeight, blockHash), att.sig);

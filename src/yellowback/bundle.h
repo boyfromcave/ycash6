@@ -67,7 +67,7 @@ ExtractBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
 
 /**
  * The node-local verified-signature cache (W8, R3), keyed by
- * SHA256(attestation74 || blockHash(citedHeight)) -> valid. Implemented in
+ * SHA256(attestation74 || blockHash(citedHeight) || pubkey33) -> valid. Implemented in
  * index.cpp; nullptr means no cache. A hit and a cold verification always agree.
  */
 class SigCache
@@ -78,8 +78,8 @@ public:
     virtual void Insert(const uint256& key, bool valid) = 0;
 };
 
-/** The cache key. */
-uint256 SigCacheKey(const Attestation& att, const uint256& blockHash);
+/** The cache key: SHA256(attestation74 || blockHash(citedHeight) || the 33-byte public key it is verified under). */
+uint256 SigCacheKey(const Attestation& att, const uint256& blockHash, const CPubKey& pk);
 
 /** The bounds BUNDLE-1 reads from the parameter set in force at R. */
 // A1: fill from Params.

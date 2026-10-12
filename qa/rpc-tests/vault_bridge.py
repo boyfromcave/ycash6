@@ -221,7 +221,7 @@ class VaultBridgeTest(VaultTestBase):
         self.mine()
         self.reject(self.cancel_hex((ud, 0), ipd, part, vp, [g[8]]), SCRIPT_SETSIG, 'script-setsig',
                     'the removed guardian cannot cancel any more')
-        self.advance_to(max(self.tip(), bonds[8]['locktime']), G, g[0])
+        self.advance_to(max(self.tip() + 1, bonds[8]['locktime']), G, g[0])   # and exit + maturity (the bond exit delay)
         self.accept(self.bond_spend_hex(bonds[8]), 'the removed guardian\'s bond is returned at its locktime')
         self.mine_to(self.tip() + DELAY)
         self.accept(self.release_hex((ud, 0), ipd, part, rd), 'release of the intent the griefer could not stop')
@@ -325,7 +325,7 @@ class VaultBridgeTest(VaultTestBase):
         self.reject(self.act_hex(v.act_set_remove(RL, v.pubkey_of(rl), 1), ch[:3]), 'bad-vault-act-sigs',
                     'bad-vault-act-sig', 'challengers cannot remove the relayer (SET_REMOVE is per set)')
         self.mine()
-        self.mine_to(max(self.tip(), chb[4]['locktime']))
+        self.mine_to(max(self.tip() + 1, chb[4]['locktime']))                 # and exit + maturity (the bond exit delay)
         self.accept(self.bond_spend_hex(chb[4]), 'the removed challenger\'s bond is returned')
         self.mine()
 

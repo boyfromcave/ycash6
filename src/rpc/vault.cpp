@@ -270,7 +270,7 @@ uint8_t ParseActType(const UniValue& v)
     throw JSONRPCError(RPC_INVALID_PARAMETER, "unknown act type " + s + " (create, join, heartbeat, remove, equivocation, winddown)");
 }
 
-UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers);
+UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers, const KVReader* kv = nullptr);
 
 #ifdef ENABLE_WALLET
 bool WalletHasKey(const CPubKey& k) { return pwalletMain && pwalletMain->HaveKey(k.GetID()); }
@@ -284,7 +284,7 @@ bool WalletHasPQKey(const CPQKeyID& id) { return pwalletMain && pwalletMain->Hav
 bool WalletHasPQKey(const CPQKeyID&) { return false; }
 #endif
 
-UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers)
+UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members, int64_t h, bool withMembers, const KVReader* kv)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("setid", id.GetHex());
@@ -335,6 +335,15 @@ UniValue SetJSON(const SetId& id, const SetRecord& s, const MemberList& members,
             mo.pushKV("bondvalue", ValueFromAmount(m.second.bondValue));
             mo.pushKV("bondlocktime", (int64_t)m.second.bondLocktime);
             mo.pushKV("bondfrozen", m.second.bondFrozen);
+            // the bond exit delay (seats re-review): when the member's bond is still indexed and its member has left
+            if (kv) {
+                if (auto b = GetBond(*kv, m.second.bondOutpoint)) {
+                    if (b->exitHeight != 0) {
+                        mo.pushKV("exitheight", b->exitHeight);
+                        mo.pushKV("unlockheight", b->exitHeight + (int64_t)s.params.maturity);
+                    }
+                }
+            }
             mo.pushKV("wallet", WalletHasKey(m.first));
             arr.push_back(mo);
         }
@@ -465,7 +474,7 @@ UniValue set_getinfo(const UniValue& params, bool fHelp)
     }
     auto s = snap->GetSet(id);
     if (!s) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "unknown set " + id.GetHex());
-    return SetJSON(id, *s, snap->GetMembers(id), h, true);
+    return SetJSON(id, *s, snap->GetMembers(id), h, true, &snap->Base());
 }
 
 UniValue vault_list(const UniValue& params, bool fHelp)
@@ -942,7 +951,10 @@ SetCreateBody ParseCreateParams(const UniValue& p)
     c.livenessWindow = (uint32_t)num("livenesswindow", 1000, false);
     c.bondMin = find_value(o, "bondmin").isNull() ? COIN : AmountFromValue(find_value(o, "bondmin"));
     c.bondLockMin = (uint32_t)num("bondlockmin", 0, false);
-    c.maturity = (uint32_t)num("maturity", 0, false);
+    c.maturity = (uint32_t)num("maturity", MinSetMaturity(), false);   // D-Q-31: at least the network's exit window
+    if (c.maturity < MinSetMaturity()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("maturity must be at least %u blocks (D-Q-31)", MinSetMaturity()));
+    }
     c.admitKey = WalletKeyParam(find_value(o, "admitkey"), "admitkey");
     if (!c.Valid()) throw JSONRPCError(RPC_INVALID_PARAMETER, "the set parameters are out of range (plan §15.5 row 0x01)");
     return c;
@@ -1144,6 +1156,55 @@ UniValue set_heartbeat(const UniValue& params, bool fHelp)
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", Broadcast(CTransaction(mtx)).GetHex());
     o.pushKV("memberkey", HexStr(key.begin(), key.end()));
+    return o;
+}
+
+UniValue set_leave(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "set_leave \"setid\" ( \"memberkey\" )\n"
+            "\nLeave a set (owner 2026-10-11, the bond exit delay): broadcast the SET_REMOVE of an ACTIVE member key of this\n"
+            "wallet (default: the first one), signed by that key alone, without burn. The member is REMOVED from the block it\n"
+            "confirms in, and its bond becomes spendable the set's maturity later (bad-vault-bond-locked before).\n"
+            "\nResult: {\"txid\", \"memberkey\", \"exitheight\" (the next block), \"bondspendableat\"}\n"
+            + HelpExampleCli("set_leave", "\"setid\"") + HelpExampleRpc("set_leave", "\"setid\""));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureVaultActive();
+    auto snap = Snapshot();
+    const SetId id = ParseSetId(params[0], "setid");
+    auto s = snap->GetSet(id);
+    if (!s) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "unknown set " + id.GetHex());
+    CPubKey key;
+    if (params.size() > 1 && !params[1].isNull()) {
+        key = WalletKeyParam(params[1], "memberkey");
+    } else {
+        for (const auto& m : snap->GetMembers(id)) {
+            if (m.second.status == MEMBER_ACTIVE && pwalletMain->HaveKey(m.first.GetID())) { key = m.first; break; }
+        }
+        if (!key.IsValid()) throw JSONRPCError(RPC_WALLET_ERROR, "this wallet holds no active member key of the set");
+    }
+    Act act;
+    act.type = ACT_SET_REMOVE;
+    act.remove.setId = id;
+    act.remove.memberKey = key;
+    act.remove.burn = 0;
+    CMutableTransaction mtx = BuildActTx(act, {});
+    Act decoded;
+    size_t ai = FindAct(mtx, decoded);
+    CKey priv;
+    if (!pwalletMain->GetKey(key.GetID(), priv)) throw JSONRPCError(RPC_WALLET_ERROR, "the member key is not in this wallet");
+    std::vector<unsigned char> sig;
+    if (!SignRecoverable(priv, ActMsg(EncodePayload(decoded), mtx.vin[0].prevout), sig)) throw JSONRPCError(RPC_WALLET_ERROR, "signing failed");
+    decoded.sigs = { sig };
+    mtx.vout[ai].scriptPubKey = EncodeAct(decoded);
+    SignWalletInputs(mtx);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", Broadcast(CTransaction(mtx)).GetHex());
+    o.pushKV("memberkey", HexStr(key.begin(), key.end()));
+    o.pushKV("exitheight", NextHeight());
+    o.pushKV("bondspendableat", NextHeight() + (int64_t)s->params.maturity);
     return o;
 }
 
@@ -1837,6 +1898,7 @@ static const CRPCCommand commands[] =
     { "vault",   "set_create",          &set_create,           false },
     { "vault",   "set_join",            &set_join,             false },
     { "vault",   "set_heartbeat",       &set_heartbeat,        false },
+    { "vault",   "set_leave",           &set_leave,            false },
     { "vault",   "set_buildact",        &set_buildact,         false },
     { "vault",   "set_signact",         &set_signact,          false },
     { "vault",   "set_sendact",         &set_sendact,          false },

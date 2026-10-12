@@ -1204,10 +1204,13 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "wallet key as the member key: set_join attestorSetId bondYec (tip + 1 + lockBlocks). vout[0] is the bond\n"
             "P2SH(<bondLocktime> CLTV DROP <memberKey> CHECKSIG); the member key signs price attestations and receives the\n"
             "attestor fee, so back up wallet.dat. seq is null until the join confirms (yed_listattestors). Refused with\n"
-            "bond-below-min, lock-below-min (the module's floor: BOND_MIN, BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
+            "bond-below-min, lock-below-min (the module's floor: yed_getinfo params.attest.bondMinZat, D-Q-30, and BOND_MIN_LOCK) and yellowback-no-attestor-set; a set\n"
             "that is not open needs admission signatures (register-needs-admission: finish with set_signact / set_sendact).\n"
+            "The minimum follows the YEC locked in YED vaults at the snapshot before the join's block (D-Q-30), so post headroom: a\n"
+            "bond within 10% of params.attest.bondMinZat (and below bondMinCapZat) returns warning \"bond-near-min\"; if vault\n"
+            "collateral grows before it confirms, the join becomes invalid (attestor-bond-below-min) and is not mined.\n"
             "\nArguments:\n"
-            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN and the set's bondmin)\n"
+            "1. bondYec     (numeric, required) the bond in YEC (>= the module's bondMinZat at the next block and the set's bondmin)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK and the set's bondlockmin; bondLocktime = tip + 1 + lockBlocks\n"
             "3. flags       (numeric, optional, default 0) accepted for compatibility and ignored (no longer recorded)\n"
             "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
@@ -1220,6 +1223,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     uint256 setId;
     int64_t locktime = 0;
     int maturesAt = 0;
+    std::string warning;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
@@ -1227,7 +1231,19 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         EnsureHealthy(index);
         const yellowback::Params& p = index.GetParams();
         if (p.attestorSetId.IsNull()) throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-no-attestor-set: this network has no YED attestor set");
-        if (bondZat < p.bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(p.bondMin)));
+        // D-Q-30: the module's floor for a join in the next block (the vault collateral of the tip's snapshot); a join mined
+        // later is judged at its own block, so collateral growth in between makes it invalid (attestor-bond-below-min)
+        const CAmount bondMin = BondMinZat(State(index.View()), p, (int64_t)IndexHeight(index) + 1);   // the index tip, as yed_getinfo
+        if (bondZat < bondMin) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("bond-below-min: the bond must be at least %s YEC", FormatMoney(bondMin)));
+        // D-Q-30 review B2 (policy): the join is judged at the snapshot before its own block, so a bond within 10 % of
+        // today's minimum can fall short if vault collateral grows before it confirms and then is never mined.
+        // The cap (bondMinCapZat) always qualifies.
+        if (bondZat < p.bondMinCapZat && bondZat < bondMin + bondMin / 10) {
+            warning = strprintf("bond-near-min: %s YEC is within 10 %% of the minimum for the next block (%s YEC); if YED vault collateral "
+                                "grows before the join confirms it becomes invalid and is not mined. Post at least %s YEC (+10 %%), or %s YEC, "
+                                "which always qualifies", FormatMoney(bondZat), FormatMoney(bondMin),
+                                FormatMoney(std::min(p.bondMinCapZat, bondMin + bondMin / 10)), FormatMoney(p.bondMinCapZat));
+        }
         if (lockBlocks < p.bondMinLock) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("lock-below-min: the lock must be at least %d blocks", p.bondMinLock));
         locktime = (int64_t)chainActive.Height() + 1 + lockBlocks;
         if (locktime >= (int64_t)LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_VERIFY_REJECTED, "lock-below-min: bondLocktime reaches LOCKTIME_THRESHOLD");
@@ -1268,7 +1284,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     fl.pushKV("pool", false);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    o.pushKV("warning", "");
+    o.pushKV("warning", warning);
     return o;
 }
 
@@ -1277,8 +1293,9 @@ UniValue yed_withdrawbond(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
             "yed_withdrawbond seq ( \"to\" )\n"
-            "\nSpend the bond of an attestor whose bondPubKey this wallet holds, after bondLocktime (nLockTime = bondLocktime, the\n"
-            "CLTV path), signed by hand. Any status may withdraw once the locktime passes; IN-2 then marks the record WITHDRAWN.\n"
+            "\nSpend the bond of an attestor whose bondPubKey this wallet holds (nLockTime = bondLocktime, the CLTV path), signed\n"
+            "by hand. The bond exit delay (owner 2026-10-11): only a WITHDRAWN record (it left with set_leave, or was evicted) whose\n"
+            "bond is not frozen, from statusHeight + the set's maturity (BOND_MATURITY); bond-locked before.\n"
             "Refused with attest-unknown-seq, attest-key-not-held, bond-locked, bond-spent, bad-address.\n"
             "\nResult: { \"txid\", \"seq\", \"bondZat\", \"bondOut\", \"to\" }\n");
     YellowbackWallet& yw = EnsureYW();

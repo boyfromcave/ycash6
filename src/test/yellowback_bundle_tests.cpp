@@ -450,19 +450,24 @@ BOOST_AUTO_TEST_CASE(sig_cache_contract)
     BOOST_CHECK_EQUAL(cache.inserts, 6);
     BOOST_CHECK_EQUAL(cache.entries.size(), 6u);
     for (const auto& e : cache.entries) BOOST_CHECK(e.second);
-    // Keys are SHA256(attestation74 || blockHash(citedHeight)).
+    // Keys are SHA256(attestation74 || blockHash(citedHeight) || pubkey33) (focused review: the key is bound).
     for (const Attestation& a : f.atts) {
         std::vector<unsigned char> pre = EncodeAttestation(a);
         const uint256& bh = f.blockHashes[a.citedHeight];
         pre.insert(pre.end(), bh.begin(), bh.end());
-        BOOST_CHECK(SigCacheKey(a, bh) == Sha256(pre));
-        BOOST_CHECK(cache.entries.count(SigCacheKey(a, bh)));
+        const CPubKey pk = f.keys.at(a.seq);
+        pre.insert(pre.end(), pk.begin(), pk.end());
+        BOOST_CHECK(SigCacheKey(a, bh, pk) == Sha256(pre));
+        BOOST_CHECK(cache.entries.count(SigCacheKey(a, bh, pk)));
     }
-    // Warm: no verification, no insert, same verdict (cache_hit_equals_cold). pubkeyOf is not even consulted.
+    // Warm: no verification, no insert, same verdict (cache_hit_equals_cold).
+    v = f.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache);
+    BOOST_CHECK(v.ok);
+    BOOST_CHECK_EQUAL(cache.inserts, 6);
+    // Without a key for a seq there is no cache line to hit: "sig", nothing inserted.
     Fixture noKeys;
     noKeys.keys.clear();
-    v = noKeys.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache);
-    BOOST_CHECK(v.ok);
+    BOOST_CHECK_EQUAL(noKeys.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache).reason, "sig");
     BOOST_CHECK_EQUAL(cache.inserts, 6);
     // A negative entry is honoured too, and a cold negative is inserted as false.
     Attestation bad = f.atts[0];
@@ -470,7 +475,7 @@ BOOST_AUTO_TEST_CASE(sig_cache_contract)
     const CTransaction badTx = TxWith({ CarrierIn(Enc({ bad, f.atts[1] })) });
     BOOST_CHECK_EQUAL(f.Verify(badTx, BundleCarrier::SCRIPTSIG, false, {}, &cache).reason, "sig");
     BOOST_CHECK_EQUAL(cache.inserts, 7);
-    BOOST_CHECK(cache.entries.at(SigCacheKey(bad, f.blockHashes[1000])) == false);
+    BOOST_CHECK(cache.entries.at(SigCacheKey(bad, f.blockHashes[1000], f.keys.at(bad.seq))) == false);
     // The key binds the block hash: a reorged hash is a fresh cache line, not a stale hit.
     Fixture k;
     *k.blockHashes[1000].begin() ^= 1;

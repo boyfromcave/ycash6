@@ -1080,7 +1080,17 @@ BundleFactsW BundleAt(const Context& ctx, int R, const std::vector<unsigned char
 {
     BundleFactsW f;
     f.armed = ArmedAt(ctx.st.View(), ctx.params, R);
-    if (!f.armed) return f;
+    if (!f.armed) {
+        // final review B-3: the builders attach a bundle only when ARMED (prepare leaves pf.bundle empty). An explicit
+        // carrier bundle while unarmed is still carried, and a bundle that refreshes liveness must pass the whole
+        // BUNDLE-1 (selection included) or the transaction is invalid: refuse it here rather than at relay.
+        if (bundle.has_value() && !bundle->empty()) {
+            std::vector<uint16_t> selected;
+            if (!VerifyBundleBytes(ctx.st.View(), ctx.params, bundle.value(), R, selector, &selected).ok)
+                throw std::runtime_error(strprintf("liveness-unheld: the layer is not ARMED at %d and the carrier's bundle fails BUNDLE-1; build the carrier without a bundle", R));
+        }
+        return f;
+    }
     std::vector<unsigned char> bytes;
     if (bundle.has_value() && !bundle->empty()) {
         bytes = bundle.value();                       // bundleHex overrides the pool
@@ -1303,6 +1313,9 @@ void DryRunOrThrow(Context& ctx, const BuiltTx& out)
 {
     const int H = ctx.indexHeight + 1;
     std::optional<TxLogRecord> log = DryRun(ctx.index.MutableView(), ctx.index.ParamsAt(H), CTransaction(out.tx), H);
+    // final review A-2: a liveness refusal is reported as itself, whatever the kind
+    if (log.has_value() && log->verdict == verdict::LIVENESS_UNHELD)
+        throw std::runtime_error(std::string(verdict::LIVENESS_UNHELD) + ": the bundle would refresh liveness but this transaction is not a held act at height " + std::to_string(H));
     switch (out.kind) {
     case BuiltKind::MINT:
         if (!log.has_value() || log->Type() != TxLogType::MINT) throw std::runtime_error("mint-dry-run: the dry run saw no mint");
@@ -1880,6 +1893,17 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
     if (rec->bondSpentHeight != 0 || !ctx.CoinAvailable(rec->bondOutpoint)) throw std::runtime_error(strprintf("bond-spent: the bond of seq %u is already spent", (unsigned)seq));
     if ((int64_t)ctx.chainHeight < (int64_t)rec->bondLocktime) {
         throw std::runtime_error(strprintf("bond-locked: the bond is locked until height %u (tip %d)", rec->bondLocktime, ctx.chainHeight));
+    }
+    // the bond exit delay (owner 2026-10-11): the vault primitive returns a bond the set's maturity (BOND_MATURITY) after its
+    // member left (set_leave, or evicted): the record's statusHeight once WITHDRAWN; a frozen bond never
+    if (rec->Frozen()) throw std::runtime_error(strprintf("bond-locked: the bond of seq %u is frozen (slashed)", (unsigned)seq));
+    if (rec->Status() != AttestorStatus::WITHDRAWN) {
+        throw std::runtime_error(strprintf("bond-locked: seq %u is still a member (%s); leave the set first (set_leave)", (unsigned)seq, AttestorStatusName(rec->Status())));
+    }
+    const std::optional<AttestorSetRecord> aset = ctx.st.GetAttestorSet();
+    const int64_t spendableAt = (int64_t)rec->statusHeight + (aset.has_value() ? (int64_t)aset->maturity : 0);
+    if ((int64_t)ctx.chainHeight + 1 < spendableAt) {
+        throw std::runtime_error(strprintf("bond-locked: the bond is returned at height %d (left at %d; tip %d)", spendableAt, rec->statusHeight, ctx.chainHeight));
     }
     // P-2: one bond input, one P2PKH output or one (padded) Sapling note; the fee never moves the shape.
     CMutableTransaction probe;

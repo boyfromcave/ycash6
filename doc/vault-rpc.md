@@ -90,7 +90,7 @@ Undocumented result fields are a contract violation; so is a missing field not m
 
 - `SetParams` = `{"seats": int, "unlockthreshold": int, "cancelthreshold": int, "slashthreshold": int, "open": bool, "ratelimitbps": int, "ratewindow": int, "livenesswindow": int, "bondmin": yec, "bondlockmin": int, "maturity": int, "admitkey": key}`
 - `Set` = `{"setid": hash, "height": height, ...SetParams, "createheight": height, "winddownheight": height, "lockedvalue": yec, "epoch": int, "epochbasis": yec, "epochused": yec, "unlockavailable"?: yec, "members": int, "active": int, "current": int, "dormant": bool, "released": bool}`
-- `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "wallet": bool}`
+- `Member` = `{"key": key, "status": "active"|"removed"|"ejected"|"withdrawn", "current": bool, "live": bool, "joinheight": height, "lastact": height, "bondoutpoint": outpoint, "bondvalue": yec, "bondlocktime": height, "bondfrozen": bool, "exitheight"?: height, "unlockheight"?: height, "wallet": bool}`
 - `VaultFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "ownerheight": height, "appheight": height, "owner": pqkeyid, "ownerscheme": int}`
 - `IntentFields` = `{"tag": hex, "tagtext": str, "setid": hash, "cancelsetid": hash, "delay": int, "owner": pqkeyid, "ownerscheme": int, "recipienthash": hash, "vaulthash": hash}`
 - `TemplateOut` = `{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "vault", "value": yec, "valuezat": zat, "height": height, "script": hex, ...VaultFields, "wallet": bool}|{"txid": hash, "vout": int, "outpoint": outpoint, "kind": "intent", "value": yec, "valuezat": zat, "height": height, "script": hex, ...IntentFields, "matureheight": height, "mature": bool, "cancellable": bool, "origin": hex, "wallet": bool}`
@@ -130,7 +130,9 @@ Result: `{...Set, "memberlist": [Member]}`
 The set's `SET_CREATE` parameters, `createheight`, `winddownheight` (0 = none), the rate fields
 (`lockedvalue`, `epoch`, `epochbasis`, `epochused`, and `unlockavailable` only when the set is
 rate limited), counts (`members`, `active`, `current`), the §15.4 predicates `dormant` and
-`released`, and `memberlist` (`wallet`: this wallet holds the key). Predicates are evaluated at
+`released`, and `memberlist` (`wallet`: this wallet holds the key; `exitheight` and `unlockheight` =
+`exitheight + maturity`, the first block its bond may be spent in, only while the member has left and its bond is
+unspent -- the bond exit delay). Predicates are evaluated at
 `height` (default: the next block) over the state at the tip. Error `-5` for an unknown set.
 
 ### `vault_list ( {"tag", "setid", "owner", "kind": "vault"|"intent", "mine": bool} )`
@@ -166,8 +168,14 @@ Result: `{"txid": hash, "setid": hash, "admitkey": key}`
 
 `seats` 1–15; defaults: `cancelthreshold` 1, `slashthreshold` = `unlockthreshold`, `open`
 false, `ratelimitbps` 0 (no limit), `ratewindow` 144, `livenesswindow` 1000, `bondmin` 1,
-`bondlockmin` 0, `maturity` 0, `admitkey` a new wallet key. Funded, signed, broadcast. The set
+`bondlockmin` 0, `maturity` the network's minimum, `admitkey` a new wallet key. Funded, signed, broadcast. The set
 exists from the block after the one it confirms in.
+
+**D-Q-31 (owner, 2026-10-11): every set has at least a 14-day exit window.** `maturity` (the bond exit delay and
+the joiners' wait) must be at least `MIN_SET_MATURITY` = 16,128 blocks on mainnet and testnet (2 on regtest);
+a smaller value is refused here (`RPC_INVALID_PARAMETER`) and a `SET_CREATE` carrying one is
+`bad-vault-act-params`. A bridge set's members therefore wait at least 14 days for their bonds after leaving,
+and stay slashable for those 14 days.
 
 ### `set_join "setid" bondamount bondlocktime ( "memberkey" )`
 Params: `["setid": hash, "bondamount": yec, "bondlocktime": height, "memberkey"?: key]`
@@ -180,12 +188,41 @@ admit key while the set has fewer than `slashthreshold` current members, current
 keys after that; none for an open set). Complete → signed and broadcast (`txid` present);
 otherwise the partially signed `hex` is returned.
 
+A join into a set that already has `seats` ACTIVE members is refused (`bad-vault-act-seats`) —
+unless a registered module governs the set (the module displacement hook, owner 2026-10-11) and
+names a member to displace: that member becomes `REMOVED` in `set_getinfo` (its bond **not**
+frozen, still spendable at its locktime) and the join is admitted in the same transaction. Only the
+YED module governs a set (the network's attestor set, when OPEN with 15 seats); its rule is in
+`doc/yellowback-attestor.md`. Every other set refuses a join when full, as before.
+
 ### `set_heartbeat "setid" ( "memberkey" )`
 Params: `["setid": hash, "memberkey"?: key]`
 
 Result: `{"txid": hash, "memberkey": key}`
 
 A `SET_HEARTBEAT` for a current member key of this wallet (default: the first), broadcast.
+
+### `set_leave "setid" ( "memberkey" )`
+Params: `["setid": hash, "memberkey"?: key]`
+
+Result: `{"txid": hash, "memberkey": key, "exitheight": height, "bondspendableat": height}`
+
+**The bond exit delay (owner 2026-10-11).** A member bond is spendable only after its member has left
+the set without a freeze and the set's `maturity` has passed since: from `exitHeight + maturity`
+(`bad-vault-bond-locked` before; a frozen bond never). A member leaves by its own `SET_REMOVE`
+(signed by its key alone, `burn` 0, no cosigners: the one removal a member can do alone), by a
+`SET_REMOVE` of the set without burn, or by the module displacement hook (`set_join`); each records
+`exitHeight` on the bond. During the delay the member is still slashable (`SET_EQUIVOCATION`, the
+module ejection hook) and the bond is then frozen. `set_leave` builds, signs and broadcasts the
+member's own `SET_REMOVE` for an ACTIVE member key of this wallet (default the first one);
+`exitheight` is the next block, `bondspendableat` = `exitheight + maturity`. The bond script's CLTV
+(`bondlockmin`) still applies on top, so a set may keep it at 0.
+
+**No slash escape through the delay (seats review B1/A1, 2026-10-11).** A key whose previous bond in the set is
+still unspent (in its exit delay, or frozen) cannot join that set again (`bad-vault-act-join`), so the member
+record always names the key's one unspent bond and every slash reaches it. A `SET_REMOVE` with burn, cosigned by
+`slashthreshold` current members, of a member that already left (`REMOVED`) and whose bond is in its exit delay
+freezes that bond (the member stays `REMOVED`); a frozen key never rejoins the set.
 
 ### `set_buildact "type" {params}`
 Params: `["type": ActType, "params": {"setid"?: hash, "memberkey"?: key, "bondamount"?: yec, "bondlocktime"?: height, "burn"?: bool, "prevout"?: outpoint, "rolea"?: int, "sighasha"?: hash, "siga"?: hex, "roleb"?: int, "sighashb"?: hash, "sigb"?: hex, "seats"?: int, "unlockthreshold"?: int, "cancelthreshold"?: int, "slashthreshold"?: int, "open"?: bool, "ratelimitbps"?: int, "ratewindow"?: int, "livenesswindow"?: int, "bondmin"?: yec, "bondlockmin"?: int, "maturity"?: int, "admitkey"?: key}]`
@@ -353,7 +390,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the set parameters are out of range` | `set_create`, `set_buildact` | `seats` 16 |
 | -5 | `unknown set` | `set_getinfo`, `set_join`, `set_heartbeat`, `set_buildact`, `vault_lock` | `set_getinfo` of a random id |
 | -4 | `this wallet holds no current member key of the set` | `set_heartbeat` | a heartbeat for a set with no members |
-| -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set |
+| -26 | `bad-vault-act-seats` | `set_join`, `set_sendact` | a join to a full set (a set a registered module governs may instead displace a member, below) |
 | -8 | `unknown act type` | `set_buildact` | type `"bogus"` |
 | -8 | `the transaction carries no YV act` | `set_signact`, `set_sendact` | `set_signact` of a vault spend |
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
@@ -378,7 +415,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 ## Example flow (regtest, three nodes A, B, C)
 
 ```
-A: set_create '{"seats":3,"unlockthreshold":2,"cancelthreshold":1,"slashthreshold":2,"maturity":2}'
+A: set_create '{"seats":3,"unlockthreshold":2,"cancelthreshold":1,"slashthreshold":2,"maturity":8}'
    -> {"setid": S, "admitkey": K}                                   ; mine 1
 A: set_join S 1 <h+500>                       -> complete (A holds the admit key)
 B: set_join S 1 <h+500>                       -> {"hex": J, "complete": false}

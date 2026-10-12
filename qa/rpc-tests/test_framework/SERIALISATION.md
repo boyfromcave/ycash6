@@ -19,9 +19,9 @@ system ratio until release) are marked **(IT-n)**.
 
 The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
-SET_CREATE at 224 (livenessWindow 150, maturity 1, 15 seats, open), attestArmMin 3, bundleCarrier
+SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`6933e6b2221b3de25cca1780d971619299be722a70a34fb3dbeb42e000cb8873`. Four entries are flagged
+`ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
@@ -33,7 +33,7 @@ and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector`
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 9`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 12`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
@@ -206,6 +206,16 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   seq. `SET_WINDDOWN` changes nothing. The acts are not re-validated (no seat count, no signature):
   the primitive has done that, which is also why the mirror may hold more records than the set has
   seats. **reading:** the transaction's `TxLog.type` is the act's unless the payload rules set one.
+  **Liveness by attestation (seats review B2):** after the payload rules, for a MINT, CLAIM_NOTICE or REDEEM whose
+  scriptsig carrier holds a bundle (hash-checked, at most `BUNDLE_MAX` attestations, BUNDLE-1 not re-checked;
+  vin[0] skipped for a REDEEM), every live record (its key's newest, not `EJECTED`/`WITHDRAWN`, bond unspent and
+  unfrozen) whose key signed an attestation citing `c` in `[START_HEIGHT, H)` over `blockHash(c)` gets
+  `lastAct = max c` when that exceeds its `lastAct`. No TxLog change. The primitive's liveness hook does the same.
+  **Focused review:** credit only from a bundle passing BUNDLE-1 but for the selection, every seq a live record, R within
+  `REF_WINDOW` of H; and a transaction with any credit must be a held MINT, CLAIM_NOTICE or REDEEM claim whose bundle
+  passes the whole BUNDLE-1, else it is invalid (`liveness-unheld`). `SCHEMA_VERSION` 12.
+  A notice (or other act) that fails its own rule and whose bundle credits nobody -- no live member's fresh,
+  verifying attestation, or R older than `REF_WINDOW` -- stays a valid no-op, as before (final review A-1).
 - **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
   START_HEIGHT` and `< H`, two prices, the scriptsig carrier); the key is the **first record in seq
   order** that is its key's newest, has `bondSpentHeight = 0` and `bondFrozen = false`, under which

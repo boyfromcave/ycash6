@@ -16,14 +16,16 @@ unlock 2, cancel 1, slash 3):
      proof EJECTs x0 and freezes its bond; x0's signature no longer counts, a second proof,
      a heartbeat and a REMOVE of x0 are refused
   2. SET_REMOVE with burn (the contested-cancel slash): signer count, the target signing, burn 2
-  3. SET_REMOVE without burn (O-6) for x2 and x6; x0 rejoins with a new bond (admission by
-     slashThreshold current members); x2, removed, is then proven to have equivocated and is
-     EJECTED with its bond frozen
+  3. SET_REMOVE without burn (O-6) for x2 and x6; x0 (ejected, its bond frozen) cannot rejoin
+     (bad-vault-act-join: one unspent bond per (set, key), seats review B1); x2, removed, is then
+     proven to have equivocated and is EJECTED with its bond frozen
   4. bonds at their locktime: x0's old bond (A-13), x1's (burned) and x2's (ejected) are frozen
      (mempool and block); x6's is returned
-  5. withdrawal: spending x5's bond while ACTIVE makes it WITHDRAWN (signature, heartbeat refused)
-  6. undo: the block that froze x4's bond disconnected (the bond spend is accepted) and
-     reconnected (the spend is evicted from the mempool)
+  5. the bond exit delay (owner 2026-10-11): x5's bond is locked while ACTIVE (bad-vault-bond-locked);
+     x5 leaves by its own SET_REMOVE (REMOVED: signature, heartbeat refused), its bond is locked one
+     block short of the set's maturity and returned at it
+  6. undo: x4 leaves and waits the delay; the block that froze x4's bond disconnected (the bond spend
+     is accepted) and reconnected (the spend is evicted from the mempool)
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/vault_slashing.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -120,9 +122,9 @@ class VaultSlashingTest(VaultTestBase):
         assert_equal(self.info(sid)['current'], 3)
         self.reject(self.join_hex(sid, x[0], [admit])[0], 'bad-vault-act-sigs',
                     'bad-vault-act-sig', 'rejoin of x0 by admitKey while 3 members are current')
-        self.join(sid, x[0], x[3:6], 'x0 rejoins with a new bond (x3, x4, x5)')
-        self.mine()
-        assert_equal(status(0), v.MEMBER_ACTIVE)
+        # seats review B1: one unspent bond per (set, key) -- x0's frozen bond is never spent, so x0 never rejoins
+        self.reject(self.join_hex(sid, x[0], x[3:6])[0], 'bad-vault-act-join', 'bad-vault-act-join',
+                    'rejoin of the ejected x0 (its frozen bond is unspent)')
         # x2 had signed B's unlock while a member: proven now, after its removal
         tx_c = self.unlock_tx(vout, vp, 4 * COIN, [(self.change_spk(), 4 * COIN)])
         sh_c = v.template_sighash(tx_c, 0, spk, 4 * COIN)
@@ -136,7 +138,7 @@ class VaultSlashingTest(VaultTestBase):
         lt = max(b['locktime'] for b in bonds.values())
         self.mine_to(lt)
         self.reject_both(self.bond_spend_hex(bonds[0]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
-                         'x0\'s old bond after its rejoin (A-13)')
+                         'x0\'s frozen bond (ejected; no rejoin, review B1)')
         self.reject_both(self.bond_spend_hex(bonds[1]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
                          'x1\'s burned bond')
         self.reject_both(self.bond_spend_hex(bonds[2]), 'bad-vault-bond-frozen', 'bad-vault-bond-frozen',
@@ -144,20 +146,32 @@ class VaultSlashingTest(VaultTestBase):
         self.accept(self.bond_spend_hex(bonds[6]), 'x6\'s bond returned (removed without burn)')
         self.mine()
 
-        print('5. withdrawal of an ACTIVE member\'s bond')
-        self.accept(self.bond_spend_hex(bonds[5]), 'x5 spends its bond while ACTIVE')
+        print('5. the bond exit delay: x5 leaves, then withdraws')
+        self.reject(self.bond_spend_hex(bonds[5]), 'bad-vault-bond-locked', 'bad-vault-bond-locked',
+                    'x5 spends its bond while ACTIVE')
+        self.reject(self.act_hex(v.act_set_remove(sid, k[5], 1), [x[5]]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+                    'x5 burns itself alone')
+        self.accept(self.act_hex(v.act_set_remove(sid, k[5], 0), [x[5]]), 'x5 leaves (its own SET_REMOVE)')
         self.mine()
-        assert_equal(status(5), v.MEMBER_WITHDRAWN)
+        assert_equal(status(5), v.MEMBER_REMOVED)
         self.reject(self.heartbeat_hex(sid, x[5]), 'bad-vault-act-heartbeat', 'bad-vault-act-heartbeat',
-                    'HEARTBEAT by the withdrawn x5')
+                    'HEARTBEAT by the departed x5')
         self.reject(self.unlock_hex(vout, vp, 4 * COIN, [(ra, 4 * COIN)], [x[5], x[3]]), SCRIPT_SETSIG,
-                    'script-setsig', 'UNLOCK signed by the withdrawn x5')
-        self.mine(2)                        # x0's rejoin is mature
-        self.accept(self.unlock_hex(vout, vp, 4 * COIN, [(ra, 4 * COIN)], [x[3], x[0]]),
-                    'UNLOCK by x3 and the rejoined x0')
+                    'script-setsig', 'UNLOCK signed by the departed x5')
+        # the next block, exit + 1, is one short of exit + maturity (2)
+        self.reject(self.bond_spend_hex(bonds[5]), 'bad-vault-bond-locked', 'bad-vault-bond-locked',
+                    'x5\'s bond one block before exit + maturity')
+        self.mine()
+        self.accept(self.bond_spend_hex(bonds[5]), 'x5\'s bond at exit + maturity')
+        self.mine()
+        self.mine(2)
+        self.accept(self.unlock_hex(vout, vp, 4 * COIN, [(ra, 4 * COIN)], [x[3], x[4]]),
+                    'UNLOCK by x3 and x4')
         self.mine()
 
         print('6. undo of a freeze')
+        self.accept(self.act_hex(v.act_set_remove(sid, k[4], 0), [x[4]]), 'x4 leaves (its own SET_REMOVE)')
+        self.mine(3)                        # past exit + maturity (2): its bond is spendable but for a freeze
         proof4 = v.equivocation_proof(sid, x[4], vout[0], vout[1], 1, sh_a, 1, sh_b)
         bh = self.mine_raw([self.act_hex(proof4)], 'a block with the proof against x4')
         assert_equal(status(4), v.MEMBER_EJECTED)
@@ -165,7 +179,7 @@ class VaultSlashingTest(VaultTestBase):
         self.reject(spend4, 'bad-vault-bond-frozen', 'bad-vault-bond-frozen', 'x4\'s frozen bond')
         self.node.invalidateblock(bh)
         self.sync_model()
-        assert_equal(status(4), v.MEMBER_ACTIVE)
+        assert_equal(status(4), v.MEMBER_REMOVED)
         s4 = self.accept(spend4, 'x4\'s bond with the proof disconnected')
         self.node.reconsiderblock(bh)
         sync_blocks(self.nodes)

@@ -246,6 +246,60 @@ inline arith_uint256 BondWeight(CAmount bondZat, int64_t ageBlocks, int ageCap)
     return arith_uint256(bondZat) * arith_uint256(ageBlocks);
 }
 
+/**
+ * log2(x) in Q16 for x >= 1 (0 for x == 0), deterministic but not exact: the integer part is the bit
+ * length - 1; the mantissa m = x / 2^n in [1, 2) is held in Q31 (truncated when x has more than 32
+ * bits) and squared 16 times in uint64 (m^2 < 2^64), each squaring that reaches [2, 4) giving the next
+ * fraction bit and halving m, and each squaring truncates. The result is floor(log2(x) x 2^16) or one
+ * below it (the review found 6 such inputs); consensus needs only that every node, and the Python model
+ * (seat_age_factor_q16), computes these same bits. No floating point, no table.
+ */
+inline uint32_t Log2Q16(uint64_t x)
+{
+    if (x == 0) return 0;
+    int n = 63;
+    while (!((x >> n) & 1)) n--;
+    uint64_t m = n <= 31 ? (x << (31 - n)) : (x >> (n - 31));   // Q31, in [2^31, 2^32)
+    uint32_t frac = 0;
+    for (int i = 0; i < 16; i++) {
+        m = (m * m) >> 31;
+        frac <<= 1;
+        if (m >= (uint64_t(1) << 32)) {
+            m >>= 1;
+            frac |= 1;
+        }
+    }
+    return ((uint32_t)n << 16) | frac;
+}
+
+/**
+ * The seat-tenure factor (owner, 2026-10-11) in Q16: 65536 at no tenure, rising with log2 to
+ * 65536 + floor(0.9 x 65536) = 124,518 (1.9) at `cap`:
+ *   fQ16 = 65536 + floor(9 x 65536 x (lg(u + a) - lg(u)) / (10 x (lg(u + cap) - lg(u)))),
+ * a = clamp(ageBlocks, 0, cap), lg = Log2Q16. `u` (SEAT_AGE_UNIT) sets how fast the early blocks
+ * count. 65536 when u or cap is not positive.
+ */
+inline uint32_t SeatAgeFactorQ16(int64_t ageBlocks, int64_t u, int64_t cap)
+{
+    if (u <= 0 || cap <= 0) return 65536;
+    const int64_t a = std::max<int64_t>(0, std::min<int64_t>(ageBlocks, cap));
+    const uint64_t lu = Log2Q16((uint64_t)u);
+    const uint64_t num = Log2Q16((uint64_t)(u + a)) - lu;
+    const uint64_t den = Log2Q16((uint64_t)(u + cap)) - lu;
+    if (den == 0) return 65536;
+    return 65536 + (uint32_t)((uint64_t(9) * 65536 * num) / (uint64_t(10) * den));
+}
+
+/**
+ * The seat weight (owner, 2026-10-11): bondZat x SeatAgeFactorQ16(ageBlocks), which ranks seats and
+ * picks an eviction victim only (the price statistic and W9 keep BondWeight). 0 for a bond <= 0.
+ */
+inline arith_uint256 SeatWeight(CAmount bondZat, int64_t ageBlocks, int64_t u, int64_t cap)
+{
+    if (bondZat <= 0) return arith_uint256(0);
+    return arith_uint256(bondZat) * arith_uint256(SeatAgeFactorQ16(ageBlocks, u, cap));
+}
+
 /** One attestation of a verified bundle as the bundle statistic sees it. */
 struct WeightedPrice
 {
@@ -310,6 +364,21 @@ inline CAmount ResidualMinZat(MicroUsd pMint, const Params& P)
     if (pMint <= 0 || P.residualMinCents <= 0) return floor;
     arith_uint256 z = CeilDiv(arith_uint256(P.residualMinCents) * arith_uint256(BPS) * arith_uint256(COIN), arith_uint256(pMint));
     if (!FitsInt64(z) || !MoneyRange((CAmount)z.GetLow64())) return floor;
+    return std::max(floor, (CAmount)z.GetLow64());
+}
+
+/**
+ * D-Q-30: the attestor bond minimum from the YEC locked in YED vaults, clamp(ceil(collateralZat x bondShareBps /
+ * (10^4 x N_SLOTS)), bondMinFloorZat, bondMinCapZat) -- BOND_SHARE_BPS of all vault collateral backs the N_SLOTS seats
+ * together. No price is read. A negative collateral counts as zero; N_SLOTS <= 0 gives the cap.
+ */
+inline CAmount BondMinFromCollateralZat(CAmount collateralZat, const Params& P)
+{
+    const CAmount floor = std::max<CAmount>(0, P.bondMinFloorZat), cap = std::max(floor, P.bondMinCapZat);
+    if (P.nSlots <= 0) return cap;
+    arith_uint256 z = CeilDiv(arith_uint256(std::max<CAmount>(0, collateralZat)) * arith_uint256(std::max(0, P.bondShareBps)),
+                              arith_uint256(BPS) * arith_uint256(P.nSlots));
+    if (!FitsInt64(z) || (CAmount)z.GetLow64() > cap) return cap;
     return std::max(floor, (CAmount)z.GetLow64());
 }
 

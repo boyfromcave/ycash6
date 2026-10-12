@@ -278,6 +278,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "set_create",                  {{o}, {}} },
     { "set_join",                    {{s, o, o}, {s}} },
     { "set_heartbeat",               {{s}, {s}} },
+    { "set_leave",                   {{s}, {s}} },
     { "set_buildact",                {{s, o}, {}} },
     { "set_signact",                 {{s}, {s}} },
     { "set_sendact",                 {{s}, {}} },

@@ -21,12 +21,14 @@
 #include "vault/template.h"
 
 #include "chain.h"
+#include "consensus/params.h"
 #include "crypto/sha256.h"
 #include "key.h"
 #include "primitives/block.h"
 #include "script/interpreter.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
+#include "streams.h"
 #include "undo.h"
 
 #include <boost/test/unit_test.hpp>
@@ -274,7 +276,13 @@ SetId SetWithMembers(Chain& c, const std::vector<CKey>& members, SetCreateBody p
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(vault_state_tests, BasicTestingSetup)
+/** The unit cases use small set maturities: D-Q-31's floor is lifted for the suite and checked in min_set_maturity. */
+struct VaultTestingSetup : public BasicTestingSetup {
+    VaultTestingSetup() { SetMinSetMaturity(0); }
+    ~VaultTestingSetup() { SetMinSetMaturity(MIN_SET_MATURITY); }
+};
+
+BOOST_FIXTURE_TEST_SUITE(vault_state_tests, VaultTestingSetup)
 
 BOOST_AUTO_TEST_CASE(create_set)
 {
@@ -465,14 +473,20 @@ BOOST_AUTO_TEST_CASE(remove_without_and_with_burn)
     BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k3.GetPubKey(), false, {k1})), "bad-vault-act-sigs");
     BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, MakeKey(9).GetPubKey(), false, {k1, k2})), "bad-vault-act-remove");
 
-    // burn = 0 (O-6): REMOVED, bond returned (spendable).
+    // burn = 0 (O-6): REMOVED, bond returned the set's maturity (5) after the removal (the bond exit delay).
+    const int64_t removedAt = c.h;
     BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k3.GetPubKey(), false, {k1, k2})));
     MemberRecord m3 = Member(c, s, k3);
     BOOST_CHECK_EQUAL(m3.status, MEMBER_REMOVED);
     BOOST_CHECK(!m3.bondFrozen);
+    BOOST_CHECK_EQUAL(GetBond(c.kv, m3.bondOutpoint)->exitHeight, removedAt);
     BOOST_CHECK(!SetSnapshot(c.kv).IsCurrentMember(s, k3.GetPubKey(), c.h));
     BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k3.GetPubKey(), false, {k1, k2})), "bad-vault-act-remove");
     CMutableTransaction spend3 = SpendTx(c, m3.bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false);
+    c.Empty((int)(removedAt + 5 - 1 - c.h));
+    BOOST_CHECK_EQUAL(c.h, removedAt + 4);
+    BOOST_CHECK_EQUAL(*c.Try(spend3), "bad-vault-bond-locked");
+    c.Empty(1);
     BOOST_REQUIRE(!c.Block1(spend3));
     BOOST_CHECK(!GetBond(c.kv, m3.bondOutpoint));
     BOOST_CHECK_EQUAL(Member(c, s, k3).status, MEMBER_REMOVED); // not WITHDRAWN: it was not ACTIVE
@@ -552,11 +566,23 @@ BOOST_AUTO_TEST_CASE(withdraw_and_rejoin)
     CKey k1 = MakeKey(1), k2 = MakeKey(2);
     SetId s = SetWithMembers(c, {k1, k2});
     MemberRecord m = Member(c, s, k1);
-    BOOST_REQUIRE(!c.Block1(SpendTx(c, m.bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false)));
-    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_WITHDRAWN);
-    BOOST_CHECK(!GetBond(c.kv, m.bondOutpoint));
+    // The bond exit delay (owner 2026-10-11): an ACTIVE member's bond is locked; the member leaves first (the
+    // SET_REMOVE of itself, signed by itself alone, without burn), then waits the set's maturity (5).
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, m.bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false)), "bad-vault-bond-locked");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k1})), "bad-vault-act-sigs");    // no self-burn
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k2.GetPubKey(), false, {k1})), "bad-vault-act-sigs");   // not another's
+    const int64_t left = c.h;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_REMOVED);
+    BOOST_CHECK_EQUAL(GetBond(c.kv, m.bondOutpoint)->exitHeight, left);
     BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 1);
-    // A withdrawn member's old proof no longer slashes (bond spent).
+    c.Empty((int)(left + 4 - c.h));
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, m.bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false)), "bad-vault-bond-locked");
+    c.Empty(1);
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, m.bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false)));   // at left + 5
+    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_REMOVED);
+    BOOST_CHECK(!GetBond(c.kv, m.bondOutpoint));
+    // A departed member's old proof no longer slashes (bond spent).
     Act e;
     e.type = ACT_SET_EQUIVOCATION;
     e.equivocation.setId = s;
@@ -572,6 +598,111 @@ BOOST_AUTO_TEST_CASE(withdraw_and_rejoin)
     BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k1, {})));
     BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_ACTIVE);
     BOOST_CHECK_EQUAL(Member(c, s, k1).joinHeight, c.h - 1);
+}
+
+BOOST_AUTO_TEST_CASE(exit_delay_slash_during_delay)
+{
+    // The bond exit delay (owner 2026-10-11): a member that left can still be slashed until its bond is spent:
+    // SET_EQUIVOCATION during the delay ejects it and freezes the bond for good.
+    Chain c;
+    CKey k1 = MakeKey(1), k2 = MakeKey(2);
+    SetId s = SetWithMembers(c, {k1, k2});
+    const COutPoint bond = Member(c, s, k1).bondOutpoint;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    BOOST_CHECK(GetBond(c.kv, bond)->exitHeight > 0);
+    Act e;
+    e.type = ACT_SET_EQUIVOCATION;
+    e.equivocation.setId = s;
+    e.equivocation.prevout = COutPoint(uint256S("0x99"), 0);
+    e.equivocation.roleA = 1;
+    e.equivocation.sighashA = uint256S("0x01");
+    e.equivocation.roleB = 1;
+    e.equivocation.sighashB = uint256S("0x02");
+    BOOST_REQUIRE(SignRecoverable(k1, SetSigMsg(s, 1, e.equivocation.prevout, e.equivocation.sighashA), e.equivocation.sigA));
+    BOOST_REQUIRE(SignRecoverable(k1, SetSigMsg(s, 1, e.equivocation.prevout, e.equivocation.sighashB), e.equivocation.sigB));
+    BOOST_REQUIRE(!c.Block1(ActTx(c, e, {})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_EJECTED);
+    BOOST_CHECK(GetBond(c.kv, bond)->frozen);
+    c.Empty(10);
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, bond, 1, {CTxOut(900, Recipient(7))}, false)), "bad-vault-bond-frozen");
+    // The record round-trips with its exit height; a record without one keeps its pre-exit bytes (67).
+    BondRecord b = *GetBond(c.kv, bond);
+    BondRecord back;
+    CDataStream ss(SER_DISK, PROTOCOL_VERSION);
+    ss << b;
+    ss >> back;
+    BOOST_CHECK(back.exitHeight == b.exitHeight && back.frozen && back.setId == s);
+    BondRecord plain;
+    plain.setId = s;
+    plain.memberKey = k2.GetPubKey();
+    CDataStream ps(SER_DISK, PROTOCOL_VERSION);
+    ps << plain;
+    BOOST_CHECK_EQUAL(ps.size(), 67u);
+}
+
+BOOST_AUTO_TEST_CASE(exit_delay_no_slash_escape)
+{
+    // Review B1/A1 (2026-10-11), on a bridge-shaped (closed, ungoverned) set: a member that left cannot rejoin while
+    // its old bond is unspent, and a cosigned SET_REMOVE with burn still reaches a bond in its exit delay.
+    Chain c;
+    const CKey admit = MakeKey(200);
+    CKey k1 = MakeKey(1), k2 = MakeKey(2), k3 = MakeKey(3), k4 = MakeKey(4);
+    SetId s = CreateSet(c, Params(false));
+    for (const CKey& k : {k1, k2, k3, k4}) BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k, {admit})));
+    c.Empty(5);
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    // A1: k1 signs something fraudulent, then exits on its own before the burn vote lands
+    const int64_t left = c.h;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    BOOST_CHECK_EQUAL(GetBond(c.kv, bond1)->exitHeight, left);
+    // B1: no rejoin during the delay (the old bond is unspent), whatever the new bond
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k1, {k2, k3})), "bad-vault-act-join");
+    // a burn = 0 vote on a member that already left stays refused; a burn by too few or by the target too
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), false, {k2, k3})), "bad-vault-act-remove");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k2})), "bad-vault-act-sigs");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k1, k2})), "bad-vault-act-sigs");
+    // the cosigned burn freezes the bond in its delay; the member stays REMOVED
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), true, {k2, k3})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).status, MEMBER_REMOVED);
+    BOOST_CHECK(Member(c, s, k1).bondFrozen);
+    BOOST_CHECK(GetBond(c.kv, bond1)->frozen);
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, k1.GetPubKey(), true, {k2, k3})), "bad-vault-act-remove");   // already frozen
+    c.Empty(10);
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, bond1, 1, {CTxOut(900, Recipient(7))}, false)), "bad-vault-bond-frozen");
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k1, {k2, k3})), "bad-vault-act-join");   // a frozen bond never leaves
+    // k2 exits; its rejoin waits for its old bond's spend at exit + maturity, then succeeds
+    const COutPoint bond2 = Member(c, s, k2).bondOutpoint;
+    const int64_t left2 = c.h;
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k2.GetPubKey(), false, {k2})));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, k2, {k3, k4})), "bad-vault-act-join");
+    c.Empty((int)(left2 + 5 - c.h));
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, bond2, 1, {CTxOut(900, Recipient(7))}, false)));
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k2, {k3, k4})));
+    BOOST_CHECK_EQUAL(Member(c, s, k2).status, MEMBER_ACTIVE);
+    // equivocation evidence also reaches a bond in its exit delay (it already did; with the rejoin refused it is
+    // always the bond the evidence's key posted)
+}
+
+BOOST_AUTO_TEST_CASE(min_set_maturity)
+{
+    // D-Q-31 (owner, 2026-10-11): every signer set has at least the network's exit window
+    BOOST_CHECK_EQUAL(MIN_SET_MATURITY, 16128u);
+    BOOST_CHECK_EQUAL(Consensus::Params().nVaultMinSetMaturity, 16128u);
+    Chain c;
+    SetMinSetMaturity(MIN_SET_MATURITY);
+    Act a;
+    a.type = ACT_SET_CREATE;
+    a.create = Params(true);
+    a.create.maturity = MIN_SET_MATURITY - 1;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "bad-vault-act-params");
+    a.create.maturity = MIN_SET_MATURITY;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "OK");
+    SetMinSetMaturity(8);                                  // regtest
+    a.create.maturity = 7;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "bad-vault-act-params");
+    a.create.maturity = 8;
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, a, {})), "OK");
+    SetMinSetMaturity(0);
 }
 
 BOOST_AUTO_TEST_CASE(vault_create_rules)
@@ -895,14 +1026,18 @@ BOOST_AUTO_TEST_CASE(apply_tx_is_atomic)
     CKey k1 = MakeKey(1);
     SetId s = SetWithMembers(c, {k1});
     MemberRecord m = Member(c, s, k1);
-    // Spends k1's bond (marks WITHDRAWN) but then fails I-0: nothing may stick.
+    // k1 leaves; after the exit delay a spend of its bond then fails I-0: nothing may stick.
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    c.Empty(5);
+    m = Member(c, s, k1);
     VaultParams vp = VaultFor(s, MakeKey(50));
     CScript ispk = BuildIntent(IntentFor(vp, BuildVault(vp), Recipient(1)));
     CMutableTransaction bad = SpendTx(c, m.bondOutpoint, 1, {CTxOut(900, ispk)}, false);
     VaultState st(c.kv);
     BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(bad), c.h, c.coins)), "bad-txns-vault-intent");
     BOOST_CHECK(st.Changes().empty());
-    BOOST_CHECK_EQUAL(GetMember(st, s, k1.GetPubKey())->status, MEMBER_ACTIVE);
+    BOOST_CHECK_EQUAL(GetMember(st, s, k1.GetPubKey())->status, MEMBER_REMOVED);
+    BOOST_CHECK(GetBond(st, m.bondOutpoint));
     // A missing input coin is a rejection, not a silent pass.
     CMutableTransaction orphan;
     orphan.vin.push_back(CTxIn(COutPoint(uint256S("0xdead"), 0), CScript(), 0xffffffff));
@@ -910,7 +1045,7 @@ BOOST_AUTO_TEST_CASE(apply_tx_is_atomic)
     BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(orphan), c.h, c.coins)), "bad-txns-vault-inputs-missing");
     // CheckTx over a snapshot of the tip.
     SetSnapshot snap(c.kv);
-    BOOST_CHECK(!CheckTx(CTransaction(HeartbeatTx(c, s, k1)), c.coins, c.h, snap));
+    BOOST_CHECK_EQUAL(*Res(CheckTx(CTransaction(HeartbeatTx(c, s, k1)), c.coins, c.h, snap)), "bad-vault-act-heartbeat");   // k1 left
     BOOST_CHECK_EQUAL(*Res(CheckTx(CTransaction(bad), c.coins, c.h, snap)), "bad-txns-vault-intent");
 }
 
@@ -949,6 +1084,8 @@ BOOST_AUTO_TEST_CASE(undo_roundtrip_byte_identical)
     CMutableTransaction unlock = SpendTx(c, vout, 1, {CTxOut(3000, ispk), CTxOut(7000, vspk)});
     BOOST_REQUIRE(!c.Block({unlock, HeartbeatTx(c, s, k1)}));
     BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k3.GetPubKey(), true, {k1, k2})));
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k2.GetPubKey(), false, {k2})));        // k2 leaves (the bond exit delay)
+    c.Empty(5);
     BOOST_REQUIRE(!c.Block1(SpendTx(c, Member(c, s, k2).bondOutpoint, 1, {CTxOut(900, Recipient(7))}, false)));
     BOOST_CHECK_EQUAL(*c.Try(WindDownTx(c, s, {k1, k3})), "bad-vault-act-sigs"); // k3 removed
     BOOST_CHECK(!c.kv.data.empty());
@@ -997,7 +1134,10 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
     a.create = Params(true);
     CMutableTransaction create = ActTx(c, a, {});
     SetId s = CTransaction(create).GetHash();
+    BOOST_CHECK_EQUAL(db.GetVersion(), 1u);                 // no version key: a database from before it (review A3)
     connect({create}, h1, h0, 100);
+    BOOST_CHECK_EQUAL(db.GetVersion(), VAULT_DB_VERSION);   // written with every connected block
+    BOOST_CHECK_EQUAL(VAULT_DB_VERSION, 3u);
     BOOST_CHECK(db.GetTip(tip, tipHeight) && tip == h1 && tipHeight == 100);
     BOOST_CHECK(!!GetSet(db, s));
     const auto afterCreate = snapshotAll();
@@ -1389,6 +1529,248 @@ BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1_yed)
         BOOST_CHECK(GetBond(sb, bond1)->frozen);
     }
     yellowback::ClearModuleParams();
+}
+
+BOOST_AUTO_TEST_CASE(module_liveness_hook)
+{
+    // Seats review B2, bounded at the re-review: a CLAIM_NOTICE (or MINT, REDEEM) whose bundle passes BUNDLE-1 at its
+    // refHeight R in everything but the selection credits its signers -- seq s is the member whose joinOrdinal is
+    // s + 1, one verification each -- with lastAct = citedHeight; any failing attestation credits nobody.
+    Chain c;
+    const CKey k1 = MakeKey(61), k2 = MakeKey(62), outsider = MakeKey(63);
+    SetCreateBody sp = Params(true);
+    sp.maturity = 2;
+    const SetId s = SetWithMembers(c, {k1, k2}, sp);
+    BOOST_CHECK_EQUAL(Member(c, s, k1).joinOrdinal, 1u);   // seq 0
+    BOOST_CHECK_EQUAL(Member(c, s, k2).joinOrdinal, 2u);   // seq 1
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 2u);
+    c.Empty(60);
+    auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xcd; return x; };
+    BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
+    auto att = [&](const CKey& k, uint16_t seq, int64_t at, bool forge = false) {
+        yellowback::Attestation a;
+        a.seq = seq;
+        a.priceMicroUsd = 50000;
+        a.citedHeight = (uint32_t)at;
+        std::vector<unsigned char> rec;
+        BOOST_REQUIRE(k.SignCompact(yellowback::AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, fakeHash(at)), rec));
+        std::copy(rec.begin() + 1, rec.end(), a.sig.begin());
+        if (forge) a.sig[5] ^= 1;
+        return a;
+    };
+    auto carrierTx = [&](const std::vector<yellowback::Attestation>& atts, const yellowback::Payload& payload) {
+        yellowback::Bundle bundle;
+        bundle.atts = atts;
+        const valtype raw = yellowback::EncodeBundle(bundle);
+        uint256 h;
+        CSHA256().Write(raw.data(), raw.size()).Finalize(h.begin());
+        const CScript redeem = yellowback::CarrierScript(MakeKey(64).GetPubKey(), h);
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(c.Fund(), yellowback::CarrierScriptSig(raw, valtype(71, 0x30), redeem)));
+        m.vout.push_back(CTxOut(0, yellowback::PayloadScript(yellowback::EncodePayload(payload))));
+        return m;
+    };
+    const int64_t R = c.h - 2;
+    const yellowback::Payload notice = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)R);
+    auto lastAct = [&](VaultState& st, const CKey& k) { return GetMember(st, s, k.GetPubKey())->lastAct; };
+    const int64_t before1 = Member(c, s, k1).lastAct, before2 = Member(c, s, k2).lastAct;
+    BOOST_REQUIRE(before1 < R - 1 && before2 < R - 1);
+    yellowback::Params p = yellowback::RegtestParams(10, 0, 0, s);
+    p.attestorLivenessMin = 1;
+    p.attestorSeats = (int)sp.seats;                  // adopt this small test set (seats, maturity)
+    p.bondMaturity = (int)sp.maturity;
+    yellowback::SetModuleParams(p);
+    BOOST_REQUIRE_EQUAL(p.mSelect, 2);
+    auto tryTx = [&](const CMutableTransaction& m, int64_t& a1, int64_t& a2) {
+        VaultState st(c.kv);
+        st.SetBlockHashes(hashes);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(m), c.h, c.coins)), "OK");
+        a1 = lastAct(st, k1);
+        a2 = lastAct(st, k2);
+    };
+    int64_t a1 = 0, a2 = 0;
+    // a bundle that passes: both signers credited at their cited heights
+    tryTx(carrierTx({att(k1, 0, R), att(k2, 1, R - 1)}, notice), a1, a2);
+    BOOST_CHECK_EQUAL(a1, R);
+    BOOST_CHECK_EQUAL(a2, R - 1);
+    {   // focused review: the hook verifies through the node's cache (vault::SetModuleCache): a second pass is all hits
+        struct CountingCache : public yellowback::SigCache {
+            std::map<uint256, bool> m;
+            mutable int hits = 0;
+            int inserts = 0;
+            std::optional<bool> Lookup(const uint256& k) const override { auto it = m.find(k); if (it == m.end()) return std::nullopt; hits++; return it->second; }
+            void Insert(const uint256& k, bool v) override { m[k] = v; inserts++; }
+        } cc;
+        SetModuleCache(static_cast<yellowback::SigCache*>(&cc));
+        const CMutableTransaction pass = carrierTx({att(k1, 0, R), att(k2, 1, R - 1)}, notice);
+        tryTx(pass, a1, a2);
+        BOOST_CHECK_EQUAL(cc.inserts, 2);
+        BOOST_CHECK_EQUAL(cc.hits, 0);
+        tryTx(pass, a1, a2);
+        BOOST_CHECK_EQUAL(cc.inserts, 2);
+        BOOST_CHECK_EQUAL(cc.hits, 2);
+        BOOST_CHECK_EQUAL(a1, R);
+        SetModuleCache(nullptr);
+    }
+    // focused review: a refHeight older than REF_WINDOW credits nobody (no replay of an old public attestation)
+    {
+        const int64_t old = c.h - p.refWindow - 1;
+        BOOST_REQUIRE(old > before1 && old > before2);
+        const yellowback::Payload oldNotice = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)old);
+        tryTx(carrierTx({att(k1, 0, old), att(k2, 1, old)}, oldNotice), a1, a2);
+        BOOST_CHECK_EQUAL(a1, before1);
+        BOOST_CHECK_EQUAL(a2, before2);
+        const yellowback::Payload edge = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)(old + 1));
+        tryTx(carrierTx({att(k1, 0, old + 1), att(k2, 1, old + 1)}, edge), a1, a2);   // c.h - R = REF_WINDOW: credited
+        BOOST_CHECK_EQUAL(a1, old + 1);
+    }
+    // bundles that fail credit nobody: one attestation (count < M_SELECT); a forged signature; a key signing under
+    // another member's seq; an unknown seq; an outsider; a stale citation (<= R - ATTEST_MAX_AGE); a duplicate seq;
+    // an EQUIVOCATION payload
+    const std::vector<CMutableTransaction> failing = {
+        carrierTx({att(k1, 0, R)}, notice),
+        carrierTx({att(k1, 0, R), att(k2, 1, R, true)}, notice),
+        carrierTx({att(k1, 1, R), att(k2, 0, R)}, notice),
+        carrierTx({att(k1, 0, R), att(k2, 7, R)}, notice),
+        carrierTx({att(k1, 0, R), att(outsider, 1, R)}, notice),
+        carrierTx({att(k1, 0, R), att(k2, 1, R - p.attestMaxAge)}, notice),
+        carrierTx({att(k1, 0, R), att(k1, 0, R - 1)}, notice),
+        carrierTx({att(k1, 0, R), att(k2, 1, R)}, yellowback::Payload::Equivocation()),
+    };
+    for (const auto& m : failing) {
+        tryTx(m, a1, a2);
+        BOOST_CHECK_EQUAL(a1, before1);
+        BOOST_CHECK_EQUAL(a2, before2);
+    }
+    // the module does not adopt a set below ATTESTOR_LIVENESS_MIN (review B3), nor one of another shape: no update
+    for (int variant = 0; variant < 2; variant++) {
+        yellowback::Params q = p;
+        if (variant == 0) q.attestorLivenessMin = (int)sp.livenessWindow + 1;
+        else q.bondMaturity = 8;
+        yellowback::SetModuleParams(q);
+        tryTx(carrierTx({att(k1, 0, R), att(k2, 1, R)}, notice), a1, a2);
+        BOOST_CHECK_EQUAL(a1, before1);
+    }
+    yellowback::ClearModuleParams();
+}
+
+BOOST_AUTO_TEST_CASE(join_ordinal_reorg)
+{
+    // focused review: a disconnected SET_JOIN gives back its ordinal (joinCount restored byte for byte by the undo);
+    // on one chain no two joins share an ordinal
+    Chain c;
+    const CKey k1 = MakeKey(81), k2 = MakeKey(82), k3 = MakeKey(83);
+    SetId s = SetWithMembers(c, {k1, k2});
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 2u);
+    const MemoryKV before = c.kv;
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k3, {})));
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 3u);
+    BOOST_CHECK_EQUAL(Member(c, s, k3).joinOrdinal, 3u);
+    {
+        MemoryKV back = c.kv;
+        VaultState u(back);
+        u.ApplyUndo(c.history.back().second);
+        back.Apply(u.Changes());
+        BOOST_CHECK(back.data == before.data);
+        BOOST_CHECK_EQUAL(GetSet(back, s)->joinCount, 2u);
+        BOOST_CHECK(!GetMember(back, s, k3.GetPubKey()));
+    }
+    // a member that leaves, withdraws and rejoins takes a new ordinal
+    BOOST_REQUIRE(!c.Block1(RemoveTx(c, s, k1.GetPubKey(), false, {k1})));
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    c.Empty(5);
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, bond1, 1, {CTxOut(900, Recipient(7))}, false)));
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k1, {})));
+    BOOST_CHECK_EQUAL(Member(c, s, k1).joinOrdinal, 4u);
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->joinCount, 4u);
+}
+
+BOOST_AUTO_TEST_CASE(module_displace_hook)
+{
+    // Owner 2026-10-11: a SET_JOIN into a full set the YED module governs displaces the member the module names
+    // (MEMBER_REMOVED, the bond neither frozen nor unindexed); an ungoverned set, or one the module does not adopt
+    // (not OPEN with 15 seats), refuses the join as before.
+    Chain c;
+    SetCreateBody p = Params(true);
+    p.seats = 15;
+    p.unlockThreshold = p.cancelThreshold = p.slashThreshold = 1;
+    p.maturity = 8;                                   // regtest BOND_MATURITY: the module adopts only that (the bond exit delay)
+    std::vector<CKey> keys;
+    for (int i = 0; i < 15; i++) keys.push_back(MakeKey((unsigned char)(70 + i)));   // one join per block: keys[14] is the youngest
+    const SetId s = SetWithMembers(c, keys, p);
+    SetCreateBody small = Params(true);
+    small.seats = 1;
+    small.unlockThreshold = small.cancelThreshold = small.slashThreshold = 1;
+    const SetId s1 = SetWithMembers(c, {MakeKey(69)}, small);
+    BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 15);
+
+    // Ungoverned (the module unconfigured): full is full, whatever the bond.
+    yellowback::ClearModuleParams();
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 100000)), "bad-vault-act-seats");
+    // Governed, but a set the module does not adopt (one seat): refused as before.
+    yellowback::SetModuleParams(yellowback::RegtestParams(10, 0, 0, s1));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s1, MakeKey(90), {}, 100000)), "bad-vault-act-seats");
+    // Governed and adopted: a bond not above x1.05 the least seat weight is refused; a larger one displaces it.
+    yellowback::Params yp = yellowback::RegtestParams(10, 0, 0, s);
+    yp.bondMinFloorZat = 1500;                        // these bonds are in zat: the dust guard (review B2) at 1,500
+    yellowback::SetModuleParams(yp);
+    BOOST_CHECK(yellowback::RegisteredModule()->GovernedSet() == std::optional<SetId>(s));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 1000)), "bad-vault-act-seats");
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 1050)), "bad-vault-act-seats");   // 1050 x 1.0 vs 1000 x f(age) x 1.05
+    // A member's own join while ACTIVE is still bad-vault-act-join (after the displacement check).
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, keys[0], {}, 5000)), "bad-vault-act-join");
+    const COutPoint youngBond = Member(c, s, keys[14]).bondOutpoint;
+    const CMutableTransaction big = JoinTx(c, s, MakeKey(90), {}, 2000);
+    const MemoryKV before = c.kv;
+    BOOST_REQUIRE(!c.Block1(big));
+    BOOST_CHECK_EQUAL(Member(c, s, keys[14]).status, MEMBER_REMOVED);
+    BOOST_CHECK(!Member(c, s, keys[14]).bondFrozen);
+    BOOST_REQUIRE(GetBond(c.kv, youngBond));
+    BOOST_CHECK(!GetBond(c.kv, youngBond)->frozen);
+    BOOST_CHECK_EQUAL(Member(c, s, MakeKey(90)).status, MEMBER_ACTIVE);
+    BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 15);
+    for (int i = 0; i < 14; i++) BOOST_CHECK_EQUAL(Member(c, s, keys[i]).status, MEMBER_ACTIVE);
+    // The block's undo restores the base byte for byte.
+    {
+        MemoryKV back = c.kv;
+        VaultState u(back);
+        u.ApplyUndo(c.history.back().second);
+        back.Apply(u.Changes());
+        BOOST_CHECK(back.data == before.data);
+    }
+    // The displaced bond is returned the set's maturity (8) after the displacement (the bond exit delay): locked at
+    // exit + 7, spendable at exit + 8 (the primitive drops its index entry; the member stays REMOVED).
+    {
+        const int64_t exit = c.h - 1;
+        BOOST_CHECK_EQUAL(GetBond(c.kv, youngBond)->exitHeight, exit);
+        CMutableTransaction spend;
+        spend.vin.push_back(CTxIn(youngBond));
+        spend.vout.push_back(CTxOut(500, Recipient(91)));
+        VaultState early(c.kv);
+        BOOST_CHECK_EQUAL(*Res(early.ApplyTx(CTransaction(spend), exit + 7, c.coins)), "bad-vault-bond-locked");
+        VaultState st(c.kv);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(spend), exit + 8, c.coins)), "OK");
+        BOOST_CHECK(!GetBond(st, youngBond));
+        BOOST_CHECK_EQUAL(GetMember(st, s, keys[14].GetPubKey())->status, MEMBER_REMOVED);
+    }
+    // A member that is not live goes first, whatever its weight: all but keys[0] (the oldest, the heaviest) heartbeat.
+    c.Empty((int)p.livenessWindow + 1);
+    std::vector<CMutableTransaction> beats;
+    for (int i = 1; i < 14; i++) beats.push_back(HeartbeatTx(c, s, keys[i]));
+    beats.push_back(HeartbeatTx(c, s, MakeKey(90)));
+    BOOST_REQUIRE(!c.Block(beats));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(91), {}, 1499)), "bad-vault-act-seats");   // dust: below the floor (review B2)
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, MakeKey(91), {}, 1500)));
+    BOOST_CHECK_EQUAL(Member(c, s, keys[0]).status, MEMBER_REMOVED);
+    BOOST_CHECK_EQUAL(Member(c, s, MakeKey(91)).status, MEMBER_ACTIVE);
+    // The module's CheckBlock: a block with a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid; of another set, not.
+    BOOST_CHECK_EQUAL(*c.Block({RemoveTx(c, s, keys[1].GetPubKey(), false, {keys[2]})}), "bad-yellowback-attestor-set-act");
+    BOOST_CHECK_EQUAL(*c.Block({WindDownTx(c, s, {keys[2]})}), "bad-yellowback-attestor-set-act");
+    BOOST_CHECK_EQUAL(*c.Try(RemoveTx(c, s, keys[1].GetPubKey(), false, {keys[2]})), "OK");   // per transaction the primitive admits it
+    BOOST_CHECK_EQUAL(*c.Block({WindDownTx(c, s1, {MakeKey(69)})}), "OK");
+    yellowback::ClearModuleParams();
+    // Unconfigured again: no displacement.
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(92), {}, 100000)), "bad-vault-act-seats");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

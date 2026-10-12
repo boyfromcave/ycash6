@@ -69,7 +69,7 @@ static CMutableTransaction AttestorSetCreate()
     a.create.rateWindow = 1000;
     a.create.livenessWindow = 1000000;
     a.create.bondMin = 1;
-    a.create.maturity = 1;
+    a.create.maturity = 8;   // BOND_MATURITY (regtest): the module adopts only that (the bond exit delay)
     unsigned char d[32];
     memset(d, 0x42, 32);
     CKey admit;
@@ -1379,7 +1379,7 @@ BOOST_AUTO_TEST_CASE(sigcache_lru_and_hit_equals_cold)
         { OverlayStateView o(index.MutableView()); warm1 = EvaluateBlock(o, live.P, block, live.Tip() + 1, block.GetHash(), 0, index.GetSigCache()); }
         BOOST_CHECK_EQUAL(index.SigCacheStats().Size(), sizeBefore + 3);       // three signatures verified once
         { OverlayStateView o(index.MutableView()); warm2 = EvaluateBlock(o, live.P, block, live.Tip() + 1, block.GetHash(), 0, index.GetSigCache()); }
-        BOOST_CHECK_EQUAL(index.SigCacheStats().Hits(), hitsBefore + 3);       // all three hit the second time
+        BOOST_CHECK_EQUAL(index.SigCacheStats().Hits(), hitsBefore + 15);      // warm1's liveness checks (6), then BUNDLE-1 and liveness (9)
         BOOST_CHECK_EQUAL(index.SigCacheStats().Size(), sizeBefore + 3);
     }
     BOOST_REQUIRE_EQUAL(cold.txlogs.size(), 1u);
@@ -1510,7 +1510,8 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     live.MineWith({ good });
     const uint256 vault = CTransaction(good).GetHash();
     BOOST_REQUIRE(b.Vault(vault)->Status() == VaultStatus::ACTIVE);
-    // NOT-1 fails on a healthy vault (attestors at the pools' price): kept, it registers nothing; holds at a fifth: kept.
+    // NOT-1 fails on a healthy vault (attestors at the pools' price): its bundle would refresh liveness, so it is
+    // invalid (liveness-unheld, focused review) and skipped; holds at a fifth: kept.
     const int R1 = live.Tip() - 1;
     const valtype selector = OutPointSelector(COutPoint(vault, 0));
     CMutableTransaction healthyNotice = b.NoticeTx(vault, R1, b.BundleFor(R1, selector, 50000));
@@ -1518,7 +1519,7 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     {
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
-        BOOST_CHECK(policy::FilterTemplate(view, CTransaction(healthyNotice), live.Tip() + 1));
+        BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(healthyNotice), live.Tip() + 1));
     }
     {
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
@@ -1533,12 +1534,13 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
         BOOST_CHECK_EQUAL(n->refHeight, R1);
         BOOST_CHECK_EQUAL(n->pEmerg, 10000);
     }
-    // A second notice while one stands is not registered (the reset attack); it is valid, so kept.
+    // A second notice while one stands is not registered (the reset attack); its bundle would refresh liveness, so it
+    // is invalid (liveness-unheld) and skipped.
     {
         const int R2 = live.Tip() - 1;
         LOCK(cs_main);   // TemplateView() asserts cs_main, as CreateNewBlock holds it
         yellowback::TemplateView view = index.TemplateView();
-        BOOST_CHECK(policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
+        BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
     }
     // EMERGENCY_PERSIST blocks later a claim opens by clause (b) and owes the residual.
     while (live.Tip() - 1 - R1 < live.P.emergencyPersist) live.MineQuote();

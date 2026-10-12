@@ -697,6 +697,7 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet/testnet 16,128)
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

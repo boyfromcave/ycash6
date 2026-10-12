@@ -4,6 +4,8 @@
 
 #include "yellowback/params.h"
 
+#include <cassert>
+
 #include <stdexcept>
 
 namespace yellowback {
@@ -93,11 +95,19 @@ void SetCommon(Params& p)
     p.residualMinZat      = 100000; // RED-5: the zat floor
     p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
-    p.bondMin             = 20000 * COIN;
-    p.bondMinLock         = 420480; // one year
+    p.bondMinFloorZat     = 10000 * COIN;   // D-Q-30 (owner 2026-10-11: 10,000 YEC, was 5,000): binds below ~1.8 M YEC of vault collateral
+    p.bondMinCapZat       = 20000 * COIN;   // D-Q-30: binds above ~3.6 M YEC
+    p.bondShareBps        = 500;            // D-Q-30: 5 % of all YED vault collateral backs the N_SLOTS seats
+    p.bondMinLock         = 0;      // the bond exit delay (owner 2026-10-11): the lock is in the vault state (exit + BOND_MATURITY), not the script
     p.bondMaturity        = 16128;  // two weeks
     p.ageCap              = 207360; // 180 d
     p.foundingWindow      = 8064;   // 7 d
+    p.seatAgeUnit         = 1152;   // seat ranking and eviction (owner 2026-10-11): one day
+    p.seatAgeCap          = 420480; // one year: x1.9
+    p.seatMarginBps       = 500;    // SEAT_MARGIN: a seated attestor's hysteresis
+    p.evictMarginBps      = 500;    // EVICT_MARGIN: a live member is evicted only by a bond above x1.05 its seat weight
+    p.attestorSeats       = 15;     // the attestor set is OPEN with 15 seats (the primitive's maximum)
+    p.attestorLivenessMin = 1152;   // seats review B3: the adopted set's livenessWindow is at least one day
     p.dormancyBlocks      = 16128;
     p.dormancyMinBundles  = 20;
     p.dormancyCheck       = 48;     // S15
@@ -122,7 +132,8 @@ Params::Params()
       nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
-      bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
+      bondMinFloorZat(0), bondMinCapZat(0), bondShareBps(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
+      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0), attestorLivenessMin(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {
@@ -154,6 +165,11 @@ const Params& MainParams()
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
         m.startHeight = 0;
+        // Invariant (focused review; wording per the final review A-4): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct
+        // starts at joinHeight + BOND_MATURITY and a liveness credit needs citedHeight > lastAct, so a member is credited
+        // only for blocks after its maturity; with ATTEST_MAX_AGE <= BOND_MATURITY no attestation stays fresh for longer
+        // than that window -- the relation the liveness rule was reviewed under. Not a consensus rule itself.
+        assert(m.bondMaturity >= m.attestMaxAge);
         return m;
     }();
     return p;
@@ -233,8 +249,11 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.pinMinTags          = 2;
     r.emergencyPersist    = 4;
     r.emergencyNoticeTtl  = 64;
-    r.bondMin             = 10 * COIN;
-    r.bondMinLock         = 200;
+    // D-Q-30 at 1/2,000 of mainnet (5 YEC / 10 YEC, share 500 bps): the suites' 10-YEC bonds sit at the cap
+    r.bondMinFloorZat     = 5 * COIN;
+    r.bondMinCapZat       = 10 * COIN;
+    r.bondMinLock         = 0;
+    r.attestorLivenessMin = 16;     // seats review B3 at regtest scale (two ATTEST_MAX_AGE windows)
     r.bondMaturity        = 8;
     r.ageCap              = 64;
     r.foundingWindow      = 16;
@@ -251,6 +270,11 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.attestArmMin       = attestArmMin;
     r.bundleCarrier      = bundleCarrier;
     r.mintRequiresArmed  = mintRequiresArmed;
+    // Invariant (focused review; wording per the final review A-4): BOND_MATURITY >= ATTEST_MAX_AGE. A member's lastAct
+    // starts at joinHeight + BOND_MATURITY and a liveness credit needs citedHeight > lastAct, so a member is credited
+    // only for blocks after its maturity; with ATTEST_MAX_AGE <= BOND_MATURITY no attestation stays fresh for longer
+    // than that window -- the relation the liveness rule was reviewed under. Not a consensus rule itself.
+    assert(r.bondMaturity >= r.attestMaxAge);
     return r;
 }
 

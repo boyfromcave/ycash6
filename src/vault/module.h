@@ -6,6 +6,7 @@
 #define YCASH_VAULT_MODULE_H
 
 #include "pubkey.h"
+#include "vault/act.h"
 #include "vault/template.h"
 
 #include <cstddef>
@@ -43,7 +44,14 @@ struct ModuleContext
     const KVReader* state = nullptr;
     /** Ancestor block hashes (may be empty: a module then finds nothing that needs them). */
     BlockHashFn blockHashAt;
+    /** The node-local verification cache the module asked for (vault::SetModuleCache; YED: its yellowback::SigCache),
+     *  opaque to the primitive; nullptr = none. Never state: a hit and a cold verification always agree. */
+    void* moduleCache = nullptr;
 };
+
+/** Set once at init (the node's YED index), read by every ModuleContext the primitive builds. */
+void SetModuleCache(void* cache);
+void* ModuleCache();
 
 class Module
 {
@@ -75,6 +83,27 @@ public:
      */
     virtual std::optional<SetId> GovernedSet() const { return std::nullopt; }
     virtual std::vector<CPubKey> Ejections(const CTransaction& tx, const ModuleContext& ctx) const { return {}; }
+
+    /**
+     * The module displacement hook (owner, 2026-10-11). A SET_JOIN into the module's GovernedSet() when that set
+     * already has `seats` ACTIVE members is refused (bad-vault-act-seats) unless this names a member to make room:
+     * the primitive then checks that the key is an ACTIVE member of the set, not the joining key, whose bond is
+     * unspent (indexed) and not frozen, sets it MEMBER_REMOVED without freezing its bond (it is spendable from
+     * exitHeight + the set's maturity, the bond exit delay) and admits the join, in the same overlay. Any other answer, or nullopt (the default), refuses the
+     * join as before. Asked only for a full governed set; a set no module governs is unchanged. The primitive does
+     * not know why the module picks a member (for YED: the eviction rule, a larger bond or a member not live).
+     */
+    virtual std::optional<CPubKey> Displace(const CTransaction& tx, const SetJoinBody& join, const ModuleContext& ctx) const { return std::nullopt; }
+
+    /**
+     * The module liveness hook (seats review B2, 2026-10-11). For every non-coinbase transaction, after the
+     * ejection hook, the primitive asks each module for (key, height) pairs: the transaction proves that the key
+     * signed, for the module, something bound to the block at `height` (for YED: a price attestation citing it).
+     * A pair whose key is an ACTIVE member of the module's GovernedSet() with an unspent, unfrozen bond and
+     * lastAct < height < the block's height sets lastAct = height, as a SET_HEARTBEAT would have; any other pair
+     * is ignored. The hook never makes a transaction invalid and never touches another set. Default: none.
+     */
+    virtual std::vector<std::pair<CPubKey, int64_t>> Liveness(const CTransaction& tx, const ModuleContext& ctx) const { return {}; }
 };
 
 /** The registered module for `tag`, or nullptr (the primitive alone governs the vault). */

@@ -61,8 +61,24 @@ struct SetRecord
     int64_t epoch = 0;
     CAmount epochBasis = 0;
     CAmount epochUsed = 0;
+    /** The number of SET_JOINs the set has admitted (seats re-review, 2026-10-11): each member records its ordinal
+     *  (MemberRecord.joinOrdinal), so a module can name a member by its join order (YED: seq = ordinal - 1).
+     *  Serialised only when non-zero, so a set without joins keeps its pre-change bytes. */
+    uint32_t joinCount = 0;
 
-    ADD_SERIALIZE_METHODS;
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        const_cast<SetRecord*>(this)->SerializationOp(s, CSerActionSerialize());
+        if (joinCount != 0) ::Serialize(s, joinCount);
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        SerializationOp(s, CSerActionUnserialize());
+        joinCount = 0;
+        if (!s.empty()) ::Unserialize(s, joinCount);
+    }
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action)
     {
@@ -96,8 +112,23 @@ struct MemberRecord
     int64_t lastAct = 0; // starts at joinHeight + maturity
     uint8_t status = MEMBER_ACTIVE;
     bool bondFrozen = false;
+    /** The set's joinCount after this member's latest SET_JOIN (1 = the set's first join); 0 = unknown. Serialised
+     *  only when non-zero. (seats re-review, 2026-10-11) */
+    uint32_t joinOrdinal = 0;
 
-    ADD_SERIALIZE_METHODS;
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        const_cast<MemberRecord*>(this)->SerializationOp(s, CSerActionSerialize());
+        if (joinOrdinal != 0) ::Serialize(s, joinOrdinal);
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        SerializationOp(s, CSerActionUnserialize());
+        joinOrdinal = 0;
+        if (!s.empty()) ::Unserialize(s, joinOrdinal);
+    }
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action)
     {
@@ -112,20 +143,34 @@ struct MemberRecord
 };
 
 /** The bond index: outpoint → its member (the frozen-bond index of §15.4, extended to every
- *  unspent member bond so that a spend can mark the member WITHDRAWN). */
+ *  unspent member bond so that a spend can mark the member WITHDRAWN).
+ *  exitHeight (owner 2026-10-11, the bond exit delay): the height its member left the set without a
+ *  freeze (a SET_REMOVE without burn, by the set or by the member itself, or the module displacement
+ *  hook); 0 = still a member's bond. The bond is spendable only from exitHeight + the set's maturity.
+ *  Serialised only when set, so every record without an exit keeps its pre-exit bytes. */
 struct BondRecord
 {
     SetId setId;
     CPubKey memberKey;
     bool frozen = false;
+    int64_t exitHeight = 0;
 
-    ADD_SERIALIZE_METHODS;
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action)
+    template <typename Stream>
+    void Serialize(Stream& s) const
     {
-        READWRITE(setId);
-        READWRITE(memberKey);
-        READWRITE(frozen);
+        ::Serialize(s, setId);
+        ::Serialize(s, memberKey);
+        ::Serialize(s, frozen);
+        if (exitHeight != 0) ::Serialize(s, exitHeight);
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        ::Unserialize(s, setId);
+        ::Unserialize(s, memberKey);
+        ::Unserialize(s, frozen);
+        exitHeight = 0;
+        if (!s.empty()) ::Unserialize(s, exitHeight);
     }
 };
 
@@ -185,6 +230,15 @@ public:
 };
 
 /** Typed reads. A record that fails to deserialize reads as absent. */
+/**
+ * D-Q-31 (owner, 2026-10-11): every signer set has at least a 14-day exit window. SET_CREATE with maturity below
+ * MinSetMaturity() is bad-vault-act-params. MIN_SET_MATURITY 16,128 blocks (14 days) on mainnet and testnet;
+ * regtest takes Consensus::Params::nVaultMinSetMaturity (2), set once at init by SetMinSetMaturity.
+ */
+static const uint32_t MIN_SET_MATURITY = 16128;
+uint32_t MinSetMaturity();
+void SetMinSetMaturity(uint32_t blocks);
+
 std::optional<SetRecord> GetSet(const KVReader& kv, const SetId& setId);
 std::optional<MemberRecord> GetMember(const KVReader& kv, const SetId& setId, const CPubKey& key);
 MemberList GetMembers(const KVReader& kv, const SetId& setId);

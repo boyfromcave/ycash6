@@ -67,7 +67,7 @@ class VaultRpcContractTest(BitcoinTestFramework):
         # ---- sets ----
         c.error('the set parameters are out of range', n, 'set_create', {'seats': 16, 'unlockthreshold': 1})
         r = c.call(n, 'set_create', {'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                                     'maturity': 1, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})
+                                     'maturity': 2, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})
         setid = r['setid']
         empty = c.call(n, 'set_create', {'seats': 2, 'unlockthreshold': 1, 'ratelimitbps': 5000, 'ratewindow': 10})['setid']
         mine(1)
@@ -210,6 +210,16 @@ class VaultRpcContractTest(BitcoinTestFramework):
         assert_equal(c.call(n, 'vault_ownerspend', rest[0]['outpoint'], addr)['selector'], 3)
         mine(1)
         assert_equal(c.call(n, 'vault_getinfo')['active'], True)
+
+        # ---- set_leave (the bond exit delay, owner 2026-10-11): a member's own SET_REMOVE ----
+        lset = c.call(n, 'set_create', {'seats': 1, 'unlockthreshold': 1, 'maturity': 2})['setid']
+        mine(1)
+        lj = c.call(n, 'set_join', lset, 1, n.getblockcount() + 1)
+        mine(1)
+        lv = c.call(n, 'set_leave', lset)
+        assert_equal((lv['memberkey'], lv['bondspendableat'] - lv['exitheight']), (lj['memberkey'], 2))
+        mine(1)
+        assert_equal(c.call(n, 'set_getinfo', lset)['memberlist'][0]['status'], 'removed')
 
         c.assert_complete()
 

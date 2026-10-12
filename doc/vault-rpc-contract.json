@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "970a9090e9169f5196e12942d1b53220f469f6bec19c2dc413dd0b5ec8d61ddd"
+    "sha256": "8bd150f5e5358d6cdea0c884feb628e4786f0e524d3264d0c6bbe337f105715e"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -238,11 +238,20 @@
         "bondfrozen": {
           "type": "bool"
         },
+        "exitheight": {
+          "type": "height"
+        },
+        "unlockheight": {
+          "type": "height"
+        },
         "wallet": {
           "type": "bool"
         }
       },
-      "optional": []
+      "optional": [
+        "exitheight",
+        "unlockheight"
+      ]
     },
     "VaultFields": {
       "type": "object",
@@ -1545,6 +1554,44 @@
         "optional": []
       }
     },
+    "set_leave": {
+      "wallet": true,
+      "signature": "set_leave \"setid\" ( \"memberkey\" )",
+      "params": [
+        {
+          "name": "setid",
+          "required": true,
+          "type": {
+            "type": "hash"
+          }
+        },
+        {
+          "name": "memberkey",
+          "required": false,
+          "type": {
+            "type": "key"
+          }
+        }
+      ],
+      "result": {
+        "type": "object",
+        "fields": {
+          "txid": {
+            "type": "hash"
+          },
+          "memberkey": {
+            "type": "key"
+          },
+          "exitheight": {
+            "type": "height"
+          },
+          "bondspendableat": {
+            "type": "height"
+          }
+        },
+        "optional": []
+      }
+    },
     "set_buildact": {
       "wallet": true,
       "signature": "set_buildact \"type\" {params}",
@@ -2081,7 +2128,7 @@
         "set_join",
         "set_sendact"
       ],
-      "provokedBy": "a join to a full set"
+      "provokedBy": "a join to a full set (a set a registered module governs may instead displace a member, below)"
     },
     {
       "code": -8,

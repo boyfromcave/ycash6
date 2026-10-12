@@ -230,8 +230,10 @@ EMERGENCY_PERSIST = 4
 EMERGENCY_NOTICE_TTL = 64
 RESIDUAL_MIN_ZAT = 100_000
 ATTEST_FEE_BPS = 2_500
-BOND_MIN_ZAT = 10 * COIN
-BOND_MIN_LOCK = 200
+BOND_MIN_ZAT = 10 * COIN       # D-Q-30: bondMinCapZat, which always qualifies; the suites' default bond
+BOND_MIN_FLOOR_ZAT = 5 * COIN   # D-Q-30: bondMinFloorZat (regtest 1/2,000 of mainnet's 10,000 YEC, owner 2026-10-11)
+BOND_SHARE_BPS = 500           # D-Q-30: the vault-collateral share the N_SLOTS seats back
+BOND_MIN_LOCK = 0              # the bond exit delay (owner 2026-10-11): the lock is in the vault state
 BOND_MATURITY = 8
 AGE_CAP = 64
 FOUNDING_WINDOW = 16
@@ -296,7 +298,7 @@ def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=
 # case says so, use a window far beyond any run; a suite that tests the set's dormancy creates its own.
 ATTESTOR_SET_LIVENESS = 100000
 ATTESTOR_SET_SPEC = {'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                     'open': True, 'maturity': 1, 'livenesswindow': ATTESTOR_SET_LIVENESS}
+                     'open': True, 'maturity': BOND_MATURITY, 'livenesswindow': ATTESTOR_SET_LIVENESS}   # maturity: the bond exit delay
 
 
 def start_nodes_with_attestor_set(num, tmpdir, args_fn, edges):
@@ -589,6 +591,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
             extra.append('-pqfalconheight=%d' % falcon)
         kw = {'sigma_ref': self.sigma_ref}
         if not self.yellowback_enabled or i == STOCK:
+            # the stock node runs without -yellowbackattestorset: it forks from the others on a block whose
+            # validity the module's hooks decide (displacement, liveness, EQV-1 ejection, attestor-set acts;
+            # doc/yellowback.md "Regtest caveat", seats review B5) -- restart it with the flag before such a block
             return yellowback_node_args(extra, yellowback=False)
         if i in POOLS:
             return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw)

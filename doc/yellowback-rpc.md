@@ -194,7 +194,7 @@ member) and `bondFrozen` (the bond is frozen in the set: `SET_REMOVE` with burn,
 or EQV-1, which now freezes the bond through the module ejection hook, U-25); `yed_gettxinfo.type`
 gains `"set_act"` (a heartbeat, removal or set equivocation of an attestor; `seq` names its record)
 and `"register"` now names a `SET_JOIN` to the set. A record is ELIGIBLE from `registerHeight +
-max(set maturity, BOND_MATURITY)` when its bond meets `BOND_MIN` / `BOND_MIN_LOCK` and its key was
+max(set maturity, BOND_MATURITY)` when its bond meets the module's floor (D-Q-30: `bondMinZat` from vault collateral at the snapshot before the join) and `BOND_MIN_LOCK` and its key was
 never slashed; DORMANT when its `lastAct` is older than the set's `livenesswindow` (or by S15, as
 before); ELIGIBLE again after a heartbeat that follows. `seated` holds at most `min(N_SLOTS, seats)`.
 
@@ -469,11 +469,19 @@ Result of `yed_getinfo`:
       "emergencyNoticeTtl": 64,
       "residualMinZat": 100000,
       "attestFeeBps": 2500,
-      "bondMinZat": 1000000000,
-      "bondMinLock": 200,
+      "bondMinZat": 500000000,
+      "bondMinFloorZat": 500000000,
+      "bondMinCapZat": 1000000000,
+      "bondShareBps": 500,
+      "bondMinLock": 0,
       "bondMaturity": 8,
       "ageCap": 64,
       "foundingWindow": 16,
+      "seats": 15,
+      "seatAgeUnit": 1152,
+      "seatAgeCap": 420480,
+      "seatMarginBps": 500,
+      "evictMarginBps": 500,
       "dormancyBlocks": 16,
       "dormancyMinBundles": 2,
       "dormancyCheck": 4,
@@ -489,8 +497,25 @@ B and C), which no mint can use. Every value in `params` other than the four has
 `attest.armMin` and `attest.carrierMode`, seven with the top-level `mintRequiresArmed`) is
 compiled into the network's parameter set (§3.1) — a wallet may display
 them but must not treat them as configurable. `params.attest` names are the v3 §3.1 rows in
-lowerCamelCase (`ATTEST_ARM_MIN` → `armMin`, `BOND_MIN` → `bondMinZat` in zatoshi, …);
-`carrierValueZat` is wallet policy and reported for display only.
+lowerCamelCase (`ATTEST_ARM_MIN` → `armMin`, …); `carrierValueZat` is wallet policy and reported for display
+only. **rpcversion 8 (D-Q-30):** the attestor bond minimum follows the YEC locked in YED vaults; no price is read.
+`bondMinFloorZat` (10,000 YEC since the owner's 2026-10-11 amendment, was 5,000; regtest 5), `bondMinCapZat` (20,000 YEC; regtest 10) and `bondShareBps` (500) are the
+parameters; `bondMinZat` is computed: the floor a `SET_JOIN` in the **next** block must meet, `clamp(⌈collateralZat ·
+bondShareBps / (10⁴ · nSlots)⌉, bondMinFloorZat, bondMinCapZat)` over the tip snapshot's `collateralZat` (ACTIVE and CLAIMING vaults: a claimed vault's collateral counts until its release) —
+5 % of all vault collateral backs the seats together; on mainnet the floor binds below ≈ 1.8 M YEC of collateral and the cap
+above ≈ 3.6 M YEC. A record is judged once, against the snapshot before its own join block; a seated or ELIGIBLE record is
+never re-judged as collateral moves. **Seat ranking and eviction (owner 2026-10-11, rpcversion 8, no bump):** seats rank by
+`seatWeight = bondZat × f(age)` with the log tenure factor `f` from 1.0 (no tenure) to 1.9 at `seatAgeCap` (one year;
+`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))`, `u = seatAgeUnit`, deterministic Q16 integer logs, `Log2Q16` in math.h), a seated attestor's counting
+×(1 + `seatMarginBps`/10⁴); the price statistic and attestor selection keep `weight = bondZat × min(age, ageCap)`. The attestor set
+is OPEN with `seats` (15) seats: a `SET_JOIN` into the full set evicts the member that is not live (`lastAct < h − livenessWindow`)
+of least seat weight, else the member of least seat weight when the new bond (at age 0) exceeds it by `evictMarginBps`; the evicted
+record becomes `WITHDRAWN` with `evicted: true` in `yed_listattestors`, its bond not frozen. `SET_REMOVE` and `SET_WINDDOWN` of the
+attestor set are invalid (`attestor-set-act`); equivocation is the only removal. **Seats re-review (2026-10-11):** a
+`SET_JOIN` of the attestor set whose bond is below `bondMinZat` at its block is invalid (`attestor-bond-below-min`), so
+every member becomes ELIGIBLE at maturity; an attestor's own attestations count as liveness only from a held mint,
+notice or claim whose bundle passes BUNDLE-1, with a refHeight within `REF_WINDOW` (one cached signature check per
+attestation); a transaction whose bundle would count but is not such an act is invalid (`liveness-unheld`).
 
 ### `yed_getstatehash [height]`
 
@@ -1186,7 +1211,10 @@ its `ageOrigin`); `seated` and `pinned` membership in `Snapshots[height].seated[
 (`null` when none); `poolFresh` whether this node's pool holds an attestation of this `seq` that
 a bundle for `R = height − REF_LAG` could cite (`R − ATTEST_MAX_AGE < citedHeight ≤ R`, as
 `yed_getinfo`). `founding` is whether the record's age runs from `triggerHeight` (v3 §3.7
-founding cohort; `false` while UNARMED). Empty list before the first registration.
+founding cohort; `false` while UNARMED). `seatWeight` (owner 2026-10-11) is the seat-ranking weight at `height` as a decimal
+string, `bondZat × SeatAgeFactorQ16(height − ageOrigin)` (Q16: divide by 65,536 for zat; without the seated ×1.05 hysteresis);
+`evicted` whether the record was evicted from the full set by a larger bond (status `WITHDRAWN`, bond not frozen). Empty list
+before the first registration.
 
 Result of `yed_listattestors`:
 
@@ -1210,6 +1238,8 @@ Result of `yed_listattestors`:
     "bondFrozen": false,
     "founding": true,
     "weight": "31000000000",
+    "seatWeight": "65801000000000",
+    "evicted": false,
     "seated": true,
     "pinned": false,
     "lastBundleHeight": 330,
@@ -1972,7 +2002,7 @@ Result of `yed_sweepcarriers`:
 
 ### `yed_registerattestor <bondYec> <lockBlocks> [flags]` (v3)
 
-Arguments: `bondYec` (number, decimal YEC, `≥ BOND_MIN`), `lockBlocks` (number, `≥
+Arguments: `bondYec` (number, decimal YEC, `≥` `yed_getinfo` `params.attest.bondMinZat`, D-Q-30), `lockBlocks` (number, `≥
 BOND_MIN_LOCK`; `bondLocktime = tip + 1 + lockBlocks`), `flags` (number, optional, default `0`;
 accepted and ignored since P4-b; it was the raw `u8` of proposal §5.2). **P4-b:** this is
 `set_join <attestorSetId> bondYec (tip + 1 + lockBlocks)` with a fresh wallet key as the member
@@ -1982,7 +2012,7 @@ change. The member key is `attestorPubKey` and the bond key at once (back up `wa
 afterwards). The bond is **not** `IsMine` (R6): the wallet finds it through `Attestors` by
 `bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in the result — it is assigned
 when the join confirms; read it from `yed_listattestors` by `attestorPubKey`; `flags` is always
-`{tier 0, pool false}`; `warning` is `""`; `maturesAt` is `tip + 1 + max(set maturity,
+`{tier 0, pool false}`; `warning` is `""`, or (D-Q-30 review B2) `"bond-near-min: …"` when `bondYec` is below `bondMinCapZat` and within 10 % of `params.attest.bondMinZat`: the join is judged at the snapshot before its own block, so if YED vault collateral grows before it confirms it becomes invalid (`attestor-bond-below-min`) and is not mined; post 10 % headroom, or `bondMinCapZat`, which always qualifies; `maturesAt` is `tip + 1 + max(set maturity,
 BOND_MATURITY)`. Refusals: `bond-below-min`, `lock-below-min` (the module's floor; also for
 `bondLocktime ≥ LOCKTIME_THRESHOLD`), `yellowback-no-attestor-set` (the network has none),
 `register-needs-admission` (`RPC_WALLET_ERROR`: the set is not open; the message carries the
@@ -2013,11 +2043,13 @@ Result of `yed_registerattestor`:
 Arguments: `seq` (number), `to` (string, optional; a transparent or `ys1…` destination; default
 a fresh own transparent address). Spends the bond outpoint of an attestor whose `bondPubKey`
 this wallet holds, after `bondLocktime` (`nLockTime = bondLocktime`, the CLTV path), signed by
-hand as the vault owner path is. Any status may withdraw once the locktime passes: IN-2 then
-marks the record WITHDRAWN (or, for an EJECTED record, only `bondSpentHeight`). `bondOut` is
+hand as the vault owner path is. **The bond exit delay (owner 2026-10-11):** only a `WITHDRAWN` record (the
+member left with `set_leave`, doc/vault-rpc.md, or was evicted) whose bond is not frozen, from `statusHeight +` the
+attestor set's maturity (`BOND_MATURITY`, 16,128; 8 on regtest), which is when the vault primitive releases the bond
+(`bad-vault-bond-locked` before); the record keeps its `statusHeight` and gains `bondSpentHeight`. `bondOut` is
 the zat paid to `to` net of the network fee. Refusals: `attest-unknown-seq`, `attest-key-not-held`
-(the bond key is not in this wallet), `bond-locked` (tip `< bondLocktime`), `bond-spent` (the
-outpoint is already spent), `bad-address`.
+(the bond key is not in this wallet), `bond-locked` (tip `< bondLocktime`; still a member; a frozen bond; or the
+next block `< statusHeight + BOND_MATURITY`), `bond-spent` (the outpoint is already spent), `bad-address`.
 
 Result of `yed_withdrawbond`:
 
@@ -2276,9 +2308,9 @@ provokes each.
 | `mint10-diverged` | `yed_estimatecollateral`, `yed_mint` | armed and `\|pFast − aMint\| · 10⁴ > DIVERGE_BPS_ATTEST · min(pFast, aMint)` (W17: the pools' fast median, the current market, not the lagging minimum `xMint`) — refused before any transaction is built: attestors at 2× the pools |
 | `notice-standing` | `yed_claimnotice` | a `Notices` record for the vault exists with `tip − notice.height ≤ EMERGENCY_NOTICE_TTL` (NOT-1's no-reset clause): post twice |
 | `notice-not-underwater` | `yed_claimnotice` | `collateralZat · pEmerg ≥ mintedCents · EMERGENCY_RATIO_BPS · COIN` under this node's bundle, or the snapshot at `R` is not armed: notice on a healthy vault |
-| `bond-below-min` | `yed_registerattestor` | `bondYec < BOND_MIN` (10 YEC on regtest): register with 9 |
-| `lock-below-min` | `yed_registerattestor` | `lockBlocks < BOND_MIN_LOCK` (200 on regtest), or the resulting `bondLocktime ≥ LOCKTIME_THRESHOLD` |
-| `bond-locked` | `yed_withdrawbond` | tip `< bondLocktime`: withdraw right after registering |
+| `bond-below-min` | `yed_registerattestor` | `bondYec <` the module's floor for a join in the next block (`params.attest.bondMinZat`, D-Q-30; 5 YEC on regtest with no vaults): register with 4 |
+| `lock-below-min` | `yed_registerattestor` | `lockBlocks < BOND_MIN_LOCK` (0 since the bond exit delay: a negative `lockBlocks`), or the resulting `bondLocktime ≥ LOCKTIME_THRESHOLD` |
+| `bond-locked` | `yed_withdrawbond` | still a member, a frozen bond, or within `BOND_MATURITY` of leaving (the bond exit delay): withdraw right after registering |
 | `bond-spent` | `yed_withdrawbond` | the bond outpoint is already spent (`bondSpentHeight` set): withdraw twice |
 | `not-dormant` | `yed_revive` | the record's status is not DORMANT: revive an ELIGIBLE attestor |
 | `not-equivocation` | `yed_reportequivocation` | any EQV-1 condition fails — different `seq`s, different `citedHeight`s, equal prices, a bad signature, a `seq` whose bond is spent or already frozen (P4-b), or a `citedHeight` whose hash is not in the index (two sides of a fork): report the same attestation twice |

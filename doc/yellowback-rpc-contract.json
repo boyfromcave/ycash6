@@ -76,13 +76,13 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "bondYec < BOND_MIN (10 YEC on regtest): register with 9"
+      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-30; 5 YEC on regtest with no vaults): register with 4"
     },
     "bond-locked": {
       "raisedBy": [
         "yed_withdrawbond"
       ],
-      "when": "tip < bondLocktime: withdraw right after registering"
+      "when": "still a member, a frozen bond, or within BOND_MATURITY of leaving (the bond exit delay): withdraw right after registering"
     },
     "bond-spent": {
       "raisedBy": [
@@ -224,7 +224,7 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "lockBlocks < BOND_MIN_LOCK (200 on regtest), or the resulting bondLocktime ≥ LOCKTIME_THRESHOLD"
+      "when": "lockBlocks < BOND_MIN_LOCK (0 since the bond exit delay: a negative lockBlocks), or the resulting bondLocktime ≥ LOCKTIME_THRESHOLD"
     },
     "mempool-check-failed:<verdict>": {
       "raisedBy": [
@@ -774,8 +774,11 @@
           "attestFeeBps": 2500,
           "attestMaxAge": 8,
           "bondMaturity": 8,
-          "bondMinLock": 200,
-          "bondMinZat": 1000000000,
+          "bondMinCapZat": 1000000000,
+          "bondMinFloorZat": 500000000,
+          "bondMinLock": 0,
+          "bondMinZat": 500000000,
+          "bondShareBps": 500,
           "bundleMax": 6,
           "carrierMode": "scriptsig",
           "carrierValueZat": 10000,
@@ -786,6 +789,7 @@
           "emergencyNoticeTtl": 64,
           "emergencyPersist": 4,
           "emergencyRatioBps": 10500,
+          "evictMarginBps": 500,
           "foundingWindow": 16,
           "kSlack": 1,
           "mSelect": 2,
@@ -799,7 +803,11 @@
           "qHighBps": 6667,
           "qLowBps": 3333,
           "required": true,
-          "residualMinZat": 100000
+          "residualMinZat": 100000,
+          "seatAgeCap": 420480,
+          "seatAgeUnit": 1152,
+          "seatMarginBps": 500,
+          "seats": 15
         },
         "attestorSetId": "5e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e75",
         "claimDelay": 10,
@@ -1173,6 +1181,7 @@
         },
         "bondSpentHeight": null,
         "bondZat": 1000000000,
+        "evicted": false,
         "flags": {
           "pool": false,
           "tier": 0
@@ -1183,6 +1192,7 @@
         "pinned": false,
         "poolFresh": true,
         "registerHeight": 280,
+        "seatWeight": "65801000000000",
         "seated": true,
         "seatedSince": 300,
         "seq": 1,

@@ -233,7 +233,7 @@ class WalletPQAddressTest(BitcoinTestFramework):
 
         print('vault_release of an intent paying the wallet PQ key: by a third party, then by the owner after a restart')
         setid = n0.set_create({'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                               'maturity': 1, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})['setid']
+                               'maturity': 2, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})['setid']
         self.mine(1)
         assert_equal(n0.set_join(setid, 1, n0.getblockcount() + 500)['complete'], True)
         self.mine(2)

@@ -51,6 +51,8 @@ from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
 # ---------------------------------------------------------------------------
 # Constants (15.1 - 15.5)
 
+MIN_SET_MATURITY = 16128                # D-Q-31: the least signer-set maturity (14 days) on mainnet and testnet
+MIN_SET_MATURITY_REGTEST = 2            # ... and on regtest (Consensus::Params::nVaultMinSetMaturity)
 VAULT_BRANCH_ID = 0x6D5B7A31            # also in util.py (15.1); defined here so this module stands alone
 
 OP_0 = 0x00
@@ -1537,6 +1539,7 @@ class Member(object):
         self.last_act = join_height + maturity
         self.status = MEMBER_ACTIVE
         self.bond_frozen = False
+        self.join_ordinal = 0          # the set's join_count after this member's latest SET_JOIN (MemberRecord.joinOrdinal)
 
     def to_json(self):
         return {'memberKey': self.key.hex(), 'bondOutpoint': {'txid': self.bond_outpoint[0], 'vout': self.bond_outpoint[1]},
@@ -1554,6 +1557,7 @@ class SetState(object):
         self.epoch = 0
         self.epoch_basis = 0
         self.epoch_used = 0
+        self.join_count = 0            # SET_JOINs admitted (SetRecord.joinCount; a module's seq = ordinal - 1)
         self.members = {}              # key33 -> Member (insertion order = join order)
 
     def current(self, h):
@@ -1617,12 +1621,17 @@ class VaultModel(object):
     ``check_tx(tx, height)`` predicts the mempool answer at ``height`` (= tip + 1).
     ``disconnect_block()`` undoes the last connected block."""
 
-    def __init__(self, activation_height=1, branch_id=VAULT_BRANCH_ID, check_scripts=True):
+    def __init__(self, activation_height=1, branch_id=VAULT_BRANCH_ID, check_scripts=True,
+                 min_set_maturity=MIN_SET_MATURITY_REGTEST, liveness_hook=None):
         self.activation_height = activation_height
+        # the module liveness hook (vault/module.h Module::Liveness): liveness_hook(tx, h, model) -> [(setId32, key33,
+        # height)], applied after each transaction's act; None = no module (the default)
+        self.liveness_hook = liveness_hook
+        self.min_set_maturity = min_set_maturity   # D-Q-31: SET_CREATE maturity floor (mainnet 16,128)
         self.branch_id = branch_id
         self.check_scripts = check_scripts
         self.sets = {}               # setId32 -> SetState
-        self.bonds = {}              # (txid, n) -> [setId32, key33, frozen]: the frozen-bond index
+        self.bonds = {}              # (txid, n) -> [setId32, key33, frozen, exitHeight]: the bond index (exitHeight 0 = a member's)
         self.coins = {}              # (txid, n) -> Coin
         self.tip = activation_height - 1
         self._undo = []
@@ -1714,6 +1723,9 @@ class VaultModel(object):
                     continue
                 if b[2]:
                     raise VaultError('bad-vault-bond-frozen')
+                # the bond exit delay (owner 2026-10-11): spendable from exitHeight + the set's maturity only
+                if not b[3] or h < b[3] + self.sets[b[0]].p['maturity']:
+                    raise VaultError('bad-vault-bond-locked')
                 m = self.sets[b[0]].members.get(b[1])
                 if m is not None and m.bond_outpoint == key and m.status == MEMBER_ACTIVE:
                     m.status = MEMBER_WITHDRAWN
@@ -1724,6 +1736,16 @@ class VaultModel(object):
                 raise VaultError('bad-vault-act-count')
             if acts:
                 self._apply_act(tx, txid, acts[0], h)
+            if self.liveness_hook is not None and not is_coinbase(tx):
+                for sid, key, at in self.liveness_hook(tx, h, self):
+                    s = self.sets.get(bytes(sid))
+                    m = None if s is None else s.members.get(bytes(key))
+                    b = None if m is None else self.bonds.get(m.bond_outpoint)
+                    if m is None or m.status != MEMBER_ACTIVE or m.bond_frozen or b is None or b[2]:
+                        continue
+                    if at >= h or at <= m.last_act:
+                        continue
+                    m.last_act = at
         for _i, key, _c in spent:
             self.coins.pop(key, None)
         for n, o in enumerate(tx.vout):
@@ -1899,6 +1921,8 @@ class VaultModel(object):
         if t == ACT_SET_CREATE:
             if sigs:
                 raise VaultError('bad-vault-act-sig', 'SET_CREATE takes none')
+            if a['maturity'] < self.min_set_maturity:
+                raise VaultError('bad-vault-act-params', 'maturity below the exit window (D-Q-31)')
             sid = txid_internal(txid)
             self.sets[sid] = SetState(sid, a, h)
             self.sets[sid].epoch = h // a['rateWindow']
@@ -1943,6 +1967,8 @@ class VaultModel(object):
                         raise VaultError('bad-vault-act-sig', 'admitKey')
             elif admit:
                 raise VaultError('bad-vault-act-sig', 'OPEN set takes only S_1')
+            if old is not None and old.bond_outpoint in self.bonds:     # one unspent bond per (set, key) (review B1)
+                raise VaultError('bad-vault-act-join', 'previous bond unspent')
             bv = a['bondVout']
             if bv >= len(tx.vout):
                 raise VaultError('bad-vault-act-bond')
@@ -1952,9 +1978,11 @@ class VaultModel(object):
             if a['bondLocktime'] < h + s.p['bondLockMin']:
                 raise VaultError('bad-vault-act-bond', 'locktime')
             m = Member(mk, (txid, bv), bo.nValue, a['bondLocktime'], h, s.p['maturity'])
+            s.join_count += 1
+            m.join_ordinal = s.join_count
             s.members.pop(mk, None)
             s.members[mk] = m
-            self.bonds[(txid, bv)] = [sid, mk, False]
+            self.bonds[(txid, bv)] = [sid, mk, False, 0]
         elif t == ACT_SET_HEARTBEAT:
             mk = bytes.fromhex(a['memberKey'])
             if keys != [mk] or not s.is_current(mk, h):
@@ -1963,13 +1991,25 @@ class VaultModel(object):
         elif t == ACT_SET_REMOVE:
             mk = bytes.fromhex(a['memberKey'])
             m = s.members.get(mk)
-            if m is None or m.status != MEMBER_ACTIVE:
-                raise VaultError('bad-vault-act-remove', 'target not active')
-            if len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys):
+            if m is None:
+                raise VaultError('bad-vault-act-remove', 'target not a member')
+            if m.status != MEMBER_ACTIVE:
+                # a slash after the exit (review A1): a cosigned burn of a REMOVED member whose bond is in its exit delay
+                b = self.bonds.get(m.bond_outpoint)
+                if m.status != MEMBER_REMOVED or a['burn'] != 1 or b is None or b[2] or not b[3]:
+                    raise VaultError('bad-vault-act-remove', 'target not active')
+                if len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys):
+                    raise VaultError('bad-vault-act-sig', 'removal signers')
+                m.bond_frozen = b[2] = True
+                return
+            own = keys == [mk] and not a['burn']        # a member's voluntary exit (owner 2026-10-11)
+            if not own and (len(keys) != th or mk in keys or any(not s.is_current(k, h) for k in keys)):
                 raise VaultError('bad-vault-act-sig', 'removal signers')
             m.status = MEMBER_REMOVED
             if a['burn']:
                 m.bond_frozen = self.bonds[m.bond_outpoint][2] = True
+            elif m.bond_outpoint in self.bonds:
+                self.bonds[m.bond_outpoint][3] = h          # the bond exit delay starts
         elif t == ACT_SET_WINDDOWN:
             if s.wind_down_height:
                 raise VaultError('bad-vault-act-winddown', 'already wound down')

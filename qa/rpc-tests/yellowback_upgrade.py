@@ -148,13 +148,13 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_raises_rpc('Method not found', n0.yed_getinfo)
         self.mine(ACTIVATION - n0.getblockcount())
         assert_equal(n0.vault_getinfo()['active'], True)
-        created = n0.set_create({'seats': 3, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                                 'open': True, 'maturity': 2})
+        created = n0.set_create({'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
+                                 'open': True, 'maturity': 8})   # the module adopts a set whose maturity is BOND_MATURITY (8 on regtest)
         self.mine()
         self.set_id = created['setid']
         joined = n1.set_join(self.set_id, 1, n0.getblockcount() + 300)
         assert 'txid' in joined, joined
-        self.mine(3)
+        self.mine(9)                        # past the set maturity (8): the member is current
         info = n0.set_getinfo(self.set_id)
         assert_equal((info['members'], info['current']), (1, 1))
 

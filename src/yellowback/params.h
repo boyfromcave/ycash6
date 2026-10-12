@@ -227,11 +227,22 @@ struct Params
     CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5): the zat floor of the residual threshold
     Cents residualMinCents;              //!< RED-5' (D-Q-23a): the residual threshold is max(residualMinZat, residualMinCents at the vault's pMint); 48 = $0.48
     int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1', H-4; regtest 2,500): the attestor share of the protocol fee (never of the early fee)
-    CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
-    int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
+    CAmount bondMinFloorZat;             //!< D-Q-30: the attestor bond minimum's floor, 10,000 YEC (owner 2026-10-11; was 5,000; regtest 5 YEC). Was
+                                         //!< BOND_MIN (20,000 YEC flat); see BondMinZat (state.h)
+    CAmount bondMinCapZat;               //!< D-Q-30: its cap, 20,000 YEC (regtest 10 YEC)
+    int bondShareBps;                    //!< D-Q-30: BOND_SHARE_BPS 500: the share of all YED vault collateral the N_SLOTS
+                                         //!< seats' bonds back together; minimum = clamp(ceil(collateral x bps / 10^4 / N_SLOTS), floor, cap)
+    int bondMinLock;                     //!< BOND_MIN_LOCK 0 (was 420,480): the bond is returned BOND_MATURITY after its exit (vault state)
     int bondMaturity;                    //!< BOND_MATURITY 16,128
     int ageCap;                          //!< AGE_CAP 207,360 (bond weight)
     int foundingWindow;                  //!< FOUNDING_WINDOW 8,064
+    int seatAgeUnit;                     //!< SEAT_AGE_UNIT 1,152 (u of SeatAgeFactorQ16, owner 2026-10-11; every network)
+    int seatAgeCap;                      //!< SEAT_AGE_CAP 420,480 (one year: the seat-tenure factor reaches 1.9; every network)
+    int seatMarginBps;                   //!< SEAT_MARGIN_BPS 500: a seated attestor's SeatWeight counts x1.05 in seat ranking
+    int evictMarginBps;                  //!< EVICT_MARGIN_BPS 500: a join into a full set evicts a live member only above x1.05
+    int attestorSeats;                   //!< ATTESTOR_SEATS 15: the module adopts only an OPEN attestor set of this many seats
+    int attestorLivenessMin;             //!< ATTESTOR_LIVENESS_MIN 1,152 (one day; regtest 16): the module adopts only an attestor
+                                         //!< set whose livenessWindow is at least this (seats review B3, 2026-10-11)
     int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128
     int dormancyMinBundles;              //!< DORMANCY_MIN_BUNDLES 20
     int dormancyCheck;                   //!< DORMANCY_CHECK 48 (S15)

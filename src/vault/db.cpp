@@ -25,6 +25,19 @@ const std::string& TipKey()
     return k;
 }
 
+const std::string& VersionKey()
+{
+    static const std::string k(1, KEY_VERSION);
+    return k;
+}
+
+std::string EncodeVersion()
+{
+    CDataStream ss(SER_DISK, PROTOCOL_VERSION);
+    ss << VAULT_DB_VERSION;
+    return std::string(ss.begin(), ss.end());
+}
+
 std::string EncodeTip(const uint256& hash, int64_t height)
 {
     CDataStream ss(SER_DISK, PROTOCOL_VERSION);
@@ -125,6 +138,7 @@ bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& p
     }
     batch.Write(RawKey(UndoKey(hash)), undoValue);
     batch.Write(RawKey(TipKey()), tipValue);
+    batch.Write(RawKey(VersionKey()), EncodeVersion());
 
     std::lock_guard<std::mutex> lock(cs);
     if (!db->WriteBatch(batch, false)) {
@@ -133,6 +147,7 @@ bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& p
     }
     for (const auto& kv : state.Changes()) CachePut(kv.first, kv.second);
     CachePut(TipKey(), tipValue);
+    CachePut(VersionKey(), EncodeVersion());
     return true;
 }
 
@@ -165,6 +180,20 @@ bool VaultDB::DisconnectBlock(const uint256& hash, const uint256& prevHash, int6
     for (const auto& e : undo.entries) CachePut(e.first, e.second);
     CachePut(TipKey(), tipValue);
     return true;
+}
+
+uint32_t VaultDB::GetVersion() const
+{
+    std::string v;
+    if (!Read(VersionKey(), v)) return 1;
+    try {
+        CDataStream ss(v.data(), v.data() + v.size(), SER_DISK, PROTOCOL_VERSION);
+        uint32_t version = 0;
+        ss >> version;
+        return version;
+    } catch (const std::exception&) {
+        return 0;
+    }
 }
 
 bool VaultDB::Flush()

@@ -34,7 +34,7 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes, wait_and_assert_operationid_status
 from test_framework.yellowback_util import (
-    ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
+    ATTESTOR_A, ATTESTOR_B, BOND_MATURITY, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
     TOKEN_VALUE, YellowbackTestFramework, wallet_network_fee, assert_same_statehash, pubkey_to_address, set_quote,
     usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW, ym,
 )
@@ -126,7 +126,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
 
 # Rule: REG-A1
         print('yed_registerattestor on nodes 6 and 7 (refusals first), one per block: seq 0 and 1')
-        assert_rpc_error('bond-below-min', wa.yed_registerattestor, 9, BOND_MIN_LOCK)
+        assert_rpc_error('bond-below-min', wa.yed_registerattestor, 2, BOND_MIN_LOCK)   # D-Q-30: below the 5-YEC floor (no vaults yet)
         assert_rpc_error('lock-below-min', wa.yed_registerattestor, 10, BOND_MIN_LOCK - 1)
         reg = {}
         for node, name in ((wa, 'A'), (wb, 'B')):
@@ -574,21 +574,37 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_same_statehash(self.enforcing_nodes(), 'claims')
 
 # Rule: IN-2 R6
-        print('the bond: never spent by sendtoaddress; withdrawable after the locktime from a wallet that imported the bond key')
+        print('the bond: never spent by sendtoaddress; withdrawable after set_leave + BOND_MATURITY from a wallet that imported the bond key')
         assert_equal([u for u in wa.listunspent(0) if u['scriptPubKey'].startswith('a914')], [])
         wa.sendtoaddress(user.getnewaddress(), Decimal(str(wa.getbalance())) - Decimal('0.01'))
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(wa.gettxout(reg[0]['txid'], 0)['value'], Decimal(10))
         print('  tip %d, bondLocktime %d (LOCK_BLOCKS %d)' % (user.getblockcount(), reg[0]['bondLocktime'], LOCK_BLOCKS))
-        assert reg[0]['bondLocktime'] > user.getblockcount() + 1, 'LOCK_BLOCKS leaves no headroom before the withdrawal refusals: raise it'
+        # the refusals below no longer need the script lock ahead: a member's bond is locked by the vault state
+        # until it leaves and BOND_MATURITY passes (the bond exit delay)
         assert_rpc_error('bond-locked', wa.yed_withdrawbond, 0)
         assert_rpc_error('attest-key-not-held', wb.yed_withdrawbond, 0)
         assert_rpc_error('attest-unknown-seq', wa.yed_withdrawbond, 77)
         claimant.importprivkey(wa.dumpprivkey(reg[0]['bondKeyAddress']), 'restored-bond', True)     # -rescan in place (R6: found through Attestors)
         assert_equal(claimant.validateaddress(reg[0]['bondKeyAddress'])['ismine'], True)
         assert_rpc_error('bond-locked', claimant.yed_withdrawbond, 0)
-        self.mine_round_robin(POOLS, reg[0]['bondLocktime'] - user.getblockcount())
+        # the bond exit delay (owner 2026-10-11): the member leaves (set_leave: its own SET_REMOVE), then waits
+        # BOND_MATURITY; the record is WITHDRAWN from the leave's block
+        setid = user.yed_getinfo()['upgrade']['attestorSetId']
+        member = {int(x['seq']): x for x in user.yed_listattestors()}[0]['attestorPubKey']
+        left = wa.set_leave(setid, member)
+        assert_equal((left['memberkey'], left['bondspendableat'] - left['exitheight']), (member, BOND_MATURITY))
+        self.sync_all()
+        self.mine(POOLS[1])
+        note_attestor_status(0, 'WITHDRAWN')
+        assert_equal(user.getblockcount(), left['exitheight'])
+        target = max(reg[0]['bondLocktime'], left['bondspendableat'] - 1)
+        if user.getblockcount() < target - 1:
+            self.mine_round_robin(POOLS, target - 1 - user.getblockcount())
+        if user.getblockcount() + 1 < left['bondspendableat']:
+            assert_rpc_error('bond-locked', claimant.yed_withdrawbond, 0)
+        self.mine_round_robin(POOLS, target - user.getblockcount())
         wd = claimant.yed_withdrawbond(0)
         rawwd = claimant.getrawtransaction(wd['txid'], 1)
         assert_equal((wd['seq'], wd['bondZat'], wd['bondOut']), (0, 10 * COIN, 10 * COIN - wallet_network_fee(rawwd)))
@@ -596,7 +612,6 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(rawwd['vout'][0]['scriptPubKey']['addresses'], [wd['to']])
         self.sync_all()
         self.mine(POOLS[2])
-        note_attestor_status(0, 'WITHDRAWN')
         assert_equal(wa.gettxout(reg[0]['txid'], 0), None)
         assert_rpc_error('bond-spent', wa.yed_withdrawbond, 0)
         assert_rpc_error('bond-spent', claimant.yed_withdrawbond, 0)

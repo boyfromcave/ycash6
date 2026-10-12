@@ -460,7 +460,7 @@ class VaultPrimitiveTest(VaultTestBase):
         W = 25
         self.mine_to((self.tip() // W + 1) * W)    # create, join, lock and the first attempt in one epoch
         sid, admit = self.create_set('R', seats=1, unlock_threshold=1, cancel_threshold=1, slash_threshold=1,
-                                     rate_limit_bps=5000, rate_window=W, maturity=1)
+                                     rate_limit_bps=5000, rate_window=W, maturity=2)
         r = v.fixed_secret('R-member')
         self.join(sid, r, [admit], 'JOIN R member')
         self.mine()
@@ -601,7 +601,7 @@ class VaultPrimitiveTest(VaultTestBase):
 
         print('  a SET_REMOVE reorged out by a longer chain (both nodes disconnect it)')
         sidu, admit = self.create_set('U', seats=2, unlock_threshold=1, cancel_threshold=1, slash_threshold=1,
-                                      maturity=1)
+                                      maturity=2)
         u0, u1 = secrets('U-member', 2)
         self.join(sidu, u0, [admit], 'JOIN U u0')
         self.join(sidu, u1, [admit], 'JOIN U u1')

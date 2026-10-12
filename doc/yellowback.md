@@ -100,10 +100,29 @@ becomes claimable. Two independent populations supply it.
 
 Attestor `seq`s are a 16-bit counter that never reuses a number: after 65,536 registrations no
 further attestor can be registered, so the attestation layer would be exhausted permanently. With
-`BOND_MIN` at 20,000 YEC and a one-year lock the concurrent set is bounded near supply / 20,000
-(about 1,000), so exhaustion takes decades; the bound is a parameter-review item if `BOND_MIN`
-ever drops, not a run-time concern. The per-block scan of every attestor record is linear in that
+the bond minimum at 10,000 YEC at the lowest (D-Q-30's floor, owner 2026-10-11) at most supply / 10,000 (about
+1,700) bonds can be held at once, and since the bond exit delay (no fixed lock) a bond is held at least `BOND_MATURITY`
+(14 days) after its record leaves, so registrations run at most about 1,700 per 14 days: exhaustion takes the whole
+supply churned for about a year and a half at the least (65,536 / 1,700 × 14 days); the bound is a parameter-review
+item, not a run-time concern. The per-block scan of every attestor record is linear in that
 same count.
+
+**Attestations as liveness are bounded, not priced (focused review, 2026-10-11).** A member's attestation carried by a
+held MINT, CLAIM_NOTICE or REDEEM claim refreshes its `lastAct` in the vault primitive and in the index alike. The
+signature checks this costs are not counted as sigops. They are bounded, not free (final review B-1): the structural
+checks run first, then one signature check per attestation whose seq names a live member, before the held-act gate --
+so a junk MINT, CLAIM_NOTICE or REDEEM costs about one uncached verification when it names no seat a signer holds and
+about k + 1 with k such seats (at most `BUNDLE_MAX`, 6), and the gate's whole-BUNDLE-1 check then re-reads the same
+entries. Both go through the node's signature cache (keyed by attestation, block hash and public key), so the primitive
+and the index verify each signature once; past `SIG_CACHE_ENTRIES` (16,384) entries evicted under load are verified
+again, at most doubling that cost. A transaction whose bundle would refresh liveness without being a held act whose
+bundle passes the whole BUNDLE-1 is invalid (`liveness-unheld`); one whose bundle credits nobody is unaffected.
+
+**Known limit: attestor seq exhaustion (final review B-4).** The attestor set's members are numbered by a 16-bit `seq`,
+one per `SET_JOIN` ever admitted, rejoins included. After 65,536 joins every further `SET_JOIN` of the attestor set is
+invalid (`attestor-seq-exhausted`) for good, so the set can no longer admit members (the primitive and the index stay in
+agreement). Each join costs a bond of at least `bondMinFloorZat` held for at least `BOND_MATURITY` after it leaves, so
+reaching the limit is impractical (see the bound above); it is recorded here as a parameter-review item.
 
 ## Configuration
 
@@ -115,6 +134,16 @@ flag can name it, so a regtest node starts with the vault upgrade alone, creates
 `set_create` once the chain is past `<h>`, and restarts with `-yellowbackattestorset`
 (`doc/yellowback-devnet.md` §2 walks through it). Without the attestor set the `yed_*` commands
 are not registered.
+
+**Regtest caveat: a node without `-yellowbackattestorset` can fork.** The module decides parts of the
+primitive's consensus for its attestor set through hooks — which member a join into the full set displaces,
+the liveness an attestation proves, the ejection EQV-1 makes, and the refusal of a `SET_REMOVE` / `SET_WINDDOWN`
+of the set (seats review B5). A regtest node that has the vault upgrade but not the flag runs none of these
+and rejects (or accepts) blocks the other nodes accept (or reject) once such a transaction is mined. On
+mainnet and testnet the set is compiled in with the activation, so every upgraded node runs them. Give every
+regtest node the flag once the set exists — the test harness and the devnet do, except the harness's and the
+devnet's "stock" node 1, which models a node without Yellowback and must not be driven through those
+transactions (restart it with the flag first, as `yellowback_attest_rejoin.py` does).
 
 Where Yellowback is live the node refuses `-prune` (the index rebuilds from blocks on disk), and a
 node whose index is unhealthy stops rather than validate blocks without it (*Rebuilding the

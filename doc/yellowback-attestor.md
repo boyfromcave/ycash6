@@ -30,18 +30,38 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   longer applies: whoever holds the attestor node's wallet can spend the bond after
   `bondLocktime` (given up for a single registry, upgrade plan §15.10 P4-b).
 - **Heartbeats**: the set's member dormancy makes an attestor DORMANT when its `lastAct` is older
-  than the set's `livenesswindow`, and signing prices is not an act. `yellowback-attest attest`
+  than the set's `livenesswindow`. Since the seats review (B2, 2026-10-11) an attestation of yours used in a held
+  mint, registered notice or claim (its bundle passing BUNDLE-1, its refHeight within `REF_WINDOW`) also counts:
+  `lastAct` rises to its `citedHeight` (in the primitive and the mirror alike), so an attestor whose prices are used
+  stays live; heartbeats still cover quiet periods. `yellowback-attest attest`
   sends `set_heartbeat <attestorSetId> <memberKey>` every `heartbeat_blocks` blocks (default
   1,152 ≈ a day; keep it well below the set's `livenesswindow`, `set_getinfo <attestorSetId>`).
   The v3 dormancy (selected and absent, below) still applies on top.
 - **Revival is a `SET_HEARTBEAT`** (`yed_revive <seq> <priceMicroUsd>` sends it and still returns a
   freshly signed attestation): the record is ELIGIBLE again at that block.
-- **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below `BOND_MIN`
-  or locked for less than `BOND_MIN_LOCK` is recorded but never becomes ELIGIBLE.
+- **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-30: 5 % of all YEC locked
+  in YED vaults spread over the 9 seats, never below 10,000 YEC nor above 20,000 YEC; `yed_getinfo`
+  `params.attest.bondMinZat` is the floor for a join in the next block) is **invalid** (`attestor-bond-below-min`,
+  seats re-review 2026-10-11: no member that can never become ELIGIBLE holds a seat); a join at or above it becomes
+  ELIGIBLE at maturity. It is judged once, at registration; a seated attestor is never re-judged.
+  **Post headroom:** the floor is judged at the snapshot before the join's own block, so a bond sized at
+  exactly today's `bondMinZat` can fall short if vault collateral grows before it confirms — and the join then
+  leaves the mempool unmined. Post at least 10 % above `bondMinZat` (`yed_registerattestor` warns
+  `bond-near-min` otherwise), or `bondMinCapZat` (20,000 YEC), which always qualifies.
 - **Ejection freezes the bond.** EQV-1 (two prices, one height) ejects the member *and* freezes
   its bond in the set: the bond can never be withdrawn, and the key never becomes ELIGIBLE again.
-  `SET_REMOVE` by the set (with or without burn) ejects too; without burn the bond is returned at
-  its locktime and the key may join again.
+  Equivocation is the **only** removal (owner 2026-10-11): `SET_REMOVE` and `SET_WINDDOWN` of the attestor
+  set are invalid (`attestor-set-act`), so members cannot vote one another out.
+- **The set is open, 15 seats, and a larger bond can evict.** The module adopts the attestor set only
+  when it is OPEN with 15 seats. A join into the full set evicts one member: first a member that is not
+  live (`lastAct < h − livenessWindow`: no heartbeat and no carried attestation for the liveness window), the
+  one of least seat weight; else the member of least seat weight, only when the new bond exceeds that seat
+  weight by 5 % (`evictMarginBps`). No join evicts with a bond below `bondMinFloorZat` (10,000 YEC; seats review
+  B2: no dust evictions; the floor, not the collateral-based minimum, because the primitive's displacement hook
+  reads no module state). The module adopts the set only when its `livenesswindow` is at least
+  `ATTESTOR_LIVENESS_MIN` (1,152 blocks, one day; regtest 16; review B3). The evicted record becomes `WITHDRAWN`
+  with `evicted: true`; its bond is **not** frozen and is returned `BOND_MATURITY` after the eviction, and the
+  key may join again once that bond is spent. Otherwise a join into the full set is refused (`bad-vault-act-seats`).
 - `yed_listattestors` rows carry `lastAct` and `bondFrozen`; `set_getinfo <attestorSetId>` shows
   the same members from the primitive's side.
 
@@ -64,8 +84,8 @@ system; YED is the unit.
   `relays = ["https://relay.you.example"]` (your own, or one the Ycash project lists for mainnet)
   or `relays = ["none"]` with direct peers only. Either way, what leaves your machine is 74
   public bytes per interval and nothing else.
-- **No periodic transactions.** Registration is one transaction; withdrawal, a year or more
-  later, is one more. Attestations are 74-byte gossip messages, never on chain unless a minter
+- **No periodic transactions.** Registration is one transaction; leaving (`set_leave`) is one more and
+  the withdrawal, 14 days later, a third. Attestations are 74-byte gossip messages, never on chain unless a minter
   or claimant carries them (or someone proves an equivocation with them).
 - **No hot wallet beyond the node's own.** The node holds the hot key and signs; the only spend
   it may ever make on your behalf is the rare `yed_revive`, funded from whatever confirmed YEC
@@ -93,20 +113,22 @@ Equivocation is slashed. Two prices signed for one height by one attestor (EQV-1
 conflicting set signatures by one member (`SET_EQUIVOCATION`), eject the member from the YED
 attestor set and **freeze its bond**: the vault primitive refuses every later spend of a frozen
 bond (`bad-vault-bond-frozen`), so the bond is lost even after its time-lock expires. The set can
-also remove a member with a burn (`SET_REMOVE`), which freezes the bond the same way. Every other
+not remove members by vote (`SET_REMOVE` of the attestor set is invalid). Every other
 misbehaviour costs ejection or dormancy and a bond that earns nothing until it unlocks; attestors
 can **grief but not extract** — no direction the price is pushed in pays them (proposal §10.3).
 
 What you need: an upgraded `ycashd` on a network where Yellowback is live (no payout address, no
-mining), outbound connectivity, a bond of at least `BOND_MIN` (20,000 YEC on mainnet) you can lock
-for at least `BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no
+mining), outbound connectivity, a bond of at least `params.attest.bondMinZat` (D-Q-30 on mainnet: 5 % of YED vault collateral over 9
+seats, between 5,000 and 20,000 YEC; a larger bond outranks smaller ones
+for a seat, and tenure adds up to ×1.9 over a year) — no fixed lock: you can leave any time and the bond
+returns 14 days after you leave (below) — and price sources. No inbound port, no
 domain, no funded hot wallet beyond the node's own for the rare `yed_revive`.
 
 ## Registration
 
 ```
 ycashd                                              # any upgraded node; no payout address, no mining
-ycash-cli yed_registerattestor 20000 420480         # once (a SET_JOIN); then wait BOND_MATURITY
+ycash-cli yed_registerattestor 20000 0              # once (a SET_JOIN); then wait BOND_MATURITY
 yellowback-attest attest --conf attest.toml          # forever: polls, yed_signattestation, gossips
 ```
 
@@ -121,7 +143,7 @@ weeks), then `ELIGIBLE`; `yed_listattestors` shows your `seq` — the attestor's
 on — once the transaction confirms.
 
 **A bond cannot be topped up.** To change it, register a new identity (new keys, new `seq`, age
-from zero) and let the old one go dormant and withdraw at its locktime. **Back up `wallet.dat`
+from zero) and let the old one leave (`set_leave`) and withdraw 14 days later. **Back up `wallet.dat`
 right after registering** — both keys came from the keypool, and a backup taken before the
 registration does not contain them (Ycash 4.5 transparent keys are not HD).
 
@@ -132,8 +154,8 @@ approval (proposal §5.3). Duplicate hot keys are refused (REG-A1) unless the ea
 ## Bond key hygiene
 
 The registering wallet holds both keys. The hot key must stay in it — `yed_signattestation` uses
-it every ten blocks. The bond key is used by exactly one command, `yed_withdrawbond`, a year or
-more later; until then it is worth `bondYec` to whoever holds it, and it collects your fees.
+it every ten blocks. The bond key is used by exactly one command, `yed_withdrawbond`, 14 days
+after you leave; until then it is worth `bondYec` to whoever holds it, and it collects your fees.
 
 Two addresses are involved, and only one of them takes a private key: `bondAddress` (in
 `yed_registerattestor`, `yed_listattestors` and `yed_decodepayload`) is the **P2SH address of the
@@ -288,12 +310,20 @@ the trigger) is a **founding member** and accrues age from `triggerHeight`, so n
 having registered a block earlier than the rest. Later registrants age from their own
 `registerHeight`.
 
-**Seating.** At every snapshot the `N_SLOTS` (9) eligible attestors with the greatest
-`weight = bondZat · min(age, AGE_CAP)` are **seated**; a transaction's bundle draws `M_SELECT +
-K_SLACK` (4 + 2) of the seated by a hash of the reference block, and at least `M_SELECT` of the
-selected must be in it. Being seated, bonded and reachable is what earns; latency does not. An
-unseated attestor keeps publishing, keeps its age, and takes the lowest seat when its weight passes
-the holder's.
+**Seating (owner 2026-10-11).** At every snapshot the `N_SLOTS` (9) eligible attestors with the greatest
+**seat weight** are **seated**: `seatWeight = bondZat · f(age)`, where the tenure factor
+`f = 1 + 0.9 · (lg(u + a) − lg(u)) / (lg(u + cap) − lg(u))` (`u` = `SEAT_AGE_UNIT` 1,152 blocks, one day;
+`cap` = `SEAT_AGE_CAP` 420,480, one year; `a` = age clamped to `[0, cap]`; deterministic Q16 integer logs, at most 1/65536 below the true floor) runs from
+1.0 at registration to 1.9 at a year — 1.317 at a week, 1.63 at six months. A currently seated attestor's
+seat weight counts ×1.05 (`SEAT_MARGIN`), so seats do not flap between near-equal bonds. Consequences: a new
+20,000 YEC bond outranks 8,000 YEC at any tenure; a bond 1.5× larger outranks a week-old member but not a
+year-old one. The same seat weight (from the join height) decides eviction from the full 15-seat set (above).
+A transaction's bundle draws `M_SELECT + K_SLACK` (4 + 2) of the seated by a hash of the reference block,
+and at least `M_SELECT` of the selected must be in it; the bundle statistic and that draw still weigh by
+`weight = bondZat · min(age, AGE_CAP)`. Being seated, bonded and reachable is what earns; latency does not.
+An unseated attestor keeps publishing, keeps its age, and takes the lowest seat when its seat weight passes
+the holder's (with the 5 % margin). `yed_listattestors` shows `seatWeight` (in Q16: divide by 65,536 for zat)
+beside `weight`.
 
 ## Dormancy and revival
 
@@ -322,11 +352,23 @@ separate and stays safe if it stayed cold.
 
 ## Withdrawal
 
-After `bondLocktime`, `yed_withdrawbond <seq> [to]` spends the bond to any address; the record
-becomes `WITHDRAWN` (an ejected record stays `EJECTED`, the spend only recorded). Before
-`bondLocktime` the command refuses (`bond-locked`); the coin is time-locked by consensus, not by
-the overlay, so nothing shorter exists. The hot key is then free to be discarded; a withdrawn
-attestor's hot key may register again.
+**The bond exit delay (owner 2026-10-11).** There is no one-year lock: an attestor can leave at any time,
+and its bond returns `BOND_MATURITY` (16,128 blocks, 14 days; 8 on regtest) after it leaves, evicted or
+voluntary. The lock lives in the vault primitive's state, not in the bond script (`BOND_MIN_LOCK` is 0; the
+attestor set's maturity is `BOND_MATURITY`, the delay): a bond is spendable only from its member's
+`exitHeight + maturity`; before that the primitive refuses it (`bad-vault-bond-locked`).
+
+1. **Leave**: `set_leave <attestorSetId> [memberkey]` broadcasts the member's own `SET_REMOVE`, signed by its
+   key alone, without burn — the one `SET_REMOVE` of the attestor set that is valid. The record is
+   `WITHDRAWN` from that block (no seat, no selection), `statusHeight` the exit height. An eviction (above)
+   starts the same clock.
+2. **Wait** `BOND_MATURITY` blocks. You are still slashable: an equivocation proved during the delay ejects
+   you and freezes the bond for good.
+3. **Withdraw**: `yed_withdrawbond <seq> [to]` spends the bond to any address (the record keeps its
+   `statusHeight`; `bondSpentHeight` is set). Before `statusHeight + BOND_MATURITY`, while still a member, or
+   with a frozen bond it refuses (`bond-locked`).
+
+The hot key is then free to be discarded; a withdrawn attestor's key may register again.
 
 ## Quick reference
 
@@ -339,6 +381,7 @@ attestor's hot key may register again.
 | sign (the agent does this) | `yed_signattestation <seq> <priceMicroUsd> [citedHeight]` | `attest-unknown-seq`, `attest-key-not-held`, `equivocation-guard`, `attest-range`, `attest-stale` |
 | return from dormancy | `yed_revive <seq> <priceMicroUsd>` | `not-dormant`, `attest-key-not-held`, `equivocation-guard` |
 | report someone's equivocation | `yed_reportequivocation <hexA> <hexB>` | `not-equivocation` |
+| leave the set (starts the 14-day delay) | `set_leave <attestorSetId> [memberkey]` | `bad-vault-act-remove` (not an active member) |
 | withdraw the bond | `yed_withdrawbond <seq> [to]` | `bond-locked`, `bond-spent`, `attest-key-not-held` |
 
 Every identifier is defined in `doc/yellowback-rpc.md`. The two calibration measurements that
