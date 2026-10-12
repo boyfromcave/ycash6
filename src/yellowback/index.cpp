@@ -22,6 +22,7 @@
 #include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
+#include "vault/act.h"
 #include "vault/template.h"
 #include "consensus/params.h"
 
@@ -533,6 +534,11 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
         vault::VaultParams vp;
         vault::IntentParams ip;
         if ((vault::ParseVault(o.scriptPubKey, vp) && vp.tag == YED_TAG) || (vault::ParseIntent(o.scriptPubKey, ip) && ip.tag == YED_TAG)) relevant = true;
+    }
+    // seats re-review: an act on the attestor set (a SET_JOIN may be below BondMinZat: attestor-bond-below-min)
+    for (const CTxOut& o : tx.vout) {
+        vault::Act act;
+        if (vault::IsActOutput(o.scriptPubKey) && !vault::DecodeAct(o.scriptPubKey, act) && act.TargetSet() == p.attestorSetId) relevant = true;
     }
     if (!relevant) return std::nullopt;
     // The module's validity at the next height by ProcessTx on a discarded overlay, exactly as FilterTemplate
