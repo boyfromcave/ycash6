@@ -241,6 +241,8 @@ struct Params
     int seatMarginBps;                   //!< SEAT_MARGIN_BPS 500: a seated attestor's SeatWeight counts x1.05 in seat ranking
     int evictMarginBps;                  //!< EVICT_MARGIN_BPS 500: a join into a full set evicts a live member only above x1.05
     int attestorSeats;                   //!< ATTESTOR_SEATS 15: the module adopts only an OPEN attestor set of this many seats
+    int attestorLivenessMin;             //!< ATTESTOR_LIVENESS_MIN 1,152 (one day; regtest 16): the module adopts only an attestor
+                                         //!< set whose livenessWindow is at least this (seats review B3, 2026-10-11)
     int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128
     int dormancyMinBundles;              //!< DORMANCY_MIN_BUNDLES 20
     int dormancyCheck;                   //!< DORMANCY_CHECK 48 (S15)

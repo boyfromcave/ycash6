@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "aacf3c29f4e360faa1cc8985094cece29bec8ce5c91ab416949a597027c801a2";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "362f47a8650039b4b2ddb563564ab0b2a42b59d2a0f8b3ab41ee673a2bd14eef";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 11 since seat ranking and eviction and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -2776,15 +2776,17 @@ BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
     // a new 20,000 YEC bond beats 8,000 YEC at any tenure
     std::vector<SeatCandidate> old8k = { cand(0, 8000 * COIN, H - 10 * 420480LL, H) };
     BOOST_CHECK(EvictionVictim(old8k, H, 20000 * COIN, LW, P).has_value());
-    // a member that is not live goes first, whatever its weight, and with any bond
+    // a member that is not live goes first, whatever its weight, with any bond at the module's floor -- never below
+    // it (seats review B2: no dust evictions)
     m.push_back(cand(3, 1000 * COIN, H - 420480, H - LW - 1));
-    BOOST_CHECK(EvictionVictim(m, H, 1, LW, P) == std::optional<CPubKey>(key(3)));
+    BOOST_CHECK(EvictionVictim(m, H, P.bondMinFloorZat, LW, P) == std::optional<CPubKey>(key(3)));
+    BOOST_CHECK(!EvictionVictim(m, H, P.bondMinFloorZat - 1, LW, P).has_value());
     m[3].lastAct = H - LW;                                                             // lastAct = H - LW is live
-    BOOST_CHECK(!EvictionVictim(m, H, 1, LW, P).has_value());
+    BOOST_CHECK(!EvictionVictim(m, H, P.bondMinFloorZat, LW, P).has_value());
     // among the not-live, the least weight; ties by key bytes
     m.push_back(cand(4, 10 * COIN, H - 420480, H - LW - 5));
     m[3].lastAct = H - LW - 1;
-    BOOST_CHECK(EvictionVictim(m, H, 1, LW, P) == std::optional<CPubKey>(key(4)));
+    BOOST_CHECK(EvictionVictim(m, H, P.bondMinFloorZat, LW, P) == std::optional<CPubKey>(key(4)));
     std::vector<SeatCandidate> tie = { cand(5, 8 * COIN, H - 50, H), cand(6, 8 * COIN, H - 50, H) };
     const CPubKey lo = std::lexicographical_compare(key(5).begin(), key(5).end(), key(6).begin(), key(6).end()) ? key(5) : key(6);
     BOOST_CHECK(EvictionVictim(tie, H, 100 * COIN, LW, P) == std::optional<CPubKey>(lo));

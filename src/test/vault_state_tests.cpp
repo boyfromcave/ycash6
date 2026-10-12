@@ -1528,6 +1528,88 @@ BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1_yed)
     yellowback::ClearModuleParams();
 }
 
+BOOST_AUTO_TEST_CASE(module_liveness_hook)
+{
+    // Seats review B2 (2026-10-11): a member's price attestation carried by a CLAIM_NOTICE (or MINT, REDEEM) raises its
+    // lastAct to the attestation's citedHeight in the primitive, as a heartbeat would; never lowers it, never for a
+    // non-member, an EQUIVOCATION payload, a forged signature or a cited height at or above the block.
+    Chain c;
+    const CKey k1 = MakeKey(61), k2 = MakeKey(62), outsider = MakeKey(63);
+    SetCreateBody sp = Params(true);
+    sp.maturity = 2;
+    const SetId s = SetWithMembers(c, {k1, k2}, sp);
+    c.Empty(20);
+    auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xcd; return x; };
+    BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
+    auto att = [&](const CKey& k, int64_t at, bool forge = false) {
+        yellowback::Attestation a;
+        a.seq = 3;
+        a.priceMicroUsd = 50000;
+        a.citedHeight = (uint32_t)at;
+        std::vector<unsigned char> rec;
+        BOOST_REQUIRE(k.SignCompact(yellowback::AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, fakeHash(at)), rec));
+        std::copy(rec.begin() + 1, rec.end(), a.sig.begin());
+        if (forge) a.sig[5] ^= 1;
+        return a;
+    };
+    auto carrierTx = [&](const std::vector<yellowback::Attestation>& atts, const yellowback::Payload& payload) {
+        yellowback::Bundle bundle;
+        bundle.atts = atts;
+        const valtype raw = yellowback::EncodeBundle(bundle);
+        uint256 h;
+        CSHA256().Write(raw.data(), raw.size()).Finalize(h.begin());
+        const CScript redeem = yellowback::CarrierScript(MakeKey(64).GetPubKey(), h);
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(c.Fund(), yellowback::CarrierScriptSig(raw, valtype(71, 0x30), redeem)));
+        m.vout.push_back(CTxOut(0, yellowback::PayloadScript(yellowback::EncodePayload(payload))));
+        return m;
+    };
+    const yellowback::Payload notice = yellowback::Payload::ClaimNotice(COutPoint(uint256S("0x77"), 0), (uint32_t)(c.h - 2));
+    auto lastAct = [&](VaultState& st, const CKey& k) { return GetMember(st, s, k.GetPubKey())->lastAct; };
+    const int64_t before1 = Member(c, s, k1).lastAct, before2 = Member(c, s, k2).lastAct;
+    const int64_t cited = c.h - 3;
+    BOOST_REQUIRE(before1 < cited && before2 < cited);
+    yellowback::Params p = yellowback::RegtestParams(10, 0, 0, s);
+    p.attestorLivenessMin = 1;
+    p.attestorSeats = (int)sp.seats;                  // adopt this small test set (seats, maturity)
+    p.bondMaturity = (int)sp.maturity;
+    yellowback::SetModuleParams(p);
+    {   // k1's attestation and an outsider's: k1's lastAct = cited, k2 unchanged
+        VaultState st(c.kv);
+        st.SetBlockHashes(hashes);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k1, cited), att(outsider, cited)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(st, k1), cited);
+        BOOST_CHECK_EQUAL(lastAct(st, k2), before2);
+        // the highest verified cited height wins, in any order; an older one never lowers it
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k2, cited + 1), att(k2, cited - 1)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(st, k2), cited + 1);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k1, cited - 2)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(st, k1), cited);
+    }
+    {   // a forged signature, a cited height at the block, an EQUIVOCATION payload, no block hashes: nothing
+        VaultState st(c.kv);
+        st.SetBlockHashes(hashes);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k1, cited, true)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k1, cited)}, yellowback::Payload::Equivocation())), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(st, k1), before1);
+        VaultState nh(c.kv);
+        BOOST_CHECK_EQUAL(*Res(nh.ApplyTx(CTransaction(carrierTx({att(k1, cited)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(nh, k1), before1);
+    }
+    // the module does not adopt a set below ATTESTOR_LIVENESS_MIN (review B3), nor one of another shape: no update
+    for (int variant = 0; variant < 2; variant++) {
+        yellowback::Params q = p;
+        if (variant == 0) q.attestorLivenessMin = (int)sp.livenessWindow + 1;
+        else q.bondMaturity = 8;
+        yellowback::SetModuleParams(q);
+        VaultState st(c.kv);
+        st.SetBlockHashes(hashes);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(carrierTx({att(k1, cited)}, notice)), c.h, c.coins)), "OK");
+        BOOST_CHECK_EQUAL(lastAct(st, k1), before1);
+    }
+    yellowback::ClearModuleParams();
+}
+
 BOOST_AUTO_TEST_CASE(module_displace_hook)
 {
     // Owner 2026-10-11: a SET_JOIN into a full set the YED module governs displaces the member the module names
@@ -1554,7 +1636,8 @@ BOOST_AUTO_TEST_CASE(module_displace_hook)
     yellowback::SetModuleParams(yellowback::RegtestParams(10, 0, 0, s1));
     BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s1, MakeKey(90), {}, 100000)), "bad-vault-act-seats");
     // Governed and adopted: a bond not above x1.05 the least seat weight is refused; a larger one displaces it.
-    const yellowback::Params yp = yellowback::RegtestParams(10, 0, 0, s);
+    yellowback::Params yp = yellowback::RegtestParams(10, 0, 0, s);
+    yp.bondMinFloorZat = 1500;                        // these bonds are in zat: the dust guard (review B2) at 1,500
     yellowback::SetModuleParams(yp);
     BOOST_CHECK(yellowback::RegisteredModule()->GovernedSet() == std::optional<SetId>(s));
     BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(90), {}, 1000)), "bad-vault-act-seats");
@@ -1601,7 +1684,8 @@ BOOST_AUTO_TEST_CASE(module_displace_hook)
     for (int i = 1; i < 14; i++) beats.push_back(HeartbeatTx(c, s, keys[i]));
     beats.push_back(HeartbeatTx(c, s, MakeKey(90)));
     BOOST_REQUIRE(!c.Block(beats));
-    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, MakeKey(91), {}, 1000)));
+    BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(91), {}, 1499)), "bad-vault-act-seats");   // dust: below the floor (review B2)
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, MakeKey(91), {}, 1500)));
     BOOST_CHECK_EQUAL(Member(c, s, keys[0]).status, MEMBER_REMOVED);
     BOOST_CHECK_EQUAL(Member(c, s, MakeKey(91)).status, MEMBER_ACTIVE);
     // The module's CheckBlock: a block with a SET_REMOVE or SET_WINDDOWN of the attestor set is invalid; of another set, not.

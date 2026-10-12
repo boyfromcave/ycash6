@@ -62,6 +62,12 @@ public:
      * an unfrozen bond (state.h); the module's mirror makes the same member's record WITHDRAWN (evicted).
      */
     std::optional<CPubKey> Displace(const CTransaction& tx, const vault::SetJoinBody& join, const vault::ModuleContext& ctx) const override;
+    /**
+     * Seats review B2 (2026-10-11): a member's price attestation carried by a MINT, CLAIM_NOTICE or REDEEM transaction
+     * counts as liveness: AttestationLiveness (state.h) over the ACTIVE members of the attestor set with an unfrozen
+     * bond; the module's mirror applies the same update to the members' Attestors records.
+     */
+    std::vector<std::pair<CPubKey, int64_t>> Liveness(const CTransaction& tx, const vault::ModuleContext& ctx) const override;
 };
 
 /** The registered instance (vault/module.cpp's table entry). */

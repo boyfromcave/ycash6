@@ -24,6 +24,18 @@ std::shared_ptr<const Params> CurrentParams()
     return g_moduleParams;
 }
 
+/** The attestor set when it has the shape the module adopts (ApplySetAct, state.cpp): OPEN, ATTESTOR_SEATS seats,
+ *  maturity BOND_MATURITY, livenessWindow >= ATTESTOR_LIVENESS_MIN; else nullopt (the module's mirror has no set). */
+std::optional<vault::SetRecord> AdoptedSet(const Params& p, const vault::ModuleContext& ctx)
+{
+    if (!ctx.state) return std::nullopt;
+    std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, p.attestorSetId);
+    if (!s || !s->params.IsOpen() || (int)s->params.seats != p.attestorSeats ||
+        (int64_t)s->params.maturity != (int64_t)p.bondMaturity ||
+        (int64_t)s->params.livenessWindow < (int64_t)p.attestorLivenessMin) return std::nullopt;
+    return s;
+}
+
 } // namespace
 
 void SetModuleParams(const Params& p)
@@ -98,9 +110,8 @@ std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::Set
 {
     std::shared_ptr<const Params> p = CurrentParams();
     if (!p || !ctx.state || join.setId != p->attestorSetId || join.bondVout >= tx.vout.size()) return std::nullopt;
-    std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, join.setId);
-    if (!s || !s->params.IsOpen() || (int)s->params.seats != p->attestorSeats ||
-        (int64_t)s->params.maturity != (int64_t)p->bondMaturity) return std::nullopt;   // a set the module does not adopt
+    std::optional<vault::SetRecord> s = AdoptedSet(*p, ctx);
+    if (!s) return std::nullopt;   // a set the module does not adopt
     std::vector<SeatCandidate> members;
     for (const auto& m : vault::GetMembers(*ctx.state, join.setId)) {
         if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;
@@ -114,6 +125,20 @@ std::optional<CPubKey> Module::Displace(const CTransaction& tx, const vault::Set
         members.push_back(c);
     }
     return EvictionVictim(members, ctx.height, tx.vout[join.bondVout].nValue, (int64_t)s->params.livenessWindow, *p);
+}
+
+std::vector<std::pair<CPubKey, int64_t>> Module::Liveness(const CTransaction& tx, const vault::ModuleContext& ctx) const
+{
+    std::shared_ptr<const Params> p = CurrentParams();
+    if (!p || !ctx.state || !ctx.blockHashAt || !AdoptedSet(*p, ctx)) return {};
+    std::vector<std::pair<CPubKey, int64_t>> members;
+    for (const auto& m : vault::GetMembers(*ctx.state, p->attestorSetId)) {
+        if (m.second.status != vault::MEMBER_ACTIVE || m.second.bondFrozen) continue;
+        std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
+        if (!b || b->frozen) continue;
+        members.push_back({ m.first, m.second.lastAct });
+    }
+    return AttestationLiveness(tx, *p, ctx.height, members, [&](int64_t h) { return ctx.blockHashAt(h); });
 }
 
 const vault::Module* RegisteredModule()

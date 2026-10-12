@@ -423,7 +423,8 @@ const char* AttestorStatusName(AttestorStatus s);
 /**
  * Attestors[seq]. Since P4-b the module's mirror of one SET_JOIN to attestorSetId (§15.10): attestorPubKey =
  * bondPubKey = the member key, bondOutpoint = txid:bondVout of the join, registerHeight = the join height,
- * lastAct = the set's lastAct for the member (joinHeight + maturity, then each SET_HEARTBEAT). Hashed.
+ * lastAct = the set's lastAct for the member (joinHeight + maturity, then each SET_HEARTBEAT and, since seats review B2,
+ * the citedHeight of its attestation carried by a MINT, CLAIM_NOTICE or REDEEM: AttestationLiveness). Hashed.
  */
 struct AttestorRecord
 {

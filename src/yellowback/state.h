@@ -340,6 +340,19 @@ struct SeatCandidate
 std::optional<CPubKey> EvictionVictim(const std::vector<SeatCandidate>& members, int64_t height, CAmount newBondZat,
                                       int64_t livenessWindow, const Params& params);
 
+/**
+ * Seats review B2 (2026-10-11): liveness by attestation. For a transaction whose payload is MINT, CLAIM_NOTICE or
+ * REDEEM, the bundle it carries (ExtractBundle at BUNDLE_CARRIER, skipping vin[0] for a REDEEM; decoded up to
+ * BUNDLE_MAX attestations; nothing when absent or malformed) is read structurally -- BUNDLE-1 is not re-checked.
+ * For each member (key, lastAct), the highest citedHeight c with START_HEIGHT <= c < height of an attestation that
+ * verifies under the key over blockHashAt(c), when c > lastAct, gives the pair (key, c): the member signed after
+ * block c existed. Order-independent; at most BUNDLE_MAX x members verifications. The primitive's liveness hook
+ * and the module's mirror call it over the same members, so both set lastAct = c alike.
+ */
+std::vector<std::pair<CPubKey, int64_t>> AttestationLiveness(const CTransaction& tx, const Params& params, int64_t height,
+                                                             const std::vector<std::pair<CPubKey, int64_t>>& members,
+                                                             const std::function<std::optional<uint256>(int64_t)>& blockHashAt);
+
 /** AttestorRecord.flags: the record was evicted by a larger bond (WITHDRAWN without slashing; owner, 2026-10-11). */
 static const uint8_t ATTESTOR_FLAG_EVICTED = 0x80;
 

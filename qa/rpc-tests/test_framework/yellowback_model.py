@@ -258,7 +258,8 @@ class Params(object):
                  bond_min_floor_zat=5_000 * COIN, bond_min_cap_zat=20_000 * COIN, bond_share_bps=500,
                  bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
-                 seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
+                 seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
+                 attestor_liveness_min=1_152)
         a.update(attest or {})
         for k, v in a.items():
             setattr(self, k, v)
@@ -271,7 +272,8 @@ class Params(object):
                           bond_min_floor_zat=COIN * 5 // 2, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-30 at 1/2,000
                           bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
-                          seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15)
+                          seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
+                          attestor_liveness_min=16)
 
     def pq_falcon_active(self, height):
         """IsPQFalconActive(params, height): scheme 0x02 owners mint and TOK-PQ binds from this height."""
@@ -444,7 +446,10 @@ def seat_weight(bond_zat, age, u, cap):
 
 def eviction_victim(members, height, new_bond_zat, liveness_window, p):
     """EvictionVictim (state.h): members = [(key33, bond_zat, join_height, last_act)].  The not-live member of least
-    seat weight first; else the member of least seat weight when the joiner's beats it by EVICT_MARGIN; ties by key."""
+    seat weight first; else the member of least seat weight when the joiner's beats it by EVICT_MARGIN; ties by key.
+    Never for a bond below the module's floor (seats review B2: no dust evictions)."""
+    if new_bond_zat < max(0, p.bond_min_floor_zat):
+        return None
     best = None
     for key, bond, join, last_act in members:
         dead = last_act < height - liveness_window
@@ -2591,6 +2596,9 @@ class YellowbackModel(object):
                 if yed_in > 0:
                     rec.verdict = VERDICT_BURNED
 
+        # seats review B2: a member's attestation carried here is liveness (the primitive's liveness hook, alike)
+        self._attestation_liveness(tx, height, payload)
+
         # U-23: a YED-tagged vault or intent output exists only as a mint's vault, a claim's intents or a
         # cancel's re-created vault
         for j, spk in enumerate(scripts):
@@ -2730,6 +2738,8 @@ class YellowbackModel(object):
                 return False              # owner 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted
             if act['maturity'] != p.bond_maturity:
                 return False              # ... whose maturity (the bond exit delay) is BOND_MATURITY
+            if act['livenessWindow'] < p.attestor_liveness_min:
+                return False              # ... and whose livenessWindow is at least ATTESTOR_LIVENESS_MIN (seats review B3)
             self.attestor_set_rec = AttestorSetRecord(height, act['seats'], act['maturity'], act['livenessWindow'])
             rec.type = 'ATTESTOR_SET_ACT'
             rec.attestor_seq = 0          # the C++ TxLog's attestorSeq default (yed_gettxinfo shows seq 0)
@@ -2853,6 +2863,53 @@ class YellowbackModel(object):
         if a[0] != b[0] or a[2] != b[2] or a[1] == b[1] or a[2] < p.start_height:
             return None
         return atts, a[2]
+
+    def _attestation_liveness(self, tx, height, payload):
+        """AttestationLiveness (state.h, seats review B2): for a MINT, CLAIM_NOTICE or REDEEM carrying a bundle (read
+        structurally, BUNDLE-1 not re-checked), each live member record (its key's newest, not EJECTED or WITHDRAWN,
+        bond unspent and unfrozen) whose key signed an attestation citing c in [START_HEIGHT, height) gets
+        lastAct = the highest such c when above its lastAct."""
+        from . import yellowback_attest as ya
+        p = self.params
+        if self.attestor_set_rec is None or payload is None:
+            return
+        if payload.type not in (PAYLOAD_MINT, PAYLOAD_CLAIM_NOTICE, PAYLOAD_REDEEM) or p.bundle_carrier == CARRIER_OP_RETURN:
+            return
+        found, _why = self._find_carrier(tx, payload.type == PAYLOAD_REDEEM)
+        if found is None:
+            return
+        _i, pushes = found
+        _pk, h = ya.parse_carrier_script(pushes[2])
+        if sha256(pushes[0]) != h:
+            return
+        atts = ya.decode_bundle(pushes[0])
+        if atts is None or len(atts) > p.bundle_max:
+            return
+        newest = {}
+        for seq in sorted(self.attestors):
+            newest[self.attestors[seq].attestor_pubkey] = seq
+        live = [seq for seq in sorted(self.attestors)
+                if newest[self.attestors[seq].attestor_pubkey] == seq
+                and self.attestors[seq].status not in (A_EJECTED, A_WITHDRAWN)
+                and not self.attestors[seq].bond_spent_height and not self.attestors[seq].bond_frozen]
+        best = {seq: self.attestors[seq].last_act for seq in live}
+        for att in atts:
+            cited = ya.parse_attestation(att)[2]
+            if cited < p.start_height or cited >= height:
+                continue
+            bh = None
+            for seq in live:
+                if best[seq] >= cited:
+                    continue
+                if bh is None:
+                    bh = self.block_hash_at(cited)
+                    if bh is None:
+                        break
+                if self._attestation_valid(att, self.attestors[seq].attestor_pubkey, bh):
+                    best[seq] = cited
+        for seq in live:
+            if best[seq] > self.attestors[seq].last_act:
+                self.attestors[seq].last_act = best[seq]
 
     def _apply_equivocation(self, tx, height, rec):
         """EQV-1 (P4-b): the first record in seq order that is its key's newest, with an unspent, unfrozen bond, under

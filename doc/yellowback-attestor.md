@@ -30,7 +30,9 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   longer applies: whoever holds the attestor node's wallet can spend the bond after
   `bondLocktime` (given up for a single registry, upgrade plan §15.10 P4-b).
 - **Heartbeats**: the set's member dormancy makes an attestor DORMANT when its `lastAct` is older
-  than the set's `livenesswindow`, and signing prices is not an act. `yellowback-attest attest`
+  than the set's `livenesswindow`. Since the seats review (B2, 2026-10-11) an attestation of yours carried by a
+  MINT, CLAIM_NOTICE or REDEEM also counts: `lastAct` rises to its `citedHeight` (in the primitive and the
+  mirror alike), so an attestor whose prices are used stays live; heartbeats still cover quiet periods. `yellowback-attest attest`
   sends `set_heartbeat <attestorSetId> <memberKey>` every `heartbeat_blocks` blocks (default
   1,152 ≈ a day; keep it well below the set's `livenesswindow`, `set_getinfo <attestorSetId>`).
   The v3 dormancy (selected and absent, below) still applies on top.
@@ -50,11 +52,14 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   set are invalid (`attestor-set-act`), so members cannot vote one another out.
 - **The set is open, 15 seats, and a larger bond can evict.** The module adopts the attestor set only
   when it is OPEN with 15 seats. A join into the full set evicts one member: first a member that is not
-  live (`lastAct < h − livenessWindow`: no heartbeat for the liveness window), the one of least seat
-  weight; else the member of least seat weight, only when the new bond exceeds that seat weight by 5 %
-  (`evictMarginBps`). The evicted record becomes `WITHDRAWN` with `evicted: true`; its bond is **not**
-  frozen and is returned at its locktime, and the key may join again. Otherwise a join into the full set
-  is refused (`bad-vault-act-seats`).
+  live (`lastAct < h − livenessWindow`: no heartbeat and no carried attestation for the liveness window), the
+  one of least seat weight; else the member of least seat weight, only when the new bond exceeds that seat
+  weight by 5 % (`evictMarginBps`). No join evicts with a bond below `bondMinFloorZat` (5,000 YEC; seats review
+  B2: no dust evictions; the floor, not the collateral-based minimum, because the primitive's displacement hook
+  reads no module state). The module adopts the set only when its `livenesswindow` is at least
+  `ATTESTOR_LIVENESS_MIN` (1,152 blocks, one day; regtest 16; review B3). The evicted record becomes `WITHDRAWN`
+  with `evicted: true`; its bond is **not** frozen and is returned `BOND_MATURITY` after the eviction, and the
+  key may join again once that bond is spent. Otherwise a join into the full set is refused (`bad-vault-act-seats`).
 - `yed_listattestors` rows carry `lastAct` and `bondFrozen`; `set_getinfo <attestorSetId>` shows
   the same members from the primitive's side.
 

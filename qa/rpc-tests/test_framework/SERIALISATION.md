@@ -21,7 +21,7 @@ The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block ent
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`aacf3c29f4e360faa1cc8985094cece29bec8ce5c91ab416949a597027c801a2`. Four entries are flagged
+`362f47a8650039b4b2ddb563564ab0b2a42b59d2a0f8b3ab41ee673a2bd14eef`. Four entries are flagged
 `"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
 Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
@@ -206,6 +206,11 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   seq. `SET_WINDDOWN` changes nothing. The acts are not re-validated (no seat count, no signature):
   the primitive has done that, which is also why the mirror may hold more records than the set has
   seats. **reading:** the transaction's `TxLog.type` is the act's unless the payload rules set one.
+  **Liveness by attestation (seats review B2):** after the payload rules, for a MINT, CLAIM_NOTICE or REDEEM whose
+  scriptsig carrier holds a bundle (hash-checked, at most `BUNDLE_MAX` attestations, BUNDLE-1 not re-checked;
+  vin[0] skipped for a REDEEM), every live record (its key's newest, not `EJECTED`/`WITHDRAWN`, bond unspent and
+  unfrozen) whose key signed an attestation citing `c` in `[START_HEIGHT, H)` over `blockHash(c)` gets
+  `lastAct = max c` when that exceeds its `lastAct`. No TxLog change. The primitive's liveness hook does the same.
 - **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
   START_HEIGHT` and `< H`, two prices, the scriptsig carrier); the key is the **first record in seq
   order** that is its key's newest, has `bondSpentHeight = 0` and `bondFrozen = false`, under which

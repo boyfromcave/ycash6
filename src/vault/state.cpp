@@ -640,6 +640,15 @@ void VaultState::ApplyEjectionsOf(const Module& module, const CTransaction& tx, 
     ctx.state = this;
     ctx.blockHashAt = blockHashes;
     for (const CPubKey& key : module.Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
+    // the module liveness hook (seats review B2): a member's proven act at height raises its lastAct to it
+    for (const auto& kh : module.Liveness(tx, ctx)) {
+        auto m = GetMember(*this, *governed, kh.first);
+        if (!m || m->status != MEMBER_ACTIVE || m->bondFrozen || kh.second >= h || kh.second <= m->lastAct) continue;
+        auto b = GetBond(*this, m->bondOutpoint);
+        if (!b || b->frozen) continue;
+        m->lastAct = kh.second;
+        PutRecord(KeyMember(*governed, kh.first), *m);
+    }
 }
 
 std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Act& act, int64_t h)

@@ -87,6 +87,16 @@ public:
      * not know why the module picks a member (for YED: the eviction rule, a larger bond or a member not live).
      */
     virtual std::optional<CPubKey> Displace(const CTransaction& tx, const SetJoinBody& join, const ModuleContext& ctx) const { return std::nullopt; }
+
+    /**
+     * The module liveness hook (seats review B2, 2026-10-11). For every non-coinbase transaction, after the
+     * ejection hook, the primitive asks each module for (key, height) pairs: the transaction proves that the key
+     * signed, for the module, something bound to the block at `height` (for YED: a price attestation citing it).
+     * A pair whose key is an ACTIVE member of the module's GovernedSet() with an unspent, unfrozen bond and
+     * lastAct < height < the block's height sets lastAct = height, as a SET_HEARTBEAT would have; any other pair
+     * is ignored. The hook never makes a transaction invalid and never touches another set. Default: none.
+     */
+    virtual std::vector<std::pair<CPubKey, int64_t>> Liveness(const CTransaction& tx, const ModuleContext& ctx) const { return {}; }
 };
 
 /** The registered module for `tag`, or nullptr (the primitive alone governs the vault). */

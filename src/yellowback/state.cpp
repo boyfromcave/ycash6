@@ -962,6 +962,7 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
         // owner, 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted (else YED has no attestor set)
         if (!act.create.IsOpen() || (int)act.create.seats != P.attestorSeats) return false;
         if ((int64_t)act.create.maturity != (int64_t)P.bondMaturity) return false;   // the bond exit delay is BOND_MATURITY
+        if ((int64_t)act.create.livenessWindow < (int64_t)P.attestorLivenessMin) return false;   // seats review B3: >= one day
         AttestorSetRecord z;
         z.createHeight = ctx.height;
         z.seats = act.create.seats;
@@ -1183,6 +1184,32 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         } else {
             log.type = setAct ? setActType : (uint8_t)TxLogType::NONE;
             if (yedIn > 0) log.verdict = verdict::BURNED;
+        }
+    }
+
+    // ---- seats review B2: a member's attestation carried here is liveness (the primitive's liveness hook, alike)
+    if (ctx.st.GetAttestorSet().has_value()) {
+        const std::vector<std::pair<uint16_t, AttestorRecord>> all = ctx.st.Attestors();
+        std::vector<std::pair<CPubKey, int64_t>> members;
+        std::vector<uint16_t> seqs;
+        for (size_t i = 0; i < all.size(); i++) {
+            const AttestorRecord& a = all[i].second;
+            if (a.Status() == AttestorStatus::EJECTED || a.Status() == AttestorStatus::WITHDRAWN) continue;
+            if (a.bondSpentHeight != 0 || a.Frozen()) continue;
+            bool newest = true;
+            for (size_t k = i + 1; k < all.size(); k++) newest = newest && all[k].second.attestorPubKey != a.attestorPubKey;
+            if (!newest) continue;
+            members.push_back({ a.AttestorKey(), (int64_t)a.lastAct });
+            seqs.push_back(all[i].first);
+        }
+        auto hashAt = [&](int64_t h) { return BlockHashAt(ctx.st.View(), ctx.params, h); };
+        for (const auto& kh : AttestationLiveness(tx, ctx.params, ctx.height, members, hashAt)) {
+            for (size_t i = 0; i < members.size(); i++) {
+                if (members[i].first != kh.first) continue;
+                std::optional<AttestorRecord> rec = ctx.st.GetAttestor(seqs[i]);
+                rec->lastAct = (int32_t)std::min<int64_t>(kh.second, 0x7FFFFFFF);
+                ctx.st.Put(keys::Attestor(seqs[i]), rec.value());
+            }
         }
     }
 
@@ -1760,9 +1787,47 @@ arith_uint256 SeatRank(const AttestorRecord& rec, const AttestState& attest, con
     return w * arith_uint256((uint64_t)(BPS + (rec.seatedSince != 0 ? std::max(0, P.seatMarginBps) : 0)));
 }
 
+std::vector<std::pair<CPubKey, int64_t>> AttestationLiveness(const CTransaction& tx, const Params& P, int64_t height,
+                                                             const std::vector<std::pair<CPubKey, int64_t>>& members,
+                                                             const std::function<std::optional<uint256>(int64_t)>& blockHashAt)
+{
+    std::vector<std::pair<CPubKey, int64_t>> out;
+    if (members.empty() || !blockHashAt) return out;
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    if (!fp.has_value()) return out;
+    const PayloadType t = fp->payload.type;
+    if (t != PayloadType::MINT && t != PayloadType::CLAIM_NOTICE && t != PayloadType::REDEEM) return out;
+    auto extracted = ExtractBundle(tx, P.bundleCarrier, t == PayloadType::REDEEM, std::vector<unsigned char>());
+    if (!extracted) return out;
+    std::optional<Bundle> bundle = DecodeBundle(extracted->first, (size_t)std::max(0, P.bundleMax));
+    if (!bundle) return out;
+    std::vector<int64_t> best;
+    for (const auto& m : members) best.push_back(m.second);
+    for (const Attestation& a : bundle->atts) {
+        const int64_t c = a.citedHeight;
+        if (c < (int64_t)P.startHeight || c >= height) continue;
+        std::optional<uint256> hash;
+        for (size_t i = 0; i < members.size(); i++) {
+            if (best[i] >= c) continue;
+            if (!hash) {
+                hash = blockHashAt(c);
+                if (!hash) break;
+            }
+            if (VerifyCompactSig(members[i].first, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, *hash), a.sig)) best[i] = c;
+        }
+    }
+    for (size_t i = 0; i < members.size(); i++) {
+        if (best[i] > members[i].second) out.push_back({ members[i].first, best[i] });
+    }
+    return out;
+}
+
 std::optional<CPubKey> EvictionVictim(const std::vector<SeatCandidate>& members, int64_t h, CAmount newBondZat,
                                       int64_t livenessWindow, const Params& P)
 {
+    // seats review B2: no eviction by a bond below the module's floor (the dust guard; state-free, so the
+    // primitive's Displace hook and the mirror agree), whether the victim is live or not
+    if (newBondZat < std::max<CAmount>(0, P.bondMinFloorZat)) return std::nullopt;
     // (not live first, least w, key bytes): the first of this order is the candidate
     const SeatCandidate* best = nullptr;
     bool bestDead = false;

@@ -42,7 +42,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'aacf3c29f4e360faa1cc8985094cece29bec8ce5c91ab416949a597027c801a2'
+GOLDEN_STATE_HASH = '362f47a8650039b4b2ddb563564ab0b2a42b59d2a0f8b3ab41ee673a2bd14eef'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -1589,8 +1589,8 @@ def golden_document(c):
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
                        'cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
-                       'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other lapses '
-                       '(the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
+                       'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
+                       'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
                        'at exit + BOND_MATURITY). '
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
                        'vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied '
@@ -1631,9 +1631,10 @@ class SeatTests(unittest.TestCase):
         self.assertIsNone(ym.eviction_victim([(k(0), 2 * C, H - 420480, H)], H, 3 * C, LW, p))
         self.assertIsNotNone(ym.eviction_victim([(k(0), 8000 * C, H - 10 * 420480, H)], H, 20000 * C, LW, p))
         m.append((k(3), 1000 * C, H - 420480, H - LW - 1))
-        self.assertEqual(ym.eviction_victim(m, H, 1, LW, p), k(3))
+        self.assertEqual(ym.eviction_victim(m, H, p.bond_min_floor_zat, LW, p), k(3))
+        self.assertIsNone(ym.eviction_victim(m, H, p.bond_min_floor_zat - 1, LW, p))   # seats review B2: no dust eviction
         m[3] = (k(3), 1000 * C, H - 420480, H - LW)
-        self.assertIsNone(ym.eviction_victim(m, H, 1, LW, p))
+        self.assertIsNone(ym.eviction_victim(m, H, p.bond_min_floor_zat, LW, p))
         self.assertEqual(ym.eviction_victim([(k(6), 8 * C, H - 50, H), (k(5), 8 * C, H - 50, H)], H, 100 * C, LW, p), k(5))
 
     def test_mirror_evicts_and_refuses_remove(self):
@@ -1800,10 +1801,12 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, v3['exit_height']))
         self.assertEqual(m.attestors[w].bond_spent_height, GOLDEN_BLOCKS)
         self.assertEqual(m.attestors[w].last_act, GOLDEN_HEARTBEAT)
-        # P4-b: the fourth attestor never heartbeat: its lastAct (join + maturity 8) lapsed at join + 8 + livenessWindow + 1
+        # seats review B2: the fourth attestor never heartbeat, but its attestation in claim5's bundle (citing R =
+        # claim height - 2) is liveness: lastAct is that cited height and it stays ELIGIBLE (it was DORMANT at
+        # join + 8 + livenessWindow + 1 before attestations counted)
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
-        self.assertEqual(m.attestors[r4].status, ym.A_DORMANT)
-        self.assertEqual(m.attestors[r4].status_height, 225 + r4 + 8 + GOLDEN_LIVENESS + 1)
+        self.assertEqual(m.attestors[r4].last_act, v3['claim_height'] - 2)
+        self.assertEqual(m.attestors[r4].status, ym.A_ELIGIBLE)
         # the pinned hash, the file on disk and a replay from the file all agree
         self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
         with open(GOLDEN_PATH) as f:
