@@ -4,7 +4,7 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-D-Q-28 (owner, revised) on regtest: the module's attestor bond floor follows the YEC locked in YED vaults, never a
+D-Q-30 (owner, revised) on regtest: the module's attestor bond floor follows the YEC locked in YED vaults, never a
 price: bondMinZat = clamp(ceil(collateralZat x bondShareBps / (10^4 x N_SLOTS)), bondMinFloorZat, bondMinCapZat) over
 the snapshot before the join's block. Regtest carries it at 1/2,000 of mainnet (2.5 YEC floor, 10 YEC cap, 500 bps,
 N_SLOTS 5; mainnet 5,000 / 20,000 YEC, N_SLOTS 9).
@@ -57,7 +57,7 @@ def expected_min(collateral_zat):
     return min(CAP, max(FLOOR, z))
 
 
-# Rule: D-Q-28
+# Rule: D-Q-30
 class YellowbackAttestBondTest(YellowbackTestFramework):
 
     initial_blocks = 101
@@ -176,7 +176,7 @@ class YellowbackAttestBondTest(YellowbackTestFramework):
             assert_equal((recs[seq]['status'], recs[seq]['seated']), ('ELIGIBLE', True))
         for seq in (below_floor, below_mid):
             assert_equal(recs[seq]['status'], 'PENDING')
-        assert_same_statehash(self.enforcing_nodes(), 'D-Q-28')
+        assert_same_statehash(self.enforcing_nodes(), 'D-Q-30')
         model_check(self.nodes[POOLS[0]])
 
 

@@ -843,10 +843,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     attest.pushKV("emergencyNoticeTtl", p.emergencyNoticeTtl);
     attest.pushKV("residualMinZat", p.residualMinZat);
     attest.pushKV("attestFeeBps", p.attestFeeBps);
-    attest.pushKV("bondMinZat", BondMinZat(st, p, (int64_t)h + 1));   // D-Q-28: the module's floor for a join in the next block
-    attest.pushKV("bondMinFloorZat", p.bondMinFloorZat);               // D-Q-28: the minimum's floor
-    attest.pushKV("bondMinCapZat", p.bondMinCapZat);                   // D-Q-28: the minimum's cap
-    attest.pushKV("bondShareBps", p.bondShareBps);                     // D-Q-28: the vault-collateral share the N_SLOTS seats back
+    attest.pushKV("bondMinZat", BondMinZat(st, p, (int64_t)h + 1));   // D-Q-30: the module's floor for a join in the next block
+    attest.pushKV("bondMinFloorZat", p.bondMinFloorZat);               // D-Q-30: the minimum's floor
+    attest.pushKV("bondMinCapZat", p.bondMinCapZat);                   // D-Q-30: the minimum's cap
+    attest.pushKV("bondShareBps", p.bondShareBps);                     // D-Q-30: the vault-collateral share the N_SLOTS seats back
     attest.pushKV("bondMinLock", p.bondMinLock);
     attest.pushKV("bondMaturity", p.bondMaturity);
     attest.pushKV("ageCap", p.ageCap);

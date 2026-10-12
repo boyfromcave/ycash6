@@ -1054,7 +1054,7 @@ class MintTests(unittest.TestCase):
         c.mine((1, 50_000, 0, KEY1), [raw])
         self.assertEqual(c.void_reason(txid_of(raw)), 'mint-vault-share')
 
-    # Rule: D-Q-28 (revised)
+    # Rule: D-Q-30
     def test_dq28_bond_min_from_collateral(self):
         m, r = ym.Params.mainnet(1), ym.Params.regtest(1)
         f = ym.bond_min_from_collateral_zat
@@ -1066,7 +1066,7 @@ class MintTests(unittest.TestCase):
         self.assertEqual(f(300 * ym.COIN, r), 3 * ym.COIN)
         self.assertEqual(f(1_300 * ym.COIN, r), 10 * ym.COIN)
 
-    # Rule: D-Q-28 (revised): the model's SNAP mirrors yellowback_state_tests dq28_bond_min_from_collateral
+    # Rule: D-Q-30: the model's SNAP mirrors yellowback_state_tests dq28_bond_min_from_collateral
     def test_dq28_bond_min_from_snapshot_collateral(self):
         c = activated_chain(ym.Params.regtest(1, 0, 0, attestor_set_id(), attest_arm_min=0), )
         tag = lambda: (1, 50_000, 0, MINERS[(c.height + 1) % 3])  # noqa: E731
@@ -1610,7 +1610,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0a\x00\x00\x00')        # SCHEMA_VERSION 10 (D-Q-28)
+        self.assertEqual(pre[37:41], b'\x0a\x00\x00\x00')        # SCHEMA_VERSION 10 (D-Q-30)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))

@@ -266,7 +266,7 @@ class Params(object):
                           q_low_bps=3_333, q_high_bps=6_667, attest_max_age=8, pin_window=16, pin_delta_bps=500,
                           pin_min_tags=2, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
                           emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
-                          bond_min_floor_zat=COIN * 5 // 2, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-28 at 1/2,000
+                          bond_min_floor_zat=COIN * 5 // 2, bond_min_cap_zat=10 * COIN, bond_share_bps=500,   # D-Q-30 at 1/2,000
                           bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4)
 
@@ -493,7 +493,7 @@ def residual_min_zat(p_mint, p):
 
 
 def bond_min_from_collateral_zat(collateral_zat, p):
-    """D-Q-28 (revised): clamp(ceil(collateral x bond_share_bps / (10^4 x N_SLOTS)), floor, cap); no price is read."""
+    """D-Q-30: clamp(ceil(collateral x bond_share_bps / (10^4 x N_SLOTS)), floor, cap); no price is read."""
     floor = max(0, p.bond_min_floor_zat)
     cap = max(floor, p.bond_min_cap_zat)
     if p.n_slots <= 0:
@@ -1902,7 +1902,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 10       # D-Q-28 bond minimum (view.h); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 10       # D-Q-30 bond minimum (view.h); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2030,8 +2030,8 @@ class YellowbackModel(object):
         return rec.register_height
 
     def bond_min_zat(self, register_height):
-        """D-Q-28 (revised): the module's bond floor for a join in block register_height, from Snapshots[register_height - 1]
-        alone: bond_min_from_collateral_zat(its collateral_zat, the YEC in ACTIVE vaults); a missing snapshot counts zero."""
+        """D-Q-30: the module's bond floor for a join in block register_height, from Snapshots[register_height - 1]
+        alone: bond_min_from_collateral_zat(its collateral_zat, the YEC in ACTIVE and CLAIMING vaults); a missing snapshot counts zero."""
         s = self.snapshot(register_height - 1)
         return bond_min_from_collateral_zat(0 if s is None else s.collateral_zat, self.params)
 
@@ -2322,7 +2322,7 @@ class YellowbackModel(object):
             floor_ok = (r.bond_locktime >= r.register_height + p.bond_min_lock
                         and r.attestor_pubkey not in slashed)
             live = r.last_act >= height - z.liveness_window
-            if r.status == A_PENDING and floor_ok and height >= mature_at and r.bond_zat >= self.bond_min_zat(r.register_height):   # D-Q-28
+            if r.status == A_PENDING and floor_ok and height >= mature_at and r.bond_zat >= self.bond_min_zat(r.register_height):   # D-Q-30
                 r.status = A_ELIGIBLE
                 r.status_height = height
             if r.status == A_ELIGIBLE and not live:

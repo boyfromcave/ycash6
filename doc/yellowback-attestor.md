@@ -36,7 +36,7 @@ Read this first; where the sections below disagree, this section wins (upgrade p
   The v3 dormancy (selected and absent, below) still applies on top.
 - **Revival is a `SET_HEARTBEAT`** (`yed_revive <seq> <priceMicroUsd>` sends it and still returns a
   freshly signed attestation): the record is ELIGIBLE again at that block.
-- **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-28: 5 % of all YEC locked
+- **Maturity** is `max(the set's maturity, BOND_MATURITY)`; a join whose bond is below the module's floor (D-Q-30: 5 % of all YEC locked
   in YED vaults spread over the 9 seats, never below 5,000 YEC nor above 20,000 YEC; `yed_getinfo`
   `params.attest.bondMinZat` is the floor for a join in the next block) or locked for less than `BOND_MIN_LOCK` is
   recorded but never becomes ELIGIBLE. It is judged once, at registration; a seated attestor is never re-judged.
@@ -104,7 +104,7 @@ misbehaviour costs ejection or dormancy and a bond that earns nothing until it u
 can **grief but not extract** — no direction the price is pushed in pays them (proposal §10.3).
 
 What you need: an upgraded `ycashd` on a network where Yellowback is live (no payout address, no
-mining), outbound connectivity, a bond of at least `params.attest.bondMinZat` (D-Q-28 on mainnet: 5 % of YED vault collateral over 9
+mining), outbound connectivity, a bond of at least `params.attest.bondMinZat` (D-Q-30 on mainnet: 5 % of YED vault collateral over 9
 seats, between 5,000 and 20,000 YEC; a larger bond outranks smaller ones
 for a seat once it has aged) you can lock
 for at least `BOND_MIN_LOCK` blocks (420,480 ≈ one year), and price sources. No inbound port, no

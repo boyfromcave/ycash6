@@ -100,7 +100,7 @@ becomes claimable. Two independent populations supply it.
 
 Attestor `seq`s are a 16-bit counter that never reuses a number: after 65,536 registrations no
 further attestor can be registered, so the attestation layer would be exhausted permanently. With
-the bond minimum at 5,000 YEC at the lowest (D-Q-28's floor) and a one-year lock the concurrent set is bounded near
+the bond minimum at 5,000 YEC at the lowest (D-Q-30's floor) and a one-year lock the concurrent set is bounded near
 supply / 5,000 (about 3,400) and each record holds a bond for a year, so exhaustion takes about nineteen years of full
 churn at the least (65,536 / 3,400 joins a year); the bound is a parameter-review item if the floor ever drops, not a run-time concern. The per-block scan of every attestor record is linear in that
 same count.

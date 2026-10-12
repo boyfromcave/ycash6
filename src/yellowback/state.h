@@ -259,7 +259,7 @@ std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, 
  * - A bond spend: WITHDRAWN unless EJECTED (IN-2, as v3).
  *
  * At SNAP: a PENDING record becomes ELIGIBLE at registerHeight + max(set maturity, BOND_MATURITY) when its bond
- * meets the module's floor (bondZat >= BondMinZat(registerHeight), D-Q-28; bondLocktime >= registerHeight + BOND_MIN_LOCK) and its key has
+ * meets the module's floor (bondZat >= BondMinZat(registerHeight), D-Q-30; bondLocktime >= registerHeight + BOND_MIN_LOCK) and its key has
  * no frozen bond in any record (a slashed key is barred for good, as v3 barred an ejected one); else it stays PENDING. An ELIGIBLE record whose lastAct < H - livenessWindow (the set's member dormancy) becomes DORMANT; a
  * DORMANT record (set dormancy or S15) is ELIGIBLE again once lastAct >= H - livenessWindow and lastAct >
  * statusHeight, i.e. after a SET_HEARTBEAT that follows its dormancy (REV-1's replacement). Seats are the
@@ -285,9 +285,9 @@ std::vector<unsigned char> OutPointSelector(const COutPoint& out);
 int64_t AgeOrigin(const AttestorRecord& rec, const AttestState& attest, const Params& params);
 
 /**
- * D-Q-28 (revised): the module's bond floor for a SET_JOIN in block registerHeight, read from Snapshots[registerHeight - 1]
- * alone (the last snapshot before the join): BondMinFromCollateralZat(that snapshot's collateralZat), the YEC in ACTIVE YED
- * vaults (Totals.collateralZat at its SNAP); a missing or virtual snapshot counts zero collateral (the floor). SNAP reads it
+ * D-Q-30: the module's bond floor for a SET_JOIN in block registerHeight, read from Snapshots[registerHeight - 1]
+ * alone (the last snapshot before the join): BondMinFromCollateralZat(that snapshot's collateralZat), the YEC in ACTIVE and
+ * CLAIMING YED vaults (Totals.collateralZat at its SNAP: a CLAIMING vault leaves at its release, state.cpp); a missing or virtual snapshot counts zero collateral (the floor). SNAP reads it
  * only for a PENDING record; an ELIGIBLE, DORMANT or seated record is never re-judged as collateral moves.
  */
 CAmount BondMinZat(const State& st, const Params& params, int64_t registerHeight);

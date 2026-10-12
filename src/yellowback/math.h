@@ -314,7 +314,7 @@ inline CAmount ResidualMinZat(MicroUsd pMint, const Params& P)
 }
 
 /**
- * D-Q-28 (revised): the attestor bond minimum from the YEC locked in YED vaults, clamp(ceil(collateralZat x bondShareBps /
+ * D-Q-30: the attestor bond minimum from the YEC locked in YED vaults, clamp(ceil(collateralZat x bondShareBps /
  * (10^4 x N_SLOTS)), bondMinFloorZat, bondMinCapZat) -- BOND_SHARE_BPS of all vault collateral backs the N_SLOTS seats
  * together. No price is read. A negative collateral counts as zero; N_SLOTS <= 0 gives the cap.
  */

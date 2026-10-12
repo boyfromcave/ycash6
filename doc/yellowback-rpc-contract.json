@@ -76,7 +76,7 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-28; 2.5 YEC on regtest with no vaults): register with 2"
+      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-30; 2.5 YEC on regtest with no vaults): register with 2"
     },
     "bond-locked": {
       "raisedBy": [

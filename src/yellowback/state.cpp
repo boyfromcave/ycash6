@@ -1342,7 +1342,7 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     std::vector<std::string> attestorBefore;
     for (const auto& r : attestors) attestorBefore.push_back(SerializeRecord(r.second));
     // maturity and the set's member dormancy (P4-b, state.h): PENDING -> ELIGIBLE at registerHeight + max(set
-    // maturity, BOND_MATURITY) over the module's bond floor (D-Q-28: BondMinZat at registerHeight, from vault collateral); ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
+    // maturity, BOND_MATURITY) over the module's bond floor (D-Q-30: BondMinZat at registerHeight, from vault collateral); ELIGIBLE -> DORMANT when lastAct < H - livenessWindow;
     // DORMANT -> ELIGIBLE after a heartbeat that follows the dormancy
     const std::optional<AttestorSetRecord> aset = st.GetAttestorSet();
     std::set<std::vector<unsigned char>> slashed;      // keys with a frozen bond: barred for good, as v3 barred an ejected key
@@ -1357,7 +1357,7 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
             const bool floorOk = (int64_t)a.bondLocktime >= (int64_t)a.registerHeight + P.bondMinLock &&
                                  !slashed.count(a.attestorPubKey);
             const bool live = (int64_t)a.lastAct >= H - (int64_t)aset->livenessWindow;
-            // D-Q-28: the collateral at registration, read for PENDING only and only when it can decide (review A2): BondMinZat
+            // D-Q-30: the collateral at registration, read for PENDING only and only when it can decide (review A2): BondMinZat
             // lies in [floor, max(floor, cap)], so a bond at or above that cap always meets it and one below the floor never
             // does; the snapshot is read only in between
             auto bondOk = [&]() -> bool {

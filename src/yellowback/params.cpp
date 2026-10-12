@@ -93,9 +93,9 @@ void SetCommon(Params& p)
     p.residualMinZat      = 100000; // RED-5: the zat floor
     p.residualMinCents    = 48;     // RED-5' (D-Q-23a, yb-calibration): $0.48 at the vault's pMint, never below residualMinZat
     p.attestFeeBps        = 5000;   // AFEE-1 (H-4; D-3 had 2,500)
-    p.bondMinFloorZat     = 5000 * COIN;    // D-Q-28 (revised): binds below ~900,000 YEC of vault collateral
-    p.bondMinCapZat       = 20000 * COIN;   // D-Q-28 (revised): binds above ~3.6 M YEC
-    p.bondShareBps        = 500;            // D-Q-28 (revised): 5 % of all YED vault collateral backs the N_SLOTS seats
+    p.bondMinFloorZat     = 5000 * COIN;    // D-Q-30: binds below ~900,000 YEC of vault collateral
+    p.bondMinCapZat       = 20000 * COIN;   // D-Q-30: binds above ~3.6 M YEC
+    p.bondShareBps        = 500;            // D-Q-30: 5 % of all YED vault collateral backs the N_SLOTS seats
     p.bondMinLock         = 420480; // one year
     p.bondMaturity        = 16128;  // two weeks
     p.ageCap              = 207360; // 180 d
@@ -235,7 +235,7 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.pinMinTags          = 2;
     r.emergencyPersist    = 4;
     r.emergencyNoticeTtl  = 64;
-    // D-Q-28 (revised) at 1/2,000 of mainnet (2.5 YEC / 10 YEC, share 500 bps): the suites' 10-YEC bonds sit at the cap
+    // D-Q-30 at 1/2,000 of mainnet (2.5 YEC / 10 YEC, share 500 bps): the suites' 10-YEC bonds sit at the cap
     r.bondMinFloorZat     = COIN * 5 / 2;
     r.bondMinCapZat       = 10 * COIN;
     r.bondMinLock         = 200;

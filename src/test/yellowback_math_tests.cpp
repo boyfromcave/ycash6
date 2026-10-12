@@ -635,7 +635,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(m.emergencyNoticeTtl, 1152);
     BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(m.attestFeeBps, 5000);                  // H-4 (D-3 had 2,500)
-    BOOST_CHECK_EQUAL(m.bondMinFloorZat, 5000 * COIN);      // D-Q-28 (revised)
+    BOOST_CHECK_EQUAL(m.bondMinFloorZat, 5000 * COIN);      // D-Q-30
     BOOST_CHECK_EQUAL(m.bondMinCapZat, 20000 * COIN);
     BOOST_CHECK_EQUAL(m.bondShareBps, 500);
     BOOST_CHECK_EQUAL(m.bondMinLock, 420480);
@@ -687,7 +687,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(r.emergencyNoticeTtl, 64);
     BOOST_CHECK_EQUAL(r.residualMinZat, 100000);
     BOOST_CHECK_EQUAL(r.attestFeeBps, 2500);
-    BOOST_CHECK_EQUAL(r.bondMinFloorZat, COIN * 5 / 2);     // D-Q-28 (revised) at 1/2,000 of mainnet
+    BOOST_CHECK_EQUAL(r.bondMinFloorZat, COIN * 5 / 2);     // D-Q-30 at 1/2,000 of mainnet
     BOOST_CHECK_EQUAL(r.bondMinCapZat, 10 * COIN);
     BOOST_CHECK_EQUAL(r.bondShareBps, 500);
     BOOST_CHECK_EQUAL(r.bondMinLock, 200);
@@ -720,7 +720,7 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK(Params().bundleCarrier == BundleCarrier::SCRIPTSIG);
 }
 
-// Rule: D-Q-28 (revised)
+// Rule: D-Q-30
 // The bond minimum from vault collateral: clamp(ceil(collateral x bondShareBps / (10^4 x N_SLOTS)), floor, cap).
 BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
 {

@@ -227,10 +227,10 @@ struct Params
     CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5): the zat floor of the residual threshold
     Cents residualMinCents;              //!< RED-5' (D-Q-23a): the residual threshold is max(residualMinZat, residualMinCents at the vault's pMint); 48 = $0.48
     int attestFeeBps;                    //!< ATTEST_FEE_BPS 5,000 (AFEE-1', H-4; regtest 2,500): the attestor share of the protocol fee (never of the early fee)
-    CAmount bondMinFloorZat;             //!< D-Q-28 (revised): the attestor bond minimum's floor, 5,000 YEC (regtest 2.5 YEC). Was
+    CAmount bondMinFloorZat;             //!< D-Q-30: the attestor bond minimum's floor, 5,000 YEC (regtest 2.5 YEC). Was
                                          //!< BOND_MIN (20,000 YEC flat); see BondMinZat (state.h)
-    CAmount bondMinCapZat;               //!< D-Q-28 (revised): its cap, 20,000 YEC (regtest 10 YEC)
-    int bondShareBps;                    //!< D-Q-28 (revised): BOND_SHARE_BPS 500: the share of all YED vault collateral the N_SLOTS
+    CAmount bondMinCapZat;               //!< D-Q-30: its cap, 20,000 YEC (regtest 10 YEC)
+    int bondShareBps;                    //!< D-Q-30: BOND_SHARE_BPS 500: the share of all YED vault collateral the N_SLOTS
                                          //!< seats' bonds back together; minimum = clamp(ceil(collateral x bps / 10^4 / N_SLOTS), floor, cap)
     int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
     int bondMaturity;                    //!< BOND_MATURITY 16,128

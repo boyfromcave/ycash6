@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "782038d14a928963f76bc29eb901f2220afd3379fc69ad45d4da94a333c656b6";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 10 since D-Q-28; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "782038d14a928963f76bc29eb901f2220afd3379fc69ad45d4da94a333c656b6";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 10 since D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -2618,7 +2618,7 @@ BOOST_AUTO_TEST_CASE(p4b_join_mirrors_member)
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_REGISTER);
     BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
     // below the module's floor: mirrored (the set admitted them) but never ELIGIBLE
-    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, COIN * 5 / 2 - 1)), verdict::OK);   // D-Q-28: below the 2.5-YEC floor (no vaults)
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, COIN * 5 / 2 - 1)), verdict::OK);   // D-Q-30: below the 2.5-YEC floor (no vaults)
     BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(2, 10 * COIN, f.P.bondMinLock - 1)), verdict::OK);
     BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 3);
     const int joined0 = f.Attestor(0)->registerHeight;
@@ -2732,7 +2732,7 @@ BOOST_AUTO_TEST_CASE(p4b_seats_bound_nslots)
     BOOST_CHECK_EQUAL(Seated(f.view, f.P, f.tip).size(), 2u);
 }
 
-// Rule: D-Q-28 (revised): the module's bond floor is clamp(ceil(collateral x BOND_SHARE_BPS / 10^4 / N_SLOTS), floor, cap)
+// Rule: D-Q-30: the module's bond floor is clamp(ceil(collateral x BOND_SHARE_BPS / 10^4 / N_SLOTS), floor, cap)
 // over the YEC in ACTIVE YED vaults at Snapshots[registerHeight - 1]; no price is read; judged once, for PENDING records only.
 BOOST_AUTO_TEST_CASE(dq28_bond_min_from_collateral)
 {
