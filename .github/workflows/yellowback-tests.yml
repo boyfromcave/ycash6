@@ -911,7 +911,15 @@ jobs:
           # U-21: the vault primitive's consensus checks (its block verdict, its timelock and the
           # final-transaction check it extends) and the YED module's block verdict are consensus
           # rejections (DoS 100); every other inserted DoS stays DoS(0).
-          git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(\|Misbehaving(' \
+          # A call split over lines (`state.DoS(` alone) must take stock zcashd's consensus DoS level on its
+          # next line (dosLevelPotentiallyRelaxing / dosLevelConstricting: 100 in a block, 10 in the mempool,
+          # 0 in IBD), as the R-A3 version-group clause does (quantum spec R-A3, audit 04/F-2).
+          git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | awk '
+            open { if ($0 !~ /dosLevel(PotentiallyRelaxing|Constricting),/) { print "split DoS( without a consensus dosLevel: " $0; bad = 1 }
+                   open = 0; next }
+            /DoS\($/ { open = 1; next }
+            { print }
+            END { exit bad }' | grep 'DoS(\|Misbehaving(' \
             | grep -v -e 'DoS(100, error("ConnectBlock(): vault: %s"' -e 'DoS(100, error("ConnectBlock(): %s", yb\.reason' \
                       -e '"bad-txns-vault-timelock")' -e '"bad-txns-nonfinal")' | { ! grep -v 'DoS(0'; } || exit 1
           # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
