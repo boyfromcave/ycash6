@@ -693,6 +693,13 @@ jobs:
             if [ "$mine" = "$theirs" ]; then echo "identical: $f ($mine)"
             else echo "::error::$f differs from $OTHER_LINE_REPO $other (here $mine, there $theirs)"; rc=1; fi
           done
+          # src/crypto/pq (the PQ schemes and their vendored C with local patches P1-P3) is byte-identical on both
+          # lines (src/crypto/pq/README.md; audit 02/PQ-1..PQ-3): the committed trees must have the same hash.
+          if [ -d src/crypto/pq ]; then
+            mine=$(git rev-parse HEAD:src/crypto/pq); theirs=$(git rev-parse other-line/head:src/crypto/pq 2>/dev/null || echo none)
+            if [ "$mine" = "$theirs" ]; then echo "identical: src/crypto/pq (tree $mine)"
+            else echo "::error::src/crypto/pq differs from $OTHER_LINE_REPO $other (tree here $mine, there $theirs)"; rc=1; fi
+          fi
           exit $rc
 
       - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees) through the workspace generator (findings (39), (44))

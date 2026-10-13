@@ -37,6 +37,16 @@ for f in src/main.cpp:40 src/miner.cpp:35 src/miner.h:10 src/rpc/mining.cpp:35 s
     if [ "$report" = 1 ]; then echo "  over budget (report only)"; else rc=1; fi
   fi
 done
+# Wallet-side secret wipes in the vendored PQ C (audit 02/PQ-1, 02/PQ-2; src/crypto/pq/README.md "Local patches"
+# P3): the Falcon keygen/sign done: blocks wipe their SHAKE256 DRBG state, and every slh_var_t built from a secret
+# key in slh_dsa.c is wiped before its function returns (the same leg as ycash-dd's leg_pq_wipes).
+if [ -d src/crypto/pq ]; then
+  fs=src/crypto/pq/falcon/ycash_falcon_sign.c; sd=src/crypto/pq/slhdsa/slh_dsa.c
+  nr=$(grep -c 'wipe(&rng, sizeof rng)' "$fs" || true); nc=$(grep -c 'wipe(&sc, sizeof sc)' "$fs" || true)
+  nv=$(grep -c 'slh_wipe_var(&var);' "$sd" || true); ns=$(grep -c 'mk_var(&var, NULL, sk, prm)' "$sd" || true)
+  echo "PQ wipes: $fs wipe(&rng) x$nr, wipe(&sc) x$nc (want 1 each); $sd slh_wipe_var(&var) x$nv (want $ns, >= 2)"
+  if [ "$nr" != 1 ] || [ "$nc" != 1 ] || [ "$nv" -lt 2 ] || [ "$nv" != "$ns" ]; then echo "  PQ wipes missing"; rc=1; fi
+fi
 # S1: every registered yed_* RPC has an exact-arity rpcCvtTable row (the server rejects it otherwise)
 ../.venv/bin/python qa/yellowback-rpc-cvt.py --check 2>/dev/null || python3 qa/yellowback-rpc-cvt.py --check || rc=1
 exit $rc
