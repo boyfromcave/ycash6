@@ -87,6 +87,7 @@ BASE_SCRIPTS= [
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',
     'vault_rpc_contract.py',
+    'vault_refee.py',
     # The primitive with raw transactions, cross-checked against VaultModel: set lifecycle, lock /
     # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
     # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.

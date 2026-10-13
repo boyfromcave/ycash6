@@ -12,6 +12,7 @@
 #include "wallet/db.h"
 #include "key.h"
 #include "keystore.h"
+#include "primitives/transaction.h"
 #include "zcash/Address.hpp"
 #include "zcash/address/zip32.h"
 
@@ -427,6 +428,14 @@ public:
     }
 };
 
+/** A "vaultsetsig" record: what this wallet's set members signed for (setId, prevout) (sign once, 07/F-5). */
+struct VaultSetSigRecord {
+    uint256 setId;
+    COutPoint prevout;
+    uint8_t role = 0;
+    uint256 sighash;
+};
+
 /** Access to the wallet database */
 class CWalletDB : public CDB
 {
@@ -457,6 +466,25 @@ public:
     // (setId, prevout), the role and sighash the wallet's members signed. Read on demand, never loaded.
     bool WriteVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t role, const uint256& sighash);
     bool ReadVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t& role, uint256& sighash);
+    /** Every "vaultsetsig" record (07/F-5: set_listsigned, the wallet dump). There is no erase: the record is never
+     *  deleted by RPC. */
+    bool ListVaultSetSigs(std::vector<VaultSetSigRecord>& out);
+    // The restore marker (07/F-5): written when the wallet was created from a seed or imported a key that is a vault
+    // set member, so it may lack the sign-once history; cleared by set_importsigned or a dump import that carries
+    // the history. While set, set_signunlock/set_signcancel refuse (set-sign-restored) unless acknowledged.
+    bool WriteVaultSignRestored();
+    bool ReadVaultSignRestored();
+    bool EraseVaultSignRestored();
+    // Vault spends this wallet built for set signatures, keyed by the template outpoint (01/V-2, 07/N-2:
+    // vault_buildunlock / vault_buildcancel return them byte-identically), and the recipient scripts of the
+    // intents it built (vault_release). Loaded with the wallet ("vaultbuild", "vaultrecipient").
+    bool WriteVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx);
+    bool EraseVaultBuild(const COutPoint& templ);
+    bool WriteVaultRecipient(const uint256& recipientHash, const CScript& script);
+    // Imported keys that were not a vault set member at the tip when imported (S3): a SET_JOIN of one in a connected
+    // block sets the restore marker. Loaded with the wallet ("vaultpendingkey").
+    bool WriteVaultPendingKey(const CKeyID& id);
+    bool EraseVaultPendingKey(const CKeyID& id);
 
     bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata &keyMeta);
     bool WriteCryptedKey(const CPubKey& vchPubKey, const std::vector<unsigned char>& vchCryptedSecret, const CKeyMetadata &keyMeta);

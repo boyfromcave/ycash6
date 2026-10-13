@@ -1986,8 +1986,11 @@ payload; XFER-1 applies when it is next spent, so split it with a TRANSFER). A c
 claimant's YED; it does not return the claim's YEC costs (the protocol fee -- half of it to an attestor
 when one is paid -- and the network fees), which a claimant loses per cancelled round. A cancel
 without the refund is invalid (`intent-cancel-no-refund`), which is why `vault_buildcancel` refuses
-a YED intent. Called again for the same intent it returns the same transaction while its fee inputs
-are unspent (members sign once). `refund.cents` is the amount re-issued; `refund.vout` is always 1.
+a YED intent. Called again for the same intent it returns the same transaction — remembered in the
+wallet database across restarts with its fee inputs locked, and re-funded with the same sighash when a
+fee input was spent meanwhile (the set signature is over `SIGHASH_ALL|SIGHASH_ANYONECANPAY`, so
+`vault_refee` also re-funds a signed one; doc/vault-rpc.md) — so members sign once. The fee never
+comes from the intent's value. `refund.cents` is the amount re-issued; `refund.vout` is always 1.
 Refusals: `RPC_INVALID_PARAMETER` for a residual intent (it is never cancelled,
 `intent-cancel-residual`), an outpoint that is not a YED claim intent, or a vault that is not
 `CLAIMING`; `vault_buildcancel`'s own (`not an unspent intent output`, `can no longer be cancelled`).

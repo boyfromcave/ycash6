@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "29386e0b35058b07cc16a0ef1c8690308ab3ffce4f0e177a415c913b245b8fe0"
+    "sha256": "9500203d0309d1588804f06ba9f3197efe9aa3d91d692e775e2fcea08b8002a1"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -1881,7 +1881,7 @@
     },
     "vault_buildunlock": {
       "wallet": true,
-      "signature": "vault_buildunlock \"outpoint\" [{\"address\"|\"script\", \"amount\"}, ...]",
+      "signature": "vault_buildunlock \"outpoint\" [{\"address\"|\"script\", \"amount\"}, ...] ( rebuild )",
       "params": [
         {
           "name": "outpoint",
@@ -1899,6 +1899,13 @@
               "ref": "Recipient"
             }
           }
+        },
+        {
+          "name": "rebuild",
+          "required": false,
+          "type": {
+            "type": "bool"
+          }
         }
       ],
       "result": {
@@ -1915,6 +1922,22 @@
           },
           "required": {
             "type": "int"
+          },
+          "sighash": {
+            "type": "hash"
+          },
+          "build": {
+            "oneOf": [
+              {
+                "const": "new"
+              },
+              {
+                "const": "reused"
+              },
+              {
+                "const": "refunded"
+              }
+            ]
           }
         },
         "optional": []
@@ -1922,13 +1945,28 @@
     },
     "set_signunlock": {
       "wallet": true,
-      "signature": "set_signunlock \"hex\"",
+      "signature": "set_signunlock \"hex\" ( {\"acknowledgerestore\": true} )",
       "params": [
         {
           "name": "hex",
           "required": true,
           "type": {
             "type": "hex"
+          }
+        },
+        {
+          "name": "options",
+          "required": false,
+          "type": {
+            "type": "object",
+            "fields": {
+              "acknowledgerestore": {
+                "type": "bool"
+              }
+            },
+            "optional": [
+              "acknowledgerestore"
+            ]
           }
         }
       ],
@@ -1938,13 +1976,20 @@
     },
     "vault_buildcancel": {
       "wallet": true,
-      "signature": "vault_buildcancel \"intentoutpoint\"",
+      "signature": "vault_buildcancel \"intentoutpoint\" ( rebuild )",
       "params": [
         {
           "name": "intentoutpoint",
           "required": true,
           "type": {
             "type": "outpoint"
+          }
+        },
+        {
+          "name": "rebuild",
+          "required": false,
+          "type": {
+            "type": "bool"
           }
         }
       ],
@@ -1965,6 +2010,22 @@
           },
           "intentconfirmed": {
             "type": "bool"
+          },
+          "sighash": {
+            "type": "hash"
+          },
+          "build": {
+            "oneOf": [
+              {
+                "const": "new"
+              },
+              {
+                "const": "reused"
+              },
+              {
+                "const": "refunded"
+              }
+            ]
           }
         },
         "optional": []
@@ -1972,7 +2033,38 @@
     },
     "set_signcancel": {
       "wallet": true,
-      "signature": "set_signcancel \"hex\"",
+      "signature": "set_signcancel \"hex\" ( {\"acknowledgerestore\": true} )",
+      "params": [
+        {
+          "name": "hex",
+          "required": true,
+          "type": {
+            "type": "hex"
+          }
+        },
+        {
+          "name": "options",
+          "required": false,
+          "type": {
+            "type": "object",
+            "fields": {
+              "acknowledgerestore": {
+                "type": "bool"
+              }
+            },
+            "optional": [
+              "acknowledgerestore"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "ref": "SetSigResult"
+      }
+    },
+    "vault_refee": {
+      "wallet": true,
+      "signature": "vault_refee \"hex\"",
       "params": [
         {
           "name": "hex",
@@ -1983,7 +2075,120 @@
         }
       ],
       "result": {
-        "ref": "SetSigResult"
+        "type": "object",
+        "fields": {
+          "hex": {
+            "type": "hex"
+          },
+          "sighash": {
+            "type": "hash"
+          },
+          "fee": {
+            "type": "yec"
+          },
+          "replaced": {
+            "type": "array",
+            "items": {
+              "type": "outpoint"
+            }
+          }
+        },
+        "optional": []
+      }
+    },
+    "set_listsigned": {
+      "wallet": true,
+      "signature": "set_listsigned",
+      "params": [],
+      "result": {
+        "type": "object",
+        "fields": {
+          "restored": {
+            "type": "bool"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "fields": {
+                "setid": {
+                  "type": "hash"
+                },
+                "prevout": {
+                  "type": "outpoint"
+                },
+                "role": {
+                  "type": "int"
+                },
+                "sighash": {
+                  "type": "hash"
+                }
+              },
+              "optional": []
+            }
+          }
+        },
+        "optional": []
+      }
+    },
+    "set_importsigned": {
+      "wallet": true,
+      "signature": "set_importsigned [{\"setid\", \"prevout\", \"role\", \"sighash\"}, ...]",
+      "params": [
+        {
+          "name": "records",
+          "required": true,
+          "type": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "fields": {
+                "setid": {
+                  "type": "hash"
+                },
+                "prevout": {
+                  "type": "outpoint"
+                },
+                "role": {
+                  "type": "int"
+                },
+                "sighash": {
+                  "type": "hash"
+                }
+              },
+              "optional": []
+            }
+          }
+        }
+      ],
+      "result": {
+        "type": "object",
+        "fields": {
+          "imported": {
+            "type": "int"
+          },
+          "present": {
+            "type": "int"
+          }
+        },
+        "optional": []
+      }
+    },
+    "set_acknowledgerestore": {
+      "wallet": true,
+      "signature": "set_acknowledgerestore",
+      "params": [],
+      "result": {
+        "type": "object",
+        "fields": {
+          "restored": {
+            "type": "bool"
+          },
+          "pendingkeys": {
+            "type": "int"
+          }
+        },
+        "optional": []
       }
     },
     "vault_send": {
@@ -2264,9 +2469,27 @@
       "message": "set-sign-once",
       "raisedBy": [
         "set_signunlock",
-        "set_signcancel"
+        "set_signcancel",
+        "set_importsigned"
       ],
       "provokedBy": "a second, different unlock of a vault this wallet already signed"
+    },
+    {
+      "code": -4,
+      "message": "set-sign-restored",
+      "raisedBy": [
+        "set_signunlock",
+        "set_signcancel"
+      ],
+      "provokedBy": "signing on a wallet that imported a member key, before `set_importsigned`"
+    },
+    {
+      "code": -8,
+      "message": "already built a different unlock",
+      "raisedBy": [
+        "vault_buildunlock"
+      ],
+      "provokedBy": "a second build of one vault with other recipients, without `rebuild`"
     },
     {
       "code": -8,

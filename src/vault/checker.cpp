@@ -31,7 +31,10 @@ bool SetSigChecker::CheckSetSigs(const uint256& setId, uint8_t role, const std::
     if (!snapshot || !txTo || nIn >= txTo->vin.size()) return false;
     uint256 sighash;
     try {
-        sighash = SignatureHash(scriptCode, *txTo, nIn, SIGHASH_ALL, amount, consensusBranchId, *txdata);
+        // SIGHASH_ALL | SIGHASH_ANYONECANPAY (01/V-2): the signature binds this input (its prevout, amount,
+        // sequence, scriptCode), every output and the rest of the ZIP-243 digest, but not the other inputs, so the
+        // ordinary coins that pay the fee may be replaced without a new set signature (vault_refee).
+        sighash = SignatureHash(scriptCode, *txTo, nIn, SIGHASH_ALL | SIGHASH_ANYONECANPAY, amount, consensusBranchId, *txdata);
     } catch (const std::logic_error&) {
         return false;
     }

@@ -65,8 +65,8 @@ class VaultSlashingTest(VaultTestBase):
         ra, rb = self.change_spk(), self.change_spk()
         tx_a = self.unlock_tx(vout, vp, 4 * COIN, [(ra, 4 * COIN)])
         tx_b = self.unlock_tx(vout, vp, 4 * COIN, [(rb, 4 * COIN)])
-        sh_a = v.template_sighash(tx_a, 0, spk, 4 * COIN)
-        sh_b = v.template_sighash(tx_b, 0, spk, 4 * COIN)
+        sh_a = v.set_sighash(tx_a, 0, spk, 4 * COIN)
+        sh_b = v.set_sighash(tx_b, 0, spk, 4 * COIN)
         hex_a = self.setsig_hex(tx_a, spk, 4 * COIN, sid, v.ROLE_UNLOCK, [x[0], x[1]], v.SEL_UNLOCK)
         hex_b = self.setsig_hex(tx_b, spk, 4 * COIN, sid, v.ROLE_UNLOCK, [x[0], x[2]], v.SEL_UNLOCK)
         self.lock_inputs(hex_a)            # kept for later probes: its fee coin stays unspent
@@ -127,7 +127,7 @@ class VaultSlashingTest(VaultTestBase):
                     'rejoin of the ejected x0 (its frozen bond is unspent)')
         # x2 had signed B's unlock while a member: proven now, after its removal
         tx_c = self.unlock_tx(vout, vp, 4 * COIN, [(self.change_spk(), 4 * COIN)])
-        sh_c = v.template_sighash(tx_c, 0, spk, 4 * COIN)
+        sh_c = v.set_sighash(tx_c, 0, spk, 4 * COIN)
         sig_c = v.sign_recoverable(x[2], v.set_sig_msg_raw(sid, 1, po, sh_c))
         self.accept(self.act_hex(v.act_set_equivocation(sid, po, 1, sh_b, sig_b_x2, 1, sh_c, sig_c)),
                     'SET_EQUIVOCATION of the removed x2 (bond still unspent)')

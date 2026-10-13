@@ -48,7 +48,7 @@ typedef std::vector<unsigned char> valtype;
  *  SignatureHash(scriptCode, tx, nIn, <this>, amount, branch)). set_sig_checker and vault_checksetsig_real_script sign
  *  with it, so a change of the consensus hashtype (MEDIUM-01-V-2: SIGHASH_ALL | SIGHASH_ANYONECANPAY) is this one line;
  *  every assertion below holds under either value, and the one that differs between them branches on it. */
-const int SET_SIG_HASHTYPE = SIGHASH_ALL;
+const int SET_SIG_HASHTYPE = SIGHASH_ALL | SIGHASH_ANYONECANPAY;
 
 /** UPGRADE_VAULT's consensus branch ID (0x6d5b7a31), the branch a set signature is made for. */
 uint32_t VaultBranchId() { return NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId; }
@@ -1670,6 +1670,105 @@ BOOST_AUTO_TEST_CASE(vault_checksetsig_real_script)
         BOOST_CHECK(!VerifyScript(OwnerScriptSig(sig2, pk2, SEL_RELEASED), vspk, flags, released, branch, &err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
     }
+}
+
+BOOST_AUTO_TEST_CASE(set_sig_checker_refee)
+{
+    // 01/V-2: a set signature is over SIGHASH_ALL|SIGHASH_ANYONECANPAY, so it binds the template input and every
+    // output but not the fee inputs: a re-funded spend verifies with the original signatures and has the same
+    // sighash (no equivocation); anything else the signers agreed to does not.
+    Chain c;
+    CKey k1 = MakeKey(1), k2 = MakeKey(2);
+    SetId s = SetWithMembers(c, {k1, k2});   // unlock 2, cancel 1
+    SetId other = SetWithMembers(c, {k1, k2});
+    BOOST_REQUIRE(other != s);
+    auto snap = std::make_shared<const SetSnapshot>(c.kv);
+    CScript scriptCode = BuildVault(VaultFor(s, MakeKey(50)));
+    const CAmount amount = 5000;
+    const uint32_t branch = 0x6d5b7a31;      // the Vault branch ID
+    const COutPoint templ(uint256S("0xabc"), 1);
+
+    CMutableTransaction a;
+    a.fOverwintered = true;                  // a v4 (Sapling) transaction: ZIP-243, bound to the branch ID
+    a.nVersion = SAPLING_TX_VERSION;
+    a.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+    a.vin.push_back(CTxIn(templ, CScript(), 0xffffffff));
+    a.vin.push_back(CTxIn(COutPoint(uint256S("0xfee1"), 0), CScript(), 0xffffffff));
+    a.vout.push_back(CTxOut(4000, Recipient(9)));
+    a.vout.push_back(CTxOut(1000, scriptCode));
+    a.vout.push_back(CTxOut(700, Recipient(8)));     // the builder's change
+    const CTransaction ta(a);
+    PrecomputedTransactionData da(ta, std::vector<CTxOut>(ta.vin.size(), CTxOut(amount, scriptCode)));
+    const uint256 sh = SignatureHash(scriptCode, ta, 0, SIGHASH_ALL | SIGHASH_ANYONECANPAY, amount, branch, da);
+    const uint256 shAll = SignatureHash(scriptCode, ta, 0, SIGHASH_ALL, amount, branch, da);
+    BOOST_CHECK(sh != shAll);
+    auto sign = [&](const CKey& k, const SetId& id, uint8_t role, const uint256& h) {
+        valtype sig;
+        BOOST_REQUIRE(SignRecoverable(k, SetSigMsg(id, role, templ, h), sig));
+        return sig;
+    };
+    const std::vector<valtype> sigs = {sign(k1, s, 1, sh), sign(k2, s, 1, sh)};
+    auto check = [&](const CMutableTransaction& m, const SetId& id, uint8_t role, const std::vector<valtype>& sg, uint32_t br) {
+        const CTransaction t(m);
+        PrecomputedTransactionData d(t, std::vector<CTxOut>(t.vin.size(), CTxOut(amount, scriptCode)));
+        SetSigChecker checker(&t, 0, amount, false, d, snap, c.h);
+        return checker.CheckSetSigs(id, role, sg, scriptCode, br);
+    };
+    auto digest = [&](const CMutableTransaction& m) {
+        const CTransaction t(m);
+        PrecomputedTransactionData d(t, std::vector<CTxOut>(t.vin.size(), CTxOut(amount, scriptCode)));
+        return SignatureHash(scriptCode, t, 0, SIGHASH_ALL | SIGHASH_ANYONECANPAY, amount, branch, d);
+    };
+    BOOST_CHECK(check(a, s, ROLE_UNLOCK, sigs, branch));
+
+    // Re-funded: the fee input replaced, then another added; same sighash, the same signatures verify.
+    CMutableTransaction b = a;
+    b.vin[1].prevout = COutPoint(uint256S("0xfee2"), 3);
+    BOOST_CHECK(digest(b) == sh);
+    BOOST_CHECK(check(b, s, ROLE_UNLOCK, sigs, branch));
+    b.vin.push_back(CTxIn(COutPoint(uint256S("0xfee3"), 0), CScript(), 0xfffffffe));
+    BOOST_CHECK(digest(b) == sh);
+    BOOST_CHECK(check(b, s, ROLE_UNLOCK, sigs, branch));
+    // The fee input's own scriptSig is not signed either (it is signed after the set signatures).
+    b.vin[1].scriptSig = CScript() << OP_1;
+    BOOST_CHECK(check(b, s, ROLE_UNLOCK, sigs, branch));
+
+    // Negatives: an output changed (the change too), one added, the template prevout, its sequence, nLockTime,
+    // another set, another role, another branch ID, a signature over the old SIGHASH_ALL digest.
+    CMutableTransaction m = a;
+    m.vout[0].nValue -= 1;
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    m = a; m.vout[2].nValue -= 1;
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    m = a; m.vout.push_back(CTxOut(1, Recipient(7)));
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    m = a; m.vin[0].prevout = COutPoint(uint256S("0xabd"), 1);
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    m = a; m.vin[0].nSequence = 0xfffffffe;
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    m = a; m.nLockTime = 7;
+    BOOST_CHECK(!check(m, s, ROLE_UNLOCK, sigs, branch));
+    BOOST_CHECK(!check(a, other, ROLE_UNLOCK, sigs, branch));
+    BOOST_CHECK(!check(a, other, ROLE_UNLOCK, {sign(k1, other, 1, sh), sign(k2, s, 1, sh)}, branch));
+    BOOST_CHECK(check(a, other, ROLE_UNLOCK, {sign(k1, other, 1, sh), sign(k2, other, 1, sh)}, branch));
+    BOOST_CHECK(!check(a, s, ROLE_CANCEL, {sigs[0]}, branch));
+    BOOST_CHECK(check(a, s, ROLE_CANCEL, {sign(k1, s, 2, sh)}, branch));
+    BOOST_CHECK(!check(a, s, ROLE_UNLOCK, sigs, 0));
+    BOOST_CHECK(!check(a, s, ROLE_UNLOCK, sigs, 0x76b809bb));     // Sapling's branch ID
+    BOOST_CHECK(!check(a, s, ROLE_UNLOCK, {sign(k1, s, 1, shAll), sign(k2, s, 1, shAll)}, branch));
+
+    // Two re-funded builds have one sighash: SET_EQUIVOCATION over them is refused (equal is not equivocation).
+    Act e;
+    e.type = ACT_SET_EQUIVOCATION;
+    e.equivocation.setId = s;
+    e.equivocation.prevout = templ;
+    e.equivocation.roleA = 1;
+    e.equivocation.sighashA = sh;
+    e.equivocation.sigA = sigs[0];
+    e.equivocation.roleB = 1;
+    e.equivocation.sighashB = digest(b);
+    BOOST_REQUIRE(SignRecoverable(k1, SetSigMsg(s, 1, templ, e.equivocation.sighashB), e.equivocation.sigB));
+    BOOST_CHECK_EQUAL(*c.Try(ActTx(c, e, {})), "bad-vault-act-equivocation");
 }
 
 BOOST_AUTO_TEST_CASE(module_table_registers_yed)

@@ -200,6 +200,10 @@ UniValue importprivkey(const UniValue& params, bool fHelp)
 
         if (!pwalletMain->AddKeyPubKey(key, pubkey))
             throw JSONRPCError(RPC_WALLET_ERROR, "Error adding key to wallet");
+        // 07/F-5: an imported vault set member key brings no sign-once history; set_signunlock/set_signcancel refuse
+        // until it is imported (set_importsigned) or the call acknowledges the restore.
+        if (!MarkVaultKeyImported(*pwalletMain, pubkey))
+            throw JSONRPCError(RPC_WALLET_ERROR, "cannot write the vault sign-once restore marker");
 
         // whenever a key is imported, we need to scan the whole chain
         pwalletMain->nTimeFirstKey = 1; // 0 would be considered 'no value'
@@ -555,6 +559,17 @@ UniValue importwallet(const UniValue& params, bool fHelp)
 	return importwallet_impl(params, false);
 }
 
+/** A dump's vaultbuild= transaction (07/F-5); false when it does not decode. */
+static bool DecodeVaultBuildHex(CTransaction& tx, const std::string& hex)
+{
+    try {
+        DecodeHexTx(tx, hex);   // 6.20.0: throws instead of returning false
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
 {
     if (fPruneMode)
@@ -584,6 +599,9 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
     int64_t nFilesize = std::max((int64_t)1, (int64_t)file.tellg());
     file.seekg(0, file.beg);
 
+    bool fVaultMarkFailed = false;                  // MarkVaultKeyImported could not write (07/F-5)
+    std::vector<VaultSetSigRecord> vVaultSetSigs;
+
     const auto& chainparams = Params();
     KeyIO keyIO(chainparams);
 
@@ -604,6 +622,62 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
 
         std::vector<std::string> vstr;
         boost::split(vstr, line, boost::is_any_of(" "));
+
+        // The vault set sign-once history and the wallet's remembered vault builds (07/F-5, 01/V-2): dumpwallet's
+        // "vaultsetsigs=<n>", "vaultsetsig=<setid>:<txid>:<n>:<role>:<sighash>", "vaultbuild=<txid>:<n>:<hex>" and
+        // "vaultrecipient=<hash>:<script hex>" lines. Older nodes skip them.
+        if (boost::algorithm::starts_with(vstr[0], "vaultsetsigs=")) {
+            continue;                               // informative only: an import never clears the restore marker (S2)
+        }
+        if (boost::algorithm::starts_with(vstr[0], "vaultsetsig=")) {
+            std::vector<std::string> f;
+            boost::split(f, vstr[0].substr(12), boost::is_any_of(":"));
+            int64_t n = 0, role = 0;
+            if (f.size() != 5 || !IsHex(f[0]) || f[0].size() != 64 || !IsHex(f[1]) || f[1].size() != 64 || !ParseInt64(f[2], &n) ||
+                n < 0 || n > 0xffffffffLL || !ParseInt64(f[3], &role) || role < 1 || role > 2 || !IsHex(f[4]) || f[4].size() != 64)
+                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "malformed vaultsetsig line: " + vstr[0]);
+            VaultSetSigRecord r;
+            r.setId = uint256S(f[0]);
+            r.prevout = COutPoint(uint256S(f[1]), (uint32_t)n);
+            r.role = (uint8_t)role;
+            const std::vector<unsigned char> sh = ParseHex(f[4]);
+            r.sighash = uint256(sh);
+            vVaultSetSigs.push_back(r);
+            continue;
+        }
+        if (boost::algorithm::starts_with(vstr[0], "vaultbuild=")) {
+            std::vector<std::string> f;
+            boost::split(f, vstr[0].substr(11), boost::is_any_of(":"));
+            int64_t n = 0;
+            CTransaction tx;
+            if (f.size() != 3 || !IsHex(f[0]) || f[0].size() != 64 || !ParseInt64(f[1], &n) || n < 0 || n > 0xffffffffLL || !DecodeVaultBuildHex(tx, f[2])) {
+                fGood = false;
+                continue;
+            }
+            const COutPoint templ(uint256S(f[0]), (uint32_t)n);
+            if (!pwalletMain->mapVaultBuilds.count(templ)) {
+                const CMutableTransaction mtx(tx);
+                if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultBuild(templ, mtx)) fGood = false;
+                else pwalletMain->LoadVaultBuild(templ, mtx);
+            }
+            continue;
+        }
+        if (boost::algorithm::starts_with(vstr[0], "vaultrecipient=")) {
+            std::vector<std::string> f;
+            boost::split(f, vstr[0].substr(15), boost::is_any_of(":"));
+            if (f.size() != 2 || !IsHex(f[0]) || f[0].size() != 64 || !IsHex(f[1])) {
+                fGood = false;
+                continue;
+            }
+            const uint256 h = uint256S(f[0]);
+            const std::vector<unsigned char> b = ParseHex(f[1]);
+            const CScript script(b.begin(), b.end());
+            if (!pwalletMain->mapVaultRecipients.count(h)) {
+                if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultRecipient(h, script)) fGood = false;
+                else pwalletMain->mapVaultRecipients[h] = script;
+            }
+            continue;
+        }
         if (vstr.size() < 2)
             continue;
 
@@ -690,6 +764,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
             fGood = false;
             continue;
         }
+        if (!MarkVaultKeyImported(*pwalletMain, pubkey)) fVaultMarkFailed = true;
         pwalletMain->mapKeyMetadata[keyid].nCreateTime = nTime;
         if (fLabel)
             pwalletMain->SetAddressBook(keyid, strLabel, "receive");
@@ -697,6 +772,19 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
     }
     file.close();
     pwalletMain->ShowProgress("", 100); // hide progress dialog in GUI
+
+    // 07/F-5: the set sign-once history. A record that conflicts with this wallet's refuses the import (two signing
+    // histories for one key are never merged). An imported member key sets the restore marker (MarkVaultKeyImported,
+    // above); importing a history never clears it -- the dump may be stale (review S2): set_acknowledgerestore does.
+    {
+        int added = 0, present = 0;
+        std::string conflict;
+        if (!ImportVaultSetSigs(*pwalletMain, vVaultSetSigs, added, present, conflict))
+            throw JSONRPCError(RPC_WALLET_ERROR, conflict);
+        if (fVaultMarkFailed)
+            throw JSONRPCError(RPC_WALLET_ERROR, "cannot write the vault sign-once restore marker");
+        if (added || present) LogPrintf("Imported %d vault set sign-once records (%d already present)\n", added, present);
+    }
 
     CBlockIndex *pindex = chainActive.Tip();
     while (pindex && pindex->pprev && pindex->GetBlockTime() > nTimeBegin - TIMESTAMP_WINDOW) {
@@ -888,6 +976,27 @@ static void WriteWalletDumpToFile(const fs::path& exportfilepath)
                               HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp),
                               keyIO.EncodeDestination(id));   // the plain-YEC sq…/tq…/rq… form (D-Q-20)
         }
+        file << "\n";
+    }
+
+    // The vault set sign-once history (07/F-5) and the remembered vault builds (01/V-2): a seed does not carry them,
+    // and a restored member key that signs a different spend of an outpoint it already signed is slashed. Older
+    // nodes skip these lines.
+    {
+        CWalletDB walletdb(pwalletMain->strWalletFile);
+        std::vector<VaultSetSigRecord> recs;
+        if (!walletdb.ListVaultSetSigs(recs))
+            throw JSONRPCError(RPC_WALLET_ERROR, "cannot read the vault set sign-once records");
+        file << "# Vault set sign-once history (vaultsetsig=<setid>:<txid>:<n>:<role>:<sighash>); import it before a restored\n";
+        file << "# member key signs (doc/vault-rpc.md, \"Sign once\")\n";
+        file << strprintf("vaultsetsigs=%u # records\n", (unsigned)recs.size());
+        for (const VaultSetSigRecord& r : recs)
+            file << strprintf("vaultsetsig=%s:%s:%u:%d:%s # %s\n", r.setId.GetHex(), r.prevout.hash.GetHex(), r.prevout.n, (int)r.role,
+                              HexStr(r.sighash.begin(), r.sighash.end()), r.role == 1 ? "unlock" : "cancel");
+        for (const auto& b : pwalletMain->mapVaultBuilds)
+            file << strprintf("vaultbuild=%s:%u:%s # remembered vault build\n", b.first.hash.GetHex(), b.first.n, EncodeHexTx(CTransaction(b.second)));
+        for (const auto& rcp : pwalletMain->mapVaultRecipients)
+            file << strprintf("vaultrecipient=%s:%s # intent recipient\n", rcp.first.GetHex(), HexStr(rcp.second.begin(), rcp.second.end()));
         file << "\n";
     }
 

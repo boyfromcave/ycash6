@@ -19,7 +19,8 @@ Ycash Yellowback (YED) on the vault primitive, end to end (docs/plans/yellowback
 - a reorg across the claim: the vault is ACTIVE again with no intent, and CLAIMING again after
   the reconsider, with one state hash on every node;
 - a wrong-price claim cancelled by the attestor set (yed_buildcancel + set_signcancel on the
-  member's node + vault_send; vault_buildcancel refuses a YED intent): the collateral is back in a
+  member's node + vault_refee re-funding the signed cancel (01/V-2) + vault_send; vault_buildcancel refuses a
+  YED intent): the collateral is back in a
   byte-identical vault, the position is ACTIVE at the cancel's output 0 and the claimant's burn is
   refunded at output 1 to the holder it came from, supply credited (CAN-1, audit 03/H-1);
 - an invalid mint (a $50 mint) is refused by the mempool (bad-yellowback-bad-mint-amount) and a
@@ -345,6 +346,15 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert n2.validateaddress(n2.decoderawtransaction(built['hex'])['vout'][1]['scriptPubKey']['addresses'][0])['ismine']
         signed = n1.set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
+        # 01/V-2: the attestor's signature (SIGHASH_ALL|ANYONECANPAY) does not bind the fee inputs: the builder's node
+        # re-funds the signed cancel (vault_refee) under the same sighash, re-signing it is idempotent for the member,
+        # and yed_buildcancel returns the re-funded transaction from then on (the build memo follows it, 07/N-2)
+        rf = n2.vault_refee(signed['hex'])
+        assert_equal(rf['sighash'], signed['sighash'])
+        assert_equal(n1.set_signcancel(rf['hex'])['sighash'], signed['sighash'])
+        again = n2.yed_buildcancel('%s:0' % claim_c)['hex']             # the re-funded build, without the signature
+        assert_equal(n1.set_signcancel(again)['hex'], rf['hex'])
+        signed = dict(signed, hex=rf['hex'])
         # the OP_CHECKSETSIG input is complete; the fee inputs are not signed yet: invalid, naming one of them
         v = n2.yed_validaterawtransaction(signed['hex'])
         assert_equal((v['valid'], v['type']), (False, 'claim_cancel'))

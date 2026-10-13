@@ -391,7 +391,7 @@ BOOST_AUTO_TEST_CASE(template_spends)
         // v4 (ZIP-243): the precomputed hashes come from the transaction alone; the previous
         // outputs are only read for v5 (ZIP-244) transactions.
         PrecomputedTransactionData txdata(tx, std::vector<CTxOut>(tx.vin.size(), CTxOut(amount, code)));
-        uint256 sighash = SignatureHash(code, tx, nIn, SIGHASH_ALL, amount, branch, txdata);
+        uint256 sighash = SignatureHash(code, tx, nIn, SIGHASH_ALL | SIGHASH_ANYONECANPAY, amount, branch, txdata); // 01/V-2
         BOOST_CHECK_MESSAGE(Hex(sighash) == sp[i]["sighash"].get_str(), "ZIP-243 sighash under the vault branch " + name);
         uint256 msg = SetSigMsg(U256(sp[i]["setId"]), sp[i]["role"].get_int(), tx.vin[nIn].prevout, sighash);
         BOOST_CHECK_EQUAL(Hex(msg), sp[i]["setSigMsg"].get_str());

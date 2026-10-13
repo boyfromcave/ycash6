@@ -27,7 +27,7 @@ from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import VAULT_BRANCH_ID, assert_equal, nuparams, start_nodes
+from test_framework.util import VAULT_BRANCH_ID, assert_equal, connect_nodes_bi, nuparams, start_nodes, sync_blocks
 from test_framework import vault
 from test_framework.vault import bond_script
 from test_framework.yellowback_util import pubkey_to_address, wif_to_secret
@@ -45,14 +45,17 @@ class VaultRpcContractTest(BitcoinTestFramework):
 
     def __init__(self):
         super().__init__()
-        self.num_nodes = 1
+        self.num_nodes = 2
         # 6.20.0: the 200-block cache is built without the Ycash upgrades the harness activates at
         # height 1, so the chain starts clean (the node mines its own funds on the way to activation).
         self.cache_behavior = 'clean'
 
     def setup_network(self, split=False):
-        self.nodes = start_nodes(1, self.options.tmpdir, extra_args=[YCASH_UPGRADE_ARGS + [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=vault']])
+        # node 1 stands for a second host that imports node 0's member key (07/F-5: the restore marker)
+        self.nodes = start_nodes(2, self.options.tmpdir, extra_args=[YCASH_UPGRADE_ARGS + [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=vault']] * 2)
+        connect_nodes_bi(self.nodes, 0, 1)
         self.is_network_split = False
+        self.sync_all()
 
     def run_test(self):
         n = self.nodes[0]
@@ -161,11 +164,18 @@ class VaultRpcContractTest(BitcoinTestFramework):
         addr = n.getnewaddress()
         c.error("the recipients' amounts exceed the vault's value", n, 'vault_buildunlock', lk['outpoint'], [{'address': addr, 'amount': 6}])
         bu = c.call(n, 'vault_buildunlock', lk['outpoint'], [{'address': addr, 'amount': 2}])
+        assert_equal(bu['build'], 'new')
+        assert_equal(c.call(n, 'vault_buildunlock', lk['outpoint'], [{'address': addr, 'amount': 2}])['hex'], bu['hex'])   # call once (07/N-2)
+        c.error('already built a different unlock', n, 'vault_buildunlock', lk['outpoint'], [{'address': addr, 'amount': 1}])
         c.error('the transaction carries no YV act', n, 'set_signact', bu['hex'])
         c.error('the template input is not an intent', n, 'set_signcancel', bu['hex'])
         su = c.call(n, 'set_signunlock', bu['hex'])
         assert_equal(su['complete'], True)
-        txid = c.call(n, 'vault_send', su['hex'])
+        assert_equal(su['sighash'], bu['sighash'])
+        rf = c.call(n, 'vault_refee', su['hex'])                     # 01/V-2: new fee input, same signatures
+        assert_equal(rf['sighash'], su['sighash'])
+        assert_equal(len(rf['replaced']), 1)
+        txid = c.call(n, 'vault_send', rf['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         mine(1)
         intents = c.call(n, 'vault_list', {'kind': 'intent'})
@@ -195,17 +205,37 @@ class VaultRpcContractTest(BitcoinTestFramework):
 
         # ---- equivocation, then the owner spend its dormancy opens ----
         c.error('owner branch opens at height', n, 'vault_ownerspend', relock, addr)
-        a = c.call(n, 'set_signunlock', c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 1}])['hex'])
-        bu_b = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 2}])
+        bu_a = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 1}])
+        a = c.call(n, 'set_signunlock', bu_a['hex'])
+        bu_b = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 2}], True)   # rebuild after signing: the hazard
         c.error('set-sign-once', n, 'set_signunlock', bu_b['hex'])         # the wallet never equivocates (sign once)
+        # 07/F-5: a second host that imports the member key has no sign-once history: it refuses until it imports one
+        m = self.nodes[1]
+        sync_blocks(self.nodes)
+        m.importprivkey(n.dumpprivkey(pubkey_to_address(bytes.fromhex(key))), '', False)
+        assert_equal(c.call(m, 'set_listsigned')['restored'], True)
+        c.error('set-sign-restored', m, 'set_signunlock', bu_b['hex'])
+        listed = c.call(n, 'set_listsigned')
+        assert_equal(listed['restored'], False)
+        assert {'setid': setid, 'prevout': relock, 'role': 1, 'sighash': a['sighash']} in listed['records'], listed
+        assert_equal(c.call(m, 'set_importsigned', []), {'imported': 0, 'present': 0})
+        assert_equal(c.call(m, 'set_listsigned')['restored'], True)          # an empty import clears nothing (S2)
+        imp = c.call(m, 'set_importsigned', listed['records'])
+        assert_equal((imp['imported'], imp['present']), (len(listed['records']), 0))
+        assert_equal(c.call(m, 'set_listsigned')['restored'], True)          # nor does a real one: it may be stale
+        assert_equal(c.call(m, 'set_acknowledgerestore')['restored'], False) # only the operator's acknowledgement
+        c.error('set-sign-once', m, 'set_signunlock', bu_b['hex'])         # now the real guard
+        assert_equal(c.call(m, 'set_signunlock', bu_a['hex'])['sighash'], a['sighash'])   # identical: idempotent
+        conflict = dict(listed['records'][-1], sighash='00' * 32)
+        c.error('set-sign-once', m, 'set_importsigned', [conflict])        # two histories are never merged
         # The second signature, made outside the wallet with the member's key (as a faulty or malicious signer would).
         tx_b = vault.tx_from_hex(bu_b['hex'])
         coin = n.gettxout(relock.split(':')[0], int(relock.split(':')[1]))
-        sh_b = vault.template_sighash(tx_b, 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
+        sh_b = vault.set_sighash(tx_b, 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
         secret = wif_to_secret(n.dumpprivkey(pubkey_to_address(bytes.fromhex(key))))
         msg_b = vault.set_sig_msg(bytes.fromhex(setid)[::-1], 1, relock.split(':')[0], int(relock.split(':')[1]), sh_b)
         sig_b = vault.sign_recoverable(secret, msg_b)
-        sh_a = vault.template_sighash(vault.tx_from_hex(a['hex']), 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
+        sh_a = vault.set_sighash(vault.tx_from_hex(a['hex']), 0, bytes.fromhex(coin['scriptPubKey']['hex']), int(coin['value'] * 100000000))
         assert_equal(sh_a.hex(), a['sighash'])                              # the framework's sighash is the node's
         assert_equal(vault.recover_compact(bytes.fromhex(a['setsigs'][0]['sig']),
                                            vault.set_sig_msg(bytes.fromhex(setid)[::-1], 1, relock.split(':')[0], int(relock.split(':')[1]), sh_a)).hex(), key)
