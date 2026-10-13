@@ -1577,8 +1577,10 @@ BOOST_AUTO_TEST_CASE(module_liveness_hook)
     BOOST_REQUIRE(before1 < R - 1 && before2 < R - 1);
     yellowback::Params p = yellowback::RegtestParams(10, 0, 0, s);
     p.attestorLivenessMin = 1;
-    p.attestorSeats = (int)sp.seats;                  // adopt this small test set (seats, maturity)
+    p.attestorSeats = (int)sp.seats;                  // adopt this small test set (seats, maturity, thresholds: 03/I-3)
     p.bondMaturity = (int)sp.maturity;
+    p.attestorUnlockThreshold = (int)sp.unlockThreshold;
+    p.attestorCancelThreshold = (int)sp.cancelThreshold;
     yellowback::SetModuleParams(p);
     BOOST_REQUIRE_EQUAL(p.mSelect, 2);
     auto tryTx = [&](const CMutableTransaction& m, int64_t& a1, int64_t& a2) {
