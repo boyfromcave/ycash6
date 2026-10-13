@@ -168,8 +168,8 @@ guard locks it to the price that key attested at that height. `attest` automates
 3. **Collector.** One member drives each claim: the current members in seq order, rotated by SHA-256(txid ‖ n); the
    member of rank r drives `r × takeover_blocks` blocks after the claim confirmed, so a missing leader is replaced
    without coordination. The driver waits for `cancelsRequired` valid co-signatures plus `spares` (no longer than
-   `spare_wait_blocks` for the spares), calls `yed_buildcancel` with up to seven (an entry the node refuses is set
-   aside and the call retried), `set_signcancel` and `vault_send`, and pushes the carrier and the cancel to every
+   `spare_wait_blocks` for the spares), calls `yed_buildcancel` with up to seven (an entry the node drops, named in
+   its `warnings`, is set aside for the next build), `set_signcancel` and `vault_send`, and pushes the carrier and the cancel to every
    `broadcast_rpc` node. A cancel that lingers is pushed again every `refee_after_blocks`; one that left the mempool
    unconfirmed is re-funded (`vault_refee`) and rebuilt with the co-signatures valid at that moment. Co-signers that
    stop being current are set aside. Nothing is driven while another transaction spends the intent in the mempool.
