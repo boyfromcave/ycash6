@@ -30,13 +30,13 @@ bool KeyGen(uint8_t scheme, const std::vector<unsigned char>& seed,
             std::vector<unsigned char>& pk, std::vector<unsigned char>& sk);
 
 // Sign the 32 bytes of msg (memory order, as pq::Verify reads them). SLH-DSA: FIPS 205 pure,
-// empty context, deterministic (opt_rand = PK.seed). Falcon: randomized, 88 bytes from the
-// OS RNG (GetRandBytes). sig is SigSize(scheme) bytes, without the hashtype byte.
+// empty context, hedged (16 bytes of opt_rand from the OS RNG, GetRandBytes). Falcon:
+// randomized, 88 bytes from the OS RNG (GetRandBytes). sig is SigSize(scheme) bytes, without the hashtype byte.
 bool Sign(uint8_t scheme, const std::vector<unsigned char>& sk, const uint256& msg,
           std::vector<unsigned char>& sig);
 
 // Sign with explicit randomness (tests and golden vectors). SLH-DSA: entropy empty
-// (deterministic, as Sign) or 16 bytes (FIPS 205 hedged opt_rand). Falcon: exactly 88 bytes,
+// (deterministic, opt_rand = PK.seed) or 16 bytes (FIPS 205 hedged opt_rand). Falcon: exactly 88 bytes,
 // the nonce (40) then the sampler seed (48), the order PQClean reads them from randombytes().
 bool SignWithEntropy(uint8_t scheme, const std::vector<unsigned char>& sk, const uint256& msg,
                      const std::vector<unsigned char>& entropy, std::vector<unsigned char>& sig);

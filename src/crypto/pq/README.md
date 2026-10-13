@@ -9,8 +9,12 @@ The signature schemes behind `OP_CHECKPQSIG` (docs/plans/yellowback-quantum-plan
 
 * `scheme.{h,cpp}`: **consensus**. Sizes, `KeyHash = SHA256(scheme ‖ pk)`, `Verify`. Built into
   `libbitcoin_common` (beside the interpreter) and `libzcash_script`.
-* `sign.{h,cpp}`: **wallet**. `KeyGen` from a seed, `Sign` (SLH-DSA deterministic, `opt_rand = PK.seed`;
-  Falcon randomized from `GetRandBytes`), `SignWithEntropy` (explicit randomness, for tests and vectors).
+* `sign.{h,cpp}`: **wallet**. `KeyGen` from a seed, `Sign` (SLH-DSA **hedged**, FIPS 205 §9.2: 16 bytes of
+  `opt_rand` from `GetRandBytes`, cleansed after use, so a repeated signature over one message takes a fresh
+  FORS/hypertree path; Falcon randomized from `GetRandBytes`), `SignWithEntropy` (explicit randomness, for tests
+  and vectors; empty entropy is the deterministic SLH-DSA variant, `opt_rand = PK.seed`). The golden vectors and
+  the ACVP cases are produced through `SignWithEntropy` with their recorded entropy and are unaffected by
+  hedging; the verifier is `R`-agnostic, so deterministic and hedged signatures verify alike.
   Built into `libbitcoin_common`; never called from a consensus path.
 * The vendored C is built into `libbitcoin_crypto` (`PQ_VERIFY_SOURCES`, `PQ_SIGN_SOURCES` in `src/Makefile.am`);
   `libzcash_script` gets only the verify set.
