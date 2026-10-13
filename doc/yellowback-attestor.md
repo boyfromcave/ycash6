@@ -136,7 +136,8 @@ runs, beside its attestation loop and with `[cancel]` on by default,
 - a **watcher** that judges every confirmed YED claim with *your* price at the claim's refHeight and calls it
   **wrong-price** when the vault was not claimable at that price with `margin_bps` (default 5 %) to spare. Your price
   there is, first, one your key is **on record** for at that height -- the attestations the agent signed (its state
-  file), your attestation in the claim's own bundle, the node's attestation pool, the node's equivocation guard --
+  file), your attestation in the claim's own bundle (only if its signature verifies under your key: a bundle is not
+  checked by the node before arming), the node's attestation pool, the node's equivocation guard --
   and only otherwise the last aggregate the agent computed at or before that height. With none of these the claim is
   `unjudged` (alerted, never guessed from a later price). It raises an alert, co-signs (`auto_cosign`) and publishes
   the co-signature on a second gossip topic, `yellowback/cancel/<network>/1`, carried by the same iroh endpoint and
@@ -146,18 +147,20 @@ runs, beside its attestation loop and with `[cancel]` on by default,
   record began, and two prices at one height are slashed (EQV-1). Reorgs are followed: a claim whose block leaves the
   chain is held (`claim-reorged`), never closed, and is judged again when it is re-mined; a reorg across the refHeight
   makes the agent re-sign over the new block hash;
-- a **gossip filter**, drained continuously, that takes only 115-byte frames from the topic: duplicates are dropped,
+- a **gossip receiver** on its own task that takes only 115-byte frames from the topic: duplicates are dropped,
   then the cheap checks (a current member's seq -- the primitive's own `current`, maturity included --, a claim this
-  node knows, its refHeight, a price at which the vault was not claimable), then a rate limit **per delivering peer**
-  (so a flood from one peer cannot starve another), then the signature must recover to that seq's member key, then a
-  per-member rate limit;
+  node knows, its refHeight, a price at which the vault was not claimable, no valid entry of that seq already held),
+  then a **uniform random sample** within a budget of 2,000 signature checks a second (so a flood, from anyone and
+  relayed by anyone, only dilutes an honest frame's chance per copy), then the signature must recover to that seq's
+  member key, then a per-member rate limit. Your agent republishes your co-signature every block while the claim is
+  short of co-signatures, so it gets through a flood within a few blocks;
 - a **collector** in which one member drives each claim: the members in seq order, rotated per claim; rank r takes
   over `r × takeover_blocks` blocks after the claim confirmed (at most 36, and shrunk at run time so the last rank
   still fits in `CLAIM_DELAY`). The driver gathers `cancelsRequired` co-signatures plus `spares` (the rule counts the
   valid ones, so spares absorb a co-signer that leaves before the cancel confirms), then `yed_buildcancel` →
   `set_signcancel` → `vault_send`, pushes the cancel and its carrier to `broadcast_rpc`, re-pushes it if it lingers,
   and re-funds and rebuilds it (`vault_refee`, then `yed_buildcancel`) if it falls out of the mempool -- with
-  backoff, at most `max_sends` times (default 5), then `cancel-send-cap`.
+  backoff, at most `max_sends` times (default 5, failed attempts included), then `cancel-send-cap`.
 
 Its state (claims, co-signatures, the cancel it sent, your signed prices and price history) is in `state_file`
 (default `yellowback-cancel-<seq>.json` beside the node's cookie, else `~/.ycash/yellowback-cancel-<network>-<seq>.json`);
@@ -194,7 +197,11 @@ refHeight not yet indexed) raise nothing: the agent retries at the next poll.
 
 If the gossip task dies the agent exits non-zero; the packaged service restarts it (`Restart=always`).
 
-`auto_cosign = false` keeps the watcher and its alerts but leaves the co-signing to you (`yellowback-attest cosign
+The record (`recording_since`) begins only once the node is out of initial block download and at the tip; before
+that the agent states no new price.
+
+`auto_cosign = false` keeps the watcher and its alerts but never makes, stores or carries your own co-signature
+(the agent still drives on other members' co-signatures) and leaves the co-signing to you (`yellowback-attest cosign
 <txid:n>` prints your co-signature; anyone with `cancelsRequired` of them runs `yed_buildcancel <intent> [cosigs]`,
 `set_signcancel`, `vault_send`). `drive = false` co-signs but never sends. `enabled = false` turns all of it off.
 

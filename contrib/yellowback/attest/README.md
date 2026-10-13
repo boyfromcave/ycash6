@@ -54,6 +54,7 @@ attest/
 │   ├── attest.rs               the attest loop, `sources` and `cosign`
 │   ├── cancel.rs               the cancel automation: watcher, gossip filter, collector, persisted state
 │   ├── cosig.rs                the cancel co-signature: message, key recovery (k256), 115-byte gossip frame
+│   ├── gossip.rs               the cancel topic's receiver task: cheap checks, uniform sampling, verification
 │   ├── subscribe.rs            the subscribe loop
 │   ├── transport/{mod,dir,iroh}.rs   the Transport trait and its two implementations
 │   ├── fixtures.rs             the Rust side of the Rust/Python cross-check
@@ -152,7 +153,8 @@ guard locks it to the price that key attested at that height. `attest` automates
 1. **Watcher** (once per poll). Every claim in `yed_listvaults CLAIMING` (confirmed claims only; `min_confirmations`)
    is judged at its refHeight (`getrawtransaction` in the claim's block + `yed_decodepayload`) with this agent's own
    price there: first a price the key is on record for at that height -- the attestations the agent signed (state
-   file), its attestation in the claim's own bundle, the node's pool (`yed_getattestations`), the node's guard (a
+   file), its attestation in the claim's own bundle (only when its 64-byte signature verifies under this seq's key over
+   AttestMessage: the node decodes a bundle without verifying it), the node's pool (`yed_getattestations`), the node's guard (a
    `yed_signcancelcosign` without a price) -- else the last aggregate it computed at or before that height
    (`price_tolerance_blocks`). Nothing later, nothing current: with no price there the claim is `ALERT unjudged`.
    **Wrong-price**: `collateralZat · p · 10⁴ ≥ mintedCents · θ · COIN · (10⁴ + margin_bps)`. It is logged as `ALERT
@@ -166,15 +168,19 @@ guard locks it to the price that key attested at that height. `attest` automates
    claim is closed as `cancelled` or `released` only once its intent is spent in a confirmed block. A changed
    confirmation resets the claim (its co-signatures are restored when the refHeight and its hash are unchanged); a
    changed blockHash(refHeight) resets it and re-signs over the new hash.
-2. **Gossip** (continuously, between polls). A frame is `"YCG1" ‖ intent txid (internal order) ‖ n LE32 ‖ seq LE16 ‖
-   refHeight LE32 ‖ price LE32 ‖ sig65` (115 bytes). The receiver drops anything else, then duplicates (a digest LRU),
-   then frames failing the cheap checks (a current member's seq -- the primitive's `current` from `set_getinfo`,
-   maturity included --, a claim this node knows, its refHeight, a price at which the vault was not claimable). Frames
-   for a claim not known yet wait (256 at most, 32 per delivering peer, 10 minutes). What passes is charged to a
-   bucket of the **peer that delivered it** (iroh's `delivered_from`; 512 at once, 200 per second), then the
-   signature must recover (secp256k1, the node's `RecoverSig` rules) over the co-sign message rebuilt from this node's
-   view to the frame's seq's member key, and only then is the per-seq bucket (`gossip_burst`,
-   `gossip_refill_seconds`) charged. A flood from one peer spends its own bucket and nothing else.
+2. **Gossip** (its own task, `gossip.rs`, never waiting for a poll). A frame is `"YCG1" ‖ intent txid (internal order)
+   ‖ n LE32 ‖ seq LE16 ‖ refHeight LE32 ‖ price LE32 ‖ sig65` (115 bytes). The receiver drops anything else, then
+   duplicates of frames already verified, then frames failing the cheap checks against the agent's latest view (a
+   current member's seq -- the primitive's `current` from `set_getinfo`, maturity included --, a claim this node
+   knows, its refHeight, a price at which the vault was not claimable, and **no valid entry of that seq already held
+   for the claim**). Frames for a claim not known yet wait (1,024 at most, random replacement, 10 minutes). What
+   passes is offered to a **uniform random sample**: every 250 ms the reservoir's 500 frames (a budget of 2,000
+   signature recoveries per second) are verified and the rest dropped, so under a flood an honest copy is drawn with
+   probability budget/offered whoever relays it; there is no per-peer state, so no relaying neighbour is blamed for
+   its traffic. Verified frames pass the per-seq bucket (`gossip_burst`, `gossip_refill_seconds`) and go to the agent.
+   The agent republishes its own co-signature **every block** while the claim is short of `cancelsRequired` (else
+   every `republish_blocks`): against a 20,000 frames/s flood it gets through within 60 blocks with probability
+   above 0.998 (`gossip::tests::a_flood_cannot_starve_an_honest_frame`).
 3. **Collector** (once per poll). One member drives each claim: the current members in seq order, rotated by
    SHA-256(txid ‖ n); the member of rank r drives `r × takeover_blocks` blocks after the claim confirmed
    (`takeover_blocks` ≤ 36, shrunk at run time to `(claimDelay − spare_wait_blocks − 2) / (members − 1)`). The driver
@@ -184,13 +190,17 @@ guard locks it to the price that key attested at that height. `attest` automates
    `set_signcancel` and `vault_send`, and pushes the carrier and the cancel to every `broadcast_rpc` node. A cancel
    that lingers is pushed again every `refee_after_blocks`; one that left the mempool unconfirmed is re-funded
    (`vault_refee`) and rebuilt, the k-th rebuild no sooner than `refee_after_blocks × 2^(k−1)` blocks after the last
-   send and at most `max_sends` sends in all (`ALERT cancel-send-cap`). A spend of the intent in the mempool that is
+   send and at most `max_sends` sends in all (`ALERT cancel-send-cap`); every attempt, a failed one included, is
+   counted before it is tried. A spend of the intent in the mempool that is
    not the agent's and lingers raises `ALERT foreign-spend`.
 4. **State.** `state_file` (default: `yellowback-cancel-<seq>.json` beside the node's `rpc_cookie`, else
    `~/.ycash/yellowback-cancel-<network>-<seq>.json`; 0600, written to a fresh O_EXCL temporary file and renamed)
    holds the claims, their co-signatures, the cancel sent, the price history, the signed prices and
-   `recording_since`: a restarted agent neither co-signs again nor rebuilds. Read it with `jq '.claims' <file>`.
-5. **Liveness.** If the gossip task dies the agent exits non-zero (the packaged unit restarts it).
+   `recording_since` (set only once the node is out of initial block download and within two blocks of the best
+   header): a restarted agent neither co-signs again nor rebuilds. Read it with `jq '.claims' <file>`.
+5. **Liveness.** If the gossip tasks die the agent exits non-zero (the packaged unit restarts it).
+6. **`auto_cosign = false`** never makes, stores or carries this member's own co-signature (not even through the
+   guard); the agent still alerts, and still drives on other members' co-signatures when `drive` is on.
 
 What it needs from the operator: the member key in the node's wallet (as for `yed_signattestation`) **and the node's
 `attest-signed.dat` with it** (the guard file is the record of every price the key signed; a node without it can be
