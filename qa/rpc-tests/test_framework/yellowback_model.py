@@ -2767,16 +2767,21 @@ class YellowbackModel(object):
         return min(self._cancel_q(v, height) + 1, max(1, self.params.cancel_signers_max))
 
     def claimable_at_snapshot(self, v, op, height):
-        """ClaimableAtSnapshot (CAN-3 round 2): at Snapshots[H - 1], (a) underwater at its pClaim under CLAIM_THRESHOLD, or
-        (b) a standing notice of ``op`` persisted at H - 1 with the position underwater at its pEmerg under EMERGENCY_RATIO."""
+        """ClaimableAtSnapshot (CAN-3 round 2, as fixed after the review): could a claim of the position at ``height`` pass
+        RED-4 at any citable R in [max(H - REF_WINDOW, START_HEIGHT), H - 1], judged fail-closed: an undefined xClaim
+        counts as claimable; (a) underwater at xClaim under CLAIM_THRESHOLD (pClaim >= xClaim); (b) an ARMED R with a
+        standing notice of ``op`` persisted for R (pEmerg can be as low as a bundle makes it)."""
         p = self.params
-        S = height - 1
-        snap = self.snapshot(S)
-        if snap is not None and snap.p_claim and is_underwater(v.collateral_zat, snap.p_claim, v.minted_cents, p.claim_threshold_bps):
-            return True
         n = self.notices.get(op)
-        return (n is not None and p.emergency_persist <= S - n.ref_height <= p.emergency_notice_ttl
-                and is_underwater(v.collateral_zat, n.p_emerg, v.minted_cents, p.emergency_ratio_bps))
+        for R in range(max(height - p.ref_window, p.start_height), height):
+            snap = self.snapshot(R)
+            if snap is None or not snap.p_claim:
+                return True
+            if is_underwater(v.collateral_zat, snap.p_claim, v.minted_cents, p.claim_threshold_bps):
+                return True
+            if n is not None and p.is_armed(snap.attest.status) and p.emergency_persist <= R - n.ref_height <= p.emergency_notice_ttl:
+                return True
+        return False
 
     def _residual_releasable(self, pos, op, height):
         """CAN-3: the held residual's position is CLOSED or CLAIMED, or ACTIVE with CANCEL_QUIET passed since its last cancel
