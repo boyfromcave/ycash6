@@ -572,6 +572,24 @@ pub fn refused_index(message: &str) -> Option<usize> {
     message[start..end].parse().ok()
 }
 
+/// Every `cosigs[i] dropped` a `yed_buildcancel` names (its `warnings`, or the reasons appended to
+/// `cancel-cosign-needed`): the indexes of the entries it would not count.
+pub fn dropped_indexes(text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("cosigs[") {
+        let tail = &rest[i..];
+        if let Some(idx) = refused_index(tail) {
+            let after = &tail[tail.find(']').map_or(0, |e| e + 1)..];
+            if after.trim_start().starts_with("dropped") && !out.contains(&idx) {
+                out.push(idx);
+            }
+        }
+        rest = &rest[i + 7..];
+    }
+    out
+}
+
 pub struct CancelAgent {
     pub cfg: CancelConfig,
     pub node: Node,
@@ -1325,8 +1343,14 @@ impl CancelAgent {
                 }
                 Err(RpcError::Node { message, .. }) if message.starts_with("cancel-cosign-needed") => {
                     tracing::warn!("cancel: {intent}: {message}");
+                    let dropped: Vec<u16> = dropped_indexes(&message)
+                        .into_iter()
+                        .filter_map(|i| usable.get(i).map(|(s, _)| *s))
+                        .collect();
                     let c = self.state.claims.get_mut(intent).expect("present");
+                    c.rejected.extend(dropped);
                     c.enough_since = None;
+                    self.dirty = true;
                     return;
                 }
                 Err(e) => {
@@ -1334,6 +1358,25 @@ impl CancelAgent {
                     return;
                 }
             };
+            // the node drops (and names) entries it would not count and builds from the rest: set those aside too
+            let warnings: Vec<String> = built
+                .get("warnings")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+                .unwrap_or_default();
+            if !warnings.is_empty() {
+                let dropped: Vec<u16> = dropped_indexes(&warnings.join("\n"))
+                    .into_iter()
+                    .filter_map(|i| usable.get(i).map(|(s, _)| *s))
+                    .collect();
+                tracing::warn!(
+                    "cancel: yed_buildcancel for {intent} dropped seqs {dropped:?}: {}",
+                    warnings.join("; ")
+                );
+                let c = self.state.claims.get_mut(intent).expect("present");
+                c.rejected.extend(dropped);
+                self.dirty = true;
+            }
             let hex_str = built.get("hex").and_then(Value::as_str).unwrap_or("").to_string();
             let carrier = built
                 .get("carrierTxid")
@@ -1772,6 +1815,17 @@ mod tests {
             Some(0)
         );
         assert_eq!(refused_index("cancel-cosign-needed: this cancel needs 2"), None);
+        assert_eq!(
+            dropped_indexes(
+                "cosigs[1] dropped: cancel-cosign-not-member: key 02ab; cosigs[3] dropped: attest-range: x"
+            ),
+            vec![1, 3]
+        );
+        assert_eq!(
+            dropped_indexes("cancel-cosign-needed: this cancel needs 2 co-signature(s), 1 given; cosigs[0] dropped: cancel-statement-claimable"),
+            vec![0]
+        );
+        assert!(dropped_indexes("cosigs[2] is not from a current member").is_empty());
     }
 
     #[test]
