@@ -148,7 +148,7 @@ env:
   # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (f149104, rpcversion 8:
   # an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it.
-  LWD_COMMIT: f149104cd214438af4fe2f6c5180446549fe4b6b
+  LWD_COMMIT: eee870be65a6c1326661ad416f5758169f23385a
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
