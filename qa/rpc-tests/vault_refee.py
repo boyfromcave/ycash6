@@ -235,9 +235,11 @@ class VaultRefeeTest(BitcoinTestFramework):
         lk2 = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 5})
         lk3 = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 5})
         self.mine(1)
+        v2_next = lk2['outpoint']
+        v3_next = lk3['outpoint']
         for round_ in range(3):
             # vault_refee right after the block that spent the signed spend's fee coin
-            v2 = lk2['outpoint'] if round_ == 0 else v2_next
+            v2 = v2_next
             b2 = n0.vault_buildunlock(v2, [{'address': addr, 'amount': 1}])
             s2 = n2.set_signunlock(n1.set_signunlock(b2['hex'])['hex'])
             [f2] = self.fee_inputs(b2['hex'], v2)
@@ -253,7 +255,7 @@ class VaultRefeeTest(BitcoinTestFramework):
             assert n0.getrawtransaction(t2, 1)['confirmations'] >= 1
             v2_next = [x['outpoint'] for x in n0.vault_list({'kind': 'vault'}) if x['outpoint'].startswith(t2)][0]
             # a build right after the block that spent its fee coin
-            v3 = lk3['outpoint'] if round_ == 0 else v3_next
+            v3 = v3_next
             b3 = n0.vault_buildunlock(v3, [{'address': addr, 'amount': 1}])
             [f3] = self.fee_inputs(b3['hex'], v3)
             self.spend_and_mine_now(n0, f3)
