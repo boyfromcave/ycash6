@@ -88,10 +88,13 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
 /** Re-run every input script of `tx` at `height`'s flags and branch against `snapshot` (inputs from
  *  `view`) when `tx` carries an OP_CHECKPQSIG; nullopt when it carries none or every input verifies.
  *  A non-v4 transaction with an OP_CHECKPQSIG is refused ("non-v4 transaction (R-A3)", quantum spec
- *  R-A3). Used by RecheckMempool (a reorg below pqFalconHeight) and by TemplateRun::Try (parity with
- *  v4.5.0's per-candidate ContextualCheckInputs, audit 04/F-4). */
+ *  R-A3). Flags are STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(height). Used by RecheckMempool
+ *  (a reorg below pqFalconHeight) and, with `forTemplate`, by TemplateRun::Try (parity with v4.5.0's
+ *  per-candidate ContextualCheckInputs, audit 04/F-4): then the template (V/I) inputs, which Try has
+ *  just verified, are skipped, and successes are stored in the signature cache. */
 std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
-                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params);
+                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params,
+                                            bool forTemplate = false);
 
 /** After a tip change (ConnectTip, DisconnectTip): re-run CheckTx for `nextHeight` on every
  *  mempool transaction that touches the primitive, and the scripts of its template inputs

@@ -167,7 +167,8 @@ bool TouchesTemplate(const CTransaction& tx, const CCoinsViewCache& view)
  *  (quantum spec R-A2), so the branch-ID eviction of a reorg does not reach a Falcon spend
  *  accepted for the block at pqFalconHeight (review F-1). */
 std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
-                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
+                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params,
+                                            bool forTemplate)
 {
     if (tx.IsCoinBase() || GetPQSigOpCount(tx, view) == 0) return std::nullopt;
     // Quantum spec R-A3: OP_CHECKPQSIG is defined over the ZIP-243 sighash of v4 transactions only.
@@ -187,9 +188,18 @@ std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoins
         const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
         if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n)) continue;
         const CTxOut& prev = coins->vout[tx.vin[i].prevout.n];
+        if (forTemplate) {
+            // TemplateRun::Try has just verified the template (V/I) inputs at the same flags,
+            // branch and snapshot (RecheckTemplateScripts).
+            VaultParams vp;
+            IntentParams ip;
+            if (MatchVault(prev.scriptPubKey, vp) != Shape::NONE || MatchIntent(prev.scriptPubKey, ip) != Shape::NONE) continue;
+        }
         ScriptError err = SCRIPT_ERR_OK;
+        // The miner stores successes in the signature cache (as ycash-dd's miner's
+        // ContextualCheckInputs does with cacheStore), so repeated templates verify once.
         if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, flags,
-                          SetSigChecker(&tx, i, prev.nValue, false, txdata, snapshot, height), branch, &err)) {
+                          SetSigChecker(&tx, i, prev.nValue, forTemplate, txdata, snapshot, height), branch, &err)) {
             return strprintf("input %u: %s", i, ScriptErrorString(err));
         }
     }
@@ -306,10 +316,12 @@ std::optional<std::string> TemplateRun::Try(const CTransaction& tx)
     std::optional<std::string> bad = trial->ApplyTx(tx, height, coins);
     if (!bad) bad = RecheckTemplateScripts(tx, view, height, snapshot, params);
     // Parity with ycash-dd's per-candidate ContextualCheckInputs / ContextualCheckSequenceLocks
-    // (audit 04/F-4): PQ input scripts at the template height's flags and branch (a Falcon spend a
+    // (audit 04/F-4): the non-template input scripts of a transaction with an OP_CHECKPQSIG at the
+    // template height's flags (STANDARD | vault flags, as the mempool checks; ycash-dd's miner uses
+    // MANDATORY | vault flags over every input of every candidate) and branch (a Falcon spend a
     // reorg below pqFalconHeight left behind), and BIP68 at the template height (an intent RELEASE
     // that became too young). TemplateRun exists only where UPGRADE_VAULT is active at `height`.
-    if (!bad) bad = RecheckPQScripts(tx, view, height, snapshot, params);
+    if (!bad) bad = RecheckPQScripts(tx, view, height, snapshot, params, /*forTemplate=*/true);
     if (!bad && !tx.IsCoinBase()) {
         for (const CTxIn& in : tx.vin) {
             if (!view.HaveCoins(in.prevout.hash)) { bad = std::string("sequence-locks: missing input"); break; }

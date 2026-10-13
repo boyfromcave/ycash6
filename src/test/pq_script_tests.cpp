@@ -1250,6 +1250,12 @@ BOOST_AUTO_TEST_CASE(pq_rechecks_refuse_v5)
     BOOST_CHECK(vault::RecheckPQScripts(spend(1, true), view, 10, nullptr, params) == R_A3);
     BOOST_CHECK(!vault::RecheckTemplateScripts(spend(0, true), view, 10, nullptr, params));
     BOOST_CHECK(!vault::RecheckPQScripts(spend(2, true), view, 10, nullptr, params));
+    // The miner's call (forTemplate) skips the template inputs Try has just verified: the v4 vault
+    // spend's only input is one, so nothing is left to check; the R-A3 refusal still applies.
+    BOOST_CHECK(vault::RecheckPQScripts(spend(1, false), view, 10, nullptr, params));
+    BOOST_CHECK(!vault::RecheckPQScripts(spend(1, false), view, 10, nullptr, params, /*forTemplate=*/true));
+    BOOST_CHECK(vault::RecheckPQScripts(spend(1, true), view, 10, nullptr, params, /*forTemplate=*/true) == R_A3);
+    BOOST_CHECK(vault::RecheckPQScripts(spend(0, false), view, 10, nullptr, params, /*forTemplate=*/true));
     BOOST_CHECK(!vault::RecheckTemplateScripts(spend(2, true), view, 10, nullptr, params));
 
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
