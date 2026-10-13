@@ -29,6 +29,7 @@
 #include "util/strencodings.h"
 #include "vault/act.h"
 #include "vault/checker.h"
+#include "vault/module.h"
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
@@ -393,6 +394,9 @@ UniValue vault_getinfo(const UniValue& params, bool fHelp)
             "  \"activationheight\": n,    (numeric) -1 when not scheduled\n"
             "  \"active\": true|false,     (boolean) active at the next block\n"
             "  \"height\": n,              (numeric) the chain tip\n"
+            "  \"attestorsetid\": \"hex\" | null, (string) the set the registered module governs (the YED attestor set;\n"
+            "                             regtest: -yellowbackattestorset), null when none: then the module validates inertly\n"
+            "  \"moduleactive\": true|false, (boolean) a registered module governs a set on this node\n"
             "  \"dbtip\": {\"hash\",\"height\"} | null,  the block the set state is at\n"
             "  \"sets\": n, \"vaults\": n, \"intents\": n, \"lockedvalue\": x.xxx,\n"
             "  \"statehash\": \"hex\"        (string) digest of the whole set state\n"
@@ -406,6 +410,14 @@ UniValue vault_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("activationheight", act == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT ? -1 : act);
     o.pushKV("active", ActiveAtNext());
     o.pushKV("height", chainActive.Height());
+    // 01/V-7: until P8 makes the attestor set a chain parameter, it is a node parameter on regtest, and a node
+    // without it computes another set state (the module's hooks are inert): make the configured set comparable.
+    std::optional<SetId> governed;
+    for (const auto& entry : Modules()) {
+        if ((governed = entry.second->GovernedSet())) break;
+    }
+    o.pushKV("attestorsetid", governed ? UniValue(governed->GetHex()) : NullUniValue);
+    o.pushKV("moduleactive", governed.has_value());
     if (!g_vaultdb) {
         o.pushKV("dbtip", NullUniValue);
         return o;

@@ -131,6 +131,16 @@ src/ycashd -datadir=$D -daemon
 C -rpcwait yed_getinfo          # rpcversion 5; upgrade.status "active"; attest.status "UNARMED"
 ```
 
+**Every validating node of a regtest or devnet network must be started with the same
+`-yellowbackattestorset`.** Until the release that makes the attestor set a chain parameter
+(upgrade plan P8) the set is a node parameter, and the YED module's hooks run only where it is
+given: a node without it (or with another set) computes different set state for the same blocks
+(the attestor set's member `lastact`, ejections, displacement) and can reject a block the others
+accept (the module refuses a `SEL_UNLOCK` of a YED vault). `vault_getinfo` reports the node's
+`attestorsetid` and `moduleactive`; `debug.log` names the set at start-up ("Yellowback: attestor
+set ..."). The devnet's stock node 1 runs without it on purpose: `upgrade-walk` checks that its set
+state differs from the module nodes' in the attestor set's `lastact` fields alone.
+
 **Fund, then register three attestors.** Each registration is a `SET_JOIN` to the attestor set.
 
 ```bash
