@@ -173,7 +173,7 @@ guard locks it to the price that key attested at that height. `attest` automates
    `broadcast_rpc` node. A cancel that lingers is pushed again every `refee_after_blocks`; one that left the mempool
    unconfirmed is re-funded (`vault_refee`) and rebuilt with the co-signatures valid at that moment. Co-signers that
    stop being current are set aside. Nothing is driven while another transaction spends the intent in the mempool.
-4. **State.** `state_file` (default `~/.ycash/yellowback-cancel-<network>-<seq>.json`, 0600, written by rename) holds
+4. **State.** `state_file` (default: `yellowback-cancel-<seq>.json` beside the node's `rpc_cookie`, else `~/.ycash/yellowback-cancel-<network>-<seq>.json`; 0600, written by rename) holds
    the claims, their co-signatures, the cancel sent, the price history and the signed prices: a restarted agent
    neither co-signs again nor rebuilds. Read it with `jq '.claims' <file>`.
 

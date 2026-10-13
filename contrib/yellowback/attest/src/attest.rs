@@ -428,20 +428,19 @@ impl Attestor {
         }
         // The cancel-limit design's automation (CAN-2 + C4b): its topic shares the transport (one iroh endpoint, or the
         // dir bus's cancel/ subdirectory) and runs on its own task; the watcher and the collector run once per poll.
-        let (mut transport, mut cancel) = if self.cfg.cancel.enabled {
-            let (a, c) = transport::open_with_cancel(&self.cfg.transport, &network).await?;
-            let (tx, rx) = transport::spawn_pump(c);
-            let path = self
-                .cfg
-                .cancel
-                .state_file
-                .clone()
-                .unwrap_or_else(|| crate::cancel::CancelAgent::default_path(&network, self.seq));
-            let agent = crate::cancel::CancelAgent::new(self.cfg.cancel.clone(), &self.cfg.node, self.seq, path)?;
-            (a, Some((agent, tx, rx)))
-        } else {
-            (transport::open(&self.cfg.transport, &network).await?, None)
-        };
+        let (mut transport, mut cancel) =
+            if self.cfg.cancel.enabled {
+                let (a, c) = transport::open_with_cancel(&self.cfg.transport, &network).await?;
+                let (tx, rx) = transport::spawn_pump(c);
+                let path =
+                    self.cfg.cancel.state_file.clone().unwrap_or_else(|| {
+                        crate::cancel::CancelAgent::default_path(&self.cfg.node, &network, self.seq)
+                    });
+                let agent = crate::cancel::CancelAgent::new(self.cfg.cancel.clone(), &self.cfg.node, self.seq, path)?;
+                (a, Some((agent, tx, rx)))
+            } else {
+                (transport::open(&self.cfg.transport, &network).await?, None)
+            };
         tracing::info!(
             "yellowback-attest attest: seq {}, network {network}, every {} blocks, ref_lag {}, poll {} s, transport {}{}",
             self.seq,

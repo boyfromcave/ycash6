@@ -184,6 +184,10 @@ path = "%(bus)s"
 
 [subscribe]
 listattestors_seconds = 5
+
+# the cancel automation (cancel-limit design, CAN-2 + C4b) runs as on mainnet; its state stays in the devnet directory
+[cancel]
+state_file = "%(state)s"
 """
 SUBSCRIBE_CONF = """# written by yellowback-devnet: the subscriber beside node %(node)d
 [node]
@@ -349,7 +353,7 @@ def attest_conf_text(directory, node, seq):
     user, password = rpc_auth_pair(node)
     return ATTEST_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password,
                           "seq": seq, "every": ATTEST_INTERVAL, "heartbeat": ATTEST_HEARTBEAT_BLOCKS, "ref_lag": REF_LAG,
-                          "bus": bus_path(directory)}
+                          "bus": bus_path(directory), "state": os.path.join(directory, "cancel-%d.json" % node)}
 
 def start_attest_agent(directory, node, seq):
     """`yellowback-attest attest` beside attestor `node`, reading that attestor's own mock price

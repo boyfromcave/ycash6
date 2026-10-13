@@ -626,8 +626,17 @@ impl CancelAgent {
         })
     }
 
-    /// The default state file: `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
-    pub fn default_path(network: &str, seq: u16) -> PathBuf {
+    /// The default state file: beside the node's cookie when `rpc_cookie` is set (the node's own per-network data
+    /// directory: one file per node and seq), else `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
+    pub fn default_path(node: &crate::config::NodeConfig, network: &str, seq: u16) -> PathBuf {
+        if let Some(dir) = node
+            .cookie
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|d| !d.as_os_str().is_empty())
+        {
+            return dir.join(format!("yellowback-cancel-{seq}.json"));
+        }
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         home.join(".ycash")
             .join(format!("yellowback-cancel-{network}-{seq}.json"))
@@ -1730,6 +1739,21 @@ mod tests {
         let m = current_members(&rows);
         // seq 0's key re-joined as seq 6 (pending): the newest record is not current, so neither is seq 0
         assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![1, 5]);
+    }
+
+    #[test]
+    fn default_state_path_follows_the_cookie() {
+        let mut n = crate::config::parse(
+            "[node]\nrpc_url = \"http://127.0.0.1:1\"\nrpc_cookie = \"/data/ycash/regtest/.cookie\"\n",
+        )
+        .unwrap()
+        .node;
+        assert_eq!(
+            CancelAgent::default_path(&n, "regtest", 3),
+            PathBuf::from("/data/ycash/regtest/yellowback-cancel-3.json")
+        );
+        n.cookie = None;
+        assert!(CancelAgent::default_path(&n, "main", 3).ends_with(".ycash/yellowback-cancel-main-3.json"));
     }
 
     #[test]

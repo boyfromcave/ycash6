@@ -181,7 +181,8 @@ pub struct CancelConfig {
     pub republish_blocks: u32,
     /// How far the height of the aggregate the watcher judges with may lie from the claim's refHeight.
     pub price_tolerance_blocks: u32,
-    /// Persisted state (JSON); None: `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
+    /// Persisted state (JSON); None: `yellowback-cancel-<seq>.json` beside `rpc_cookie`, else
+    /// `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
     pub state_file: Option<PathBuf>,
     /// Other nodes' JSON-RPC URLs (`http://user:pass@host:port`) the cancel and its carrier are pushed to with
     /// `sendrawtransaction` as soon as they are sent (pinning, review S1: broadcast early to well-connected peers).

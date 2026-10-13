@@ -149,7 +149,7 @@ runs, beside its attestation loop and with `[cancel]` on by default,
   the mempool.
 
 Its state (claims, co-signatures, the cancel it sent, your price history) is in `state_file` (default
-`~/.ycash/yellowback-cancel-<network>-<seq>.json`); a restart resumes from it. Back it up with `wallet.dat` if you
+`yellowback-cancel-<seq>.json` beside the node's cookie, else `~/.ycash/yellowback-cancel-<network>-<seq>.json`); a restart resumes from it. Back it up with `wallet.dat` if you
 like, but it is not precious: a lost file means the agent co-signs again (the node's guard returns the same
 statement) and rebuilds the same cancel (the sign-once build memo).
 
