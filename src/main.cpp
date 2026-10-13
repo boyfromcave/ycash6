@@ -2171,7 +2171,8 @@ bool AcceptToMemoryPool(
         // A transaction spending a V or I has that template input's script checked alone first, with the
         // same flags and set state. This exit runs before Consensus::CheckTxInputs (inside
         // ContextualCheckInputs): a transaction that is also value-invalid but fails OP_CHECKSETSIG on its
-        // template input scores 0, at a cost of at most one set-signature recovery (CheckSetSigs returns
+        // template input scores 0, at a cost of at most k recoveries, k-1 of them over signatures the sender
+        // must produce (CheckSetSigs returns
         // at the first bad signature). A failure of it that depends on the set state at this node's tip, which
         // the relaying peer's tip need not share, is no proof of misbehaviour (DoS 0). Every other outcome
         // goes on to the stock checks below, which score every other failure as stock: the error of the
