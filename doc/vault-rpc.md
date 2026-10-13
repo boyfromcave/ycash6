@@ -413,7 +413,11 @@ template coin plus the fee (the 10,000-zatoshi vault fee) — an existing confir
 1,000 zatoshi of it, else a self-send of exactly that amount that this call broadcasts and the
 re-funded spend chains on in the mempool (the old fee inputs this wallet locked are released
 first, so a still-unspent one can fund it). The fee never comes from the vault's value (S-2, I-1,
-I-2). The new input is unsigned and locked; `vault_send` on this node signs it. When this wallet built the spend, its remembered build
+I-2). Coins are taken only when unspent in the node's own UTXO view (chain tip and mempool), never
+from the wallet's view alone, which can lag a block by the wallet's notification; the new input is
+never one it replaces, and the call refuses (nothing changed) unless the resulting fee is above 0
+and at most the vault/Yellowback cap. The builders choose their fee coins the same way. The new
+input is unsigned and locked; `vault_send` on this node signs it. When this wallet built the spend, its remembered build
 follows the re-funded transaction. Re-funding changes the txid (third-party malleability by
 input replacement, as the selector case 01/V-4).
 **Pinning (review S1):** because anyone may re-fund, a third party can also broadcast its own

@@ -17,7 +17,9 @@ that each hold one member key of a set (unlock 2, cancel 1):
   re-funded hex is idempotent (same sighash, no set-sign-once);
 - the same for a CANCEL inside the intent's delay, re-funded by another member's node (anyone may
   re-fund: the signatures bind the template input and the outputs only);
-- the build memo survives a restart and its fee coins stay locked (listlockunspent).
+- the build memo survives a restart and its fee coins stay locked (listlockunspent);
+- refee-utxo: the fee coin spent in a block and vault_refee / vault_buildunlock called at once, before the
+  wallet's notification: each picks a different coin unspent in the node's view, with a fee in (0, cap].
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_refee.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -110,6 +112,16 @@ class VaultRefeeTest(BitcoinTestFramework):
         node.sendrawtransaction(signed['hex'])
         self.mine(1)
         assert_equal(node.gettxout(txid, n), None)
+
+    def spend_and_mine_now(self, node, outpoint):
+        """Spend `outpoint` (a locked wallet coin) in a block mined at once, without waiting for the wallet."""
+        txid, n = outpoint.split(':')
+        n = int(n)
+        node.lockunspent(True, [{'txid': txid, 'vout': n}])
+        coin = node.gettxout(txid, n)
+        raw = node.createrawtransaction([{'txid': txid, 'vout': n}], {node.getnewaddress(): coin['value'] - Decimal('0.0001')})
+        node.sendrawtransaction(node.signrawtransaction(raw)['hex'])
+        node.generate(1)
 
     def set_sighash(self, node, hexstr, templ):
         txid, n = templ.split(':')
@@ -216,6 +228,45 @@ class VaultRefeeTest(BitcoinTestFramework):
         assert all(m['status'] == 'active' for m in n0.set_getinfo(setid)['memberlist'])
         # the spent template prunes the memo and its locks at the next build call
         assert_raises_rpc('not an unspent intent output', n2.vault_buildcancel, intent_op)
+
+        # ---- refee-utxo regression: the fee coin spent in a block, the RPC called before the wallet's notification ----
+        # The wallet learns of a block's spends on its own notification thread; the builders and vault_refee pick coins
+        # unspent in the node's UTXO view, never the replaced one, and refuse a fee outside (0, cap].
+        lk2 = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 5})
+        lk3 = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 5})
+        self.mine(1)
+        for round_ in range(3):
+            # vault_refee right after the block that spent the signed spend's fee coin
+            v2 = lk2['outpoint'] if round_ == 0 else v2_next
+            b2 = n0.vault_buildunlock(v2, [{'address': addr, 'amount': 1}])
+            s2 = n2.set_signunlock(n1.set_signunlock(b2['hex'])['hex'])
+            [f2] = self.fee_inputs(b2['hex'], v2)
+            self.spend_and_mine_now(n0, f2)
+            r2 = n0.vault_refee(s2['hex'])                                   # no sync, no wait
+            new2 = self.fee_inputs(r2['hex'], v2)
+            assert_equal((r2['replaced'], r2['sighash'], len(new2)), ([f2], b2['sighash'], 1))
+            assert new2[0] != f2
+            assert n0.gettxout(new2[0].split(':')[0], int(new2[0].split(':')[1]), True) is not None
+            assert Decimal('0') < r2['fee'] <= Decimal('0.001'), r2
+            t2 = n0.vault_send(r2['hex'])
+            self.mine(1)
+            assert n0.getrawtransaction(t2, 1)['confirmations'] >= 1
+            v2_next = [x['outpoint'] for x in n0.vault_list({'kind': 'vault'}) if x['outpoint'].startswith(t2)][0]
+            # a build right after the block that spent its fee coin
+            v3 = lk3['outpoint'] if round_ == 0 else v3_next
+            b3 = n0.vault_buildunlock(v3, [{'address': addr, 'amount': 1}])
+            [f3] = self.fee_inputs(b3['hex'], v3)
+            self.spend_and_mine_now(n0, f3)
+            r3 = n0.vault_buildunlock(v3, [{'address': addr, 'amount': 1}])  # no sync, no wait
+            assert_equal((r3['build'], r3['sighash']), ('refunded', b3['sighash']))
+            new3 = self.fee_inputs(r3['hex'], v3)
+            assert f3 not in new3
+            for op in new3:
+                assert n0.gettxout(op.split(':')[0], int(op.split(':')[1]), True) is not None
+            t3 = n0.vault_send(n2.set_signunlock(n1.set_signunlock(r3['hex'])['hex'])['hex'])
+            self.mine(1)
+            assert n0.getrawtransaction(t3, 1)['confirmations'] >= 1
+            v3_next = [x['outpoint'] for x in n0.vault_list({'kind': 'vault'}) if x['outpoint'].startswith(t3)][0]
 
 
 if __name__ == '__main__':
