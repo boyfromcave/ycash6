@@ -250,7 +250,9 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         a = user.getnewaddress('', 'pqslh')
         value = Decimal('1.23456789')
         fund = user.sendtoaddress(a, value)
+        self.sync_all()                        # the funding reaches the pool's mempool before it mines
         self.mine(POOLS[0])
+        assert_equal(user.getrawtransaction(fund, 1)['confirmations'], 1)
         vout = [o['n'] for o in user.getrawtransaction(fund, 1)['vout'] if Decimal(str(o['value'])) == value]
         assert_equal(len(vout), 1)
         raw = user.createrawtransaction([{'txid': fund, 'vout': vout[0]}],
