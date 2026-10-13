@@ -56,7 +56,8 @@ plan's H3-c had taken 4 on its own branch, and the two merge to 5):
   `CLAIMING` (a new status) with **optional** `intents` until the claimant intent is released
   (`vault_release`, after `CLAIM_DELAY`: `CLAIMED`) or cancelled by the attestor set
   (`vault_buildcancel` + `set_signcancel` + `vault_send`: the vault is re-created at the cancel's
-  output 0 and is the same position, `ACTIVE`; the claim's burn is not refunded, U-24).
+  output 0 and is the same position, `ACTIVE`; the claim's burn is not refunded, U-24 -- **revised by
+  CAN-1, audit 03/H-1:** the cancel refunds the burn, built with `yed_buildcancel`, below).
   `yed_gettxinfo` gains `reopenedVaults` and the types `claim_release` and `claim_cancel`.
 - A failing mint or vault spend is an invalid transaction: no VOID vault is produced
   (`voidReason` stays `""`), the mempool refuses it with `bad-yellowback-<verdict>` and a block
@@ -537,9 +538,14 @@ Result of `yed_getstatehash`:
 
 ### `yed_getstats`
 
-Arguments: none. `Totals` plus the tip snapshot. `pClaim` is `null` when undefined (fewer than
-the minimum fill on the mid or slow window); `globalRatioBps` is `null` when there is no supply or
-no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
+Arguments: none. `Totals` plus the tip snapshot. `supplyCents` is the circulating supply -- the YED
+that can still be presented, the system's liability -- and `globalRatioBps` (HALT-2) reads it. It is
+not the sum of the open vaults' `mintedCents`: YED burned outside a redemption (XFER-2's remainder, a
+non-Yellowback spend) leaves supply but not the debt, and a claim's burn leaves supply while its
+vault is CLAIMING; an attestor-set cancel puts the claim's whole burn back (CAN-1, audit 03/H-1,
+03/M-1), so a cancel no longer leaves a re-created vault's debt outside `supplyCents`. `pClaim` is
+`null` when undefined (fewer than the minimum fill on the mid or slow window); `globalRatioBps` is
+`null` when there is no supply or no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
 `haltMask` is the decoded tip `haltMask` as an array of names (empty when minting is open);
 `mintingAllowed` is `activation == active && haltMask == [] && !supplyCapReached` and, when
 `yed_getinfo.mintRequiresArmed`, the tip ARMED (H-1) — every enabled class can mint.
@@ -780,7 +786,10 @@ intent) carries **`intents`** (**optional**, absent otherwise): `[{txid, vout, r
 releaseHeight}]`, `role` `"claimant"` or `"residual"`, `releaseHeight` = `height + CLAIM_DELAY`,
 the first height `vault_release` can spend it. Releasing the claimant intent makes the vault
 `CLAIMED`; an attestor-set cancel re-creates it as an `ACTIVE` vault at the cancel's output 0
-(the same position under that outpoint; the claim's burn is not refunded, U-24). A VOID vault is
+(the same position under that outpoint) and **refunds the claim's burn** (CAN-1, audit 03/H-1, U-24
+revised): a CLAIMING vault also carries **`refundHolder`** (**optional**, absent otherwise; hex), the
+scriptPubKey the claim's burned YED came from, which a cancel must pay a token carrier at an output
+`≥ 1` (`yed_buildcancel`). `burnedCents` of a CLAIMING vault is the amount that cancel re-issues. A VOID vault is
 no longer produced (a failing mint is an invalid transaction); `VOID` stays a valid status
 filter for a chain indexed before the upgrade. The prototype's `tier`, `rosterIndex`, `errBpsAtClose`, `requiredBurnCents`, `indexHeight` are
 gone. Refuses with `vault-not-found`.
@@ -986,7 +995,9 @@ no longer written (`ATTESTOR_REVIVE` is invalid).
 **Vault upgrade** (`rpcversion` 5): `reopenedVaults` lists the vaults an attestor-set cancel
 re-created as `ACTIVE` (U-24; the cancel's output 0, empty otherwise); `type` gains
 `"claim_release"` (the claimant or residual intent released after `CLAIM_DELAY`) and
-`"claim_cancel"`. A failing transaction has no `TxLog` row: it is invalid, never confirmed.
+`"claim_cancel"`; a `"claim_cancel"` row's `assigned` is CAN-1's refund (`[{vout, cents}]`, the
+claim's whole burn re-issued to the holder it came from, audit 03/H-1) and its `yedOut` that amount.
+A failing transaction has no `TxLog` row: it is invalid, never confirmed.
 
 Result of `yed_gettxinfo`:
 
@@ -1896,8 +1907,9 @@ input carries no collateral to pay them from: `yed_claim` funds them), with its 
 must be transparent (an intent pays a key; `bad-address` otherwise). The vault becomes
 `CLAIMING`; after `CLAIM_DELAY` blocks the primitive's **`vault_release <intentTxid> 0`** pays the
 intent to `to` and the vault becomes `CLAIMED`. Until then any `cancelThreshold` members of the
-YED attestor set may cancel it (`vault_buildcancel` + `set_signcancel` + `vault_send`), which
-re-creates the vault as `ACTIVE` at the cancel's output 0 and does not refund the burn (U-24).
+YED attestor set may cancel it (`yed_buildcancel` + `set_signcancel` + `vault_send`), which
+re-creates the vault as `ACTIVE` at the cancel's output 0 and refunds the burn to the YED holder it
+came from (CAN-1, audit 03/H-1; U-24 revised): a cancel delays a claim, it never costs the claimant.
 `collateralOut` is the claimant intent's value. The v2 fields of `yed_redeem` (including
 `extraBurnCents`, H4, and `earlyRedeemFeeZat`, always `0` on a claim) plus the **v3** fields below. Refusals: `vault-not-found`,
 `vault-not-active`, `claim-not-yet` (tip below the vault's `appHeight`: only a vault minted before
@@ -1942,6 +1954,43 @@ Result of `yed_claim`:
   "attestFeeZat": 125944584,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0
+}
+```
+
+### `yed_buildcancel <intentOutpoint>`
+
+Arguments: `intentOutpoint` (string, `"txid:n"`): a YED **claimant** intent (a `CLAIMING` vault's
+`intents[]` row with `role` `"claimant"`), confirmed or still in the mempool. The attestor set's
+CANCEL of that intent before it matures (U-23, I-2), with **CAN-1's refund** (audit 03/H-1): the
+primitive's `vault_buildcancel` transaction — the claimed vault's V re-created at output 0 with the
+intent's value — plus, at output 1, a token carrier (`TOKEN_VALUE`) paying `refundHolder`, the
+scriptPubKey the claim's burned YED came from (the token at the claim's lowest-index YED input),
+then this wallet's fee inputs and change; unsigned. Collect the attestor set's signature with
+`set_signcancel` (one member: the module pins `cancelThreshold` 1, 03/I-3), then `vault_send`.
+When it confirms the vault is `ACTIVE` again at the cancel's output 0 and the claim's whole burn
+(`burnedCents`, any sub-dollar remainder included) is a YED token at output 1 of the holder it came
+from, `supplyCents` credited: a cancel delays a liquidation and never costs the claimant. A cancel
+without the refund is invalid (`intent-cancel-no-refund`), which is why `vault_buildcancel` refuses
+a YED intent. Called again for the same intent it returns the same transaction while its fee inputs
+are unspent (members sign once). `refund.cents` is the amount re-issued; `refund.vout` is always 1.
+Refusals: `RPC_INVALID_PARAMETER` for a residual intent (it is never cancelled,
+`intent-cancel-residual`), an outpoint that is not a YED claim intent, or a vault that is not
+`CLAIMING`; `vault_buildcancel`'s own (`not an unspent intent output`, `can no longer be cancelled`).
+
+Result of `yed_buildcancel`:
+
+```json
+{
+  "hex": "0400008085202f89...",
+  "required": 1,
+  "cancelsetid": "755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e",
+  "deadline": 980,
+  "intentconfirmed": true,
+  "refund": {
+    "vout": 1,
+    "script": "76a914a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d488ac",
+    "cents": 100000
+  }
 }
 ```
 
@@ -2224,9 +2273,11 @@ transfer that burned), `redeem` (own owner-path redemption), `claim` (this walle
 own vault included; `amountCents` is minus the burned debt), `claimed` (an own vault was claimed by
 someone else; `amountCents` 0), **upgrade (U-23)** `claim_release` / `claim_cancel` (the claimant
 intent of this wallet's claim was released to it, the vault CLAIMED, or cancelled by the attestor
-set, the vault ACTIVE again with the burn kept, U-24) and `claim_released` / `claim_cancelled` (the
+set, the vault ACTIVE again and the burn refunded to the holder it came from, CAN-1) and `claim_released` / `claim_cancelled` (the
 same two, seen by the owner of a vault someone else claimed) — on these four `path` is `"claim"`,
-`amountCents` is 0 and `burned` 0 (the claim row carries the burn); the release of the owner's
+`amountCents` is 0 and `burned` 0 (the claim row carries the burn), except that a `claim_cancel` row's
+`amountCents` is the refund this wallet received (CAN-1: the claim's burn re-issued to the holder it
+came from); the release of the owner's
 RED-5 residual intent has no row (it moves no Yellowback record), `sweep` (an own vault swept under the
 retired abandonment rule; only on a chain indexed before the upgrade), **v3** `notice` (a CLAIM_NOTICE this wallet posted), `noticed` (a notice was
 posted on an own vault), `register`, `withdraw` (an own bond withdrawn), `revive`,

@@ -81,7 +81,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 12;  //!< 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 13;  //!< 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -605,6 +605,9 @@ struct IntentRecord
     COutPoint vault;         //!< the claimed vault's outpoint (its Vaults record is CLAIMING)
     uint8_t role;            //!< IntentRole: the claimant's debt-worth, or the owner's residual (RED-5)
     int32_t height;          //!< the claim's height
+    std::vector<unsigned char> refundScript;   //!< CAN-1 (03/H-1): on the claimant intent, the scriptPubKey of the YED token the
+                                               //!< claim spent at its lowest-index YED input -- the holder a cancel refunds the burn
+                                               //!< to; empty on the residual intent. Appended last (SERIALISATION.md append rule)
 
     IntentRecord() : role((uint8_t)IntentRole::CLAIMANT), height(0) {}
 
@@ -616,6 +619,7 @@ struct IntentRecord
         READWRITE(vault);
         READWRITE(role);
         READWRITE(height);
+        READWRITE(refundScript);
     }
 };
 

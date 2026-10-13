@@ -1608,8 +1608,9 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         if (l.Type() == TxLogType::MINT) { type = "mint"; }
         else if (intentSpend) {
             // U-23: the claimant's intent released (CLAIMED) or cancelled by the attestor set (the vault
-            // ACTIVE again); the claimant's view wins when this wallet claimed its own vault. No YED moves
-            // (the claim burned it), so amountCents is 0; path is the claim's.
+            // ACTIVE again); the claimant's view wins when this wallet claimed its own vault. A release moves no
+            // YED (the claim burned it); a cancel re-issues the burn to the holder it came from (CAN-1), so the
+            // claimant's amountCents is that refund (received); path is the claim's.
             const bool release = l.Type() == TxLogType::CLAIM_RELEASE;
             type = claimantMine ? (release ? "claim_release" : "claim_cancel") : (release ? "claim_released" : "claim_cancelled");
             path = "claim";
@@ -1801,6 +1802,72 @@ UniValue yed_unlockcoin(const UniValue& params, bool fHelp)
     return o;
 }
 
+UniValue yed_buildcancel(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "yed_buildcancel \"intentoutpoint\"\n"
+            "\nBuild the attestor CANCEL of a YED claimant intent before it matures (U-23, CAN-1): vault_buildcancel's\n"
+            "transaction -- the claimed vault re-created at vout[0] -- with the refund of the claim's burn at vout[1], a token\n"
+            "carrier paying the holder the burned YED came from (yed_getvault.refundHolder), then this wallet's fee inputs and\n"
+            "change (unsigned). Collect the attestor set's signature with set_signcancel, then vault_send. A cancel without\n"
+            "the refund is invalid (intent-cancel-no-refund), which is why vault_buildcancel refuses a YED intent. A claim\n"
+            "still in the mempool can be cancelled too (the holder and the burn are read from its inputs). Called again for\n"
+            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once).\n"
+            "\nResult: vault_buildcancel's {\"hex\", \"required\", \"cancelsetid\", \"deadline\", \"intentconfirmed\"} plus\n"
+            "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)}\n"
+            + HelpExampleCli("yed_buildcancel", "\"txid:0\"") + HelpExampleRpc("yed_buildcancel", "\"txid:0\""));
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const std::string s = params[0].get_str();
+    const size_t colon = s.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size()) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
+    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)atoi(s.substr(colon + 1)));
+    std::vector<unsigned char> holder;
+    Cents cents = 0;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        State st(index.View());
+        if (std::optional<IntentRecord> ir = st.GetIntent(op)) {
+            if (ir->Role() != IntentRole::CLAIMANT) throw JSONRPCError(RPC_INVALID_PARAMETER, "the owner's residual intent is never cancelled (intent-cancel-residual)");
+            std::optional<VaultRecord> v = st.GetVault(ir->vault);
+            if (!v || v->Status() != VaultStatus::CLAIMING) throw JSONRPCError(RPC_INVALID_PARAMETER, "the intent's vault is not CLAIMING");
+            holder = ir->refundScript;
+            cents = v->burnedCents;
+        } else {
+            // A claim still in the mempool: CAN-1's holder is the token at its lowest-index YED input, the refund its burn.
+            std::shared_ptr<const CTransaction> claimp = mempool.get(op.hash);   // 6.20.0: mempool.get, not lookup
+            vault::IntentParams ip;
+            if (!claimp || op.n >= claimp->vout.size() || !vault::ParseIntent(claimp->vout[op.n].scriptPubKey, ip) ||
+                !(ip.tag == YED_TAG)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "not a YED claim intent (confirmed in the index or in the mempool)");
+            }
+            const CTransaction& claim = *claimp;
+            Cents yedIn = 0;
+            for (const CTxIn& in : claim.vin) {
+                if (std::optional<TokenRecord> t = st.GetToken(in.prevout)) {
+                    if (holder.empty()) holder.assign(t->scriptPubKey.begin(), t->scriptPubKey.end());
+                    yedIn += t->cents;
+                }
+            }
+            std::optional<FoundPayload> fp = FindPayload(claim);
+            cents = yedIn - (fp.has_value() ? fp->payload.AssignedCents() : 0);
+        }
+        if (holder.empty() || cents <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "the claim recorded no refund holder");
+    }
+    const CScript to(holder.begin(), holder.end());
+    UniValue o = BuildYedIntentCancel(op, CTxOut(index.GetParams().tokenValue, to));
+    UniValue r(UniValue::VOBJ);
+    r.pushKV("vout", 1);
+    r.pushKV("script", HexStr(to.begin(), to.end()));
+    r.pushKV("cents", cents);
+    o.pushKV("refund", r);
+    return o;
+}
+
 static const CRPCCommand commands[] =
 { //  category     name                    actor (function)        okSafeMode
   //  -----------  ----------------------  ----------------------  ----------
@@ -1819,6 +1886,7 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
     { "yellowback", "yed_estimateredeem",   &yed_estimateredeem,    false },   // IT-9
     { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
+    { "yellowback", "yed_buildcancel",      &yed_buildcancel,       false },   // CAN-1 (03/H-1)
     // v3 (plan §4.5)
     { "yellowback", "yed_claimnotice",      &yed_claimnotice,       false },
     { "yellowback", "yed_sweepcarriers",    &yed_sweepcarriers,     false },

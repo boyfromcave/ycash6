@@ -60,4 +60,9 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
 } // namespace rpc
 } // namespace yellowback
 
+/** rpc/vault.cpp: the I-2 cancel of a YED claimant intent -- the re-created V at vout[0], CAN-1's `refund` at vout[1],
+ *  the wallet's fee inputs and change -- as vault_buildcancel's result (sign-once rebuild cache shared). Wallet builds only;
+ *  takes cs_main and the wallet lock itself, so the caller must not hold cs_yellowback (lock order N25). */
+UniValue BuildYedIntentCancel(const COutPoint& intent, const CTxOut& refund);
+
 #endif // YCASH_RPC_YELLOWBACKRPC_H

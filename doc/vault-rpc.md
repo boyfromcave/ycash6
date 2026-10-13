@@ -357,6 +357,11 @@ locked; when a fee input was spent meanwhile it returns the same transaction re-
 `vault_buildunlock` (the fee never comes from the intent's value: I-2). A pre-built spend that
 chains on a re-funded parent (a cancel of a mempool intent whose unlock was re-funded) must be
 rebuilt: re-funding changes the parent's txid, not its sighash.
+An intent of the YED module (tag `YED\0`) is refused: the module's
+CAN-1 rule (audit 03/H-1) also requires the cancel to refund the claim's burn, so it is built with
+`yed_buildcancel` (doc/yellowback-rpc.md), and a member never signs a cancel the module rejects
+(`RPC_INVALID_PARAMETER`, "a YED claim intent is cancelled with yed_buildcancel"; provoked by the Yellowback
+contract test, which has the module configured, so it is not in this file's error table).
 
 ### `set_signcancel "hex" ( {"acknowledgerestore": true} )`
 Params: `["hex": hex, "options"?: {"acknowledgerestore"?: bool}]`

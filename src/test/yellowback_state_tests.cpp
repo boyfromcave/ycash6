@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "0789e469827c35a43dc708b8059980b54b9f329e02bc54762553bc2880c81d05";   // SCHEMA_VERSION 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -707,6 +707,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), uint256S(pj["attestorSetId"].get_str()),
                                          pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
                                          pj["mintRequiresArmed"].get_bool());
+    if (pj.exists("pqFalconHeight")) P.pqFalconHeight = pj["pqFalconHeight"].get_int();   // TOK-PQ from here (not hashed)
     MemoryStateView view;
     const MemoryStateView empty = view;
     std::vector<UndoRecord> undos;
@@ -729,12 +730,19 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         if (ev.blockInvalid) {
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
-            static const std::map<int, std::string> expected = {
-                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" }, { 251, "mint9-no-bundle" } };
-            invalidBlocks++;
+            // One rejected block per verdict, in order (audit 03/T-1; test_yellowback_model.golden_rejected is the same list;
+            // the emergency claim of build_golden landed at 300, the Falcon height is 400).
+            static const std::vector<std::pair<int, std::string>> expected = {
+                { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
+                { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
+                { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
+                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" },
+                { 309, "intent-cancel-residual" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
-            BOOST_REQUIRE(expected.count(height));
-            BOOST_CHECK_EQUAL(ev.verdict, expected.at(height));
+            BOOST_REQUIRE((size_t)invalidBlocks < expected.size());
+            BOOST_CHECK_EQUAL(height, expected[invalidBlocks].first);
+            BOOST_CHECK_EQUAL(ev.verdict, expected[invalidBlocks].second);
+            invalidBlocks++;
             BOOST_CHECK_EQUAL(ev.reason.substr(0, ev.verdict.size() + 1), ev.verdict + ":");
             continue;
         }
@@ -744,7 +752,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 4);
+    BOOST_CHECK_EQUAL(invalidBlocks, 17);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -2759,6 +2767,26 @@ BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
     }
 }
 
+// Rule: P4-b
+// Rule: I-3
+BOOST_AUTO_TEST_CASE(attestor_set_adopted_only_with_threshold_one)
+{
+    // 03/I-3: cancelThreshold and unlockThreshold are pinned at ATTESTOR_CANCEL/UNLOCK_THRESHOLD (1)
+    BOOST_CHECK_EQUAL(MainParams().attestorCancelThreshold, 1);
+    BOOST_CHECK_EQUAL(MainParams().attestorUnlockThreshold, 1);
+    for (int variant = 0; variant < 3; variant++) {
+        Fixture f;
+        vault::Act a;
+        BOOST_REQUIRE(!vault::DecodeAct(f.setCreate.vout[0].scriptPubKey, a));
+        if (variant == 0) a.create.cancelThreshold = 2;
+        if (variant == 1) a.create.unlockThreshold = 2;
+        f.setCreate.vout[0].scriptPubKey = vault::EncodeAct(a);
+        f.P.attestorSetId = CTransaction(f.setCreate).GetHash();
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.setCreate });
+        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 2);
+    }
+}
+
 // Rule: seat ranking and eviction (owner 2026-10-11): EvictionVictim over primitive fields
 BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
 {
@@ -4542,6 +4570,363 @@ BOOST_AUTO_TEST_CASE(in_term_halt_ratio_counts_claiming_vault)
     BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMED);
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, each);
     BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, each);
+}
+
+// ===========================================================================
+// The claim intent's attestor cancel (U-23, U-24, I-2; audit 03/T-2: the cancel path's verdicts, totals and undo)
+
+namespace {
+
+/**
+ * Two ACTIVE vaults; the pools fall to $0.009, so `w` (300 %) is under theta and is claimed on path (a) at the
+ * construction (its claimant intent at claim:0, no residual due). CancelTx builds the attestor CANCEL of that
+ * intent (selector 2; the set signature is a placeholder: EvaluateBlock reads the selector, the primitive checks
+ * the signature) with the re-created vault at vout[0] unless `outs` says otherwise.
+ */
+struct CancelFixture
+{
+    Fixture f;
+    uint256 v, w, claimTxid;
+    CAmount each;
+    Totals beforeClaim, afterClaim;
+
+    CancelFixture()
+    {
+        f.Activate();
+        v = f.MintActive(10000);
+        w = f.MintActive(10000);
+        each = f.Vault(w)->collateralZat;
+        for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+        beforeClaim = f.GetTotals();
+        SpendOpts o; o.ownerPath = false;
+        CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
+        BOOST_REQUIRE_EQUAL(Spend(f, w, claim).verdict, verdict::OK);
+        claimTxid = CTransaction(claim).GetHash();
+        afterClaim = f.GetTotals();
+        BOOST_REQUIRE_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMING);
+    }
+    COutPoint Intent() const { return COutPoint(claimTxid, 0); }
+    /** The claimed vault's V script: what a cancel must re-create at vout[0]. */
+    CScript VaultScript() const
+    {
+        const VaultRecord r = f.Vault(w).value();
+        return YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight);
+    }
+    CTxOut Relock() const { return CTxOut(each, VaultScript()); }
+    /** CAN-1: the holder the claim's burn came from -- the mint's token script, P2PKH(owner) -- and the refund to it. */
+    CScript Holder() const { return GetScriptForDestination(f.ownerKey.GetPubKey().GetID()); }
+    CTxOut Refund() const { return CTxOut(TOKEN_VALUE, Holder()); }
+    CMutableTransaction CancelTx(std::optional<std::vector<CTxOut>> outs = std::nullopt, CScript scriptSig = CScript() << valtype(65, 0) << OP_2)
+    {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(Intent(), scriptSig, 0xFFFFFFFF));
+        m.vin.push_back(CTxIn(f.FakeInput()));                 // the canceller's fee input
+        m.vout = outs.value_or(std::vector<CTxOut>{ Relock(), Refund() });
+        return m;
+    }
+    /** Mine `tx` at tip + 1 (pools at $0.009); returns the verdict that refused it, "" when it was applied. */
+    std::string Mine(const CMutableTransaction& tx)
+    {
+        f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { tx });
+        return f.Refused(CTransaction(tx).GetHash());
+    }
+};
+
+} // namespace
+
+// Rule: U-23
+// Rule: U-24
+// Rule: I-2
+// Rule: IT-6
+BOOST_AUTO_TEST_CASE(intent_cancel_recreates_the_vault_at_vout0)
+{
+    CancelFixture c;
+    const VaultRecord claiming = c.f.Vault(c.w).value();
+    BOOST_CHECK_EQUAL(claiming.burnedCents, 10000);
+    BOOST_CHECK_EQUAL(c.afterClaim.supplyCents, c.beforeClaim.supplyCents - 10000);       // RED-2: the claim burned the debt
+    BOOST_CHECK_EQUAL(c.afterClaim.activeVaults, c.beforeClaim.activeVaults - 1);
+    BOOST_CHECK_EQUAL(c.afterClaim.collateralZat, c.beforeClaim.collateralZat);           // IT-6: still counted while CLAIMING
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK(!c.f.Vault(c.w).has_value());                                             // the CLAIMING record moved
+    const std::optional<VaultRecord> back = c.f.Vault(txid);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK_EQUAL(back->status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(back->mintedCents, 10000);
+    BOOST_CHECK_EQUAL(back->burnedCents, 0);
+    BOOST_CHECK_EQUAL(back->collateralZat, c.each);                                       // the re-lock's value
+    BOOST_CHECK_EQUAL(back->closeHeight, 0);
+    BOOST_CHECK(back->closingTxid.IsNull());
+    BOOST_CHECK_EQUAL(back->pMint, claiming.pMint);                                       // FEE-1': the same position
+    BOOST_CHECK_EQUAL(back->mintHeight, claiming.mintHeight);
+    BOOST_CHECK(!State(c.f.view).GetIntent(c.Intent()).has_value());
+    const TxLogRecord log = c.f.Log(txid).value();
+    BOOST_CHECK_EQUAL(log.type, (uint8_t)TxLogType::CLAIM_CANCEL);
+    BOOST_CHECK_EQUAL(log.verdict, verdict::OK);
+    BOOST_CHECK(log.closedVaults == std::vector<COutPoint>({ COutPoint(c.w, 0) }));
+    BOOST_CHECK(log.reopenedVaults == std::vector<COutPoint>({ COutPoint(txid, 0) }));
+    const Totals t = c.f.GetTotals();
+    BOOST_CHECK_EQUAL(t.activeVaults, c.beforeClaim.activeVaults);                        // +1: the vault is ACTIVE again
+    BOOST_CHECK_EQUAL(t.claimedVaults, c.beforeClaim.claimedVaults);                      // a cancel never counts as a claim
+    BOOST_CHECK_EQUAL(t.collateralZat, c.afterClaim.collateralZat + c.each - claiming.collateralZat);
+    // CAN-1 (03/H-1; flips the 03/T-2 assertion "supply unchanged"): the claim's burn is re-issued to the holder it came
+    // from at cancel:1 and supply is back where it was before the claim (03/M-1 gone)
+    const std::optional<TokenRecord> tok = c.f.Token(txid, 1);
+    BOOST_REQUIRE(tok.has_value());
+    BOOST_CHECK_EQUAL(tok->cents, claiming.burnedCents);
+    BOOST_CHECK(tok->scriptPubKey == c.Holder());
+    BOOST_CHECK_EQUAL(tok->nValue, TOKEN_VALUE);
+    BOOST_CHECK_EQUAL(t.supplyCents, c.beforeClaim.supplyCents);
+    BOOST_CHECK_EQUAL(t.supplyCents, c.afterClaim.supplyCents + 10000);
+    BOOST_REQUIRE_EQUAL(log.assigned.size(), 1u);
+    BOOST_CHECK(log.assigned[0].outpoint == COutPoint(txid, 1));
+    BOOST_CHECK_EQUAL(log.assigned[0].cents, 10000);
+    BOOST_CHECK_EQUAL(log.yedOut, 10000);
+    BOOST_CHECK_EQUAL(log.burned, 0);
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_claim_records_the_refund_holder)
+{
+    CancelFixture c;
+    const IntentRecord ir = State(c.f.view).GetIntent(c.Intent()).value();
+    BOOST_CHECK(ir.Role() == IntentRole::CLAIMANT);
+    BOOST_CHECK(CScript(ir.refundScript.begin(), ir.refundScript.end()) == c.Holder());
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_cancel_without_refund_invalid)
+{
+    CancelFixture c;
+    const CTxOut other(TOKEN_VALUE, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock() })), verdict::INTENT_CANCEL_NO_REFUND);              // none
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock(), other })), verdict::INTENT_CANCEL_NO_REFUND);       // another script
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock(), CTxOut(0, c.Holder()) })), verdict::INTENT_CANCEL_NO_REFUND);   // zero carrier
+    // the refund at vout 0 displaces the re-lock: the re-lock rule speaks first
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Refund(), c.Relock() })), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_at_lowest_holder_output)
+{
+    CancelFixture c;
+    const CTxOut other(777, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ c.Relock(), other, CTxOut(5000, c.Holder()), CTxOut(6000, c.Holder()) });
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 2)->cents, 10000);
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 2)->nValue, 5000);
+    BOOST_CHECK(!c.f.Token(txid, 3).has_value());
+}
+
+// Rule: CAN-1
+// Rule: IN-3
+BOOST_AUTO_TEST_CASE(intent_cancel_yed_inputs_still_burn)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    cancel.vin.push_back(CTxIn(COutPoint(c.v, 1)));     // the other vault's 10,000 cents, spent by the canceller
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const TxLogRecord log = c.f.Log(CTransaction(cancel).GetHash()).value();
+    BOOST_CHECK_EQUAL(log.yedIn, 10000);
+    BOOST_CHECK_EQUAL(log.yedOut, 10000);
+    BOOST_CHECK_EQUAL(log.burned, 10000);
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents + 10000 - 10000);
+}
+
+// Rule: CAN-1
+// Rule: XFER-1
+// Rule: RED-2
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_spendable_and_reclaims)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    // the refunded YED claims the re-created vault again (still under theta at $0.009): the claimant is made whole
+    SpendOpts o; o.ownerPath = false;
+    CMutableTransaction again = c.f.SpendTx(txid, { COutPoint(txid, 1) }, c.f.tip, o);
+    BOOST_CHECK_EQUAL(c.Mine(again), "");
+    BOOST_CHECK_EQUAL(c.f.Vault(txid)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(!c.f.Token(txid, 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
+}
+
+// Rule: CAN-1
+// Rule: XFER-1
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_transferable)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    CMutableTransaction t = c.f.TransferTx({ COutPoint(txid, 1) }, { Assignment{ 0, 10000 } });
+    BOOST_REQUIRE_EQUAL(c.Mine(t), "");
+    BOOST_CHECK(!c.f.Token(txid, 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.Token(CTransaction(t).GetHash(), 0)->cents, 10000);
+}
+
+// Rule: CAN-1
+// Rule: TOK-PQ
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_crosses_the_falcon_boundary)
+{
+    // The claim burned a P2PKH holder's YED before the Falcon height; the cancel lands after it: the refund to that
+    // holder is valid (CAN-1's TOK-PQ exemption) while an assignment to the same script is BAD_YED_HOLDER.
+    CancelFixture c;
+    c.f.P.pqFalconHeight = c.f.tip + 1;                   // not hashed: the module's mirror of the consensus height
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 1)->cents, 10000);
+    CMutableTransaction t = c.f.TransferTx({ COutPoint(txid, 1) }, { Assignment{ 0, 10000 } });
+    BOOST_CHECK_EQUAL(c.Mine(t), verdict::BAD_YED_HOLDER);
+    BOOST_CHECK(c.f.Token(txid, 1).has_value());
+}
+
+// Rule: U-23
+// Rule: U-24
+BOOST_AUTO_TEST_CASE(intent_cancel_of_residual_invalid)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    SpendOpts o; o.residualValue = g.Residual(g.f.tip - 1);
+    CMutableTransaction claim = g.Claim(o);
+    RedResult r = g.Mine(claim);
+    BOOST_REQUIRE_EQUAL(r.verdict, verdict::OK);
+    const uint256 claimTxid = CTransaction(claim).GetHash();
+    // the owner's residual intent is the claim's last output
+    const uint32_t resVout = (uint32_t)claim.vout.size() - 1;
+    std::optional<IntentRecord> ir = State(g.f.view).GetIntent(COutPoint(claimTxid, resVout));
+    BOOST_REQUIRE(ir.has_value());
+    BOOST_REQUIRE(ir->Role() == IntentRole::RESIDUAL);
+    const VaultRecord rec = g.f.Vault(g.w).value();
+    const CScript vs = YedVaultScriptAt(g.f.P, rec.Owner(), rec.ownerHeight, rec.appHeight);
+    CMutableTransaction cancel;
+    cancel.vin.push_back(CTxIn(COutPoint(claimTxid, resVout), CScript() << valtype(65, 0) << OP_2, 0xFFFFFFFF));
+    cancel.vin.push_back(CTxIn(g.f.FakeInput()));
+    cancel.vout.push_back(CTxOut(claim.vout[resVout].nValue, vs));
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { cancel });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(cancel).GetHash()), verdict::INTENT_CANCEL_RESIDUAL);
+    BOOST_CHECK(State(g.f.view).GetIntent(COutPoint(claimTxid, resVout)).has_value());      // U-21: nothing applied
+    BOOST_CHECK_EQUAL(g.f.Vault(g.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_relock_not_vout0_invalid)
+{
+    CancelFixture c;
+    const CTxOut change(1000, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ change, c.Relock() });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);              // U-21: refused, not applied
+    BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_two_relocks_invalid)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ c.Relock(), CTxOut(1000, c.VaultScript()) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_relock_script_differs_invalid)
+{
+    CancelFixture c;
+    // no output carries the claimed vault's script: the value goes to a P2PKH
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ CTxOut(c.each, GetScriptForDestination(c.f.userKey.GetPubKey().GetID())) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    // a V of another owner at vout[0] is not the claimed vault either
+    const VaultRecord r = c.f.Vault(c.w).value();
+    const CKey other = CKey::TestOnlyRandomKey(true);   // 6.20.0: no CKey::MakeNewKey
+    const CScript otherV = YedVaultScriptAt(c.f.P, TestPQOwner(other.GetPubKey()), r.ownerHeight, r.appHeight);
+    BOOST_REQUIRE(otherV != c.VaultScript());
+    CMutableTransaction cancel2 = c.CancelTx(std::vector<CTxOut>{ CTxOut(c.each, otherV) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel2), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+BOOST_AUTO_TEST_CASE(intent_cancel_payload_or_selector3_malformed)
+{
+    CancelFixture c;
+    // a release or cancel carries no Yellowback payload
+    std::vector<CTxOut> outs{ c.Relock(), CTxOut(0, PayloadScript(EncodePayload(Payload::Transfer({})))) };
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(outs)), verdict::INTENT_SPEND_MALFORMED);
+    // selector 3 (the owner's released path) is not an intent path
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::nullopt, CScript() << valtype(65, 0) << OP_3)), verdict::INTENT_SPEND_MALFORMED);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(intent_cancel_erases_the_notice)
+{
+    CancelFixture c;
+    // IN-2 erased any notice when the vault left ACTIVE at the claim; a record standing at the CLAIMING outpoint
+    // (forced in here) is erased by the cancel too, so the re-created vault starts without one
+    NoticeRecord n;
+    n.height = c.f.tip;
+    n.refHeight = c.f.tip - 2;
+    n.pEmerg = 9000;
+    State(c.f.view).Put(keys::Notice(COutPoint(c.w, 0)), n);
+    BOOST_REQUIRE(c.f.Notice(c.w).has_value());
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    BOOST_CHECK(!c.f.Notice(c.w).has_value());
+    BOOST_CHECK(!c.f.Notice(CTransaction(cancel).GetHash()).has_value());
+}
+
+// Rule: U-23
+// Rule: UNDO
+BOOST_AUTO_TEST_CASE(intent_cancel_undo_roundtrip)
+{
+    CancelFixture c;
+    const std::string claiming = Hash(c.f.view);
+    const MemoryStateView before = c.f.view;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    BOOST_CHECK(Hash(c.f.view) != claiming);
+    BOOST_CHECK(c.f.Token(CTransaction(cancel).GetHash(), 1).has_value());
+    c.f.Undo();
+    BOOST_CHECK_EQUAL(Hash(c.f.view), claiming);
+    BOOST_CHECK(c.f.view == before);
+    BOOST_CHECK(!c.f.Token(CTransaction(cancel).GetHash(), 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
+// Rule: R12
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(r12_failing_notice_leaves_no_bundle_row)
+{
+    // 03/M-2 (R12 hardened): a CLAIM_NOTICE that does not hold -- here because a notice already stands -- is a valid
+    // no-op, and its verified bundle of already-credited attestations adds no BundleLog[H] row; one carrying a fresh
+    // attestation is LIVENESS_UNHELD.
+    EmergencyFixture g;
+    const int R = g.f.tip - 1;
+    BOOST_REQUIRE(g.PostNotice());
+    BOOST_REQUIRE(g.f.BundleRow(g.f.tip).has_value());                                   // the held notice's row
+    const NoticeRecord standing = g.f.Notice(g.w).value();
+    CMutableTransaction again = g.f.NoticeTx(g.w, R, g.f.BundleFor(R, g.Selector(), g.attPrice));   // the same R: nothing fresh
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { again });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(again).GetHash()), "");
+    BOOST_CHECK(!g.f.BundleRow(g.f.tip).has_value());
+    BOOST_CHECK_EQUAL(g.f.Notice(g.w)->height, standing.height);                          // not replaced
+    const int fresh = g.f.tip - 1;
+    CMutableTransaction third = g.f.NoticeTx(g.w, fresh, g.f.BundleFor(fresh, g.Selector(), g.attPrice));
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { third });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(third).GetHash()), verdict::LIVENESS_UNHELD);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

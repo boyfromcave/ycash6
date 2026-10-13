@@ -241,6 +241,11 @@ struct Params
     int seatMarginBps;                   //!< SEAT_MARGIN_BPS 500: a seated attestor's SeatWeight counts x1.05 in seat ranking
     int evictMarginBps;                  //!< EVICT_MARGIN_BPS 500: a join into a full set evicts a live member only above x1.05
     int attestorSeats;                   //!< ATTESTOR_SEATS 15: the module adopts only an OPEN attestor set of this many seats
+    int attestorCancelThreshold;         //!< ATTESTOR_CANCEL_THRESHOLD 1 (03/I-3, upgrade plan section 3.4 table): ... and of this
+                                         //!< cancelThreshold (a cancel is value-neutral for the claimant, CAN-1, so one signature
+                                         //!< can delay a liquidation, never charge for it); consensus constant, not hashed
+    int attestorUnlockThreshold;         //!< ATTESTOR_UNLOCK_THRESHOLD 1 (03/I-3): ... and of this unlockThreshold (UNLOCK of a YED V is
+                                         //!< refused by ValidateSpend anyway); consensus constant, not hashed
     int attestorLivenessMin;             //!< ATTESTOR_LIVENESS_MIN 1,152 (one day; regtest 16): the module adopts only an attestor
                                          //!< set whose livenessWindow is at least this (seats review B3, 2026-10-11)
     int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128

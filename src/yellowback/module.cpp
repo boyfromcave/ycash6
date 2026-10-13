@@ -36,12 +36,14 @@ std::shared_ptr<const Params> ParamsAtHeight(int64_t height)
 }
 
 /** The attestor set when it has the shape the module adopts (ApplySetAct, state.cpp): OPEN, ATTESTOR_SEATS seats,
- *  maturity BOND_MATURITY, livenessWindow >= ATTESTOR_LIVENESS_MIN; else nullopt (the module's mirror has no set). */
+ *  cancelThreshold ATTESTOR_CANCEL_THRESHOLD and unlockThreshold ATTESTOR_UNLOCK_THRESHOLD (03/I-3), maturity
+ *  BOND_MATURITY, livenessWindow >= ATTESTOR_LIVENESS_MIN; else nullopt (the module's mirror has no set). */
 std::optional<vault::SetRecord> AdoptedSet(const Params& p, const vault::ModuleContext& ctx)
 {
     if (!ctx.state) return std::nullopt;
     std::optional<vault::SetRecord> s = vault::GetSet(*ctx.state, p.attestorSetId);
     if (!s || !s->params.IsOpen() || (int)s->params.seats != p.attestorSeats ||
+        (int)s->params.cancelThreshold != p.attestorCancelThreshold || (int)s->params.unlockThreshold != p.attestorUnlockThreshold ||
         (int64_t)s->params.maturity != (int64_t)p.bondMaturity ||
         (int64_t)s->params.livenessWindow < (int64_t)p.attestorLivenessMin) return std::nullopt;
     return s;

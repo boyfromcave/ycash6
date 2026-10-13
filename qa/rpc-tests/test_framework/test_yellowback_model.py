@@ -14,9 +14,15 @@ or from this directory:
 
     ../../../../.venv/bin/python test_yellowback_model.py -v
 
-Regenerate the golden vector (after a deliberate protocol or serialisation change only):
+Regenerate the golden vector (after a deliberate protocol or serialisation change only, in a commit of its own:
+doc/yellowback-testing.md, "The golden vector"):
 
     ../../../../.venv/bin/python test_yellowback_model.py --write-golden
+
+Check that the committed golden is exactly what the model and build_golden produce (byte for byte, the whole
+document; CI's python job, audit 03/T-1):
+
+    ../../../../.venv/bin/python test_yellowback_model.py --check-golden
 
 Every test case is tagged ``# Rule: <ID>`` on the line before it (plan N36).
 """
@@ -40,9 +46,18 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
-# ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64'
+# The golden sequence's state hash is the committed file's ``stateHash`` (audit 03/T-4: one artifact, no third copy
+# here).  The reviewer-recomputed pin is the C++ ``GOLDEN_HASH`` in src/test/yellowback_state_tests.cpp, whose
+# ``statehash_golden_vector`` replays yellowback_golden.json; test_golden_vector asserts the model reproduces both.
+
+
+def cpp_golden_hash():
+    """The C++ pin (``GOLDEN_HASH`` in src/test/yellowback_state_tests.cpp), read from the source."""
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'src', 'test', 'yellowback_state_tests.cpp')
+    with open(path) as f:
+        m = re.search(r'^const std::string GOLDEN_HASH = "([0-9a-f]{64})";', f.read(), re.M)
+    return m.group(1)
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -65,9 +80,9 @@ ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
 BONDS = ATTESTORS
 
 
-def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15):
-    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds), from a fixed input; its txid is the set id."""
-    act = va.act_set_create(seats, 1, 1, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
+def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15, unlock_threshold=1, cancel_threshold=1):
+    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds by default), from a fixed input; its txid is the set id."""
+    act = va.act_set_create(seats, unlock_threshold, cancel_threshold, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
                             liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity)
     vin = [(ym.sha256(b'yellowback-attestor-set')[::-1].hex(), 0, b'', 0xFFFFFFFF)]
     return ym.serialize_tx_v4(vin, [(0, va.act_script(va.encode_act(act)))]).hex()
@@ -92,6 +107,8 @@ class Chain(object):
         self.funding = 0
         self.refused = {}      # U-21: txid -> the verdict that made it invalid (its block was rejected and mined again without it)
         self.refused_logs = {}  # txid -> the model's TxLogRecord of the refused evaluation
+        self.side = False       # rejected(): fund inputs come from a separate namespace
+        self.side_funding = 0
 
     def block_hash(self, h):
         return ym.sha256(b'golden-block-%d' % h)[::-1].hex()
@@ -147,8 +164,20 @@ class Chain(object):
             self.mine((1 if signal else 0, price, 0, key))
 
     def fund_input(self):
+        if self.side:
+            self.side_funding += 1
+            return (ym.sha256(b'rejected-funding-%d' % self.side_funding)[::-1].hex(), 0, b'', 0xFFFFFFFF)
         self.funding += 1
         return (outpoint_hex(self.funding), 0, b'', 0xFFFFFFFF)
+
+    def rejected(self, build):
+        """Build a transaction the module must refuse (U-21) with fund and carrier inputs from a separate namespace,
+        so adding it to a block leaves every accepted transaction -- and so the state hash -- byte-identical."""
+        self.side = True
+        try:
+            return build()
+        finally:
+            self.side = False
 
     # -- transaction builders (section 3.5 shapes) --------------------------
 
@@ -270,13 +299,25 @@ class Chain(object):
         vin = [(intent_op[0], intent_op[1], bytes([ym.OP_1]), self.params.claim_delay), self.fund_input()]
         return ym.serialize_tx_v4(vin, [(value, recipient_spk or ym.p2pkh_script(OWNER_KEYHASH))]).hex()
 
-    def cancel_tx(self, intent_op, vault_op_of_record, value):
+    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2, refund=False):
         """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
-        does not verify) re-creating the byte-identical vault at vout[0]; a fee input."""
+        does not verify) re-creating the byte-identical vault at vout[0]; a fee input.  ``refund``: CAN-1's refund output
+        at vout[1] (``self.refund_out(intent_op)``).  ``vouts`` = [(value, script)] replaces the outputs (the re-lock
+        is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode."""
+        if vouts is None:
+            vouts = [self.relock(vault_op_of_record, value)] + ([self.refund_out(intent_op)] if refund else [])
+        vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([selector]), 0xFFFFFFFF), self.fund_input()]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def refund_out(self, intent_op):
+        """CAN-1 (03/H-1): the refund output a cancel of the claimant intent carries -- a token carrier paying the
+        holder the claim's burn came from (the intent's refund_script)."""
+        return (self.params.token_value, self.model.intents[intent_op].refund_script)
+
+    def relock(self, vault_op_of_record, value):
+        """The output a cancel re-creates: the claimed vault's byte-identical V of ``value``."""
         v = self.model.vaults[vault_op_of_record]
-        spk = ym.yed_vault_script_at(self.params, v.owner_pubkey, v.owner_height, v.app_height)
-        vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), self.fund_input()]
-        return ym.serialize_tx_v4(vin, [(value, spk)]).hex()
+        return (value, ym.yed_vault_script_at(self.params, v.owner_pubkey, v.owner_height, v.app_height))
 
     # -- v3 builders (section 3.5) -------------------------------------------
 
@@ -1395,12 +1436,200 @@ class RedeemTests(unittest.TestCase):
         self.assertIsNone(c.model.snapshot(c.height - 1).p_claim)
         self.assertFails(self.spend(path='claim', fee_vout=0xFF, fee_key=None), 'vault-claim-not-underwater')
 
+class CancelTests(unittest.TestCase):
+    """U-23/U-24/I-2 and CAN-1: the attestor cancel of a claim intent -- the model twins of yellowback_state_tests'
+    intent_cancel_* cases (audit 03/T-2, 03/H-1)."""
+
+    def setUp(self):
+        self.c = c = activated_chain()
+        ref = c.height - 1
+        self.coll = collateral_for(c, 10_000, ref)
+        raw = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1)
+        raw2 = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1, token_script=ym.p2pkh_script(KEY3))
+        c.mine((1, 50_000, 0, KEY2), [raw, raw2])
+        self.vault = (txid_of(raw), 0)
+        self.token = (txid_of(raw), 1)
+        self.spare = (txid_of(raw2), 1)          # another holder's 10,000 cents
+        self.holder = ym.p2pkh_script(OWNER_KEYHASH)
+        c.mine_n(64, price_fn=lambda h: 9_000)
+        self.before = ym.Totals()
+        for k in self.before.__slots__:
+            setattr(self.before, k, getattr(c.model.totals, k))
+        claim = c.spend_tx(self.vault, None, 'claim', [self.token], c.height - 1, KEY1, c.vault_fee(self.vault, owner=False))
+        self.assertFalse(c.mine((1, 9_000, 0, KEY2), [claim]).block_invalid)
+        self.claim = txid_of(claim)
+        self.intent = (self.claim, 0)
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.after_claim = c.model.totals.supply_cents
+
+    def mine(self, raw):
+        """Returns the verdict that refused ``raw`` ('' when it was applied)."""
+        self.c.mine((1, 9_000, 0, KEY2), [raw])
+        return self.c.refused.get(txid_of(raw), '')
+
+    def cancel(self, vouts=None, **kw):
+        return self.c.cancel_tx(self.intent, self.vault, self.coll, vouts=vouts, refund=True, **kw)
+
+    # Rule: U-23
+    # Rule: U-24
+    # Rule: CAN-1
+    # Rule: I-2
+    # Rule: IT-6
+    def test_cancel_recreates_the_vault_at_vout0(self):
+        c, m = self.c, self.c.model
+        self.assertEqual(self.after_claim, self.before.supply_cents - 10_000)
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        txid = txid_of(raw)
+        self.assertNotIn(self.vault, m.vaults)
+        v = m.vaults[(txid, 0)]
+        self.assertEqual((v.status, v.minted_cents, v.burned_cents, v.collateral_zat, v.close_height, v.closing_txid),
+                         (ym.V_ACTIVE, 10_000, 0, self.coll, 0, None))
+        rec = m.txlog[txid]
+        self.assertEqual((rec.type, rec.verdict, rec.closed_vaults, rec.reopened_vaults, rec.burned, rec.assigned, rec.yed_out),
+                         ('CLAIM_CANCEL', 'ok', [self.vault], [(txid, 0)], 0, [(1, 10_000)], 10_000))
+        self.assertEqual(m.intents, {})
+        t = m.totals
+        self.assertEqual((t.active_vaults, t.claimed_vaults, t.collateral_zat),
+                         (self.before.active_vaults, self.before.claimed_vaults, self.before.collateral_zat))
+        # CAN-1 (03/H-1, 03/M-1): the claim's burn is re-issued to the holder it came from and supply is back
+        tok = m.tokens[(txid, 1)]
+        self.assertEqual((tok.cents, tok.script_pub_key, tok.n_value), (10_000, self.holder, c.params.token_value))
+        self.assertEqual(t.supply_cents, self.before.supply_cents)
+        self.assertEqual(t.supply_cents, self.after_claim + 10_000)
+
+    # Rule: CAN-1
+    def test_claim_records_the_refund_holder(self):
+        ir = self.c.model.intents[self.intent]
+        self.assertEqual((ir.role, ir.refund_script), (ym.I_CLAIMANT, self.holder))
+
+    # Rule: CAN-1
+    def test_cancel_without_the_refund_invalid(self):
+        c = self.c
+        relock = c.relock(self.vault, self.coll)
+        for vouts in ([relock],                                                    # no refund output
+                      [relock, (c.params.token_value, ym.p2pkh_script(KEY3))],      # to another script
+                      [relock, (0, self.holder)]):                                 # a zero carrier
+            self.assertEqual(self.mine(self.cancel(vouts=vouts)), 'intent-cancel-no-refund')
+        # the refund at vout 0 displaces the re-lock: the re-lock rule speaks first
+        self.assertEqual(self.mine(self.cancel(vouts=[c.refund_out(self.intent), relock])), 'intent-cancel-no-vault')
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.assertEqual(c.model.totals.supply_cents, self.after_claim)
+
+    # Rule: CAN-1
+    def test_refund_at_the_lowest_holder_output(self):
+        c, m = self.c, self.c.model
+        relock = c.relock(self.vault, self.coll)
+        raw = self.cancel(vouts=[relock, (777, ym.p2pkh_script(KEY3)), (5_000, self.holder), (6_000, self.holder)])
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.tokens[(txid_of(raw), 2)].cents, 10_000)
+        self.assertNotIn((txid_of(raw), 3), m.tokens)
+
+    # Rule: CAN-1
+    # Rule: IN-3
+    def test_cancel_yed_inputs_still_burn(self):
+        """A cancel's YED inputs burn as any non-Yellowback spend's do; the refund is re-issued, not carried."""
+        c, m = self.c, self.c.model
+        vouts = [c.relock(self.vault, self.coll), c.refund_out(self.intent)]
+        vin = [(self.intent[0], self.intent[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), c.fund_input(),
+               (self.spare[0], self.spare[1], b'', 0xFFFFFFFF)]
+        raw = ym.serialize_tx_v4(vin, vouts).hex()
+        self.assertEqual(self.mine(raw), '')
+        rec = m.txlog[txid_of(raw)]
+        self.assertEqual((rec.yed_in, rec.yed_out, rec.burned), (10_000, 10_000, 10_000))
+        self.assertEqual(m.totals.supply_cents, self.after_claim + 10_000 - 10_000)
+
+    # Rule: CAN-1
+    # Rule: XFER-1
+    def test_refund_spendable(self):
+        c, m = self.c, self.c.model
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        xfer = c.transfer_tx([(txid_of(raw), 1)], [(0, 10_000)])
+        self.assertEqual(self.mine(xfer), '')
+        self.assertNotIn((txid_of(raw), 1), m.tokens)
+        self.assertEqual(m.tokens[(txid_of(xfer), 0)].cents, 10_000)
+        self.assertEqual(m.txlog[txid_of(xfer)].verdict, 'ok')
+
+    # Rule: U-23
+    # Rule: U-24
+    def test_cancel_of_residual_invalid(self):
+        c = self.c
+        c.model.intents[self.intent].role = ym.I_RESIDUAL      # the owner's residual intent (role flipped for the unit)
+        self.assertEqual(self.mine(self.cancel()), 'intent-cancel-residual')
+        self.assertIn(self.intent, c.model.intents)
+
+    # Rule: U-23
+    # Rule: I-2
+    def test_cancel_relock_shapes_invalid(self):
+        c = self.c
+        relock = c.relock(self.vault, self.coll)
+        refund = c.refund_out(self.intent)
+        change = (1000, ym.p2pkh_script(OWNER_KEYHASH))
+        other = ym.yed_vault_script_at(c.params, G2_OWNER, c.model.vaults[self.vault].owner_height, c.model.vaults[self.vault].app_height)
+        for vouts in ([change, relock, refund], [relock, (1000, relock[1]), refund], [(self.coll, ym.p2pkh_script(OWNER_KEYHASH)), refund],
+                      [(self.coll, other), refund]):
+            self.assertEqual(self.mine(self.cancel(vouts=vouts)), 'intent-cancel-no-vault')
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+
+    # Rule: U-23
+    def test_cancel_payload_or_selector3_malformed(self):
+        c = self.c
+        payload = (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([])))
+        self.assertEqual(self.mine(self.cancel(vouts=[c.relock(self.vault, self.coll), c.refund_out(self.intent), payload])),
+                         'intent-spend-malformed')
+        self.assertEqual(self.mine(self.cancel(selector=ym.OP_3)), 'intent-spend-malformed')
+
+    # Rule: U-23
+    # Rule: NOT-1
+    def test_cancel_erases_the_notice(self):
+        c = self.c
+        c.model.notices[self.vault] = ym.NoticeRecord(c.height, c.height - 2, 9_000)    # forced in at the CLAIMING outpoint
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(c.model.notices, {})
+
+    # Rule: U-23
+    # Rule: UNDO
+    def test_cancel_refused_leaves_the_state(self):
+        c = self.c
+        raw = self.cancel(vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(self.vault, self.coll)])
+        self.assertEqual(self.mine(raw), 'intent-cancel-no-vault')
+        # U-21: only the re-mined (empty) block moved the state: the CLAIMING record and the intent are untouched
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.assertIn(self.intent, c.model.intents)
+        self.assertEqual(c.model.txlog.get(txid_of(raw)), None)
+
+
+class AttestorSetThresholdTests(unittest.TestCase):
+
+    # Rule: P4-b
+    # Rule: I-3
+    def test_adopted_only_with_threshold_one(self):
+        """03/I-3: the mirror adopts the attestor set only with cancelThreshold = unlockThreshold = 1."""
+        for kw, adopted in (({}, True), ({'cancel_threshold': 2}, False), ({'unlock_threshold': 2}, False)):
+            c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id(**kw)))
+            c.mine((1, 50_000, 0, KEY1), [attestor_set_create(**kw)])
+            self.assertEqual(c.model.attestor_set_rec is not None, adopted, kw)
+
+
 # ===========================================================================
 # section 3.6  State hash and the golden vector
 
 GOLDEN_BLOCKS = 440
+
+
+def golden_rejected(claim_height):
+    """The golden's rejected blocks in order, (height, verdict) -- the vector's manifest (doc/yellowback-testing.md); the
+    C++ statehash_golden_vector carries the same list.  claim_height is where build_golden's emergency claim landed."""
+    return [(137, 'bad-mint-amount'), (141, 'bad-mint-collateral'), (146, 'yed-template-output'), (150, 'bad-redeem-early-fee'),
+            (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
+            (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
+            (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
+            (claim_height + 9, 'intent-cancel-residual'), (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
+GOLDEN_FALCON = 400            # TOK-PQ binds from here (pqFalconHeight; not hashed): only the golden's TOK-PQ refusals come after it
 
 
 def build_golden():
@@ -1408,10 +1637,19 @@ def build_golden():
     lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
     mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
     intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
-    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Three blocks are rejected and
-    mined again without the offending transaction (U-21): 137 (a mint of $50), 217 (an owner spend
-    with no payload) and 251 (an armed mint without a bundle)."""
+    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends; the cancel refunds the
+    claim's burn (CAN-1) and a second, non-held notice at 293 leaves no BundleLog row (R12 hardened).  Seventeen blocks
+    are rejected and mined again without the offending transaction (U-21), one per consensus verdict the vector covers
+    (audit 03/T-1; golden_rejected() lists them): the original four -- 137 (a mint of $50), 217 (an owner spend with no
+    payload), 231 (a v3 ATTESTOR_REGISTER) and 251 (an armed mint without a bundle) -- and, each built by
+    Chain.rejected() so the accepted chain is unchanged, an over-mint at required - 1 (141), a YED V output no rule
+    created (146), an early owner redeem without the early fee (150), a short burn (185), a bundle with a bad
+    signature (252), a bundle drawn for another selector replayed on a mint (253), a non-held notice carrying a fresh
+    attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 and one
+    without the refund (claim + 1), a cancel of the owner's residual intent (claim + 9), and from the Falcon height
+    (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
+    params.pq_falcon_height = GOLDEN_FALCON
     c = Chain(params)
     # IT-2 keeps the v3 tail on RED-4's path (b): at 300 % collateral minted at $0.009 the vault sits at ~127 %
     # when the pools quote $0.0038 (not under theta 125 %) and at 100 % at the attestors' $0.003 (under 105 %).
@@ -1504,6 +1742,12 @@ def build_golden():
             bundle, _ = c.bundle_for(ref, ya.outpoint_selector(*vault), {'*': 3_000}, skip=(v3['lazy'],))
             txs_at['notice5'] = c.notice_tx(vault, ref, bundle)
             txs.append(txs_at['notice5'])
+        elif h == 293:                                          # R12 hardened (03/M-2): a notice that does not hold (notice5 stands)
+            vault = (txid_of(txs_at['mint5']), 0)                # with notice5's bundle (cited 288, already credited): valid, no BundleLog row
+            sel = c.model.selected(288, ya.outpoint_selector(*vault))
+            bundle, _ = c.bundle_for(288, ya.outpoint_selector(*vault), {'*': 3_000}, skip=(sel[0],))
+            txs_at['notice5b'] = c.notice_tx(vault, 288, bundle)
+            txs.append(txs_at['notice5b'])
         elif h >= 298 and 'claim5' not in txs_at:               # RED-4(b) + RED-5 at the first R >= 296 that selects the lazy attestor
             ref = h - 2
             vault = (txid_of(txs_at['mint5']), 0)
@@ -1528,7 +1772,7 @@ def build_golden():
         elif 'claim_height' in v3 and h == v3['claim_height'] + 1:      # U-23/U-24: an attestor cancels the claimant intent
             vault = (txid_of(txs_at['mint5']), 0)
             v = c.model.vaults[vault]
-            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'])
+            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'], refund=True)   # CAN-1
             txs.append(txs_at['cancel5'])
         elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
             claim5 = txid_of(txs_at['claim5'])
@@ -1565,6 +1809,80 @@ def build_golden():
                 rec = c.model.attestors[q]
                 txs_at[name] = c.bond_spend_tx(rec.bond_outpoint, ya.bond_script(BONDS[q][1], rec.bond_locktime), rec.bond_locktime)
                 txs.append(txs_at[name])
+        # ---- audit 03/T-1: one rejected block per verdict, the refused transaction first in its block
+        bad = []
+        if h == 141:                                            # MINT-5: collateral one zat below the requirement
+            s141 = c.model.snapshot(139)
+            req = ym.required_zat(10_000, ym.min_ratio_bps(params.base_ratio_bps[0], s141.sigma_mult_bps), s141.p_mint)
+            bad.append(c.rejected(lambda: c.mint_tx(10_000, 48, 139, req - 1, fee_key=KEY3)))
+        elif h == 146:                                          # U-23: a YED V output that no mint, claim or cancel created
+            bad.append(c.rejected(lambda: ym.serialize_tx_v4([c.fund_input()], [(10 ** 9, ym.yed_vault_script(params, G_OWNER, 144))]).hex()))
+        elif h == 150:                                          # IT-9': an owner redeem before lockHeight paying only the protocol fee
+            op4 = (txid_of(txs_at['mint4']), 0)
+            v = c.model.vaults[op4]
+            payee = c.model.eligible_payees(148)[0]
+            bad.append(c.rejected(lambda: c.spend_tx(op4, None, 'owner', [(txid_of(txs_at['mint4']), 1)], 148, payee,
+                                                     c.vault_fee(op4), [], collateral_out=v.collateral_zat - 10 ** 9)))
+        elif h == 185:                                          # RED-2: 6,000 cents burned for a 10,000-cent debt
+            op1 = (txid_of(txs_at['mint1']), 0)
+            v = c.model.vaults[op1]
+            bad.append(c.rejected(lambda: c.spend_tx(op1, None, 'owner', [(txid_of(txs_at['xfer1']), 0)], 183, KEY2,
+                                                     c.vault_fee(op1, h), [], collateral_out=v.collateral_zat - 10 ** 9)))
+        elif h in (252, 253):                                   # BUNDLE-1: a bad signature (252); a vault selector's bundle replayed on a mint (253)
+            ref = h - 2
+            x = c.model.snapshot(ref).p_mint
+            if h == 252:
+                bundle, sel = c.bundle_for(ref, b'', {'*': 9_000})
+                atts = ya.decode_bundle(bundle)
+                seq0 = sel[0]
+                atts[0] = ya.sign_attestation(ATTESTORS[seq0][0], seq0, 9_000, ref, c.block_hash(ref - 1))   # signs the wrong block hash
+                bundle = ya.encode_bundle(atts)
+            else:                                               # the bundle mint5's vault would get as a claim selector, replayed on a mint
+                bundle, sel = c.bundle_for(ref, ya.outpoint_selector(txid_of(txs_at['mint5']), 0), {'*': 9_000})
+            fee = c.mint_fee(10_000, ref, p_mint=min(x, 9_000))
+            bad.append(c.rejected(lambda: c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref, p_mint=min(x, 9_000)), fee_key=KEY1,
+                                                    carrier=bundle, p_mint=min(x, 9_000),
+                                                    attest_fee=(ym.hash160(BONDS[sel[0]][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)))))
+        elif h == 292:                                          # liveness: a notice that does not hold (one stands) with a fresh attestation
+            vault = (txid_of(txs_at['mint5']), 0)
+            bundle, _ = c.bundle_for(290, ya.outpoint_selector(*vault), {'*': 3_000})
+            bad.append(c.rejected(lambda: c.notice_tx(vault, 290, bundle)))
+        elif 'claim5' in txs_at and txs_at['claim5'] in txs:    # RED-5: the same claim one zat short of the residual
+            vault = (txid_of(txs_at['mint5']), 0)
+            v = c.model.vaults[vault]
+            ref = h - 2
+            selector = ya.outpoint_selector(*vault)
+            sel = c.model.selected(ref, selector)
+            bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
+            fee = c.vault_fee(vault, owner=False)
+            payee = [q for q in sel if q != v3['lazy']][0]
+            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
+                                                     carrier=bundle, collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
+                                                     attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
+                                                     residual=(ym.pqpkh_script(G_OWNER), v3['residual'] - 1))))
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1:     # I-2 / U-23: the cancel's re-lock at vout 1; CAN-1: no refund
+            vault = (txid_of(txs_at['mint5']), 0)
+            value = c.model.vaults[vault].collateral_zat - v3['residual']
+            intent = (txid_of(txs_at['claim5']), 0)
+            bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value, vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(vault, value),
+                                                                                    c.refund_out(intent)])))
+            bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value)))
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 9:     # U-23: the owner's residual intent is never cancelled
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
+            bad.append(c.rejected(lambda: c.cancel_tx(res, (txid_of(txs_at['cancel5']), 0), v3['residual'])))
+        elif h == GOLDEN_FALCON + 2:                            # TOK-PQ: a TRANSFER of the CAN-1 refund to a P2PKH after the Falcon height
+            refund = (txid_of(txs_at['cancel5']), 1)
+            bad.append(c.rejected(lambda: c.transfer_tx([refund], [(0, 10_000)])))
+        elif h == GOLDEN_FALCON + 3:                            # TOK-PQ: a REDEEM-type transfer whose change goes to a P2PKH
+            refund = (txid_of(txs_at['cancel5']), 1)
+            def change_tx():
+                vin = [(refund[0], refund[1], b'', 0xFFFFFFFF), c.fund_input()]
+                vouts = [(params.token_value, ym.p2pkh_script(OWNER_KEYHASH)),
+                         (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_redeem(h - 1, ym.FEE_VOUT_NONE, [(0, 4_000)])))]
+                return ym.serialize_tx_v4(vin, vouts).hex()
+            bad.append(c.rejected(change_tx))
+        txs = bad + txs
         if h == 5:
             c.mine(None, txs)                                          # untagged
         elif h == 9:
@@ -1586,21 +1904,25 @@ def golden_document(c):
     return {
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
-                       'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
+                       'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false, pqFalconHeight %d (not hashed: TOK-PQ binds from it)}; '
+                       'SCHEMA_VERSION 13 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
+                       'CAN-1: a cancelled claim refunds its burn); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
-                       'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
-                       'cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
+                       'a mint with a bundle, a notice, a second notice that does not hold (no BundleLog row, R12 hardened), an emergency '
+                       'claim into a claimant and a residual intent, an attestor cancel of the claimant intent refunding the burn '
+                       '(CAN-1), the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
                        'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
                        'at exit + BOND_MATURITY). '
-                       'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
-                       'vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied '
-                       '(U-21); the next entry is the same height mined again without the offending transaction.'
-                       % (set_id, GOLDEN_LIVENESS, GOLDEN_BLOCKS),
+                       'txs[0] of every block is the coinbase. Blocks flagged "invalid" (%s; one per verdict, audit 03/T-1) are '
+                       'rejected and not applied (U-21); the next entry is the same height mined again without the offending '
+                       'transaction.'
+                       % (set_id, GOLDEN_LIVENESS, GOLDEN_FALCON, GOLDEN_BLOCKS,
+                          ', '.join('%d %s' % hv for hv in golden_rejected(c.v3['claim_height']))),
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': set_id,
-                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
+                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False,
+                   'pqFalconHeight': GOLDEN_FALCON},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
         'totals': c.model.totals.as_dict(),
@@ -1673,7 +1995,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0c\x00\x00\x00')        # SCHEMA_VERSION 12 (liveness by attestation, join refusals)
+        self.assertEqual(pre[37:41], b'\x0d\x00\x00\x00')        # SCHEMA_VERSION 13 (CAN-1: IntentRecord.refundScript)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))
@@ -1727,13 +2049,15 @@ class StateHashTests(unittest.TestCase):
         self.assertIn(17, m.tags)
         self.assertFalse(m.tags[9].is_quote)
         self.assertEqual(m.vaults[(txid_of(txs_at['mint1']), 0)].status, ym.V_CLOSED)
-        # U-21: four blocks rejected, none applied; the same heights mined again without the offending transaction
-        self.assertEqual([(v.height, v.verdict) for v in m.rejected],
-                         [(137, 'bad-mint-amount'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
-                          (251, 'mint9-no-bundle')])
+        # U-21: one rejected block per verdict (audit 03/T-1), none applied; the same heights mined again without the
+        # offending transaction (the C++ statehash_golden_vector's `expected` map is this list)
+        v3 = c.v3
+        rejected = golden_rejected(v3['claim_height'])
+        self.assertEqual([(v.height, v.verdict) for v in m.rejected], rejected)
+        self.assertGreaterEqual(len(set(v for _h, v in rejected)), 16)               # one block per verdict (TOK-PQ: two shapes)
         self.assertTrue(all(v.rejected for v in m.rejected))
-        self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [137, 217, 231, 251])
-        self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + 4)
+        self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [h for h, _v in rejected])
+        self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + len(rejected))
         self.assertEqual(c.refused[txid_of(txs_at['legacyreg'])], 'attestor-register-retired')   # P4-b
         self.assertNotIn((txid_of(txs_at['mint2']), 0), m.vaults)                      # no VOID vault (section 15.10)
         self.assertEqual(c.refused[txid_of(txs_at['mint2'])], 'bad-mint-amount')
@@ -1747,7 +2071,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity)
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -1777,7 +2101,8 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual((claim5.verdict, claim5.claim_path, claim5.residual_zat), ('ok', 'b', v3['residual']))
         self.assertTrue(claim5.residual_zat >= ym.Params.REGTEST_ATTEST['residual_min_zat'])
         # U-23/U-24: the attestor cancel re-created the vault at (cancel5, 0): the same position, ACTIVE, its
-        # collateral the claimant intent's value; the claim's 10,000-cent burn was not refunded
+        # collateral the claimant intent's value; CAN-1 (03/H-1): the claim's 10,000-cent burn was refunded at (cancel5, 1)
+        # to the holder it came from, and supply credited
         self.assertNotIn((txid_of(txs_at['mint5']), 0), m.vaults)
         cancel = m.txlog[txid_of(txs_at['cancel5'])]
         self.assertEqual(cancel.type, 'CLAIM_CANCEL')
@@ -1789,6 +2114,12 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(v5.p_mint, min(m.snapshots[248].p_mint, 9_000))
         self.assertEqual(v5.p_mint, 9_000)
         self.assertEqual(claim5.burned, 10_000)
+        self.assertEqual((cancel.assigned, cancel.yed_out, cancel.burned), ([(1, 10_000)], 10_000, 0))
+        refund = m.tokens[(txid_of(txs_at['cancel5']), 1)]
+        self.assertEqual((refund.cents, refund.script_pub_key), (10_000, ym.p2pkh_script(OWNER_KEYHASH)))
+        # R12 hardened (03/M-2): the notice at 293 did not hold (notice5 stands) and its verified bundle left no row
+        self.assertNotIn(293, m.bundle_log)
+        self.assertNotIn(txid_of(txs_at['notice5b']), m.txlog)
         self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
         self.assertEqual(m.intents, {})
         self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE
@@ -1810,14 +2141,14 @@ class StateHashTests(unittest.TestCase):
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
         self.assertEqual(m.attestors[r4].last_act, v3['claim_height'] - 2)
         self.assertEqual(m.attestors[r4].status, ym.A_ELIGIBLE)
-        # the pinned hash, the file on disk and a replay from the file all agree
-        self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
+        # the file on disk, the C++ pin, the model and a replay from the file all agree
         with open(GOLDEN_PATH) as f:
             doc = json.load(f)
-        self.assertEqual(doc['stateHash'], GOLDEN_STATE_HASH)
+        self.assertEqual(m.state_hash(), doc['stateHash'])
+        self.assertEqual(doc['stateHash'], cpp_golden_hash())
         self.assertEqual(doc['blocks'], c.blocks)
         replayed = ym.replay_golden(doc)
-        self.assertEqual(replayed.state_hash(), GOLDEN_STATE_HASH)
+        self.assertEqual(replayed.state_hash(), doc['stateHash'])
         self.assertEqual(replayed.state_hash_preimage(), m.state_hash_preimage())
 
     # Rule: N18
@@ -2048,18 +2379,44 @@ class PQVectorTests(unittest.TestCase):
         self.assertEqual(len(pinned['scripts']), 364)
 
 
-def write_golden():
+def golden_text():
+    """The golden document exactly as --write-golden writes it."""
     c, _ = build_golden()
     doc = golden_document(c)
+    return json.dumps(doc, indent=1) + '\n', doc
+
+
+def write_golden():
+    text, doc = golden_text()
     with open(GOLDEN_PATH, 'w') as f:
-        json.dump(doc, f, indent=1)
-        f.write('\n')
+        f.write(text)
     print('wrote %s: %d blocks, stateHash %s' % (GOLDEN_PATH, len(doc['blocks']), doc['stateHash']))
+    print('sha256 of the file: %s' % ym.sha256(text.encode()).hex())
+
+
+def check_golden():
+    """Rebuild the golden sequence and compare the whole document with the committed file, byte for byte (audit
+    03/T-1: stronger than the stateHash pin -- a hand "fix" of the hash, or of any block, fails here).  Exit 1 on
+    any difference."""
+    text, doc = golden_text()
+    with open(GOLDEN_PATH) as f:
+        committed = f.read()
+    if committed == text:
+        print('golden OK: %s is the model\'s output byte for byte (%d blocks, stateHash %s, sha256 %s)'
+              % (GOLDEN_PATH, len(doc['blocks']), doc['stateHash'], ym.sha256(text.encode()).hex()))
+        return 0
+    import difflib
+    diff = list(difflib.unified_diff(committed.splitlines(), text.splitlines(), 'committed', 'rebuilt', lineterm='', n=1))
+    print('golden STALE: %s differs from the model\'s output (%d diff lines; first 40):' % (GOLDEN_PATH, len(diff)))
+    print('\n'.join(diff[:40]))
+    return 1
 
 
 if __name__ == '__main__':
     if '--write-golden' in sys.argv:
         write_golden()
+    elif '--check-golden' in sys.argv:
+        sys.exit(check_golden())
     elif '--write-pq-vectors' in sys.argv:
         write_pq_vectors()
     else:

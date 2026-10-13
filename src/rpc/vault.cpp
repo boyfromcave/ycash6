@@ -1778,30 +1778,24 @@ UniValue set_signunlock(const UniValue& params, bool fHelp)
     return SignSetInPlace(mtx, idx, coin, vp.setId, ROLE_UNLOCK, AckRestore(params));
 }
 
-UniValue vault_buildcancel(const UniValue& params, bool fHelp)
+/**
+ * The I-2 cancel of `op` (vault_buildcancel, and yed_buildcancel through BuildYedIntentCancel): vout[0] re-creates the
+ * originating V with the intent's value, then `extra` (CAN-1's refund for a YED claim intent), then the wallet's fee
+ * inputs and change. `yedAllowed` false refuses a YED-tagged intent (its cancel needs the refund output). The build is
+ * remembered in the wallet (07/N-2) and returned byte-identical while its outputs are the same (sign once), re-funded
+ * with the same sighash when a fee input was spent (01/V-2); `rebuild` discards it. `buildFields` adds "sighash" and
+ * "build" to the result (vault_buildcancel's contract; yed_buildcancel's has neither).
+ */
+UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra, bool yedAllowed, bool rebuild, bool buildFields)
 {
-    if (fHelp || params.size() < 1 || params.size() > 2)
-        throw std::runtime_error(
-            "vault_buildcancel \"intentoutpoint\" ( rebuild )\n"
-            "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
-            "(I-2), fee from this wallet (unsigned; never from the intent's value). Collect the cancel set's signatures with\n"
-            "set_signcancel, then vault_send.\n"
-            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
-            "the same intent it returns the same transaction (remembered in the wallet, across restarts); if its fee inputs\n"
-            "were spent meanwhile it is re-funded (vault_refee) with the same sighash (members sign once: a second, different\n"
-            "cancel signature is an equivocation). rebuild=true discards the remembered build (only before anyone signed it).\n"
-            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
-            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\", \"sighash\", \"build\" (\"new\",\n"
-            "\"reused\" or \"refunded\")}\n"
-            + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
-    EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureVaultActive();
-    const COutPoint op = ParseOutPoint(params[0], "intentoutpoint");
     CTxOut coin;
     int h;
     IntentParams ip;
     if (!GetCoin(op, coin, h) || !ParseIntent(coin.scriptPubKey, ip)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not an unspent intent output");
+    if (!yedAllowed && ip.tag == yellowback::YED_TAG)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "a YED claim intent is cancelled with yed_buildcancel (its cancel refunds the claim's burn, CAN-1)");
     // The originating V script (the vaultHash preimage the cancel re-creates): from the vault
     // database for a confirmed intent, else from the vault coin its mempool transaction spends
     // (finding (50): a watcher pre-builds and signs the cancel as soon as the intent appears).
@@ -1834,14 +1828,14 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     // The remembered build, byte-identical (sign once): the same transaction whether the intent was in the mempool
     // or has confirmed since, and across restarts (07/N-2); a lost fee input is replaced without changing the
     // sighash (01/V-2).
-    const bool rebuild = params.size() > 1 && !params[1].isNull() && params[1].get_bool();
     PruneVaultBuilds();
     CMutableTransaction mtx;
     std::string build = "new";
     auto cached = pwalletMain->mapVaultBuilds.find(op);
     if (cached != pwalletMain->mapVaultBuilds.end()) {
         const CMutableTransaction& c = cached->second;
-        if (rebuild || c.vin.empty() || c.vin[0].prevout != op || c.vout.empty() || c.vout[0].scriptPubKey != origin || c.vout[0].nValue != coin.nValue) {
+        if (rebuild || c.vin.empty() || c.vin[0].prevout != op || c.vout.size() <= extra.size() || c.vout[0].scriptPubKey != origin ||
+            c.vout[0].nValue != coin.nValue || !std::equal(extra.begin(), extra.end(), c.vout.begin() + 1)) {
             UnlockBuildInputs(op, c);
         } else {
             mtx = c;
@@ -1856,6 +1850,7 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
         mtx = NewTx();
         mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
         mtx.vout.push_back(CTxOut(coin.nValue, origin));
+        for (const CTxOut& o : extra) mtx.vout.push_back(o);
         Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
     }
     RememberBuild(op, mtx);
@@ -1867,9 +1862,34 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     o.pushKV("cancelsetid", ip.cancelSetId.GetHex());
     o.pushKV("deadline", coinHeight + ip.delay - 1);
     o.pushKV("intentconfirmed", confirmed);
-    o.pushKV("sighash", HexStr(sighash.begin(), sighash.end()));
-    o.pushKV("build", build);
+    if (buildFields) {
+        o.pushKV("sighash", HexStr(sighash.begin(), sighash.end()));
+        o.pushKV("build", build);
+    }
     return o;
+}
+
+UniValue vault_buildcancel(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "vault_buildcancel \"intentoutpoint\" ( rebuild )\n"
+            "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
+            "(I-2), fee from this wallet (unsigned; never from the intent's value). Collect the cancel set's signatures with\n"
+            "set_signcancel, then vault_send.\n"
+            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
+            "the same intent it returns the same transaction (remembered in the wallet, across restarts); if its fee inputs\n"
+            "were spent meanwhile it is re-funded (vault_refee) with the same sighash (members sign once: a second, different\n"
+            "cancel signature is an equivocation). rebuild=true discards the remembered build (only before anyone signed it).\n"
+            "A YED claim intent (tag YED) is refused: its cancel must also refund the claim's burn (CAN-1), which\n"
+            "yed_buildcancel builds.\n"
+            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
+            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\", \"sighash\", \"build\" (\"new\",\n"
+            "\"reused\" or \"refunded\")}\n"
+            + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
+    EnsureWallet(fHelp);
+    const bool rebuild = params.size() > 1 && !params[1].isNull() && params[1].get_bool();
+    return BuildIntentCancel(ParseOutPoint(params[0], "intentoutpoint"), {}, false, rebuild, true);
 }
 
 UniValue set_signcancel(const UniValue& params, bool fHelp)
@@ -1903,9 +1923,10 @@ UniValue vault_refee(const UniValue& params, bool fHelp)
             "wallet's coins; the template input (with any set signatures already on it) and every output stay as they are,\n"
             "so the signatures stay valid: they are over SIGHASH_ALL|ANYONECANPAY, which binds the template input and the\n"
             "outputs, not the fee inputs. Anyone may re-fund. Use it when a fee input of a signed spend was spent elsewhere.\n"
-            "The outputs, the builder's change included, are bound, so there is no new change output: the new inputs pay\n"
-            "every output not covered by the template coin plus the fee, and any excess is fee. The fee never comes from the\n"
-            "vault's value (S-2, I-1, I-2). The new inputs are unsigned and locked: vault_send on this node signs them.\n"
+            "The outputs, the builder's change included, are bound, so there can be no new change output: the new input is one\n"
+            "coin worth exactly what the outputs need beyond the template coin plus the fee (an existing coin within 1,000\n"
+            "zatoshi of it, else a self-send of exactly that amount, broadcast now, that the spend chains on). The fee never\n"
+            "comes from the vault's value (S-2, I-1, I-2). The new input is unsigned and locked: vault_send on this node signs it.\n"
             "\nResult: {\"hex\", \"sighash\" (unchanged), \"fee\", \"replaced\": [\"txid:n\", ...]}\n"
             + HelpExampleCli("vault_refee", "\"hex\"") + HelpExampleRpc("vault_refee", "\"hex\""));
     EnsureWallet(fHelp);
@@ -2209,6 +2230,14 @@ UniValue vault_app(const UniValue& params, bool fHelp)
 #endif // ENABLE_WALLET
 
 } // namespace
+
+#ifdef ENABLE_WALLET
+/** yed_buildcancel (rpc/yellowbackwallet.cpp, CAN-1): the I-2 cancel of a YED claimant intent with its refund output. */
+UniValue BuildYedIntentCancel(const COutPoint& intent, const CTxOut& refund)
+{
+    return BuildIntentCancel(intent, { refund }, true, false, false);
+}
+#endif
 
 static const CRPCCommand commands[] =
 { //  category   name                   actor (function)       okSafeMode

@@ -445,7 +445,7 @@ class Liquidator(Persona):
                 continue
             if row.get("status") != "CLAIMING":
                 if row.get("status") == "ACTIVE":
-                    self.log("%-12s claim %s of vault %s was CANCELLED by the attestor set: %s YED burned for nothing (U-24)"
+                    self.log("%-12s claim %s of vault %s was CANCELLED by the attestor set: its %s YED burn refunded (CAN-1)"
                              % (self.name, claim["txid"][:16], vault[:16], Decimal(claim["burnedCents"]) / 100))
                 del self.claims[vault]
                 continue

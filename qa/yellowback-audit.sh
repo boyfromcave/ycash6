@@ -37,6 +37,24 @@ for f in src/main.cpp:40 src/miner.cpp:35 src/miner.h:10 src/rpc/mining.cpp:35 s
     if [ "$report" = 1 ]; then echo "  over budget (report only)"; else rc=1; fi
   fi
 done
+# golden-separate-commit (doc/yellowback-testing.md, audit 03/T-1; report-only for one release cycle): a commit that
+# regenerates the YED golden vector touches nothing under src/yellowback/ and does not change yellowback_model.py.
+gbase=${YB_GOLDEN_BASE:-}
+if [ -z "$gbase" ]; then
+  if git rev-parse --verify -q origin/upgrade/vault >/dev/null; then gbase=$(git merge-base origin/upgrade/vault HEAD); else gbase=$base; fi
+fi
+gbad=""; gn=0
+for c in $(git rev-list "$gbase..HEAD"); do
+  files=$(git diff-tree --no-commit-id --name-only -r "$c")
+  printf '%s\n' "$files" | grep -qE '^(src/test/data|qa/rpc-tests/test_framework)/yellowback_golden\.json$' || continue
+  gn=$((gn + 1))
+  if printf '%s\n' "$files" | grep -qE '^src/yellowback/|^qa/rpc-tests/test_framework/yellowback_model\.py$'; then
+    gbad="$gbad
+  $(git log -1 --format='%h %s' "$c")"
+  fi
+done
+echo "golden-separate-commit: $gn golden regeneration commit(s) in $(git rev-parse --short "$gbase")..HEAD"
+[ -z "$gbad" ] || echo "REPORT golden-separate-commit (non-gating): regenerated with a rule or model change:$gbad"
 # S1: every registered yed_* RPC has an exact-arity rpcCvtTable row (the server rejects it otherwise)
 ../.venv/bin/python qa/yellowback-rpc-cvt.py --check 2>/dev/null || python3 qa/yellowback-rpc-cvt.py --check || rc=1
 exit $rc
