@@ -133,40 +133,66 @@ co-signed: a claim's txid can still change before it confirms.
 The owner decided that this brake is automated before release, so **the agent does it with no operator**: `attest`
 runs, beside its attestation loop and with `[cancel]` on by default,
 
-- a **watcher** that judges every confirmed YED claim with *your* price at the claim's refHeight (what you signed
-  there, else the last aggregate you computed at or before that height) and calls it **wrong-price** when the vault was not claimable at
-  that price with `margin_bps` (default 5 %) to spare. It raises an alert, co-signs (`auto_cosign`) and publishes
+- a **watcher** that judges every confirmed YED claim with *your* price at the claim's refHeight and calls it
+  **wrong-price** when the vault was not claimable at that price with `margin_bps` (default 5 %) to spare. Your price
+  there is, first, one your key is **on record** for at that height -- the attestations the agent signed (its state
+  file), your attestation in the claim's own bundle, the node's attestation pool, the node's equivocation guard --
+  and only otherwise the last aggregate the agent computed at or before that height. With none of these the claim is
+  `unjudged` (alerted, never guessed from a later price). It raises an alert, co-signs (`auto_cosign`) and publishes
   the co-signature on a second gossip topic, `yellowback/cancel/<network>/1`, carried by the same iroh endpoint and
-  the same `peers`. A claim that is claimable at your price is honest and left alone;
-- a **gossip filter** that takes only 115-byte frames whose signature recovers to the named seq's current member
-  key over the claim's own message, at a price saying the vault was not claimable, behind a dedup cache, a global
-  and a per-member rate limit;
+  the same `peers`. A claim that is claimable at your price is honest and left alone. A **new** price is stated for
+  a height only when the agent's own record covers that height (its state file began before it); otherwise, if the
+  guard holds nothing either, the agent refuses (`no-record`), because your key may have attested there before the
+  record began, and two prices at one height are slashed (EQV-1). Reorgs are followed: a claim whose block leaves the
+  chain is held (`claim-reorged`), never closed, and is judged again when it is re-mined; a reorg across the refHeight
+  makes the agent re-sign over the new block hash;
+- a **gossip filter**, drained continuously, that takes only 115-byte frames from the topic: duplicates are dropped,
+  then the cheap checks (a current member's seq -- the primitive's own `current`, maturity included --, a claim this
+  node knows, its refHeight, a price at which the vault was not claimable), then a rate limit **per delivering peer**
+  (so a flood from one peer cannot starve another), then the signature must recover to that seq's member key, then a
+  per-member rate limit;
 - a **collector** in which one member drives each claim: the members in seq order, rotated per claim; rank r takes
-  over `r × takeover_blocks` blocks after the claim confirmed. The driver gathers `cancelsRequired` co-signatures plus
-  `spares` (the rule counts the valid ones, so spares absorb a co-signer that leaves before the cancel confirms),
-  then `yed_buildcancel` → `set_signcancel` → `vault_send`, pushes the cancel and its carrier to `broadcast_rpc`,
-  re-pushes it if it lingers and re-funds and rebuilds it (`vault_refee`, then `yed_buildcancel`) if it falls out of
-  the mempool.
+  over `r × takeover_blocks` blocks after the claim confirmed (at most 36, and shrunk at run time so the last rank
+  still fits in `CLAIM_DELAY`). The driver gathers `cancelsRequired` co-signatures plus `spares` (the rule counts the
+  valid ones, so spares absorb a co-signer that leaves before the cancel confirms), then `yed_buildcancel` →
+  `set_signcancel` → `vault_send`, pushes the cancel and its carrier to `broadcast_rpc`, re-pushes it if it lingers,
+  and re-funds and rebuilds it (`vault_refee`, then `yed_buildcancel`) if it falls out of the mempool -- with
+  backoff, at most `max_sends` times (default 5), then `cancel-send-cap`.
 
-Its state (claims, co-signatures, the cancel it sent, your price history) is in `state_file` (default
-`yellowback-cancel-<seq>.json` beside the node's cookie, else `~/.ycash/yellowback-cancel-<network>-<seq>.json`); a restart resumes from it. Back it up with `wallet.dat` if you
-like, but it is not precious: a lost file means the agent co-signs again (the node's guard returns the same
-statement) and rebuilds the same cancel (the sign-once build memo).
+Its state (claims, co-signatures, the cancel it sent, your signed prices and price history) is in `state_file`
+(default `yellowback-cancel-<seq>.json` beside the node's cookie, else `~/.ycash/yellowback-cancel-<network>-<seq>.json`);
+a restart resumes from it. Losing it costs a little: the agent co-signs again through the node's guard and rebuilds
+the same cancel, but it will not state a new price for heights before the new file began.
+
+**The node's guard file `attest-signed.dat` is precious.** It is the record of every price your key signed, by height,
+and the node uses it to refuse a second, different price for a height (`yed_signattestation`, `yed_revive`,
+`yed_signcancelcosign`). Back it up with `wallet.dat`, move it with `wallet.dat`, and never run a member key on a node
+without it: a node that lost it can be made to state a price your key already contradicted, and EQV-1 then ejects the
+member and freezes the bond.
 
 **What you do.** Keep a few YEC of confirmed coins in the node's wallet (the cancel's carrier and fee come from it);
 after importing your member key or restoring the wallet, complete the sign-once history and run
 `set_acknowledgerestore` (above), or `set_signcancel` refuses and the agent alerts `sign-refused`; give
 `broadcast_rpc` the RPC of a well-connected node or a pool you trust if you have one; and wire `alert_command` (or a
-log watcher on `ALERT`) to a pager. The alerts:
+log watcher on `ALERT`) to a pager (at most four run at once, each killed after 30 s). The alerts:
 
 | Alert | Meaning | Act |
 |---|---|---|
 | `wrong-price` | a confirmed claim is not claimable at your price; the agent co-signs and the rota cancels it | watch it close as `cancelled` |
-| `unjudged` | you have no price near the claim's refHeight (your feed was down): you do not co-sign | fix the feed; others may still cancel |
-| `cosign-refused` | your key signed, for that height, a price at which the vault *was* claimable | none: your own attestation says the claim is right |
+| `unjudged` | you have no price of your own at the claim's refHeight (your feed or the agent was down there): you do not co-sign | fix the feed; others may still cancel |
+| `no-record` | the guard holds no price of your key at that height and the agent's record does not cover it: it states none | none needed; restore `attest-signed.dat` if it was lost |
+| `cosign-refused` | the node refused for good: your key signed, for that height, a price at which the vault *was* claimable, or another price (`equivocation-guard`), or a price out of range | none for the first: your own attestation says the claim is right; investigate the others |
 | `cosign-within-margin` | the price your key signed there is inside the margin | none, or review `margin_bps` |
 | `sign-refused` | `set_signcancel` refused (restore marker, locked wallet) | fix the wallet; the next member in the rota takes over |
+| `claim-reorged` | the claim's block left the chain; the claim is held and followed again if re-mined | none; watch it |
+| `foreign-spend` | a transaction that is not yours has spent the claim's intent in the mempool for `refee_after_blocks` without confirming (a pinned cancel variant, or a release) | send a cancel directly to miners |
+| `cancel-send-cap` | your cancel left the mempool `max_sends` times | act by hand |
 | `wrong-price-past-delay`, `wrong-price-released` | a claim you judged wrong-price reached its release height uncancelled | escalate: the brake failed (too few live members, censorship) |
+
+Transient refusals of a co-signature (a timeout, a locked wallet, the index behind the chain or the claim's
+refHeight not yet indexed) raise nothing: the agent retries at the next poll.
+
+If the gossip task dies the agent exits non-zero; the packaged service restarts it (`Restart=always`).
 
 `auto_cosign = false` keeps the watcher and its alerts but leaves the co-signing to you (`yellowback-attest cosign
 <txid:n>` prints your co-signature; anyone with `cancelsRequired` of them runs `yed_buildcancel <intent> [cosigs]`,
@@ -341,8 +367,8 @@ keys are refused, exit 2):
               topic_override = ""              default "yellowback/attest/<network>/3"; leave it
               kind = "dir"; path = "..."       tests and the regtest devnet: <seq>-<citedHeight>.att files in a shared directory
 [cancel]      enabled = true; auto_cosign = true; margin_bps = 500    the cancel automation ("Cancelling wrong-price claims")
-              drive = true; spares = 2; spare_wait_blocks = 1; takeover_blocks = 6; min_confirmations = 1
-              refee_after_blocks = 6; republish_blocks = 4; price_tolerance_blocks = 24; state_file = "..."
+              drive = true; spares = 2; spare_wait_blocks = 1; takeover_blocks = 6 (at most 36); min_confirmations = 1
+              refee_after_blocks = 6; max_sends = 5; republish_blocks = 4; price_tolerance_blocks = 24; state_file = "..."
               broadcast_rpc = [...]; allow_insecure_broadcast = false; alert_command = "..."; gossip_burst = 16; gossip_refill_seconds = 10
 [subscribe]   listattestors_seconds = 60; endpoints = [...]; endpoints_seconds = 30      subscriber side only
               allow_insecure_endpoints = false (endpoints are https://; http:// only on loopback without this)
