@@ -178,23 +178,36 @@ guard locks it to the price that key attested at that height. `attest` automates
    - **Direct, members only** (`direct.rs`). A dedicated iroh endpoint (`direct_secret_key_file`, default
      `<state_file>.direct.key`) serves one ALPN, `yellowback/cancel-cosig/1`. An `EndpointHooks::after_handshake` gate
      refuses any connection on it whose authenticated endpoint id is not bound to a current member, and the agent
-     never dials one (`before_connect`). Each co-signature goes straight to every other bound member on a fresh uni
+     never dials one (`before_connect`) -- except a **self-introduction** (review N-A): an unbound connection is let
+     through the handshake only while fewer than 16 wait, from a source address (remote IP, or the relay it came by)
+     with a token (a burst of 4, then one per 10 s), and its first uni stream must carry, within 3 s,
+     `0x03 ‖ announce` binding a current member's seat to that very endpoint id with a valid proof of possession --
+     checked once per connection (one secp256k1 recovery) -- or the connection is closed with the refusal. Every new
+     connection the agent opens starts with its own announce, so a member reaches another that has not seen its
+     binding yet on the first connection, whatever the topic carries; the receiver takes the binding into its table
+     (and, newly binding a member at a new endpoint, announces its own at the next poll, which dials it back). Each co-signature goes straight to every other bound member on a fresh uni
      stream (`0x01 ‖ frame`); it is accepted only under the seq its connection is bound to and within that member's
      quota (64 at once, 4 a second), then verified at once -- no sampler: the author is authenticated, so a member can
      exhaust only its own allowance. Nothing is forwarded.
    - **The binding** (`binding.rs`): `YED-IROH-1|<network>|<attestorSetId>|<seq>|<endpoint id>|<issued>|<expiry>`, signed
      by the node's stock `signmessage` with the member key (its address, checked against `attestorPubKey` with
      `validateaddress`), valid at most `binding_ttl_blocks` (8,064; a longer one is refused) and re-signed at half
-     of it. The endpoint key adds a **proof of possession** (ed25519 over `"YED-IROH-POP-1|" ‖ statement`), so no
-     member can bind another member's endpoint id; a binding of an endpoint id another current seat holds is
+     of it. The endpoint key adds a **proof of possession** over the statement **and the dial hints** (ed25519 over
+     `"YED-IROH-POP-2|" ‖ statement ‖ "|" hint_seq "|" addrs "|" relay`; review N-B), so no member can bind another
+     member's endpoint id, and any copy's hints are the endpoint's own: a replay with other hints fails. The agent
+     re-signs the proof locally (no node call; the `signmessage` statement is unchanged) whenever its addresses
+     change, with a higher `hint_seq`, and a valid proof with a higher `hint_seq` replaces the hints held; a binding of an endpoint id another current seat holds is
      refused anyway (and two seats binding one id in the same poll are both refused), with `ALERT binding-conflict`.
-     Announces (`"YBD2"`: statement, member signature, proof of possession, unsigned address hints) travel on the
-     public binding topic `yellowback/bindings/<network>/1` and over each member's own direct connection, every 10
-     blocks. A member connection is taken only for that member's own seat, and first; the public topic keeps, per
+     Announces (`"YBD3"`: statement, member signature, hint_seq, proof of possession, address hints, relay) travel on
+     the public binding topic `yellowback/bindings/<network>/1` and over each member's own direct connection: every
+     poll for the first 20 blocks after a new binding, then every 10 blocks. A member connection is taken only for that member's own seat, and first; the public topic keeps, per
      claimed seat, a uniform sample of 4 announces a poll (an honest announce competes only with forgeries of its own
-     seat), seats without a binding or near expiry first, deduplicated by (seq, endpoint, issued), at most 64
-     signature checks a poll. Address hints are taken from the member's own connection, or from the topic only for a
-     seat that has none yet; a topic copy never replaces them. The table is persisted.
+     seat), seats without a binding or near expiry first, deduplicated by the announce's digest (review N-C: a look-alike
+     with the same statement but a bad signature cannot displace the genuine copy), at most 64 signature checks a
+     poll. The table is persisted. **Timing:** through the topic alone, under a 100x flood of forgeries for a seat,
+     each announce lands with p = 4/151; the 20 fresh blocks at 15-second polls are about 100 announces (25 minutes
+     on mainnet, ~93 %), then one per 10 blocks adds 4/151 each (~98 % by 12 hours). Self-introduction does not
+     depend on the topic: a member admits a fresh member on its first direct connection.
    - **On-chain fallback** (`onchain.rs`, `onchain_fallback`, default on). A claim still short of `cancelsRequired`
      `fallback_after_blocks` (192) after it confirmed: every co-signing agent publishes its co-signature once in a
      standard transaction, `OP_RETURN OP_PUSHDATA1 79 ‖ "YF" ‖ short id (8) ‖ price ‖ sig65` (82-byte script, within

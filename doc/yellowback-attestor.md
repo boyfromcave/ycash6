@@ -158,8 +158,11 @@ runs, beside its attestation loop and with `[cancel]` on by default,
   members-only protocol. A connection on it is refused at the handshake unless its endpoint id is bound to a current
   member. You bind yours once (the agent does it): your node signs `YED-IROH-1|<network>|<set>|<seq>|<endpoint>|
   <issued>|<expiry>` with your member key through the stock `signmessage` -- a statement about a network address,
-  never a price -- and re-signs it every few days; the agent's endpoint key proves it holds that endpoint, so nobody
-  can bind your endpoint to another seat. During the trial the old public cancel topic runs beside it
+  never a price -- and re-signs it every few days; the agent's endpoint key proves it holds that endpoint and signs your
+  dial addresses, so nobody can bind your endpoint to another seat or point others at fake addresses. A member that
+  has not seen your binding yet admits you on your first connection, when its first stream carries your binding and
+  that proof (self-introduction, rate-limited per source address); otherwise members learn it from the binding topic,
+  where your agent announces it every poll for 20 blocks after signing it, then every 10 blocks. During the trial the old public cancel topic runs beside it
   (`delivery = "trial"`); `delivery = "direct"` uses the direct path alone. If a claim is still short of
   co-signatures `fallback_after_blocks` (192, a third of `CLAIM_DELAY`) after it confirmed, your agent also publishes
   your co-signature on chain in one standard transaction (an 82-byte OP_RETURN, fee `fallback_fee_zat` = 10,000 zat,
