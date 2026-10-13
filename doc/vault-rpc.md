@@ -317,7 +317,11 @@ is provable equivocation: sign only the transaction you mean.
 **Sign once:** before handing out a signature the wallet records, in its wallet database, the
 role and sighash its members signed for `(setid, prevout)`, and refuses a different role or
 sighash for that pair with `set-sign-once` (`RPC_WALLET_ERROR`), across restarts; re-signing the
-identical transaction is idempotent. There is no override.
+identical transaction is idempotent. There is no override. The record lives in this wallet's `wallet.dat`
+only. A wallet restored from a seed or a backup, or a second node holding the same member key, has
+**no** record and will sign a different spend of the same outpoint when asked — a provable
+equivocation. Keep the member key in exactly one wallet, back `wallet.dat` up together with the
+sidecar's own ledger, and never run two copies (see `hawkeye/docs/operations.md`).
 
 ### `vault_buildcancel "intentoutpoint"`
 Params: `["intentoutpoint": outpoint]`
