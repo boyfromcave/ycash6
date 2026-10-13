@@ -4342,7 +4342,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     view.SetBestBlock(pindex->GetBlockHash());
     if (yellowback::g_yellowback && !yellowback::g_yellowback->CommitConnect(block, pindex))
         return AbortNode(state, "Failed to write to the Yellowback index");
-    if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo))
+    if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo,
+                                                      vault::UndoToPrune(pindex, chainparams.GetConsensus())))
         return AbortNode(state, "Failed to write to the vault database");
 
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;

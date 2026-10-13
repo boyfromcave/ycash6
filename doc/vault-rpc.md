@@ -444,7 +444,12 @@ C: vault_buildcancel I' -> X ; C: set_signcancel X -> X1 ; C: vault_send X1   (a
   (disconnected with its own undo, replayed from the block files). Replay needs every block and
   undo file from the activation height, so `-prune` is refused wherever the upgrade has an
   activation height, with or without Yellowback (audit 01/N-1): a node that pruned before its
-  network set a height must re-download the chain without `-prune`.
+  network set a height must re-download the chain without `-prune`. Undo records are kept for
+  4,096 blocks (`UNDO_KEEP`, `src/vault/db.h`); a crash-time walk-back deeper than that is a wipe
+  and replay from the activation height (minutes to hours), as a `VAULT_DB_VERSION` change is
+  (audit 07/F-7, 07/F-8). Live reorgs stop at 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock`
+  more than 4,096 blocks deep stops the node, which then needs `-reindex`. A smaller `-dbcache` flushes the chainstate more often and
+  keeps a crash within the walk-back.
 - A template input whose coin was created below the activation height is invalid (S-0,
   `bad-txns-vault-preactivation`, audit 01/V-1): a V or I a miner put in a block before the
   rules existed is never a template input, in the mempool, in a block or on replay (which reads

@@ -20,6 +20,7 @@
 #include "yellowback/script.h"
 #include "vault/template.h"
 
+#include "arith_uint256.h"
 #include "chain.h"
 #include "consensus/params.h"
 #include "crypto/sha256.h"
@@ -1323,6 +1324,44 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
     BOOST_CHECK(db.Flush());
     BOOST_CHECK(db.Wipe());
     BOOST_CHECK(!db.GetTip(tip, tipHeight));
+}
+
+BOOST_AUTO_TEST_CASE(db_undo_prune)
+{
+    // Audit 07/F-7: connecting block h erases the undo of block h - UNDO_KEEP in the same batch (the caller,
+    // UndoToPrune, names it); disconnects within the horizon work, one past it fails on the missing undo —
+    // the condition Reconcile turns into a wipe + replay.
+    VaultDB db(fs::temp_directory_path() / "vault_db_prune_test", 1 << 20, /*fMemory=*/true, /*fWipe=*/true);
+    const int64_t start = 100;
+    auto hashAt = [](int64_t h) { return ArithToUint256(arith_uint256((uint64_t)h + 0x10000)); };
+    const int n = UNDO_KEEP + 2;
+    for (int64_t h = start; h < start + n; h++) {
+        VaultState st(db);
+        BlockUndo undo;
+        BOOST_REQUIRE(!st.ApplyBlock(CBlock(), h, MapCoinAccessor(), undo));
+        std::optional<uint256> prune;
+        if (h - UNDO_KEEP >= start) prune = hashAt(h - UNDO_KEEP);
+        BOOST_REQUIRE(db.ConnectBlock(hashAt(h), h, hashAt(h - 1), st, undo, prune));
+    }
+    const int64_t tipH = start + n - 1;
+    BlockUndo u;
+    BOOST_CHECK(!db.ReadUndo(hashAt(start), u));
+    BOOST_CHECK(!db.ReadUndo(hashAt(start + 1), u));
+    BOOST_CHECK(db.ReadUndo(hashAt(start + 2), u));
+    BOOST_CHECK(db.ReadUndo(hashAt(tipH), u));
+    size_t undos = 0;
+    db.Iterate(std::string(1, KEY_UNDO), [&](const std::string&, const std::string&) { undos++; return true; });
+    BOOST_CHECK_EQUAL(undos, (size_t)UNDO_KEEP);
+    // Disconnect back through the horizon: every block still holding its undo, then the first without one.
+    int64_t h = tipH;
+    for (; h > tipH - UNDO_KEEP; h--) {
+        BOOST_REQUIRE_MESSAGE(db.DisconnectBlock(hashAt(h), hashAt(h - 1), h - 1), "disconnect at " << h);
+    }
+    BOOST_CHECK_EQUAL(h, start + 1);
+    BOOST_CHECK(!db.DisconnectBlock(hashAt(h), hashAt(h - 1), h - 1));   // pruned: Reconcile wipes and replays
+    uint256 tip;
+    int64_t tipHeight;
+    BOOST_CHECK(db.GetTip(tip, tipHeight) && tip == hashAt(start + 1) && tipHeight == start + 1);
 }
 
 BOOST_AUTO_TEST_CASE(set_sig_checker)

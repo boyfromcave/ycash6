@@ -44,6 +44,17 @@ BlockHashFn AncestorHashes(const CBlockIndex* prev)
     };
 }
 
+std::optional<uint256> UndoToPrune(const CBlockIndex* pindex, const Consensus::Params& params)
+{
+    const int activation = params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    if (!pindex || activation == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) return std::nullopt;
+    const int h = pindex->nHeight - UNDO_KEEP;
+    if (h < activation) return std::nullopt;
+    const CBlockIndex* old = pindex->GetAncestor(h);
+    if (!old) return std::nullopt;
+    return old->GetBlockHash();
+}
+
 bool AtParentOf(const CBlockIndex* pindex, const Consensus::Params& params)
 {
     if (!g_vaultdb || !pindex) return false;
@@ -349,6 +360,8 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
                     wiped = true;
                     break;
                 }
+                // An undo record more than UNDO_KEEP blocks old has been pruned (audit 07/F-7): a deeper walk
+                // fails DisconnectBlock below and takes the wipe + replay, as a version bump does.
                 LogPrintf("vault: disconnecting %s at %d (not on the active chain)\n", pindex->GetBlockHash().GetHex(), pindex->nHeight);
                 if (!g_vaultdb->DisconnectBlock(pindex->GetBlockHash(), pindex->pprev->GetBlockHash(), pindex->pprev->nHeight)) {
                     LogPrintf("vault: cannot disconnect %s; rebuilding from height %d\n", pindex->GetBlockHash().GetHex(), activation);
@@ -389,7 +402,7 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
             err = strprintf("vault: block %d on the active chain fails the vault rules on replay (%s)", h, *bad);
             return false;
         }
-        if (!g_vaultdb->ConnectBlock(pindex->GetBlockHash(), h, pindex->pprev->GetBlockHash(), state, vundo)) {
+        if (!g_vaultdb->ConnectBlock(pindex->GetBlockHash(), h, pindex->pprev->GetBlockHash(), state, vundo, UndoToPrune(pindex, params))) {
             err = strprintf("vault: cannot write block %d to the set-state database", h);
             return false;
         }

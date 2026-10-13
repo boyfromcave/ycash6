@@ -117,7 +117,8 @@ bool VaultDB::ReadUndo(const uint256& hash, BlockUndo& undo) const
     return true;
 }
 
-bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& prevHash, const VaultState& state, const BlockUndo& undo)
+bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& prevHash, const VaultState& state, const BlockUndo& undo,
+                           const std::optional<uint256>& pruneUndoOf)
 {
     uint256 tipHash;
     int64_t tipHeight;
@@ -137,6 +138,9 @@ bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& p
         else batch.Erase(RawKey(kv.first));
     }
     batch.Write(RawKey(UndoKey(hash)), undoValue);
+    // Audit 07/F-7: the undo of the block UNDO_KEEP below, in the same batch (undo records are read
+    // through ReadUndo, never the cache, so there is no cache entry to drop).
+    if (pruneUndoOf) batch.Erase(RawKey(UndoKey(*pruneUndoOf)));
     batch.Write(RawKey(TipKey()), tipValue);
     batch.Write(RawKey(VersionKey()), EncodeVersion());
 
@@ -148,6 +152,7 @@ bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& p
     for (const auto& kv : state.Changes()) CachePut(kv.first, kv.second);
     CachePut(TipKey(), tipValue);
     CachePut(VersionKey(), EncodeVersion());
+    if (pruneUndoOf) LogPrint("vault", "vault: pruned undo of %s at %d\n", pruneUndoOf->GetHex(), height - UNDO_KEEP);
     return true;
 }
 

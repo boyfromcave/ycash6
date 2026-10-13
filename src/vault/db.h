@@ -52,6 +52,19 @@ static const char KEY_VERSION = 'V';
  */
 static const uint32_t VAULT_DB_VERSION = 3;   //!< 3: SetRecord.joinCount and MemberRecord.joinOrdinal (seats re-review)
 
+/**
+ * Undo records older than this many blocks are pruned on connect (audit 07/F-7), as the Yellowback index
+ * prunes its own (yellowback/index.h UNDO_KEEP): connecting block h erases the undo of block h - UNDO_KEEP
+ * in the same batch, so a database holds at most UNDO_KEEP of them. A crash-time walk-back in Reconcile deeper
+ * than that finds no undo and takes the wipe + replay from the activation height (07/F-8). A live reorg is
+ * bounded far below it (MAX_REORG_LENGTH, 99 blocks); a deeper manual invalidateblock finds no undo in
+ * DisconnectBlock and stops the node (AbortNode, as the Yellowback index does): restart with -reindex.
+ * No VAULT_DB_VERSION bump: the record set only shrinks; a database written before this keeps its
+ * older undo records (never pruned retroactively), which is harmless. Do not bump the version to clean them:
+ * a bump replays every node from activation.
+ */
+static const int UNDO_KEEP = 4096;
+
 class VaultDB : public KVReader
 {
 public:
@@ -67,8 +80,11 @@ public:
     bool GetTip(uint256& hash, int64_t& height) const;
 
     /** Commit `state` (one block's VaultState over this DB) and `undo` as block `hash` at
-     *  `height`. Refused unless the tip is `prevHash` or the DB has no tip yet. */
-    bool ConnectBlock(const uint256& hash, int64_t height, const uint256& prevHash, const VaultState& state, const BlockUndo& undo);
+     *  `height`. Refused unless the tip is `prevHash` or the DB has no tip yet. `pruneUndoOf`, the
+     *  hash of the block UNDO_KEEP below (UndoToPrune, vault/node.h), has its undo record erased in
+     *  the same batch. */
+    bool ConnectBlock(const uint256& hash, int64_t height, const uint256& prevHash, const VaultState& state, const BlockUndo& undo,
+                      const std::optional<uint256>& pruneUndoOf = std::nullopt);
     /** Undo block `hash` (must be the tip) and set the tip to (prevHash, prevHeight). */
     bool DisconnectBlock(const uint256& hash, const uint256& prevHash, int64_t prevHeight);
     bool ReadUndo(const uint256& hash, BlockUndo& undo) const;

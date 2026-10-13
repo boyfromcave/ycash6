@@ -95,6 +95,10 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
  *  inputs of every transaction with an OP_CHECKPQSIG at `nextHeight`'s flags and evicts failures. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
 
+/** The block whose vault undo record connecting `pindex` prunes (UNDO_KEEP below it, audit 07/F-7):
+ *  its ancestor at pindex->nHeight - UNDO_KEEP when that is at or above the activation height. */
+std::optional<uint256> UndoToPrune(const CBlockIndex* pindex, const Consensus::Params& params);
+
 /**
  * The miner's view of the vault rules for one block template (plan §15.6 "Miner"; 6.20.0's
  * BlockAssembler). A running copy of the set state over the database; coins from the tip and
