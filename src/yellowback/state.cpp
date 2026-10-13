@@ -64,6 +64,7 @@ const char* const VAULT_CLAIM_INTENTS = "vault-claim-intents";
 const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
+const char* const INTENT_CANCEL_NO_REFUND = "intent-cancel-no-refund";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
@@ -718,6 +719,13 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
         return true;
     }
     const bool ownerPath = IsOwnerSelector(selector.value());
+    // CAN-1 (03/H-1): a claim records the holder its burn came from; RED-2 (yedIn >= mintedCents > 0) means a held claim
+    // spent at least one YED token, so this refusal is for totality only
+    if (!ownerPath && log.spentTokens.empty()) {
+        log.verdict = verdict::VAULT_SPEND_MALFORMED;
+        log.yedOut = 0;
+        return true;
+    }
     const Payload& p = fp->payload;
     VaultRecord& vault = active[0].record;
     for (const Assignment& a : p.assignments) {
@@ -768,6 +776,8 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
             ir.vault = active[0].outpoint;
             ir.role = (uint8_t)(j == facts.claimantVout ? IntentRole::CLAIMANT : IntentRole::RESIDUAL);
             ir.height = ctx.height;
+            // CAN-1: the refund holder is the token spent at the claim's lowest-index YED input (spentTokens is in vin order)
+            if (ir.Role() == IntentRole::CLAIMANT) ir.refundScript.assign(log.spentTokens[0].scriptPubKey.begin(), log.spentTokens[0].scriptPubKey.end());
             ctx.st.Put(keys::Intent(COutPoint(txid, (uint32_t)j)), ir);
             yedOutputs.insert((unsigned int)j);
         }
@@ -785,12 +795,15 @@ struct SpentIntent
 };
 
 /**
- * U-23, U-24: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
+ * U-23, U-24, CAN-1: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
  * already checked the delay (BIP68 / I-2) and the payment (I-1 / I-2); the module moves its records:
  * the claimant intent's release closes the vault (CLAIMED); its cancel re-creates the byte-identical
  * vault, which becomes the same position again (ACTIVE at the new outpoint, its collateral the re-lock's
- * value), and the claim's burn is not refunded (U-24). The owner's residual intent may only be released.
- * The re-created vault must be vout[0]. Returns the verdict; OK on success.
+ * value), and -- CAN-1, audit 03/H-1, U-24 revised -- re-issues the claim's burn as a YED token to the holder
+ * the burn came from (the claimant intent's refundScript), at the lowest output index >= 1 paying that script,
+ * crediting supplyCents: a cancel delays a liquidation and never charges the claimant for it. The refund is
+ * exempt from TOK-PQ (the holder was allowed at the claim, at most `delay` blocks earlier). The owner's residual
+ * intent may only be released. The re-created vault must be vout[0]. Returns the verdict; OK on success.
  */
 std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const SpentIntent& in,
                              const std::optional<FoundPayload>& fp, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
@@ -824,6 +837,29 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     // The re-created vault is vout[0] (vault_buildcancel's shape), so the position stays "txid:0" as every
     // Yellowback position is (the wallet addresses vaults by txid).
     if (relock != 0) return verdict::INTENT_CANCEL_NO_VAULT;
+    // CAN-1: the refund output -- the lowest index >= 1 paying the recorded holder a non-zero carrier
+    const Cents refund = vault->burnedCents;
+    if (refund <= 0 || in.record.refundScript.empty()) return verdict::INTENT_CANCEL_NO_REFUND;
+    const CScript holder(in.record.refundScript.begin(), in.record.refundScript.end());
+    int refundVout = -1;
+    for (unsigned int j = 1; j < tx.vout.size(); j++) {
+        if (tx.vout[j].scriptPubKey == holder && tx.vout[j].nValue > 0) { refundVout = (int)j; break; }
+    }
+    if (refundVout < 0) return verdict::INTENT_CANCEL_NO_REFUND;
+    const COutPoint refundOut(txid, (uint32_t)refundVout);
+    TokenRecord tok;
+    tok.cents = refund;
+    tok.nValue = tx.vout[refundVout].nValue;
+    tok.scriptPubKey = holder;
+    tok.height = ctx.height;
+    ctx.st.Put(keys::Token(refundOut), tok);
+    AssignedOutput ao;
+    ao.outpoint = refundOut;
+    ao.cents = refund;
+    ao.scriptPubKey = holder;
+    log.assigned.push_back(ao);
+    log.yedOut = refund;
+    totals.supplyCents += refund;                                       // 03/M-1: the debt is back in supply with its vault
     const COutPoint reopened(txid, (uint32_t)relock);
     VaultRecord v = vault.value();
     v.status = (uint8_t)VaultStatus::ACTIVE;
@@ -1286,8 +1322,9 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         log.closedVaults.push_back(s.outpoint);
     }
 
-    // ---- IN-3 (for a MINT the burn formula's yedOut is 0, N19: every YED input of a mint is burned)
-    const Cents burnOut = log.Type() == TxLogType::MINT ? 0 : log.yedOut;
+    // ---- IN-3 (for a MINT the burn formula's yedOut is 0, N19: every YED input of a mint is burned; for a CLAIM_CANCEL too:
+    // its yedOut is CAN-1's re-issued refund, credited by ApplyIntentSpend, not carried from its inputs)
+    const Cents burnOut = (log.Type() == TxLogType::MINT || log.Type() == TxLogType::CLAIM_CANCEL) ? 0 : log.yedOut;
     const Cents burned = yedIn - burnOut;
     log.burned = burned;
     totals.supplyCents -= burned;
