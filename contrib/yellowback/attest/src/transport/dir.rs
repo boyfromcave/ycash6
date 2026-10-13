@@ -53,7 +53,12 @@ impl DirTransport {
 
     /// The cancel topic's bus: `<path>/cancel`, digest names.
     pub fn open_cancel(path: &Path) -> anyhow::Result<Self> {
-        let mut t = Self::open(&path.join("cancel"))?;
+        Self::open_digest(path, "cancel")
+    }
+
+    /// A digest-named bus in the subdirectory `sub` (the cancel and binding topics).
+    pub fn open_digest(path: &Path, sub: &str) -> anyhow::Result<Self> {
+        let mut t = Self::open(&path.join(sub))?;
         t.naming = Naming::Digest;
         Ok(t)
     }

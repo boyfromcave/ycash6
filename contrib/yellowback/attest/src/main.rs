@@ -9,13 +9,16 @@
 //! Exit codes: 2 for a bad configuration; otherwise the loops run until a signal.
 
 mod attest;
+mod binding;
 mod cancel;
 mod config;
 mod cosig;
+mod direct;
 mod fixtures;
 mod framing;
 mod gossip;
 mod http;
+mod onchain;
 mod price;
 mod rpc;
 mod subscribe;
@@ -61,6 +64,15 @@ enum Command {
     Sources,
     /// Parse the configuration and exit 0 if the agent could run with it
     CheckConfig,
+    /// Dial a member's direct endpoint on the members-only co-signature ALPN with this (unbound) endpoint; exit 3 when
+    /// the member's gate refuses it (what any non-member sees), 0 when it is admitted, 1 on no answer
+    DirectProbe {
+        /// The target endpoint id (hex)
+        endpoint: String,
+        /// The target's direct addresses ("ip:port"), as its binding announces them
+        #[arg(long)]
+        addr: Vec<String>,
+    },
     /// Co-sign the cancel of a YED claimant intent (the cancel-limit design): print the co-signature for yed_buildcancel
     Cosign {
         /// The claimant intent, "txid:n"
@@ -134,6 +146,16 @@ async fn main() {
                 std::process::exit(EXIT_BAD_CONFIG);
             }
         },
+        Command::DirectProbe { endpoint, addr } => {
+            let r = async {
+                let id: iroh::EndpointId = endpoint.parse().map_err(|e| anyhow::anyhow!("endpoint id: {e}"))?;
+                let addrs: Vec<std::net::SocketAddr> = addr.iter().filter_map(|a| a.parse().ok()).collect();
+                let refused = direct::probe(direct::endpoint_addr(id, &addrs, None), &cfg.cancel.direct_relays).await?;
+                println!("{}", if refused { "refused" } else { "admitted" });
+                Ok::<i32, anyhow::Error>(if refused { 3 } else { 0 })
+            };
+            r.await
+        }
         Command::CheckConfig => {
             println!(
                 "ok: {} source(s), {} BTC/USD reference(s), transport {}",

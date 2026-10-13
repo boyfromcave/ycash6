@@ -268,6 +268,54 @@ impl Verifier {
         self.classify(f, now)
     }
 
+    /// A frame from the direct members-only path: its author is the authenticated peer (`author`, the seq its
+    /// endpoint is bound to), so it skips the sampler -- a member can only spend its own quota, which the direct
+    /// handler and the per-seq bucket enforce -- and is verified at once. A frame naming another seq is dropped.
+    pub fn intake_direct(&mut self, bytes: &[u8], author: u16, now: Instant) -> Result<Verified, Drop> {
+        let f = Frame::decode(bytes).map_err(|e| Drop::Malformed(e.to_string()))?;
+        if f.seq != author {
+            return Err(Drop::BadSignature(f.seq));
+        }
+        let d: [u8; 32] = Sha256::digest(bytes).into();
+        if self.seen.contains(&d) {
+            return Err(Drop::Duplicate);
+        }
+        let intent = f.intent();
+        let seq = f.seq;
+        let c = self.ctx.claims.get(&intent).cloned();
+        let Some(c) = c else {
+            if self.ctx.view.members.contains_key(&seq) {
+                if self.pending.len() < PENDING_MAX {
+                    self.pending.push((f, now));
+                } else {
+                    let j = self.rng.below(PENDING_MAX as u64) as usize;
+                    self.pending[j] = (f, now);
+                }
+            }
+            return Err(Drop::UnknownClaim);
+        };
+        if !self.ctx.view.members.contains_key(&seq) {
+            return Err(Drop::NotMember(seq));
+        }
+        if f.ref_height != c.ref_height {
+            return Err(Drop::WrongRefHeight(seq));
+        }
+        if (f.entry.price as i64) < 100
+            || cosig::is_underwater(
+                c.collateral_zat,
+                f.entry.price as i64,
+                c.minted_cents,
+                self.ctx.view.theta_bps,
+            )
+        {
+            return Err(Drop::Claimable(seq));
+        }
+        if c.held.contains(&seq) {
+            return Err(Drop::AlreadyHeld(seq));
+        }
+        self.verify(&f, now)
+    }
+
     /// The end of a slice: verify the sample, drop the rest.
     pub fn run_slice(&mut self, now: Instant) -> Vec<Verified> {
         let (sample, _offered) = self.reservoir.take();
@@ -333,6 +381,7 @@ impl Verifier {
 /// the agent. It ends -- and the agent sees its output close -- when the pump's channel closes.
 pub fn spawn(
     mut frames: tokio::sync::mpsc::Receiver<crate::transport::Delivered>,
+    mut direct: tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>,
     mut ctx: tokio::sync::watch::Receiver<Arc<Ctx>>,
     out: tokio::sync::mpsc::Sender<Verified>,
     seq_burst: u32,
@@ -354,6 +403,18 @@ pub fn spawn(
                         return;
                     }
                 },
+                got = direct.recv() => {
+                    if let Some((bytes, author)) = got {
+                        match v.intake_direct(&bytes, author, Instant::now()) {
+                            Ok(item) => {
+                                if out.send(item).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(d) => tracing::debug!("cancel direct: from seq {author}: {d:?}"),
+                        }
+                    }
+                }
                 changed = ctx.changed() => {
                     if changed.is_err() {
                         return;
@@ -472,6 +533,24 @@ mod tests {
         });
         v.set_ctx(Arc::new(c), now);
         assert_eq!(v.intake(&frame(2, 2, 4_000_000), now), Err(Drop::AlreadyHeld(2)));
+    }
+
+    #[test]
+    fn direct_frames_are_attributed_to_their_author() {
+        let now = Instant::now();
+        let mut v = Verifier::new(4, 60, 100, Rng::new(3));
+        v.set_ctx(ctx(&[(1, 1), (2, 2)]), now);
+        // member 2's connection carrying a frame that names seq 1: refused before any recovery
+        assert_eq!(
+            v.intake_direct(&frame(1, 1, 4_000_000), 2, now),
+            Err(Drop::BadSignature(1))
+        );
+        // its own frame, forged: refused by the signature
+        assert_eq!(v.intake_direct(&forged(2, 0), 2, now), Err(Drop::BadSignature(2)));
+        // its own valid frame: verified at once, no sampler
+        let ok = v.intake_direct(&frame(2, 2, 4_000_000), 2, now).unwrap();
+        assert_eq!((ok.seq, ok.ref_height), (2, 99));
+        assert_eq!(v.intake_direct(&frame(2, 2, 4_000_000), 2, now), Err(Drop::Duplicate));
     }
 
     #[test]

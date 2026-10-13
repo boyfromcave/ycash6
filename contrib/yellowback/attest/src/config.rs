@@ -62,6 +62,8 @@ pub struct TransportToml {
     pub peers: Option<Vec<String>>,
     pub secret_key_file: Option<String>,
     pub topic_override: Option<String>,
+    /// Relays added to n0's default set (a project-run relay, owner decision 4); ignored with relays = ["none"].
+    pub fallback_relays: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -92,6 +94,15 @@ pub struct CancelToml {
     pub min_confirmations: Option<u32>,
     pub refee_after_blocks: Option<u32>,
     pub max_sends: Option<u32>,
+    pub delivery: Option<String>,
+    pub direct_secret_key_file: Option<String>,
+    pub direct_relays: Option<Vec<String>>,
+    pub fallback_relays: Option<Vec<String>>,
+    pub binding_ttl_blocks: Option<u32>,
+    pub onchain_fallback: Option<bool>,
+    pub fallback_after_blocks: Option<u32>,
+    pub fallback_fee_zat: Option<i64>,
+    pub fallback_max_txs: Option<u32>,
     pub republish_blocks: Option<u32>,
     pub price_tolerance_blocks: Option<u32>,
     pub state_file: Option<String>,
@@ -146,6 +157,7 @@ pub enum TransportConfig {
         peers: Vec<String>,
         secret_key_file: Option<PathBuf>,
         topic_override: Option<String>,
+        fallback_relays: Vec<String>,
     },
 }
 
@@ -156,6 +168,23 @@ pub struct SubscribeConfig {
     pub endpoints_seconds: u64,
     pub seq_burst: u32,
     pub seq_refill_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Gossip,
+    Trial,
+    Direct,
+    Onchain,
+}
+
+impl Delivery {
+    pub fn gossip(self) -> bool {
+        matches!(self, Delivery::Gossip | Delivery::Trial)
+    }
+    pub fn direct(self) -> bool {
+        matches!(self, Delivery::Direct | Delivery::Trial)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +210,26 @@ pub struct CancelConfig {
     /// At most this many sends (the first and every rebuild) per claim, rebuilds spaced
     /// `refee_after_blocks × 2^(sends − 1)` apart; reaching the cap raises an alert.
     pub max_sends: u32,
+    /// How co-signatures travel (owner decision 1, 2026-10-13): "trial" (the members-only direct path and the old
+    /// gossip topic side by side, the default until the trial ends), "direct" (direct only), "gossip" (the old topic
+    /// only), "onchain" (neither: the on-chain fallback alone).
+    pub delivery: Delivery,
+    /// The direct endpoint's key; None: `<state_file>.direct.key`.
+    pub direct_secret_key_file: Option<PathBuf>,
+    /// The direct endpoint's relays: empty = n0's public relays; `["none"]` = direct addresses only.
+    pub direct_relays: Vec<String>,
+    /// Relays added to n0's (a project-run relay, owner decision 4).
+    pub fallback_relays: Vec<String>,
+    /// A binding is valid this many blocks after it is issued and re-signed at half of it.
+    pub binding_ttl_blocks: u32,
+    /// Owner decision 2: publish this member's co-signature on chain when a claim is still short.
+    pub onchain_fallback: bool,
+    /// ... this many blocks after the claim confirmed.
+    pub fallback_after_blocks: u32,
+    /// The fee of each fallback transaction, exactly.
+    pub fallback_fee_zat: i64,
+    /// At most this many fallback transactions per 1,152 blocks (a day), whatever the claims.
+    pub fallback_max_txs: u32,
     /// Republish this agent's own co-signature every this many blocks while the claim stands (late joiners, restarts).
     pub republish_blocks: u32,
     /// How far the height of the aggregate the watcher judges with may lie from the claim's refHeight.
@@ -204,6 +253,11 @@ pub const DEFAULT_SPARE_WAIT_BLOCKS: u32 = 1;
 pub const DEFAULT_TAKEOVER_BLOCKS: u32 = 6;
 pub const DEFAULT_REFEE_AFTER_BLOCKS: u32 = 6;
 pub const DEFAULT_MAX_SENDS: u32 = 5;
+pub const DEFAULT_BINDING_TTL_BLOCKS: u32 = 8_064;
+/// A third of CLAIM_DELAY (576): time for the direct path first, and for two more rounds after the fallback.
+pub const DEFAULT_FALLBACK_AFTER_BLOCKS: u32 = 192;
+pub const DEFAULT_FALLBACK_FEE_ZAT: i64 = 10_000;
+pub const DEFAULT_FALLBACK_MAX_TXS: u32 = 20;
 /// The largest `takeover_blocks`: with the 15-seat attestor set the last rank drives 14 × this after the claim
 /// confirmed, which must leave time inside CLAIM_DELAY (576): 14 × 36 = 504. The agent also shrinks it at run time
 /// to fit the node's claimDelay and the set's current size.
@@ -378,7 +432,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     let t = raw.transport.unwrap_or_default();
     let transport = match t.kind.as_deref().unwrap_or("iroh") {
         "dir" => {
-            if t.relays.is_some() || t.peers.is_some() || t.secret_key_file.is_some() || t.topic_override.is_some() {
+            if t.relays.is_some()
+                || t.peers.is_some()
+                || t.secret_key_file.is_some()
+                || t.topic_override.is_some()
+                || t.fallback_relays.is_some()
+            {
                 return Err("[transport]: kind = \"dir\" takes only path".to_string().into());
             }
             let path = t
@@ -398,6 +457,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 peers: t.peers.unwrap_or_default(),
                 secret_key_file: t.secret_key_file.as_deref().map(expand_user),
                 topic_override: t.topic_override.filter(|s| !s.is_empty()),
+                fallback_relays: t.fallback_relays.unwrap_or_default(),
             }
         }
         other => return Err(format!("[transport]: unknown kind {other:?} (iroh or dir)").into()),
@@ -441,6 +501,27 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         min_confirmations: c.min_confirmations.unwrap_or(1).max(1),
         refee_after_blocks: c.refee_after_blocks.unwrap_or(DEFAULT_REFEE_AFTER_BLOCKS).max(1),
         max_sends: c.max_sends.unwrap_or(DEFAULT_MAX_SENDS).max(1),
+        delivery: match c.delivery.as_deref().unwrap_or("trial") {
+            "trial" => Delivery::Trial,
+            "direct" => Delivery::Direct,
+            "gossip" => Delivery::Gossip,
+            "onchain" => Delivery::Onchain,
+            other => {
+                return Err(format!("[cancel] delivery: {other:?} is not trial, direct, gossip or onchain").into())
+            }
+        },
+        direct_secret_key_file: c
+            .direct_secret_key_file
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(expand_user),
+        direct_relays: c.direct_relays.unwrap_or_default(),
+        fallback_relays: c.fallback_relays.unwrap_or_default(),
+        binding_ttl_blocks: c.binding_ttl_blocks.unwrap_or(DEFAULT_BINDING_TTL_BLOCKS).max(10),
+        onchain_fallback: c.onchain_fallback.unwrap_or(true),
+        fallback_after_blocks: c.fallback_after_blocks.unwrap_or(DEFAULT_FALLBACK_AFTER_BLOCKS),
+        fallback_fee_zat: c.fallback_fee_zat.unwrap_or(DEFAULT_FALLBACK_FEE_ZAT),
+        fallback_max_txs: c.fallback_max_txs.unwrap_or(DEFAULT_FALLBACK_MAX_TXS),
         republish_blocks: c.republish_blocks.unwrap_or(DEFAULT_REPUBLISH_BLOCKS).max(1),
         price_tolerance_blocks: c.price_tolerance_blocks.unwrap_or(DEFAULT_PRICE_TOLERANCE_BLOCKS),
         state_file: c.state_file.as_deref().filter(|p| !p.is_empty()).map(expand_user),
@@ -454,6 +535,11 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "[cancel]: takeover_blocks must be at most {MAX_TAKEOVER_BLOCKS} (the last of 15 ranks must still drive inside CLAIM_DELAY)"
         )
         .into());
+    }
+    if !(1_000..=1_000_000).contains(&cancel.fallback_fee_zat) {
+        return Err("[cancel]: fallback_fee_zat must be between 1000 and 1000000"
+            .to_string()
+            .into());
     }
     if cancel.margin_bps > 100_000 {
         return Err("[cancel]: margin_bps must be at most 100000".to_string().into());
@@ -635,6 +721,16 @@ endpoints = ["https://attestor.example/att"]
                 .to_string();
         assert!(!e.contains("s3cret"), "{e}");
         assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 37\n").is_err());
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n").unwrap().cancel;
+        assert_eq!(c.delivery, Delivery::Trial);
+        assert!(c.delivery.gossip() && c.delivery.direct() && c.onchain_fallback);
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ndelivery = \"direct\"\nfallback_relays = [\"https://r.example\"]\n")
+            .unwrap()
+            .cancel;
+        assert!(!c.delivery.gossip() && c.delivery.direct());
+        assert_eq!(c.fallback_relays.len(), 1);
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ndelivery = \"carrier pigeon\"\n").is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nfallback_fee_zat = 5\n").is_err());
         assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 36\n").is_ok());
     }
 

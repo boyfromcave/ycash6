@@ -135,6 +135,12 @@ pub struct Claim {
     /// Since when a transaction that is not this agent's spends the intent in the mempool.
     #[serde(default)]
     pub foreign_spend_since: Option<u32>,
+    /// The on-chain fallback transaction this agent sent for the claim (owner decision 2).
+    #[serde(default)]
+    pub onchain_posted: Option<String>,
+    /// The last block scanned for on-chain co-signature records.
+    #[serde(default)]
+    pub scanned_to: Option<u32>,
     /// Alert kinds already raised for this claim.
     pub alerted: BTreeSet<String>,
 }
@@ -175,6 +181,8 @@ impl Claim {
             next_rebuild: 0,
             orphaned: false,
             foreign_spend_since: None,
+            onchain_posted: None,
+            scanned_to: None,
             alerted: BTreeSet::new(),
         }
     }
@@ -206,6 +214,8 @@ impl Claim {
         // for this claimant intent, which a reorg does not re-create
         self.orphaned = false;
         self.foreign_spend_since = None;
+        self.onchain_posted = None;
+        self.scanned_to = None;
         for k in [
             "honest",
             "wrong-price",
@@ -255,6 +265,15 @@ pub struct State {
     /// this agent did not attest there (review M-2); at or below it the state cannot say.
     #[serde(default)]
     pub recording_since: Option<u32>,
+    /// The members' endpoint bindings (owner decision 1): the latest valid one per seq.
+    #[serde(default)]
+    pub bindings: crate::binding::Store,
+    /// This member's own announced binding.
+    #[serde(default)]
+    pub own_binding: Option<crate::binding::Announce>,
+    /// Heights of the on-chain fallback transactions this agent sent (the daily cap).
+    #[serde(default)]
+    pub fallback_posts: Vec<u32>,
 }
 
 impl State {
@@ -552,6 +571,9 @@ pub struct MemberView {
 
 // ------------------------------------------------------------------------------------------------------- agent
 
+/// A bound member's endpoint: (endpoint id, seq, address hints, relay).
+pub type BoundPeer = ([u8; 32], u16, Vec<String>, Option<String>);
+
 /// The `yed_listattestors` rows → the current members (status ELIGIBLE or DORMANT, bond unspent and unfrozen; the
 /// newest record of each key). `current_keys`, when the node gave it (`set_getinfo`'s memberlist), is the primitive's
 /// own IsCurrent (maturity included, review L-1); a key not in it is not current.
@@ -644,6 +666,18 @@ pub struct CancelAgent {
     pub view: MemberView,
     /// This seq's own member key (from yed_listattestors, whatever its status): the claim's bundle is verified with it.
     pub my_key: Option<[u8; 33]>,
+    /// This seq's P2PKH address of the member key (`bondKeyAddress`): what `signmessage` signs the binding with.
+    pub my_address: Option<String>,
+    /// The network the node reports (yed_getinfo).
+    pub network: String,
+    /// The direct endpoint (id, address hints), set by attest; None while direct delivery is off.
+    pub direct: Option<([u8; 32], Vec<String>, Option<String>)>,
+    /// Binding announces received (the binding topic, the direct table exchange), checked at the next poll.
+    bindings_in: Vec<Vec<u8>>,
+    /// Announces to publish (the binding topic and every bound member).
+    announces_out: Vec<Vec<u8>>,
+    last_announce: Option<u32>,
+    rng: crate::gossip::Rng,
     /// The node's CLAIM_DELAY (yed_getinfo), for the takeover bound.
     pub claim_delay: Option<u32>,
     peers: Vec<Node>,
@@ -688,6 +722,13 @@ impl CancelAgent {
             path,
             view: MemberView::default(),
             my_key: None,
+            my_address: None,
+            network: String::new(),
+            direct: None,
+            bindings_in: Vec::new(),
+            announces_out: Vec::new(),
+            last_announce: None,
+            rng: crate::gossip::Rng::from_clock(),
             claim_delay: None,
             peers,
             outbox: Vec::new(),
@@ -770,6 +811,7 @@ impl CancelAgent {
                         (Some(s), Some(t)) if t > 0 => {
                             self.view.set_id = s;
                             self.view.theta_bps = t;
+                            self.network = v.get("network").and_then(Value::as_str).unwrap_or("").to_string();
                         }
                         _ => {
                             tracing::warn!("cancel: yed_getinfo carries no attestorSetId / claimThresholdBps yet");
@@ -809,6 +851,14 @@ impl CancelAgent {
             .and_then(|r| r.get("attestorPubKey").and_then(Value::as_str))
             .and_then(|h| hex::decode(h).ok())
             .and_then(|b| <[u8; 33]>::try_from(b.as_slice()).ok());
+        self.my_address = rows
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .find(|r| r.get("seq").and_then(Value::as_u64) == Some(self.seq as u64))
+            })
+            .and_then(|r| r.get("bondKeyAddress").and_then(Value::as_str))
+            .map(String::from);
         true
     }
 
@@ -984,6 +1034,8 @@ impl CancelAgent {
         if !self.refresh_view().await {
             return;
         }
+        // 0. the endpoint bindings (owner decision 1)
+        self.bindings_step(height).await;
         // 1. the claims the index holds (reorgs included)
         match self.claiming().await {
             Ok(rows) => self.follow(height, rows).await,
@@ -997,7 +1049,13 @@ impl CancelAgent {
         for intent in &intents {
             self.watch(intent, height).await;
         }
-        // 3. drive
+        // 3. the on-chain fallback (owner decision 2): post when short, read what others posted
+        if self.cfg.onchain_fallback {
+            for intent in &intents {
+                self.fallback(intent, height).await;
+            }
+        }
+        // 4. drive
         for intent in &intents {
             self.collect(intent, height).await;
         }
@@ -1473,6 +1531,269 @@ impl CancelAgent {
                 tracing::warn!("cancel: yed_signcancelcosign {intent}: {m}; retried next poll")
             }
         }
+    }
+
+    /// A binding announce from the binding topic or a member's table exchange; checked at the next poll. The queue
+    /// is bounded with random replacement, so a flood of announces cannot keep a real one out for long.
+    pub fn take_binding(&mut self, blob: Vec<u8>) {
+        const QUEUE: usize = 512;
+        if self.bindings_in.len() < QUEUE {
+            self.bindings_in.push(blob);
+        } else {
+            let j = self.rng.below(QUEUE as u64) as usize;
+            self.bindings_in[j] = blob;
+        }
+    }
+
+    /// Announces to publish (on the binding topic and to every bound member).
+    pub fn take_announces(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.announces_out)
+    }
+
+    /// The bound members' endpoints: (endpoint id, seq, address hints, relay).
+    pub fn bound_peers(&self) -> Vec<BoundPeer> {
+        self.state
+            .bindings
+            .endpoints()
+            .into_iter()
+            .map(|(ep, (seq, a))| (ep, seq, a.addrs, a.relay))
+            .collect()
+    }
+
+    /// Sign this member's binding when it has none for its current direct endpoint or it is past half its life,
+    /// announce it every 10 blocks (or when its hints change), take the queued announces (at most 64 signature
+    /// recoveries a poll), and drop the bindings of seqs that left.
+    async fn bindings_step(&mut self, height: u32) {
+        let set_hex = cosig::display_of_internal(&self.view.set_id);
+        if let (Some((ep, addrs, relay)), true) = (self.direct.clone(), self.member()) {
+            let current = self.state.own_binding.as_ref().and_then(|a| {
+                crate::binding::Statement::parse(&a.binding.message)
+                    .filter(|st| st.endpoint == ep && st.seq == self.seq && st.set_id_hex == set_hex)
+                    .filter(|st| height < st.issued.saturating_add(self.cfg.binding_ttl_blocks / 2))
+            });
+            if current.is_none() {
+                if let Some(addr) = self.my_address.clone() {
+                    let st = crate::binding::Statement {
+                        network: self.network.clone(),
+                        set_id_hex: set_hex.clone(),
+                        seq: self.seq,
+                        endpoint: ep,
+                        issued: height,
+                        expiry: height.saturating_add(self.cfg.binding_ttl_blocks),
+                    };
+                    let msg = st.message();
+                    match self.node.call("signmessage", vec![json!(addr), json!(msg)]).await {
+                        Ok(v) => match v
+                            .as_str()
+                            .and_then(|b| crate::binding::Binding::from_signmessage(msg, b))
+                        {
+                            Some(b) => {
+                                tracing::info!(
+                                    "cancel direct: signed the binding of endpoint {} to seq {}",
+                                    hex::encode(ep),
+                                    self.seq
+                                );
+                                self.state.own_binding = Some(crate::binding::Announce {
+                                    binding: b,
+                                    addrs: addrs.clone(),
+                                    relay: relay.clone(),
+                                });
+                                self.last_announce = None;
+                                self.dirty = true;
+                            }
+                            None => tracing::error!("cancel direct: signmessage returned no 65-byte signature"),
+                        },
+                        Err(e) => tracing::warn!("cancel direct: signmessage for the binding: {e}; retried next poll"),
+                    }
+                }
+            }
+            if let Some(own) = self.state.own_binding.as_mut() {
+                if own.addrs != addrs || own.relay != relay {
+                    own.addrs = addrs;
+                    own.relay = relay;
+                    self.last_announce = None;
+                }
+                let due = self.last_announce.is_none_or(|h| height >= h.saturating_add(10));
+                if due {
+                    let blob = own.encode();
+                    self.announces_out.push(blob.clone());
+                    self.last_announce = Some(height);
+                    self.bindings_in.push(blob); // our own entry in the table, verified like any other
+                }
+            }
+        }
+        let queued = std::mem::take(&mut self.bindings_in);
+        let members = self.view.members.clone();
+        let mut checked = 0;
+        for blob in queued {
+            let Some(a) = crate::binding::Announce::decode(&blob) else {
+                continue;
+            };
+            if checked >= 64 {
+                break;
+            }
+            checked += 1;
+            match self.state.bindings.offer(a, &self.network, &set_hex, height, &members) {
+                Ok(true) => self.dirty = true,
+                Ok(false) => {}
+                Err(r) => tracing::debug!("cancel direct: binding refused: {r:?}"),
+            }
+        }
+        self.state.bindings.prune(height, &members);
+    }
+
+    /// The on-chain fallback for one claim: post this member's co-signature when the claim is still short
+    /// `fallback_after_blocks` after it confirmed, and read the records others posted.
+    async fn fallback(&mut self, intent: &str, height: u32) {
+        let Some(c) = self.state.claims.get(intent) else {
+            return;
+        };
+        if c.is_closed() || c.orphaned || height >= c.release_height {
+            return;
+        }
+        let (Some(r), Some(bh)) = (
+            c.ref_height,
+            c.block_hash.as_deref().and_then(cosig::internal_from_display),
+        ) else {
+            return;
+        };
+        let members = self.view.members.clone();
+        let short = (c.usable(self.seq, self.cfg.auto_cosign, &members).len() as u32) < c.required;
+        if !short || height < c.confirm_height.saturating_add(self.cfg.fallback_after_blocks) {
+            return;
+        }
+        let Some((txid, n)) = cosig::parse_intent(intent) else {
+            return;
+        };
+        // read: the blocks since the claim confirmed (at most 20 a poll)
+        let from = c.scanned_to.map_or(c.confirm_height, |s| s + 1);
+        let id = crate::onchain::short_id(&txid, n);
+        let mut scanned = c.scanned_to;
+        for h in from..=height.min(from.saturating_add(19)) {
+            let Ok(hash) = self.block_hash_at(h).await else {
+                break;
+            };
+            let Ok(block) = self.node.call("getblock", vec![json!(hash), json!(2)]).await else {
+                break;
+            };
+            for e in crate::onchain::records_in_block(&block, &id) {
+                let Some(key) = crate::onchain::signer(&self.view.set_id, &txid, n, r, &bh, &e) else {
+                    continue;
+                };
+                let Some(seq) = members.iter().find(|(_, k)| **k == key).map(|(s, _)| *s) else {
+                    continue;
+                };
+                if seq == self.seq && !self.cfg.auto_cosign {
+                    continue;
+                }
+                if (e.price as i64) < 100 {
+                    continue;
+                }
+                let c = self.state.claims.get_mut(intent).expect("present");
+                if cosig::is_underwater(c.collateral_zat, e.price as i64, c.minted_cents, self.view.theta_bps) {
+                    continue;
+                }
+                if let std::collections::btree_map::Entry::Vacant(v) = c.cosigs.entry(seq) {
+                    tracing::info!("cancel: co-signature of seq {seq} for {intent} read from the chain (block {h})");
+                    v.insert(e.to_hex());
+                    self.dirty = true;
+                }
+            }
+            scanned = Some(h);
+        }
+        if let Some(c) = self.state.claims.get_mut(intent) {
+            c.scanned_to = scanned;
+        }
+        // post: this member's own co-signature, once per claim, within the daily cap
+        let c = &self.state.claims[intent];
+        if !self.cfg.auto_cosign || c.verdict != Verdict::Wrong || c.onchain_posted.is_some() {
+            return;
+        }
+        let Some(own) = c.own_cosig.as_deref().and_then(Entry::decode_hex) else {
+            return;
+        };
+        self.state.fallback_posts.retain(|p| height < p.saturating_add(1_152));
+        if self.state.fallback_posts.len() as u32 >= self.cfg.fallback_max_txs {
+            self.alert(
+                intent,
+                "onchain-fallback-cap",
+                format!(
+                    "{} fallback transactions in the last day: no more (fallback_max_txs)",
+                    self.cfg.fallback_max_txs
+                ),
+            );
+            return;
+        }
+        let v = c.vault.clone();
+        let (have, need) = (c.usable(self.seq, self.cfg.auto_cosign, &members).len(), c.required);
+        match self.post_onchain(&txid, n, &own).await {
+            Ok(tx) => {
+                self.alert(
+                    intent,
+                    "onchain-fallback",
+                    format!(
+                        "the claim on vault {v} had {have} of {need} co-signatures {} blocks after it confirmed: this                          member's co-signature was published on chain in {tx} (fee {} zat)",
+                        self.cfg.fallback_after_blocks, self.cfg.fallback_fee_zat
+                    ),
+                );
+                let c = self.state.claims.get_mut(intent).expect("present");
+                c.onchain_posted = Some(tx);
+                self.state.fallback_posts.push(height);
+                self.dirty = true;
+            }
+            Err(e) => tracing::warn!("cancel: on-chain fallback for {intent}: {e:#}; retried next poll"),
+        }
+    }
+
+    /// One standard transaction carrying the record: a random fundable coin, change back to its address, the data
+    /// output inserted, signed, sent. The fee is exactly `fallback_fee_zat`.
+    async fn post_onchain(&mut self, txid: &[u8; 32], n: u32, e: &Entry) -> anyhow::Result<String> {
+        let fee = self.cfg.fallback_fee_zat;
+        let rows = self.node.call("listunspent", vec![json!(1)]).await?;
+        let coins: Vec<_> = rows
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|r| crate::onchain::fundable(r, fee + 2_000))
+            .collect();
+        anyhow::ensure!(
+            !coins.is_empty(),
+            "no confirmed P2PKH coin above {} zat in the wallet",
+            fee + 2_000
+        );
+        let (ctxid, vout, addr, zat) = coins[self.rng.below(coins.len() as u64) as usize].clone();
+        let change = zat - fee;
+        let raw = self
+            .node
+            .call(
+                "createrawtransaction",
+                vec![
+                    json!([{"txid": ctxid, "vout": vout}]),
+                    json!({ addr: change as f64 / 1e8 }),
+                ],
+            )
+            .await?;
+        let bytes =
+            hex::decode(raw.as_str().unwrap_or("")).map_err(|e| anyhow::anyhow!("createrawtransaction hex: {e}"))?;
+        let with = crate::onchain::insert_output(&bytes, 0, &crate::onchain::script(txid, n, e))
+            .ok_or_else(|| anyhow::anyhow!("createrawtransaction returned a shape the fallback cannot extend"))?;
+        let signed = self
+            .node
+            .call("signrawtransaction", vec![json!(hex::encode(with))])
+            .await?;
+        anyhow::ensure!(
+            signed.get("complete").and_then(Value::as_bool) == Some(true),
+            "signrawtransaction did not complete: {signed}"
+        );
+        let sent = self
+            .node
+            .call(
+                "sendrawtransaction",
+                vec![json!(signed.get("hex").and_then(Value::as_str).unwrap_or(""))],
+            )
+            .await?;
+        Ok(sent.as_str().unwrap_or("").to_string())
     }
 
     /// The verifier's view (`gossip::Ctx`): the members, and every open claim with its refHeight, hash, numbers and

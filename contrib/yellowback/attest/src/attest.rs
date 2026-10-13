@@ -428,29 +428,13 @@ impl Attestor {
         }
         // The cancel-limit design's automation (CAN-2 + C4b): its topic shares the transport (one iroh endpoint, or the
         // dir bus's cancel/ subdirectory) and runs on its own task; the watcher and the collector run once per poll.
-        let (mut transport, mut cancel) =
-            if self.cfg.cancel.enabled {
-                let (a, c) = transport::open_with_cancel(&self.cfg.transport, &network).await?;
-                let (tx, rx) = transport::spawn_pump(c);
-                // the receive side runs on its own task (re-review N-4): sampling and verification never wait for a poll
-                let (ctx_tx, ctx_rx) = tokio::sync::watch::channel(std::sync::Arc::new(crate::gossip::Ctx::default()));
-                let (vtx, vrx) = tokio::sync::mpsc::channel(4096);
-                crate::gossip::spawn(
-                    rx,
-                    ctx_rx,
-                    vtx,
-                    self.cfg.cancel.gossip_burst,
-                    self.cfg.cancel.gossip_refill_seconds,
-                );
-                let path =
-                    self.cfg.cancel.state_file.clone().unwrap_or_else(|| {
-                        crate::cancel::CancelAgent::default_path(&self.cfg.node, &network, self.seq)
-                    });
-                let agent = crate::cancel::CancelAgent::new(self.cfg.cancel.clone(), &self.cfg.node, self.seq, path)?;
-                (a, Some((agent, tx, ctx_tx, vrx)))
-            } else {
-                (transport::open(&self.cfg.transport, &network).await?, None)
-            };
+        let (mut transport, mut cancel) = if self.cfg.cancel.enabled {
+            let rt = CancelRuntime::open(&self.cfg, &network, self.seq).await?;
+            let topics_attest = rt.1;
+            (topics_attest, Some(rt.0))
+        } else {
+            (transport::open(&self.cfg.transport, &network).await?, None)
+        };
         tracing::info!(
             "yellowback-attest attest: seq {}, network {network}, every {} blocks, ref_lag {}, poll {} s, transport {}{}",
             self.seq,
@@ -466,32 +450,16 @@ impl Attestor {
                 Ok((_, h)) if h >= 0 => {
                     let tick = self.tick(h as u32, transport.as_mut()).await;
                     self.heartbeat(h as u32).await;
-                    if let Some((agent, tx, ctx_tx, vrx)) = cancel.as_mut() {
+                    if let Some(rt) = cancel.as_mut() {
                         if let Some(p) = self.last_aggregate {
-                            agent.state.record_price(h as u32, p);
+                            rt.agent.state.record_price(h as u32, p);
                         }
                         if let Tick::Published(att) = &tick {
-                            agent.state.record_signed(att.cited_height, att.price_micro_usd as i64);
+                            rt.agent
+                                .state
+                                .record_signed(att.cited_height, att.price_micro_usd as i64);
                         }
-                        loop {
-                            match vrx.try_recv() {
-                                Ok(v) => agent.accept_verified(v),
-                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => anyhow::bail!(
-                                    "cancel topic: the gossip tasks are gone; exiting so the agent is restarted"
-                                ),
-                            }
-                        }
-                        agent.tick(h as u32).await;
-                        let _ = ctx_tx.send(std::sync::Arc::new(agent.gossip_ctx()));
-                        for frame in agent.take_outbox() {
-                            if tx.send(frame).await.is_err() {
-                                // review L-5: never run on without the topic; the service manager restarts us
-                                anyhow::bail!(
-                                    "cancel topic: the transport task is gone; exiting so the agent is restarted"
-                                );
-                            }
-                        }
+                        rt.poll(h as u32).await?;
                     }
                 }
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
@@ -501,10 +469,10 @@ impl Attestor {
             let deadline = tokio::time::Instant::now() + poll;
             loop {
                 match cancel.as_mut() {
-                    Some((agent, _, _, vrx)) => tokio::select! {
+                    Some(rt) => tokio::select! {
                         _ = tokio::time::sleep_until(deadline) => break,
-                        got = vrx.recv() => match got {
-                            Some(v) => agent.accept_verified(v),
+                        got = rt.verified.recv() => match got {
+                            Some(v) => rt.agent.accept_verified(v),
                             None => anyhow::bail!("cancel topic: the gossip tasks are gone; exiting so the agent is restarted"),
                         },
                         _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
@@ -516,6 +484,151 @@ impl Attestor {
                 }
             }
         }
+    }
+}
+
+/// The cancel automation's moving parts beside the attest loop: the agent, the gossip verifier task (fed by the
+/// old cancel topic during the trial and by the members-only direct path), the binding topic, the direct endpoint
+/// and its sender (owner decisions 1 and 4, 2026-10-13).
+pub struct CancelRuntime {
+    pub agent: crate::cancel::CancelAgent,
+    gossip_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    bindings_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    bindings_rx: tokio::sync::mpsc::Receiver<transport::Delivered>,
+    direct: Option<crate::direct::DirectNode>,
+    direct_tx: Option<tokio::sync::mpsc::Sender<crate::direct::Out>>,
+    direct_announces: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    ctx_tx: tokio::sync::watch::Sender<std::sync::Arc<crate::gossip::Ctx>>,
+    pub verified: tokio::sync::mpsc::Receiver<crate::gossip::Verified>,
+    /// Senders kept alive for a channel whose path is off, so the verifier task does not see it close.
+    _idle: Vec<tokio::sync::mpsc::Sender<transport::Delivered>>,
+    _idle_direct: Option<tokio::sync::mpsc::Sender<(Vec<u8>, u16)>>,
+}
+
+impl CancelRuntime {
+    pub async fn open(cfg: &Config, network: &str, seq: u16) -> anyhow::Result<(Self, Box<dyn Transport>)> {
+        let c = &cfg.cancel;
+        let topics = transport::open_with_cancel(&cfg.transport, network, c.delivery.gossip()).await?;
+        let mut idle = Vec::new();
+        let (gossip_tx, grx) = match topics.cancel {
+            Some(t) => {
+                let (tx, rx) = transport::spawn_pump(t);
+                (Some(tx), rx)
+            }
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                idle.push(tx);
+                (None, rx)
+            }
+        };
+        let (bindings_tx, bindings_rx) = transport::spawn_pump(topics.bindings);
+        let path = c
+            .state_file
+            .clone()
+            .unwrap_or_else(|| crate::cancel::CancelAgent::default_path(&cfg.node, network, seq));
+        let (direct, direct_tx, direct_announces, drx, idle_direct) = if c.delivery.direct() {
+            let key = c
+                .direct_secret_key_file
+                .clone()
+                .unwrap_or_else(|| path.with_extension("direct.key"));
+            let (node, frames, announces) =
+                crate::direct::DirectNode::open(Some(&key), &c.direct_relays, &c.fallback_relays).await?;
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            node.spawn_sender(rx);
+            (Some(node), Some(tx), Some(announces), frames, None)
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (None, None, None, rx, Some(tx))
+        };
+        let (ctx_tx, ctx_rx) = tokio::sync::watch::channel(std::sync::Arc::new(crate::gossip::Ctx::default()));
+        let (vtx, verified) = tokio::sync::mpsc::channel(4096);
+        crate::gossip::spawn(grx, drx, ctx_rx, vtx, c.gossip_burst, c.gossip_refill_seconds);
+        let agent = crate::cancel::CancelAgent::new(c.clone(), &cfg.node, seq, path)?;
+        tracing::info!(
+            "cancel automation: delivery {:?}, on-chain fallback {} (after {} blocks, {} zat a transaction)",
+            c.delivery,
+            c.onchain_fallback,
+            c.fallback_after_blocks,
+            c.fallback_fee_zat
+        );
+        Ok((
+            CancelRuntime {
+                agent,
+                gossip_tx,
+                bindings_tx,
+                bindings_rx,
+                direct,
+                direct_tx,
+                direct_announces,
+                ctx_tx,
+                verified,
+                _idle: idle,
+                _idle_direct: idle_direct,
+            },
+            topics.attest,
+        ))
+    }
+
+    /// One poll: take what arrived, run the agent, publish what it produced, hand the verifier and the direct gate
+    /// their new view. An error means a transport task is gone: attest exits so the service manager restarts it.
+    pub async fn poll(&mut self, height: u32) -> anyhow::Result<()> {
+        use tokio::sync::mpsc::error::TryRecvError;
+        loop {
+            match self.verified.try_recv() {
+                Ok(v) => self.agent.accept_verified(v),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => anyhow::bail!("cancel: the verifier task is gone; exiting"),
+            }
+        }
+        loop {
+            match self.bindings_rx.try_recv() {
+                Ok((bytes, _peer)) => self.agent.take_binding(bytes),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => anyhow::bail!("cancel: the binding topic is gone; exiting"),
+            }
+        }
+        if let Some(rx) = self.direct_announces.as_mut() {
+            while let Ok(bytes) = rx.try_recv() {
+                self.agent.take_binding(bytes);
+            }
+        }
+        if let Some(node) = &self.direct {
+            let (addrs, relay) = node.hints();
+            self.agent.direct = Some((*node.id().as_bytes(), addrs, relay));
+        }
+        self.agent.tick(height).await;
+        let _ = self.ctx_tx.send(std::sync::Arc::new(self.agent.gossip_ctx()));
+        if let Some(node) = &self.direct {
+            let map = self
+                .agent
+                .bound_peers()
+                .into_iter()
+                .filter_map(|(ep, seq, addrs, relay)| {
+                    let id = iroh::EndpointId::from_bytes(&ep).ok()?;
+                    Some((id, crate::direct::peer_from_hints(seq, &addrs, relay.as_deref())))
+                })
+                .collect();
+            node.members.set(map);
+        }
+        for frame in self.agent.take_outbox() {
+            if let Some(tx) = &self.gossip_tx {
+                if tx.send(frame.clone()).await.is_err() {
+                    anyhow::bail!("cancel topic: the transport task is gone; exiting so the agent is restarted");
+                }
+            }
+            if let Some(tx) = &self.direct_tx {
+                let _ = tx.try_send(crate::direct::Out::Frame(frame));
+            }
+        }
+        for a in self.agent.take_announces() {
+            if self.bindings_tx.send(a.clone()).await.is_err() {
+                anyhow::bail!("cancel: the binding topic is gone; exiting so the agent is restarted");
+            }
+            if let Some(tx) = &self.direct_tx {
+                let _ = tx.try_send(crate::direct::Out::Announce(a));
+            }
+        }
+        Ok(())
     }
 }
 

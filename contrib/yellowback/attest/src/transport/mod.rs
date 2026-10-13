@@ -54,39 +54,75 @@ pub async fn open(cfg: &TransportConfig, network: &str) -> anyhow::Result<Box<dy
             peers,
             secret_key_file,
             topic_override,
+            fallback_relays,
         } => {
             let topic = topic_override.clone().unwrap_or_else(|| topic_name(network));
-            Box::new(iroh::IrohTransport::open(relays, peers, secret_key_file.as_deref(), &topic).await?)
+            let mut v =
+                iroh::IrohTransport::open_topics(relays, fallback_relays, peers, secret_key_file.as_deref(), &[&topic])
+                    .await?;
+            Box::new(v.remove(0))
         }
     })
 }
 
-/// The attestation topic and the cancel topic, sharing one iroh endpoint (or the `dir` bus and its `cancel/`).
-pub async fn open_with_cancel(
-    cfg: &TransportConfig,
-    network: &str,
-) -> anyhow::Result<(Box<dyn Transport>, Box<dyn Transport>)> {
+/// The endpoint-binding topic (owner decision 1): members announce the signed binding of their direct endpoint here
+/// (`binding::Announce`, self-verifying; anyone may read them), so agents learn which endpoint ids to admit and dial.
+pub const BINDING_VERSION: u32 = 1;
+
+pub fn binding_topic_name(network: &str) -> String {
+    format!("yellowback/bindings/{network}/{BINDING_VERSION}")
+}
+
+/// The topics `attest` opens: the attestation topic, the cancel gossip topic (only while it is in use: delivery
+/// "gossip" or "trial") and the binding topic, sharing one iroh endpoint (or the dir bus's `cancel/` and `bindings/`).
+pub struct Topics {
+    pub attest: Box<dyn Transport>,
+    pub cancel: Option<Box<dyn Transport>>,
+    pub bindings: Box<dyn Transport>,
+}
+
+pub async fn open_with_cancel(cfg: &TransportConfig, network: &str, cancel_topic: bool) -> anyhow::Result<Topics> {
     Ok(match cfg {
-        TransportConfig::Dir { path } => (
-            Box::new(dir::DirTransport::open(path)?),
-            Box::new(dir::DirTransport::open_cancel(path)?),
-        ),
+        TransportConfig::Dir { path } => Topics {
+            attest: Box::new(dir::DirTransport::open(path)?),
+            cancel: if cancel_topic {
+                Some(Box::new(dir::DirTransport::open_cancel(path)?))
+            } else {
+                None
+            },
+            bindings: Box::new(dir::DirTransport::open_digest(path, "bindings")?),
+        },
         TransportConfig::Iroh {
             relays,
             peers,
             secret_key_file,
             topic_override,
+            fallback_relays,
         } => {
             let topic = topic_override.clone().unwrap_or_else(|| topic_name(network));
-            let cancel = match topic_override {
-                Some(t) => format!("{t}/cancel"),
-                None => cancel_topic_name(network),
+            let (cancel, bindings) = match topic_override {
+                Some(t) => (format!("{t}/cancel"), format!("{t}/bindings")),
+                None => (cancel_topic_name(network), binding_topic_name(network)),
             };
+            let mut names: Vec<&str> = vec![&topic, &bindings];
+            if cancel_topic {
+                names.push(&cancel);
+            }
             let mut v =
-                iroh::IrohTransport::open_topics(relays, peers, secret_key_file.as_deref(), &[&topic, &cancel]).await?;
-            let c = v.pop().expect("two topics");
-            let a = v.pop().expect("two topics");
-            (Box::new(a), Box::new(c))
+                iroh::IrohTransport::open_topics(relays, fallback_relays, peers, secret_key_file.as_deref(), &names)
+                    .await?;
+            let c: Option<Box<dyn Transport>> = if cancel_topic {
+                Some(Box::new(v.pop().expect("three topics")))
+            } else {
+                None
+            };
+            let b = v.pop().expect("binding topic");
+            let a = v.pop().expect("attestation topic");
+            Topics {
+                attest: Box::new(a),
+                cancel: c,
+                bindings: Box::new(b),
+            }
         }
     })
 }
@@ -144,5 +180,6 @@ mod tests {
         assert_eq!(super::topic_name("main"), "yellowback/attest/main/3");
         assert_eq!(super::topic_name("regtest"), "yellowback/attest/regtest/3");
         assert_eq!(super::cancel_topic_name("main"), "yellowback/cancel/main/1");
+        assert_eq!(super::binding_topic_name("main"), "yellowback/bindings/main/1");
     }
 }
