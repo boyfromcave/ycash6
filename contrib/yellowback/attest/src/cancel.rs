@@ -26,10 +26,10 @@
 //!    re-pushes a lingering cancel, and rebuilds one that left the mempool with exponential backoff, at most
 //!    `max_sends` times (review M-3). Everything is persisted (`state_file`), so a restart resumes.
 //!
-//! The decisions are pure functions ([`honest_price`], [`judge`], [`rank`], [`decide`], [`GossipFilter`]) for the
+//! The decisions are pure functions ([`honest_price`], [`judge`], [`rank`], [`decide`]; the gossip's in `gossip.rs`) for the
 //! unit tests; [`CancelAgent`] performs the RPCs.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -43,18 +43,6 @@ use crate::cosig::{self, Entry, Frame};
 use crate::rpc::{Node, RpcError};
 
 pub const STATE_VERSION: u32 = 1;
-/// Frames waiting for a claim this node does not know yet (gossip can outrun a block by a few seconds) ...
-pub const PENDING_MAX: usize = 256;
-/// ... of which one delivering peer may hold this many.
-pub const PENDING_PER_PEER: usize = 32;
-pub const PENDING_TTL: Duration = Duration::from_secs(600);
-pub const DEDUP_CAPACITY: usize = 4096;
-/// The per-peer bucket in front of signature recovery (~100 µs each): a burst and a steady rate per second. A peer
-/// beyond it is dropped; the other peers are not affected.
-pub const PEER_BURST: f64 = 512.0;
-pub const PEER_RATE: f64 = 200.0;
-/// Peers remembered for their buckets (the least recently seen are forgotten beyond this).
-pub const PEERS_MAX: usize = 4096;
 /// Price history kept (blocks): far more than CLAIM_DELAY.
 pub const PRICE_HISTORY: u32 = 4096;
 /// A closed claim is forgotten this many blocks after its release height; a claim whose block left the chain and
@@ -214,8 +202,8 @@ impl Claim {
         self.rejected.clear();
         self.enough_since = None;
         self.phase = Phase::Watching;
-        self.sends = 0;
-        self.next_rebuild = 0;
+        // sends and next_rebuild survive a reorg (re-review N-7): the cap and the backoff count every attempt made
+        // for this claimant intent, which a reorg does not re-create
         self.orphaned = false;
         self.foreign_spend_since = None;
         for k in [
@@ -232,9 +220,10 @@ impl Claim {
     }
 
     /// The co-signatures a cancel would carry: those of current `members` the node did not refuse, this agent's
-    /// first, then by seq; at most `CANCEL_COSIGN_MAX`.
-    pub fn usable(&self, me: u16, members: &BTreeMap<u16, [u8; 33]>) -> Vec<(u16, String)> {
-        let ok = |s: &u16| members.contains_key(s) && !self.rejected.contains(s);
+    /// first (only with `own`: never with `auto_cosign = false`, re-review N-5), then by seq; at most
+    /// `CANCEL_COSIGN_MAX`.
+    pub fn usable(&self, me: u16, own: bool, members: &BTreeMap<u16, [u8; 33]>) -> Vec<(u16, String)> {
+        let ok = |s: &u16| members.contains_key(s) && !self.rejected.contains(s) && (own || *s != me);
         let mut out: Vec<(u16, String)> = Vec::new();
         if let Some(own) = self.cosigs.get(&me).filter(|_| ok(&me)) {
             out.push((me, own.clone()));
@@ -434,6 +423,8 @@ pub struct DecideCtx<'a> {
     pub spare_wait_blocks: u32,
     pub refee_after_blocks: u32,
     pub max_sends: u32,
+    /// This member's own co-signature may be carried (`auto_cosign`).
+    pub own: bool,
     pub members: &'a BTreeMap<u16, [u8; 33]>,
     /// The claimant intent is spent in the mempool (a cancel or a release is pending).
     pub intent_spent_in_mempool: bool,
@@ -462,7 +453,7 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
     let Some(rank) = x.rank else {
         return Decision::Idle("not a current member");
     };
-    let usable = c.usable(x.me, x.members);
+    let usable = c.usable(x.me, x.own, x.members);
     let n = usable.len() as u32;
     if c.verdict == Verdict::Unjudged && n < c.required {
         return Decision::Idle("unjudged and short of co-signatures");
@@ -495,6 +486,13 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
             }
             if x.intent_spent_in_mempool {
                 return Decision::Idle("another cancel is in the mempool");
+            }
+            // a first send that failed counts as well (re-review N-1)
+            if c.sends >= x.max_sends {
+                return Decision::SendCap;
+            }
+            if x.height < c.next_rebuild {
+                return Decision::Idle("rebuild backoff");
             }
             if n < c.required {
                 return Decision::Idle("short of co-signatures");
@@ -541,171 +539,15 @@ pub fn classify_sign_error(e: &RpcError) -> SignErr {
     }
 }
 
-// ------------------------------------------------------------------------------------------------------ gossip
+// ------------------------------------------------------------------------------------------------------ view
 
-/// Why a frame was not taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Drop {
-    Malformed(String),
-    Duplicate,
-    /// The delivering peer is over its bucket.
-    PeerRate,
-    /// The claim is unknown to this node (yet): the frame waits in the pending queue.
-    UnknownClaim,
-    NotMember(u16),
-    WrongRefHeight(u16),
-    BadSignature(u16),
-    Claimable(u16),
-    SeqRate(u16),
-    /// A valid entry of this seq is already held for the claim.
-    AlreadyHeld(u16),
-}
-
-struct Bucket {
-    tokens: f64,
-    last: Instant,
-}
-
-fn take(b: &mut Bucket, burst: f64, per_second: f64, now: Instant) -> bool {
-    let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
-    b.tokens = (b.tokens + elapsed * per_second).min(burst);
-    b.last = now;
-    if b.tokens >= 1.0 {
-        b.tokens -= 1.0;
-        true
-    } else {
-        false
-    }
-}
-
-/// The chain facts a frame is verified against.
+/// The chain facts a frame is verified against (`gossip::Ctx` carries a copy).
 #[derive(Clone, Debug, Default)]
 pub struct MemberView {
     pub set_id: [u8; 32],
     pub theta_bps: u32,
     /// Current members: seq -> compressed key (the newest record of each key, current in the primitive's sense).
     pub members: BTreeMap<u16, [u8; 33]>,
-}
-
-/// The cancel topic's receive filter. Order: size, magic and dedup ([`GossipFilter::screen`]); the cheap checks
-/// ([`GossipFilter::cheap`]); the delivering peer's bucket ([`GossipFilter::peer_ok`]); signature recovery and the
-/// authenticated per-seq bucket ([`GossipFilter::verify`]).
-pub struct GossipFilter {
-    seq_burst: f64,
-    seq_per_second: f64,
-    peers: HashMap<String, Bucket>,
-    seqs: HashMap<u16, Bucket>,
-    seen: std::collections::HashSet<[u8; 32]>,
-    order: VecDeque<[u8; 32]>,
-}
-
-impl GossipFilter {
-    pub fn new(seq_burst: u32, seq_refill_seconds: u64) -> Self {
-        GossipFilter {
-            seq_burst: seq_burst.max(1) as f64,
-            seq_per_second: 1.0 / seq_refill_seconds.max(1) as f64,
-            peers: HashMap::new(),
-            seqs: HashMap::new(),
-            seen: Default::default(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn remember(&mut self, d: [u8; 32]) {
-        if self.seen.insert(d) {
-            self.order.push_back(d);
-            while self.order.len() > DEDUP_CAPACITY {
-                if let Some(old) = self.order.pop_front() {
-                    self.seen.remove(&old);
-                }
-            }
-        }
-    }
-
-    /// Forget every frame seen (a reorg reset a claim: its republished co-signatures must be taken again).
-    pub fn forget_seen(&mut self) {
-        self.seen.clear();
-        self.order.clear();
-    }
-
-    /// Size, magic, dedup. No shared limit is spent here.
-    pub fn screen(&mut self, bytes: &[u8]) -> Result<Frame, Drop> {
-        let frame = Frame::decode(bytes).map_err(|e| Drop::Malformed(e.to_string()))?;
-        let d: [u8; 32] = Sha256::digest(bytes).into();
-        if self.seen.contains(&d) {
-            return Err(Drop::Duplicate);
-        }
-        Ok(frame)
-    }
-
-    /// The checks that cost no signature: a current member's seq, the claim's refHeight, a price at which the vault
-    /// was not claimable.
-    pub fn cheap(frame: &Frame, claim: &Claim, view: &MemberView) -> Result<(), Drop> {
-        let seq = frame.seq;
-        if !view.members.contains_key(&seq) {
-            return Err(Drop::NotMember(seq));
-        }
-        let (Some(r), Some(_)) = (claim.ref_height, claim.block_hash.as_deref()) else {
-            return Err(Drop::UnknownClaim);
-        };
-        if frame.ref_height != r {
-            return Err(Drop::WrongRefHeight(seq));
-        }
-        if (frame.entry.price as i64) < 100
-            || cosig::is_underwater(
-                claim.collateral_zat,
-                frame.entry.price as i64,
-                claim.minted_cents,
-                view.theta_bps,
-            )
-        {
-            return Err(Drop::Claimable(seq));
-        }
-        Ok(())
-    }
-
-    /// The delivering peer's bucket (PEER_BURST, PEER_RATE per second): spent only by frames that passed the cheap
-    /// checks, so it bounds the signature work one peer can cause and nothing else.
-    pub fn peer_ok(&mut self, peer: &str, now: Instant) -> bool {
-        if !self.peers.contains_key(peer) && self.peers.len() >= PEERS_MAX {
-            if let Some(oldest) = self.peers.iter().min_by_key(|(_, b)| b.last).map(|(k, _)| k.clone()) {
-                self.peers.remove(&oldest);
-            }
-        }
-        let b = self.peers.entry(peer.to_string()).or_insert(Bucket {
-            tokens: PEER_BURST,
-            last: now,
-        });
-        take(b, PEER_BURST, PEER_RATE, now)
-    }
-
-    /// Signature recovery against the seq's member key, then the authenticated per-seq bucket. The frame is
-    /// remembered (dedup) once its signature was checked, whatever the outcome.
-    pub fn verify(&mut self, frame: &Frame, claim: &Claim, view: &MemberView, now: Instant) -> Result<(), Drop> {
-        let seq = frame.seq;
-        let key = view.members.get(&seq).ok_or(Drop::NotMember(seq))?;
-        let (Some(r), Some(bh)) = (claim.ref_height, claim.block_hash.as_deref()) else {
-            return Err(Drop::UnknownClaim);
-        };
-        let bh = cosig::internal_from_display(bh).ok_or(Drop::UnknownClaim)?;
-        let msg = cosig::message(&view.set_id, &frame.txid, frame.n, r, frame.entry.price, &bh);
-        let digest: [u8; 32] = Sha256::digest(frame.encode()).into();
-        self.remember(digest);
-        if cosig::recover(&msg, &frame.entry.sig).as_ref() != Some(key) {
-            return Err(Drop::BadSignature(seq));
-        }
-        if claim.cosigs.get(&seq) == Some(&frame.entry.to_hex()) {
-            return Err(Drop::AlreadyHeld(seq));
-        }
-        let b = self.seqs.entry(seq).or_insert(Bucket {
-            tokens: self.seq_burst,
-            last: now,
-        });
-        if !take(b, self.seq_burst, self.seq_per_second, now) {
-            return Err(Drop::SeqRate(seq));
-        }
-        Ok(())
-    }
 }
 
 // ------------------------------------------------------------------------------------------------------- agent
@@ -799,10 +641,9 @@ pub struct CancelAgent {
     pub seq: u16,
     pub state: State,
     pub path: PathBuf,
-    pub filter: GossipFilter,
-    /// Frames for claims this node does not know yet, with their delivering peer.
-    pending: VecDeque<(Frame, Instant, String)>,
     pub view: MemberView,
+    /// This seq's own member key (from yed_listattestors, whatever its status): the claim's bundle is verified with it.
+    pub my_key: Option<[u8; 33]>,
     /// The node's CLAIM_DELAY (yed_getinfo), for the takeover bound.
     pub claim_delay: Option<u32>,
     peers: Vec<Node>,
@@ -840,14 +681,13 @@ impl CancelAgent {
             state.claims.len()
         );
         Ok(CancelAgent {
-            filter: GossipFilter::new(cfg.gossip_burst, cfg.gossip_refill_seconds),
             cfg,
             node,
             seq,
             state,
             path,
-            pending: VecDeque::new(),
             view: MemberView::default(),
+            my_key: None,
             claim_delay: None,
             peers,
             outbox: Vec::new(),
@@ -960,6 +800,15 @@ impl CancelAgent {
             }
         };
         self.view.members = current_members(&rows, keys.as_ref());
+        self.my_key = rows
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .find(|r| r.get("seq").and_then(Value::as_u64) == Some(self.seq as u64))
+            })
+            .and_then(|r| r.get("attestorPubKey").and_then(Value::as_str))
+            .and_then(|h| hex::decode(h).ok())
+            .and_then(|b| <[u8; 33]>::try_from(b.as_slice()).ok());
         true
     }
 
@@ -1034,21 +883,42 @@ impl CancelAgent {
             .and_then(Value::as_u64)
             .and_then(|r| u32::try_from(r).ok())
             .ok_or("the claim carries no refHeight")?;
-        let own = dec
-            .get("bundle")
-            .and_then(|b| b.get("attestations"))
-            .and_then(Value::as_array)
-            .and_then(|a| {
-                a.iter().find(|x| {
-                    x.get("seq").and_then(Value::as_u64) == Some(self.seq as u64)
-                        && x.get("citedHeight").and_then(Value::as_u64) == Some(r as u64)
-                })
-            })
-            .and_then(|x| x.get("priceMicroUsd").and_then(Value::as_i64));
         let bh = self
             .block_hash_at(r)
             .await
             .map_err(|e| format!("getblockhash {r}: {e}"))?;
+        // this seq's attestation at R in the claim's bundle -- decoded only by the node, never verified (a bundle
+        // carried before arming is not checked by consensus either), so it counts only if its signature verifies
+        // under this seq's own key over AttestMessage(seq, price, R, blockHash(R)) (re-review N-2)
+        let own = dec
+            .get("bundle")
+            .and_then(|b| b.get("attestations"))
+            .and_then(Value::as_array)
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .filter(|x| {
+                x.get("seq").and_then(Value::as_u64) == Some(self.seq as u64)
+                    && x.get("citedHeight").and_then(Value::as_u64) == Some(r as u64)
+            })
+            .filter_map(|x| x.get("hex").and_then(Value::as_str))
+            .filter_map(|h| crate::framing::Attestation::decode_hex(h).ok())
+            .find(|att| match (self.my_key.as_ref(), cosig::internal_from_display(&bh)) {
+                (Some(key), Some(bh_internal)) => {
+                    let ok = att.seq == self.seq
+                        && att.cited_height == r
+                        && cosig::verify_attestation(key, att.seq, att.price_micro_usd, r, &bh_internal, &att.sig);
+                    if !ok {
+                        tracing::warn!(
+                            "cancel: {intent}: the claim's bundle carries an attestation of seq {} at {r} that this key                              did not sign; ignored",
+                            self.seq
+                        );
+                    }
+                    ok
+                }
+                _ => false,
+            })
+            .map(|att| att.price_micro_usd as i64);
         Ok((r, bh, own))
     }
 
@@ -1086,10 +956,28 @@ impl CancelAgent {
         }
     }
 
+    /// `getblockchaininfo`: out of initial block download and within two blocks of the best header.
+    async fn node_synced(&self) -> bool {
+        match self.node.call("getblockchaininfo", vec![]).await {
+            Ok(v) => {
+                let done = v.get("initial_block_download_complete").and_then(Value::as_bool) == Some(true);
+                let blocks = v.get("blocks").and_then(Value::as_i64).unwrap_or(-1);
+                let headers = v.get("headers").and_then(Value::as_i64).unwrap_or(i64::MAX);
+                done && blocks >= 0 && headers - blocks <= 2
+            }
+            Err(e) => {
+                tracing::warn!("cancel: getblockchaininfo: {e}");
+                false
+            }
+        }
+    }
+
     /// One poll at tip `height` (the caller has recorded this poll's aggregate and any attestation it signed;
-    /// frames arrive through [`CancelAgent::on_frame`] between polls).
+    /// verified co-signatures arrive through [`CancelAgent::accept_verified`]).
     pub async fn tick(&mut self, height: u32) {
-        if self.state.recording_since.is_none() {
+        // the record starts only on a node at the network's tip (re-review N-6): before that the agent has not seen
+        // the heights it would vouch for, and states no new price at all
+        if self.state.recording_since.is_none() && self.node_synced().await {
             self.state.recording_since = Some(height);
             self.dirty = true;
         }
@@ -1109,13 +997,7 @@ impl CancelAgent {
         for intent in &intents {
             self.watch(intent, height).await;
         }
-        // 3. frames that waited for their claim
-        let now = Instant::now();
-        let parked: Vec<(Frame, Instant, String)> = self.pending.drain(..).collect();
-        for (f, at, peer) in parked {
-            self.admit(f, &peer, at, now);
-        }
-        // 4. drive
+        // 3. drive
         for intent in &intents {
             self.collect(intent, height).await;
         }
@@ -1133,7 +1015,6 @@ impl CancelAgent {
         let prior = c.reset(confirm, release);
         tracing::warn!("cancel: claim {intent}: {why}; judged again from the chain");
         self.priors.insert(intent.to_string(), prior);
-        self.filter.forget_seen();
         self.dirty = true;
     }
 
@@ -1392,9 +1273,12 @@ impl CancelAgent {
         let c = &self.state.claims[intent];
         let r = c.ref_height.expect("set above");
         if let Some(own) = c.own_cosig.clone() {
-            let due = c
-                .last_publish
-                .is_none_or(|h| height >= h.saturating_add(self.cfg.republish_blocks));
+            // every block while the claim is short of cancelsRequired (re-review N-3c: under a flood each copy is
+            // drawn for verification with probability budget/offered), else every republish_blocks
+            let members = self.view.members.clone();
+            let short = (c.usable(self.seq, true, &members).len() as u32) < c.required;
+            let every = if short { 1 } else { self.cfg.republish_blocks };
+            let due = c.last_publish.is_none_or(|h| height >= h.saturating_add(every));
             if due {
                 if let (Some(entry), Some((txid, n))) = (Entry::decode_hex(&own), cosig::parse_intent(intent)) {
                     let f = Frame {
@@ -1436,7 +1320,8 @@ impl CancelAgent {
         };
         let mut honest_by_record = false;
         // review L-2: with no price of its own, ask the node's guard (the price this key signed there) first
-        if price.is_none() && self.member() {
+        // (never with auto_cosign = false: a null-price signing is a co-signature too, re-review N-5)
+        if price.is_none() && self.member() && self.cfg.auto_cosign {
             match self.sign(intent, None).await {
                 Ok((p, cosig)) => {
                     price = Some(p);
@@ -1590,73 +1475,60 @@ impl CancelAgent {
         }
     }
 
-    /// A frame from the cancel topic, as it arrives (the caller drains the topic continuously): screened, checked,
-    /// rate-limited by the peer that delivered it, verified.
-    pub fn on_frame(&mut self, bytes: &[u8], peer: &str) {
-        self.on_frame_at(bytes, peer, Instant::now());
-    }
-
-    pub fn on_frame_at(&mut self, bytes: &[u8], peer: &str, now: Instant) {
-        match self.filter.screen(bytes) {
-            Ok(f) => self.admit(f, peer, now, now),
-            Err(d) => tracing::debug!("cancel topic: from {peer}: dropped {d:?}"),
-        }
-    }
-
-    /// Take a screened frame: the cheap checks, the peer's bucket, the signature; or park it (bounded per peer) until
-    /// this node knows its claim.
-    fn admit(&mut self, f: Frame, peer: &str, at: Instant, now: Instant) {
-        let intent = f.intent();
-        let known = self
+    /// The verifier's view (`gossip::Ctx`): the members, and every open claim with its refHeight, hash, numbers and
+    /// the seqs whose entry is already held. Published after every poll.
+    pub fn gossip_ctx(&self) -> crate::gossip::Ctx {
+        let claims = self
             .state
             .claims
-            .get(&intent)
-            .filter(|c| !c.is_closed() && c.ref_height.is_some());
-        let Some(claim) = known else {
-            if self.state.claims.get(&intent).is_some_and(Claim::is_closed) || !self.view.members.contains_key(&f.seq) {
-                return;
-            }
-            let mine = self.pending.iter().filter(|(_, _, p)| p == peer).count();
-            if now.saturating_duration_since(at) < PENDING_TTL
-                && self.pending.len() < PENDING_MAX
-                && mine < PENDING_PER_PEER
-            {
-                self.pending.push_back((f, at, peer.to_string()));
-            }
+            .iter()
+            .filter(|(_, c)| !c.is_closed() && !c.orphaned)
+            .filter_map(|(k, c)| {
+                let r = c.ref_height?;
+                let bh = cosig::internal_from_display(c.block_hash.as_deref()?)?;
+                Some((
+                    k.clone(),
+                    crate::gossip::ClaimCtx {
+                        ref_height: r,
+                        block_hash: bh,
+                        collateral_zat: c.collateral_zat,
+                        minted_cents: c.minted_cents,
+                        held: c.cosigs.keys().filter(|s| !c.rejected.contains(s)).copied().collect(),
+                    },
+                ))
+            })
+            .collect();
+        crate::gossip::Ctx {
+            view: self.view.clone(),
+            claims,
+        }
+    }
+
+    /// A co-signature the verifier task checked: kept when the claim still has the refHeight and hash it was
+    /// verified against (a reorg in between makes it worthless) and holds no other entry of that seq.
+    pub fn accept_verified(&mut self, v: crate::gossip::Verified) {
+        let own = self.cfg.auto_cosign;
+        let Some(c) = self.state.claims.get_mut(&v.intent) else {
             return;
         };
-        if let Err(d) = GossipFilter::cheap(&f, claim, &self.view) {
-            tracing::debug!("cancel topic: frame {f:?} from {peer} dropped: {d:?}");
+        let same = c.ref_height == Some(v.ref_height)
+            && c.block_hash.as_deref().and_then(cosig::internal_from_display) == Some(v.block_hash);
+        if !same || c.is_closed() || (v.seq == self.seq && !own) {
             return;
         }
-        if !self.filter.peer_ok(peer, now) {
-            tracing::debug!("cancel topic: frame {f:?} from {peer} dropped: {:?}", Drop::PeerRate);
-            return;
-        }
-        match self.filter.verify(&f, claim, &self.view, now) {
-            Ok(()) => {
-                let c = self.state.claims.get_mut(&intent).expect("present");
-                if let Some(old) = c.cosigs.get(&f.seq) {
-                    if *old != f.entry.to_hex() && !c.rejected.contains(&f.seq) {
-                        tracing::warn!(
-                            "cancel: seq {} sent a second, different co-signature for {intent}; keeping the first",
-                            f.seq
-                        );
-                        return;
-                    }
-                }
-                tracing::info!(
-                    "cancel: co-signature of seq {} for {intent} at {} µUSD verified",
-                    f.seq,
-                    f.entry.price
+        if let Some(old) = c.cosigs.get(&v.seq) {
+            if *old != v.entry_hex && !c.rejected.contains(&v.seq) {
+                tracing::warn!(
+                    "cancel: seq {} sent a second, different co-signature for {}; keeping the first",
+                    v.seq,
+                    v.intent
                 );
-                c.cosigs.insert(f.seq, f.entry.to_hex());
-                c.rejected.remove(&f.seq);
-                self.dirty = true;
             }
-            Err(Drop::AlreadyHeld(_)) => {}
-            Err(d) => tracing::info!("cancel topic: frame {f:?} from {peer} dropped: {d:?}"),
+            return;
         }
+        tracing::info!("cancel: co-signature of seq {} for {} verified", v.seq, v.intent);
+        c.cosigs.insert(v.seq, v.entry_hex);
+        self.dirty = true;
     }
 
     async fn mempool_has(&self, txid: &str) -> bool {
@@ -1687,7 +1559,7 @@ impl CancelAgent {
             return;
         }
         let members = self.view.members.clone();
-        let n = c.usable(self.seq, &members).len() as u32;
+        let n = c.usable(self.seq, self.cfg.auto_cosign, &members).len() as u32;
         if n < c.required {
             if c.enough_since.is_some() {
                 self.state.claims.get_mut(intent).expect("present").enough_since = None;
@@ -1754,19 +1626,21 @@ impl CancelAgent {
             spare_wait_blocks: self.cfg.spare_wait_blocks,
             refee_after_blocks: self.cfg.refee_after_blocks,
             max_sends: self.cfg.max_sends,
+            own: self.cfg.auto_cosign,
             members: &members,
             intent_spent_in_mempool: spent,
             our_tx_in_mempool,
         };
         match decide(c, &x) {
             Decision::Idle(why) => tracing::debug!("cancel: {intent}: {why}"),
-            Decision::Build(_) => {
+            Decision::Build(seqs) => {
                 tracing::info!(
                     "cancel: driving the cancel of {intent} (rank {}, {} co-signature(s), {} required)",
                     r.unwrap_or(0),
-                    c.usable(self.seq, &members).len(),
+                    seqs.len(),
                     c.required
                 );
+                self.count_attempt(intent, height);
                 self.build_and_send(intent, height, None).await;
             }
             Decision::Rebroadcast => {
@@ -1793,6 +1667,9 @@ impl CancelAgent {
                     // vault_refee replaces the fee inputs of the cancel this agent sent last (and drops its carrier);
                     // yed_buildcancel then re-attaches a carrier with the co-signatures valid now (the build memo
                     // follows the re-funded transaction)
+                    // the attempt counts before anything is tried: a failure counts towards the cap and the backoff too
+                    // (re-review N-1)
+                    self.count_attempt(intent, height);
                     if let Err(e) = self.node.call("vault_refee", vec![json!(hex)]).await {
                         tracing::warn!("cancel: vault_refee: {e}; rebuilding without it");
                     }
@@ -1814,13 +1691,25 @@ impl CancelAgent {
         }
     }
 
+    /// One send attempt (a first build or a rebuild), counted before it is tried: `sends` + 1, and the next attempt
+    /// no sooner than `refee_after_blocks × 2^(sends − 1)` blocks later (review M-3, re-review N-1).
+    fn count_attempt(&mut self, intent: &str, height: u32) {
+        let refee = self.cfg.refee_after_blocks;
+        if let Some(c) = self.state.claims.get_mut(intent) {
+            c.sends = c.sends.saturating_add(1);
+            let backoff = refee.saturating_mul(1u32 << (c.sends - 1).min(10));
+            c.next_rebuild = height.saturating_add(backoff);
+            self.dirty = true;
+        }
+    }
+
     /// `yed_buildcancel` (entries the node drops or refuses are set aside), `set_signcancel`, `vault_send`, then
     /// the peers.
     async fn build_and_send(&mut self, intent: &str, height: u32, previous: Option<String>) {
         let members = self.view.members.clone();
         for _ in 0..BUILD_ATTEMPTS {
             let c = &self.state.claims[intent];
-            let usable = c.usable(self.seq, &members);
+            let usable = c.usable(self.seq, self.cfg.auto_cosign, &members);
             if (usable.len() as u32) < c.required {
                 tracing::warn!(
                     "cancel: {intent}: {} usable co-signature(s), {} required; waiting",
@@ -1931,13 +1820,6 @@ impl CancelAgent {
                 cosigners,
                 last_push: height,
             };
-            c.sends += 1;
-            // the next rebuild waits refee_after_blocks × 2^(sends − 1) (review M-3)
-            let backoff = self
-                .cfg
-                .refee_after_blocks
-                .saturating_mul(1u32 << (c.sends - 1).min(10));
-            c.next_rebuild = height.saturating_add(backoff);
             self.dirty = true;
             self.save();
             self.push_to_peers(&carrier, &shex).await;
@@ -2081,6 +1963,7 @@ mod tests {
             spare_wait_blocks: 1,
             refee_after_blocks: 3,
             max_sends: 3,
+            own: true,
             members: m,
             intent_spent_in_mempool: false,
             our_tx_in_mempool: false,
@@ -2331,88 +2214,11 @@ mod tests {
         assert!(c.cosigs.is_empty() && c.rejected.is_empty());
         assert_eq!(
             (c.verdict, c.phase.clone(), c.sends),
-            (Verdict::Pending, Phase::Watching, 0)
+            (Verdict::Pending, Phase::Watching, 2)
         );
         assert!(!c.alerted.contains("wrong-price")); // a new verdict is alerted afresh
         assert_eq!(prior.ref_height, Some(99));
         assert_eq!(prior.cosigs.len(), 1);
-    }
-
-    // ---- gossip validation
-
-    fn view(keys: &[(u16, u8)]) -> MemberView {
-        MemberView {
-            set_id: [0x75; 32],
-            theta_bps: THETA,
-            members: keys
-                .iter()
-                .map(|(s, k)| (*s, testkit::pubkey(&testkit::key(*k))))
-                .collect(),
-        }
-    }
-
-    fn frame_for(c: &Claim, seq: u16, key: u8, price: u32, set: [u8; 32]) -> Frame {
-        let txid = [0xaa; 32];
-        let bh = cosig::internal_from_display(c.block_hash.as_deref().unwrap()).unwrap();
-        let msg = cosig::message(&set, &txid, 0, c.ref_height.unwrap(), price, &bh);
-        Frame {
-            txid,
-            n: 0,
-            seq,
-            ref_height: c.ref_height.unwrap(),
-            entry: Entry {
-                price,
-                sig: testkit::sign(&testkit::key(key), &msg),
-            },
-        }
-    }
-
-    #[test]
-    fn gossip_admits_only_verified_current_members() {
-        let now = Instant::now();
-        let c = claim(1);
-        let v = view(&[(1, 1), (2, 2), (3, 3)]);
-        let mut g = GossipFilter::new(4, 60);
-        let good = frame_for(&c, 2, 2, 4_000_000, v.set_id);
-        let f = g.screen(&good.encode()).unwrap();
-        assert_eq!(GossipFilter::cheap(&f, &c, &v), Ok(()));
-        assert_eq!(g.verify(&f, &c, &v, now), Ok(()));
-        assert_eq!(g.screen(&good.encode()), Err(Drop::Duplicate));
-        assert!(matches!(g.screen(&[0u8; 116]), Err(Drop::Malformed(_))));
-        assert!(matches!(g.screen(b"YCG1"), Err(Drop::Malformed(_))));
-        let forged = frame_for(&c, 3, 9, 4_000_000, v.set_id);
-        assert_eq!(GossipFilter::cheap(&forged, &c, &v), Ok(())); // the cheap checks cannot tell ...
-        assert_eq!(g.verify(&forged, &c, &v, now), Err(Drop::BadSignature(3))); // ... the signature can
-        let stranger = frame_for(&c, 7, 7, 4_000_000, v.set_id);
-        assert_eq!(GossipFilter::cheap(&stranger, &c, &v), Err(Drop::NotMember(7)));
-        let other_set = frame_for(&c, 1, 1, 4_000_000, [0x01; 32]);
-        assert_eq!(g.verify(&other_set, &c, &v, now), Err(Drop::BadSignature(1)));
-        let claimable = frame_for(&c, 1, 1, 1_600_000, v.set_id);
-        assert_eq!(GossipFilter::cheap(&claimable, &c, &v), Err(Drop::Claimable(1)));
-        let mut wrong_r = frame_for(&c, 1, 1, 4_000_000, v.set_id);
-        wrong_r.ref_height += 1;
-        assert_eq!(GossipFilter::cheap(&wrong_r, &c, &v), Err(Drop::WrongRefHeight(1)));
-        let mut held = c.clone();
-        held.cosigs.insert(2, good.entry.to_hex());
-        let again = frame_for(&c, 2, 2, 4_000_000, v.set_id);
-        assert_eq!(g.verify(&again, &held, &v, now), Err(Drop::AlreadyHeld(2)));
-    }
-
-    #[test]
-    fn gossip_rate_limits_per_authenticated_seq() {
-        let now = Instant::now();
-        let c = claim(1);
-        let v = view(&[(1, 1)]);
-        let mut g = GossipFilter::new(2, 60);
-        let mut outcomes = Vec::new();
-        for p in [4_000_000u32, 4_000_001, 4_000_002] {
-            let f = frame_for(&c, 1, 1, p, v.set_id);
-            outcomes.push(g.verify(&f, &c, &v, now));
-        }
-        assert_eq!(outcomes, vec![Ok(()), Ok(()), Err(Drop::SeqRate(1))]);
-        let later = now + Duration::from_secs(120);
-        let f = frame_for(&c, 1, 1, 4_000_100, v.set_id);
-        assert_eq!(g.verify(&f, &c, &v, later), Ok(()));
     }
 
     #[test]
@@ -2541,6 +2347,12 @@ mod tests {
         sign_failures: u32,
         /// the equivocation guard refuses an explicit price
         guard_refuses: bool,
+        /// vault_send refuses every cancel (re-review N-1)
+        send_refused: bool,
+        /// the claim's bundle as yed_decodepayload decodes it (re-review N-2)
+        bundle: Value,
+        /// the node is still in initial block download (re-review N-6)
+        ibd: bool,
         sent: Vec<Vec<String>>,
         mempool: Vec<String>,
         sign_calls: u32,
@@ -2557,6 +2369,9 @@ mod tests {
             guard: HashMap::new(),
             sign_failures: 0,
             guard_refuses: false,
+            send_refused: false,
+            bundle: Value::Null,
+            ibd: false,
             sent: vec![],
             mempool: vec![],
             sign_calls: 0,
@@ -2591,7 +2406,12 @@ mod tests {
                     json!([])
                 }),
                 "getrawtransaction" => Ok(json!("00")),
-                "yed_decodepayload" => Ok(json!({"valid": true, "type": "redeem", "refHeight": 99})),
+                "yed_decodepayload" => {
+                    Ok(json!({"valid": true, "type": "redeem", "refHeight": 99, "bundle": ch.bundle}))
+                }
+                "getblockchaininfo" => {
+                    Ok(json!({"blocks": 100, "headers": 100, "initial_block_download_complete": !ch.ibd}))
+                }
                 "yed_getattestations" => Ok(json!([])),
                 "getblockhash" => Ok(json!(hash_at(&ch, params[0].as_u64().unwrap() as u32))),
                 "yed_signcancelcosign" => {
@@ -2667,6 +2487,9 @@ mod tests {
                 }
                 "set_signcancel" => Ok(json!({"hex": "c0ffee01", "complete": true})),
                 "vault_send" => {
+                    if ch.send_refused {
+                        return Err((-26, "16: bad-txns-inputs-spent".into()));
+                    }
                     ch.mempool.push("dd".repeat(32));
                     Ok(json!("dd".repeat(32)))
                 }
@@ -2724,6 +2547,17 @@ mod tests {
         .to_vec()
     }
 
+    /// Frames through the verifier task's logic (gossip::Verifier) against the agent's view, as attest does.
+    fn deliver(a: &mut CancelAgent, bytes: &[u8]) {
+        let now = Instant::now();
+        let mut v = crate::gossip::Verifier::new(16, 1, 10_000, crate::gossip::Rng::new(9));
+        v.set_ctx(std::sync::Arc::new(a.gossip_ctx()), now);
+        let _ = v.intake(bytes, now);
+        for x in v.run_slice(now) {
+            a.accept_verified(x);
+        }
+    }
+
     fn new_agent(m: &MockNode, seq: u16, path: &Path) -> CancelAgent {
         let mut a = CancelAgent::new(agent_cfg(), &m.config(None, None, None), seq, path.to_path_buf()).unwrap();
         a.state.recording_since.get_or_insert(50); // this agent's record covers the claim's refHeight (99)
@@ -2752,11 +2586,11 @@ mod tests {
         assert!(ch.lock().unwrap().sent.is_empty()); // required 2: one in hand
 
         // another member's co-signature arrives (and a forged one, dropped), between polls
-        a.on_frame(
+        deliver(
+            &mut a,
             &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
-            "peer-a",
         );
-        a.on_frame(&signed_frame(other, 99, 4_000_001, &default_hash()), "peer-b");
+        deliver(&mut a, &signed_frame(other, 99, 4_000_001, &default_hash()));
         assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
         a.tick(100).await;
         assert!(ch.lock().unwrap().sent.is_empty()); // waits a block for the spare
@@ -2858,7 +2692,10 @@ mod tests {
         let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
         a.state.record_signed(99, 4_000_000);
         a.tick(100).await;
-        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()), "p");
+        deliver(
+            &mut a,
+            &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
+        );
         let old = a.state.claims[&intent()].own_cosig.clone().unwrap();
         assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
         let new_hash = cosig::display_of_internal(&[0x55; 32]);
@@ -2872,45 +2709,13 @@ mod tests {
         assert_eq!(c.cosigs.len(), 1, "the other member's old co-signature is gone");
         assert_eq!(a.take_outbox().len(), 1, "the new co-signature is published at once");
         // the other member's old frame does not verify any more; its re-signed one does
-        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()), "p");
-        assert_eq!(a.state.claims[&intent()].cosigs.len(), 1);
-        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &new_hash), "p");
-        assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
-    }
-
-    /// Review H-3: a flood from one peer -- frames that pass every cheap check, with bad signatures -- does not
-    /// starve another peer's valid frame.
-    #[tokio::test]
-    async fn a_flood_from_one_peer_cannot_starve_another() {
-        let ch = chain(2);
-        let m = mock(ch.clone());
-        let dir = tempfile::tempdir().unwrap();
-        let (leader, other) = leader_and_other();
-        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
-        a.state.record_price(99, 4_000_000);
-        a.tick(100).await;
-        let now = Instant::now();
-        let mut flood = 0;
-        for i in 0..5_000u32 {
-            // a member's seq, the right R, a non-claimable price, a signature by a key that is not the member's
-            a.on_frame_at(&signed_frame(other, 99, 4_000_000 + i, &default_hash()), "evil", now);
-            flood += 1;
-        }
-        assert_eq!(flood, 5_000);
-        assert_eq!(a.state.claims[&intent()].cosigs.len(), 1);
-        a.on_frame_at(
+        deliver(
+            &mut a,
             &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
-            "good",
-            now,
         );
-        assert_eq!(
-            a.state.claims[&intent()].cosigs.len(),
-            2,
-            "the honest peer's frame got through"
-        );
-        // and the flooding peer itself is limited: its bucket is empty now
-        assert!(!a.filter.peer_ok("evil", now));
-        assert!(a.filter.peer_ok("good", now));
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 1);
+        deliver(&mut a, &signed_frame(other, 10 + other as u8, 4_000_000, &new_hash));
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
     }
 
     /// Review M-1: a transient refusal (a locked wallet) is retried; a sticky one blocks.
@@ -3057,5 +2862,171 @@ mod tests {
         assert!(a.state.claims[&intent()].alerted.contains("cancel-send-cap"));
         let c = &a.state.claims[&intent()];
         assert!(c.next_rebuild > 0);
+    }
+
+    /// Re-review N-1: a cancel the node keeps refusing (vault_send) counts every attempt: the cap is reached after
+    /// max_sends attempts, spaced by the backoff, and vault_refee is called fewer times than that.
+    #[tokio::test]
+    async fn persistent_send_failures_hit_the_cap() {
+        let ch = chain(1);
+        ch.lock().unwrap().send_refused = true;
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, _) = leader_and_other();
+        let mut cfg = agent_cfg();
+        cfg.refee_after_blocks = 1;
+        cfg.max_sends = 3;
+        cfg.spares = 0;
+        let mut a = CancelAgent::new(cfg, &m.config(None, None, None), leader, dir.path().join("s.json")).unwrap();
+        a.state.recording_since = Some(50);
+        a.state.record_price(99, 4_000_000);
+        for h in 100..110 {
+            a.tick(h).await;
+        }
+        let builds = ch.lock().unwrap().sent.len();
+        let refees = m
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "vault_refee")
+            .count();
+        let c = &a.state.claims[&intent()];
+        assert_eq!(c.sends, 3);
+        assert_eq!(builds, 3, "one build per counted attempt, none beyond the cap");
+        assert!(refees <= 3);
+        assert!(c.alerted.contains("cancel-send-cap"));
+    }
+
+    /// Re-review N-2: an attestation of this seq at R in the claim's bundle is used only when its signature
+    /// verifies under this seq's key; a forged one (a thief's, claiming the vault was claimable) is ignored and the
+    /// claim is judged on the real record.
+    #[tokio::test]
+    async fn a_forged_bundle_entry_is_ignored() {
+        let ch = chain(1);
+        let (leader, _) = leader_and_other();
+        let bh = cosig::internal_from_display(&default_hash()).unwrap();
+        let att = |key: u8, price: u32| {
+            let msg = cosig::attest_message(leader, price, 99, &bh);
+            let sig65 = testkit::sign(&testkit::key(key), &msg);
+            let a = crate::framing::Attestation {
+                seq: leader,
+                price_micro_usd: price,
+                cited_height: 99,
+                sig: sig65[1..].try_into().unwrap(),
+            };
+            json!({"seq": leader, "priceMicroUsd": price, "citedHeight": 99, "hex": a.to_hex()})
+        };
+        // forged: signed by another key at a claimable price
+        ch.lock().unwrap().bundle = json!({"attestations": [att(99, 1_600_000)]});
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.record_price(99, 4_000_000);
+        a.tick(100).await;
+        let c = &a.state.claims[&intent()];
+        assert_eq!(c.bundle_price, None);
+        assert_eq!((c.verdict, c.judged_price), (Verdict::Wrong, Some(4_000_000)));
+        // with no history either, the forged entry still does not decide: unjudged (alerted)
+        let ch2 = chain(1);
+        ch2.lock().unwrap().bundle = json!({"attestations": [att(99, 1_600_000)]});
+        let m2 = mock(ch2.clone());
+        let mut cfg = agent_cfg();
+        cfg.auto_cosign = false; // no guard either
+        let mut b = CancelAgent::new(cfg, &m2.config(None, None, None), leader, dir.path().join("s2.json")).unwrap();
+        b.state.recording_since = Some(50);
+        b.tick(100).await;
+        assert_eq!(b.state.claims[&intent()].verdict, Verdict::Unjudged);
+        assert!(b.state.claims[&intent()].alerted.contains("unjudged"));
+        // a genuine entry of this key is the record: here it says claimable, so the claim is honest by its own word
+        let ch3 = chain(1);
+        ch3.lock().unwrap().bundle = json!({"attestations": [att(10 + leader as u8, 1_600_000)]});
+        let m3 = mock(ch3.clone());
+        let mut c3 = new_agent(&m3, leader, &dir.path().join("s3.json"));
+        c3.state.record_price(99, 4_000_000);
+        c3.tick(100).await;
+        let c = &c3.state.claims[&intent()];
+        assert_eq!((c.bundle_price, c.verdict), (Some(1_600_000), Verdict::Honest));
+        assert!(c.own_cosig.is_none());
+    }
+
+    /// Re-review N-5: with auto_cosign = false the member's own co-signature is never made, stored or carried, even
+    /// when the guard holds a price or a frame of its own seq arrives.
+    #[tokio::test]
+    async fn auto_cosign_off_never_carries_its_own_cosignature() {
+        let ch = chain(1);
+        let (leader, other) = leader_and_other();
+        ch.lock().unwrap().guard.insert(leader, 4_000_000);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = agent_cfg();
+        cfg.auto_cosign = false;
+        cfg.spares = 0;
+        let mut a = CancelAgent::new(cfg, &m.config(None, None, None), leader, dir.path().join("s.json")).unwrap();
+        a.state.recording_since = Some(50);
+        a.tick(100).await; // no history: unjudged, and the guard is not asked
+        assert_eq!(ch.lock().unwrap().sign_calls, 0);
+        deliver(
+            &mut a,
+            &signed_frame(leader, 10 + leader as u8, 4_000_000, &default_hash()),
+        );
+        assert!(!a.state.claims[&intent()].cosigs.contains_key(&leader));
+        deliver(
+            &mut a,
+            &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
+        );
+        a.tick(101).await;
+        let sent = ch.lock().unwrap().sent.clone();
+        assert_eq!(sent.len(), 1, "it still drives on another member's co-signature");
+        let own = Entry::decode_hex(&sent[0][0]).unwrap();
+        assert_eq!(sent[0].len(), 1);
+        let msg = cosig::message(
+            &[0x75; 32],
+            &cosig::internal_from_display(&"aa".repeat(32)).unwrap(),
+            0,
+            99,
+            own.price,
+            &cosig::internal_from_display(&default_hash()).unwrap(),
+        );
+        assert_eq!(
+            cosig::recover(&msg, &own.sig),
+            Some(testkit::pubkey(&testkit::key(10 + other as u8)))
+        );
+    }
+
+    /// Re-review N-6: the record starts only once the node is out of IBD and at the tip.
+    #[tokio::test]
+    async fn the_record_starts_at_the_tip_only() {
+        let ch = chain(1);
+        ch.lock().unwrap().ibd = true;
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = CancelAgent::new(agent_cfg(), &m.config(None, None, None), 0, dir.path().join("s.json")).unwrap();
+        a.tick(100).await;
+        assert_eq!(a.state.recording_since, None);
+        ch.lock().unwrap().ibd = false;
+        a.tick(101).await;
+        assert_eq!(a.state.recording_since, Some(101));
+    }
+
+    /// Re-review N-1 for a first send: Watching respects the cap and the backoff too.
+    #[test]
+    fn decide_backs_off_a_failed_first_send() {
+        let m = members(&[0, 1]);
+        let mut c = claim(1);
+        c.cosigs.insert(1, "11".into());
+        c.enough_since = Some(100);
+        c.sends = 1;
+        c.next_rebuild = 104;
+        assert_eq!(decide(&c, &ctx(102, 0, &m)), Decision::Idle("rebuild backoff"));
+        assert_eq!(decide(&c, &ctx(104, 0, &m)), Decision::Build(vec![1]));
+        c.sends = 3;
+        assert_eq!(decide(&c, &ctx(104, 0, &m)), Decision::SendCap);
+        // own entries are not carried when the member does not co-sign
+        c.sends = 0;
+        c.next_rebuild = 0;
+        let mut x = ctx(104, 0, &m);
+        x.own = false;
+        assert_eq!(decide(&c, &x), Decision::Idle("short of co-signatures"));
     }
 }

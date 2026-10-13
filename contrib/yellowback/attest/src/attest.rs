@@ -432,12 +432,22 @@ impl Attestor {
             if self.cfg.cancel.enabled {
                 let (a, c) = transport::open_with_cancel(&self.cfg.transport, &network).await?;
                 let (tx, rx) = transport::spawn_pump(c);
+                // the receive side runs on its own task (re-review N-4): sampling and verification never wait for a poll
+                let (ctx_tx, ctx_rx) = tokio::sync::watch::channel(std::sync::Arc::new(crate::gossip::Ctx::default()));
+                let (vtx, vrx) = tokio::sync::mpsc::channel(4096);
+                crate::gossip::spawn(
+                    rx,
+                    ctx_rx,
+                    vtx,
+                    self.cfg.cancel.gossip_burst,
+                    self.cfg.cancel.gossip_refill_seconds,
+                );
                 let path =
                     self.cfg.cancel.state_file.clone().unwrap_or_else(|| {
                         crate::cancel::CancelAgent::default_path(&self.cfg.node, &network, self.seq)
                     });
                 let agent = crate::cancel::CancelAgent::new(self.cfg.cancel.clone(), &self.cfg.node, self.seq, path)?;
-                (a, Some((agent, tx, rx)))
+                (a, Some((agent, tx, ctx_tx, vrx)))
             } else {
                 (transport::open(&self.cfg.transport, &network).await?, None)
             };
@@ -456,14 +466,24 @@ impl Attestor {
                 Ok((_, h)) if h >= 0 => {
                     let tick = self.tick(h as u32, transport.as_mut()).await;
                     self.heartbeat(h as u32).await;
-                    if let Some((agent, tx, _)) = cancel.as_mut() {
+                    if let Some((agent, tx, ctx_tx, vrx)) = cancel.as_mut() {
                         if let Some(p) = self.last_aggregate {
                             agent.state.record_price(h as u32, p);
                         }
                         if let Tick::Published(att) = &tick {
                             agent.state.record_signed(att.cited_height, att.price_micro_usd as i64);
                         }
+                        loop {
+                            match vrx.try_recv() {
+                                Ok(v) => agent.accept_verified(v),
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => anyhow::bail!(
+                                    "cancel topic: the gossip tasks are gone; exiting so the agent is restarted"
+                                ),
+                            }
+                        }
                         agent.tick(h as u32).await;
+                        let _ = ctx_tx.send(std::sync::Arc::new(agent.gossip_ctx()));
                         for frame in agent.take_outbox() {
                             if tx.send(frame).await.is_err() {
                                 // review L-5: never run on without the topic; the service manager restarts us
@@ -477,15 +497,15 @@ impl Attestor {
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
                 Err(e) => tracing::error!("yed_getinfo failed: {e}; retrying"),
             }
-            // between polls the cancel topic is drained continuously (review H-3): a frame is checked as it arrives
+            // between polls the verified co-signatures are taken as they come (the verifier task drains the topic)
             let deadline = tokio::time::Instant::now() + poll;
             loop {
                 match cancel.as_mut() {
-                    Some((agent, _, rx)) => tokio::select! {
+                    Some((agent, _, _, vrx)) => tokio::select! {
                         _ = tokio::time::sleep_until(deadline) => break,
-                        got = rx.recv() => match got {
-                            Some((bytes, peer)) => agent.on_frame(&bytes, &peer),
-                            None => anyhow::bail!("cancel topic: the transport task is gone; exiting so the agent is restarted"),
+                        got = vrx.recv() => match got {
+                            Some(v) => agent.accept_verified(v),
+                            None => anyhow::bail!("cancel topic: the gossip tasks are gone; exiting so the agent is restarted"),
                         },
                         _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
                     },

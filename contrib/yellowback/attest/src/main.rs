@@ -14,6 +14,7 @@ mod config;
 mod cosig;
 mod fixtures;
 mod framing;
+mod gossip;
 mod http;
 mod price;
 mod rpc;

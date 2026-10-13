@@ -75,6 +75,42 @@ pub fn recover(msg: &[u8; 32], sig: &[u8; SIG_SIZE]) -> Option<[u8; 33]> {
     point.as_bytes().try_into().ok()
 }
 
+/// `attest.cpp` `AttestMessage`: SHA256("YBATTEST1" ‖ seq LE16 ‖ price LE32 ‖ citedHeight LE32 ‖ blockHash), hashed
+/// once.
+pub fn attest_message(seq: u16, price: u32, cited_height: u32, block_hash: &[u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(9 + 2 + 4 + 4 + 32);
+    buf.extend_from_slice(b"YBATTEST1");
+    buf.extend_from_slice(&seq.to_le_bytes());
+    buf.extend_from_slice(&price.to_le_bytes());
+    buf.extend_from_slice(&cited_height.to_le_bytes());
+    buf.extend_from_slice(block_hash);
+    Sha256::digest(&buf).into()
+}
+
+/// `VerifyCompactSig` for a 74-byte attestation: the 64-byte compact signature (r ‖ s), low S required (a high S is
+/// a rejection, not a repair, R17), verified under the compressed `key` over [`attest_message`].
+pub fn verify_attestation(
+    key: &[u8; 33],
+    seq: u16,
+    price: u32,
+    cited_height: u32,
+    block_hash: &[u8; 32],
+    sig: &[u8; 64],
+) -> bool {
+    use k256::ecdsa::signature::hazmat::PrehashVerifier;
+    let Ok(vk) = VerifyingKey::from_sec1_bytes(key) else {
+        return false;
+    };
+    let Ok(s) = Signature::from_slice(sig) else {
+        return false;
+    };
+    if s.normalize_s().is_some() {
+        return false;
+    }
+    vk.verify_prehash(&attest_message(seq, price, cited_height, block_hash), &s)
+        .is_ok()
+}
+
 /// One co-signature entry: the stated price and the member's signature.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
@@ -296,6 +332,40 @@ mod tests {
         hs[1..].copy_from_slice(&high.to_bytes());
         hs[0] = if sig[0] == 31 { 32 } else { 31 };
         assert_eq!(recover(&msg, &hs), None);
+    }
+
+    #[test]
+    fn attestations_verify_as_the_node_does() {
+        let k = key(3);
+        let bh = [0x44; 32];
+        let msg = attest_message(5, 4_000_000, 120, &bh);
+        let mut pre = b"YBATTEST1".to_vec();
+        pre.extend_from_slice(&5u16.to_le_bytes());
+        pre.extend_from_slice(&4_000_000u32.to_le_bytes());
+        pre.extend_from_slice(&120u32.to_le_bytes());
+        pre.extend_from_slice(&bh);
+        assert_eq!(pre.len(), 51);
+        assert_eq!(msg, <[u8; 32]>::from(Sha256::digest(&pre)));
+        let sig65 = sign(&k, &msg);
+        let sig: [u8; 64] = sig65[1..].try_into().unwrap();
+        let pk = pubkey(&k);
+        assert!(verify_attestation(&pk, 5, 4_000_000, 120, &bh, &sig));
+        assert!(!verify_attestation(&pk, 5, 1_600_000, 120, &bh, &sig)); // another price
+        assert!(!verify_attestation(&pk, 6, 4_000_000, 120, &bh, &sig)); // another seq
+        assert!(!verify_attestation(&pk, 5, 4_000_000, 121, &bh, &sig)); // another height
+        assert!(!verify_attestation(&pubkey(&key(4)), 5, 4_000_000, 120, &bh, &sig)); // another key
+                                                                                      // high S is refused
+        let s = Signature::from_slice(&sig).unwrap();
+        let (r, low) = s.split_scalars();
+        let high = Signature::from_scalars(r, -*low).unwrap();
+        assert!(!verify_attestation(
+            &pk,
+            5,
+            4_000_000,
+            120,
+            &bh,
+            &high.to_bytes().into()
+        ));
     }
 
     #[test]
