@@ -107,6 +107,8 @@ void SetCommon(Params& p)
     p.seatMarginBps       = 500;    // SEAT_MARGIN: a seated attestor's hysteresis
     p.evictMarginBps      = 500;    // EVICT_MARGIN: a live member is evicted only by a bond above x1.05 its seat weight
     p.attestorSeats       = 15;     // the attestor set is OPEN with 15 seats (the primitive's maximum)
+    p.attestorCancelThreshold = 1;  // 03/I-3: the adopted set's cancelThreshold (one watcher can cancel; CAN-1 makes that a delay only)
+    p.attestorUnlockThreshold = 1;  // 03/I-3: the adopted set's unlockThreshold
     p.attestorLivenessMin = 1152;   // seats review B3: the adopted set's livenessWindow is at least one day
     p.dormancyBlocks      = 16128;
     p.dormancyMinBundles  = 20;
@@ -133,7 +135,7 @@ Params::Params()
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
       bondMinFloorZat(0), bondMinCapZat(0), bondShareBps(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
-      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0), attestorLivenessMin(0),
+      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0), attestorCancelThreshold(0), attestorUnlockThreshold(0), attestorLivenessMin(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {
