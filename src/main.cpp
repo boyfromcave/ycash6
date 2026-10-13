@@ -1870,31 +1870,35 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetRejectCode());
 }
 
-// AcceptToMemoryPool policy (audit 07/F-1): does a failed script check of a transaction spending a V or I fail
-// for a reason that depends on the set state at this node's tip, which the relaying peer's tip need not share?
-// ContextualCheckInputs reports the ScriptError only in its reject reason, "...-script-verify-flag... (<error>)"
-// formatted with ScriptErrorString, so the error is matched there. Two kinds qualify:
-//   - SCRIPT_ERR_SETSIG / SCRIPT_ERR_SETSIG_COUNT, raised only by OP_CHECKSETSIG / OP_CHECKSETDORMANT;
-//   - SCRIPT_ERR_VERIFY when an input spends a template with selector 3 (OWNER-RELEASED): the templates' only
-//     OP_VERIFY follows OP_CHECKSETDORMANT, which pushes false while the set is not released at this tip.
-// Every other failure (an owner's PQ signature, a sibling input's signature, a malformed spend) is not state-
-// dependent and keeps its stock score. No consensus effect: the score is this node's view of its peer.
-bool IsVaultSetStateFailure(const CTransaction& tx, const CCoinsViewCache& view, const std::string& strRejectReason)
+// AcceptToMemoryPool policy (audit 07/F-1 and its review): the one template input (V or I) of a transaction,
+// if any (a second is bad-txns-vault-multi, refused before the script checks).
+std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const CCoinsViewCache& view)
 {
-    auto names = [&strRejectReason](ScriptError err) {
-        return strRejectReason.find("(" + std::string(ScriptErrorString(err)) + ")") != std::string::npos;
-    };
-    if (names(SCRIPT_ERR_SETSIG) || names(SCRIPT_ERR_SETSIG_COUNT))
-        return true;
-    if (!names(SCRIPT_ERR_VERIFY))
-        return false;
-    for (const CTxIn& in : tx.vin) {
-        const CCoins* coins = view.AccessCoins(in.prevout.hash);
-        if (!coins || !coins->IsAvailable(in.prevout.n))
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
+        if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n))
             continue;
-        auto spend = vault::ParseTemplateSpend(coins->vout[in.prevout.n].scriptPubKey, in.scriptSig);
-        if (spend && spend->selector == vault::SEL_RELEASED)
-            return true;
+        const CScript& spk = coins->vout[tx.vin[i].prevout.n].scriptPubKey;
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        if (vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
+            return i;
+    }
+    return std::nullopt;
+}
+
+// Does the template input's own script error depend on the set state at this node's tip, which the
+// relaying peer's tip need not share? SCRIPT_ERR_SETSIG (OP_CHECKSETSIG: set membership, threshold and
+// dormancy move with the tip), and SCRIPT_ERR_VERIFY with selector 3 (OWNER-RELEASED: the templates'
+// only OP_VERIFY follows OP_CHECKSETDORMANT, which pushes false while the set is not released). Not
+// SCRIPT_ERR_SETSIG_COUNT: a template runs exactly one OP_CHECKSETSIG, so it never depends on state.
+bool IsVaultSetStateScriptError(const CScript& templateScriptSig, ScriptError err)
+{
+    if (err == SCRIPT_ERR_SETSIG)
+        return true;
+    if (err == SCRIPT_ERR_VERIFY) {
+        auto selector = vault::ParseSelector(templateScriptSig);
+        return selector && *selector == vault::SEL_RELEASED;
     }
     return false;
 }
@@ -2161,31 +2165,25 @@ bool AcceptToMemoryPool(
         PrecomputedTransactionData txdata(tx, allPrevOutputs);
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
-        // A template input's script reads the set state at this node's tip, which the relaying
-        // peer's tip need not share: a failure that depends on it is no proof of misbehaviour (DoS 0);
-        // every other failure keeps its stock score (IsVaultSetStateFailure, audit 07/F-1).
-        const bool fVaultTemplateInput = vaultFlags && vault::HasTemplateInput(tx, view);
-        CValidationState vaultScriptState;
-        CValidationState& scriptState = fVaultTemplateInput ? vaultScriptState : state;
-        auto forwardVaultScriptState = [&]() {
-            const std::string strReason = vaultScriptState.GetRejectReason();
-            if (vaultScriptState.IsError()) {
-                state.Error(strReason);
-                return;
+        // A transaction spending a V or I has that template input's script checked alone first, with the
+        // same flags and set state. A failure of it that depends on the set state at this node's tip, which
+        // the relaying peer's tip need not share, is no proof of misbehaviour (DoS 0). Every other outcome
+        // goes on to the stock checks below, which score every other failure as stock: the error of the
+        // first failing input of the whole transaction would not say which input failed (audit 07/F-1 and
+        // its review).
+        if (vaultFlags) {
+            if (auto nTemplate = FindVaultTemplateInput(tx, view)) {
+                const CCoins* coins = view.AccessCoins(tx.vin[*nTemplate].prevout.hash);
+                CScriptCheck check(*coins, tx, *nTemplate, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, consensusBranchId, &txdata);
+                check.SetVault(vaultSnapshot ? vaultSnapshot : vault::TipSnapshot(), GetSpendHeight(view));
+                if (!check() && IsVaultSetStateScriptError(tx.vin[*nTemplate].scriptSig, check.GetScriptError()))
+                    return state.DoS(0, error("AcceptToMemoryPool: vault: %s input %u: %s", hash.ToString(), *nTemplate,
+                                              ScriptErrorString(check.GetScriptError())), REJECT_INVALID,
+                                     strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(check.GetScriptError())));
             }
-            int nStockDoS = 0;
-            vaultScriptState.IsInvalid(nStockDoS);
-            if (IsVaultSetStateFailure(tx, view, strReason))
-                nStockDoS = 0;
-            state.DoS(nStockDoS, false,
-                      vaultScriptState.GetRejectCode(), strReason,
-                      vaultScriptState.CorruptionPossible() ? BodyCorruption::Possible : BodyCorruption::HeaderOnly,
-                      vaultScriptState.GetDebugMessage());
-        };
-        if (!ContextualCheckInputs(tx, scriptState, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        }
+        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
-            if (fVaultTemplateInput)
-                forwardVaultScriptState();
             return false;
         }
 
@@ -2198,10 +2196,8 @@ bool AcceptToMemoryPool(
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!ContextualCheckInputs(tx, scriptState, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
-            if (fVaultTemplateInput)
-                forwardVaultScriptState();
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
