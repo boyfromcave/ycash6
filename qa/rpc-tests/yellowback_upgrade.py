@@ -304,8 +304,23 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
 
         print('a wrong-price claim cancelled by the attestor set: the same position ACTIVE, the burn refunded (CAN-1)')
         _res, claim_c = self.two_step(n2, 'yed_claim', mint_c, '')
+        # yed_buildcancel on the claim still in the mempool (review of 03/H-1): it reads the holder and the burn from the
+        # claim's inputs, so it builds only when every input is confirmed (the index sees confirmed tokens only) and
+        # must then name exactly the holder and burn consensus records at the claim; otherwise it refuses
+        claim_raw = n2.getrawtransaction(claim_c, 1)
+        pool = set(n2.getrawmempool())
+        unconfirmed = [i for i in claim_raw['vin'] if i['txid'] in pool]
+        early = None
+        if unconfirmed:
+            assert_raises_rpc('spends an unconfirmed output', n2.yed_buildcancel, '%s:0' % claim_c)
+        else:
+            early = n2.yed_buildcancel('%s:0' % claim_c)
+            assert_equal(early['intentconfirmed'], False)
         self.mine()
         claiming = n0.yed_getvault(mint_c)
+        if early is not None:
+            assert_equal((early['refund']['script'], early['refund']['cents']), (claiming['refundHolder'], claiming['burnedCents']))
+            assert_equal(n2.yed_buildcancel('%s:0' % claim_c)['hex'], early['hex'])     # sign once across the confirmation
         assert_equal(claiming['status'], 'CLAIMING')
         before = n0.yed_getstats()
         # CAN-1 (audit 03/H-1): the primitive's builder refuses a YED intent; yed_buildcancel adds the refund to the
