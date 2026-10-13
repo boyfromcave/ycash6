@@ -17,11 +17,11 @@ primitive's set `attestorSetId`) is marked **(P4-b)**. In-term claims
 and the vault record remembers it; RED-4 decides a claim at every height; CLAIMING collateral stays in the
 system ratio until release) are marked **(IT-n)**.
 
-The golden vector `yellowback_golden.json` (440 synthetic heights, 457 block entries, regtest
+The golden vector `yellowback_golden.json` (440 synthetic heights, 460 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false, pqFalconHeight 400 (not hashed)}`) pins the result of all of these choices: state hash
-`0789e469827c35a43dc708b8059980b54b9f329e02bc54762553bc2880c81d05`. Seventeen entries are flagged
+`02f3ce11e0394e1bb4fea21ba6e177ddf761d537960447821fda520b1bb06a17`. Twenty entries are flagged
 `"invalid"`, one per consensus verdict the vector covers (audit 03/T-1; `golden_rejected` in
 `test_yellowback_model.py` lists them): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
