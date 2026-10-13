@@ -10,16 +10,20 @@ the shipped Rust agent against real nodes and no human act.
 Four ``yellowback-attest attest`` processes, one per attestor-set member (seqs 0-3, all four member keys in node 6's
 wallet), run with ``[cancel]`` on (the default): the watcher, the co-signature gossip on the ``dir`` bus's
 ``cancel/`` topic, and the collector. Their honest price (a mock file each) is $4.00. The pools are captured: they
-quote $1.60, and the claim's bundle is signed at $1.60 in Python with the members' keys (the stand-in for a captured
-attestation quantile together with a pool majority, upgrade plan §11's collusion row), so a class-A vault minted at
-$4.00 (300 %) reads 120 %, under theta, and the claim is consensus-valid at a false price.
+quote $1.60, and the claim's bundle is signed at $1.60 in Python with the members' keys citing refHeight - 1 (the
+stand-in for a captured attestation quantile together with a pool majority, upgrade plan §11's collusion row; not at
+the refHeight itself, where the agents' own record would rightly forbid them a contradicting statement, review M-2),
+so a class-A vault minted at $4.00 (300 %) reads 120 %, under theta, and the claim is consensus-valid at a false
+price. The agents wait one block for spares (spares 4), which opens a window for a reorg.
 
 What it asserts, in order:
 
   1. A wrong-price claim on vault V1 is cancelled with no RPC from this script but mining: the agents judge it,
      co-sign it (``yed_signcancelcosign``), gossip the co-signatures, one of them drives (``yed_buildcancel``,
      ``set_signcancel``, ``vault_send``) and the cancel confirms before CLAIM_DELAY. ``cancelsRequired`` was 1;
-     the cancel's TxLog row counts at least 1 co-signer; the vault is ACTIVE again with ``cancelCount`` 1.
+     the cancel's TxLog row counts at least 1 co-signer; the vault is ACTIVE again with ``cancelCount`` 1. Before
+     the cancel is sent, the claim's block is invalidated on every node and the claim re-mined (review H-1): no
+     agent closes the claim while it is out of the chain, and the agents still cancel it.
   2. The same position is claimed again inside CANCEL_QUIET: ``cancelsRequired`` is 2, and the agents cancel it
      again, the TxLog row counting at least 2 distinct co-signers; ``cancelCount`` 2, ``cancelsRequired`` 3. The
      rota's leader for this claim is stopped before the claim confirms: the next member takes over after
@@ -48,7 +52,9 @@ from test_framework.yellowback_util import (
     ATTESTOR_A, CANCEL_QUIET, CANCEL_SIGNERS_MAX, CLAIM_DELAY, POOLS, REF_LAG, STOCK,
     YellowbackTestFramework, set_quote, usd_to_micro, wait_yed_healthy, write_private,
 )
-from test_framework.yellowback_attest import ArmedModeMixin, hot_wif_for, register_and_arm
+from test_framework.yellowback_attest import (
+    ArmedModeMixin, hot_wif_for, offline_bundle_hex, outpoint_selector, register_and_arm, wallet_claim,
+)
 from yellowback_attest_agent import find_agent
 
 HONEST = Decimal('4.00')        # every agent's price: a class-A vault minted here is at 300 %
@@ -80,7 +86,7 @@ path = "%(bus)s"
 auto_cosign = true
 margin_bps = 500
 drive = true
-spares = 1
+spares = 4
 spare_wait_blocks = 1
 takeover_blocks = 2
 refee_after_blocks = 3
@@ -225,8 +231,49 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
                 last = time.time()
             time.sleep(0.5)
 
+    def captured_claim(self, claimant, position):
+        """The claim, its bundle signed at the captured price by the members' keys, citing refHeight - 1."""
+        r = claimant.yed_getinfo()['height']
+        bundle = offline_bundle_hex(self, claimant, r, outpoint_selector(position, 0), CAPTURED, cited=r - 1)
+        return wallet_claim(self, claimant, position, bundle_hex=bundle)
+
+    def claim_state(self, seq, intent):
+        state = self.agent_states()[seq]
+        return None if state is None else state['claims'].get(intent)
+
+    def reorg_claim_block(self, claim_txid, at):
+        """Review H-1: once every agent co-signed and before the cancel is sent, invalidate the claim's block on every
+        node, let the agents see the claim leave CLAIMING, then re-mine it."""
+        intent = '%s:0' % claim_txid
+        deadline = time.time() + 60
+        while not all((self.claim_state(s, intent) or {}).get('own_cosig') for s in range(MEMBERS)):
+            assert time.time() < deadline, 'the agents did not co-sign the claim; logs in %s' % self.workdir
+            self.assert_agents_alive('reorg: co-signing')
+            time.sleep(0.5)
+        assert self.nodes[ATTESTOR_A].gettxout(claim_txid, 0, True) is not None, 'a cancel was sent before the reorg'
+        block = self.nodes[2].getblockhash(at)
+        for n in self.nodes:
+            n.invalidateblock(block)
+        for n in self.nodes:
+            deadline = time.time() + 30
+            while n.getblockcount() != at - 1:
+                assert time.time() < deadline, 'a node did not roll back'
+                time.sleep(0.2)
+        time.sleep(4 * POLL_SECONDS)                    # the agents see the claim leave CLAIMING
+        for s in range(MEMBERS):
+            c = self.claim_state(s, intent)
+            assert c is not None and not (isinstance(c['phase'], dict) and 'Closed' in c['phase']), \
+                'agent %d closed a claim whose block left the chain: %r' % (s, c and c['phase'])
+        self.mine(POOLS[0])                             # the claim (back in the mempools) is mined again
+        assert_equal(self.nodes[2].getblockcount(), at)
+        assert self.nodes[2].getblockhash(at) != block
+        v = self.nodes[2].getrawtransaction(claim_txid, 1, self.nodes[2].getblockhash(at))
+        assert_equal(v['txid'], claim_txid)
+        print('   reorg: block %d invalidated and the claim re-mined in %s; no agent closed it'
+              % (at, self.nodes[2].getblockhash(at)[:16]))
+
     def claim_and_confirm(self, claimant, position, before_mining=None):
-        claimed = self.claim(claimant, position)
+        claimed = self.captured_claim(claimant, position)
         if before_mining is not None:
             before_mining(claimed)
         self.sync_all()
@@ -308,6 +355,7 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
         before = user.yed_getvault(v1)
         assert_equal((before['cancelCount'], before['cancelsRequired']), (0, 1))
         claimed, at = self.claim_and_confirm(claimant, v1)
+        self.reorg_claim_block(claimed['txid'], at)
         cancel1 = self.wait_cancel(claimed['txid'], at, 'round 1')
         self.sync_all()
         info = nodes[2].yed_gettxinfo(cancel1)
