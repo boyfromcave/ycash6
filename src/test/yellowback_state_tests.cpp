@@ -2764,6 +2764,26 @@ BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
     }
 }
 
+// Rule: P4-b
+// Rule: I-3
+BOOST_AUTO_TEST_CASE(attestor_set_adopted_only_with_threshold_one)
+{
+    // 03/I-3: cancelThreshold and unlockThreshold are pinned at ATTESTOR_CANCEL/UNLOCK_THRESHOLD (1)
+    BOOST_CHECK_EQUAL(MainParams().attestorCancelThreshold, 1);
+    BOOST_CHECK_EQUAL(MainParams().attestorUnlockThreshold, 1);
+    for (int variant = 0; variant < 3; variant++) {
+        Fixture f;
+        vault::Act a;
+        BOOST_REQUIRE(!vault::DecodeAct(f.setCreate.vout[0].scriptPubKey, a));
+        if (variant == 0) a.create.cancelThreshold = 2;
+        if (variant == 1) a.create.unlockThreshold = 2;
+        f.setCreate.vout[0].scriptPubKey = vault::EncodeAct(a);
+        f.P.attestorSetId = CTransaction(f.setCreate).GetHash();
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.setCreate });
+        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 2);
+    }
+}
+
 // Rule: seat ranking and eviction (owner 2026-10-11): EvictionVictim over primitive fields
 BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
 {
@@ -4590,12 +4610,15 @@ struct CancelFixture
         return YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight);
     }
     CTxOut Relock() const { return CTxOut(each, VaultScript()); }
+    /** CAN-1: the holder the claim's burn came from -- the mint's token script, P2PKH(owner) -- and the refund to it. */
+    CScript Holder() const { return GetScriptForDestination(f.ownerKey.GetPubKey().GetID()); }
+    CTxOut Refund() const { return CTxOut(TOKEN_VALUE, Holder()); }
     CMutableTransaction CancelTx(std::optional<std::vector<CTxOut>> outs = std::nullopt, CScript scriptSig = CScript() << valtype(65, 0) << OP_2)
     {
         CMutableTransaction m;
         m.vin.push_back(CTxIn(Intent(), scriptSig, 0xFFFFFFFF));
         m.vin.push_back(CTxIn(f.FakeInput()));                 // the canceller's fee input
-        m.vout = outs.value_or(std::vector<CTxOut>{ Relock() });
+        m.vout = outs.value_or(std::vector<CTxOut>{ Relock(), Refund() });
         return m;
     }
     /** Mine `tx` at tip + 1 (pools at $0.009); returns the verdict that refused it, "" when it was applied. */
@@ -4644,10 +4667,120 @@ BOOST_AUTO_TEST_CASE(intent_cancel_recreates_the_vault_at_vout0)
     BOOST_CHECK_EQUAL(t.activeVaults, c.beforeClaim.activeVaults);                        // +1: the vault is ACTIVE again
     BOOST_CHECK_EQUAL(t.claimedVaults, c.beforeClaim.claimedVaults);                      // a cancel never counts as a claim
     BOOST_CHECK_EQUAL(t.collateralZat, c.afterClaim.collateralZat + c.each - claiming.collateralZat);
-    // U-24 / 03/M-1: the cancel does not credit supply -- the claim's burn is not refunded, so from here the
-    // re-created vault's mintedCents is not in supplyCents (sum of ACTIVE mintedCents = supplyCents is no invariant)
-    BOOST_CHECK_EQUAL(t.supplyCents, c.afterClaim.supplyCents);
+    // CAN-1 (03/H-1; flips the 03/T-2 assertion "supply unchanged"): the claim's burn is re-issued to the holder it came
+    // from at cancel:1 and supply is back where it was before the claim (03/M-1 gone)
+    const std::optional<TokenRecord> tok = c.f.Token(txid, 1);
+    BOOST_REQUIRE(tok.has_value());
+    BOOST_CHECK_EQUAL(tok->cents, claiming.burnedCents);
+    BOOST_CHECK(tok->scriptPubKey == c.Holder());
+    BOOST_CHECK_EQUAL(tok->nValue, TOKEN_VALUE);
+    BOOST_CHECK_EQUAL(t.supplyCents, c.beforeClaim.supplyCents);
+    BOOST_CHECK_EQUAL(t.supplyCents, c.afterClaim.supplyCents + 10000);
+    BOOST_REQUIRE_EQUAL(log.assigned.size(), 1u);
+    BOOST_CHECK(log.assigned[0].outpoint == COutPoint(txid, 1));
+    BOOST_CHECK_EQUAL(log.assigned[0].cents, 10000);
+    BOOST_CHECK_EQUAL(log.yedOut, 10000);
     BOOST_CHECK_EQUAL(log.burned, 0);
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_claim_records_the_refund_holder)
+{
+    CancelFixture c;
+    const IntentRecord ir = State(c.f.view).GetIntent(c.Intent()).value();
+    BOOST_CHECK(ir.Role() == IntentRole::CLAIMANT);
+    BOOST_CHECK(CScript(ir.refundScript.begin(), ir.refundScript.end()) == c.Holder());
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_cancel_without_refund_invalid)
+{
+    CancelFixture c;
+    const CTxOut other(TOKEN_VALUE, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock() })), verdict::INTENT_CANCEL_NO_REFUND);              // none
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock(), other })), verdict::INTENT_CANCEL_NO_REFUND);       // another script
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Relock(), CTxOut(0, c.Holder()) })), verdict::INTENT_CANCEL_NO_REFUND);   // zero carrier
+    // the refund at vout 0 displaces the re-lock: the re-lock rule speaks first
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::vector<CTxOut>{ c.Refund(), c.Relock() })), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
+}
+
+// Rule: CAN-1
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_at_lowest_holder_output)
+{
+    CancelFixture c;
+    const CTxOut other(777, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ c.Relock(), other, CTxOut(5000, c.Holder()), CTxOut(6000, c.Holder()) });
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 2)->cents, 10000);
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 2)->nValue, 5000);
+    BOOST_CHECK(!c.f.Token(txid, 3).has_value());
+}
+
+// Rule: CAN-1
+// Rule: IN-3
+BOOST_AUTO_TEST_CASE(intent_cancel_yed_inputs_still_burn)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    cancel.vin.push_back(CTxIn(COutPoint(c.v, 1)));     // the other vault's 10,000 cents, spent by the canceller
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const TxLogRecord log = c.f.Log(CTransaction(cancel).GetHash()).value();
+    BOOST_CHECK_EQUAL(log.yedIn, 10000);
+    BOOST_CHECK_EQUAL(log.yedOut, 10000);
+    BOOST_CHECK_EQUAL(log.burned, 10000);
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents + 10000 - 10000);
+}
+
+// Rule: CAN-1
+// Rule: XFER-1
+// Rule: RED-2
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_spendable_and_reclaims)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    // the refunded YED claims the re-created vault again (still under theta at $0.009): the claimant is made whole
+    SpendOpts o; o.ownerPath = false;
+    CMutableTransaction again = c.f.SpendTx(txid, { COutPoint(txid, 1) }, c.f.tip, o);
+    BOOST_CHECK_EQUAL(c.Mine(again), "");
+    BOOST_CHECK_EQUAL(c.f.Vault(txid)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(!c.f.Token(txid, 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
+}
+
+// Rule: CAN-1
+// Rule: XFER-1
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_transferable)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    CMutableTransaction t = c.f.TransferTx({ COutPoint(txid, 1) }, { Assignment{ 0, 10000 } });
+    BOOST_REQUIRE_EQUAL(c.Mine(t), "");
+    BOOST_CHECK(!c.f.Token(txid, 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.Token(CTransaction(t).GetHash(), 0)->cents, 10000);
+}
+
+// Rule: CAN-1
+// Rule: TOK-PQ
+BOOST_AUTO_TEST_CASE(intent_cancel_refund_crosses_the_falcon_boundary)
+{
+    // The claim burned a P2PKH holder's YED before the Falcon height; the cancel lands after it: the refund to that
+    // holder is valid (CAN-1's TOK-PQ exemption) while an assignment to the same script is BAD_YED_HOLDER.
+    CancelFixture c;
+    c.f.P.pqFalconHeight = c.f.tip + 1;                   // not hashed: the module's mirror of the consensus height
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK_EQUAL(c.f.Token(txid, 1)->cents, 10000);
+    CMutableTransaction t = c.f.TransferTx({ COutPoint(txid, 1) }, { Assignment{ 0, 10000 } });
+    BOOST_CHECK_EQUAL(c.Mine(t), verdict::BAD_YED_HOLDER);
+    BOOST_CHECK(c.f.Token(txid, 1).has_value());
 }
 
 // Rule: U-23
@@ -4760,11 +4893,37 @@ BOOST_AUTO_TEST_CASE(intent_cancel_undo_roundtrip)
     CMutableTransaction cancel = c.CancelTx();
     BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
     BOOST_CHECK(Hash(c.f.view) != claiming);
+    BOOST_CHECK(c.f.Token(CTransaction(cancel).GetHash(), 1).has_value());
     c.f.Undo();
     BOOST_CHECK_EQUAL(Hash(c.f.view), claiming);
     BOOST_CHECK(c.f.view == before);
+    BOOST_CHECK(!c.f.Token(CTransaction(cancel).GetHash(), 1).has_value());
+    BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
     BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
     BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
+// Rule: R12
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(r12_failing_notice_leaves_no_bundle_row)
+{
+    // 03/M-2 (R12 hardened): a CLAIM_NOTICE that does not hold -- here because a notice already stands -- is a valid
+    // no-op, and its verified bundle of already-credited attestations adds no BundleLog[H] row; one carrying a fresh
+    // attestation is LIVENESS_UNHELD.
+    EmergencyFixture g;
+    const int R = g.f.tip - 1;
+    BOOST_REQUIRE(g.PostNotice());
+    BOOST_REQUIRE(g.f.BundleRow(g.f.tip).has_value());                                   // the held notice's row
+    const NoticeRecord standing = g.f.Notice(g.w).value();
+    CMutableTransaction again = g.f.NoticeTx(g.w, R, g.f.BundleFor(R, g.Selector(), g.attPrice));   // the same R: nothing fresh
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { again });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(again).GetHash()), "");
+    BOOST_CHECK(!g.f.BundleRow(g.f.tip).has_value());
+    BOOST_CHECK_EQUAL(g.f.Notice(g.w)->height, standing.height);                          // not replaced
+    const int fresh = g.f.tip - 1;
+    CMutableTransaction third = g.f.NoticeTx(g.w, fresh, g.f.BundleFor(fresh, g.Selector(), g.attPrice));
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { third });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(third).GetHash()), verdict::LIVENESS_UNHELD);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
