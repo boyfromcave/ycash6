@@ -1870,6 +1870,35 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetRejectCode());
 }
 
+// AcceptToMemoryPool policy (audit 07/F-1): does a failed script check of a transaction spending a V or I fail
+// for a reason that depends on the set state at this node's tip, which the relaying peer's tip need not share?
+// ContextualCheckInputs reports the ScriptError only in its reject reason, "...-script-verify-flag... (<error>)"
+// formatted with ScriptErrorString, so the error is matched there. Two kinds qualify:
+//   - SCRIPT_ERR_SETSIG / SCRIPT_ERR_SETSIG_COUNT, raised only by OP_CHECKSETSIG / OP_CHECKSETDORMANT;
+//   - SCRIPT_ERR_VERIFY when an input spends a template with selector 3 (OWNER-RELEASED): the templates' only
+//     OP_VERIFY follows OP_CHECKSETDORMANT, which pushes false while the set is not released at this tip.
+// Every other failure (an owner's PQ signature, a sibling input's signature, a malformed spend) is not state-
+// dependent and keeps its stock score. No consensus effect: the score is this node's view of its peer.
+bool IsVaultSetStateFailure(const CTransaction& tx, const CCoinsViewCache& view, const std::string& strRejectReason)
+{
+    auto names = [&strRejectReason](ScriptError err) {
+        return strRejectReason.find("(" + std::string(ScriptErrorString(err)) + ")") != std::string::npos;
+    };
+    if (names(SCRIPT_ERR_SETSIG) || names(SCRIPT_ERR_SETSIG_COUNT))
+        return true;
+    if (!names(SCRIPT_ERR_VERIFY))
+        return false;
+    for (const CTxIn& in : tx.vin) {
+        const CCoins* coins = view.AccessCoins(in.prevout.hash);
+        if (!coins || !coins->IsAvailable(in.prevout.n))
+            continue;
+        auto spend = vault::ParseTemplateSpend(coins->vout[in.prevout.n].scriptPubKey, in.scriptSig);
+        if (spend && spend->selector == vault::SEL_RELEASED)
+            return true;
+    }
+    return false;
+}
+
 bool AcceptToMemoryPool(
         const CChainParams& chainparams,
         CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
@@ -2133,14 +2162,30 @@ bool AcceptToMemoryPool(
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
         // A template input's script reads the set state at this node's tip, which the relaying
-        // peer's tip need not share: its failure is no proof of misbehaviour (DoS 0).
+        // peer's tip need not share: a failure that depends on it is no proof of misbehaviour (DoS 0);
+        // every other failure keeps its stock score (IsVaultSetStateFailure, audit 07/F-1).
         const bool fVaultTemplateInput = vaultFlags && vault::HasTemplateInput(tx, view);
         CValidationState vaultScriptState;
         CValidationState& scriptState = fVaultTemplateInput ? vaultScriptState : state;
+        auto forwardVaultScriptState = [&]() {
+            const std::string strReason = vaultScriptState.GetRejectReason();
+            if (vaultScriptState.IsError()) {
+                state.Error(strReason);
+                return;
+            }
+            int nStockDoS = 0;
+            vaultScriptState.IsInvalid(nStockDoS);
+            if (IsVaultSetStateFailure(tx, view, strReason))
+                nStockDoS = 0;
+            state.DoS(nStockDoS, false,
+                      vaultScriptState.GetRejectCode(), strReason,
+                      vaultScriptState.CorruptionPossible() ? BodyCorruption::Possible : BodyCorruption::HeaderOnly,
+                      vaultScriptState.GetDebugMessage());
+        };
         if (!ContextualCheckInputs(tx, scriptState, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
             if (fVaultTemplateInput)
-                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
+                forwardVaultScriptState();
             return false;
         }
 
@@ -2156,7 +2201,7 @@ bool AcceptToMemoryPool(
         if (!ContextualCheckInputs(tx, scriptState, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
             if (fVaultTemplateInput)
-                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
+                forwardVaultScriptState();
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
