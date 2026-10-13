@@ -195,7 +195,8 @@ struct EvalContext
         return S.has_value() && params.IsArmed(S->attest.IsArmed());
     }
 
-    /** BUNDLE-1 for the transaction under evaluation, recorded into the BundleLog accumulator when it holds (R12). */
+    /** BUNDLE-1 for the transaction under evaluation. Nothing is recorded: the calling rule commits the facts with
+     *  CommitBundle once it holds (R12 as hardened, audit 03/M-2). */
     BundleFacts Bundle(const CTransaction& tx, int64_t refHeight, const std::vector<unsigned char>& selector, bool skipVin0)
     {
         BundleFacts f;
@@ -211,12 +212,19 @@ struct EvalContext
             f.seqs.push_back(a.seq);
             f.pairs.push_back(std::make_tuple(a.seq, (int64_t)a.priceMicroUsd, a.citedHeight));
         }
+        return f;
+    }
+
+    /** R12 (hardened, audit 03/M-2): a verified bundle enters the BundleLog[H] accumulator only once the MINT, REDEEM or
+     *  CLAIM_NOTICE carrying it holds, so a transaction whose rule fails contributes no row to PIN-1/PIN-2 or S15. */
+    void CommitBundle(const BundleFacts& f)
+    {
+        if (!f.verified) return;
         anyBundle = true;
         if (f.aMint.has_value()) aMints.push_back(f.aMint.value());
         if (f.aClaim.has_value()) aClaims.push_back(f.aClaim.value());
         selectedUnion.insert(f.selected.begin(), f.selected.end());
         pairUnion.insert(f.pairs.begin(), f.pairs.end());
-        return f;
     }
 
     /** BundleLog[H] from the accumulator; nullopt when no bundle was verified in this block. */
@@ -473,6 +481,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     SetVault(vault, p, P, tx, ctx.height);
     const COutPoint vaultOut(txid, 0);
     if (v == verdict::OK) {
+        ctx.CommitBundle(facts.bundle);   // R12 (03/M-2): the mint held
         vault.status = (uint8_t)VaultStatus::ACTIVE;
         vault.pMint = facts.pMint;      // FEE-1' (D-Q-23): the mint price, read by RED-3'/IT-9' instead of a live one
         if (!ctx.Eligible((int)p.refHeight).empty()) {
@@ -726,6 +735,7 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
         log.yedOut = 0;
         return true;
     }
+    ctx.CommitBundle(facts.bundle);   // R12 (03/M-2): RED-1..5 held
     const Payload& p = fp->payload;
     VaultRecord& vault = active[0].record;
     for (const Assignment& a : p.assignments) {
@@ -922,6 +932,7 @@ bool ApplyNotice(EvalContext& ctx, const CTransaction& tx, const Payload& p, TxL
     n.refHeight = (int32_t)ref;
     n.pEmerg = c.pEmerg.value();
     ctx.st.Put(keys::Notice(vaultOut), n);
+    ctx.CommitBundle(f);              // R12 (03/M-2): NOT-1 held
     LogBundle(log, f);
     log.notice = true;
     return true;
