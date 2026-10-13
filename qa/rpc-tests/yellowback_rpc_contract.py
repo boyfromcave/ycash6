@@ -455,6 +455,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(claimant.decoderawtransaction(cancel['hex'])['vout'][1]['scriptPubKey']['hex'], claiming['refundHolder'])
         assert_equal(claimant.yed_buildcancel('%s:0' % claimed['txid'])['hex'], cancel['hex'])          # sign once: the same transaction
         assert_rpc_error('is cancelled with yed_buildcancel', claimant.vault_buildcancel, '%s:0' % claimed['txid'])
+        fee_inputs = [{'txid': i['txid'], 'vout': i['vout']} for i in claimant.decoderawtransaction(cancel['hex'])['vin'][1:]]
+        claimant.lockunspent(True, fee_inputs)                     # the cancel is not sent: free its fee inputs for the release
         assert_equal([v['status'] for v in c.check('yed_listvaults', user.yed_listvaults('CLAIMING'))], ['CLAIMING'])
         c.check('yed_listtransactions', claimant.yed_listtransactions())
         self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())

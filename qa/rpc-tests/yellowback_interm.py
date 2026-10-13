@@ -384,9 +384,11 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         raw = claimant.getrawtransaction(claimed['txid'], 1)
         ispk = hex_str_to_bytes(raw['vout'][0]['scriptPubKey']['hex'])
         ip = v.IntentParams(*ym.yed_intent_fields(ispk))
-        owner = vault_owner(vault)
+        # the claimed V, as the node shows it (IT-1 extended: ownerHeight = appHeight = refHeight + 1, not lockHeight)
+        vp = v.parse_vault(hex_str_to_bytes(vault['scriptPubKey']))
         s = yed_params().attestor_set_internal
-        vp = v.VaultParams(ym.YED_TAG, s, s, CLAIM_DELAY, vault['lockHeight'], vault['refHeight'] + 1, owner)
+        assert_equal((vp.tag, vp.set_id, vp.cancel_set_id, vp.delay, vp.owner_height, vp.app_height, vp.owner),
+                     (ym.YED_TAG, s, s, CLAIM_DELAY, vault['refHeight'] + 1, vault['refHeight'] + 1, vault_owner(vault)))
         assert_equal(v.sha256(v.vault_script(vp)), ip.vault_hash)
         secret = hot_secret_for(user, 0)
         refund = (yed_params().token_value, hex_str_to_bytes(holder))
