@@ -132,9 +132,10 @@ env:
   LWD_REPO: boyfromcave/lightwalletd
   # On the upgrade line: lightwalletd-dd's upgrade/vault build (rpcversion 5, the vault read RPCs;
   # upgrade plan P6), as ycash-dd's CI pins it; it must be pushed before this resolves.
-  # On upgrade/vault-in-term: lightwalletd-dd's upgrade/vault-in-term (3244976, rpcversion 6: the upgrade
-  # line's build refuses a node reporting 6). It must be pushed before the nightly resolves it.
-  LWD_COMMIT: 3244976ef686a628a9e3185196a40501df65bbd9
+  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (f149104, rpcversion 8:
+  # an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
+  # It must be pushed before the nightly resolves it.
+  LWD_COMMIT: f149104cd214438af4fe2f6c5180446549fe4b6b
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
