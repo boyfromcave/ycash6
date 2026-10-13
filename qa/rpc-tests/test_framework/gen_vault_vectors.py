@@ -47,7 +47,8 @@ hashes are the **internal** byte order = uint256::begin()..end() unless the key 
                               RecoverSetSig (strict: header 31..34, low S) fails
     spends[]                 {name, tx (final hex), nIn, scriptCode, amount, branchId, sighash,
                               setId, role, setSigMsg, signers, sigs, scriptSig}
-                              SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branchId) == sighash
+                              SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL|SIGHASH_ANYONECANPAY, amount,
+                              branchId) == sighash (01/V-2: the fee inputs are not signed)
     ownerSpends[]            {name, tx (final hex), nIn, scriptCode, amount, branchId, sighash, selector,
                               scriptSig}  the pqOwner's SLH-DSA spend of a V's OWNER branch (selector 2):
                               VerifyScript(scriptSig, scriptCode) under the vault flags passes
@@ -473,7 +474,7 @@ def _owner_spend(name, kind, tx, spk, amount, selector, verify):
 
 
 def _spend(name, tx, n_in, spk, amount, set_id, role, signers, K, P):
-    sh = v.template_sighash(tx, n_in, spk, amount)
+    sh = v.set_sighash(tx, n_in, spk, amount)
     txid, n = v.prevout_of(tx, n_in)
     msg = v.set_sig_msg(set_id, role, txid, n, sh)
     sigs = [v.sign_recoverable(K[s], msg) for s in signers]

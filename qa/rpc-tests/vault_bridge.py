@@ -349,8 +349,8 @@ class VaultBridgeTest(VaultTestBase):
                     'script-notreleased', 'owner recovery while the relayer is live')
         sig_a = v.push_values(v.tx_from_hex(ha).vin[0].scriptSig)[0]
         sig_b = v.push_values(v.tx_from_hex(hb).vin[0].scriptSig)[0]
-        sh_a = v.template_sighash(tx_a, 0, vspk, rest)
-        sh_b = v.template_sighash(tx_b, 0, vspk, rest)
+        sh_a = v.set_sighash(tx_a, 0, vspk, rest)
+        sh_b = v.set_sighash(tx_b, 0, vspk, rest)
         po = v.ser_prevout(vback[0], vback[1])
         self.accept(self.act_hex(v.act_set_equivocation(RL, po, 1, sh_a, sig_a, 1, sh_b, sig_b)),
                     'SET_EQUIVOCATION of the relayer, from its two signatures on one outpoint')

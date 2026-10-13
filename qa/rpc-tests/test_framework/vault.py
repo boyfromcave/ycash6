@@ -84,6 +84,9 @@ OP_CHECKSETDORMANT = 0xc1
 OP_CHECKPQSIG = 0xc2
 
 SIGHASH_ALL = 1
+SIGHASH_ANYONECANPAY = 0x80
+# OP_CHECKSETSIG's digest (01/V-2): the fee inputs are not signed, so anyone may re-fund a set-signed spend.
+SET_SIGHASH = SIGHASH_ALL | SIGHASH_ANYONECANPAY
 
 ROLE_UNLOCK = 1
 ROLE_CANCEL = 2
@@ -971,11 +974,18 @@ def act_msg_raw(payload, prevout36):
     return sha256d(ACT_DOMAIN + bytes(payload) + bytes(prevout36))
 
 
-def template_sighash(tx, n_in, spk, amount, branch_id=VAULT_BRANCH_ID):
-    """``SignatureHash(scriptCode = the V/I spk, tx, nIn, SIGHASH_ALL, amount, branch)``
-    (ZIP-243), the framework's implementation."""
+def template_sighash(tx, n_in, spk, amount, branch_id=VAULT_BRANCH_ID, hashtype=SIGHASH_ALL):
+    """``SignatureHash(scriptCode = the V/I spk, tx, nIn, hashtype, amount, branch)`` (ZIP-243), the
+    framework's implementation. ``SIGHASH_ALL`` is the owner's (OP_CHECKPQSIG); set signatures use
+    ``set_sighash``."""
     from .script import CScript, SignatureHash
-    return SignatureHash(CScript(bytes(spk)), tx, n_in, SIGHASH_ALL, amount, branch_id)[0]
+    return SignatureHash(CScript(bytes(spk)), tx, n_in, hashtype, amount, branch_id)[0]
+
+
+def set_sighash(tx, n_in, spk, amount, branch_id=VAULT_BRANCH_ID):
+    """The OP_CHECKSETSIG digest: ``template_sighash`` under ``SIGHASH_ALL | SIGHASH_ANYONECANPAY``
+    (01/V-2) -- every output and this input, not the fee inputs."""
+    return template_sighash(tx, n_in, spk, amount, branch_id, SET_SIGHASH)
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1307,7 @@ def build_lock_tx(vin, vp, amount, change=None, extra_vout=()):
 
 def set_sigs_for(tx, n_in, spk, amount, set_id32, role, member_secrets, branch_id=VAULT_BRANCH_ID):
     """The ``k`` set signatures over ``set_sig_msg(setId, role, prevout, sighash)``."""
-    sh = template_sighash(tx, n_in, spk, amount, branch_id)
+    sh = set_sighash(tx, n_in, spk, amount, branch_id)
     txid, n = prevout_of(tx, n_in)
     msg = set_sig_msg(set_id32, role, txid, n, sh)
     return [sign_recoverable(s, msg) for s in member_secrets]
@@ -1797,7 +1807,7 @@ class VaultModel(object):
         if len(args) < k:
             raise VaultError('script-setsig', 'need %d signatures' % k)
         args = args[-k:]      # OP_CHECKSETSIG pops k; anything below stays (no CLEANSTACK)
-        sh = template_sighash(tx, i, coin.spk, coin.value, self.branch_id)
+        sh = set_sighash(tx, i, coin.spk, coin.value, self.branch_id)
         po = tx.vin[i].prevout
         msg = set_sig_msg_raw(set_id, role, po.serialize(), sh)
         seen = set()
