@@ -32,7 +32,16 @@ summary that every step passed:
   invalid   an invalid mint refused by every Yellowback mempool, its block rejected by every node
   bridge    the WYEC bridge persona (bridge-sim), both shapes: lock -> mock burn -> intent ->
             release; a rogue intent cancelled by the watcher; owner recovery on a dormant set
-  final     one YED and one vault state hash on the ten module nodes, one tip on all eleven
+  final     one YED and one vault state hash on the ten module nodes, one tip on all eleven; the stock
+            node's set state differs from theirs in the attestor set's member lastact alone (07/F-4),
+            and every node reports its attestor set (vault_getinfo.attestorsetid, 01/V-7)
+
+After the walk, an independent witness of the set state (07/F-4): two Python VaultModels replay the
+chain from the activation height, one with the YED module's liveness hook
+(test_framework/vault_module_hook.py, a port of Module::Liveness) and one without; every set and
+member of node 0 (a module node) must equal the first's, every one of node 1 (the stock node) the
+second's, the models must differ exactly where the nodes do, and the hook must have credited
+liveness somewhere on the chain (the walk's heartbeats can re-converge the tip's lastact).
 
 The clients (chain-viz, lightwalletd, yolo) are left to the manual walk (its transcript is
 ``contrib/yellowback/devnet/upgrade-walk-transcript.txt``). SKIPs without the Rust attestor
@@ -72,6 +81,39 @@ def find_agent():
             if os.access(candidate, os.X_OK):
                 return candidate
     return None
+
+
+def witness(directory, stock_evidence, say):
+    """07/F-4: the two-model replay over the walked chain, compared with node 0 (module) and node 1 (stock)."""
+    import importlib.machinery
+    import importlib.util
+    sys.path.insert(0, HERE)
+    from test_framework import vault_module_hook as vmh
+    from test_framework import yellowback_model as ym
+    loader = importlib.machinery.SourceFileLoader('yellowback_devnet', DEVNET)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    dv = importlib.util.module_from_spec(spec)
+    loader.exec_module(dv)
+    state = dv.load(directory)
+    user, stock = dv.rpc(state, 0, timeout=600), dv.rpc(state, 1, timeout=600)
+    t0 = time.time()
+    params = ym.params_from_getinfo(user.yed_getinfo())
+    with_hook, without, tip, credits = vmh.replay_models(user, params)
+    assert stock.getbestblockhash() == user.getblockhash(tip), 'the stock node is not at the replayed tip'
+    h = tip + 1
+    n_user = vmh.compare_set_state(user, with_hook, h)
+    n_stock = vmh.compare_set_state(stock, without, h)
+    # the models differ where the nodes do: in the attestor set's lastAct, as the walk recorded it
+    sid = vmh.set_id_internal(params.attestor_set)
+    a, b = with_hook.get_set(sid), without.get_set(sid)
+    differ = {k.hex(): (a.members[k].last_act, b.members[k].last_act) for k in a.members if a.members[k].last_act != b.members[k].last_act}
+    recorded = {k: (d['module'], d['stock']) for k, d in stock_evidence['lastactDiff'].items()}
+    assert differ == recorded, 'the models differ in %r, the nodes (walk evidence) in %r' % (differ, recorded)
+    # the hook credited attestation liveness somewhere on the chain (a later heartbeat may re-converge the end state)
+    assert credits > 0, 'the walk credited no attestation liveness: the module hook was never exercised'
+    say('witness: two VaultModels over [%d, %d] agree with node 0 (%d members, with the module hook: %d credits) and node 1 '
+        '(%d members, without); %d lastAct differ at the tip, as on the nodes (%d s)'
+        % (with_hook.activation_height, tip, n_user, credits, n_stock, len(differ), time.time() - t0))
 
 
 def main():
@@ -164,6 +206,9 @@ def main():
         for shape in options.bridge_shapes.split(','):
             assert evidence.get('bridge_%s_release' % shape, {}).get('release'), shape
             assert evidence.get('bridge_%s_rogue' % shape, {}).get('cancelled'), shape
+        stock = evidence['statehash'].get('stock') or {}
+        assert evidence['statehash'].get('attestorSetId') and 'lastactDiff' in stock, evidence['statehash']
+        witness(directory, stock, say)
         say('PASS: every step of the walk passed at height %s (%s s walking)' % (summary.get('height'), summary.get('seconds')))
         status = 0
     finally:

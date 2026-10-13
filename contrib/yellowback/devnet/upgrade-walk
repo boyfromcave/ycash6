@@ -139,6 +139,7 @@ class Walk:
         self.set_id = self.state["attestor_set"]
         self.yed_nodes = [i for i in range(self.n) if i != STOCK]
         self.vaults = {}
+        self.last_divergence = None
 
     # ------------------------------------------------------------------ transcript
     def out(self, text=""):
@@ -335,15 +336,63 @@ class Walk:
         # consensus parameter (-yellowbackattestorset; on mainnet a network constant), and the YED module's liveness
         # hook (seats review B2, vault/state.cpp ApplyEjectionsOf) writes the set's member lastAct, which is hashed
         # and feeds IsDormant. The stock node, without the set, does not run that hook: it follows the same tip
-        # but its set state is not the network's, so it is checked for the tip, not the hash.
-        vault = {i: self.node(i).vault_getinfo()["statehash"] for i in self.yed_nodes}
+        # and its set state differs from the module nodes' in the governed set's lastAct alone (stock_divergence).
+        infos = {i: self.node(i).vault_getinfo() for i in range(self.n)}
+        vault = {i: infos[i]["statehash"] for i in self.yed_nodes}
         tips = {i: self.node(i).getbestblockhash() for i in range(self.n)}
-        self.out("  $ yed_getstatehash and vault_getinfo.statehash on nodes %s; getbestblockhash on every node" % ",".join(str(i) for i in self.yed_nodes))
-        self.out("    = yed %s ; vault %s ; stock vault %s" % (sorted(set(yed.values())), sorted(set(vault.values())), self.node(STOCK).vault_getinfo()["statehash"]))
+        self.out("  $ yed_getstatehash and vault_getinfo on every node; getbestblockhash on every node")
+        self.out("    = yed %s ; vault %s ; stock vault %s" % (sorted(set(yed.values())), sorted(set(vault.values())), infos[STOCK]["statehash"]))
         self.ok(len(set(yed.values())) == 1, "%s: one YED state hash on all %d Yellowback nodes" % (label, len(yed)))
         self.ok(len(set(vault.values())) == 1, "%s: one vault state hash on all %d module nodes" % (label, len(vault)))
         self.ok(len(set(tips.values())) == 1, "%s: one tip on all %d nodes, the stock node included" % (label, len(tips)))
+        # 01/V-7: until P8 the attestor set is a node parameter; every module node names the walk's set, the stock none
+        named = {i: infos[i].get("attestorsetid") for i in range(self.n)}
+        self.ok(all(named[i] == self.set_id and infos[i].get("moduleactive") is True for i in self.yed_nodes)
+                and named[STOCK] is None and infos[STOCK].get("moduleactive") is False,
+                "%s: vault_getinfo.attestorsetid is the walk's set on the %d module nodes, null on the stock node" % (label, len(self.yed_nodes)))
+        self.last_divergence = self.stock_divergence(label, infos)
         return yed[USER], vault[USER]
+
+    def stock_divergence(self, label, infos):
+        """07/F-4: the stock node's set state differs from a module node's (USER's) in the governed set's member lastAct
+        and what is derived from it (member live; set dormant / released) alone. Every other set, every count, the
+        locked value and every other member field are equal, and the state hashes differ iff some lastAct does."""
+        for k in ("sets", "vaults", "intents", "lockedvalue", "height", "dbtip"):
+            self.ok(infos[USER].get(k) == infos[STOCK].get(k), "%s: vault_getinfo.%s equal on the module and the stock node (%s)"
+                    % (label, k, jdump(infos[USER].get(k), 120)))
+        h = infos[USER]["height"] + 1
+        sets_user = {s["setid"]: s for s in self.node(USER).set_list()}
+        sets_stock = {s["setid"]: s for s in self.node(STOCK).set_list()}
+        self.ok(set(sets_user) == set(sets_stock), "%s: the same %d sets on the module and the stock node" % (label, len(sets_user)))
+        derived_set = ("dormant", "released")
+        derived_member = ("lastact", "live", "wallet")      # wallet: whether that node's wallet holds the key
+        lastact_diff = {}
+        for sid in sorted(sets_user):
+            a, b = self.node(USER).set_getinfo(sid, h), self.node(STOCK).set_getinfo(sid, h)
+            governed = sid == self.set_id
+            skip = derived_set if governed else ()
+            for k in sorted(set(a) | set(b)):
+                if k in skip or k == "memberlist": continue
+                if a.get(k) != b.get(k):
+                    self.ok(False, "%s: set %s.%s equal on both (%r vs %r)" % (label, sid[:12], k, a.get(k), b.get(k)))
+            ma = {m["key"]: m for m in a.get("memberlist", [])}
+            mb = {m["key"]: m for m in b.get("memberlist", [])}
+            if set(ma) != set(mb):
+                self.ok(False, "%s: set %s has the same members on both" % (label, sid[:12]))
+            for key in ma:
+                for k in sorted(set(ma[key]) | set(mb[key])):
+                    if k == "wallet" or (governed and k in derived_member): continue
+                    if ma[key].get(k) != mb[key].get(k):
+                        self.ok(False, "%s: set %s member %s.%s equal on both (%r vs %r)" % (label, sid[:12], key[:12], k, ma[key].get(k), mb[key].get(k)))
+                if ma[key].get("lastact") != mb[key].get("lastact"):
+                    if not governed:
+                        self.ok(False, "%s: set %s member %s lastact equal on both" % (label, sid[:12], key[:12]))
+                    lastact_diff[key] = (ma[key]["lastact"], mb[key]["lastact"])
+        hashes_differ = infos[USER]["statehash"] != infos[STOCK]["statehash"]
+        self.ok(hashes_differ == bool(lastact_diff), "%s: the stock node's state hash %s the module nodes' and %d member lastAct differ "
+                "(the module liveness hook's, and nothing else)" % (label, "differs from" if hashes_differ else "equals", len(lastact_diff)))
+        return {"hashModule": infos[USER]["statehash"], "hashStock": infos[STOCK]["statehash"],
+                "lastactDiff": {k: {"module": v[0], "stock": v[1]} for k, v in lastact_diff.items()}}
 
     def yed_params(self):
         return self.node(USER).yed_getinfo()["params"]
@@ -1425,7 +1474,8 @@ class Walk:
     def s_final(self):
         self.step("final", "every node agrees; the clients agree")
         yed, vault = self.statehashes("end")
-        self.evidence("statehash", {"yed": yed, "vault": vault, "height": self.tip()})
+        self.evidence("statehash", {"yed": yed, "vault": vault, "height": self.tip(), "stock": self.last_divergence,
+                                    "attestorSetId": self.set_id})
         self.call(USER, "vault_getinfo", keys=["sets", "vaults", "intents", "lockedvalue", "statehash"])
         self.call(USER, "yed_getstats", keys=["supplyCents", "activeVaults", "claimedVaults", "closedVaults", "mintingAllowed"])
         self.chainviz("end")

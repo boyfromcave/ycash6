@@ -107,13 +107,19 @@ Undocumented result fields are a contract violation; so is a missing field not m
 ### `vault_getinfo`
 Params: `[]`
 
-Result: `{"branchid": str, "activationheight": int, "active": bool, "height": height, "dbtip": {"hash": hash, "height": height}|null, "sets"?: int, "vaults"?: int, "intents"?: int, "lockedvalue"?: yec, "statehash"?: hash}`
+Result: `{"branchid": str, "activationheight": int, "active": bool, "height": height, "attestorsetid": hash|null, "moduleactive": bool, "dbtip": {"hash": hash, "height": height}|null, "sets"?: int, "vaults"?: int, "intents"?: int, "lockedvalue"?: yec, "statehash"?: hash}`
 
 `branchid` is `"6d5b7a31"`; `activationheight` is -1 if unscheduled; `active` is at the next
-block; `height` is the tip. `dbtip` is the block the set state is at (null before the first
-active block). `statehash` is SHA256d over every state record (sets, members, bonds, the
-template-output index) in key order: two nodes on the same chain report the same value. The
-counts, `lockedvalue` and `statehash` are absent only when the vault database is not open.
+block; `height` is the tip. `attestorsetid` is the set the registered module (YED) governs on this
+node, null when it governs none, and `moduleactive` whether it governs one: until the release that
+makes the attestor set a chain parameter (upgrade plan P8) it is the node parameter
+`-yellowbackattestorset` on regtest and unset elsewhere, and the module's hooks (ejections, the
+liveness `lastact`, displacement, its spend rule) are inert where it is null, so two nodes that
+report different values compute different set state for the same blocks. `dbtip` is the block the
+set state is at (null before the first active block). `statehash` is SHA256d over every state
+record (sets, members, bonds, the template-output index) in key order: two nodes on the same chain
+with the same `attestorsetid` report the same value. The counts, `lockedvalue` and `statehash` are
+absent only when the vault database is not open.
 
 ### `set_list`
 Params: `[]`

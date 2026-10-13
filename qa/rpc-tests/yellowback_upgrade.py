@@ -158,9 +158,23 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         info = n0.set_getinfo(self.set_id)
         assert_equal((info['members'], info['current']), (1, 1))
 
+        # 01/V-7: before P8 the attestor set is a node parameter; vault_getinfo says which one a node validates with
+        for n in self.nodes:
+            gi = n.vault_getinfo()
+            assert_equal((gi['attestorsetid'], gi['moduleactive']), (None, False))
+
         print('the nodes learn the attestor set: Yellowback is live from the activation height (U-22)')
         self.payout = n0.getnewaddress()
         self.restart_all()
+        for i, n in enumerate(self.nodes):
+            gi = n.vault_getinfo()
+            want = (self.set_id, True) if i < 3 else (None, False)        # node 3 never learns it
+            assert_equal((gi['attestorsetid'], gi['moduleactive']), want)
+            with open(os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log')) as f:
+                log = f.read()
+            line = ('Yellowback: attestor set %s (regtest -yellowbackattestorset)' % self.set_id if i < 3
+                    else 'Yellowback: no attestor set; the YED module validates inertly')
+            assert line in log, 'node%d debug.log lacks "%s"' % (i, line)
         for n in self.yb():
             act = n.yed_getactivation()
             assert_equal(act['status'], 'active')

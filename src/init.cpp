@@ -1530,6 +1530,14 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         yellowback::g_yellowbackLive = yellowbackParams.IsConfigured();
         // The module's per-transaction rules run inside the primitive from the first block connected (§15.7).
         yellowback::SetModuleParams(yellowbackParams);
+        // 01/V-7: until P8 makes the attestor set a chain parameter it is a node parameter on regtest, and nodes
+        // started with different sets compute different set state; say which one this node validates with.
+        if (yellowbackParams.IsConfigured()) {
+            LogPrintf("Yellowback: attestor set %s (%s); every validating node of this network must name the same set\n",
+                      yellowbackParams.attestorSetId.GetHex(), chainparams.NetworkIDString() == "regtest" ? "regtest -yellowbackattestorset" : "the network's");
+        } else {
+            LogPrintf("Yellowback: no attestor set; the YED module validates inertly on this network (its set state can differ from a node's that has one)\n");
+        }
     }
     for (const char* retired : { "-yellowbackenforce", "-yellowbacksignal", "-yellowbacktemplatepolicy", "-yellowbackrequirehealthy" }) {
         if (mapArgs.count(retired)) LogPrintf("Yellowback: %s is retired with the vault upgrade and ignored\n", retired);

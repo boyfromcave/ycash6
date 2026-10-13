@@ -810,5 +810,81 @@ class VectorTests(unittest.TestCase):
                 self.assertEqual(f.read(), gvv.dumps(doc), 'vault_vectors.json is stale: run gen_vault_vectors.py')
 
 
+class ModuleHookTests(unittest.TestCase):
+    """vault_module_hook.yed_liveness_hook, the Python port of Module::Liveness (07/F-4), over one hand-built
+    carrier: a MINT whose scriptSig bundle carries attestations by the attestor set's members."""
+
+    def setUp(self):
+        from test_framework import vault_module_hook as hook
+        from test_framework import yellowback_attest as ya
+        from test_framework import yellowback_model as ym
+        self.hook, self.ya, self.ym = hook, ya, ym
+        self.c = Chain()
+        # the shape the module adopts (AdoptedSet): OPEN, ATTESTOR_SEATS seats, BOND_MATURITY, livenessWindow >= the floor
+        self.sid = self.c.create_set(flags=v.SET_FLAG_OPEN, seats=15, maturity=8, liveness_window=16, unlock_threshold=2,
+                                     cancel_threshold=1, slash_threshold=2)
+        self.c.block(*[self.c.join_tx(self.sid, i, admit=[]) for i in (0, 1, 2)])
+        self.c.mine_to(self.c.h + 12)          # past maturity: lastAct = join + maturity is below the cited heights
+        self.params = ym.Params.regtest(1, attestor_set=v.txid_display(self.sid))
+        self.hashes = {h: '%064x' % (0xb10c0000 + h) for h in range(0, 400)}
+
+    def carrier_tx(self, signers, cited, ref, price=50_000_000, payload_type='mint', carrier_vin=0):
+        ya, ym = self.ya, self.ym
+        atts = [ya.sign_attestation(MEMBERS[i], seq, price, cited, self.hashes[cited]) for i, seq in signers]
+        bundle = ya.encode_bundle(atts)
+        redeem = ya.carrier_script(v.pubkey_of(ADMIT), ym.sha256(bundle))
+        if payload_type == 'mint':
+            payload = ym.encode_mint(0, 10000, ref + 60, ref, b'\x01' + bytes(32), 1)
+        else:
+            payload = ym.encode_transfer([(1, 100)])
+        vin = self.c.coin() + self.c.coin()
+        tx = v.make_tx(vin, [(0, bytes([0x6a]) + ym.push(payload)), (v.COIN, self.c.dest)])
+        tx.vin[carrier_vin].scriptSig = ya.carrier_scriptsig(bundle, b'\x30' * 71, redeem)
+        return tx
+
+    def last_act(self, i):
+        return self.c.m.get_set(self.sid).members[MKEYS[i]].last_act
+
+    def test_credits_members_by_join_ordinal(self):
+        c, h = self.c, self.c.h
+        hook = self.hook.yed_liveness_hook(self.params, self.hashes.get)
+        before = [self.last_act(i) for i in range(3)]
+        cited = h - 2
+        self.assertGreater(cited, max(before))
+        # seq = join ordinal - 1: members 0 and 2 joined first and third
+        tx = self.carrier_tx([(0, 0), (2, 2)], cited, h - 1)
+        self.assertEqual(hook(tx, h, c.m), [(self.sid, MKEYS[0], cited), (self.sid, MKEYS[2], cited)])
+        c.m.liveness_hook = hook
+        c.block(tx)
+        self.assertEqual([self.last_act(i) for i in range(3)], [cited, before[1], cited])
+        # the same attestations again credit nobody (cited no longer above lastAct)
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (2, 2)], cited, c.h - 1), c.h, c.m), [])
+
+    def test_any_failure_credits_nobody(self):
+        c, h = self.c, self.c.h
+        hook = self.hook.yed_liveness_hook(self.params, self.hashes.get)
+        cited, ref = h - 2, h - 1
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], cited, ref), h, c.m) != [], True)
+        self.assertEqual(hook(self.carrier_tx([(0, 0)], cited, ref), h, c.m), [])                 # below M_SELECT
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 2)], cited, ref), h, c.m), [])         # seq 2 signed by member 1
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 5)], cited, ref), h, c.m), [])         # seq 5: no such member
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], cited, h), h, c.m), [])           # R not below h
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], ref - 9, ref), h, c.m), [])       # stale cited height
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], cited, ref, payload_type='transfer'), h, c.m), [])
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], cited, ref, price=1), h, c.m), [])   # price below PRICE_MIN
+        other = self.hook.yed_liveness_hook(self.params, lambda height: '%064x' % 7)
+        self.assertEqual(other(self.carrier_tx([(0, 0), (1, 1)], cited, ref), h, c.m), [])        # another chain's block hash
+        # a set the module does not adopt (another seat count) is not governed
+        p2 = self.ym.Params.regtest(1, attestor_set=v.txid_display(self.sid))
+        p2.attestor_seats = 9
+        self.assertEqual(self.hook.yed_liveness_hook(p2, self.hashes.get)(self.carrier_tx([(0, 0), (1, 1)], cited, ref), h, c.m), [])
+        # a removed member (not ACTIVE) is not live
+        rm, _p = v.build_set_remove_tx(c.coin(), self.sid, MKEYS[1], [MEMBERS[1]], burn=0)
+        c.block(rm)
+        h = c.h
+        self.assertEqual(hook(self.carrier_tx([(0, 0), (1, 1)], h - 2, h - 1), h, c.m), [])
+        self.assertEqual(len(hook(self.carrier_tx([(0, 0), (2, 2)], h - 2, h - 1), h, c.m)), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

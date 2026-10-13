@@ -1146,6 +1146,7 @@ jobs:
           python3 src/test/gen_yellowback_corpus.py --check
           if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
           if [ -f src/test/gen_pq_corpus.py ]; then python3 src/test/gen_pq_corpus.py --check; fi
+          if [ -f src/test/gen_vault_state_corpus.py ]; then python3 src/test/gen_vault_state_corpus.py --check; fi
       - name: The attestation known-answer vectors regenerate byte for byte (BUNDLE-1, R13)
         # The generator has no --check mode: regenerate, then require a clean tree.
         if: ${{ !cancelled() }}
@@ -1936,6 +1937,10 @@ jobs:
           fi
           if [ -f src/test/gen_pq_corpus.py ]; then
             python3 src/test/gen_pq_corpus.py --write || true
+            git add -f src/test/vault_fuzz_tests.cpp
+          fi
+          if [ -f src/test/gen_vault_state_corpus.py ]; then
+            python3 src/test/gen_vault_state_corpus.py --write || true
             git add -f src/test/vault_fuzz_tests.cpp
           fi
       - name: Upload corpus and crashes

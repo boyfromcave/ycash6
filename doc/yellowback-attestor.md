@@ -19,6 +19,12 @@ together, and never start the old one again. Do not delete `attest-signed.dat`.
 
 Read this first; where the sections below disagree, this section wins (upgrade plan §15.10).
 
+- **Every validating node names the same attestor set.** Until the release that sets it as a chain
+  parameter (upgrade plan P8) the set is the node parameter `-yellowbackattestorset` (regtest; unset
+  on mainnet and testnet). Every validating node of a regtest or devnet network must be started with
+  the same value: a node without it computes different set state for the same blocks (no ejections,
+  no liveness `lastact`, no displacement) and may reject blocks the others accept. Compare
+  `vault_getinfo.attestorsetid` across your nodes.
 - **Registration is a `SET_JOIN`** to the vault primitive's YED attestor set (`attestorSetId`,
   `yed_getinfo.upgrade`). `yed_registerattestor <bondYec> <lockBlocks>` is exactly that join with a
   fresh wallet key (`flags` is ignored); `set_join <attestorSetId> <bondYec> <bondLocktime>

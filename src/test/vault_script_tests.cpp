@@ -11,6 +11,7 @@
 #include "coins.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
+#include "crypto/pq/scheme.h"
 #include "main.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
@@ -23,6 +24,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <optional>
 #include <vector>
 
@@ -385,6 +387,67 @@ BOOST_AUTO_TEST_CASE(vault_opcodes_without_flag)
     // 0xc2 is OP_CHECKPQSIG (quantum plan §4.2, pq_script_tests); 0xc3 stays BAD_OPCODE.
     BOOST_CHECK_EQUAL(Eval(CScript() << (opcodetype)0xc3, SCRIPT_VERIFY_VAULT, checker), SCRIPT_ERR_BAD_OPCODE);
     BOOST_CHECK_EQUAL(checker.setSigCalls, 0);
+
+    // T-4 (01/T-4): the same parity on the scriptSig side, through VerifyScript(scriptSig, scriptPubKey). The
+    // checker accepts everything, so only the opcode gate and the stack decide. No flag set accepts a scriptSig that
+    // executes 0xc0 / 0xc1 / 0xc2 by itself: before the upgrade each is BAD_OPCODE where it executes (bare or with
+    // the operands that would satisfy it) and skipped where it does not; with SCRIPT_VERIFY_VAULT the bare opcode
+    // fails on the empty stack. A scriptSig that supplies the operands is refused by the push-only rules, not by the
+    // opcode: SCRIPT_VERIFY_SIGPUSHONLY (policy: IsStandardTx's scriptsig-not-pushonly), the P2SH push-only rule
+    // (consensus for a P2SH output), and for a template input S-1
+    // (ParseSelector, bad-txns-vault-selector, vault_state_tests / vault_fuzz_tests' spend_not_push_only).
+    MockSetChecker accept;
+    accept.threshold = 1;
+    accept.released = true;
+    const CScript spkTrue = CScript() << OP_1;
+    const CScript redeem = CScript() << OP_1;
+    const CScript spkP2SH = GetScriptForDestination(CScriptID(redeem));
+    const unsigned int preActivation[] = {0U, (unsigned int)SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY,
+                                          (unsigned int)SCRIPT_VERIFY_CHECKSEQUENCEVERIFY};
+    // OP_CHECKPQSIG's operands in their exact SLH-DSA shape (the key hash does not match, so it would push false)
+    CScript pqOperands;
+    {
+        const valtype sig(pq::SigSize(pq::SCHEME_SLH_DSA_SHA2_128S) + 1, 0x22), pk(pq::PubKeySize(pq::SCHEME_SLH_DSA_SHA2_128S), 0x11);
+        int n = 0;
+        for (size_t i = 0; i < sig.size(); i += pq::MAX_CHUNK, n++)
+            pqOperands << valtype(sig.begin() + i, sig.begin() + std::min(sig.size(), i + pq::MAX_CHUNK));
+        pqOperands << CScript::EncodeOP_N(n) << pk << OP_1 << valtype(32, 0x33) << OP_1;
+    }
+    struct Case { opcodetype op; CScript operands; };
+    const Case cases[] = {
+        {OP_CHECKSETSIG, CScript() << GoodSig(1) << setId << OP_1},
+        {OP_CHECKSETDORMANT, CScript() << setId},
+        {OP_CHECKPQSIG, pqOperands},
+    };
+    for (const Case& c : cases) {
+        const CScript bare = CScript() << c.op;
+        const CScript full = CScript(c.operands) << c.op;
+        const CScript skipped = CScript() << OP_0 << OP_IF << c.op << OP_ENDIF;
+        ScriptError err;
+        for (unsigned int flags : preActivation) {
+            BOOST_CHECK(!VerifyScript(bare, spkTrue, flags, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+            BOOST_CHECK(!VerifyScript(full, spkTrue, flags, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+            BOOST_CHECK(VerifyScript(skipped, spkTrue, flags, accept, VAULT_BRANCH_ID, &err));   // unexecuted: as today
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+            // SIGPUSHONLY refuses a non-push scriptSig before anything runs
+            BOOST_CHECK(!VerifyScript(full, spkTrue, flags | SCRIPT_VERIFY_SIGPUSHONLY, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_PUSHONLY);
+            // after the upgrade: the bare opcode has nothing to pop
+            BOOST_CHECK(!VerifyScript(bare, spkTrue, flags | SCRIPT_VERIFY_VAULT, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_INVALID_STACK_OPERATION);
+            // after the upgrade with operands: refused as a non-push scriptSig (SIGPUSHONLY) ...
+            BOOST_CHECK(!VerifyScript(full, spkTrue, flags | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_SIGPUSHONLY, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_PUSHONLY);
+            // ... and, spending a P2SH output, by consensus (the P2SH scriptSig is push-only)
+            BOOST_CHECK(!VerifyScript(CScript(full) << valtype(redeem.begin(), redeem.end()), spkP2SH,
+                                      flags | SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_VAULT, accept, VAULT_BRANCH_ID, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SIG_PUSHONLY);
+        }
+    }
+    // only the P2SH case reaches the checker (once per flag set): there the scriptSig runs before the push-only check
+    BOOST_CHECK_EQUAL(accept.setSigCalls, 3);
 }
 
 BOOST_AUTO_TEST_CASE(vault_checksetsig)

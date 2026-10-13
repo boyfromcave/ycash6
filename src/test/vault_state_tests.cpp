@@ -23,8 +23,12 @@
 #include "arith_uint256.h"
 #include "chain.h"
 #include "consensus/params.h"
+#include "consensus/upgrades.h"
+#include "crypto/pq/scheme.h"
+#include "crypto/pq/sign.h"
 #include "crypto/sha256.h"
 #include "key.h"
+#include "policy/policy.h"
 #include "primitives/block.h"
 #include "script/interpreter.h"
 #include "script/standard.h"
@@ -39,6 +43,43 @@ using namespace vault;
 namespace {
 
 typedef std::vector<unsigned char> valtype;
+
+/** The hashtype vault::SetSigChecker::CheckSetSigs computes the set-signature sighash under (plan §15.2 step 4:
+ *  SignatureHash(scriptCode, tx, nIn, <this>, amount, branch)). set_sig_checker and vault_checksetsig_real_script sign
+ *  with it, so a change of the consensus hashtype (MEDIUM-01-V-2: SIGHASH_ALL | SIGHASH_ANYONECANPAY) is this one line;
+ *  every assertion below holds under either value, and the one that differs between them branches on it. */
+const int SET_SIG_HASHTYPE = SIGHASH_ALL;
+
+/** UPGRADE_VAULT's consensus branch ID (0x6d5b7a31), the branch a set signature is made for. */
+uint32_t VaultBranchId() { return NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId; }
+
+/** A v4 (Sapling) transaction: the ZIP-243 sighash commits to the branch ID and the spent amount (a pre-Overwinter
+ *  transaction's sighash commits to neither, so a binding test over one proves nothing). */
+CMutableTransaction SaplingSpend(const std::vector<COutPoint>& prevouts, const std::vector<CTxOut>& outs)
+{
+    CMutableTransaction m;
+    m.fOverwintered = true;
+    m.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+    m.nVersion = SAPLING_TX_VERSION;
+    for (const COutPoint& op : prevouts) m.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL - 1));
+    m.vout = outs;
+    return m;
+}
+
+/** A post-quantum owner scriptSig: <sig chunks> <s> <pk chunks> <p> <selector> (quantum plan §4.2; as in
+ *  vault_template_tests). */
+CScript OwnerScriptSig(const valtype& sigWithHashtype, const valtype& pk, int selector)
+{
+    CScript ss;
+    int s = 0, p = 0;
+    for (size_t i = 0; i < sigWithHashtype.size(); i += pq::MAX_CHUNK, s++)
+        ss << valtype(sigWithHashtype.begin() + i, sigWithHashtype.begin() + std::min(sigWithHashtype.size(), i + pq::MAX_CHUNK));
+    ss << CScript::EncodeOP_N(s);
+    for (size_t i = 0; i < pk.size(); i += pq::MAX_CHUNK, p++)
+        ss << valtype(pk.begin() + i, pk.begin() + std::min(pk.size(), i + pq::MAX_CHUNK));
+    ss << CScript::EncodeOP_N(p) << CScript::EncodeOP_N(selector);
+    return ss;
+}
 
 CKey MakeKey(unsigned char seed)
 {
@@ -1374,13 +1415,13 @@ BOOST_AUTO_TEST_CASE(set_sig_checker)
     auto snap = std::make_shared<const SetSnapshot>(c.kv);
 
     CScript scriptCode = BuildVault(VaultFor(s, MakeKey(50)));
-    CMutableTransaction m;
-    m.vin.push_back(CTxIn(COutPoint(uint256S("0xabc"), 1), CScript(), 0xffffffff));
-    m.vout.push_back(CTxOut(1000, Recipient(9)));
+    // A v4 spend: the sighash commits to the branch and the amount (T-2, 01/T-2).
+    CMutableTransaction m = SaplingSpend({COutPoint(uint256S("0xabc"), 1)}, {CTxOut(1000, Recipient(9))});
     CTransaction tx(m);
     const CAmount amount = 5000;
     PrecomputedTransactionData txdata(tx, {CTxOut(amount, scriptCode)});
-    const uint32_t branch = 0;
+    const uint32_t branch = VaultBranchId();
+    BOOST_REQUIRE_EQUAL(branch, 0x6d5b7a31U);
     SetSigChecker checker(&tx, 0, amount, false, txdata, snap, c.h);
     BOOST_CHECK(*checker.SetThreshold(s, ROLE_UNLOCK) == 2);
     BOOST_CHECK(*checker.SetThreshold(s, ROLE_CANCEL) == 1);
@@ -1388,28 +1429,247 @@ BOOST_AUTO_TEST_CASE(set_sig_checker)
     BOOST_CHECK(!checker.IsSetReleased(s));
     BOOST_CHECK(checker.IsSetReleased(uint256S("0x5")));
 
-    uint256 sighash = SignatureHash(scriptCode, tx, 0, SIGHASH_ALL, amount, branch, txdata);
-    auto sign = [&](const CKey& k, uint8_t role, const uint256& sh) {
+    uint256 sighash = SignatureHash(scriptCode, tx, 0, SET_SIG_HASHTYPE, amount, branch, txdata);
+    auto signAt = [&](const CKey& k, uint8_t role, const COutPoint& prevout, const uint256& sh) {
         valtype sig;
-        BOOST_REQUIRE(SignRecoverable(k, SetSigMsg(s, role, tx.vin[0].prevout, sh), sig));
+        BOOST_REQUIRE(SignRecoverable(k, SetSigMsg(s, role, prevout, sh), sig));
         return sig;
     };
+    auto sign = [&](const CKey& k, uint8_t role, const uint256& sh) { return signAt(k, role, tx.vin[0].prevout, sh); };
     BOOST_CHECK(checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(k2, 1, sighash)}, scriptCode, branch));
     BOOST_CHECK(checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k2, 1, sighash), sign(k1, 1, sighash)}, scriptCode, branch));
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash)}, scriptCode, branch));
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(k1, 1, sighash)}, scriptCode, branch));
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(k3, 1, sighash)}, scriptCode, branch)); // immature
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(MakeKey(9), 1, sighash)}, scriptCode, branch));
-    // Bound to the role, the sighash (hence scriptCode) and the outpoint.
+    // Bound to the role, the sighash (hence scriptCode, branch and amount) and the outpoint.
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 1, sighash)}, scriptCode, branch));
     BOOST_CHECK(checker.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighash)}, scriptCode, branch));
     BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighash)}, Recipient(1), branch));
     BOOST_CHECK(!checker.CheckSetSigs(uint256S("0x5"), ROLE_CANCEL, {sign(k1, 2, sighash)}, scriptCode, branch));
+
+    // The branch ID: signatures over another branch's sighash (Sapling's, and 0) are refused under the Vault branch,
+    // and the Vault branch's signatures are refused when the checker is asked for another branch.
+    for (uint32_t other : {(uint32_t)0, NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId}) {
+        const uint256 sighashOther = SignatureHash(scriptCode, tx, 0, SET_SIG_HASHTYPE, amount, other, txdata);
+        BOOST_REQUIRE(sighashOther != sighash);
+        BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighashOther), sign(k2, 1, sighashOther)}, scriptCode, branch));
+        BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighashOther)}, scriptCode, branch));
+        BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(k2, 1, sighash)}, scriptCode, other));
+        // ... and each is valid for the branch it was made for (the refusal above is the branch, not the signature)
+        BOOST_CHECK(checker.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighashOther), sign(k2, 1, sighashOther)}, scriptCode, other));
+    }
+
+    // The outpoint: signatures whose message names another prevout (same sighash) are refused; the checker binds
+    // txTo->vin[nIn].prevout, not anything the signer chose.
+    const COutPoint other(uint256S("0xabd"), 1);
+    BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_UNLOCK, {signAt(k1, 1, other, sighash), signAt(k2, 1, other, sighash)}, scriptCode, branch));
+    BOOST_CHECK(!checker.CheckSetSigs(s, ROLE_CANCEL, {signAt(k1, 2, COutPoint(tx.vin[0].prevout.hash, 0), sighash)}, scriptCode, branch));
+
+    // The amount: a checker for amount + 1 (the coin's real value differs from what the signers saw) refuses the
+    // signatures made over `amount`, and accepts signatures over its own.
+    SetSigChecker checkerAmount(&tx, 0, amount + 1, false, txdata, snap, c.h);
+    BOOST_CHECK(!checkerAmount.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighash), sign(k2, 1, sighash)}, scriptCode, branch));
+    BOOST_CHECK(!checkerAmount.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighash)}, scriptCode, branch));
+    const uint256 sighashAmount = SignatureHash(scriptCode, tx, 0, SET_SIG_HASHTYPE, amount + 1, branch, txdata);
+    BOOST_CHECK(checkerAmount.CheckSetSigs(s, ROLE_UNLOCK, {sign(k1, 1, sighashAmount), sign(k2, 1, sighashAmount)}, scriptCode, branch));
+
+    // The input index: in a two-input transaction, signatures made for input 0 do not verify for input 1.
+    {
+        CMutableTransaction m2 = SaplingSpend({COutPoint(uint256S("0xabc"), 1), COutPoint(uint256S("0xabe"), 0)}, {CTxOut(1000, Recipient(9))});
+        CTransaction tx2(m2);
+        PrecomputedTransactionData txdata2(tx2, {CTxOut(amount, scriptCode), CTxOut(amount, scriptCode)});
+        const uint256 sh0 = SignatureHash(scriptCode, tx2, 0, SET_SIG_HASHTYPE, amount, branch, txdata2);
+        const std::vector<valtype> sigs0 = {signAt(k1, 1, tx2.vin[0].prevout, sh0), signAt(k2, 1, tx2.vin[0].prevout, sh0)};
+        SetSigChecker in0(&tx2, 0, amount, false, txdata2, snap, c.h);
+        SetSigChecker in1(&tx2, 1, amount, false, txdata2, snap, c.h);
+        BOOST_CHECK(in0.CheckSetSigs(s, ROLE_UNLOCK, sigs0, scriptCode, branch));
+        BOOST_CHECK(!in1.CheckSetSigs(s, ROLE_UNLOCK, sigs0, scriptCode, branch));
+        // nIn past the inputs fails closed (no throw)
+        SetSigChecker in2(&tx2, 2, amount, false, txdata2, snap, c.h);
+        BOOST_CHECK(!in2.CheckSetSigs(s, ROLE_UNLOCK, sigs0, scriptCode, branch));
+
+        // The rest of the transaction: under SIGHASH_ALL another input (a builder's fee input) invalidates the
+        // signatures; under SIGHASH_ALL|ANYONECANPAY (MEDIUM-01-V-2) it does not. Either way another output does.
+        CMutableTransaction m3 = SaplingSpend({COutPoint(uint256S("0xabc"), 1), COutPoint(uint256S("0xfee"), 0)}, {CTxOut(1000, Recipient(9))});
+        CTransaction tx3(m3);
+        PrecomputedTransactionData txdata3(tx3, {CTxOut(amount, scriptCode), CTxOut(amount, Recipient(8))});
+        SetSigChecker fee(&tx3, 0, amount, false, txdata3, snap, c.h);
+        const bool anyoneCanPay = (SET_SIG_HASHTYPE & SIGHASH_ANYONECANPAY) != 0;
+        BOOST_CHECK_EQUAL(fee.CheckSetSigs(s, ROLE_UNLOCK, sigs0, scriptCode, branch), anyoneCanPay);
+        CMutableTransaction m4 = m2;
+        m4.vout[0].nValue -= 1;
+        CTransaction tx4(m4);
+        PrecomputedTransactionData txdata4(tx4, {CTxOut(amount, scriptCode), CTxOut(amount, scriptCode)});
+        SetSigChecker out(&tx4, 0, amount, false, txdata4, snap, c.h);
+        BOOST_CHECK(!out.CheckSetSigs(s, ROLE_UNLOCK, sigs0, scriptCode, branch));
+    }
+
     // A checker without a snapshot fails closed.
     SetSigChecker none(&tx, 0, amount, false, txdata, nullptr, c.h);
     BOOST_CHECK(!none.SetThreshold(s, ROLE_UNLOCK));
     BOOST_CHECK(!none.IsSetReleased(s));
     BOOST_CHECK(!none.CheckSetSigs(s, ROLE_CANCEL, {sign(k1, 2, sighash)}, scriptCode, branch));
+}
+
+BOOST_AUTO_TEST_CASE(vault_checksetsig_real_script)
+{
+    // T-3 (01/T-3): the templates' set branches through VerifyScript with the real SetSigChecker over a real
+    // SetSnapshot, so the interpreter's pop order, k from the snapshot, the member/current check and the released
+    // predicate are covered in the fast tier. Each negative names the §15.2 step (or the opcode gate) its error is.
+    Chain c;
+    CKey k1 = MakeKey(1), k2 = MakeKey(2), k3 = MakeKey(3);
+    SetId s = SetWithMembers(c, {k1, k2}); // unlock 2, cancel 1, livenessWindow 50
+    BOOST_REQUIRE(!c.Block1(JoinTx(c, s, k3, {}))); // k3 joined, immature at c.h
+    auto snap = std::make_shared<const SetSnapshot>(c.kv);
+    const int64_t hCurrent = c.h;
+    const int64_t hReleased = c.h + 100; // no heartbeat for > livenessWindow: dormant, hence released
+    BOOST_REQUIRE(!snap->IsReleased(s, hCurrent));
+    BOOST_REQUIRE(snap->IsReleased(s, hReleased));
+
+    const uint32_t branch = VaultBranchId();
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
+    const unsigned int preVault = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY;
+    const CAmount amount = 5 * COIN;
+
+    // The owner: a Falcon key (fast to sign), for the OWNER-RELEASED branch.
+    const uint8_t scheme = pq::SCHEME_FN_DSA_512;
+    valtype pk, sk;
+    BOOST_REQUIRE(pq::KeyGen(scheme, valtype(pq::SeedSize(scheme), 0x3c), pk, sk));
+    VaultParams vp = VaultFor(s, MakeKey(50));
+    vp.owner = CPQKeyID(scheme, pq::KeyHash(scheme, pk));
+    const CScript vspk = BuildVault(vp);
+    const CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    BOOST_REQUIRE(!vspk.empty() && !ispk.empty());
+
+    const COutPoint prevout(uint256S("0x7a"), 0);
+    const CTransaction tx(SaplingSpend({prevout}, {CTxOut(amount - 10000, ispk)}));
+    PrecomputedTransactionData txdata(tx, {CTxOut(amount, vspk)});
+    auto setSigs = [&](const CScript& spk, uint8_t role, const std::vector<CKey>& keys) {
+        const uint256 sh = SignatureHash(spk, tx, 0, SET_SIG_HASHTYPE, amount, branch, txdata);
+        CScript ss;
+        for (const CKey& k : keys) {
+            valtype sig;
+            BOOST_REQUIRE(SignRecoverable(k, SetSigMsg(s, role, prevout, sh), sig));
+            ss << sig;
+        }
+        return ss;
+    };
+    SetSigChecker checker(&tx, 0, amount, false, txdata, snap, hCurrent);
+    SetSigChecker released(&tx, 0, amount, false, txdata, snap, hReleased);
+    SetSigChecker unknown(&tx, 0, amount, false, txdata, nullptr, hCurrent);
+    ScriptError err;
+
+    // ---- V, selector 1 (UNLOCK): <sig1> <sig2> OP_1; the branch pushes <setId> OP_1 and OP_CHECKSETSIG pops role,
+    // setId, then k = unlockThreshold = 2 signatures.
+    const CScript unlock = setSigs(vspk, ROLE_UNLOCK, {k1, k2}) << OP_1;
+    auto parsed = ParseTemplateSpend(vspk, unlock);
+    BOOST_REQUIRE(parsed && parsed->kind == TemplateKind::VAULT && parsed->selector == SEL_UNLOCK);
+    BOOST_CHECK_EQUAL(parsed->sigs.size(), 2U);
+    BOOST_CHECK(VerifyScript(unlock, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+    BOOST_CHECK(VerifyScript(setSigs(vspk, ROLE_UNLOCK, {k2, k1}) << OP_1, vspk, flags, checker, branch, &err)); // any member order
+    // step 1/3: one signature where the threshold is two (k > the stack) -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_UNLOCK, {k1}) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 5: a signature by k3, a member not yet current (immature) -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_UNLOCK, {k1, k3}) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 5: the same member twice -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_UNLOCK, {k1, k1}) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 4: the cancel role's signatures on the unlock branch (the message binds the role) -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_CANCEL, {k1, k2}) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 4: signatures over the intent's scriptCode, not the V's -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(ispk, ROLE_UNLOCK, {k1, k2}) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 2: the set unknown to the checker (no snapshot: fails closed) -> SETSIG
+    BOOST_CHECK(!VerifyScript(unlock, vspk, flags, unknown, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // step 2: a V naming a set that does not exist -> SETSIG
+    {
+        VaultParams other = vp;
+        other.setId = uint256S("0x5e7");
+        BOOST_CHECK(!VerifyScript(unlock, BuildVault(other), flags, checker, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    }
+    // step 3: a signature that is not a 65-byte compact recoverable signature -> SETSIG
+    BOOST_CHECK(!VerifyScript(CScript() << valtype(64, 0x11) << valtype(65, 0x22) << OP_1, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // the branch ID: the same scriptSig checked for the Sapling branch -> SETSIG
+    BOOST_CHECK(!VerifyScript(unlock, vspk, flags, checker, NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // before the upgrade (no SCRIPT_VERIFY_VAULT): the executed 0xc0 is a bad opcode -> BAD_OPCODE
+    BOOST_CHECK(!VerifyScript(unlock, vspk, preVault, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+    // a released set does not weaken the unlock branch: still two current members' signatures
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_UNLOCK, {k1}) << OP_1, vspk, flags, released, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+
+    // One executed OP_CHECKSETSIG per script (§15.2): a (non-template) script running it twice -> SETSIG_COUNT,
+    // with signatures that would pass the first.
+    {
+        CScript twice = CScript() << valtype(s.begin(), s.end()) << OP_2 << VAULT_OP_CHECKSETSIG << OP_VERIFY
+                                  << valtype(s.begin(), s.end()) << OP_2 << VAULT_OP_CHECKSETSIG;
+        CScript ss = setSigs(twice, ROLE_CANCEL, {k1}) + setSigs(twice, ROLE_CANCEL, {k2});
+        BOOST_CHECK(!VerifyScript(ss, twice, flags, checker, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG_COUNT);
+        CScript once = CScript() << valtype(s.begin(), s.end()) << OP_2 << VAULT_OP_CHECKSETSIG;
+        BOOST_CHECK(VerifyScript(setSigs(once, ROLE_CANCEL, {k2}), once, flags, checker, branch, &err));
+    }
+
+    // ---- I, selector 2 (CANCEL): <sig> OP_2; the branch pushes <cancelSetId> OP_2, k = cancelThreshold = 1.
+    const CScript cancel = setSigs(ispk, ROLE_CANCEL, {k2}) << OP_2;
+    parsed = ParseTemplateSpend(ispk, cancel);
+    BOOST_REQUIRE(parsed && parsed->kind == TemplateKind::INTENT && parsed->selector == SEL_OWNER);
+    BOOST_CHECK(VerifyScript(cancel, ispk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+    // no signature -> SETSIG (k = 1 > the empty stack)
+    BOOST_CHECK(!VerifyScript(CScript() << OP_2, ispk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // the unlock role's signature on the cancel branch -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(ispk, ROLE_UNLOCK, {k2}) << OP_2, ispk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // an immature member -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(ispk, ROLE_CANCEL, {k3}) << OP_2, ispk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // a cancel signature over the V's scriptCode -> SETSIG
+    BOOST_CHECK(!VerifyScript(setSigs(vspk, ROLE_CANCEL, {k2}) << OP_2, ispk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_SETSIG);
+    // before the upgrade -> BAD_OPCODE
+    BOOST_CHECK(!VerifyScript(cancel, ispk, preVault, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+
+    // ---- V, selector 3 (OWNER-RELEASED): <setId> OP_CHECKSETDORMANT OP_VERIFY, then the owner's OP_CHECKPQSIG.
+    const uint256 ownerSighash = SignatureHash(vspk, tx, 0, SIGHASH_ALL, amount, branch, txdata);
+    valtype ownerSig;
+    BOOST_REQUIRE(pq::Sign(scheme, sk, ownerSighash, ownerSig));
+    ownerSig.push_back(SIGHASH_ALL);
+    const CScript ownerReleased = OwnerScriptSig(ownerSig, pk, SEL_RELEASED);
+    parsed = ParseTemplateSpend(vspk, ownerReleased);
+    BOOST_REQUIRE(parsed && parsed->kind == TemplateKind::VAULT && parsed->selector == SEL_RELEASED);
+    BOOST_CHECK(VerifyScript(ownerReleased, vspk, flags, released, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+    // the set is current (not released): OP_CHECKSETDORMANT pushes false -> VERIFY
+    BOOST_CHECK(!VerifyScript(ownerReleased, vspk, flags, checker, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_VERIFY);
+    // a checker without a snapshot answers "not released" (fails closed) -> VERIFY
+    SetSigChecker unknownLater(&tx, 0, amount, false, txdata, nullptr, hReleased);
+    BOOST_CHECK(!VerifyScript(ownerReleased, vspk, flags, unknownLater, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_VERIFY);
+    // before the upgrade: the executed 0xc1 -> BAD_OPCODE
+    BOOST_CHECK(!VerifyScript(ownerReleased, vspk, preVault, released, branch, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+    // the released predicate opens only the owner's branch: another owner's signature still fails
+    {
+        valtype pk2, sk2, sig2;
+        BOOST_REQUIRE(pq::KeyGen(scheme, valtype(pq::SeedSize(scheme), 0x3d), pk2, sk2));
+        BOOST_REQUIRE(pq::Sign(scheme, sk2, ownerSighash, sig2));
+        sig2.push_back(SIGHASH_ALL);
+        BOOST_CHECK(!VerifyScript(OwnerScriptSig(sig2, pk2, SEL_RELEASED), vspk, flags, released, branch, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(module_table_registers_yed)
