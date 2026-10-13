@@ -55,14 +55,19 @@ VaultDB::VaultDB(const fs::path& path, size_t nCacheSize, bool fMemory, bool fWi
 void VaultDB::CachePut(const std::string& key, const std::optional<std::string>& value) const
 {
     // caller holds cs
-    if (cache.size() >= MAX_CACHE_ENTRIES) cache.clear();
+    if (cache.size() >= MAX_CACHE_ENTRIES) {
+        cache.clear();
+        ++generation;   // a clear also invalidates every read in flight (audit 01/V-6)
+    }
     cache[key] = value;
 }
 
 bool VaultDB::Read(const std::string& key, std::string& value) const
 {
+    uint64_t gen;
     {
         std::lock_guard<std::mutex> lock(cs);
+        gen = generation;
         auto it = cache.find(key);
         if (it != cache.end()) {
             if (!it->second.has_value()) return false;
@@ -73,9 +78,10 @@ bool VaultDB::Read(const std::string& key, std::string& value) const
     std::string v;
     const bool found = db->Read(RawKey(key), v);
     std::lock_guard<std::mutex> lock(cs);
-    // A ConnectBlock/DisconnectBlock may have committed and cached this key while the read ran outside cs:
-    // never overwrite a newer entry with what was read before the commit (audit 01/V-6).
-    if (cache.find(key) == cache.end()) CachePut(key, found ? std::optional<std::string>(v) : std::nullopt);
+    // A commit (ConnectBlock/DisconnectBlock), a cache clear or a Wipe may have run while the read ran outside cs:
+    // cache what was read only if none did (the generation is unchanged) and the key is still absent, so a value
+    // read before a commit never replaces or outlives it (audit 01/V-6).
+    if (generation == gen && cache.find(key) == cache.end()) CachePut(key, found ? std::optional<std::string>(v) : std::nullopt);
     if (found) value = v;
     return found;
 }
@@ -147,6 +153,7 @@ bool VaultDB::ConnectBlock(const uint256& hash, int64_t height, const uint256& p
     batch.Write(RawKey(VersionKey()), EncodeVersion());
 
     std::lock_guard<std::mutex> lock(cs);
+    ++generation;   // every read that started before this commit may hold a pre-commit value (audit 01/V-6)
     if (!db->WriteBatch(batch, false)) {
         cache.clear();
         return LogError("vault", "vault: database write failed connecting %s\n", hash.GetHex());
@@ -180,6 +187,7 @@ bool VaultDB::DisconnectBlock(const uint256& hash, const uint256& prevHash, int6
     batch.Write(RawKey(TipKey()), tipValue);
 
     std::lock_guard<std::mutex> lock(cs);
+    ++generation;   // every read that started before this commit may hold a pre-commit value (audit 01/V-6)
     if (!db->WriteBatch(batch, false)) {
         cache.clear();
         return LogError("vault", "vault: database write failed disconnecting %s\n", hash.GetHex());
@@ -212,6 +220,7 @@ bool VaultDB::Wipe()
 {
     std::lock_guard<std::mutex> lock(cs);
     cache.clear();
+    ++generation;
     std::vector<std::string> keys;
     {
         std::unique_ptr<CDBIterator> it(db->NewIterator());
