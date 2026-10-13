@@ -98,6 +98,9 @@ private:
     void CachePut(const std::string& key, const std::optional<std::string>& value) const;
 
     std::unique_ptr<CDBWrapper> db;
+    /** Guards `cache` and the write batch (a commit and its cache update are one step under it). Every
+     *  consensus reader additionally holds cs_main, which is what orders reads against commits; Read never
+     *  lets a value read before a commit replace the entry the commit cached (audit 01/V-6). */
     mutable std::mutex cs;
     mutable std::map<std::string, std::optional<std::string>> cache;
     static const size_t MAX_CACHE_ENTRIES = 100000;

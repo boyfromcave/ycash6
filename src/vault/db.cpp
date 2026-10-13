@@ -71,9 +71,11 @@ bool VaultDB::Read(const std::string& key, std::string& value) const
         }
     }
     std::string v;
-    bool found = db->Read(RawKey(key), v);
+    const bool found = db->Read(RawKey(key), v);
     std::lock_guard<std::mutex> lock(cs);
-    CachePut(key, found ? std::optional<std::string>(v) : std::nullopt);
+    // A ConnectBlock/DisconnectBlock may have committed and cached this key while the read ran outside cs:
+    // never overwrite a newer entry with what was read before the commit (audit 01/V-6).
+    if (cache.find(key) == cache.end()) CachePut(key, found ? std::optional<std::string>(v) : std::nullopt);
     if (found) value = v;
     return found;
 }

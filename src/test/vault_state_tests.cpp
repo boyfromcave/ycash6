@@ -1288,11 +1288,12 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
     CMutableTransaction create = ActTx(c, a, {});
     SetId s = CTransaction(create).GetHash();
     BOOST_CHECK_EQUAL(db.GetVersion(), 1u);                 // no version key: a database from before it (review A3)
+    BOOST_CHECK(!GetSet(db, s));                            // a miss, cached as absent (audit 01/V-6 contract) ...
     connect({create}, h1, h0, 100);
     BOOST_CHECK_EQUAL(db.GetVersion(), VAULT_DB_VERSION);   // written with every connected block
     BOOST_CHECK_EQUAL(VAULT_DB_VERSION, 3u);
     BOOST_CHECK(db.GetTip(tip, tipHeight) && tip == h1 && tipHeight == 100);
-    BOOST_CHECK(!!GetSet(db, s));
+    BOOST_CHECK(!!GetSet(db, s));                           // ... replaced by the commit's value, never the stale read
     const auto afterCreate = snapshotAll();
 
     c.h = 101;
