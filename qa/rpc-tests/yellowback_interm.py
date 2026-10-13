@@ -26,10 +26,10 @@ explainer's example (yb-calibration docs/reports/2026-10-zec/in-term-claims.html
         yellowback_attest_wallet's V2 and the unit test in_term_emergency_claim_pays_the_residual_to_the_owner;
   - the owner's redeem is open in term (IT-1 extended: ownerHeight = refHeight + 1): Y is redeemed in term above
     theta, Y2 in term while under theta before anyone claims it, both for the full debt;
-  - --armed only: an attestor cancels a wrong-price in-term claim (vault_cancel by the set's member key, with
-    CAN-1's refund of the claim's burn to the claimant, audit 03/H-1):
-    the vault comes back byte-identical as the same position, ACTIVE; the claimant's burn is not refunded
-    (U-24);
+  - --armed only: the attestor set cancels an in-term claim three times (CAN-1's refund of the claim's burn to the
+    claimant, audit 03/H-1; the cancel-limit design's CAN-2 schedule: 1, 2, 3 co-signers, each with a C4b price
+    statement, through the wallet RPCs and by hand); the vault comes back byte-identical as the same position, ACTIVE;
+    at the end EQV-1 ejects a member whose statement contradicts its own attestation (C4b);
   - assert_model_matches(node, full=True) at the end.
 
 Nodes: 0 user (vault owner), 1 stock, 2-4 pools, 5 observer (the claimant).
@@ -363,54 +363,119 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_best_hash(self.enforcing_nodes(), 'end')
         assert_same_statehash(self.enforcing_nodes(), 'end')
 
-# Rule: RED-4 I-2 U-24 IT-2 CAN-1
+# Rule: RED-4 I-2 U-24 IT-2 CAN-1 CAN-2 C4b EQV-1
     def cancel_case(self, mint):
-        """--armed: the claimant claims the class-A vault in term with a bundle at a wrong (low) price; an
-        attestor cancels the claimant intent (selector 2, one member signature: the set's cancel threshold is
-        1): the vault is back as the same position, ACTIVE, at the cancel's vout 0, and (CAN-1, audit 03/H-1) the
-        claim's burn is refunded at vout 1 to the claimant's YED, which claims the vault again."""
+        """--armed: the claimant claims the class-A vault in term with a bundle at the pools' price; the attestor set
+        cancels the claimant intent, three times (the cancel-limit design, owner 2026-10-13): CAN-2's schedule asks
+        1, 2 and 3 co-signatures (regtest CANCEL_SIGNERS_MAX 3) of distinct current members, each a price statement at
+        the claim's refHeight saying the vault was not claimable (C4b). Rounds 1 and 3 go through the wallet
+        (yed_signcancelcosign, yed_buildcancel with cosigs, set_signcancel, vault_send), round 2 by hand. Each time the
+        vault is back as the same position, ACTIVE, at the cancel's vout 0, and (CAN-1, audit 03/H-1) the claim's burn
+        is refunded at vout 1 to the claimant's YED, which claims the vault again. The members had signed the claims'
+        bundles at the pools' price themselves, so their statements contradict their own attestations: at the end
+        EQV-1 ejects one of them on its statement (C4b)."""
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
-        print("--armed: an attestor cancels the claimant's in-term claim of the class-A vault; the vault is back, the burn refunded")
-        vault = user.yed_getvault(mint['txid'])
+        print("--armed: the attestor set cancels the claimant's in-term claim of the class-A vault three times (1, 2, 3 co-signers)")
+        from test_framework import yellowback_attest as ya
+        from test_framework.yellowback_attest import ATTESTOR_WIFS
+        members = [0, 1, 2]
+        secrets = dict((i, hot_secret_for(user, i)) for i in members)
+        for i in members:                                  # the wallet path: the member keys in node 0's wallet
+            user.importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)
+        honest = usd_to_micro(PRICE)                       # $4.00: the class-A vault at 300 %, not claimable
+        position = mint['txid']
         supply_before = nodes[2].yed_getstats()['supplyCents']
-        claimed = self.claim(claimant, mint['txid'])
-        self.sync_all()
-        self.mine(POOLS[1])
-        assert_equal(nodes[2].yed_getvault(mint['txid'])['status'], 'CLAIMING')
-        assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before - 10000)
-        holder = nodes[2].yed_getvault(mint['txid'])['refundHolder']           # CAN-1: the script the burned YED came from
-        balance_before = claimant.yed_getbalance()['confirmedCents']
-        raw = claimant.getrawtransaction(claimed['txid'], 1)
-        ispk = hex_str_to_bytes(raw['vout'][0]['scriptPubKey']['hex'])
-        ip = v.IntentParams(*ym.yed_intent_fields(ispk))
-        # the claimed V, as the node shows it (IT-1 extended: ownerHeight = appHeight = refHeight + 1, not lockHeight)
-        vp = v.parse_vault(hex_str_to_bytes(vault['scriptPubKey']))
-        s = yed_params().attestor_set_internal
-        assert_equal((vp.tag, vp.set_id, vp.cancel_set_id, vp.delay, vp.owner_height, vp.app_height, vp.owner),
-                     (ym.YED_TAG, s, s, CLAIM_DELAY, vault['refHeight'] + 1, vault['refHeight'] + 1, vault_owner(vault)))
-        assert_equal(v.sha256(v.vault_script(vp)), ip.vault_hash)
-        secret = hot_secret_for(user, 0)
-        refund = (yed_params().token_value, hex_str_to_bytes(holder))
-        no_refund = v.node_cancel(user, (claimed['txid'], 0), ip, raw['vout'][0]['valueZat'], vp, [secret])
-        assert_rpc_error('intent-cancel-no-refund', user.sendrawtransaction, no_refund)
-        cancel_hex = v.node_cancel(user, (claimed['txid'], 0), ip, raw['vout'][0]['valueZat'], vp, [secret], extra=[refund])
-        cancel_txid = user.sendrawtransaction(cancel_hex)
-        self.sync_all()
-        self.mine(POOLS[2])
-        for i in OVERLAY:
-            back = nodes[i].yed_getvault(cancel_txid)
-            assert_equal((back['status'], back['collateralZat'], back['mintedCents'], back['lockHeight']),
-                         ('ACTIVE', raw['vout'][0]['valueZat'], 10000, vault['lockHeight']))
-            assert_rpc_error('vault-not-found', nodes[i].yed_getvault, mint['txid'])
-        assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before)              # CAN-1: the burn is refunded
-        info = nodes[2].yed_gettxinfo(cancel_txid)
-        assert_equal((info['type'], info['assigned'], info['yedOut']), ('claim_cancel', [{'vout': 1, 'cents': 10000}], 10000))
-        refunded = [u for u in claimant.yed_listunspent() if u['txid'] == cancel_txid and u['vout'] == 1]
-        assert_equal([u['cents'] for u in refunded], [10000])                         # the claimant holds the burned YED again
-        assert_equal(claimant.yed_getbalance()['confirmedCents'], balance_before + 10000)
-        self.checkpoint('cancel')
+        statements = {}
+        for rnd in (1, 2, 3):
+            vault = user.yed_getvault(position)
+            assert_equal((vault['cancelCount'], vault['cancelsRequired']), (rnd - 1, rnd))
+            claimed = self.claim(claimant, position)
+            self.sync_all()
+            self.mine(POOLS[1])
+            assert_equal(nodes[2].yed_getvault(position)['status'], 'CLAIMING')
+            assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before - 10000)
+            holder = nodes[2].yed_getvault(position)['refundHolder']           # CAN-1: the script the burned YED came from
+            balance_before = claimant.yed_getbalance()['confirmedCents']
+            raw = claimant.getrawtransaction(claimed['txid'], 1)
+            ref = user.yed_decodepayload(raw['hex'])['refHeight']               # the claim's refHeight: what statements cite
+            ispk = hex_str_to_bytes(raw['vout'][0]['scriptPubKey']['hex'])
+            ip = v.IntentParams(*ym.yed_intent_fields(ispk))
+            vp = v.parse_vault(hex_str_to_bytes(vault['scriptPubKey']))
+            s = yed_params().attestor_set_internal
+            assert_equal((vp.tag, vp.set_id, vp.cancel_set_id, vp.delay, vp.owner_height, vp.app_height, vp.owner),
+                         (ym.YED_TAG, s, s, CLAIM_DELAY, vault['refHeight'] + 1, vault['refHeight'] + 1, vault_owner(vault)))
+            assert_equal(v.sha256(v.vault_script(vp)), ip.vault_hash)
+            intent = '%s:0' % claimed['txid']
+            refund = (yed_params().token_value, hex_str_to_bytes(holder))
+            value = raw['vout'][0]['valueZat']
+            bh = user.getblockhash(ref)
+            self.wrong = vault['underwaterAt'] - 1          # a price at which the vault is claimable (the claim's side)
+            if rnd == 1:
+                # the refund comes first (CAN-1), then the co-signatures (CAN-2): a cancel without any is refused
+                no_refund = v.node_cancel(user, (claimed['txid'], 0), ip, value, vp, [secrets[0]])
+                assert_rpc_error('intent-cancel-no-refund', user.sendrawtransaction, no_refund)
+                no_cosign = v.node_cancel(user, (claimed['txid'], 0), ip, value, vp, [secrets[0]], extra=[refund])
+                assert_rpc_error('intent-cancel-cosign', user.sendrawtransaction, no_cosign)
+                assert_rpc_error('cancel-cosign-needed: this cancel needs 1', user.yed_buildcancel, intent)
+                assert_rpc_error('cancel-statement-claimable', user.yed_signcancelcosign, intent, vault['underwaterAt'] - 1, 0)
+            if rnd == 2:
+                # by hand: one co-signature short is refused by every Yellowback mempool, two pass
+                cos = [ya.sign_cancel_cosign(secrets[i], s, claimed['txid'], 0, ref, honest, bh) for i in (0, 1)]
+                short = ya.yed_cancel_raw(user, (claimed['txid'], 0), ip, value, vp, [secrets[0]], refund, cos[:1])
+                self.sync_all()                                                  # its carrier reaches every mempool
+                for i in OVERLAY:
+                    assert_rpc_error('intent-cancel-cosign', nodes[i].sendrawtransaction, short)
+                self.mine(POOLS[2])                                              # the short cancel's carrier confirms
+                cancel_txid = user.sendrawtransaction(ya.yed_cancel_raw(user, (claimed['txid'], 0), ip, value, vp, [secrets[1]], refund, cos))
+                statements = dict((i, cos[n]) for n, i in enumerate((0, 1)))
+            else:
+                cosigs = [user.yed_signcancelcosign(intent, honest, i) for i in range(rnd)]
+                for i, c in enumerate(cosigs):
+                    assert_equal((c['seq'], c['priceMicroUsd'], c['citedHeight']), (i, honest, ref))
+                    statements[i] = ya.cosign_entry_of_hex(c['cosig'])
+                if rnd > 1:
+                    assert_rpc_error('cancel-cosign-needed: this cancel needs %d' % rnd, user.yed_buildcancel, intent, [c['cosig'] for c in cosigs[:-1]])
+                built = user.yed_buildcancel(intent, [c['cosig'] for c in cosigs])
+                assert_equal((built['cancelsRequired'], built['cosigners']), (rnd, list(range(rnd))))
+                assert_equal(user.yed_buildcancel(intent, [c['cosig'] for c in cosigs])['hex'], built['hex'])   # sign once: the same transaction
+                signed = user.set_signcancel(built['hex'], {'acknowledgerestore': True})
+                assert_equal(signed['complete'], True)
+                cancel_txid = user.vault_send(signed['hex'])
+            self.sync_all()
+            self.mine(POOLS[2])
+            for i in OVERLAY:
+                back = nodes[i].yed_getvault(cancel_txid)
+                assert_equal((back['status'], back['collateralZat'], back['mintedCents'], back['lockHeight']),
+                             ('ACTIVE', value, 10000, vault['lockHeight']))
+                assert_equal((back['cancelCount'], back['cancelsRequired'], back['cancelQuietUntil']),
+                             (rnd, min(rnd + 1, 3), nodes[i].getblockcount() + 40))
+                assert_rpc_error('vault-not-found', nodes[i].yed_getvault, position)
+            assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before)              # CAN-1: the burn is refunded
+            info = nodes[2].yed_gettxinfo(cancel_txid)
+            assert_equal((info['type'], info['assigned'], info['yedOut']), ('claim_cancel', [{'vout': 1, 'cents': 10000}], 10000))
+            refunded = [u for u in claimant.yed_listunspent() if u['txid'] == cancel_txid and u['vout'] == 1]
+            assert_equal([u['cents'] for u in refunded], [10000])                         # the claimant holds the burned YED again
+            assert_equal(claimant.yed_getbalance()['confirmedCents'], balance_before + 10000)
+            position = cancel_txid
+            last = (claimed['txid'], ref, bh)
+            self.checkpoint('cancel %d' % rnd)
 
+        print('C4b: EQV-1 ejects member 2 on its cancel statement ($%s) against its own attestation at the same height' % PRICE)
+        txid, ref, bh = last
+        att = ya.sign_attestation(secrets[2], 2, self.wrong, ref, bh)
+        price, sig = statements[2]
+        carrier = ya.build_carrier_tx(user, ya.encode_cancel_evidence(att, txid, 0, price, sig))
+        self.sync_all()
+        self.mine(POOLS[0])
+        user.sendrawtransaction(ya.equivocation_raw(user, carrier))
+        self.sync_all()
+        self.mine(POOLS[0])
+        for i in OVERLAY:
+            rec = [r for r in nodes[i].yed_listattestors() if int(r['seq']) == 2][0]
+            assert_equal((rec['status'], rec['bondFrozen']), ('EJECTED', True))
+            assert_equal([r['status'] for r in nodes[i].yed_listattestors() if int(r['seq']) in (0, 1)].count('EJECTED'), 0)
+        self.checkpoint('cancel statement slashed')
 
 if __name__ == '__main__':
     YellowbackInTermTest().main()

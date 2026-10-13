@@ -65,6 +65,8 @@ const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
 const char* const INTENT_CANCEL_NO_REFUND = "intent-cancel-no-refund";
+const char* const INTENT_CANCEL_COSIGN = "intent-cancel-cosign";
+const char* const INTENT_RESIDUAL_HELD = "intent-residual-held";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
@@ -786,6 +788,7 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
             ir.vault = active[0].outpoint;
             ir.role = (uint8_t)(j == facts.claimantVout ? IntentRole::CLAIMANT : IntentRole::RESIDUAL);
             ir.height = ctx.height;
+            ir.claimRefHeight = (int32_t)p.refHeight;   // C4b: the height a cancel's statements cite
             // CAN-1: the refund holder is the token spent at the claim's lowest-index YED input (spentTokens is in vin order)
             if (ir.Role() == IntentRole::CLAIMANT) ir.refundScript.assign(log.spentTokens[0].scriptPubKey.begin(), log.spentTokens[0].scriptPubKey.end());
             ctx.st.Put(keys::Intent(COutPoint(txid, (uint32_t)j)), ir);
@@ -796,6 +799,8 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
     return false;
 }
 
+std::optional<std::pair<uint16_t, AttestorRecord>> LatestRecord(const State& st, const std::vector<unsigned char>& key);
+
 /** A spent claim intent (U-23). */
 struct SpentIntent
 {
@@ -803,6 +808,110 @@ struct SpentIntent
     IntentRecord record;
     size_t vin;
 };
+
+/** CAN-2: q, the position's recent cancels (0 once CANCEL_QUIET has passed since its last one). */
+int64_t CancelQ(const VaultRecord& v, const Params& P, int64_t h)
+{
+    return h - (int64_t)v.lastCancelHeight < (int64_t)P.cancelQuiet ? (int64_t)v.cancelCount : 0;
+}
+
+/**
+ * CAN-3 round 2, as fixed after the review (coordinator 2026-10-13): whether a claim of the position `v` at `out` in this
+ * block could pass RED-4 at ANY reference height it may cite, R in [max(H - REF_WINDOW, START_HEIGHT), H - 1], judged
+ * fail-closed from chain state alone (no bundle is at hand at a release):
+ *  - an undefined xClaim at R (no snapshot, no price) counts as claimable;
+ *  - path (a): a claim uses pClaim = max(xClaim, aClaim) when R is ARMED and xClaim otherwise; since pClaim >= xClaim
+ *    either way, the position is treated as claimable when it is underwater at xClaim under CLAIM_THRESHOLD (an
+ *    unarmed R: exactly the claim's test; an armed R: a claim could pass with a bundle whose aClaim is as low);
+ *  - path (b): when R is ARMED and a standing notice of the position persists for R (EMERGENCY_PERSIST <=
+ *    R - notice.refHeight <= EMERGENCY_NOTICE_TTL), the claim's pEmerg = min(xClaim, aClaim) can be as low as a bundle
+ *    makes it, so the position is treated as claimable.
+ * Reads at most REF_WINDOW (40) snapshots (cached per block) and one notice per held residual's release; only the
+ * owner's own records. Over-approximating claimability can only hold a residual a real claim could not take, never
+ * release one it could; the owner can always redeem.
+ */
+bool ClaimableAtSnapshot(EvalContext& ctx, const VaultRecord& v, const COutPoint& out)
+{
+    const Params& P = ctx.params;
+    const int64_t H = ctx.height;
+    const int64_t lo = std::max<int64_t>(H - P.refWindow, P.startHeight);
+    std::optional<NoticeRecord> n = ctx.st.GetNotice(out);
+    for (int64_t R = lo; R <= H - 1; R++) {
+        const std::optional<Snapshot>& snap = ctx.Snap(R);
+        if (!snap.has_value() || !snap->PClaim().has_value()) return true;                       // fail closed
+        if (IsUnderwater(v.collateralZat, snap->PClaim(), v.mintedCents, P.claimThresholdBps)) return true;   // (a)
+        if (n.has_value() && P.IsArmed(snap->attest.IsArmed()) && R - (int64_t)n->refHeight >= P.emergencyPersist &&
+            R - (int64_t)n->refHeight <= P.emergencyNoticeTtl) return true;                      // (b)
+    }
+    return false;
+}
+
+/** CAN-3: a held residual is released once its position is closed (CLOSED by the owner, CLAIMED by a later release),
+ *  or -- owner, round 2 -- once it is ACTIVE with CANCEL_QUIET passed since its last cancel AND no claim of it could pass
+ *  at any reference height a claim in this block may cite (ClaimableAtSnapshot); never while it is CLAIMING. */
+bool ResidualReleasable(EvalContext& ctx, const std::optional<VaultRecord>& pos, const COutPoint& out)
+{
+    if (!pos.has_value()) return false;     // cannot happen: every cancel moves heldBy to the position it re-creates
+    const VaultStatus s = pos->Status();
+    if (s == VaultStatus::CLOSED || s == VaultStatus::CLAIMED) return true;
+    if (s != VaultStatus::ACTIVE || ctx.height - (int64_t)pos->lastCancelHeight < (int64_t)ctx.params.cancelQuiet) return false;
+    return !ClaimableAtSnapshot(ctx, pos.value(), out);
+}
+
+/**
+ * The seq of `key` when it is a current member of the attestor set at `h` on the module's mirror (the primitive's
+ * IsCurrent, vault/state.cpp: an ACTIVE member whose join has matured): its key's newest Attestors record, neither
+ * EJECTED nor WITHDRAWN, bond unspent and unfrozen, h >= registerHeight + the set's maturity. nullopt otherwise.
+ */
+std::optional<uint16_t> CurrentMemberSeq(const State& st, const CPubKey& key, int64_t h)
+{
+    std::optional<AttestorSetRecord> set = st.GetAttestorSet();
+    if (!set.has_value()) return std::nullopt;
+    std::optional<std::pair<uint16_t, AttestorRecord>> r = LatestRecord(st, std::vector<unsigned char>(key.begin(), key.end()));
+    if (!r.has_value()) return std::nullopt;
+    const AttestorRecord& rec = r->second;
+    if (rec.Status() == AttestorStatus::EJECTED || rec.Status() == AttestorStatus::WITHDRAWN) return std::nullopt;
+    if (rec.bondSpentHeight != 0 || rec.Frozen()) return std::nullopt;
+    if (h < (int64_t)rec.registerHeight + (int64_t)set->maturity) return std::nullopt;
+    return r->first;
+}
+
+/**
+ * CAN-2 + C4b (cancel-limit design §2 C2, C4b; owner 2026-10-13): the cancel's carrier holds a well-formed "YC" list
+ * (bundle.h; a malformed one fails) in which at least `required` DISTINCT VALID entries are found (round 2, coordinator
+ * decision on review M-2): an entry is valid when its price is in [PRICE_MIN, PRICE_MAX], the CLAIMING vault is not
+ * claimable at it (collateral x price >= debt x CLAIM_THRESHOLD: !IsUnderwater), and it recovers (vault::RecoverSig)
+ * over CancelCosignMessage(the attestor set, the claimant intent, the claim's refHeight, its price,
+ * blockHash(refHeight)) to a current member; it counts once per key. Invalid, non-current and repeated entries are
+ * ignored, so a co-signer that leaves (or is ejected) before the cancel confirms does not void it when spares were
+ * carried. `seqs` receives the counted co-signers' seqs in carrier order.
+ */
+bool CancelCosignsHold(EvalContext& ctx, const CTransaction& tx, const SpentIntent& in, const VaultRecord& vault, int required,
+                       std::vector<uint16_t>& seqs)
+{
+    const Params& P = ctx.params;
+    auto extracted = ExtractBundle(tx, P.bundleCarrier, false, std::vector<unsigned char>());
+    if (!extracted) return false;
+    std::optional<std::vector<CancelCosignEntry>> entries = DecodeCancelCosigns(extracted->first);
+    if (!entries.has_value()) return false;
+    const int64_t R = in.record.claimRefHeight;
+    std::optional<uint256> blockHash = BlockHashAt(ctx.st.View(), P, R);
+    if (!blockHash.has_value()) return false;
+    std::set<CPubKey> counted;
+    for (const CancelCosignEntry& e : entries.value()) {
+        if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX) continue;
+        if (IsUnderwater(vault.collateralZat, (MicroUsd)e.priceMicroUsd, vault.mintedCents, P.claimThresholdBps)) continue;
+        CPubKey key;
+        const uint256 msg = CancelCosignMessage(P.attestorSetId, in.outpoint.hash, in.outpoint.n, (uint32_t)R, e.priceMicroUsd, blockHash.value());
+        if (!vault::RecoverSig(msg, e.sig, key)) continue;
+        if (counted.count(key)) continue;
+        std::optional<uint16_t> seq = CurrentMemberSeq(ctx.st, key, ctx.height);
+        if (!seq.has_value()) continue;
+        counted.insert(key);
+        seqs.push_back(seq.value());
+    }
+    return seqs.size() >= (size_t)required;
+}
 
 /**
  * U-23, U-24, CAN-1: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
@@ -826,9 +935,13 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     const Params& P = ctx.params;
     std::optional<uint8_t> selector = vault::ParseSelector(tx.vin[in.vin].scriptSig);
     if (!selector.has_value() || !(selector.value() == vault::SEL_UNLOCK || selector.value() == vault::SEL_OWNER)) return verdict::INTENT_SPEND_MALFORMED;
-    if (fp.has_value()) return verdict::INTENT_SPEND_MALFORMED;           // a release or cancel carries no Yellowback payload
     const bool cancel = selector.value() == vault::SEL_OWNER;
+    // a release carries no Yellowback payload; a cancel none but CAN-2's CANCEL_COSIGN marker
+    if (fp.has_value() && !(cancel && fp->payload.type == PayloadType::CANCEL_COSIGN)) return verdict::INTENT_SPEND_MALFORMED;
     if (cancel && in.record.Role() == IntentRole::RESIDUAL) return verdict::INTENT_CANCEL_RESIDUAL;
+    // CAN-3: the residual of a cancelled claim is held while the re-created position lives
+    if (!cancel && in.record.Role() == IntentRole::RESIDUAL && !in.record.heldBy.IsNull() &&
+        !ResidualReleasable(ctx, ctx.st.GetVault(in.record.heldBy), in.record.heldBy)) return verdict::INTENT_RESIDUAL_HELD;
     std::optional<VaultRecord> vault = ctx.st.GetVault(in.record.vault);
     ctx.st.EraseKey(keys::Intent(in.outpoint));
     log.type = (uint8_t)(cancel ? TxLogType::CLAIM_CANCEL : TxLogType::CLAIM_RELEASE);
@@ -861,6 +974,12 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         if (tx.vout[j].scriptPubKey == holder && tx.vout[j].nValue > 0) { refundVout = (int)j; break; }
     }
     if (refundVout < 0) return verdict::INTENT_CANCEL_NO_REFUND;
+    // CAN-2 + C4b: at least CancelsRequired distinct current members, each with its price statement at the claim's refHeight
+    std::vector<uint16_t> cosigners;
+    if (!fp.has_value() || !CancelCosignsHold(ctx, tx, in, vault.value(), CancelsRequired(vault.value(), P, ctx.height), cosigners)) {
+        return verdict::INTENT_CANCEL_COSIGN;
+    }
+    log.bundleSeqs = cosigners;
     const COutPoint refundOut(txid, (uint32_t)refundVout);
     TokenRecord tok;
     tok.cents = refund;
@@ -882,8 +1001,20 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     v.closeHeight = 0;
     v.closingTxid = uint256();
     v.burnedCents = 0;
+    v.cancelCount = (uint8_t)std::min<int64_t>(CancelQ(vault.value(), P, ctx.height) + 1, 255);   // CAN-2
+    v.lastCancelHeight = ctx.height;
     ctx.st.EraseKey(keys::Vault(in.record.vault));
     ctx.st.Put(keys::Vault(reopened), v);
+    // CAN-3: this claim's residual, and any residual an earlier cancel of the position holds, is held by the re-created one
+    std::vector<std::pair<COutPoint, IntentRecord>> held;
+    for (const auto& r : ctx.st.Intents()) {
+        if (r.second.Role() != IntentRole::RESIDUAL) continue;
+        if ((r.second.heldBy.IsNull() ? r.second.vault : r.second.heldBy) == in.record.vault) held.push_back(r);
+    }
+    for (auto& r : held) {
+        r.second.heldBy = reopened;
+        ctx.st.Put(keys::Intent(r.first), r.second);
+    }
     if (ctx.st.Has(keys::Notice(in.record.vault))) ctx.st.EraseKey(keys::Notice(in.record.vault));
     totals.collateralZat += v.collateralZat - vault->collateralZat;    // IT-6: the CLAIMING collateral was still counted
     totals.activeVaults++;
@@ -973,10 +1104,9 @@ void EjectRecord(EvalContext& ctx, uint16_t seq, AttestorRecord rec, bool freeze
 bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& log)
 {
     const Params& P = ctx.params;
-    std::optional<std::pair<Attestation, Attestation>> e = EquivocationEvidence(tx, P);
+    std::optional<Equivocation> e = EquivocationEvidence(tx, P);
     if (!e) return false;
-    const Attestation& a = e->first;
-    const Attestation& b = e->second;
+    const Attestation& a = e->a;
     if ((int64_t)a.citedHeight >= ctx.height) return false;
     std::optional<uint256> blockHash = BlockHashAt(ctx.st.View(), P, a.citedHeight);
     if (!blockHash.has_value()) return false;
@@ -988,7 +1118,7 @@ bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& lo
         for (size_t j = i + 1; j < all.size(); j++) newest = newest && all[j].second.attestorPubKey != rec.attestorPubKey;
         if (!newest) continue;
         const CPubKey pk = rec.AttestorKey();
-        if (!EquivocatedBy(e.value(), pk, blockHash.value())) continue;   // never the W8 cache: it is keyed by seq, not by key
+        if (!EquivocatedBy(e.value(), pk, blockHash.value(), P.attestorSetId)) continue;   // never the W8 cache: it is keyed by seq, not by key
         EjectRecord(ctx, all[i].first, rec, true);
         log.attestorSeq = all[i].first;
         log.bundleSeqs.push_back(a.seq);
@@ -1835,28 +1965,51 @@ void UndoBlock(StateView& view, const UndoRecord& undo)
 // ---------------------------------------------------------------------------
 // v3: attestors, arming, selection (v3 plan §3.7, W9)
 
-std::optional<std::pair<Attestation, Attestation>> EquivocationEvidence(const CTransaction& tx, const Params& P)
+std::optional<Equivocation> EquivocationEvidence(const CTransaction& tx, const Params& P)
 {
     std::optional<FoundPayload> fp = FindPayload(tx);
     if (!fp.has_value() || fp->payload.type != PayloadType::EQUIVOCATION) return std::nullopt;
     std::string reason;
     auto extracted = ExtractBundle(tx, P.bundleCarrier, false, std::vector<unsigned char>(), &reason);
     if (!extracted) return std::nullopt;
-    std::optional<Bundle> bundle = DecodeBundle(extracted->first, 255);
-    if (!bundle || bundle->atts.size() != 2) return std::nullopt;
-    const Attestation& a = bundle->atts[0];
-    const Attestation& b = bundle->atts[1];
-    if (a.seq != b.seq || a.citedHeight != b.citedHeight || a.priceMicroUsd == b.priceMicroUsd) return std::nullopt;
-    if ((int64_t)a.citedHeight < (int64_t)P.startHeight) return std::nullopt;
-    return std::make_pair(a, b);
+    Equivocation e;
+    if (std::optional<Bundle> bundle = DecodeBundle(extracted->first, 255)) {
+        if (bundle->atts.size() != 2) return std::nullopt;
+        const Attestation& a = bundle->atts[0];
+        const Attestation& b = bundle->atts[1];
+        if (a.seq != b.seq || a.citedHeight != b.citedHeight || a.priceMicroUsd == b.priceMicroUsd) return std::nullopt;
+        e.a = a;
+        e.b = b;
+    } else if (auto c = DecodeCancelEvidence(extracted->first)) {
+        // C4b (cancel-limit design, owner 2026-10-13): a regular attestation and a cancel statement at its citedHeight
+        if (c->first.priceMicroUsd == c->second.priceMicroUsd) return std::nullopt;
+        e.a = c->first;
+        e.s = c->second;
+    } else {
+        return std::nullopt;
+    }
+    if ((int64_t)e.a.citedHeight < (int64_t)P.startHeight) return std::nullopt;
+    return e;
 }
 
-bool EquivocatedBy(const std::pair<Attestation, Attestation>& e, const CPubKey& key, const uint256& blockHash)
+bool EquivocatedBy(const Equivocation& e, const CPubKey& key, const uint256& blockHash, const uint256& attestorSetId)
 {
-    const Attestation& a = e.first;
-    const Attestation& b = e.second;
-    return VerifyCompactSig(key, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig) &&
-           VerifyCompactSig(key, AttestMessage(b.seq, b.priceMicroUsd, b.citedHeight, blockHash), b.sig);
+    const Attestation& a = e.a;
+    if (!VerifyCompactSig(key, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig)) return false;
+    if (e.b.has_value()) {
+        const Attestation& b = e.b.value();
+        return VerifyCompactSig(key, AttestMessage(b.seq, b.priceMicroUsd, b.citedHeight, blockHash), b.sig);
+    }
+    if (!e.s.has_value()) return false;
+    const CancelStatement& s = e.s.value();
+    CPubKey signer;
+    return vault::RecoverSig(CancelCosignMessage(attestorSetId, s.intent.hash, s.intent.n, a.citedHeight, s.priceMicroUsd, blockHash), s.sig, signer) &&
+           signer == key;
+}
+
+int CancelsRequired(const VaultRecord& vault, const Params& P, int64_t height)
+{
+    return (int)std::min<int64_t>(CancelQ(vault, P, height) + 1, std::max(1, P.cancelSignersMax));
 }
 
 bool ArmedAt(const StateView& view, const Params& P, int refHeight)

@@ -37,7 +37,7 @@ pub fn topic_id(topic: &str) -> TopicId {
     TopicId::from_bytes(Sha256::digest(topic.as_bytes()).into())
 }
 
-fn load_or_create_secret(path: Option<&Path>) -> anyhow::Result<SecretKey> {
+pub fn load_or_create_secret(path: Option<&Path>) -> anyhow::Result<SecretKey> {
     let Some(path) = path else {
         return Ok(SecretKey::generate());
     };
@@ -77,7 +77,32 @@ fn load_or_create_secret(path: Option<&Path>) -> anyhow::Result<SecretKey> {
     }
 }
 
-fn relay_mode(relays: &[String]) -> anyhow::Result<RelayMode> {
+/// `relays` empty: n0's public relays, with the `fallback` relays (a project-run relay, owner decision 4) added to
+/// the map when given; `["none"]`: no relay; otherwise exactly `relays` (plus `fallback`).
+pub fn relay_mode_with_fallback(relays: &[String], fallback: &[String]) -> anyhow::Result<RelayMode> {
+    if fallback.is_empty() {
+        return relay_mode(relays);
+    }
+    if relays.len() == 1 && relays[0].eq_ignore_ascii_case("none") {
+        return Ok(RelayMode::Disabled);
+    }
+    let parse = |r: &String| r.parse::<RelayUrl>().with_context(|| format!("relay url {r:?}"));
+    let extra = fallback.iter().map(parse).collect::<anyhow::Result<Vec<_>>>()?;
+    let map = if relays.is_empty() {
+        iroh::defaults::prod::default_relay_map()
+    } else {
+        relays
+            .iter()
+            .map(parse)
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .collect::<RelayMap>()
+    };
+    map.extend(&extra.into_iter().collect::<RelayMap>());
+    Ok(RelayMode::Custom(map))
+}
+
+pub fn relay_mode(relays: &[String]) -> anyhow::Result<RelayMode> {
     if relays.is_empty() {
         return Ok(RelayMode::Default);
     }
@@ -92,12 +117,26 @@ fn relay_mode(relays: &[String]) -> anyhow::Result<RelayMode> {
 }
 
 impl IrohTransport {
+    #[cfg(test)]
     pub async fn open(
         relays: &[String],
         peers: &[String],
         secret_key_file: Option<&Path>,
         topic: &str,
     ) -> anyhow::Result<Self> {
+        let mut v = Self::open_topics(relays, &[], peers, secret_key_file, &[topic]).await?;
+        Ok(v.remove(0))
+    }
+
+    /// One endpoint, one gossip instance, one subscription per topic (the attestation topic and, beside it, the
+    /// cancel-limit design's co-signature topic): the peers an operator configures carry both.
+    pub async fn open_topics(
+        relays: &[String],
+        fallback_relays: &[String],
+        peers: &[String],
+        secret_key_file: Option<&Path>,
+        topics: &[&str],
+    ) -> anyhow::Result<Vec<Self>> {
         let secret = load_or_create_secret(secret_key_file)?;
         let bootstrap = peers
             .iter()
@@ -106,7 +145,7 @@ impl IrohTransport {
                     .with_context(|| format!("peer endpoint id {p:?}"))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let mode = relay_mode(relays)?;
+        let mode = relay_mode_with_fallback(relays, fallback_relays)?;
         let lookup = MemoryLookup::new();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret)
@@ -123,27 +162,32 @@ impl IrohTransport {
             endpoint.online().await;
         }
         tracing::info!(
-            "iroh: endpoint id {} (give this to peers as [transport] peers); topic {topic}",
-            endpoint.id()
+            "iroh: endpoint id {} (give this to peers as [transport] peers); topic(s) {}",
+            endpoint.id(),
+            topics.join(", ")
         );
         if bootstrap.is_empty() {
             tracing::warn!("iroh: no [transport] peers configured; waiting for peers to dial us");
         }
-        // `subscribe` (not `subscribe_and_join`): the topic is usable before a neighbour appears,
-        // and publications queue until one does.
-        let sub = gossip
-            .subscribe(topic_id(topic), bootstrap)
-            .await
-            .context("iroh-gossip subscribe")?;
-        let (sender, receiver) = sub.split();
-        Ok(IrohTransport {
-            endpoint,
-            lookup,
-            router,
-            _gossip: gossip,
-            sender,
-            receiver,
-        })
+        let mut out = Vec::with_capacity(topics.len());
+        for topic in topics {
+            // `subscribe` (not `subscribe_and_join`): the topic is usable before a neighbour appears,
+            // and publications queue until one does.
+            let sub = gossip
+                .subscribe(topic_id(topic), bootstrap.clone())
+                .await
+                .context("iroh-gossip subscribe")?;
+            let (sender, receiver) = sub.split();
+            out.push(IrohTransport {
+                endpoint: endpoint.clone(),
+                lookup: lookup.clone(),
+                router: router.clone(),
+                _gossip: gossip.clone(),
+                sender,
+                receiver,
+            });
+        }
+        Ok(out)
     }
 
     /// Used by the tests and kept public for a future `peers`-less bootstrap path.
@@ -188,10 +232,16 @@ impl Transport for IrohTransport {
     }
 
     fn recv(&mut self) -> BoxFuture<'_, anyhow::Result<Vec<u8>>> {
+        Box::pin(async move { Ok(self.recv_from().await?.0) })
+    }
+
+    fn recv_from(&mut self) -> BoxFuture<'_, anyhow::Result<(Vec<u8>, String)>> {
         Box::pin(async move {
             loop {
                 match self.receiver.next().await {
-                    Some(Ok(Event::Received(msg))) => return Ok(msg.content.to_vec()),
+                    Some(Ok(Event::Received(msg))) => {
+                        return Ok((msg.content.to_vec(), msg.delivered_from.to_string()))
+                    }
                     Some(Ok(Event::NeighborUp(id))) => tracing::info!("iroh: neighbour up {}", id.fmt_short()),
                     Some(Ok(Event::NeighborDown(id))) => tracing::info!("iroh: neighbour down {}", id.fmt_short()),
                     Some(Ok(Event::Lagged)) => tracing::warn!("iroh: receiver lagged; some messages were dropped"),
@@ -212,6 +262,27 @@ mod tests {
         let id = topic_id("yellowback/attest/main/3");
         assert_eq!(id.as_bytes(), &Sha256::digest(b"yellowback/attest/main/3")[..]);
         assert_ne!(topic_id("yellowback/attest/test/3"), id);
+    }
+
+    #[test]
+    fn a_project_relay_joins_n0s() {
+        let fb = vec!["https://relay.ycash.example".to_string()];
+        match relay_mode_with_fallback(&[], &fb).unwrap() {
+            RelayMode::Custom(map) => {
+                assert_eq!(map.len(), iroh::defaults::prod::default_relay_map().len() + 1);
+                assert!(map.contains(&"https://relay.ycash.example".parse::<RelayUrl>().unwrap()));
+            }
+            m => panic!("{m:?}"),
+        }
+        assert!(matches!(
+            relay_mode_with_fallback(&["none".into()], &fb).unwrap(),
+            RelayMode::Disabled
+        ));
+        assert!(matches!(
+            relay_mode_with_fallback(&[], &[]).unwrap(),
+            RelayMode::Default
+        ));
+        assert!(relay_mode_with_fallback(&[], &["not a url".into()]).is_err());
     }
 
     #[test]

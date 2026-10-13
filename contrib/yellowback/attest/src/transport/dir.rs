@@ -7,6 +7,10 @@
 //! reader never sees a partial file; a subscriber lists the directory every 2 s and delivers each
 //! `.att` file it has not seen. Files already present at start are delivered too: the node's pool
 //! is empty after a restart and rejects anything stale on its own.
+//!
+//! The cancel topic (the cancel-limit design's co-signatures) is a `dir` transport too, on the subdirectory `cancel/`
+//! with digest names (`c-<sha256 of the frame, 16 bytes hex>.att`): a frame republished unchanged lands on the same
+//! name, so a subscriber delivers it once.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -20,11 +24,19 @@ use super::{BoxFuture, Transport};
 
 pub const POLL: Duration = Duration::from_secs(2);
 
+/// How a publication is named: the attestation topic by `<seq>-<citedHeight>`, the cancel topic by digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    Attestation,
+    Digest,
+}
+
 pub struct DirTransport {
     path: PathBuf,
     seen: HashSet<PathBuf>,
     pending: Vec<PathBuf>,
     poll: Duration,
+    naming: Naming,
 }
 
 impl DirTransport {
@@ -35,7 +47,25 @@ impl DirTransport {
             seen: HashSet::new(),
             pending: Vec::new(),
             poll: POLL,
+            naming: Naming::Attestation,
         })
+    }
+
+    /// The cancel topic's bus: `<path>/cancel`, digest names.
+    pub fn open_cancel(path: &Path) -> anyhow::Result<Self> {
+        Self::open_digest(path, "cancel")
+    }
+
+    /// A digest-named bus in the subdirectory `sub` (the cancel and binding topics).
+    pub fn open_digest(path: &Path, sub: &str) -> anyhow::Result<Self> {
+        let mut t = Self::open(&path.join(sub))?;
+        t.naming = Naming::Digest;
+        Ok(t)
+    }
+
+    pub fn digest_name(message: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("c-{}.att", hex::encode(&Sha256::digest(message)[..16]))
     }
 
     #[cfg(test)]
@@ -75,7 +105,10 @@ impl Transport for DirTransport {
 
     fn publish<'a>(&'a mut self, message: &'a [u8]) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            let name = Self::file_name(message);
+            let name = match self.naming {
+                Naming::Attestation => Self::file_name(message),
+                Naming::Digest => Self::digest_name(message),
+            };
             let final_path = self.path.join(&name);
             let tmp = self.path.join(format!(".{name}.{}.tmp", std::process::id()));
             tokio::fs::write(&tmp, message)
@@ -97,7 +130,9 @@ impl Transport for DirTransport {
                 }
                 if !self.pending.is_empty() {
                     let p = self.pending.remove(0);
-                    match tokio::fs::read(&p).await {
+                    // synchronous: no await between taking the name and returning its bytes, so a caller that
+                    // drops this future (a select!) never loses a frame
+                    match std::fs::read(&p) {
                         Ok(bytes) => return Ok(bytes),
                         Err(e) => {
                             tracing::debug!("dir: {} unreadable, skipped: {e}", p.display());
@@ -171,6 +206,31 @@ mod tests {
             heights.push(Attestation::decode(&s.recv().await.unwrap()).unwrap().cited_height);
         }
         assert_eq!(heights, vec![10, 14, 18]);
+    }
+
+    #[tokio::test]
+    async fn cancel_bus_uses_digest_names_and_delivers_a_republication_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = DirTransport::open_cancel(dir.path()).unwrap();
+        let mut s = DirTransport::open_cancel(dir.path())
+            .unwrap()
+            .with_poll(Duration::from_millis(20));
+        let frame = vec![0x42u8; 115];
+        p.publish(&frame).await.unwrap();
+        p.publish(&frame).await.unwrap(); // the same name: overwritten, not a second file
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("cancel")).unwrap().collect();
+        assert_eq!(names.len(), 1);
+        assert_eq!(s.recv().await.unwrap(), frame);
+        assert!(tokio::time::timeout(Duration::from_millis(100), s.recv())
+            .await
+            .is_err());
+        // the attestation bus beside it never sees the cancel frames
+        let mut a = DirTransport::open(dir.path())
+            .unwrap()
+            .with_poll(Duration::from_millis(20));
+        assert!(tokio::time::timeout(Duration::from_millis(100), a.recv())
+            .await
+            .is_err());
     }
 
     #[test]

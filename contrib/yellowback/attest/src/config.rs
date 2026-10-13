@@ -62,6 +62,8 @@ pub struct TransportToml {
     pub peers: Option<Vec<String>>,
     pub secret_key_file: Option<String>,
     pub topic_override: Option<String>,
+    /// Relays added to n0's default set (a project-run relay, owner decision 4); ignored with relays = ["none"].
+    pub fallback_relays: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -77,6 +79,40 @@ pub struct SubscribeToml {
     pub seq_refill_seconds: Option<u64>,
 }
 
+/// `[cancel]`: the cancel-limit design's automation (CAN-2 + C4b, owner 2026-10-13): the watcher, the co-signature
+/// gossip and the collector, all inside `attest`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelToml {
+    pub enabled: Option<bool>,
+    pub auto_cosign: Option<bool>,
+    pub margin_bps: Option<u32>,
+    pub drive: Option<bool>,
+    pub spares: Option<u32>,
+    pub spare_wait_blocks: Option<u32>,
+    pub takeover_blocks: Option<u32>,
+    pub min_confirmations: Option<u32>,
+    pub refee_after_blocks: Option<u32>,
+    pub max_sends: Option<u32>,
+    pub delivery: Option<String>,
+    pub direct_secret_key_file: Option<String>,
+    pub direct_relays: Option<Vec<String>>,
+    pub fallback_relays: Option<Vec<String>>,
+    pub binding_ttl_blocks: Option<u32>,
+    pub onchain_fallback: Option<bool>,
+    pub fallback_after_blocks: Option<u32>,
+    pub fallback_fee_zat: Option<i64>,
+    pub fallback_max_txs: Option<u32>,
+    pub republish_blocks: Option<u32>,
+    pub price_tolerance_blocks: Option<u32>,
+    pub state_file: Option<String>,
+    pub broadcast_rpc: Option<Vec<String>>,
+    pub allow_insecure_broadcast: Option<bool>,
+    pub alert_command: Option<String>,
+    pub gossip_burst: Option<u32>,
+    pub gossip_refill_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -86,6 +122,7 @@ struct RawConfig {
     btc_usd_sources: Option<Vec<SourceToml>>,
     transport: Option<TransportToml>,
     subscribe: Option<SubscribeToml>,
+    cancel: Option<CancelToml>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +157,7 @@ pub enum TransportConfig {
         peers: Vec<String>,
         secret_key_file: Option<PathBuf>,
         topic_override: Option<String>,
+        fallback_relays: Vec<String>,
     },
 }
 
@@ -132,6 +170,103 @@ pub struct SubscribeConfig {
     pub seq_refill_seconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Gossip,
+    Trial,
+    Direct,
+    Onchain,
+}
+
+impl Delivery {
+    pub fn gossip(self) -> bool {
+        matches!(self, Delivery::Gossip | Delivery::Trial)
+    }
+    pub fn direct(self) -> bool {
+        matches!(self, Delivery::Direct | Delivery::Trial)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CancelConfig {
+    /// Run the watcher, the gossip and the collector inside `attest`.
+    pub enabled: bool,
+    /// Co-sign (yed_signcancelcosign) and publish every confirmed claim judged wrong-price, with no operator.
+    pub auto_cosign: bool,
+    /// Co-sign only when the vault is above theta at this agent's price with this many basis points to spare.
+    pub margin_bps: u32,
+    /// Take part in the leader rota: build, sign and send the cancel when this member's turn comes.
+    pub drive: bool,
+    /// Co-signatures beyond `cancelsRequired` to wait for (the rule counts valid entries; spares absorb a co-signer
+    /// that leaves or a reorg that raises the count, design A-6).
+    pub spares: u32,
+    /// Once `cancelsRequired` are in hand, how many blocks to wait for the spares before sending without them.
+    pub spare_wait_blocks: u32,
+    /// The member of rank r in the rota drives after r × this many blocks since the claim confirmed.
+    pub takeover_blocks: u32,
+    pub min_confirmations: u32,
+    /// A cancel unconfirmed this long after it was sent is re-pushed, and re-funded (vault_refee) if it left the mempool.
+    pub refee_after_blocks: u32,
+    /// At most this many sends (the first and every rebuild) per claim, rebuilds spaced
+    /// `refee_after_blocks × 2^(sends − 1)` apart; reaching the cap raises an alert.
+    pub max_sends: u32,
+    /// How co-signatures travel (owner decision 1, 2026-10-13): "trial" (the members-only direct path and the old
+    /// gossip topic side by side, the default until the trial ends), "direct" (direct only), "gossip" (the old topic
+    /// only), "onchain" (neither: the on-chain fallback alone).
+    pub delivery: Delivery,
+    /// The direct endpoint's key; None: `<state_file>.direct.key`.
+    pub direct_secret_key_file: Option<PathBuf>,
+    /// The direct endpoint's relays: empty = n0's public relays; `["none"]` = direct addresses only.
+    pub direct_relays: Vec<String>,
+    /// Relays added to n0's (a project-run relay, owner decision 4).
+    pub fallback_relays: Vec<String>,
+    /// A binding is valid this many blocks after it is issued and re-signed at half of it.
+    pub binding_ttl_blocks: u32,
+    /// Owner decision 2: publish this member's co-signature on chain when a claim is still short.
+    pub onchain_fallback: bool,
+    /// ... this many blocks after the claim confirmed.
+    pub fallback_after_blocks: u32,
+    /// The fee of each fallback transaction, exactly.
+    pub fallback_fee_zat: i64,
+    /// At most this many fallback transactions per 1,152 blocks (a day), whatever the claims.
+    pub fallback_max_txs: u32,
+    /// Republish this agent's own co-signature every this many blocks while the claim stands (late joiners, restarts).
+    pub republish_blocks: u32,
+    /// How far the height of the aggregate the watcher judges with may lie from the claim's refHeight.
+    pub price_tolerance_blocks: u32,
+    /// Persisted state (JSON); None: `yellowback-cancel-<seq>.json` beside `rpc_cookie`, else
+    /// `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
+    pub state_file: Option<PathBuf>,
+    /// Other nodes' JSON-RPC URLs (`http://user:pass@host:port`) the cancel and its carrier are pushed to with
+    /// `sendrawtransaction` as soon as they are sent (pinning, review S1: broadcast early to well-connected peers).
+    pub broadcast_rpc: Vec<String>,
+    /// A program run on every alert: `<program> <kind> <intent> <message>`.
+    pub alert_command: Option<String>,
+    /// Per-seq token bucket on the cancel topic.
+    pub gossip_burst: u32,
+    pub gossip_refill_seconds: u64,
+}
+
+pub const DEFAULT_CANCEL_MARGIN_BPS: u32 = 500;
+pub const DEFAULT_CANCEL_SPARES: u32 = 2;
+pub const DEFAULT_SPARE_WAIT_BLOCKS: u32 = 1;
+pub const DEFAULT_TAKEOVER_BLOCKS: u32 = 6;
+pub const DEFAULT_REFEE_AFTER_BLOCKS: u32 = 6;
+pub const DEFAULT_MAX_SENDS: u32 = 5;
+pub const DEFAULT_BINDING_TTL_BLOCKS: u32 = 8_064;
+/// A third of CLAIM_DELAY (576): time for the direct path first, and for two more rounds after the fallback.
+pub const DEFAULT_FALLBACK_AFTER_BLOCKS: u32 = 192;
+pub const DEFAULT_FALLBACK_FEE_ZAT: i64 = 10_000;
+pub const DEFAULT_FALLBACK_MAX_TXS: u32 = 20;
+/// The largest `takeover_blocks`: with the 15-seat attestor set the last rank drives 14 × this after the claim
+/// confirmed, which must leave time inside CLAIM_DELAY (576): 14 × 36 = 504. The agent also shrinks it at run time
+/// to fit the node's claimDelay and the set's current size.
+pub const MAX_TAKEOVER_BLOCKS: u32 = 36;
+pub const DEFAULT_REPUBLISH_BLOCKS: u32 = 4;
+pub const DEFAULT_PRICE_TOLERANCE_BLOCKS: u32 = 24;
+pub const DEFAULT_GOSSIP_BURST: u32 = 16;
+pub const DEFAULT_GOSSIP_REFILL_SECONDS: u64 = 10;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub node: NodeConfig,
@@ -140,6 +275,7 @@ pub struct Config {
     pub btc_usd_sources: Vec<Source>,
     pub transport: TransportConfig,
     pub subscribe: SubscribeConfig,
+    pub cancel: CancelConfig,
 }
 
 pub const DEFAULT_EVERY_BLOCKS: u32 = 10;
@@ -162,6 +298,22 @@ fn expand_user(p: &str) -> PathBuf {
         }
     }
     PathBuf::from(p)
+}
+
+/// `scheme://user:password@host` with the password replaced by `***`, for error messages.
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((creds, host)) => {
+            let user = creds.split_once(':').map_or(creds, |(u, _)| u);
+            format!("{scheme}://{user}:***@{host}{path}")
+        }
+        None => url.to_string(),
+    }
 }
 
 /// The host of an http(s) URL is loopback (`localhost`, `127.0.0.0/8`, `::1`).
@@ -231,7 +383,11 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         .filter(|u| !u.is_empty())
         .ok_or_else(|| "[node] rpc_url is required".to_string())?;
     if !(rpc_url.starts_with("http://") || rpc_url.starts_with("https://")) {
-        return Err(format!("[node] rpc_url must start with http:// or https:// (got {rpc_url:?})").into());
+        return Err(format!(
+            "[node] rpc_url must start with http:// or https:// (got {:?})",
+            redact_url(&rpc_url)
+        )
+        .into());
     }
     let has_credentials = n.rpc_user.is_some() || n.rpc_cookie.is_some() || rpc_url.contains('@');
     if rpc_url.starts_with("http://")
@@ -240,8 +396,9 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         && !n.allow_insecure_rpc.unwrap_or(false)
     {
         return Err(format!(
-            "[node] rpc_url {rpc_url:?} would send the node's credentials as cleartext Basic auth to a host that is not \
-             loopback: use https://, an SSH tunnel to 127.0.0.1, or set allow_insecure_rpc = true"
+            "[node] rpc_url {:?} would send the node's credentials as cleartext Basic auth to a host that is not \
+             loopback: use https://, an SSH tunnel to 127.0.0.1, or set allow_insecure_rpc = true",
+            redact_url(&rpc_url)
         )
         .into());
     }
@@ -275,7 +432,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     let t = raw.transport.unwrap_or_default();
     let transport = match t.kind.as_deref().unwrap_or("iroh") {
         "dir" => {
-            if t.relays.is_some() || t.peers.is_some() || t.secret_key_file.is_some() || t.topic_override.is_some() {
+            if t.relays.is_some()
+                || t.peers.is_some()
+                || t.secret_key_file.is_some()
+                || t.topic_override.is_some()
+                || t.fallback_relays.is_some()
+            {
                 return Err("[transport]: kind = \"dir\" takes only path".to_string().into());
             }
             let path = t
@@ -295,6 +457,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 peers: t.peers.unwrap_or_default(),
                 secret_key_file: t.secret_key_file.as_deref().map(expand_user),
                 topic_override: t.topic_override.filter(|s| !s.is_empty()),
+                fallback_relays: t.fallback_relays.unwrap_or_default(),
             }
         }
         other => return Err(format!("[transport]: unknown kind {other:?} (iroh or dir)").into()),
@@ -326,6 +489,93 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         return Err(format!("[subscribe] endpoints: {e:?} is not an http(s) URL").into());
     }
 
+    let c = raw.cancel.unwrap_or_default();
+    let cancel = CancelConfig {
+        enabled: c.enabled.unwrap_or(true),
+        auto_cosign: c.auto_cosign.unwrap_or(true),
+        margin_bps: c.margin_bps.unwrap_or(DEFAULT_CANCEL_MARGIN_BPS),
+        drive: c.drive.unwrap_or(true),
+        spares: c.spares.unwrap_or(DEFAULT_CANCEL_SPARES),
+        spare_wait_blocks: c.spare_wait_blocks.unwrap_or(DEFAULT_SPARE_WAIT_BLOCKS),
+        takeover_blocks: c.takeover_blocks.unwrap_or(DEFAULT_TAKEOVER_BLOCKS).max(1),
+        min_confirmations: c.min_confirmations.unwrap_or(1).max(1),
+        refee_after_blocks: c.refee_after_blocks.unwrap_or(DEFAULT_REFEE_AFTER_BLOCKS).max(1),
+        max_sends: c.max_sends.unwrap_or(DEFAULT_MAX_SENDS).max(1),
+        delivery: match c.delivery.as_deref().unwrap_or("trial") {
+            "trial" => Delivery::Trial,
+            "direct" => Delivery::Direct,
+            "gossip" => Delivery::Gossip,
+            "onchain" => Delivery::Onchain,
+            other => {
+                return Err(format!("[cancel] delivery: {other:?} is not trial, direct, gossip or onchain").into())
+            }
+        },
+        direct_secret_key_file: c
+            .direct_secret_key_file
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(expand_user),
+        direct_relays: c.direct_relays.unwrap_or_default(),
+        fallback_relays: c.fallback_relays.unwrap_or_default(),
+        binding_ttl_blocks: c.binding_ttl_blocks.unwrap_or(DEFAULT_BINDING_TTL_BLOCKS).max(10),
+        onchain_fallback: c.onchain_fallback.unwrap_or(true),
+        fallback_after_blocks: c.fallback_after_blocks.unwrap_or(DEFAULT_FALLBACK_AFTER_BLOCKS),
+        fallback_fee_zat: c.fallback_fee_zat.unwrap_or(DEFAULT_FALLBACK_FEE_ZAT),
+        fallback_max_txs: c.fallback_max_txs.unwrap_or(DEFAULT_FALLBACK_MAX_TXS),
+        republish_blocks: c.republish_blocks.unwrap_or(DEFAULT_REPUBLISH_BLOCKS).max(1),
+        price_tolerance_blocks: c.price_tolerance_blocks.unwrap_or(DEFAULT_PRICE_TOLERANCE_BLOCKS),
+        state_file: c.state_file.as_deref().filter(|p| !p.is_empty()).map(expand_user),
+        broadcast_rpc: c.broadcast_rpc.unwrap_or_default(),
+        alert_command: c.alert_command.filter(|s| !s.is_empty()),
+        gossip_burst: c.gossip_burst.unwrap_or(DEFAULT_GOSSIP_BURST).max(1),
+        gossip_refill_seconds: c.gossip_refill_seconds.unwrap_or(DEFAULT_GOSSIP_REFILL_SECONDS).max(1),
+    };
+    if let (
+        Some(d),
+        TransportConfig::Iroh {
+            secret_key_file: Some(t),
+            ..
+        },
+    ) = (&cancel.direct_secret_key_file, &transport)
+    {
+        if d == t {
+            return Err(
+                "[cancel] direct_secret_key_file must not be [transport] secret_key_file: the direct endpoint is bound to \
+                 the seat and must have its own key"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
+    if cancel.takeover_blocks > MAX_TAKEOVER_BLOCKS {
+        return Err(format!(
+            "[cancel]: takeover_blocks must be at most {MAX_TAKEOVER_BLOCKS} (the last of 15 ranks must still drive inside CLAIM_DELAY)"
+        )
+        .into());
+    }
+    if !(1_000..=1_000_000).contains(&cancel.fallback_fee_zat) {
+        return Err("[cancel]: fallback_fee_zat must be between 1000 and 1000000"
+            .to_string()
+            .into());
+    }
+    if cancel.margin_bps > 100_000 {
+        return Err("[cancel]: margin_bps must be at most 100000".to_string().into());
+    }
+    let allow_insecure_broadcast = c.allow_insecure_broadcast.unwrap_or(false);
+    for u in &cancel.broadcast_rpc {
+        if !(u.starts_with("http://") || u.starts_with("https://")) {
+            return Err(format!("[cancel] broadcast_rpc: {:?} is not an http(s) URL", redact_url(u)).into());
+        }
+        if u.starts_with("http://") && u.contains('@') && !is_loopback_url(u) && !allow_insecure_broadcast {
+            return Err(format!(
+                "[cancel] broadcast_rpc: {:?} would send credentials as cleartext to a host that is not loopback \
+                 (use https://, a tunnel, or allow_insecure_broadcast = true)",
+                redact_url(u)
+            )
+            .into());
+        }
+    }
+
     Ok(Config {
         node,
         attest,
@@ -333,6 +583,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         btc_usd_sources,
         transport,
         subscribe,
+        cancel,
     })
 }
 
@@ -468,6 +719,77 @@ endpoints = ["https://attestor.example/att"]
         std::fs::write(&p, "[node]\nrpc_url = \"http://127.0.0.1:1\"\nrpc_cookie = \"/x\"\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load(&p, false).is_ok());
+    }
+
+    #[test]
+    fn errors_never_print_a_password() {
+        assert_eq!(
+            redact_url("http://u:s3cret@node.example:8832/x"),
+            "http://u:***@node.example:8832/x"
+        );
+        assert_eq!(redact_url("https://h:1"), "https://h:1");
+        let e = parse("[node]\nrpc_url = \"http://u:s3cret@node.example:8832\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("s3cret"), "{e}");
+        let e =
+            parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:s3cret@peer.example:9\"]\n")
+                .unwrap_err()
+                .to_string();
+        assert!(!e.contains("s3cret"), "{e}");
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 37\n").is_err());
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n").unwrap().cancel;
+        assert_eq!(c.delivery, Delivery::Trial);
+        assert!(c.delivery.gossip() && c.delivery.direct() && c.onchain_fallback);
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ndelivery = \"direct\"\nfallback_relays = [\"https://r.example\"]\n")
+            .unwrap()
+            .cancel;
+        assert!(!c.delivery.gossip() && c.delivery.direct());
+        assert_eq!(c.fallback_relays.len(), 1);
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ndelivery = \"carrier pigeon\"\n").is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nfallback_fee_zat = 5\n").is_err());
+        assert!(parse(
+            "[node]\nrpc_url = \"http://h:1\"\n[transport]\nsecret_key_file = \"/k\"\n[cancel]\ndirect_secret_key_file = \"/k\"\n"
+        )
+        .is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 36\n").is_ok());
+    }
+
+    #[test]
+    fn cancel_defaults_and_overrides() {
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n").unwrap();
+        assert!(c.cancel.enabled && c.cancel.auto_cosign && c.cancel.drive);
+        assert_eq!(
+            (
+                c.cancel.margin_bps,
+                c.cancel.spares,
+                c.cancel.takeover_blocks,
+                c.cancel.min_confirmations
+            ),
+            (
+                DEFAULT_CANCEL_MARGIN_BPS,
+                DEFAULT_CANCEL_SPARES,
+                DEFAULT_TAKEOVER_BLOCKS,
+                1
+            )
+        );
+        assert!(c.cancel.state_file.is_none() && c.cancel.broadcast_rpc.is_empty());
+        let c = parse(
+            "[node]\nrpc_url = \"http://h:1\"\n[cancel]\nauto_cosign = false\nmargin_bps = 0\ntakeover_blocks = 0\n\
+             state_file = \"/tmp/s.json\"\nbroadcast_rpc = [\"http://u:p@127.0.0.1:9\", \"https://u:p@miner.example\"]\n",
+        )
+        .unwrap();
+        assert!(!c.cancel.auto_cosign);
+        assert_eq!((c.cancel.margin_bps, c.cancel.takeover_blocks), (0, 1));
+        assert_eq!(c.cancel.state_file, Some(PathBuf::from("/tmp/s.json")));
+        assert_eq!(c.cancel.broadcast_rpc.len(), 2);
+        assert!(
+            parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:p@peer.example:9\"]\n")
+                .is_err()
+        );
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:p@peer.example:9\"]\nallow_insecure_broadcast = true\n").is_ok());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"ftp://x\"]\n").is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbogus = 1\n").is_err());
     }
 
     #[test]

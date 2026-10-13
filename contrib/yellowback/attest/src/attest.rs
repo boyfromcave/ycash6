@@ -136,6 +136,8 @@ pub struct Attestor {
     pub published: u64,
     /// P4-b: the height of the last SET_HEARTBEAT sent (or attempted: a failure retries a block later).
     pub last_heartbeat: Option<u32>,
+    /// The aggregate of the last poll (µUSD), whether or not it was due: the cancel watcher's price history.
+    pub last_aggregate: Option<i64>,
 }
 
 impl Attestor {
@@ -166,6 +168,7 @@ impl Attestor {
             seq,
             published: 0,
             last_heartbeat: None,
+            last_aggregate: None,
         })
     }
 
@@ -207,6 +210,7 @@ impl Attestor {
     /// aggregate at a due tick does not consume the tick — the next poll tries again.
     pub async fn tick(&mut self, height: u32, transport: &mut dyn Transport) -> Tick {
         let agg = poll_and_aggregate(&mut self.feed, &self.fetcher, self.mock.as_deref()).await;
+        self.last_aggregate = agg.as_ref().map(|a| a.micro_usd);
         if !self.cadence.due(height) {
             return Tick::NotDue;
         }
@@ -350,6 +354,68 @@ impl Attestor {
     }
 
     /// The exit code: the loop runs until a signal (0); 2 is a bad configuration found at runtime.
+    /// The cancel-limit design (CAN-2 + C4b, owner 2026-10-13): co-sign the cancel of the YED claimant intent `intent`
+    /// ("txid:n") with this seq's member key, which the node holds (`yed_signcancelcosign`). The co-signature is at the
+    /// same time this attestor's signed price statement at the claim's refHeight, and EQV-1 ejects a member whose
+    /// regular attestation there carries another price, so the node's equivocation guard decides first: by default it
+    /// states the price this key already signed for that height. Only when the key signed none (`price-required`) does
+    /// the agent state its own aggregate now (`price` overrides it). Returns the 69-byte co-signature hex that
+    /// `yed_buildcancel` takes; a statement saying the vault was claimable is the node's `cancel-statement-claimable`.
+    pub async fn cosign(&mut self, intent: &str, price: Option<i64>) -> anyhow::Result<String> {
+        let first = self
+            .node
+            .call(
+                "yed_signcancelcosign",
+                vec![
+                    json!(intent),
+                    price.map(|p| json!(p)).unwrap_or(Value::Null),
+                    json!(self.seq),
+                ],
+            )
+            .await;
+        let reply = match first {
+            Ok(v) => v,
+            Err(RpcError::Node { message, .. }) if price.is_none() && message.starts_with("price-required") => {
+                let agg = poll_and_aggregate(&mut self.feed, &self.fetcher, self.mock.as_deref())
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("price-required and no aggregate: this agent has no price to state")
+                    })?;
+                tracing::info!(
+                    "seq {} signed no price at the claim's refHeight; stating the aggregate {} µUSD",
+                    self.seq,
+                    agg.micro_usd
+                );
+                self.node
+                    .call(
+                        "yed_signcancelcosign",
+                        vec![json!(intent), json!(agg.micro_usd), json!(self.seq)],
+                    )
+                    .await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        reply
+            .get("cosig")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("yed_signcancelcosign returned no cosig"))
+    }
+
+    /// `cosign`: the one-shot command around [`Attestor::cosign`]; prints the co-signature hex on stdout.
+    pub async fn cosign_command(mut self, intent: &str, price: Option<i64>) -> anyhow::Result<i32> {
+        let network = self.wait_network().await;
+        if !self.mock_allowed_on(&network) {
+            tracing::error!(
+                "bad configuration: --mock-price on network {network:?} would state the file's number; regtest only"
+            );
+            return Ok(crate::EXIT_BAD_CONFIG);
+        }
+        let cosig = self.cosign(intent, price).await?;
+        println!("{cosig}");
+        Ok(0)
+    }
+
     pub async fn run(mut self) -> anyhow::Result<i32> {
         let network = self.wait_network().await;
         if !self.mock_allowed_on(&network) {
@@ -360,7 +426,15 @@ impl Attestor {
             );
             return Ok(crate::EXIT_BAD_CONFIG);
         }
-        let mut transport = transport::open(&self.cfg.transport, &network).await?;
+        // The cancel-limit design's automation (CAN-2 + C4b): its topic shares the transport (one iroh endpoint, or the
+        // dir bus's cancel/ subdirectory) and runs on its own task; the watcher and the collector run once per poll.
+        let (mut transport, mut cancel) = if self.cfg.cancel.enabled {
+            let rt = CancelRuntime::open(&self.cfg, &network, self.seq).await?;
+            let topics_attest = rt.1;
+            (topics_attest, Some(rt.0))
+        } else {
+            (transport::open(&self.cfg.transport, &network).await?, None)
+        };
         tracing::info!(
             "yellowback-attest attest: seq {}, network {network}, every {} blocks, ref_lag {}, poll {} s, transport {}{}",
             self.seq,
@@ -374,17 +448,194 @@ impl Attestor {
         loop {
             match self.getinfo().await {
                 Ok((_, h)) if h >= 0 => {
-                    self.tick(h as u32, transport.as_mut()).await;
+                    let tick = self.tick(h as u32, transport.as_mut()).await;
                     self.heartbeat(h as u32).await;
+                    if let Some(rt) = cancel.as_mut() {
+                        if let Some(p) = self.last_aggregate {
+                            rt.agent.state.record_price(h as u32, p);
+                        }
+                        if let Tick::Published(att) = &tick {
+                            rt.agent
+                                .state
+                                .record_signed(att.cited_height, att.price_micro_usd as i64);
+                        }
+                        rt.poll(h as u32).await?;
+                    }
                 }
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
                 Err(e) => tracing::error!("yed_getinfo failed: {e}; retrying"),
             }
-            tokio::select! {
-                _ = tokio::time::sleep(poll) => {}
-                _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+            // between polls the verified co-signatures are taken as they come (the verifier task drains the topic)
+            let deadline = tokio::time::Instant::now() + poll;
+            loop {
+                match cancel.as_mut() {
+                    Some(rt) => tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        got = rt.verified.recv() => match got {
+                            Some(v) => rt.agent.accept_verified(v),
+                            None => anyhow::bail!("cancel topic: the gossip tasks are gone; exiting so the agent is restarted"),
+                        },
+                        _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+                    },
+                    None => tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+                    },
+                }
             }
         }
+    }
+}
+
+/// The cancel automation's moving parts beside the attest loop: the agent, the gossip verifier task (fed by the
+/// old cancel topic during the trial and by the members-only direct path), the binding topic, the direct endpoint
+/// and its sender (owner decisions 1 and 4, 2026-10-13).
+pub struct CancelRuntime {
+    pub agent: crate::cancel::CancelAgent,
+    gossip_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    bindings_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    bindings_rx: tokio::sync::mpsc::Receiver<transport::Delivered>,
+    direct: Option<crate::direct::DirectNode>,
+    direct_tx: Option<tokio::sync::mpsc::Sender<crate::direct::Out>>,
+    direct_announces: Option<tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>>,
+    ctx_tx: tokio::sync::watch::Sender<std::sync::Arc<crate::gossip::Ctx>>,
+    pub verified: tokio::sync::mpsc::Receiver<crate::gossip::Verified>,
+    /// Senders kept alive for a channel whose path is off, so the verifier task does not see it close.
+    _idle: Vec<tokio::sync::mpsc::Sender<transport::Delivered>>,
+    _idle_direct: Option<tokio::sync::mpsc::Sender<(Vec<u8>, u16)>>,
+}
+
+impl CancelRuntime {
+    pub async fn open(cfg: &Config, network: &str, seq: u16) -> anyhow::Result<(Self, Box<dyn Transport>)> {
+        let c = &cfg.cancel;
+        let topics = transport::open_with_cancel(&cfg.transport, network, c.delivery.gossip()).await?;
+        let mut idle = Vec::new();
+        let (gossip_tx, grx) = match topics.cancel {
+            Some(t) => {
+                let (tx, rx) = transport::spawn_pump(t);
+                (Some(tx), rx)
+            }
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                idle.push(tx);
+                (None, rx)
+            }
+        };
+        let (bindings_tx, bindings_rx) = transport::spawn_pump(topics.bindings);
+        let path = c
+            .state_file
+            .clone()
+            .unwrap_or_else(|| crate::cancel::CancelAgent::default_path(&cfg.node, network, seq));
+        let (direct, direct_tx, direct_announces, drx, idle_direct) = if c.delivery.direct() {
+            let key = c
+                .direct_secret_key_file
+                .clone()
+                .unwrap_or_else(|| path.with_extension("direct.key"));
+            let (node, frames, announces) =
+                crate::direct::DirectNode::open(Some(&key), &c.direct_relays, &c.fallback_relays).await?;
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            node.spawn_sender(rx);
+            (Some(node), Some(tx), Some(announces), frames, None)
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (None, None, None, rx, Some(tx))
+        };
+        let (ctx_tx, ctx_rx) = tokio::sync::watch::channel(std::sync::Arc::new(crate::gossip::Ctx::default()));
+        let (vtx, verified) = tokio::sync::mpsc::channel(4096);
+        crate::gossip::spawn(grx, drx, ctx_rx, vtx, c.gossip_burst, c.gossip_refill_seconds);
+        let agent = crate::cancel::CancelAgent::new(c.clone(), &cfg.node, seq, path)?;
+        tracing::info!(
+            "cancel automation: delivery {:?}, on-chain fallback {} (after {} blocks, {} zat a transaction)",
+            c.delivery,
+            c.onchain_fallback,
+            c.fallback_after_blocks,
+            c.fallback_fee_zat
+        );
+        Ok((
+            CancelRuntime {
+                agent,
+                gossip_tx,
+                bindings_tx,
+                bindings_rx,
+                direct,
+                direct_tx,
+                direct_announces,
+                ctx_tx,
+                verified,
+                _idle: idle,
+                _idle_direct: idle_direct,
+            },
+            topics.attest,
+        ))
+    }
+
+    /// One poll: take what arrived, run the agent, publish what it produced, hand the verifier and the direct gate
+    /// their new view. An error means a transport task is gone: attest exits so the service manager restarts it.
+    pub async fn poll(&mut self, height: u32) -> anyhow::Result<()> {
+        use tokio::sync::mpsc::error::TryRecvError;
+        loop {
+            match self.verified.try_recv() {
+                Ok(v) => self.agent.accept_verified(v),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => anyhow::bail!("cancel: the verifier task is gone; exiting"),
+            }
+        }
+        loop {
+            match self.bindings_rx.try_recv() {
+                Ok((bytes, _peer)) => self.agent.take_binding(bytes),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => anyhow::bail!("cancel: the binding topic is gone; exiting"),
+            }
+        }
+        if let Some(rx) = self.direct_announces.as_mut() {
+            while let Ok((bytes, from)) = rx.try_recv() {
+                self.agent.take_member_binding(bytes, from);
+            }
+        }
+        if let Some(node) = &self.direct {
+            let (addrs, relay) = node.hints();
+            self.agent.direct = Some((*node.id().as_bytes(), addrs, relay));
+            if self.agent.direct_key.is_none() {
+                self.agent.direct_key = Some(node.endpoint.secret_key().clone());
+            }
+        }
+        self.agent.tick(height).await;
+        let _ = self.ctx_tx.send(std::sync::Arc::new(self.agent.gossip_ctx()));
+        if let Some(node) = &self.direct {
+            let map = self
+                .agent
+                .bound_peers()
+                .into_iter()
+                .filter_map(|(ep, seq, addrs, relay)| {
+                    let id = iroh::EndpointId::from_bytes(&ep).ok()?;
+                    Some((id, crate::direct::peer_from_hints(seq, &addrs, relay.as_deref())))
+                })
+                .collect();
+            node.members.set(map);
+            node.intro.set_ctx(self.agent.intro_ctx(height));
+            if let (Some(tx), Some(own)) = (&self.direct_tx, self.agent.own_announce()) {
+                let _ = tx.try_send(crate::direct::Out::Intro(own));
+            }
+        }
+        for frame in self.agent.take_outbox() {
+            if let Some(tx) = &self.gossip_tx {
+                if tx.send(frame.clone()).await.is_err() {
+                    anyhow::bail!("cancel topic: the transport task is gone; exiting so the agent is restarted");
+                }
+            }
+            if let Some(tx) = &self.direct_tx {
+                let _ = tx.try_send(crate::direct::Out::Frame(frame));
+            }
+        }
+        for a in self.agent.take_announces() {
+            if self.bindings_tx.send(a.clone()).await.is_err() {
+                anyhow::bail!("cancel: the binding topic is gone; exiting so the agent is restarted");
+            }
+            if let Some(tx) = &self.direct_tx {
+                let _ = tx.try_send(crate::direct::Out::Announce(a));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -664,6 +915,56 @@ mod tests {
         );
         let mut never = Attestor::new(config::parse(&text0).unwrap(), Some(PathBuf::from("/dev/null")), false).unwrap();
         assert!(!never.heartbeat(500).await);
+    }
+
+    /// The cancel-limit design: the node's guard states the price first; on price-required the agent states its own.
+    #[tokio::test]
+    async fn cosign_prefers_the_guard_then_the_aggregate() {
+        let m = MockNode::start(None, move |method, params| match method {
+            "yed_getinfo" => Ok(json!({"network": "regtest", "height": 50})),
+            "yed_signcancelcosign" => {
+                assert_eq!(params[2], json!(4));
+                match (params[0].as_str().unwrap(), &params[1]) {
+                    ("aa:0", Value::Null) => Ok(json!({"cosig": "11".repeat(69), "seq": 4, "reused": true})),
+                    ("bb:1", Value::Null) => Err((
+                        -8,
+                        "price-required: seq 4 signed no price for the claim's refHeight 40".into(),
+                    )),
+                    ("bb:1", p) => {
+                        Ok(json!({"cosig": format!("{:08x}", p.as_u64().unwrap()) + &"22".repeat(65), "seq": 4}))
+                    }
+                    _ => Err((-8, "not a YED claim intent".into())),
+                }
+            }
+            _ => Err((-32601, "Method not found".into())),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mock = dir.path().join("price");
+        std::fs::write(&mock, "0.5\n").unwrap();
+        let text = format!(
+            "[node]\nrpc_url = \"{}\"\n[attest]\nseq = 4\n[transport]\nkind = \"dir\"\npath = \"{}\"\n",
+            m.url,
+            dir.path().display()
+        );
+        let mut a = Attestor::new(config::parse(&text).unwrap(), Some(mock), false).unwrap();
+        assert_eq!(a.cosign("aa:0", None).await.unwrap(), "11".repeat(69)); // the guard's price, no aggregate
+        assert_eq!(
+            a.cosign("bb:1", None).await.unwrap(),
+            format!("{:08x}", 500_000) + &"22".repeat(65)
+        );
+        assert_eq!(
+            a.cosign("bb:1", Some(700_000)).await.unwrap(),
+            format!("{:08x}", 700_000) + &"22".repeat(65)
+        );
+        assert!(a.cosign("cc:0", None).await.is_err());
+        let calls = m
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "yed_signcancelcosign")
+            .count();
+        assert_eq!(calls, 5);
     }
 
     #[test]

@@ -299,14 +299,33 @@ class Chain(object):
         vin = [(intent_op[0], intent_op[1], bytes([ym.OP_1]), self.params.claim_delay), self.fund_input()]
         return ym.serialize_tx_v4(vin, [(value, recipient_spk or ym.p2pkh_script(OWNER_KEYHASH))]).hex()
 
-    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2, refund=False):
+    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2, refund=False, cosigns=None):
         """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
         does not verify) re-creating the byte-identical vault at vout[0]; a fee input.  ``refund``: CAN-1's refund output
         at vout[1] (``self.refund_out(intent_op)``).  ``vouts`` = [(value, script)] replaces the outputs (the re-lock
-        is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode."""
+        is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode.  ``cosigns`` (CAN-2 + C4b): "YC"
+        entries [(price, sig65)] carried by a carrier input, with the CANCEL_COSIGN marker as the last output."""
         if vouts is None:
             vouts = [self.relock(vault_op_of_record, value)] + ([self.refund_out(intent_op)] if refund else [])
         vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([selector]), 0xFFFFFFFF), self.fund_input()]
+        if cosigns:
+            vin.append(self.carrier_input(ya.encode_cancel_cosigns(cosigns)))
+            vouts = list(vouts) + [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_cancel_cosign()))]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def cosign(self, intent_op, seq, price, ref=None, block_hash=None, member=None):
+        """CAN-2 + C4b: member ``seq``'s (ATTESTORS[seq], or ``member``) co-signature of the cancel of ``intent_op``: its
+        price statement at ``ref`` (default the intent's claim_ref_height)."""
+        if ref is None:
+            ref = self.model.intents[intent_op].claim_ref_height
+        secret = (member or ATTESTORS[seq])[0]
+        return ya.sign_cancel_cosign(secret, self.params.attestor_set_internal, intent_op[0], intent_op[1], ref, price,
+                                     block_hash or self.block_hash(ref))
+
+    def cancel_evidence_tx(self, att74, intent_op, entry):
+        """C4b: an EQUIVOCATION whose carrier holds a regular attestation and a cancel statement ("YX")."""
+        vin = [self.carrier_input(ya.encode_cancel_evidence(att74, intent_op[0], intent_op[1], entry[0], entry[1]))]
+        vouts = [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_equivocation())), (1000, ym.p2pkh_script(OWNER_KEYHASH))]
         return ym.serialize_tx_v4(vin, vouts).hex()
 
     def refund_out(self, intent_op):
@@ -1440,8 +1459,16 @@ class CancelTests(unittest.TestCase):
     """U-23/U-24/I-2 and CAN-1: the attestor cancel of a claim intent -- the model twins of yellowback_state_tests'
     intent_cancel_* cases (audit 03/T-2, 03/H-1)."""
 
+    HONEST = 50_000     # the co-signers' price ($0.05: the vault at 300 %, not claimable)
+
     def setUp(self):
-        self.c = c = activated_chain()
+        # ATTEST_ARM_MIN 10: the four members (CAN-2 co-signers) never arm the chain, so the claim stays unarmed path (a)
+        self.c = c = activated_chain(ym.Params.regtest(1, 0, 0, attestor_set_id(), attest_arm_min=10))
+        c.mine((1, 50_000, 0, KEY2), [attestor_set_create()])
+        for i in range(4):
+            c.mine((1, 50_000, 0, KEY2), [c.register_tx(ATTESTORS[i], c.height + 1, 10 * ym.COIN)])
+        c.mine_n(c.params.bond_maturity, price_fn=lambda h: 50_000)
+        self.assertEqual(sorted(c.model.attestors), [0, 1, 2, 3])
         ref = c.height - 1
         self.coll = collateral_for(c, 10_000, ref)
         raw = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1)
@@ -1467,7 +1494,10 @@ class CancelTests(unittest.TestCase):
         self.c.mine((1, 9_000, 0, KEY2), [raw])
         return self.c.refused.get(txid_of(raw), '')
 
-    def cancel(self, vouts=None, **kw):
+    def cancel(self, vouts=None, seqs=(0,), price=None, **kw):
+        """The cancel, by default co-signed by member 0 at HONEST (CAN-2's first cancel)."""
+        if 'cosigns' not in kw:
+            kw['cosigns'] = [self.c.cosign(self.intent, s, price or self.HONEST) for s in seqs]
         return self.c.cancel_tx(self.intent, self.vault, self.coll, vouts=vouts, refund=True, **kw)
 
     # Rule: U-23
@@ -1532,7 +1562,8 @@ class CancelTests(unittest.TestCase):
         c, m = self.c, self.c.model
         vouts = [c.relock(self.vault, self.coll), c.refund_out(self.intent)]
         vin = [(self.intent[0], self.intent[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), c.fund_input(),
-               (self.spare[0], self.spare[1], b'', 0xFFFFFFFF)]
+               (self.spare[0], self.spare[1], b'', 0xFFFFFFFF), c.carrier_input(ya.encode_cancel_cosigns([c.cosign(self.intent, 0, self.HONEST)]))]
+        vouts = vouts + [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_cancel_cosign()))]
         raw = ym.serialize_tx_v4(vin, vouts).hex()
         self.assertEqual(self.mine(raw), '')
         rec = m.txlog[txid_of(raw)]
@@ -1576,7 +1607,7 @@ class CancelTests(unittest.TestCase):
     def test_cancel_payload_or_selector3_malformed(self):
         c = self.c
         payload = (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([])))
-        self.assertEqual(self.mine(self.cancel(vouts=[c.relock(self.vault, self.coll), c.refund_out(self.intent), payload])),
+        self.assertEqual(self.mine(self.cancel(vouts=[c.relock(self.vault, self.coll), c.refund_out(self.intent), payload], cosigns=None)),
                          'intent-spend-malformed')
         self.assertEqual(self.mine(self.cancel(selector=ym.OP_3)), 'intent-spend-malformed')
 
@@ -1599,6 +1630,226 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
         self.assertIn(self.intent, c.model.intents)
         self.assertEqual(c.model.txlog.get(txid_of(raw)), None)
+
+
+class CancelLimitTests(CancelTests):
+    """The per-vault cancel limit (cancel-limit design, owner 2026-10-13): CAN-2's schedule and quiet reset, the CAN-2 +
+    C4b co-signature refusals, CAN-3's held residual and C4b's EQV-1 statement slash -- the model twins of
+    yellowback_state_tests' cancel_limit_* / cancel_cosign_* / cancel_statement_* cases."""
+
+    def reclaim(self, pos):
+        """Claim ``pos`` again with the refund token at pos:1 (under theta at $0.009); returns the new claimant intent."""
+        c = self.c
+        ref = c.height - 1
+        payee = sorted(c.model.eligible_payees(ref))[0]
+        claim = c.spend_tx(pos, None, 'claim', [(pos[0], 1)], ref, payee, c.vault_fee(pos, owner=False))
+        self.assertEqual(self.mine(claim), '')
+        self.assertEqual(c.model.vaults[pos].status, ym.V_CLAIMING)
+        return (txid_of(claim), 0)
+
+    def cancel_of(self, intent, pos, seqs, price=None):
+        c = self.c
+        return c.cancel_tx(intent, pos, self.coll, vouts=[c.relock(pos, self.coll), c.refund_out(intent)],
+                           cosigns=[c.cosign(intent, s, price or self.HONEST) for s in seqs])
+
+    # Rule: CAN-2
+    def test_escalation_schedule_and_cap(self):
+        c, m = self.c, self.c.model
+        self.assertEqual((c.params.cancel_signers_max, c.params.cancel_quiet), (3, 40))
+        pos, intent = self.vault, self.intent
+        minted = m.vaults[pos]
+        for rnd in range(1, 6):
+            if rnd > 1:
+                intent = self.reclaim(pos)
+            need = min(rnd, c.params.cancel_signers_max)
+            self.assertEqual(m.cancels_required(m.vaults[pos], c.height + 1), need)
+            if need > 1:
+                self.assertEqual(self.mine(self.cancel_of(intent, pos, range(need - 1))), 'intent-cancel-cosign')
+            raw = self.cancel_of(intent, pos, range(need))
+            self.assertEqual(self.mine(raw), '')
+            pos = (txid_of(raw), 0)
+            v = m.vaults[pos]
+            self.assertEqual((v.status, v.cancel_count, v.last_cancel_height, v.mint_height, v.p_mint),
+                             (ym.V_ACTIVE, rnd, c.height, minted.mint_height, minted.p_mint))
+            self.assertEqual(m.txlog[pos[0]].bundle_seqs, list(range(need)))
+
+    # Rule: CAN-2
+    def test_quiet_resets_the_schedule(self):
+        c, m = self.c, self.c.model
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        first, pos = c.height, (txid_of(raw), 0)
+        while c.height + 2 < first + c.params.cancel_quiet - 1:
+            c.mine_n(1, price_fn=lambda h: 9_000)
+        intent = self.reclaim(pos)
+        self.assertEqual(c.height + 1, first + c.params.cancel_quiet - 1)
+        self.assertEqual(m.cancels_required(m.vaults[pos], c.height + 1), 2)
+        self.assertEqual(self.mine(self.cancel_of(intent, pos, [0])), 'intent-cancel-cosign')
+        self.assertEqual(m.cancels_required(m.vaults[pos], c.height + 1), 1)
+        raw = self.cancel_of(intent, pos, [1])
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.vaults[(txid_of(raw), 0)].cancel_count, 1)
+
+    # Rule: CAN-2
+    # Rule: C4b
+    def test_cosign_refusals(self):
+        c, m = self.c, self.c.model
+        bad = 'intent-cancel-cosign'
+        self.assertEqual(self.mine(self.cancel(cosigns=None)), bad)                          # no statement at all
+        no_marker = c.cancel_tx(self.intent, self.vault, self.coll, refund=True, cosigns=None,
+                                vouts=None)
+        self.assertEqual(self.mine(no_marker), bad)
+        other = c.cosign(self.intent, 4, self.HONEST)                                          # ATTESTORS[4] never joined
+        self.assertEqual(self.mine(self.cancel(cosigns=[other])), bad)
+        self.assertEqual(self.mine(self.cancel(cosigns=[c.cosign((self.claim, 1), 0, self.HONEST, ref=m.intents[self.intent].claim_ref_height)])), bad)
+        self.assertEqual(self.mine(self.cancel(cosigns=[c.cosign(self.intent, 0, self.HONEST, ref=m.intents[self.intent].claim_ref_height - 1)])), bad)
+        self.assertEqual(self.mine(self.cancel(cosigns=[c.cosign(self.intent, 0, self.HONEST, block_hash='01' * 32)])), bad)
+        v = m.vaults[self.vault]
+        edge = next(p for p in range(1, 10 ** 6) if not ym.is_underwater(v.collateral_zat, p, v.minted_cents, c.params.claim_threshold_bps))
+        self.assertEqual(self.mine(self.cancel(price=9_000)), bad)                            # a claimable statement
+        self.assertEqual(self.mine(self.cancel(price=edge - 1)), bad)
+        self.assertEqual(self.mine(self.cancel(price=99)), bad)                               # under PRICE_MIN
+        self.assertEqual(self.mine(self.cancel(cosigns=[other, c.cosign(self.intent, 0, 9_000)])), bad)   # nothing valid
+        self.assertEqual(m.vaults[self.vault].status, ym.V_CLAIMING)
+        raw = self.cancel(seqs=(0, 2, 3), price=edge)                                        # extras valid; the boundary holds
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.txlog[txid_of(raw)].bundle_seqs, [0, 2, 3])
+
+    # Rule: CAN-3
+    # Rule: NOT-1
+    def test_residual_held_while_claimable_by_path_b(self):
+        """Round 2: path (b) needs an ARMED reference: on this unarmed chain a persisted notice does not hold the residual
+        (the C++ ResidualFixture, armed, shows it does there)."""
+        c, m = self.c, self.c.model
+        self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        c.mine_n(128, price_fn=lambda h: 50_000)
+        m.notices[pos] = ym.NoticeRecord(c.height - 4, c.height - c.params.emergency_persist, 1_000)
+        self.assertFalse(m.armed_at(c.height))
+        self.assertFalse(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+        for snap in m.snapshots.values():                         # the same notice at an ARMED reference holds it
+            snap.attest = ym.AttestState(ym.ARMED, 0, 0)
+        self.assertTrue(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+
+    # Rule: CAN-3
+    def test_residual_release_mirrors_every_citable_ref(self):
+        """The round-2 fix: an undefined price, or a claimable price at any citable ref, holds the residual; an older ref
+        does not."""
+        c, m = self.c, self.c.model
+        res = self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        c.mine_n(128, price_fn=lambda h: 50_000)
+
+        def attempt(back, p_claim):
+            h = c.height + 1 - back
+            orig = m.snapshots[h].p_claim
+            m.snapshots[h].p_claim = p_claim
+            try:
+                return self.mine(c.release_tx(res, 1000))
+            finally:
+                m.snapshots[h].p_claim = orig      # the dict may have been restored from a copy by a rejected block
+        self.assertEqual(attempt(1, 0), 'intent-residual-held')
+        self.assertEqual(attempt(10, 9_000), 'intent-residual-held')
+        self.assertEqual(attempt(c.params.ref_window, 9_000), 'intent-residual-held')
+        self.assertEqual(attempt(c.params.ref_window + 1, 9_000), '')
+
+    # Rule: CAN-2
+    def test_cancel_constants_per_network(self):
+        for net in (ym.Params.mainnet(1),):
+            self.assertEqual((net.cancel_signers_max, net.cancel_quiet), (4, 8_064))
+        self.assertEqual((self.c.params.cancel_signers_max, self.c.params.cancel_quiet), (3, 40))
+
+    # Rule: CAN-2
+    def test_counts_distinct_valid_entries(self):
+        """Round 2 (review M-2): invalid, non-current and repeated entries are ignored; enough distinct valid ones hold."""
+        c, m = self.c, self.c.model
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        intent = self.reclaim(pos)                               # two needed now
+        cs = lambda seq, price=None: c.cosign(intent, seq, price or self.HONEST)  # noqa: E731
+        other = c.cosign(intent, 0, self.HONEST, member=ATTESTORS[4])            # never joined
+        vouts = [c.relock(pos, self.coll), c.refund_out(intent)]
+        self.assertEqual(self.mine(c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), cs(0)])), 'intent-cancel-cosign')
+        self.assertEqual(self.mine(c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), other])), 'intent-cancel-cosign')
+        raw = c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), other, cs(2, 9_000), cs(0), cs(1)])
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.txlog[txid_of(raw)].bundle_seqs, [0, 1])
+        self.assertEqual(m.vaults[(txid_of(raw), 0)].cancel_count, 2)
+
+    def fake_residual(self):
+        """A residual intent of this fixture's claim (the claim had none due: injected into the model for the unit,
+        as test_cancel_of_residual_invalid flips a role); returns its outpoint."""
+        m = self.c.model
+        ir = m.intents[self.intent]
+        op = (self.claim, 1)
+        m.intents[op] = ym.IntentRec(self.vault, ym.I_RESIDUAL, ir.height, b'', ir.claim_ref_height)
+        return op
+
+    # Rule: CAN-3
+    def test_residual_held_until_quiet(self):
+        c, m = self.c, self.c.model
+        res = self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        cancelled, pos = c.height, (txid_of(raw), 0)
+        self.assertEqual(m.intents[res].held_by, pos)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        while c.height + 2 < cancelled + c.params.cancel_quiet:
+            c.mine_n(1, price_fn=lambda h: 9_000)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        # round 2: past CANCEL_QUIET the position (300 % at $0.05) is claimable at $0.009: still held
+        self.assertTrue(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        c.mine_n(128, price_fn=lambda h: 50_000)                # the price recovers at every citable ref
+        self.assertFalse(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
+        self.assertNotIn(res, m.intents)
+
+    # Rule: CAN-3
+    def test_residual_follows_the_position_and_is_freed_by_a_close(self):
+        c, m = self.c, self.c.model
+        res = self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        intent = self.reclaim(pos)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')     # CLAIMING
+        raw2 = self.cancel_of(intent, pos, [0, 1])
+        self.assertEqual(self.mine(raw2), '')
+        pos2 = (txid_of(raw2), 0)
+        self.assertEqual(m.intents[res].held_by, pos2)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        redeem = c.spend_tx(pos2, None, 'owner', [(pos2[0], 1)], c.height - 1, sorted(m.eligible_payees(c.height - 1))[0], c.vault_fee(pos2))
+        self.assertEqual(self.mine(redeem), '')
+        self.assertEqual(m.vaults[pos2].status, ym.V_CLOSED)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
+
+    # Rule: C4b
+    # Rule: EQV-1
+    def test_statement_slashed_and_honest_never(self):
+        c, m = self.c, self.c.model
+        ref = m.intents[self.intent].claim_ref_height
+        entry1 = c.cosign(self.intent, 1, self.HONEST)
+        entry0 = c.cosign(self.intent, 0, self.HONEST)
+        self.assertEqual(self.mine(self.cancel(cosigns=[entry0, entry1])), '')
+        # member 0 attested the same price at the claim's refHeight: no evidence; member 1 attested $0.009: slashed
+        same = ya.sign_attestation(ATTESTORS[0][0], 0, self.HONEST, ref, c.block_hash(ref))
+        self.assertIsNone(m.equivocation_evidence(ym.tx_from_hex(c.cancel_evidence_tx(same, self.intent, entry0))))
+        other = ya.sign_attestation(ATTESTORS[2][0], 2, 9_000, ref, c.block_hash(ref))     # another member's attestation
+        lying = ya.sign_attestation(ATTESTORS[1][0], 1, 9_000, ref, c.block_hash(ref))
+        raws = [c.cancel_evidence_tx(same, self.intent, entry0), c.cancel_evidence_tx(other, self.intent, entry0)]
+        c.mine((1, 9_000, 0, KEY2), raws)
+        for seq in (0, 2):
+            self.assertNotEqual(m.attestors[seq].status, ym.A_EJECTED)
+            self.assertFalse(m.attestors[seq].bond_frozen)
+        eqv = c.cancel_evidence_tx(lying, self.intent, entry1)
+        c.mine((1, 9_000, 0, KEY2), [eqv])
+        self.assertEqual((m.attestors[1].status, m.attestors[1].bond_frozen), (ym.A_EJECTED, True))
+        self.assertEqual((m.txlog[txid_of(eqv)].type, m.txlog[txid_of(eqv)].attestor_seq), ('EQUIVOCATION', 1))
 
 
 class AttestorSetThresholdTests(unittest.TestCase):
@@ -1626,9 +1877,12 @@ def golden_rejected(claim_height):
             (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
             (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
             (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
-            (claim_height + 9, 'intent-cancel-residual'), (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
+            (claim_height + 1, 'intent-cancel-cosign'), (claim_height + 9, 'intent-cancel-residual'), (claim_height + 11, 'intent-residual-held'),
+            (claim_height + 41, 'intent-residual-held'),
+            (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
+GOLDEN_RELEASE_CHECK = 41      # CAN-3 round 2: the held residual's release attempt after CANCEL_QUIET (claim + 1 + 40)
 GOLDEN_FALCON = 400            # TOK-PQ binds from here (pqFalconHeight; not hashed): only the golden's TOK-PQ refusals come after it
 
 
@@ -1647,7 +1901,13 @@ def build_golden():
     signature (252), a bundle drawn for another selector replayed on a mint (253), a non-held notice carrying a fresh
     attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 and one
     without the refund (claim + 1), a cancel of the owner's residual intent (claim + 9), and from the Falcon height
-    (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ)."""
+    (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ).  The per-vault cancel
+    limit (cancel-limit design, owner 2026-10-13; twenty rejected blocks): the cancel carries two CANCEL_COSIGN
+    statements (CAN-2 + C4b), a cancel whose statement says the vault was claimable is refused (claim + 1,
+    intent-cancel-cosign), the residual's release after CLAIM_DELAY is held (claim + 11, intent-residual-held, CAN-3)
+    and, round 2, still at claim + 1 + CANCEL_QUIET (the re-created position is claimable at the snapshot), so the
+    residual stays held to the end, and at GOLDEN_BLOCKS - 1 EQV-1 ejects the attestor whose statement
+    contradicts its claim5 attestation (C4b)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
     params.pq_falcon_height = GOLDEN_FALCON
     c = Chain(params)
@@ -1767,19 +2027,21 @@ def build_golden():
                                               residual=(ym.pqpkh_script(G_OWNER), residual))
                 txs.append(txs_at['claim5'])
                 v3['claim_height'] = h
+                v3['claim_ref'] = ref
                 v3['residual'] = residual
                 v3['dormancy_height'] = h + (-h) % 4            # the first DORMANCY_CHECK multiple at or after the claim
         elif 'claim_height' in v3 and h == v3['claim_height'] + 1:      # U-23/U-24: an attestor cancels the claimant intent
             vault = (txid_of(txs_at['mint5']), 0)
             v = c.model.vaults[vault]
-            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'], refund=True)   # CAN-1
+            intent = (txid_of(txs_at['claim5']), 0)
+            # CAN-2 + C4b: the first cancel needs one co-signer; the lazy attestor (it signed no bundle at R) and, as an
+            # extra, the attestor that signed claim5's bundle at $0.003 both state $0.009 (300 %, not claimable) -- the
+            # second statement is slashable (EQV-1 at GOLDEN_BLOCKS - 1)
+            v3['liar'] = sorted(q for q in range(4) if q != v3['lazy'])[1]
+            v3['statement'] = c.cosign(intent, v3['liar'], 9_000)
+            txs_at['cancel5'] = c.cancel_tx(intent, vault, v.collateral_zat - v3['residual'], refund=True,   # CAN-1
+                                            cosigns=[c.cosign(intent, v3['lazy'], 9_000), v3['statement']])
             txs.append(txs_at['cancel5'])
-        elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
-            claim5 = txid_of(txs_at['claim5'])
-            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL]
-            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.pqpkh_script(G_OWNER))
-            txs.append(txs_at['release5r'])
-            v3['residual_vout'] = res[0][1]
         elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
             e = min(q for q in range(4) if q != v3['lazy'])
             v3['ejected'] = e
@@ -1803,6 +2065,12 @@ def build_golden():
             v3['exit_height'] = h
             txs_at['leave_w'] = c.remove_tx(ATTESTORS[w][1], ATTESTORS[w])
             txs.append(txs_at['leave_w'])
+        elif h == GOLDEN_BLOCKS - 1:                            # C4b: the liar's cancel statement ($0.009) against its claim5 attestation ($0.003)
+            R = v3['claim_ref']
+            liar = v3['liar']
+            att = ya.sign_attestation(ATTESTORS[liar][0], liar, 3_000, R, c.block_hash(R))
+            txs_at['eqv_statement'] = c.cancel_evidence_tx(att, (txid_of(txs_at['claim5']), 0), v3['statement'])
+            txs.append(txs_at['eqv_statement'])
         elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (w's at exit + BOND_MATURITY; the EJECTED one stays EJECTED)
             e, w = v3['ejected'], v3['withdrawn']
             for name, q in (('spend_e', e), ('spend_w', w)):
@@ -1867,10 +2135,22 @@ def build_golden():
             bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value, vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(vault, value),
                                                                                     c.refund_out(intent)])))
             bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value)))
+            # CAN-2 + C4b: a cancel whose one statement says the vault was claimable ($0.003: 100 %)
+            bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value, refund=True, cosigns=[c.cosign(intent, v3['lazy'], 3_000)])))
         elif 'claim_height' in v3 and h == v3['claim_height'] + 9:     # U-23: the owner's residual intent is never cancelled
             claim5 = txid_of(txs_at['claim5'])
             res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
             bad.append(c.rejected(lambda: c.cancel_tx(res, (txid_of(txs_at['cancel5']), 0), v3['residual'])))
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 11:    # CAN-3: the residual's release after CLAIM_DELAY is held
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
+            bad.append(c.rejected(lambda: c.release_tx(res, v3['residual'], ym.pqpkh_script(G_OWNER))))
+            v3['residual_vout'] = res[1]
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1 + params.cancel_quiet:   # CAN-3 round 2: CANCEL_QUIET has
+            # passed, but the re-created position (~100 % at the claim's pClaim) is claimable at the pools' ~$0.0038: still held
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
+            bad.append(c.rejected(lambda: c.release_tx(res, v3['residual'], ym.pqpkh_script(G_OWNER))))
         elif h == GOLDEN_FALCON + 2:                            # TOK-PQ: a TRANSFER of the CAN-1 refund to a P2PKH after the Falcon height
             refund = (txid_of(txs_at['cancel5']), 1)
             bad.append(c.rejected(lambda: c.transfer_tx([refund], [(0, 10_000)])))
@@ -1905,16 +2185,17 @@ def golden_document(c):
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
                        'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false, pqFalconHeight %d (not hashed: TOK-PQ binds from it)}; '
-                       'SCHEMA_VERSION 13 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
-                       'CAN-1: a cancelled claim refunds its burn); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
+                       'SCHEMA_VERSION 14 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
+                       'CAN-1: a cancelled claim refunds its burn; the per-vault cancel limit: CAN-2 escalating co-signed cancels, '
+                       'C4b slashable cancel statements, CAN-3 the held residual); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, a second notice that does not hold (no BundleLog row, R12 hardened), an emergency '
                        'claim into a claimant and a residual intent, an attestor cancel of the claimant intent refunding the burn '
-                       '(CAN-1), the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
+                       '(CAN-1) co-signed by two members (CAN-2 + C4b), the residual held past CANCEL_QUIET while the position stays claimable (CAN-3, round 2), S15 dormancy, an equivocation (EQV-1: ejected, bond '
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
-                       'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
-                       'at exit + BOND_MATURITY). '
+                       'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0), an EQV-1 ejection on a cancel statement (C4b) '
+                       'and two bond spends (the leaver\'s at exit + BOND_MATURITY). '
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (%s; one per verdict, audit 03/T-1) are '
                        'rejected and not applied (U-21); the next entry is the same height mined again without the offending '
                        'transaction.'
@@ -1995,7 +2276,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0d\x00\x00\x00')        # SCHEMA_VERSION 13 (CAN-1: IntentRecord.refundScript)
+        self.assertEqual(pre[37:41], b'\x0e\x00\x00\x00')        # SCHEMA_VERSION 14 (the cancel limit: CAN-2, C4b, CAN-3)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))
@@ -2054,7 +2335,7 @@ class StateHashTests(unittest.TestCase):
         v3 = c.v3
         rejected = golden_rejected(v3['claim_height'])
         self.assertEqual([(v.height, v.verdict) for v in m.rejected], rejected)
-        self.assertGreaterEqual(len(set(v for _h, v in rejected)), 16)               # one block per verdict (TOK-PQ: two shapes)
+        self.assertGreaterEqual(len(set(v for _h, v in rejected)), 18)               # one block per verdict (TOK-PQ: two shapes)
         self.assertTrue(all(v.rejected for v in m.rejected))
         self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [h for h, _v in rejected])
         self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + len(rejected))
@@ -2115,13 +2396,20 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(v5.p_mint, 9_000)
         self.assertEqual(claim5.burned, 10_000)
         self.assertEqual((cancel.assigned, cancel.yed_out, cancel.burned), ([(1, 10_000)], 10_000, 0))
+        # CAN-2 + C4b: the first cancel needed one co-signer; it carried two statements (the lazy attestor's and the liar's)
+        self.assertEqual(cancel.bundle_seqs, [v3['lazy'], v3['liar']])
+        self.assertEqual((v5.cancel_count, v5.last_cancel_height), (1, v3['claim_height'] + 1))
         refund = m.tokens[(txid_of(txs_at['cancel5']), 1)]
         self.assertEqual((refund.cents, refund.script_pub_key), (10_000, ym.p2pkh_script(OWNER_KEYHASH)))
         # R12 hardened (03/M-2): the notice at 293 did not hold (notice5 stands) and its verified bundle left no row
         self.assertNotIn(293, m.bundle_log)
         self.assertNotIn(txid_of(txs_at['notice5b']), m.txlog)
-        self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
-        self.assertEqual(m.intents, {})
+        # CAN-3: the residual was held at claim + 11, and (round 2) still at claim + 1 + CANCEL_QUIET because the re-created
+        # position is claimable at the snapshot; it stays held to the end
+        res = (txid_of(txs_at['claim5']), v3['residual_vout'])
+        self.assertEqual((m.intents[res].role, m.intents[res].held_by), (ym.I_RESIDUAL, (txid_of(txs_at['cancel5']), 0)))
+        self.assertEqual(GOLDEN_RELEASE_CHECK, v3['claim_height'] + 1 + c.params.cancel_quiet - v3['claim_height'])
+        self.assertEqual(list(m.intents), [res])
         self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE
         lazy, e, w = v3['lazy'], v3['ejected'], v3['withdrawn']
         self.assertEqual(m.snapshots[v3['dormancy_height']].attest.status, ym.ARMED)
@@ -2140,7 +2428,12 @@ class StateHashTests(unittest.TestCase):
         # join + 8 + livenessWindow + 1 before attestations counted)
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
         self.assertEqual(m.attestors[r4].last_act, v3['claim_height'] - 2)
-        self.assertEqual(m.attestors[r4].status, ym.A_ELIGIBLE)
+        # C4b: the same attestor co-signed cancel5 stating $0.009 at R while its claim5 attestation said $0.003; EQV-1 took
+        # the statement as one side at GOLDEN_BLOCKS - 1: EJECTED, bond frozen
+        self.assertEqual(r4, v3['liar'])
+        self.assertEqual((m.attestors[r4].status, m.attestors[r4].status_height, m.attestors[r4].bond_frozen), (ym.A_EJECTED, GOLDEN_BLOCKS - 1, True))
+        eqv2 = m.txlog[txid_of(txs_at['eqv_statement'])]
+        self.assertEqual((eqv2.type, eqv2.attestor_seq), ('EQUIVOCATION', r4))
         # the file on disk, the C++ pin, the model and a replay from the file all agree
         with open(GOLDEN_PATH) as f:
             doc = json.load(f)

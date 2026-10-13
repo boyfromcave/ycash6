@@ -108,6 +108,31 @@
       ],
       "when": "bundleHex is not \"YA\" ‖ 0x01 ‖ count ‖ count × 74 bytes (RPC_INVALID_PARAMETER)"
     },
+    "cancel-cosign-malformed": {
+      "raisedBy": [
+        "yed_buildcancel"
+      ],
+      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set: the entry is dropped"
+    },
+    "cancel-cosign-needed": {
+      "raisedBy": [
+        "yed_buildcancel"
+      ],
+      "when": "fewer co-signatures of distinct current members than cancelsRequired (the cancel-limit design, CAN-2; RPC_INVALID_PARAMETER, before any transaction). Message grammar: cancel-cosign-needed: this cancel needs <n> co-signature(s) of distinct current members (cancelsRequired), <m> given: call it with no cosigs"
+    },
+    "cancel-cosign-not-member": {
+      "raisedBy": [
+        "yed_buildcancel"
+      ],
+      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set: the entry is dropped"
+    },
+    "cancel-statement-claimable": {
+      "raisedBy": [
+        "yed_buildcancel",
+        "yed_signcancelcosign"
+      ],
+      "when": "the statement's price says the vault was claimable at the claim's refHeight (C4b): co-sign at the vault's underwaterAt − 1"
+    },
     "carrier-timeout": {
       "raisedBy": [
         "yed_mint",
@@ -159,6 +184,12 @@
       ],
       "when": "minOutZat > 0 and what reaches the destination (the claimant intent: the collateral less the RED-5 residual, U-23; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat"
     },
+    "claim-unconfirmed": {
+      "raisedBy": [
+        "yed_signcancelcosign"
+      ],
+      "when": "the claim is still in the mempool (co-sign only a confirmed claim, design A-6)"
+    },
     "collateral-above-max": {
       "raisedBy": [
         "yed_mint"
@@ -168,9 +199,10 @@
     "equivocation-guard": {
       "raisedBy": [
         "yed_signattestation",
-        "yed_revive"
+        "yed_revive",
+        "yed_signcancelcosign"
       ],
-      "when": "attest-signed.dat holds a signature for (seq, citedHeight) at a different price (S16): sign twice for one height at two prices, also across a restart. Message grammar: equivocation-guard: seq <n> already signed <p₀> for height <h>"
+      "when": "attest-signed.dat holds a signature for (seq, citedHeight) at a different price (S16): sign twice for one height at two prices, also across a restart. Since the cancel-limit review it is looked up **by key**: a signature at that height under any seq the key ever held counts (a member that left and rejoined with the same hot key; EQV-1 binds the key). Message grammar: equivocation-guard: seq <n> already signed <p₀> for height <h>, or equivocation-guard: this key already signed <p₀> for height <h> under seq <n>"
     },
     "expiring-too-soon": {
       "raisedBy": [
@@ -340,6 +372,12 @@
       ],
       "when": "a Notices record for the vault exists with tip − notice.height ≤ EMERGENCY_NOTICE_TTL (NOT-1's no-reset clause): post twice"
     },
+    "price-required": {
+      "raisedBy": [
+        "yed_signcancelcosign"
+      ],
+      "when": "no priceMicroUsd given and the guard holds no price of this key for the claim's refHeight"
+    },
     "quote-out-of-range": {
       "raisedBy": [
         "yed_setquote"
@@ -494,9 +532,14 @@
     }
   },
   "yed_buildcancel": {
-    "args": "<intentOutpoint>",
+    "args": "<intentOutpoint> [cosigs]",
     "returns": {
+      "cancelsRequired": 1,
       "cancelsetid": "755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e",
+      "carrierTxid": "c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1",
+      "cosigners": [
+        0
+      ],
       "deadline": 980,
       "hex": "0400008085202f89...",
       "intentconfirmed": true,
@@ -1153,6 +1196,9 @@
     "args": "<txid>",
     "returns": {
       "burnedCents": 0,
+      "cancelCount": 0,
+      "cancelQuietUntil": null,
+      "cancelsRequired": 1,
       "claimHeight": 401,
       "claimable": false,
       "closeHeight": null,
@@ -1267,6 +1313,9 @@
         "canClaim": false,
         "canNotice": false,
         "canRedeem": false,
+        "cancelCount": 0,
+        "cancelQuietUntil": null,
+        "cancelsRequired": 1,
         "claimHeight": 401,
         "claimable": false,
         "closeHeight": null,
@@ -1353,6 +1402,9 @@
     "returns": [
       {
         "burnedCents": 0,
+        "cancelCount": 0,
+        "cancelQuietUntil": null,
+        "cancelsRequired": 1,
         "claimHeight": 401,
         "claimable": false,
         "closeHeight": null,
@@ -1514,6 +1566,16 @@
       "priceMicroUsd": 1985000,
       "reused": false,
       "seq": 1
+    }
+  },
+  "yed_signcancelcosign": {
+    "args": "<intentOutpoint> [priceMicroUsd] [seq]",
+    "returns": {
+      "citedHeight": 978,
+      "cosig": "50c300001f5a1c2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9001",
+      "priceMicroUsd": 50000,
+      "reused": false,
+      "seq": 0
     }
   },
   "yed_sweepcarriers": {

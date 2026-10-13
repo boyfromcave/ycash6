@@ -97,14 +97,14 @@ std::vector<CPubKey> Module::Ejections(const CTransaction& tx, const vault::Modu
 {
     std::shared_ptr<const Params> p = CurrentParams();
     if (!p || !ctx.state || !ctx.blockHashAt) return {};
-    std::optional<std::pair<Attestation, Attestation>> e = EquivocationEvidence(tx, *p);
-    if (!e || (int64_t)e->first.citedHeight >= ctx.height) return {};
-    std::optional<uint256> blockHash = ctx.blockHashAt((int64_t)e->first.citedHeight);
+    std::optional<Equivocation> e = EquivocationEvidence(tx, *p);
+    if (!e || (int64_t)e->a.citedHeight >= ctx.height) return {};
+    std::optional<uint256> blockHash = ctx.blockHashAt((int64_t)e->a.citedHeight);
     if (!blockHash) return {};
     for (const auto& m : vault::GetMembers(*ctx.state, p->attestorSetId)) {
         std::optional<vault::BondRecord> b = vault::GetBond(*ctx.state, m.second.bondOutpoint);
         if (!b || b->frozen) continue;
-        if (EquivocatedBy(e.value(), m.first, blockHash.value())) return { m.first };
+        if (EquivocatedBy(e.value(), m.first, blockHash.value(), p->attestorSetId)) return { m.first };
     }
     return {};
 }

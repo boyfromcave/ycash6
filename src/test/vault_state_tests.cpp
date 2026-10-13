@@ -2082,6 +2082,65 @@ BOOST_AUTO_TEST_CASE(module_ejection_hook_eqv1_yed)
     yellowback::ClearModuleParams();
 }
 
+BOOST_AUTO_TEST_CASE(module_ejection_hook_cancel_statement)
+{
+    // C4b (cancel-limit design, owner 2026-10-13): EQV-1's second evidence shape on the primitive side -- a member's
+    // regular attestation and its cancel statement (the co-signature it gave a YED cancel, "YX") at one height with
+    // different prices. The primitive ejects the member and freezes its bond in the same block as the module's mirror.
+    Chain c;
+    const CKey k1 = MakeKey(71), k2 = MakeKey(72);
+    const SetId s = SetWithMembers(c, {k1, k2});
+    const COutPoint bond1 = Member(c, s, k1).bondOutpoint;
+    const int64_t cited = c.h - 3;
+    auto fakeHash = [](int64_t h) { uint256 x; x.begin()[0] = (unsigned char)(h & 0xff); x.begin()[1] = (unsigned char)((h >> 8) & 0xff); x.begin()[31] = 0xab; return x; };
+    BlockHashFn hashes = [&](int64_t h) -> std::optional<uint256> { if (h < 0 || h >= c.h) return std::nullopt; return fakeHash(h); };
+    auto att = [&](const CKey& k, uint32_t price, int64_t at) {
+        yellowback::Attestation a;
+        a.seq = 3;
+        a.priceMicroUsd = price;
+        a.citedHeight = (uint32_t)at;
+        std::vector<unsigned char> rec;
+        BOOST_REQUIRE(k.SignCompact(yellowback::AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, fakeHash(at)), rec));
+        std::copy(rec.begin() + 1, rec.end(), a.sig.begin());
+        return a;
+    };
+    auto statement = [&](const CKey& k, uint32_t price, int64_t at, const uint256& set) {
+        yellowback::CancelStatement st;
+        st.intent = COutPoint(uint256S("0x99"), 1);
+        st.priceMicroUsd = price;
+        BOOST_REQUIRE(SignRecoverable(k, yellowback::CancelCosignMessage(set, st.intent.hash, st.intent.n, (uint32_t)at, price, fakeHash(at)), st.sig));
+        return st;
+    };
+    auto eqvTx = [&](const yellowback::Attestation& a, const yellowback::CancelStatement& st) {
+        const valtype raw = yellowback::EncodeCancelEvidence(a, st);
+        uint256 h;
+        CSHA256().Write(raw.data(), raw.size()).Finalize(h.begin());
+        const CScript redeem = yellowback::CarrierScript(MakeKey(64).GetPubKey(), h);
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(c.Fund(), yellowback::CarrierScriptSig(raw, valtype(71, 0x30), redeem)));
+        m.vout.push_back(CTxOut(0, yellowback::PayloadScript(yellowback::EncodePayload(yellowback::Payload::Equivocation()))));
+        return m;
+    };
+    auto apply = [&](const CMutableTransaction& m, VaultState& st) {
+        st.SetBlockHashes(hashes);
+        return Res(st.ApplyTx(CTransaction(m), c.h, c.coins));
+    };
+    const yellowback::Params p = yellowback::RegtestParams(10, 0, 0, s);
+    yellowback::SetModuleParams(p);
+    // Not evidence: the same price (an honest canceller); another member's statement; a statement over another set.
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 50000, cited), statement(k1, 50000, cited, s)), st), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 50000, cited), statement(k2, 60000, cited, s)), st), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen);
+      BOOST_CHECK_EQUAL(GetMember(st, s, k2.GetPubKey())->status, MEMBER_ACTIVE); }
+    { VaultState st(c.kv); BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 50000, cited), statement(k1, 60000, cited, uint256S("0x42"))), st), "OK"); BOOST_CHECK(!GetBond(st, bond1)->frozen); }
+    // The evidence: k1 EJECTED and its bond frozen; k2 untouched.
+    VaultState st(c.kv);
+    BOOST_CHECK_EQUAL(*apply(eqvTx(att(k1, 9000, cited), statement(k1, 50000, cited, s)), st), "OK");
+    BOOST_CHECK_EQUAL(GetMember(st, s, k1.GetPubKey())->status, MEMBER_EJECTED);
+    BOOST_CHECK(GetBond(st, bond1)->frozen);
+    BOOST_CHECK_EQUAL(GetMember(st, s, k2.GetPubKey())->status, MEMBER_ACTIVE);
+    yellowback::ClearModuleParams();
+}
+
 BOOST_AUTO_TEST_CASE(module_liveness_hook)
 {
     // Seats review B2, bounded at the re-review: a CLAIM_NOTICE (or MINT, REDEEM) whose bundle passes BUNDLE-1 at its

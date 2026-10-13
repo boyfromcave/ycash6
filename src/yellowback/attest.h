@@ -53,6 +53,19 @@ uint256 AttestMessage(uint16_t seq, uint32_t priceMicroUsd, uint32_t citedHeight
  */
 bool VerifyCompactSig(const CPubKey& pk, const uint256& msg, const std::array<unsigned char, 64>& sig);
 
+/**
+ * CAN-2 + C4b (cancel-limit design, owner 2026-10-13): the message a member signs to co-sign the cancel of a YED
+ * claimant intent, which is at the same time its signed price statement at the claim's reference height:
+ *
+ *   SHA256d("YedCancelCosign" || attestorSetId 32 || intent txid 32 || intent n LE32 || citedHeight LE32 ||
+ *           priceMicroUsd LE32 || blockHash(citedHeight) 32)
+ *
+ * (15 ASCII bytes, no length byte; every hash as its 32 internal bytes; 123 bytes hashed twice). The signature is a
+ * 65-byte recoverable one under the vault primitive's set-signature rule (vault::RecoverSig: header 31..34, low S).
+ */
+uint256 CancelCosignMessage(const uint256& attestorSetId, const uint256& intentTxid, uint32_t intentN, uint32_t citedHeight,
+                            uint32_t priceMicroUsd, const uint256& blockHash);
+
 /** 74 bytes. */
 std::vector<unsigned char> EncodeAttestation(const Attestation& att);
 

@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "0789e469827c35a43dc708b8059980b54b9f329e02bc54762553bc2880c81d05";   // SCHEMA_VERSION 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "02f3ce11e0394e1bb4fea21ba6e177ddf761d537960447821fda520b1bb06a17";   // SCHEMA_VERSION 14: the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -589,6 +589,16 @@ struct Fixture
         return CTxIn(FakeInput(), CarrierScriptSig(bundle, valtype(71, 0x30), redeem));
     }
 
+    /** CAN-2 + C4b: member `seq`'s co-signature of the cancel of `intent` -- its price statement at the claim's refHeight R. */
+    CancelCosignEntry Cosign(int seq, MicroUsd price, const COutPoint& intent, int R, std::optional<uint256> blockHash = std::nullopt)
+    {
+        CancelCosignEntry e;
+        e.priceMicroUsd = (uint32_t)price;
+        const uint256 msg = CancelCosignMessage(P.attestorSetId, intent.hash, intent.n, (uint32_t)R, (uint32_t)price, blockHash.value_or(FakeHash(R)));
+        BOOST_REQUIRE(vault::SignRecoverable(hotKeys[seq], msg, e.sig));
+        return e;
+    }
+
     /** A CLAIM_NOTICE for the vault at (vaultTxid, 0) with refHeight R carrying `bundle`. */
     CMutableTransaction NoticeTx(const uint256& vaultTxid, int R, const valtype& bundle)
     {
@@ -736,8 +746,9 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
                 { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
-                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" },
-                { 309, "intent-cancel-residual" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
+                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" }, { 301, "intent-cancel-cosign" },
+                { 309, "intent-cancel-residual" }, { 311, "intent-residual-held" },
+                { 341, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
             BOOST_REQUIRE((size_t)invalidBlocks < expected.size());
             BOOST_CHECK_EQUAL(height, expected[invalidBlocks].first);
@@ -752,7 +763,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 17);
+    BOOST_CHECK_EQUAL(invalidBlocks, 20);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -4585,20 +4596,24 @@ namespace {
  */
 struct CancelFixture
 {
-    Fixture f;
+    Fixture f{ 1, 0, 0, 10 };    // ATTEST_ARM_MIN 10: the four members below never arm the chain, so the claims stay unarmed
     uint256 v, w, claimTxid;
     CAmount each;
     Totals beforeClaim, afterClaim;
+    int claimRef = 0;            //!< the claim's refHeight: the height a cancel's statements cite (C4b)
+    static const MicroUsd HONEST = 50000;   //!< the co-signers' price: $0.05, at which the vault is at 300 % (not claimable)
 
     CancelFixture()
     {
         f.Activate();
+        f.Register(4);           // CAN-2: members 0..3, current (maturity 8) long before the claim
         v = f.MintActive(10000);
         w = f.MintActive(10000);
         each = f.Vault(w)->collateralZat;
         for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
         beforeClaim = f.GetTotals();
         SpendOpts o; o.ownerPath = false;
+        claimRef = f.tip;
         CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
         BOOST_REQUIRE_EQUAL(Spend(f, w, claim).verdict, verdict::OK);
         claimTxid = CTransaction(claim).GetHash();
@@ -4616,13 +4631,33 @@ struct CancelFixture
     /** CAN-1: the holder the claim's burn came from -- the mint's token script, P2PKH(owner) -- and the refund to it. */
     CScript Holder() const { return GetScriptForDestination(f.ownerKey.GetPubKey().GetID()); }
     CTxOut Refund() const { return CTxOut(TOKEN_VALUE, Holder()); }
-    CMutableTransaction CancelTx(std::optional<std::vector<CTxOut>> outs = std::nullopt, CScript scriptSig = CScript() << valtype(65, 0) << OP_2)
+    /** CAN-2 + C4b: co-signatures of `seqs` at `price` over this fixture's intent and claimRef. */
+    std::vector<CancelCosignEntry> Cosigns(const std::vector<int>& seqs, MicroUsd price = HONEST) { return CosignsFor(Intent(), claimRef, seqs, price); }
+    std::vector<CancelCosignEntry> CosignsFor(const COutPoint& intent, int R, const std::vector<int>& seqs, MicroUsd price = HONEST)
+    {
+        std::vector<CancelCosignEntry> out;
+        for (int seq : seqs) out.push_back(f.Cosign(seq, price, intent, R));
+        return out;
+    }
+    /** The cancel of `intent` with `entries` in a carrier and the CANCEL_COSIGN marker last (none when `entries` is empty). */
+    CMutableTransaction CancelOf(const COutPoint& intent, const std::vector<CTxOut>& outs, const std::vector<CancelCosignEntry>& entries,
+                                 CScript scriptSig = CScript() << valtype(65, 0) << OP_2)
     {
         CMutableTransaction m;
-        m.vin.push_back(CTxIn(Intent(), scriptSig, 0xFFFFFFFF));
+        m.vin.push_back(CTxIn(intent, scriptSig, 0xFFFFFFFF));
         m.vin.push_back(CTxIn(f.FakeInput()));                 // the canceller's fee input
-        m.vout = outs.value_or(std::vector<CTxOut>{ Relock(), Refund() });
+        m.vout = outs;
+        if (!entries.empty()) {
+            m.vin.push_back(f.CarrierIn(EncodeCancelCosigns(entries)));
+            m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::CancelCosign()))));
+        }
         return m;
+    }
+    /** This fixture's cancel; by default co-signed by member 0 alone (CAN-2's first cancel). */
+    CMutableTransaction CancelTx(std::optional<std::vector<CTxOut>> outs = std::nullopt, CScript scriptSig = CScript() << valtype(65, 0) << OP_2,
+                                 std::vector<int> seqs = { 0 })
+    {
+        return CancelOf(Intent(), outs.value_or(std::vector<CTxOut>{ Relock(), Refund() }), Cosigns(seqs), scriptSig);
     }
     /** Mine `tx` at tip + 1 (pools at $0.009); returns the verdict that refused it, "" when it was applied. */
     std::string Mine(const CMutableTransaction& tx)
@@ -4859,9 +4894,9 @@ BOOST_AUTO_TEST_CASE(intent_cancel_relock_script_differs_invalid)
 BOOST_AUTO_TEST_CASE(intent_cancel_payload_or_selector3_malformed)
 {
     CancelFixture c;
-    // a release or cancel carries no Yellowback payload
-    std::vector<CTxOut> outs{ c.Relock(), CTxOut(0, PayloadScript(EncodePayload(Payload::Transfer({})))) };
-    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(outs)), verdict::INTENT_SPEND_MALFORMED);
+    // a cancel carries no Yellowback payload but CANCEL_COSIGN (CAN-2)
+    std::vector<CTxOut> outs{ c.Relock(), c.Refund(), CTxOut(0, PayloadScript(EncodePayload(Payload::Transfer({})))) };
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelOf(c.Intent(), outs, {})), verdict::INTENT_SPEND_MALFORMED);
     // selector 3 (the owner's released path) is not an intent path
     BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::nullopt, CScript() << valtype(65, 0) << OP_3)), verdict::INTENT_SPEND_MALFORMED);
     BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
@@ -4904,6 +4939,555 @@ BOOST_AUTO_TEST_CASE(intent_cancel_undo_roundtrip)
     BOOST_CHECK_EQUAL(c.f.GetTotals().supplyCents, c.afterClaim.supplyCents);
     BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
     BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
+// ===========================================================================
+// The per-vault cancel limit (cancel-limit design, owner 2026-10-13): CAN-2 escalating co-signed cancels, C4b
+// statements slashable by EQV-1, CAN-3 the held residual
+
+namespace {
+
+/** The V script and value of the YED position recorded at `pos`: what a cancel of its claim re-creates at vout[0]. */
+CTxOut RelockOf(const Fixture& f, const COutPoint& pos, CAmount value)
+{
+    const VaultRecord r = State(const_cast<MemoryStateView&>(f.view)).GetVault(pos).value();
+    return CTxOut(value, YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight));
+}
+
+/** The lowest price at which `collateral` backing `cents` is not claimable at CLAIM_THRESHOLD (!IsUnderwater). */
+MicroUsd FirstNotClaimable(CAmount collateral, Cents cents, int thresholdBps)
+{
+    MicroUsd lo = 1, hi = PRICE_MAX;
+    while (lo < hi) {
+        const MicroUsd mid = lo + (hi - lo) / 2;
+        if (IsUnderwater(collateral, mid, cents, thresholdBps)) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+/** CancelFixture's position after `rounds` claim-and-cancel rounds, each cancel co-signed by exactly CancelsRequired members. */
+struct RoundsFixture : public CancelFixture
+{
+    COutPoint pos;          //!< the live position (txid:0)
+    COutPoint intent;       //!< the claimant intent of the last claim
+    int ref = 0;            //!< that claim's refHeight
+
+    /** Claim `pos` again with the refund token at pos:1 (the vault is under theta at $0.009, unarmed path (a)). */
+    void Reclaim()
+    {
+        SpendOpts o; o.ownerPath = false;
+        ref = f.tip;
+        CMutableTransaction claim = f.SpendTx(pos.hash, { COutPoint(pos.hash, 1) }, ref, o);
+        BOOST_REQUIRE_EQUAL(Mine(claim), "");
+        intent = COutPoint(CTransaction(claim).GetHash(), 0);
+        BOOST_REQUIRE_EQUAL(f.Vault(pos.hash)->status, (uint8_t)VaultStatus::CLAIMING);
+    }
+    CMutableTransaction Cancel(const std::vector<int>& seqs, MicroUsd price = HONEST)
+    {
+        return CancelOf(intent, { RelockOf(f, pos, each), Refund() }, CosignsFor(intent, ref, seqs, price));
+    }
+    /** Mine the cancel; on success the position moves to the cancel's vout[0]. */
+    std::string MineCancel(const std::vector<int>& seqs, MicroUsd price = HONEST)
+    {
+        CMutableTransaction c = Cancel(seqs, price);
+        const std::string v = Mine(c);
+        if (v.empty()) pos = COutPoint(CTransaction(c).GetHash(), 0);
+        return v;
+    }
+    RoundsFixture() : pos(COutPoint(w, 0)), intent(Intent()), ref(claimRef) {}
+};
+
+std::vector<int> FirstSeqs(int n)
+{
+    std::vector<int> out;
+    for (int i = 0; i < n; i++) out.push_back(i);
+    return out;
+}
+
+} // namespace
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_limit_constants_per_network)
+{
+    // owner round 2: CANCEL_SIGNERS_MAX 4 on mainnet and testnet, 3 on regtest; CANCEL_QUIET 8,064 / 40
+    for (const char* net : { "main", "test" }) {
+        BOOST_CHECK_EQUAL(ParamsForNetwork(net).cancelSignersMax, 4);
+        BOOST_CHECK_EQUAL(ParamsForNetwork(net).cancelQuiet, 8064);
+    }
+    BOOST_CHECK_EQUAL(ParamsForNetwork("regtest").cancelSignersMax, 3);
+    BOOST_CHECK_EQUAL(ParamsForNetwork("regtest").cancelQuiet, 40);
+    VaultRecord v;
+    v.cancelCount = 9;
+    v.lastCancelHeight = 100;
+    BOOST_CHECK_EQUAL(CancelsRequired(v, ParamsForNetwork("main"), 101), 4);       // the schedule caps at four
+    BOOST_CHECK_EQUAL(CancelsRequired(v, ParamsForNetwork("main"), 100 + 8064), 1);
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_limit_escalation_schedule_and_cap)
+{
+    RoundsFixture c;
+    BOOST_REQUIRE_EQUAL(c.f.P.cancelSignersMax, 3);           // regtest: schedule 1, 2, 3, 3, ...
+    BOOST_REQUIRE_EQUAL(c.f.P.cancelQuiet, 40);
+    const VaultRecord minted = c.f.Vault(c.w).value();
+    BOOST_CHECK_EQUAL(minted.cancelCount, 0);
+    BOOST_CHECK_EQUAL(minted.lastCancelHeight, 0);
+    for (int round = 1; round <= 5; round++) {
+        if (round > 1) c.Reclaim();
+        const int need = std::min(round, c.f.P.cancelSignersMax);
+        BOOST_CHECK_EQUAL(CancelsRequired(c.f.Vault(c.pos.hash).value(), c.f.P, c.f.tip + 1), need);
+        if (need > 1) {
+            // one co-signer short: refused, the vault stays CLAIMING (U-21)
+            BOOST_CHECK_EQUAL(c.MineCancel(FirstSeqs(need - 1)), verdict::INTENT_CANCEL_COSIGN);
+            BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->status, (uint8_t)VaultStatus::CLAIMING);
+        }
+        BOOST_REQUIRE_EQUAL(c.MineCancel(FirstSeqs(need)), "");
+        const VaultRecord r = c.f.Vault(c.pos.hash).value();
+        BOOST_CHECK_EQUAL(r.status, (uint8_t)VaultStatus::ACTIVE);
+        BOOST_CHECK_EQUAL(r.cancelCount, round);              // q + 1: every round within CANCEL_QUIET of the last
+        BOOST_CHECK_EQUAL(r.lastCancelHeight, c.f.tip);
+        BOOST_CHECK_EQUAL(r.mintHeight, minted.mintHeight);   // the counter rides the same position across re-creations
+        BOOST_CHECK_EQUAL(r.pMint, minted.pMint);
+        const std::vector<int> seqs = FirstSeqs(need);
+        BOOST_CHECK(c.f.Log(c.pos.hash)->bundleSeqs == std::vector<uint16_t>(seqs.begin(), seqs.end()));
+    }
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_limit_quiet_resets_the_schedule)
+{
+    RoundsFixture c;
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+    const int first = c.f.tip;
+    // the next cancel lands at first + CANCEL_QUIET - 1: still inside the quiet period, two co-signers needed
+    while (c.f.tip + 2 < first + c.f.P.cancelQuiet - 1) c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3));
+    c.Reclaim();
+    BOOST_REQUIRE_EQUAL(c.f.tip + 1, first + c.f.P.cancelQuiet - 1);
+    BOOST_CHECK_EQUAL(CancelsRequired(c.f.Vault(c.pos.hash).value(), c.f.P, c.f.tip + 1), 2);
+    BOOST_CHECK_EQUAL(c.MineCancel({ 0 }), verdict::INTENT_CANCEL_COSIGN);
+    // one block later (the refused attempt's block) the quiet period has passed: q = 0, one co-signer again
+    BOOST_REQUIRE_EQUAL(c.f.tip + 1, first + c.f.P.cancelQuiet);
+    BOOST_CHECK_EQUAL(CancelsRequired(c.f.Vault(c.pos.hash).value(), c.f.P, c.f.tip + 1), 1);
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 1 }), "");
+    BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->cancelCount, 1);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->lastCancelHeight, c.f.tip);
+}
+
+// Rule: CAN-2
+// Rule: C4b
+BOOST_AUTO_TEST_CASE(cancel_cosign_refusals)
+{
+    CancelFixture c;
+    const std::vector<CTxOut> outs{ c.Relock(), c.Refund() };
+    auto refused = [&](const CMutableTransaction& tx) { return c.Mine(tx) == verdict::INTENT_CANCEL_COSIGN; };
+    // no co-signature at all (CAN-1's shape): even the first cancel carries one statement
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, {})));
+    // the marker without its carrier, and a carrier without the marker
+    CMutableTransaction noCarrier = c.CancelTx();
+    noCarrier.vin.pop_back();
+    BOOST_CHECK(refused(noCarrier));
+    CMutableTransaction noMarker = c.CancelTx();
+    noMarker.vout.pop_back();
+    BOOST_CHECK(refused(noMarker));
+    // a price bundle ("YA") in the carrier is not a co-signature list
+    CMutableTransaction yaCarrier = c.CancelTx();
+    Bundle b;
+    b.atts = { c.f.Att(0, CancelFixture::HONEST, c.claimRef) };
+    yaCarrier.vin.back() = c.f.CarrierIn(EncodeBundle(b));
+    BOOST_CHECK(refused(yaCarrier));
+    // a repeated key, a non-member, another intent, another height, another block hash
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 10 }))));
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.CosignsFor(COutPoint(c.claimTxid, 1), c.claimRef, { 0 }))));
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.CosignsFor(c.Intent(), c.claimRef - 1, { 0 }))));
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, { c.f.Cosign(0, CancelFixture::HONEST, c.Intent(), c.claimRef, uint256S("01")) })));
+    // C4b: a statement at which the vault WAS claimable; the boundary is collateral x price >= debt x theta
+    const MicroUsd edge = FirstNotClaimable(c.each, 10000, c.f.P.claimThresholdBps);
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, 9000))));
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, edge - 1))));
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, PRICE_MIN - 1))));
+    // a malformed list fails whatever it holds
+    CMutableTransaction junk = c.CancelTx();
+    valtype bad = EncodeCancelCosigns(c.Cosigns({ 0 }));
+    bad.push_back(0);
+    junk.vin.back() = c.f.CarrierIn(bad);
+    BOOST_CHECK(refused(junk));
+    // a member whose bond was spent (WITHDRAWN) and a member that joined too recently (not current) cannot co-sign
+    const AttestorRecord one = c.f.Attestor(1).value();
+    CMutableTransaction exit;
+    exit.vin.push_back(CTxIn(one.bondOutpoint));
+    exit.vout.push_back(CTxOut(one.bondZat - 1000, GetScriptForDestination(c.f.userKey.GetPubKey().GetID())));
+    c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { exit });
+    BOOST_REQUIRE_EQUAL(c.f.Attestor(1)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 1 }))));
+    c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { c.f.RegisterTx(5) });
+    BOOST_REQUIRE(c.f.Attestor(4).has_value());          // hotKeys[5] became seq 4
+    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 5 }))));
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+    // extra valid co-signatures are accepted, and the statement at the boundary price holds
+    CMutableTransaction ok = c.CancelOf(c.Intent(), outs, c.Cosigns({ 0, 2, 3 }, edge));
+    BOOST_REQUIRE_EQUAL(c.Mine(ok), "");
+    BOOST_CHECK(c.f.Log(CTransaction(ok).GetHash())->bundleSeqs == std::vector<uint16_t>({ 0, 2, 3 }));
+    BOOST_CHECK_EQUAL(c.f.Vault(CTransaction(ok).GetHash())->cancelCount, 1);
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_cosign_counts_distinct_valid_entries)
+{
+    // round 2 (review M-2): invalid, non-current and repeated entries are ignored; the distinct valid ones must reach
+    // CancelsRequired
+    RoundsFixture c;
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+    c.Reclaim();                                               // the second cancel needs two
+    auto mine = [&](const std::vector<CancelCosignEntry>& e) {
+        CMutableTransaction tx = c.CancelOf(c.intent, { RelockOf(c.f, c.pos, c.each), c.Refund() }, e);
+        const std::string v = c.Mine(tx);
+        if (v.empty()) c.pos = COutPoint(CTransaction(tx).GetHash(), 0);
+        return v;
+    };
+    BOOST_CHECK_EQUAL(mine(c.CosignsFor(c.intent, c.ref, { 0, 0 })), verdict::INTENT_CANCEL_COSIGN);          // one key twice
+    BOOST_CHECK_EQUAL(mine(c.CosignsFor(c.intent, c.ref, { 0, 10 })), verdict::INTENT_CANCEL_COSIGN);         // a non-member
+    std::vector<CancelCosignEntry> e = c.CosignsFor(c.intent, c.ref, { 0 });
+    e.push_back(c.f.Cosign(10, CancelFixture::HONEST, c.intent, c.ref));                                     // ignored
+    e.push_back(c.f.Cosign(2, 9000, c.intent, c.ref));                                                       // claimable: ignored
+    e.push_back(c.f.Cosign(0, CancelFixture::HONEST, c.intent, c.ref));                                      // a repeat: ignored
+    e.push_back(c.f.Cosign(1, CancelFixture::HONEST, c.intent, c.ref));
+    const COutPoint before = c.pos;
+    BOOST_REQUIRE_EQUAL(mine(e), "");
+    BOOST_CHECK(c.pos != before);
+    BOOST_CHECK(c.f.Log(c.pos.hash)->bundleSeqs == std::vector<uint16_t>({ 0, 1 }));
+    BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->cancelCount, 2);
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_cosign_holds_when_a_cosigner_leaves_in_the_same_block)
+{
+    // round 2: member 1 spends its bond (WITHDRAWN) earlier in the cancel's block; with a spare co-signature the cancel
+    // still holds, without one it fails
+    for (bool spare : { false, true }) {
+        RoundsFixture c;
+        BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+        c.Reclaim();                                           // two needed
+        const AttestorRecord one = c.f.Attestor(1).value();
+        CMutableTransaction exit;
+        exit.vin.push_back(CTxIn(one.bondOutpoint));
+        exit.vout.push_back(CTxOut(one.bondZat - 1000, GetScriptForDestination(c.f.userKey.GetPubKey().GetID())));
+        CMutableTransaction cancel = c.Cancel(spare ? std::vector<int>{ 0, 1, 2 } : std::vector<int>{ 0, 1 });
+        c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { exit, cancel });
+        BOOST_CHECK_EQUAL(c.f.Attestor(1)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+        BOOST_CHECK_EQUAL(c.f.Refused(CTransaction(cancel).GetHash()), spare ? "" : verdict::INTENT_CANCEL_COSIGN);
+        if (spare) BOOST_CHECK(c.f.Log(CTransaction(cancel).GetHash())->bundleSeqs == std::vector<uint16_t>({ 0, 2 }));
+    }
+}
+
+// Rule: CAN-2
+// Rule: UNDO
+BOOST_AUTO_TEST_CASE(cancel_limit_counter_undo_byte_identical)
+{
+    RoundsFixture c;
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+    c.Reclaim();
+    const MemoryStateView before = c.f.view;
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 0, 1 }), "");
+    BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->cancelCount, 2);
+    c.f.Undo();
+    BOOST_CHECK(c.f.view == before);
+}
+
+namespace {
+
+/** A path-(b) claim of EmergencyFixture's vault with the owner's residual intent, and the cancel of its claimant intent. */
+struct ResidualFixture
+{
+    EmergencyFixture g;
+    uint256 claimTxid;
+    COutPoint claimant, residual, pos;
+    IntentRecord claimantRec;
+    CMutableTransaction claim;
+
+    ResidualFixture()
+    {
+        BOOST_REQUIRE(g.PostNotice());
+        for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+        SpendOpts o; o.residualValue = g.Residual(g.f.tip - 1);
+        claim = g.Claim(o);
+        BOOST_REQUIRE_EQUAL(g.Mine(claim).verdict, verdict::OK);
+        claimTxid = CTransaction(claim).GetHash();
+        for (uint32_t j = 0; j < claim.vout.size(); j++) {
+            std::optional<IntentRecord> ir = State(g.f.view).GetIntent(COutPoint(claimTxid, j));
+            if (!ir.has_value()) continue;
+            if (ir->Role() == IntentRole::CLAIMANT) { claimant = COutPoint(claimTxid, j); claimantRec = ir.value(); }
+            else residual = COutPoint(claimTxid, j);
+        }
+        BOOST_REQUIRE(!claimant.IsNull() && !residual.IsNull());
+        BOOST_CHECK_EQUAL(claimantRec.claimRefHeight, g.f.tip - 2);                    // the claim's refHeight
+        BOOST_CHECK(State(g.f.view).GetIntent(residual)->heldBy.IsNull());
+    }
+    /** The cancel of `intent` (claimant of position `from`) co-signed by `seqs` at `price`, re-locking `value`. */
+    CMutableTransaction CancelTx(const COutPoint& intent, const COutPoint& from, CAmount value, const std::vector<int>& seqs, MicroUsd price)
+    {
+        const IntentRecord ir = State(g.f.view).GetIntent(intent).value();
+        std::vector<CancelCosignEntry> entries;
+        for (int seq : seqs) entries.push_back(g.f.Cosign(seq, price, intent, ir.claimRefHeight));
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(intent, CScript() << valtype(65, 0) << OP_2, 0xFFFFFFFF));
+        m.vin.push_back(CTxIn(g.f.FakeInput()));
+        m.vin.push_back(g.f.CarrierIn(EncodeCancelCosigns(entries)));
+        m.vout.push_back(RelockOf(g.f, from, value));
+        m.vout.push_back(CTxOut(TOKEN_VALUE, CScript(ir.refundScript.begin(), ir.refundScript.end())));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::CancelCosign()))));
+        return m;
+    }
+    /** Cancel the path-(b) claim (one co-signer, statement at the honest pool price: 126 %, not claimable). */
+    void CancelFirst()
+    {
+        CMutableTransaction c = CancelTx(claimant, COutPoint(g.w, 0), claim.vout[claimant.n].nValue, { 0 }, g.poolPrice);
+        g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { c });
+        BOOST_REQUIRE_EQUAL(g.f.Refused(CTransaction(c).GetHash()), "");
+        pos = COutPoint(CTransaction(c).GetHash(), 0);
+    }
+    /** Mine the residual's release (I-1, selector 1) at tip + 1; returns the verdict that refused it, "" when applied. */
+    std::string Release()
+    {
+        CMutableTransaction rel;
+        rel.vin.push_back(CTxIn(residual, CScript() << OP_1, (uint32_t)g.f.P.claimDelay));
+        rel.vin.push_back(CTxIn(g.f.FakeInput()));
+        rel.vout.push_back(CTxOut(claim.vout[residual.n].nValue, GetScriptForDestination(g.f.ownerKey.GetPubKey().GetID())));
+        g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { rel });
+        return g.f.Refused(CTransaction(rel).GetHash());
+    }
+};
+
+} // namespace
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_until_quiet)
+{
+    ResidualFixture r;
+    r.CancelFirst();
+    BOOST_CHECK(State(r.g.f.view).GetIntent(r.residual)->heldBy == r.pos);
+    const int cancelled = r.g.f.tip;
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    while (r.g.f.tip + 2 < cancelled + r.g.f.P.cancelQuiet) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(r.g.f.tip + 1, cancelled + r.g.f.P.cancelQuiet - 1);
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);   // one block inside CANCEL_QUIET
+    // round 2 (R-1c): CANCEL_QUIET has passed, but the re-created position (the claimant intent's value, ~100 % at
+    // $0.021) is claimable on path (a) at the latest snapshot: still held
+    const VaultRecord pos = r.g.f.Vault(r.pos.hash).value();
+    BOOST_REQUIRE(IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    // the price recovers for a whole slow window: the position is no longer claimable, the residual is released
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));   // every citable ref recovers
+    BOOST_REQUIRE(!IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), "");
+    BOOST_CHECK(!State(r.g.f.view).GetIntent(r.residual).has_value());
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_release_mirrors_every_citable_ref)
+{
+    // the round-2 fix: past CANCEL_QUIET and healthy at the latest snapshot, the residual is still held when a claim in
+    // the release's block could cite an earlier reference height at which the position is claimable, or one whose price
+    // is undefined (fail closed); a height older than REF_WINDOW cannot be cited and does not hold it
+    ResidualFixture r;
+    r.CancelFirst();
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    const int refWindow = r.g.f.P.refWindow;
+    BOOST_REQUIRE_EQUAL(refWindow, 40);
+    // each attempt sets one snapshot's pClaim relative to the release's block H = tip + 1, then restores it (a refused
+    // release still mines a block, so H moves on by one)
+    auto attempt = [&](int back, int64_t pClaim) {
+        const int h = r.g.f.tip + 1 - back;
+        const Snapshot orig = r.g.f.Snap(h);
+        Snapshot s = orig;
+        s.pClaim = pClaim;
+        State(r.g.f.view).Put(keys::Snapshot((uint32_t)h), s);
+        const std::string v = r.Release();
+        State(r.g.f.view).Put(keys::Snapshot((uint32_t)h), orig);
+        return v;
+    };
+    BOOST_CHECK_EQUAL(attempt(1, 0), verdict::INTENT_RESIDUAL_HELD);               // undefined price at H - 1
+    BOOST_CHECK_EQUAL(attempt(10, 9000), verdict::INTENT_RESIDUAL_HELD);           // claimable at an earlier citable ref only
+    BOOST_CHECK_EQUAL(attempt(refWindow, 9000), verdict::INTENT_RESIDUAL_HELD);    // the oldest citable ref
+    BOOST_CHECK_EQUAL(attempt(refWindow + 1, 9000), "");                           // too old to cite: released
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_armed_pool_low_fails_closed)
+{
+    // the round-2 fix at an ARMED reference: the pools under theta and the attestors high (pClaim = max(x, a) would keep a
+    // claim out only with a high bundle, but a claim may carry a low one): the residual is held, fail-closed, until the
+    // position closes or the pools recover for the whole REF_WINDOW
+    ResidualFixture r;
+    r.CancelFirst();
+    BOOST_REQUIRE(ArmedAt(r.g.f.view, r.g.f.P, r.g.f.tip));
+    while (r.g.f.tip + 1 < r.g.f.Vault(r.pos.hash)->lastCancelHeight + r.g.f.P.cancelQuiet) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    const VaultRecord pos = r.g.f.Vault(r.pos.hash).value();
+    BOOST_REQUIRE(IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+}
+
+// Rule: CAN-3
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_while_claimable_by_path_b)
+{
+    // round 2: past CANCEL_QUIET and healthy at the snapshot price, but a persisted notice on the position whose pEmerg
+    // puts it under EMERGENCY_RATIO makes it claimable on path (b): held; without the notice, or before it persists,
+    // released
+    ResidualFixture r;
+    r.CancelFirst();
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    NoticeRecord n;
+    n.height = r.g.f.tip - 4;
+    n.refHeight = r.g.f.tip - r.g.f.P.emergencyPersist;      // persisted at H - 1 = tip
+    n.pEmerg = 10000;                                          // ~48 % at $0.01: under 105 %
+    State(r.g.f.view).Put(keys::Notice(r.pos), n);
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    n.refHeight = r.g.f.tip;                                   // not yet persisted at any citable ref
+    State(r.g.f.view).Put(keys::Notice(r.pos), n);
+    BOOST_CHECK_EQUAL(r.Release(), "");
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_released_when_the_position_closes)
+{
+    ResidualFixture r;
+    r.CancelFirst();
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    // the owner redeems the re-created position with the refunded YED: CLOSED frees the residual at once
+    CMutableTransaction redeem = r.g.f.SpendTx(r.pos.hash, { COutPoint(r.pos.hash, 1) }, r.g.f.tip);
+    r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3), { redeem });
+    BOOST_REQUIRE_EQUAL(r.g.f.Refused(CTransaction(redeem).GetHash()), "");
+    BOOST_REQUIRE_EQUAL(r.g.f.Vault(r.pos.hash)->status, (uint8_t)VaultStatus::CLOSED);
+    BOOST_CHECK_EQUAL(r.Release(), "");
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_follows_the_position_and_holds_while_claiming)
+{
+    ResidualFixture r;
+    r.CancelFirst();
+    const COutPoint first = r.pos;
+    // the price falls; past CANCEL_QUIET the re-created position is claimed on path (a) (no residual due)
+    r.g.poolPrice = 9000;
+    r.g.attPrice = 9000;
+    for (int i = 0; i < 64; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    r.g.w = first.hash;                                       // the fixture's selector is the claimed position's outpoint
+    SpendOpts o2;
+    o2.ownerPath = false;
+    const int R = r.g.f.tip - 1;
+    o2.bundle = r.g.f.BundleFor(R, r.g.Selector(), 9000);
+    o2.attestPayee = Selected(r.g.f.view, r.g.f.P, R, r.g.Selector()).front();
+    CMutableTransaction claim2 = r.g.f.SpendTx(first.hash, { COutPoint(first.hash, 1) }, R, o2);   // the refunded YED burns the debt again
+    BOOST_REQUIRE_EQUAL(r.g.Mine(claim2).verdict, verdict::OK);
+    BOOST_REQUIRE_EQUAL(r.g.f.Vault(first.hash)->status, (uint8_t)VaultStatus::CLAIMING);
+    // past CANCEL_QUIET, but CLAIMING: still held
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    // the second cancel (q = 0 after the quiet period: one co-signer) moves heldBy to the new position
+    const COutPoint claimant2(CTransaction(claim2).GetHash(), 0);
+    CMutableTransaction cancel2 = r.CancelTx(claimant2, first, claim2.vout[0].nValue, { 1 }, 60000);
+    r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3), { cancel2 });
+    BOOST_REQUIRE_EQUAL(r.g.f.Refused(CTransaction(cancel2).GetHash()), "");
+    const COutPoint second(CTransaction(cancel2).GetHash(), 0);
+    BOOST_CHECK(State(r.g.f.view).GetIntent(r.residual)->heldBy == second);
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);   // the new position's quiet period starts again
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_of_a_released_claim_unchanged)
+{
+    ResidualFixture r;
+    // the claimant intent is released (no cancel): the residual keeps today's rule, released at once
+    CMutableTransaction rel;
+    rel.vin.push_back(CTxIn(r.claimant, CScript() << OP_1, (uint32_t)r.g.f.P.claimDelay));
+    rel.vin.push_back(CTxIn(r.g.f.FakeInput()));
+    rel.vout.push_back(CTxOut(r.claim.vout[r.claimant.n].nValue, GetScriptForDestination(r.g.f.userKey.GetPubKey().GetID())));
+    r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3), { rel });
+    BOOST_REQUIRE_EQUAL(r.g.f.Refused(CTransaction(rel).GetHash()), "");
+    BOOST_CHECK(State(r.g.f.view).GetIntent(r.residual)->heldBy.IsNull());
+    BOOST_CHECK_EQUAL(r.Release(), "");
+}
+
+namespace {
+
+/** C4b: an EQUIVOCATION whose carrier holds attestation `a` and the cancel statement `s` ("YX"). */
+CMutableTransaction CancelEvidenceTx(Fixture& f, const Attestation& a, const CancelStatement& s)
+{
+    CMutableTransaction m;
+    m.vin.push_back(f.CarrierIn(EncodeCancelEvidence(a, s)));
+    m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Equivocation()))));
+    m.vout.push_back(CTxOut(1000, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
+    return m;
+}
+
+CancelStatement StatementOf(const COutPoint& intent, const CancelCosignEntry& e)
+{
+    CancelStatement s;
+    s.intent = intent;
+    s.priceMicroUsd = e.priceMicroUsd;
+    s.sig = e.sig;
+    return s;
+}
+
+} // namespace
+
+// Rule: C4b
+// Rule: EQV-1
+BOOST_AUTO_TEST_CASE(cancel_statement_slashed_by_eqv1)
+{
+    CancelFixture c;
+    // member 1 co-signs the cancel saying $0.05 at the claim's refHeight, while its regular attestation there said $0.009
+    const CancelCosignEntry e = c.f.Cosign(1, CancelFixture::HONEST, c.Intent(), c.claimRef);
+    const Attestation att = c.f.Att(1, 9000, c.claimRef);
+    CMutableTransaction cancel = c.CancelOf(c.Intent(), { c.Relock(), c.Refund() }, { e });
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    // structure: the "YX" shape is EQV-1 evidence; the attestation side and the statement side verify under the key
+    CMutableTransaction eqv = CancelEvidenceTx(c.f, att, StatementOf(c.Intent(), e));
+    std::optional<Equivocation> ev = EquivocationEvidence(CTransaction(eqv), c.f.P);
+    BOOST_REQUIRE(ev.has_value() && ev->s.has_value() && !ev->b.has_value());
+    BOOST_CHECK(EquivocatedBy(ev.value(), c.f.hotKeys[1].GetPubKey(), Fixture::FakeHash(c.claimRef), c.f.P.attestorSetId));
+    BOOST_CHECK(!EquivocatedBy(ev.value(), c.f.hotKeys[0].GetPubKey(), Fixture::FakeHash(c.claimRef), c.f.P.attestorSetId));
+    BOOST_CHECK(!EquivocatedBy(ev.value(), c.f.hotKeys[1].GetPubKey(), Fixture::FakeHash(c.claimRef), uint256S("02")));
+    c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { eqv });
+    const AttestorRecord slashed = c.f.Attestor(1).value();
+    BOOST_CHECK_EQUAL(slashed.status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK(slashed.bondFrozen);
+    const TxLogRecord log = c.f.Log(CTransaction(eqv).GetHash()).value();
+    BOOST_CHECK_EQUAL(log.type, (uint8_t)TxLogType::EQUIVOCATION);
+    BOOST_CHECK_EQUAL(log.attestorSeq, 1);
+    // the ejected member can no longer co-sign
+    BOOST_CHECK(!c.f.Attestor(0)->bondFrozen);
+}
+
+// Rule: C4b
+// Rule: EQV-1
+BOOST_AUTO_TEST_CASE(cancel_statement_honest_canceller_never_slashed)
+{
+    CancelFixture c;
+    // member 0's statement repeats the price it attested at the claim's refHeight: no evidence exists
+    const CancelCosignEntry e = c.f.Cosign(0, CancelFixture::HONEST, c.Intent(), c.claimRef);
+    const Attestation same = c.f.Att(0, CancelFixture::HONEST, c.claimRef);
+    BOOST_REQUIRE_EQUAL(c.Mine(c.CancelOf(c.Intent(), { c.Relock(), c.Refund() }, { e })), "");
+    CMutableTransaction eqv = CancelEvidenceTx(c.f, same, StatementOf(c.Intent(), e));
+    BOOST_CHECK(!EquivocationEvidence(CTransaction(eqv), c.f.P).has_value());
+    c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { eqv });
+    BOOST_CHECK(c.f.Attestor(0)->status != (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK(!c.f.Attestor(0)->bondFrozen);
+    // an attestation at another height is not evidence either (one citedHeight), nor another member's attestation
+    const Attestation other = c.f.Att(0, 9000, c.claimRef - 1);
+    CMutableTransaction eqv2 = CancelEvidenceTx(c.f, other, StatementOf(c.Intent(), e));
+    std::optional<Equivocation> ev2 = EquivocationEvidence(CTransaction(eqv2), c.f.P);
+    BOOST_REQUIRE(ev2.has_value());   // structure only: the statement is read at the attestation's height,
+    BOOST_CHECK(!EquivocatedBy(ev2.value(), c.f.hotKeys[0].GetPubKey(), Fixture::FakeHash(c.claimRef - 1), c.f.P.attestorSetId));   // where it does not verify
+    CMutableTransaction eqv3 = CancelEvidenceTx(c.f, c.f.Att(2, 9000, c.claimRef), StatementOf(c.Intent(), e));
+    c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { eqv2, eqv3 });
+    for (int seq : { 0, 2 }) {
+        BOOST_CHECK(c.f.Attestor(seq)->status != (uint8_t)AttestorStatus::EJECTED);
+        BOOST_CHECK(!c.f.Attestor(seq)->bondFrozen);
+    }
 }
 
 // Rule: R12

@@ -100,6 +100,7 @@ BOOST_AUTO_TEST_CASE(mint1_roundtrip_table)
         { Payload::ClaimNotice(COutPoint(vault, 2), 0xFFFFFFFF), 41 },
         { Payload::ClaimNotice(uint256(), 0, 0), 41 },
         { Payload::Equivocation(), 4 },
+        { Payload::CancelCosign(), 4 },
         { Payload::AttestorRevive(0, 0, 0, TestSig(0)), 78 },
         { Payload::AttestorRevive(0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, TestSig(0x80)), 78 },
     };
@@ -202,7 +203,10 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
         { "equivocation_version_4", "59420407", false },
         { "version_ff",          "5942ff01" + mintBody, false },
         { "unknown_type_04",     "59420304" "01000000", false },
-        { "unknown_type_09",     "59420309" "00", false },
+        { "cancel_cosign",       "59420309", true },                                          // CAN-2: the empty-bodied marker
+        { "cancel_cosign_trailing", "59420309" "00", false },
+        { "cancel_cosign_version_4", "59420409", false },
+        { "unknown_type_0a",     "5942030a", false },
         { "retired_type_10",     "59420310" "50c3000000000000", false },   // the prototype's PRICE, reserved
         { "reserved_type_1f",    "5942031f" "00", false },
         { "reserved_type_20",    "59420320" "00", false },
@@ -507,6 +511,7 @@ BOOST_AUTO_TEST_CASE(tx0_find_payload_in_transaction)
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::CLAIM_NOTICE)), "notice");
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::EQUIVOCATION)), "equivocation");
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::ATTESTOR_REVIVE)), "revive");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::CANCEL_COSIGN)), "cancelcosign");
 }
 
 // ---------------------------------------------------------------------------

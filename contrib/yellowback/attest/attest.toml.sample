@@ -100,6 +100,7 @@ kind = "iroh"                    # "iroh" (production) or "dir" (tests and the d
 # relays = []                    # empty: iroh's default relays; ["none"]: no relay, direct only; or your own list
 # peers = []                     # bootstrap endpoint ids of other attestors/subscribers (the agent prints its own at startup)
 # secret_key_file = "~/.ycash/yellowback-attest.key"   # keeps this agent's endpoint id stable across restarts
+# fallback_relays = []           # the project's relays, added to n0's default set (owner decision 4)
 # topic_override = ""            # default: "yellowback/attest/<network>/3"
 # kind = "dir"
 # path = "/var/lib/yellowback/attest-bus"   # dir transport: <seq>-<citedHeight>.att files
@@ -111,3 +112,39 @@ listattestors_seconds = 60       # refresh the registered set and the node's tip
 # allow_insecure_endpoints = false   # http:// endpoints are refused except on loopback; true to insist
 # seq_burst = 8                  # per-seq token bucket: frames a seq may send at once ...
 # seq_refill_seconds = 15        # ... and the seconds per further frame (one legitimate frame per every_blocks blocks)
+
+# The cancel-limit design's safety brake, automated (CAN-2 + C4b; doc/yellowback-attestor.md "Cancelling wrong-price
+# claims"). Runs inside `attest`: a watcher that judges every confirmed YED claim with this agent's own price at the
+# claim's refHeight, co-signs the wrong-price ones (yed_signcancelcosign) and gossips the co-signatures on a second
+# topic ("yellowback/cancel/<network>/1", same peers), and a collector that, when this member's turn in the rota comes,
+# gathers cancelsRequired + spares co-signatures and sends the cancel (yed_buildcancel, set_signcancel, vault_send).
+# The node's wallet needs a few YEC of confirmed coins for the carrier and the fee.
+[cancel]
+# enabled = true                 # false: the attest loop only (no watcher, no cancel topic)
+# auto_cosign = true             # co-sign and publish wrong-price claims with no operator (false: alert only)
+# margin_bps = 500               # co-sign only when the vault is above theta at your price with 5 % to spare
+# drive = true                   # take your turn in the rota: build, sign and send the cancel
+# spares = 2                     # co-signatures beyond cancelsRequired to wait for (spares absorb a co-signer that leaves)
+# spare_wait_blocks = 1          # ... but no longer than this once cancelsRequired are in hand
+# takeover_blocks = 6            # rank r in the rota drives r x this many blocks after the claim confirmed (at most 36; shrunk to fit CLAIM_DELAY)
+# min_confirmations = 1          # only CONFIRMED claims are judged and co-signed
+# refee_after_blocks = 6         # a cancel unconfirmed this long is re-pushed; one gone from the mempool is re-funded and rebuilt
+# max_sends = 5                  # ... at most this many sends per claim, the k-th rebuild after refee_after_blocks x 2^(k-1)
+# republish_blocks = 4           # republish your co-signature this often while the claim stands
+# price_tolerance_blocks = 24    # how far from the claim's refHeight your price history may be to judge it
+# state_file = "~/.ycash/yellowback-cancel-main-0.json"   # default: yellowback-cancel-<seq>.json beside rpc_cookie, else ~/.ycash/yellowback-cancel-<network>-<seq>.json
+# broadcast_rpc = ["https://user:pass@miner.example:8832"]   # push the carrier and the cancel to these nodes too
+# allow_insecure_broadcast = false   # http:// with credentials to a host other than loopback is refused without this
+# alert_command = "/usr/local/bin/page-me"   # run as: <program> <kind> <intent> <message> on every alert
+# delivery = "trial"             # co-signatures: "trial" (members-only direct path + the old gossip topic), "direct",
+#                                #   "gossip", or "onchain" (the on-chain fallback alone)
+# direct_secret_key_file = "~/.ycash/yellowback-cancel-direct.key"   # default <state_file>.direct.key; bound to your seat
+# direct_relays = []             # empty: n0's relays and lookup; ["none"]: direct addresses only (devnet, LAN)
+# fallback_relays = []           # the project's relays, added to n0's (e.g. ["https://relay.example"])
+# binding_ttl_blocks = 8064      # the signmessage binding of the direct endpoint is valid this long, re-signed at half
+# onchain_fallback = true        # publish your co-signature on chain when a claim is still short ...
+# fallback_after_blocks = 192    # ... this many blocks after it confirmed (a third of CLAIM_DELAY)
+# fallback_fee_zat = 10000       # the fee of each fallback transaction, exactly
+# fallback_max_txs = 20          # at most this many fallback transactions a day
+# gossip_burst = 16              # per-seq token bucket on the cancel topic (after the per-peer one) ...
+# gossip_refill_seconds = 10     # ... and the seconds per further frame

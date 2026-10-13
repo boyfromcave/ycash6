@@ -431,6 +431,21 @@ std::vector<std::pair<uint16_t, AttestorRecord>> State::Attestors() const
     return out;
 }
 
+std::vector<std::pair<COutPoint, IntentRecord>> State::Intents() const
+{
+    std::vector<std::pair<COutPoint, IntentRecord>> out;
+    view.Iterate(std::string(1, 'I'), [&](const std::string& k, const std::string& raw) {
+        IntentRecord r;
+        if (k.size() != 37 || !DeserializeRecord(raw, r)) return true;
+        COutPoint op;
+        op.hash = uint256(std::vector<unsigned char>(k.begin() + 1, k.begin() + 33));
+        op.n = ((uint32_t)(unsigned char)k[33] << 24) | ((uint32_t)(unsigned char)k[34] << 16) | ((uint32_t)(unsigned char)k[35] << 8) | (uint32_t)(unsigned char)k[36];
+        out.push_back(std::make_pair(op, r));
+        return true;
+    });
+    return out;
+}
+
 uint256 StateHash(const StateView& view, const std::string& network)
 {
     CSHA256 hasher;

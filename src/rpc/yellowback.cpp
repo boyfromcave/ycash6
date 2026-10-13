@@ -253,6 +253,11 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
+    // CAN-2 (the cancel-limit design): the position's recent cancels, the co-signers its next cancel needs (a cancel at
+    // tip + 1) and the first height at which the schedule starts again from one (null when never cancelled)
+    o.pushKV("cancelCount", (int)v.cancelCount);
+    o.pushKV("cancelsRequired", CancelsRequired(v, p, (int64_t)tip + 1));
+    o.pushKV("cancelQuietUntil", v.lastCancelHeight > 0 ? UniValue((int64_t)v.lastCancelHeight + p.cancelQuiet) : NullUniValue);
     // RED-4 by either clause, exactly yed_listclaimable's test (unarmed: v2's tip-snapshot clause (a)).
     const bool claimable = v.Status() == VaultStatus::ACTIVE && tip >= v.appHeight && tipSnap.has_value() &&
                            yellowback::rpc::EstimateClaim(index, out, v, tip).claimable;
@@ -283,6 +288,19 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
         o.pushKV("intents", intents);
         // CAN-1 (03/H-1): the script a cancel of the claimant intent must refund the claim's burn to (yed_buildcancel)
         if (!refundHolder.empty()) o.pushKV("refundHolder", refundHolder);
+    }
+    // CAN-3: the residual intents of cancelled claims this position holds (released at close, or after cancelQuietUntil
+    // while it is ACTIVE)
+    {
+        UniValue held(UniValue::VARR);
+        for (const auto& r : State(index.View()).Intents()) {
+            if (r.second.Role() != IntentRole::RESIDUAL || !(r.second.heldBy == out)) continue;
+            UniValue e(UniValue::VOBJ);
+            e.pushKV("txid", r.first.hash.GetHex());
+            e.pushKV("vout", (int64_t)r.first.n);
+            held.push_back(e);
+        }
+        if (!held.empty()) o.pushKV("heldResiduals", held);
     }
     yellowback::rpc::PushNoticeFields(o, State(index.View()), p, out, v);
     return o;
@@ -547,6 +565,9 @@ UniValue PayloadToJSON(const Payload& p)
     }
     case PayloadType::EQUIVOCATION:
         o.pushKV("equivocation", UniValue(UniValue::VOBJ));
+        break;
+    case PayloadType::CANCEL_COSIGN:         // CAN-2 + C4b: the cancel's marker (its co-signatures ride the carrier)
+        o.pushKV("cancelCosign", UniValue(UniValue::VOBJ));
         break;
     case PayloadType::ATTESTOR_REVIVE: {
         UniValue rv(UniValue::VOBJ);
@@ -1468,6 +1489,7 @@ UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
                 case PayloadType::CLAIM_NOTICE: expired.type = (uint8_t)TxLogType::CLAIM_NOTICE; break;
                 case PayloadType::EQUIVOCATION: expired.type = (uint8_t)TxLogType::EQUIVOCATION; break;
                 case PayloadType::ATTESTOR_REVIVE: expired.type = (uint8_t)TxLogType::ATTESTOR_REVIVE; break;
+                case PayloadType::CANCEL_COSIGN: expired.type = (uint8_t)TxLogType::CLAIM_CANCEL; break;
                 }
                 const CTransaction& tx = wtx;
                 return TxLogToJSON(txid, expired, index, std::nullopt, &tx, true);

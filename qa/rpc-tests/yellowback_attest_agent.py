@@ -76,6 +76,10 @@ path = "%(bus)s"
 
 [subscribe]
 listattestors_seconds = 5
+
+[cancel]
+state_file = "%(state)s"
+direct_relays = ["none"]
 """
 
 SUBSCRIBE_CONF = """[node]
@@ -150,7 +154,8 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
         conf = os.path.join(self.workdir, 'attest-%d.toml' % seq)
         write_private(conf, ATTEST_CONF % {'port': rpc_port(node), 'user': user, 'password': password,
                                            'seq': seq, 'every': ATTEST_INTERVAL, 'ref_lag': REF_LAG,
-                                           'poll': POLL_SECONDS, 'bus': self.bus})
+                                           'poll': POLL_SECONDS, 'bus': self.bus,
+                                           'state': os.path.join(self.workdir, 'cancel-%d.json' % seq)})
         return self.spawn('attest-%d' % seq, [self.agent, '--conf', conf, '--log-level', 'debug',
                                               'attest', '--mock-price', self.mock[seq]])
 

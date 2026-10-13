@@ -114,6 +114,11 @@ extern const char* const INTENT_SPEND_MALFORMED; //!< a claim intent spent by a 
 extern const char* const INTENT_CANCEL_RESIDUAL; //!< an attestor cancel of the owner's residual intent
 extern const char* const INTENT_CANCEL_NO_VAULT; //!< a cancel that does not re-create exactly one byte-identical vault
 extern const char* const INTENT_CANCEL_NO_REFUND; //!< CAN-1 (03/H-1): a cancel without the refund output to the claim's YED holder
+extern const char* const INTENT_CANCEL_COSIGN;    //!< CAN-2 + C4b: a cancel whose CANCEL_COSIGN statements are missing, malformed, from a
+                                                  //!< non-member or a repeated key, say the vault was claimable, or number fewer than
+                                                  //!< CancelsRequired
+extern const char* const INTENT_RESIDUAL_HELD;    //!< CAN-3: the release of a residual intent whose claimant intent was cancelled, while
+                                                  //!< the re-created position is open and either CLAIMING or inside CANCEL_QUIET
 extern const char* const BAD_YED_HOLDER;         //!< TOK-PQ: from the Falcon height a token output that is not a Falcon TX_PQPKH
 extern const char* const YED_TEMPLATE_OUTPUT;    //!< a YED-tagged V or I output no mint, claim or cancel created
 extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUNDLE-1 held but the statistic is undefined
@@ -288,13 +293,35 @@ std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, 
  */
 
 /**
- * EQV-1's evidence (structure only): the two attestations of an EQUIVOCATION transaction's carrier bundle when
- * they share a seq and a citedHeight with different prices; nullopt otherwise. No key, hash or state is read.
+ * EQV-1's evidence: two signed prices at one citedHeight. `a` is a regular attestation; the other side is either a
+ * second attestation `b` (same seq, the "YA" bundle of two) or, since C4b (cancel-limit design, owner 2026-10-13), a
+ * cancel statement `s` (bundle.h "YX": the co-signature a member gave a YED cancel, which is its signed price at the
+ * claim's refHeight).
  */
-std::optional<std::pair<Attestation, Attestation>> EquivocationEvidence(const CTransaction& tx, const Params& params);
+struct Equivocation
+{
+    Attestation a;
+    std::optional<Attestation> b;
+    std::optional<CancelStatement> s;
+};
 
-/** Both attestations of the evidence verify under `key` over `blockHash` (EQV-1's signature check). */
-bool EquivocatedBy(const std::pair<Attestation, Attestation>& evidence, const CPubKey& key, const uint256& blockHash);
+/**
+ * EQV-1's evidence (structure only): an EQUIVOCATION transaction whose carrier holds two attestations sharing a seq
+ * and a citedHeight with different prices, or (C4b) one attestation and one cancel statement whose price differs;
+ * citedHeight >= START_HEIGHT; nullopt otherwise. No key, hash or state is read.
+ */
+std::optional<Equivocation> EquivocationEvidence(const CTransaction& tx, const Params& params);
+
+/** Both sides of the evidence verify under `key` over `blockHash` (EQV-1's signature check); a cancel statement's
+ *  message names `attestorSetId` (attest.h CancelCosignMessage) and its signature must recover to `key`. */
+bool EquivocatedBy(const Equivocation& evidence, const CPubKey& key, const uint256& blockHash, const uint256& attestorSetId);
+
+/**
+ * CAN-2 (cancel-limit design §2 C2): the number of distinct current members whose CANCEL_COSIGN statements a cancel
+ * of `vault`'s claimant intent at `height` needs: min(q + 1, CANCEL_SIGNERS_MAX), q = cancelCount when
+ * height - lastCancelHeight < CANCEL_QUIET, else 0.
+ */
+int CancelsRequired(const VaultRecord& vault, const Params& params, int64_t height);
 
 /** "ARMED" as every v3 rule reads it for refHeight R: Snapshots[R].attest.status == ARMED and the set's ATTEST_REQUIRED (W15). */
 bool ArmedAt(const StateView& view, const Params& params, int refHeight);

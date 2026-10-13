@@ -164,6 +164,13 @@ Payload Payload::Equivocation()
     return p;
 }
 
+Payload Payload::CancelCosign()
+{
+    Payload p;
+    p.type = PayloadType::CANCEL_COSIGN;
+    return p;
+}
+
 Payload Payload::AttestorRevive(uint16_t seq, uint32_t priceMicroUsd, uint32_t citedHeight, const std::array<unsigned char, COMPACT_SIG_SIZE>& sig)
 {
     Payload p;
@@ -209,6 +216,7 @@ bool operator==(const Payload& a, const Payload& b)
     case PayloadType::CLAIM_NOTICE:
         return a.vaultTxid == b.vaultTxid && a.vaultVout == b.vaultVout && a.refHeight == b.refHeight;
     case PayloadType::EQUIVOCATION:
+    case PayloadType::CANCEL_COSIGN:
         return true;
     case PayloadType::ATTESTOR_REVIVE:
         return a.seq == b.seq && a.priceMicroUsd == b.priceMicroUsd && a.citedHeight == b.citedHeight && a.sig == b.sig;
@@ -289,6 +297,10 @@ bool DecodeBodyV3(Reader& r, uint8_t type, size_t size, Payload& p)
         if (size != 4) return false;
         p.type = PayloadType::EQUIVOCATION;
         return true;
+    case (uint8_t)PayloadType::CANCEL_COSIGN:
+        if (size != 4) return false;
+        p.type = PayloadType::CANCEL_COSIGN;
+        return true;
     case (uint8_t)PayloadType::ATTESTOR_REVIVE: {
         if (size != 4 + REVIVE_BODY_SIZE) return false;
         p.type = PayloadType::ATTESTOR_REVIVE;
@@ -352,6 +364,7 @@ std::vector<unsigned char> EncodePayload(const Payload& payload)
             PutU32(out, payload.refHeight);
             break;
         case PayloadType::EQUIVOCATION:
+        case PayloadType::CANCEL_COSIGN:
             break;
         case PayloadType::ATTESTOR_REVIVE:
             PutU16(out, payload.seq);
@@ -447,6 +460,7 @@ const char* PayloadTypeName(PayloadType type)
     case PayloadType::CLAIM_NOTICE: return "notice";
     case PayloadType::EQUIVOCATION: return "equivocation";
     case PayloadType::ATTESTOR_REVIVE: return "revive";
+    case PayloadType::CANCEL_COSIGN: return "cancelcosign";
     }
     return "unknown";
 }
