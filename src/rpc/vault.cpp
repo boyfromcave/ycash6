@@ -884,17 +884,25 @@ std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut&
 {
     const uint256 before = SetSighash(mtx, idx, coin);
     std::vector<COutPoint> old;
-    std::set<COutPoint> exclude;
-    for (size_t i = 0; i < mtx.vin.size(); i++) {
-        exclude.insert(mtx.vin[i].prevout);
+    for (size_t i = 0; i < mtx.vin.size(); i++)
         if (i != idx) old.push_back(mtx.vin[i].prevout);
-    }
     const CTxIn templ = mtx.vin[idx];
+    // The old fee inputs this wallet locked are released first, so a still-unspent one can fund the new input (a split
+    // of it, typically): the old transaction is abandoned either way. Re-locked if re-funding fails.
+    std::vector<COutPoint> released;
+    for (COutPoint op : old) {
+        if (pwalletMain->IsLockedCoin(op.hash, op.n)) { pwalletMain->UnlockCoin(op); released.push_back(op); }
+    }
     mtx.vin.assign(1, templ);
     CAmount out = 0;
     for (const CTxOut& o : mtx.vout) out += o.nValue;
     const CAmount needed = out + VAULT_RPC_FEE - coin.nValue;
-    if (needed > 0) mtx.vin.push_back(CTxIn(ExactCoin(needed, exclude), CScript(), CTxIn::SEQUENCE_FINAL));
+    try {
+        if (needed > 0) mtx.vin.push_back(CTxIn(ExactCoin(needed, {templ.prevout}), CScript(), CTxIn::SEQUENCE_FINAL));
+    } catch (...) {
+        for (COutPoint op : released) pwalletMain->LockCoin(op);
+        throw;
+    }
     if (SetSighash(mtx, 0, coin) != before)
         throw JSONRPCError(RPC_INTERNAL_ERROR, "re-funding changed the set sighash");
     std::set<COutPoint> now;

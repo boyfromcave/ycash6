@@ -394,7 +394,8 @@ and the outputs only. The outputs, the builder's change included, are bound, so 
 new change output: the new input is one coin worth exactly what the outputs need beyond the
 template coin plus the fee (the 10,000-zatoshi vault fee) — an existing confirmed coin within
 1,000 zatoshi of it, else a self-send of exactly that amount that this call broadcasts and the
-re-funded spend chains on in the mempool. The fee never comes from the vault's value (S-2, I-1,
+re-funded spend chains on in the mempool (the old fee inputs this wallet locked are released
+first, so a still-unspent one can fund it). The fee never comes from the vault's value (S-2, I-1,
 I-2). The new input is unsigned and locked; `vault_send` on this node signs it. When this wallet built the spend, its remembered build
 follows the re-funded transaction. Re-funding changes the txid (third-party malleability by
 input replacement, as the selector case 01/V-4).
