@@ -540,4 +540,66 @@ BOOST_AUTO_TEST_CASE(bundle_stat)
     BOOST_CHECK_EQUAL(*r.second, 101000);
 }
 
+// CAN-2 + C4b (cancel-limit design, owner 2026-10-13): the cancel's co-signature list ("YC") and EQV-1's cancel
+// evidence ("YX"), and the co-sign message's preimage layout.
+BOOST_AUTO_TEST_CASE(cancel_cosign_codecs)
+{
+    const CKey k = CKey::TestOnlyRandomKey(true);
+    const uint256 setId = uint256S("0x5e7"), txid = uint256S("0xc1a1"), bh = uint256S("0xb10c");
+    const uint256 msg = CancelCosignMessage(setId, txid, 2, 950, 50000, bh);
+    // the preimage: "YedCancelCosign" | setId | txid | n | citedHeight | price | blockHash, hashed twice
+    std::vector<unsigned char> pre{ 'Y', 'e', 'd', 'C', 'a', 'n', 'c', 'e', 'l', 'C', 'o', 's', 'i', 'g', 'n' };
+    pre.insert(pre.end(), setId.begin(), setId.end());
+    pre.insert(pre.end(), txid.begin(), txid.end());
+    for (uint32_t v : { 2u, 950u, 50000u }) for (int i = 0; i < 4; i++) pre.push_back((v >> (8 * i)) & 0xff);
+    pre.insert(pre.end(), bh.begin(), bh.end());
+    BOOST_CHECK_EQUAL(pre.size(), 123u);
+    unsigned char once[32];
+    CSHA256().Write(pre.data(), pre.size()).Finalize(once);
+    uint256 twice;
+    CSHA256().Write(once, 32).Finalize(twice.begin());
+    BOOST_CHECK(msg == twice);
+    CancelCosignEntry e;
+    e.priceMicroUsd = 50000;
+    std::vector<unsigned char> sig;
+    BOOST_REQUIRE(k.SignCompact(msg, sig));
+    e.sig = sig;
+    std::vector<CancelCosignEntry> entries(7, e);
+    const std::vector<unsigned char> blob = EncodeCancelCosigns(entries);
+    BOOST_CHECK_EQUAL(blob.size(), 4u + 69u * 7u);
+    BOOST_CHECK(blob.size() <= 520u);                          // one carrier push
+    BOOST_CHECK(DecodeCancelCosigns(blob).value() == entries);
+    BOOST_CHECK(EncodeCancelCosigns({}).empty());
+    BOOST_CHECK(EncodeCancelCosigns(std::vector<CancelCosignEntry>(8, e)).empty());
+    std::vector<unsigned char> bad = blob;
+    bad.pop_back();
+    BOOST_CHECK(!DecodeCancelCosigns(bad).has_value());       // length
+    bad = blob; bad[3] = 0;
+    BOOST_CHECK(!DecodeCancelCosigns(bad).has_value());       // count 0
+    bad = blob; bad[2] = 2;
+    BOOST_CHECK(!DecodeCancelCosigns(bad).has_value());       // version
+    bad = blob; bad[1] = 'A';
+    BOOST_CHECK(!DecodeCancelCosigns(bad).has_value());       // a price bundle's magic
+    // "YX": an attestation and a statement
+    Attestation a;
+    a.seq = 4; a.priceMicroUsd = 9000; a.citedHeight = 950; a.sig.fill(7);
+    CancelStatement st;
+    st.intent = COutPoint(txid, 2);
+    st.priceMicroUsd = 50000;
+    st.sig = sig;
+    const std::vector<unsigned char> ev = EncodeCancelEvidence(a, st);
+    BOOST_CHECK_EQUAL(ev.size(), CANCEL_EVIDENCE_SIZE);
+    BOOST_CHECK_EQUAL(ev.size(), 182u);
+    auto back = DecodeCancelEvidence(ev);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK(back->first == a);
+    BOOST_CHECK(back->second.intent == st.intent);
+    BOOST_CHECK_EQUAL(back->second.priceMicroUsd, 50000u);
+    BOOST_CHECK(back->second.sig == sig);
+    bad = ev; bad.push_back(0);
+    BOOST_CHECK(!DecodeCancelEvidence(bad).has_value());
+    BOOST_CHECK(!DecodeCancelCosigns(ev).has_value());
+    BOOST_CHECK(!DecodeBundle(ev).has_value());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
