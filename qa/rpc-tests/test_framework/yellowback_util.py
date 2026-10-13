@@ -161,7 +161,7 @@ VAULT_ACTIVATION = 103
 START_HEIGHT = VAULT_ACTIVATION  # = yellowbackStartHeight (U-22); -yellowbackstartheight is retired
 ATTESTOR_SET = [None]           # the current run's attestor set id (display hex), set by ``activate``
 CLAIM_DELAY = 10               # CLAIM_DELAY on regtest (U-23)
-CANCEL_SIGNERS_MAX = 3         # CAN-2 on regtest (the cancel-limit design; mainnet 5): the escalation schedule caps here
+CANCEL_SIGNERS_MAX = 3         # CAN-2 on regtest (the cancel-limit design; mainnet 4, owner round 2): the escalation schedule caps here
 CANCEL_QUIET = 40              # CAN-2/CAN-3 on regtest (mainnet 8,064): the schedule restarts, a held residual is released
 TAG_MAGIC = ym.TAG_MAGIC
 TAG_VERSION = ym.TAG_VERSION
