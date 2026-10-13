@@ -80,9 +80,9 @@ ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
 BONDS = ATTESTORS
 
 
-def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15):
-    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds), from a fixed input; its txid is the set id."""
-    act = va.act_set_create(seats, 1, 1, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
+def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15, unlock_threshold=1, cancel_threshold=1):
+    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds by default), from a fixed input; its txid is the set id."""
+    act = va.act_set_create(seats, unlock_threshold, cancel_threshold, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
                             liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity)
     vin = [(ym.sha256(b'yellowback-attestor-set')[::-1].hex(), 0, b'', 0xFFFFFFFF)]
     return ym.serialize_tx_v4(vin, [(0, va.act_script(va.encode_act(act)))]).hex()
@@ -299,14 +299,20 @@ class Chain(object):
         vin = [(intent_op[0], intent_op[1], bytes([ym.OP_1]), self.params.claim_delay), self.fund_input()]
         return ym.serialize_tx_v4(vin, [(value, recipient_spk or ym.p2pkh_script(OWNER_KEYHASH))]).hex()
 
-    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2):
+    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2, refund=False):
         """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
-        does not verify) re-creating the byte-identical vault at vout[0]; a fee input.  ``vouts`` = [(value, script)]
-        replaces the outputs (the re-lock is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode."""
+        does not verify) re-creating the byte-identical vault at vout[0]; a fee input.  ``refund``: CAN-1's refund output
+        at vout[1] (``self.refund_out(intent_op)``).  ``vouts`` = [(value, script)] replaces the outputs (the re-lock
+        is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode."""
         if vouts is None:
-            vouts = [self.relock(vault_op_of_record, value)]
+            vouts = [self.relock(vault_op_of_record, value)] + ([self.refund_out(intent_op)] if refund else [])
         vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([selector]), 0xFFFFFFFF), self.fund_input()]
         return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def refund_out(self, intent_op):
+        """CAN-1 (03/H-1): the refund output a cancel of the claimant intent carries -- a token carrier paying the
+        holder the claim's burn came from (the intent's refund_script)."""
+        return (self.params.token_value, self.model.intents[intent_op].refund_script)
 
     def relock(self, vault_op_of_record, value):
         """The output a cancel re-creates: the claimed vault's byte-identical V of ``value``."""
@@ -1431,17 +1437,20 @@ class RedeemTests(unittest.TestCase):
         self.assertFails(self.spend(path='claim', fee_vout=0xFF, fee_key=None), 'vault-claim-not-underwater')
 
 class CancelTests(unittest.TestCase):
-    """U-23/U-24/I-2: the attestor cancel of a claim intent -- the model twins of yellowback_state_tests'
-    intent_cancel_* cases (audit 03/T-2)."""
+    """U-23/U-24/I-2 and CAN-1: the attestor cancel of a claim intent -- the model twins of yellowback_state_tests'
+    intent_cancel_* cases (audit 03/T-2, 03/H-1)."""
 
     def setUp(self):
         self.c = c = activated_chain()
         ref = c.height - 1
         self.coll = collateral_for(c, 10_000, ref)
         raw = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1)
-        c.mine((1, 50_000, 0, KEY2), [raw])
+        raw2 = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1, token_script=ym.p2pkh_script(KEY3))
+        c.mine((1, 50_000, 0, KEY2), [raw, raw2])
         self.vault = (txid_of(raw), 0)
         self.token = (txid_of(raw), 1)
+        self.spare = (txid_of(raw2), 1)          # another holder's 10,000 cents
+        self.holder = ym.p2pkh_script(OWNER_KEYHASH)
         c.mine_n(64, price_fn=lambda h: 9_000)
         self.before = ym.Totals()
         for k in self.before.__slots__:
@@ -1458,14 +1467,18 @@ class CancelTests(unittest.TestCase):
         self.c.mine((1, 9_000, 0, KEY2), [raw])
         return self.c.refused.get(txid_of(raw), '')
 
+    def cancel(self, vouts=None, **kw):
+        return self.c.cancel_tx(self.intent, self.vault, self.coll, vouts=vouts, refund=True, **kw)
+
     # Rule: U-23
     # Rule: U-24
+    # Rule: CAN-1
     # Rule: I-2
     # Rule: IT-6
     def test_cancel_recreates_the_vault_at_vout0(self):
         c, m = self.c, self.c.model
         self.assertEqual(self.after_claim, self.before.supply_cents - 10_000)
-        raw = c.cancel_tx(self.intent, self.vault, self.coll)
+        raw = self.cancel()
         self.assertEqual(self.mine(raw), '')
         txid = txid_of(raw)
         self.assertNotIn(self.vault, m.vaults)
@@ -1473,21 +1486,77 @@ class CancelTests(unittest.TestCase):
         self.assertEqual((v.status, v.minted_cents, v.burned_cents, v.collateral_zat, v.close_height, v.closing_txid),
                          (ym.V_ACTIVE, 10_000, 0, self.coll, 0, None))
         rec = m.txlog[txid]
-        self.assertEqual((rec.type, rec.verdict, rec.closed_vaults, rec.reopened_vaults, rec.burned),
-                         ('CLAIM_CANCEL', 'ok', [self.vault], [(txid, 0)], 0))
+        self.assertEqual((rec.type, rec.verdict, rec.closed_vaults, rec.reopened_vaults, rec.burned, rec.assigned, rec.yed_out),
+                         ('CLAIM_CANCEL', 'ok', [self.vault], [(txid, 0)], 0, [(1, 10_000)], 10_000))
         self.assertEqual(m.intents, {})
         t = m.totals
         self.assertEqual((t.active_vaults, t.claimed_vaults, t.collateral_zat),
                          (self.before.active_vaults, self.before.claimed_vaults, self.before.collateral_zat))
-        # U-24 / 03/M-1: the claim's burn is not refunded; supply stays where the claim left it
-        self.assertEqual(t.supply_cents, self.after_claim)
+        # CAN-1 (03/H-1, 03/M-1): the claim's burn is re-issued to the holder it came from and supply is back
+        tok = m.tokens[(txid, 1)]
+        self.assertEqual((tok.cents, tok.script_pub_key, tok.n_value), (10_000, self.holder, c.params.token_value))
+        self.assertEqual(t.supply_cents, self.before.supply_cents)
+        self.assertEqual(t.supply_cents, self.after_claim + 10_000)
+
+    # Rule: CAN-1
+    def test_claim_records_the_refund_holder(self):
+        ir = self.c.model.intents[self.intent]
+        self.assertEqual((ir.role, ir.refund_script), (ym.I_CLAIMANT, self.holder))
+
+    # Rule: CAN-1
+    def test_cancel_without_the_refund_invalid(self):
+        c = self.c
+        relock = c.relock(self.vault, self.coll)
+        for vouts in ([relock],                                                    # no refund output
+                      [relock, (c.params.token_value, ym.p2pkh_script(KEY3))],      # to another script
+                      [relock, (0, self.holder)]):                                 # a zero carrier
+            self.assertEqual(self.mine(self.cancel(vouts=vouts)), 'intent-cancel-no-refund')
+        # the refund at vout 0 displaces the re-lock: the re-lock rule speaks first
+        self.assertEqual(self.mine(self.cancel(vouts=[c.refund_out(self.intent), relock])), 'intent-cancel-no-vault')
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.assertEqual(c.model.totals.supply_cents, self.after_claim)
+
+    # Rule: CAN-1
+    def test_refund_at_the_lowest_holder_output(self):
+        c, m = self.c, self.c.model
+        relock = c.relock(self.vault, self.coll)
+        raw = self.cancel(vouts=[relock, (777, ym.p2pkh_script(KEY3)), (5_000, self.holder), (6_000, self.holder)])
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.tokens[(txid_of(raw), 2)].cents, 10_000)
+        self.assertNotIn((txid_of(raw), 3), m.tokens)
+
+    # Rule: CAN-1
+    # Rule: IN-3
+    def test_cancel_yed_inputs_still_burn(self):
+        """A cancel's YED inputs burn as any non-Yellowback spend's do; the refund is re-issued, not carried."""
+        c, m = self.c, self.c.model
+        vouts = [c.relock(self.vault, self.coll), c.refund_out(self.intent)]
+        vin = [(self.intent[0], self.intent[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), c.fund_input(),
+               (self.spare[0], self.spare[1], b'', 0xFFFFFFFF)]
+        raw = ym.serialize_tx_v4(vin, vouts).hex()
+        self.assertEqual(self.mine(raw), '')
+        rec = m.txlog[txid_of(raw)]
+        self.assertEqual((rec.yed_in, rec.yed_out, rec.burned), (10_000, 10_000, 10_000))
+        self.assertEqual(m.totals.supply_cents, self.after_claim + 10_000 - 10_000)
+
+    # Rule: CAN-1
+    # Rule: XFER-1
+    def test_refund_spendable(self):
+        c, m = self.c, self.c.model
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        xfer = c.transfer_tx([(txid_of(raw), 1)], [(0, 10_000)])
+        self.assertEqual(self.mine(xfer), '')
+        self.assertNotIn((txid_of(raw), 1), m.tokens)
+        self.assertEqual(m.tokens[(txid_of(xfer), 0)].cents, 10_000)
+        self.assertEqual(m.txlog[txid_of(xfer)].verdict, 'ok')
 
     # Rule: U-23
     # Rule: U-24
     def test_cancel_of_residual_invalid(self):
         c = self.c
         c.model.intents[self.intent].role = ym.I_RESIDUAL      # the owner's residual intent (role flipped for the unit)
-        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll)), 'intent-cancel-residual')
+        self.assertEqual(self.mine(self.cancel()), 'intent-cancel-residual')
         self.assertIn(self.intent, c.model.intents)
 
     # Rule: U-23
@@ -1495,26 +1564,28 @@ class CancelTests(unittest.TestCase):
     def test_cancel_relock_shapes_invalid(self):
         c = self.c
         relock = c.relock(self.vault, self.coll)
+        refund = c.refund_out(self.intent)
         change = (1000, ym.p2pkh_script(OWNER_KEYHASH))
         other = ym.yed_vault_script_at(c.params, G2_OWNER, c.model.vaults[self.vault].owner_height, c.model.vaults[self.vault].app_height)
-        for vouts in ([change, relock], [relock, (1000, relock[1])], [(self.coll, ym.p2pkh_script(OWNER_KEYHASH))], [(self.coll, other)]):
-            self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, vouts=vouts)), 'intent-cancel-no-vault')
+        for vouts in ([change, relock, refund], [relock, (1000, relock[1]), refund], [(self.coll, ym.p2pkh_script(OWNER_KEYHASH)), refund],
+                      [(self.coll, other), refund]):
+            self.assertEqual(self.mine(self.cancel(vouts=vouts)), 'intent-cancel-no-vault')
         self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
 
     # Rule: U-23
     def test_cancel_payload_or_selector3_malformed(self):
         c = self.c
         payload = (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([])))
-        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, vouts=[c.relock(self.vault, self.coll), payload])),
+        self.assertEqual(self.mine(self.cancel(vouts=[c.relock(self.vault, self.coll), c.refund_out(self.intent), payload])),
                          'intent-spend-malformed')
-        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, selector=ym.OP_3)), 'intent-spend-malformed')
+        self.assertEqual(self.mine(self.cancel(selector=ym.OP_3)), 'intent-spend-malformed')
 
     # Rule: U-23
     # Rule: NOT-1
     def test_cancel_erases_the_notice(self):
         c = self.c
         c.model.notices[self.vault] = ym.NoticeRecord(c.height, c.height - 2, 9_000)    # forced in at the CLAIMING outpoint
-        raw = c.cancel_tx(self.intent, self.vault, self.coll)
+        raw = self.cancel()
         self.assertEqual(self.mine(raw), '')
         self.assertEqual(c.model.notices, {})
 
@@ -1522,12 +1593,24 @@ class CancelTests(unittest.TestCase):
     # Rule: UNDO
     def test_cancel_refused_leaves_the_state(self):
         c = self.c
-        raw = c.cancel_tx(self.intent, self.vault, self.coll, vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(self.vault, self.coll)])
+        raw = self.cancel(vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(self.vault, self.coll)])
         self.assertEqual(self.mine(raw), 'intent-cancel-no-vault')
         # U-21: only the re-mined (empty) block moved the state: the CLAIMING record and the intent are untouched
         self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
         self.assertIn(self.intent, c.model.intents)
         self.assertEqual(c.model.txlog.get(txid_of(raw)), None)
+
+
+class AttestorSetThresholdTests(unittest.TestCase):
+
+    # Rule: P4-b
+    # Rule: I-3
+    def test_adopted_only_with_threshold_one(self):
+        """03/I-3: the mirror adopts the attestor set only with cancelThreshold = unlockThreshold = 1."""
+        for kw, adopted in (({}, True), ({'cancel_threshold': 2}, False), ({'unlock_threshold': 2}, False)):
+            c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id(**kw)))
+            c.mine((1, 50_000, 0, KEY1), [attestor_set_create(**kw)])
+            self.assertEqual(c.model.attestor_set_rec is not None, adopted, kw)
 
 
 # ===========================================================================
@@ -1885,7 +1968,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0c\x00\x00\x00')        # SCHEMA_VERSION 12 (liveness by attestation, join refusals)
+        self.assertEqual(pre[37:41], b'\x0d\x00\x00\x00')        # SCHEMA_VERSION 13 (CAN-1: IntentRecord.refundScript)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:90], bytes(40))

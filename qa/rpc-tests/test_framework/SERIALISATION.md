@@ -35,7 +35,7 @@ of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of re
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 12`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 13`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
@@ -45,7 +45,7 @@ of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of re
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |
 | 9 | `Params` | `P` | `i32 startHeight` (the `UPGRADE_VAULT` activation height, U-22), `i32 sigmaRefBps`, `i32 supplyCapBps`, `uint256 attestorSetId` (32 internal bytes; it replaced v3's `i32 enforceUntil`, **U-22**); v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1: `u8 mintRequiresArmed` |
 | 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice`. `Attestors`: `bytes attestorPubKey`, `bytes bondPubKey`, `COutPoint bondOutpoint`, `i64 bondZat`, `u32 bondLocktime`, `u8 flags`, `i32 registerHeight`, `u8 status` (`PENDING, ELIGIBLE, DORMANT, EJECTED, WITHDRAWN`), `i32 statusHeight`, `i32 bondSpentHeight`, `i32 seatedSince`, then **(P4-b)** `i32 lastAct`, `bool bondFrozen` |
-| 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height` |
+| 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height`, `bytes refundScript` (**CAN-1**, audit 03/H-1, schema 13, appended last: on the claimant intent the scriptPubKey of the token the claim spent at its lowest-index YED input; empty on the residual) |
 | 16 | `AttestorSet` **(P4-b)**, once the set's `SET_CREATE` is seen | `Z` | `i32 createHeight`, `u8 seats`, `u32 maturity`, `u32 livenessWindow` |
 
 Each record is its key immediately followed by its value. `TxLog`, `Rejected`, `Undo` are
@@ -123,7 +123,7 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
 - **C2. Invalid transactions and blocks (U-21).** The verdicts that make a transaction invalid:
   every MINT verdict but `ok`; every RED-1..5 verdict of a spend of an ACTIVE vault;
   `vault-claim-intents`, `intent-spend-malformed`, `intent-cancel-residual`,
-  `intent-cancel-no-vault` and `yed-template-output` (L–N below); **(P4-b)** any `ATTESTOR_REGISTER`
+  `intent-cancel-no-vault`, `intent-cancel-no-refund` and `yed-template-output` (L–N below); **(P4-b)** any `ATTESTOR_REGISTER`
   payload (`attestor-register-retired`) and any `ATTESTOR_REVIVE` payload (`attestor-revive-retired`),
   whatever its body. A failing TRANSFER still burns (E) and a failing NOT-1 or EQV-1 is still
   non-Yellowback: neither is invalid. The block's evaluation
@@ -174,7 +174,9 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   paying `P2PKH(hash160(ownerPubKey))` (its `recipientHash`) at least the residual — the first such
   in output order is the owner's residual intent, the other the claimant's — else `red5-residual`;
   with no residual due there must be exactly one (the claimant's), else `vault-claim-intents`.
-  Each gets an `Intents` record `{vault, role, height}`. The claim's REDEEM burn happens there (IN-3).
+  Each gets an `Intents` record `{vault, role, height, refundScript}` -- **(CAN-1)** the claimant's `refundScript` is
+  the script of the token spent at the claim's lowest-index YED input (a held claim always spent one, RED-2; none is
+  `vault-spend-malformed`), the residual's is empty. The claim's REDEEM burn happens there (IN-3).
 - **M. Intent spends (U-23, U-24).** A transaction spending an `Intents` outpoint (exactly one, and
   no ACTIVE vault, else `intent-spend-malformed`) must use selector 1 (release) or 2 (cancel) and
   carry no Yellowback payload (`intent-spend-malformed`). The record is erased. The residual's
@@ -183,9 +185,14 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   vault's V, at `vout[0]` (`intent-cancel-no-vault`): the vault record moves to `(cancelTxid, 0)`
   as `ACTIVE` with `collateralZat` = that output's value, `closeHeight = 0`, `closingTxid` zero,
   `burnedCents = 0` (the rest kept: the same position), its notice (if any) erased, and back in
-  `collateralZat`/`activeVaults`; the claim's burn is **not** refunded (U-24). `TxLog.closedVaults`
-  names the old outpoint, `reopenedVaults` the new one. The model checks neither the delay nor
-  the payment (the primitive does).
+  `collateralZat`/`activeVaults`. **(CAN-1, audit 03/H-1; U-24 revised)** The cancel must also pay the
+  claimant intent's `refundScript` a non-zero carrier at an index `≥ 1` (else `intent-cancel-no-refund`,
+  checked after the re-lock): the lowest such output becomes `Tokens[(cancelTxid, j)]` of the CLAIMING
+  record's `burnedCents` (the whole burn), `TxLog.assigned = [(j, burnedCents)]`, `yedOut = burnedCents`,
+  and `Totals.supplyCents += burnedCents`; IN-3 treats a `CLAIM_CANCEL` like a MINT (its `yedOut` is not
+  carried from its inputs, so YED inputs of a cancel burn). TOK-PQ is not applied to the refund.
+  `TxLog.closedVaults` names the old outpoint, `reopenedVaults` the new one. The model checks neither
+  the delay nor the payment (the primitive does).
 - **N. YED template outputs (U-23).** After the payload rules, any output that is a YED V or I
   and was not created by the rule that ran (the mint's `vout[0]`, the claim's intents, the
   cancel's `vout[0]`) makes the transaction invalid (`yed-template-output`).
@@ -216,6 +223,9 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   **Focused review:** credit only from a bundle passing BUNDLE-1 but for the selection, every seq a live record, R within
   `REF_WINDOW` of H; and a transaction with any credit must be a held MINT, CLAIM_NOTICE or REDEEM claim whose bundle
   passes the whole BUNDLE-1, else it is invalid (`liveness-unheld`). `SCHEMA_VERSION` 12.
+  **R12 hardened (audit 03/M-2):** a verified bundle enters the `BundleLog[H]` accumulator only when the MINT,
+  REDEEM or CLAIM_NOTICE carrying it holds (C++ `EvalContext::CommitBundle`, model `_commit_bundle`); a notice that
+  does not hold adds no row.
   A notice (or other act) that fails its own rule and whose bundle credits nobody -- no live member's fresh,
   verifying attestation, or R older than `REF_WINDOW` -- stays a valid no-op, as before (final review A-1).
 - **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
