@@ -112,7 +112,7 @@
       "raisedBy": [
         "yed_buildcancel"
       ],
-      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set"
+      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set: the entry is dropped"
     },
     "cancel-cosign-needed": {
       "raisedBy": [
@@ -124,7 +124,7 @@
       "raisedBy": [
         "yed_buildcancel"
       ],
-      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set"
+      "when": "a cosigs entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set: the entry is dropped"
     },
     "cancel-statement-claimable": {
       "raisedBy": [
@@ -199,9 +199,10 @@
     "equivocation-guard": {
       "raisedBy": [
         "yed_signattestation",
-        "yed_revive"
+        "yed_revive",
+        "yed_signcancelcosign"
       ],
-      "when": "attest-signed.dat holds a signature for (seq, citedHeight) at a different price (S16): sign twice for one height at two prices, also across a restart. Message grammar: equivocation-guard: seq <n> already signed <p₀> for height <h>"
+      "when": "attest-signed.dat holds a signature for (seq, citedHeight) at a different price (S16): sign twice for one height at two prices, also across a restart. Since the cancel-limit review it is looked up **by key**: a signature at that height under any seq the key ever held counts (a member that left and rejoined with the same hot key; EQV-1 binds the key). Message grammar: equivocation-guard: seq <n> already signed <p₀> for height <h>, or equivocation-guard: this key already signed <p₀> for height <h> under seq <n>"
     },
     "expiring-too-soon": {
       "raisedBy": [

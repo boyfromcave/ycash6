@@ -1985,6 +1985,16 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
     // (audit C-5): after a reorg across citedHeight the earlier line is for another block, so a fresh
     // signature for this one is not equivocation (EQV-1 binds the hash too).
     const uint256 citedHash = ctx.BlockHashAt(citedHeight);
+    // Review of the cancel limit (A L-3 / B6): the guard is also looked up by KEY across every seq the key ever held. EQV-1
+    // binds two prices to a key, not a seq, so a member that left and rejoined with the same hot key must not attest a
+    // price at a height where its old seq attested another (nor contradict a cancel statement, yed_signcancelcosign).
+    for (const auto& r : ctx.st.Attestors()) {
+        if (r.first == seq || r.second.AttestorKey() != hot) continue;
+        std::optional<SignedAttestation> other = yw.LookupSigned(r.first, (uint32_t)citedHeight, citedHash);
+        if (other.has_value() && other->priceMicroUsd != (uint32_t)priceMicroUsd) {
+            throw std::runtime_error(strprintf("equivocation-guard: this key already signed %u for height %d under seq %u", other->priceMicroUsd, citedHeight, (unsigned)r.first));
+        }
+    }
     std::optional<SignedAttestation> prior = yw.LookupSigned(seq, (uint32_t)citedHeight, citedHash);
     if (prior.has_value()) {
         if (prior->priceMicroUsd != (uint32_t)priceMicroUsd) {

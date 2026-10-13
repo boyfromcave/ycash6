@@ -794,7 +794,7 @@ scriptPubKey the claim's burned YED came from, which a cancel must pay a token c
 the position's cancels counted by CAN-2's escalation schedule (it survives every re-creation; `0` at the mint),
 `cancelsRequired` the number of distinct current attestor-set members whose co-signatures a cancel of its claim would
 need if it confirmed in the next block (`min(q + 1, CANCEL_SIGNERS_MAX)`, `q` = `cancelCount` while inside the quiet
-period, else 0; `CANCEL_SIGNERS_MAX` 5, regtest 3), and `cancelQuietUntil` the first height at which the schedule
+period, else 0; `CANCEL_SIGNERS_MAX` 4 (owner round 2, 2026-10-13), regtest 3), and `cancelQuietUntil` the first height at which the schedule
 starts from one again (`lastCancelHeight + CANCEL_QUIET`, 8,064 blocks, regtest 40; *null when the vault was never
 cancelled*). **`heldResiduals`** (**optional**, absent when none): `[{txid, vout}]`, the residual intents of cancelled
 claims this position holds (CAN-3): `vault_release` of one is refused (`intent-residual-held`) until the position is
@@ -2017,9 +2017,7 @@ co-signature of this cancel and its price statement at the claim's `refHeight`).
 `cancelsRequired` (`yed_getvault`) of them from **distinct current members** of the attestor set: 1 for a position's
 first cancel (so the first response stays one watcher), one more for each cancel within `CANCEL_QUIET`, at most
 `CANCEL_SIGNERS_MAX`. Each statement's price must say the vault was **not** claimable at that height. With fewer the
-call is refused before anything is built (`cancel-cosign-needed`, naming the number); a co-signature that does not
-recover over this intent (`cancel-cosign-malformed`), is not from a current member (`cancel-cosign-not-member`) or
-states a claimable price (`cancel-statement-claimable`) is refused; a repeat of one key is dropped. With enough, a
+call is refused before anything is built (`cancel-cosign-needed`, naming the number); entries that would not count are dropped with a warning (below). With enough, a
 carrier holding them (`"YC" ‖ 1 ‖ count ‖ count × (price ‖ sig65)`) is broadcast (`CARRIER_VALUE`, `carrierTxid`; an
 outstanding carrier of this wallet with the same bytes is reused, so the same co-signatures give the same
 transaction) and the cancel spends it as its **last input, already signed**; the CANCEL_COSIGN marker (`0x09`, an
@@ -2027,8 +2025,11 @@ empty-bodied payload) is its last output before the change. The set signature (`
 the outputs only, so it is the same whatever co-signatures arrive — members still sign once. **Add spare
 co-signatures** (round 2, review M-2): consensus counts the distinct valid entries and ignores the rest, so spares keep
 the cancel valid when a co-signer leaves, is evicted or ejected before it confirms, or a reorg adds an earlier cancel
-that raises the count; this RPC still refuses an entry it can already see is bad, naming its index, seq or key and the
-reason (`attest-range` for a price outside `[PRICE_MIN, PRICE_MAX]`). `vault_refee` replaces every
+that raises the count. An entry this RPC can already see would not count (malformed, over another intent, a repeat, not
+a current member, a price outside `[PRICE_MIN, PRICE_MAX]` or a claimable one) is **dropped and named** in
+**`warnings`** (**optional**, absent when nothing was dropped; `cosigs[i] dropped: <identifier>: <why>`), and the cancel is
+built from the rest; the call is refused (`cancel-cosign-needed`, the dropped entries' reasons appended) only when fewer
+than `cancelsRequired` remain. `vault_refee` replaces every
 non-template input, the carrier included: after it, call `yed_buildcancel` again with the same `cosigs` to re-attach
 the carrier. `cancelsRequired` and `cosigners` (the co-signers' `seq`s, carrier order) report what was built.
 
@@ -2460,7 +2461,7 @@ provokes each.
 | `not-dormant` | `yed_revive` | the record's status is not DORMANT: revive an ELIGIBLE attestor |
 | `not-equivocation` | `yed_reportequivocation` | any EQV-1 condition fails — different `seq`s, different `citedHeight`s, equal prices, a bad signature, a `seq` whose bond is spent or already frozen (P4-b), or a `citedHeight` whose hash is not in the index (two sides of a fork): report the same attestation twice |
 | `attest-key-not-held` | `yed_signattestation`, `yed_revive` (the hot key), `yed_withdrawbond` (the bond key) | the wallet does not hold the key the command needs: sign for a `seq` registered by another node |
-| `equivocation-guard` | `yed_signattestation`, `yed_revive` | `attest-signed.dat` holds a signature for `(seq, citedHeight)` at a different price (S16): sign twice for one height at two prices, also across a restart. Message grammar: `equivocation-guard: seq <n> already signed <p₀> for height <h>` |
+| `equivocation-guard` | `yed_signattestation`, `yed_revive`, `yed_signcancelcosign` | `attest-signed.dat` holds a signature for `(seq, citedHeight)` at a different price (S16): sign twice for one height at two prices, also across a restart. Since the cancel-limit review it is looked up **by key**: a signature at that height under any seq the key ever held counts (a member that left and rejoined with the same hot key; EQV-1 binds the key). Message grammar: `equivocation-guard: seq <n> already signed <p₀> for height <h>`, or `equivocation-guard: this key already signed <p₀> for height <h> under seq <n>` |
 
 The wallet builder's own refusals (`src/yellowback/txbuilder.cpp`; Phase 6) carry identifiers
 the same way, so the GUI can match them too. They are not rule refusals: `RPC_INVALID_PARAMETER`
@@ -2483,8 +2484,8 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
 | `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
 | `cancel-cosign-needed` | `yed_buildcancel` | fewer co-signatures of distinct current members than `cancelsRequired` (the cancel-limit design, CAN-2; `RPC_INVALID_PARAMETER`, before any transaction). Message grammar: `cancel-cosign-needed: this cancel needs <n> co-signature(s) of distinct current members (cancelsRequired), <m> given`: call it with no `cosigs` |
-| `cancel-cosign-malformed`, `cancel-cosign-not-member` | `yed_buildcancel` | a `cosigs` entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set |
-| `cancel-statement-claimable` | `yed_buildcancel`, `yed_signcancelcosign` | the statement's price says the vault was claimable at the claim's `refHeight` (C4b): co-sign at the vault's `underwaterAt − 1` |
+| `cancel-cosign-malformed`, `cancel-cosign-not-member` | `yed_buildcancel` (in `warnings`, or appended to `cancel-cosign-needed`) | a `cosigs` entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set: the entry is dropped |
+| `cancel-statement-claimable` | `yed_buildcancel` (dropped, in `warnings`), `yed_signcancelcosign` | the statement's price says the vault was claimable at the claim's `refHeight` (C4b): co-sign at the vault's `underwaterAt − 1` |
 | `price-required` | `yed_signcancelcosign` | no `priceMicroUsd` given and the guard holds no price of this key for the claim's `refHeight` |
 | `claim-unconfirmed` | `yed_signcancelcosign` | the claim is still in the mempool (co-sign only a confirmed claim, design A-6) |
 
