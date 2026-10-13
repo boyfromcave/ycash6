@@ -245,7 +245,8 @@ class YellowbackIndexTest(YellowbackTestFramework):
         stop_node(nodes[OBSERVER], OBSERVER)
         nodes[OBSERVER] = None
         assert_start_raises_init_error(OBSERVER, tmpdir, self.node_args(OBSERVER, ['-prune=550']),
-                                       'Yellowback is live on this network and incompatible with -prune')
+                                       # the vault upgrade's -prune refusal (01/N-1) fires before the Yellowback one
+                                       'The vault upgrade is configured on this network and incompatible with -prune')
         self.restart(OBSERVER)
         self.sync_all(blocks_only=True)
 

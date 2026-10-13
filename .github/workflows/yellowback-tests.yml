@@ -713,8 +713,12 @@ jobs:
           url="https://github.com/$OTHER_LINE_REPO.git"
           other=upgrade/vault
           if git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then other=$REF; fi
-          if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
-          if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
+          # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
+          # with the other line's upgrade/vault; the markers only route the record branches.
+          if [ "$REF" != upgrade/vault ]; then
+            if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
+            if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
+          fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
           rc=0

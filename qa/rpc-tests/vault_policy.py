@@ -23,7 +23,7 @@ Both nodes here run with ``-acceptnonstdtxn=0`` (relay policy enforced) and ``-p
 from test_framework import pq
 from test_framework import vault as v
 from test_framework.authproxy import JSONRPCException
-from test_framework.vault_harness import COIN, OWNER_KEY, VaultTestBase, secrets
+from test_framework.vault_harness import COIN, VaultTestBase, secrets
 
 NONSTANDARD = ('bad-txns-nonstandard-inputs', 'nonstandard transaction input', 'TX rejected')
 
