@@ -179,9 +179,13 @@ guard locks it to the price that key attested at that height. `attest` automates
      `<state_file>.direct.key`) serves one ALPN, `yellowback/cancel-cosig/1`. An `EndpointHooks::after_handshake` gate
      refuses any connection on it whose authenticated endpoint id is not bound to a current member, and the agent
      never dials one (`before_connect`) -- except a **self-introduction** (review N-A): an unbound connection is let
-     through the handshake only while fewer than 16 wait, from a source address (remote IP, or the relay it came by)
-     with a token (a burst of 4, then one per 10 s), and its first uni stream must carry, within 3 s,
-     `0x03 ‖ announce` binding a current member's seat to that very endpoint id with a valid proof of possession --
+     through the handshake only with a token from its source's bucket (a burst of 4, then one per 10 s; the source is
+     an IPv4 address, an IPv6 /64, or -- arriving by a relay, whose URL everyone behind it shares -- its endpoint
+     id), from the relay ceiling for a relay arrival (200, then 50 a second) and from the global ceiling (400, then
+     100 a second). It then counts as pending until it verifies or closes; at most 64 are held, and a new one past
+     that closes the oldest, so holding connections open shuts nobody out. Its first uni stream must carry, within 3 s,
+     `0x03 ‖ announce` binding a current member's seat to that very endpoint id with a valid proof of possession, no older than
+     the binding held for that seat (a key retired by rotation cannot come back) --
      checked once per connection (one secp256k1 recovery) -- or the connection is closed with the refusal. Every new
      connection the agent opens starts with its own announce, so a member reaches another that has not seen its
      binding yet on the first connection, whatever the topic carries; the receiver takes the binding into its table
