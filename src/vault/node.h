@@ -65,8 +65,9 @@ private:
 /** The spent coins of `block` (connected at `height`) from its undo data, for replay. A coin's
  *  height comes from the undo record when it carries one, else from the block itself (a coin
  *  created earlier in the block), else from the template-output index in `base` (the state
- *  before the block); only an intent's height is consensus input (I-2). False if an intent's
- *  height cannot be found. */
+ *  before the block), else 0: a coin created before activation (never indexed) or not a
+ *  template, whose height is no rule's input — S-0 rejects a template spend of it, live and on
+ *  replay alike (audit 01/V-1). False only for an undo record that does not match the block. */
 bool CoinsFromUndo(const CBlock& block, const CBlockUndo& undo, int64_t height, const KVReader& base, MapCoinAccessor& out);
 
 /** Does `tx` spend a V- or I-shaped coin (inputs read from `view`)? */

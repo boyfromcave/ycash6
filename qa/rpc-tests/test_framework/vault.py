@@ -1758,9 +1758,11 @@ class VaultModel(object):
                 continue
             vp, ip = parse_vault(coin.spk), parse_intent(coin.spk)
             if vp is not None or ip is not None:
+                if coin.height < self.activation_height:
+                    raise VaultError('bad-txns-vault-preactivation')              # S-0 (audit 01/V-1)
+                if tins:
+                    raise VaultError('bad-vault-template-count')                  # S-1
                 tins.append((i, key, coin, vp, ip))
-        if len(tins) > 1:
-            raise VaultError('bad-vault-template-count')                          # S-1
         v_outs = [(n, o, parse_vault(o.scriptPubKey)) for n, o in enumerate(tx.vout)]
         v_outs = [(n, o, p) for n, o, p in v_outs if p is not None]
         i_outs = [(n, o, parse_intent(o.scriptPubKey)) for n, o in enumerate(tx.vout)]

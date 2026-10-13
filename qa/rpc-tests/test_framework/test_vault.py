@@ -704,6 +704,28 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(c.reject(v.build_app_tx(o2, disabled, v2, [(c.dest, v2)], fee_vin=c.coin())),
                          'bad-vault-app-disabled')
 
+    def test_preactivation_floor(self):
+        # S-0 (audit 01/V-1): a template input whose coin was created below the activation height is invalid
+        c = Chain()
+        sid = c.setup()
+        act = c.m.activation_height
+        vp = vparams(tag=b'YED\x00', set_id=sid, cancel_set_id=sid, delay=1, owner_height=act, app_height=act)
+        vspk = v.vault_script(vp)
+        ip = v.intent_for(vp, c.dest)
+        c.m.add_coin('%064x' % 0xbeef01, 0, 5 * v.COIN, vspk, act - 1)
+        c.m.add_coin('%064x' % 0xbeef02, 0, 5 * v.COIN, v.intent_script(ip), act - 1)
+        c.m.add_coin('%064x' % 0xbeef03, 0, 5 * v.COIN, v.intent_script(ip), act)
+        pre_v, pre_i, at_i = ('%064x' % 0xbeef01, 0), ('%064x' % 0xbeef02, 0), ('%064x' % 0xbeef03, 0)
+        c.mine_to(c.h + 2)
+        self.assertEqual(c.reject(v.build_release_tx(pre_i, ip, 5 * v.COIN, c.dest, fee_vin=c.coin())),
+                         'bad-txns-vault-preactivation')
+        self.assertEqual(c.reject(v.build_app_tx(pre_v, vp, 5 * v.COIN, [(c.dest, 5 * v.COIN)], fee_vin=c.coin())),
+                         'bad-txns-vault-preactivation')
+        self.assertEqual(c.reject(v.build_owner_spend_tx(pre_v, vspk, 5 * v.COIN, OWNER, c.dest, v.SEL_OWNER,
+                                                         lock_time=act)), 'bad-txns-vault-preactivation')
+        # at the activation height: past the floor, the rules as ever
+        c.block(v.build_release_tx(at_i, ip, 5 * v.COIN, c.dest, fee_vin=c.coin()))
+
     def test_two_acts_and_time_lock(self):
         c = Chain()
         sid = c.create_set()

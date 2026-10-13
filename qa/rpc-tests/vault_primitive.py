@@ -28,13 +28,18 @@ Every transaction is built with ``test_framework/vault.py`` and stock RPCs only,
   H. mempool eviction of an I-2 cancel that ages out and of a release made early by a reorg
   I. reorg / undo: a SET_REMOVE disconnected and reconnected (eviction of a spend it
      invalidates); a SET_REMOVE reorged out by a longer chain on both nodes
-  J. restart reconciliation: clean restart, SIGKILL, and <datadir>/vaults/ deleted
+  J. restart reconciliation: clean restart, SIGKILL, and <datadir>/vaults/ deleted, with a miner's
+     pre-activation I and V in the chain (S-0 refuses them as template inputs, mempool and block) and a
+     pre-activation MALFORMED I-shaped output spent after activation (replay derives height 0, audit
+     01/V-1 / 01/T-6); -prune refused with an UPGRADE_VAULT height, allowed without (01/N-1)
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/vault_primitive.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import assert_equal, sync_blocks
+from test_framework.util import (assert_equal, assert_start_raises_init_error, bitcoind_processes, connect_nodes_bi,
+                                 initialize_datadir, start_node, stop_node, sync_blocks)
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
 from test_framework import vault as v
 from test_framework.vault_harness import (
     ACTIVATION,
@@ -89,9 +94,32 @@ class VaultPrimitiveTest(VaultTestBase):
         bad_v = v.vault_script_unchecked(v.VaultParams(b'TEST', self.pre_sid, self.pre_sid, 0, 1000, 0,
                                                        OWNER_KEY))
         v.node_send(self.node, self.wallet_tx_hex([(COIN, bad_v)]))
+        # A miner's pre-activation preparation (audit 01/V-1, 01/V-3; regtest relays nonstandard outputs, a
+        # mainnet miner includes them directly): a well-formed I and a well-formed V, each beside a change output
+        # that stays unspent (so the spend of vout 0 never empties the CCoins entry: its undo has no height), and
+        # a MALFORMED-shaped I (delay pushed non-minimally) the same way. S-0 refuses the first two as template
+        # inputs after activation; the third is an ordinary output, spent below and replayed on the restarts.
+        self.pre_recipient = self.change_spk()
+        self.pre_vp = self.vparams(self.pre_sid, delay=1, owner_height=ACTIVATION)
+        self.pre_ip = v.intent_for(self.pre_vp, self.pre_recipient)
+        self.pre_v_spk, self.pre_i_spk = v.vault_script(self.pre_vp), v.intent_script(self.pre_ip)
+        good_i = v.intent_script(v.intent_for(self.vparams(self.pre_sid, delay=5), self.pre_recipient))
+        head = len(v.push(self.pre_ip.tag)) + 2 * 33 + 7          # tag, recipientHash, vaultHash, 2DROP DROP DUP 1 EQUAL IF DROP
+        assert good_i[head] == v.OP_1 + 5 - 1
+        self.pre_m_spk = good_i[:head] + bytes([0x01, 5]) + good_i[head + 1:]
+        assert v.parse_intent(self.pre_m_spk) is None and v.template_shape(self.pre_m_spk) == 'malformed'
+        self.pre_i = (v.node_send(self.node, self.wallet_tx_hex([(COIN, self.pre_i_spk)])), 0)
+        self.pre_v = (v.node_send(self.node, self.wallet_tx_hex([(COIN, self.pre_v_spk)])), 0)
+        self.pre_m = (v.node_send(self.node, self.wallet_tx_hex([(COIN, self.pre_m_spk)])), 0)
         self.node.generate(1)
         sync_blocks(self.nodes)
         assert self.tip() < ACTIVATION
+        for (txid, n), spk in ((self.pre_i, self.pre_i_spk), (self.pre_v, self.pre_v_spk), (self.pre_m, self.pre_m_spk)):
+            assert_equal(self.node.getrawtransaction(txid, 1)['height'], self.tip())
+            assert len(self.node.getrawtransaction(txid, 1)['vout']) == 2       # vout 1 (change) stays unspent
+            self.node.lockunspent(False, [{'txid': txid, 'vout': 1}])
+            if spk != self.pre_m_spk:
+                self.model.add_coin(txid, n, COIN, spk, self.tip())
         self.mine_to(ACTIVATION + 1)
         assert_equal(self.node.getblockchaininfo()['upgrades']['6d5b7a31']['status'], 'active')
         self.split_coins(40, 2)
@@ -642,9 +670,27 @@ class VaultPrimitiveTest(VaultTestBase):
         self.probe_v = self.lock(self.probe_vp, COIN, '%s: the next probe vault' % label)
         self.mine()
 
+    def section_preactivation_coins(self):
+        print('  pre-activation template coins (S-0, audit 01/V-1): refused as template inputs, live and in a block')
+        rel = self.release_hex(self.pre_i, self.pre_ip, COIN, self.pre_recipient)
+        self.reject_both(rel, 'bad-txns-vault-preactivation', 'bad-txns-vault-preactivation',
+                         'RELEASE of an I created before activation')
+        self.reject(self.cancel_hex(self.pre_i, self.pre_ip, COIN, self.pre_vp, [self.Sm[0]]),
+                    'bad-txns-vault-preactivation', 'bad-txns-vault-preactivation',
+                    'CANCEL of an I created before activation')
+        self.reject(self.owner_hex(self.pre_v, self.pre_v_spk, COIN, v.SEL_OWNER, lock_time=self.pre_vp.owner_height),
+                    'bad-txns-vault-preactivation', 'bad-txns-vault-preactivation',
+                    'OWNER spend of a V created before activation')
+        print('  the pre-activation MALFORMED I-shaped output is ordinary: spent in a block (replayed on the restarts)')
+        spend = v.make_tx([(self.pre_m[0], self.pre_m[1], 5)], [(COIN - v.VAULT_FEE, self.change_spk())])
+        spend.vin[0].scriptSig = bytes([v.OP_1])                   # RELEASE branch: CSV 5, no signature
+        bh = self.mine_raw([v.tx_hex(spend)], 'spend of the pre-activation malformed I')
+        assert self.in_block(v.tx_txid(spend), bh)
+
     def section_restart(self):
         print('J. restart reconciliation')
         sid, m = self.S, self.Sm
+        self.section_preactivation_coins()
         self.probe_vp = self.vparams(sid)
         self.probe_v = self.lock(self.probe_vp, COIN, 'probe vault')
         self.mine()
@@ -662,6 +708,24 @@ class VaultPrimitiveTest(VaultTestBase):
         self.restart_node0(wipe_vaults=True)
         self.sync_model()
         self.probes('after deleting the vault DB')
+        assert self.node.gettxout(self.pre_i[0], 0) is not None and self.node.gettxout(self.pre_v[0], 0) is not None
+        self.section_prune()
+
+    def section_prune(self):
+        print('  -prune is refused wherever UPGRADE_VAULT has a height (audit 01/N-1), allowed where it has none')
+        stop_node(self.nodes[0], 0)
+        assert_start_raises_init_error(0, self.options.tmpdir, self.node_args(0) + ['-prune=550'],
+                                       'The vault upgrade is configured on this network and incompatible with -prune')
+        if 0 in bitcoind_processes:
+            del bitcoind_processes[0]
+        initialize_datadir(self.options.tmpdir, 2)
+        fresh = start_node(2, self.options.tmpdir, list(YCASH_UPGRADE_ARGS) + ['-prune=550'])
+        assert_equal(fresh.getblockchaininfo()['pruned'], True)
+        stop_node(fresh, 2)
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0))
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
+        self.sync_model()
 
 
 if __name__ == '__main__':
