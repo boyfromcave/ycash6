@@ -13,6 +13,7 @@
 #include "crypto/pq/sign.h"
 #include "keystore.h"
 #include "main.h"
+#include "mempool_limit.h"
 #include "policy/policy.h"
 #include "pqkey.h"
 #include "script/interpreter.h"
@@ -393,6 +394,28 @@ BOOST_AUTO_TEST_CASE(pq_size_fee)
     BOOST_CHECK_EQUAL(PQSizeFee(LEGACY_DEFAULT_FEE, 8100), 8100);
     BOOST_CHECK_EQUAL(PQSizeFee(10000, 8100), 10000);
     pqFeeRate = saved;
+}
+
+BOOST_AUTO_TEST_CASE(pq_zip317_low_fee_penalty)
+{
+    // Audit 04/N-1: a post-quantum spend paying less than its ZIP-317 conventional fee (ycash-dd's former wallet fee,
+    // 1,000 zat) carries LOW_FEE_PENALTY in its ZIP-401 eviction weight, so the limiter ranks it first for eviction
+    // under -mempooltxcostlimit pressure; at the conventional fee it carries none.
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        CMutableTransaction mtx;
+        mtx.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+        mtx.vin[0].scriptSig = PQScriptSig(valtype(pq::SigSize(scheme) + 1, 0), valtype(pq::PubKeySize(scheme), 0));
+        mtx.vout.push_back(CTxOut(1000, GetScriptForDestination(CKeyID())));
+        const CTransaction tx(mtx);
+        const CAmount conventional = tx.GetConventionalFee();
+        BOOST_CHECK_EQUAL(conventional, 500 * (CAmount)((PQSpendInputSize(scheme) + 149) / 150));
+        BOOST_CHECK_GT(conventional, 1000);
+        const auto low = MempoolCostAndEvictionWeight(tx, 1000);
+        const auto paid = MempoolCostAndEvictionWeight(tx, conventional);
+        BOOST_CHECK_EQUAL(low.first, paid.first);
+        BOOST_CHECK_EQUAL(low.second, low.first + LOW_FEE_PENALTY);
+        BOOST_CHECK_EQUAL(paid.second, paid.first);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

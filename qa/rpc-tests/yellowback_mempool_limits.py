@@ -35,6 +35,13 @@ yellowback_fee.py. This script covers the other two clauses on ycashd 6.20.0 + Y
    on the threshold, the two-step mint refuses with expiring-too-soon instead of building one;
    at 35 it builds the mint exactly on the threshold.
 
+3. Audit 04/N-1: a post-quantum spend paying ycash-dd's former wallet fee (1,000 zat, below its ZIP-317
+   conventional fee: an SLH-DSA input is ~54 logical actions, ~27,000 zat) relays at the defaults
+   (-txunpaidactionlimit = SIZE_MAX) and is mined, while a node started with -txunpaidactionlimit=0 refuses it
+   (`tx unpaid action limit exceeded`). Its ZIP-401 eviction weight carries LOW_FEE_PENALTY, which the unit test
+   pq_wallet_tests/pq_zip317_low_fee_penalty asserts (the limiter evicts at random by weight, so a functional
+   "evicted first" would be probabilistic). Both lines' wallets now pay at least the conventional fee.
+
 Nodes: 0 user (the limits), 1 stock, 2-4 pools, 5 observer.
 """
 
@@ -45,6 +52,7 @@ from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_greater_than, sync_blocks
 from test_framework.yellowback_util import (
     COIN,
+    OBSERVER,
     POOLS,
     REF_LAG,
     REF_WINDOW,
@@ -230,6 +238,43 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         assert expected in msgs[0][1], msgs[0]
         assert_equal(msgs[0], msgs[1])
         print('  vault spend, both nodes: %d %s (MP-1 alone would admit it)' % msgs[0])
+        for node in self.nodes:
+            assert_equal(len(node.getrawmempool()), 0)
+
+    # --- 3. a dd-fee post-quantum spend vs the ZIP-317 opt-in (audit 04/N-1) -------------
+
+    def pq_spend_below_conventional(self):
+        nodes = self.nodes
+        user = nodes[USER]
+        print('audit 04/N-1: an SLH-DSA spend paying 1,000 zat relays at the defaults, is refused by a -txunpaidactionlimit=0 node')
+        a = user.getnewaddress('', 'pqslh')
+        value = Decimal('1.23456789')
+        fund = user.sendtoaddress(a, value)
+        self.mine(POOLS[0])
+        vout = [o['n'] for o in user.getrawtransaction(fund, 1)['vout'] if Decimal(str(o['value'])) == value]
+        assert_equal(len(vout), 1)
+        raw = user.createrawtransaction([{'txid': fund, 'vout': vout[0]}],
+                                        {user.getnewaddress(): value - Decimal(1_000) / COIN})
+        signed = user.signrawtransaction(raw)
+        assert_equal(signed['complete'], True)
+        decoded = user.decoderawtransaction(signed['hex'])
+        conv = conventional_fee(decoded)
+        print('  1,000 zat paid, ZIP-317 conventional fee %d zat (%d actions)' % (conv, conv // 500))
+        assert_greater_than(conv, 25_000)
+        self.restart(OBSERVER, ['-txunpaidactionlimit=0'])
+        sync_blocks(nodes)
+        code, msg = rpc_refusal(nodes[OBSERVER].sendrawtransaction, signed['hex'])
+        assert 'tx unpaid action limit exceeded' in msg, (code, msg)
+        print('  -txunpaidactionlimit=0: %d %s' % (code, msg))
+        txid = user.sendrawtransaction(signed['hex'])
+        wait_for_mempool(nodes[POOLS[0]], txid)
+        print('  defaults: relayed (node 0 -> pool %d)' % POOLS[0])
+        nodes[POOLS[0]].generate(1)
+        sync_blocks(nodes)
+        assert_equal(user.getrawtransaction(txid, 1)['confirmations'], 1)
+        assert txid not in nodes[OBSERVER].getrawmempool()
+        self.restart(OBSERVER)
+        sync_blocks(nodes)
         for node in self.nodes:
             assert_equal(len(node.getrawmempool()), 0)
 
@@ -464,6 +509,7 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         self.evicted_refusal = None
         self.prepare()
         self.expiring_soon_raw()
+        self.pq_spend_below_conventional()
         self.sweep_at_cost_limit()
         self.yed_under_pressure()
         self.builders_at_the_boundary()
