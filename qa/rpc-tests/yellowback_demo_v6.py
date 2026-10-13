@@ -22,7 +22,7 @@ _stock_node, _stockparity); this script strings them together on one chain.
      so node 1 runs it below VAULT_ACTIVATION only -- compared fork-vs-stock against node 5 as the
      fork binary without the overlay (yellowback_stockparity's comparison), its block and a pool's
      block followed both ways -- and is then restarted on the fork binary for items 1-10
-  1  every Yellowback node starts with the attestor set, index synced, yed_getinfo rpcversion 6
+  1  every Yellowback node starts with the attestor set, index synced, yed_getinfo rpcversion 8
      healthy; node 1 has no yed_* command
   2  pools tag quotes; yed_getprice median; forged tags from a non-pool change nothing
   3  activation is UPGRADE_VAULT at a height plus the attestor set (U-22): one branch id and one
@@ -54,7 +54,6 @@ from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
     assert_greater_than,
-    hex_str_to_bytes,
     nuparams,
     p2p_port,
     sync_blocks,
@@ -68,6 +67,7 @@ from test_framework.yellowback_attest import (
     encode_bundle,
     has_rpc,
     hot_secret_for,
+    outpoint_selector,
     register_and_arm,
     select_attestors,
     selection_pool,
@@ -98,14 +98,14 @@ from test_framework.yellowback_util import (
     build_mint_tx,
     build_vault_spend_raw,
     debug_log_contains,
-    early_redeem_fee_zat,
-    fee_zat,
     mine_block_raw,
-    pubkey_to_address,
+    protocol_fee_zat,
     redeem_vault_raw,
     restart_with_yellowback,
     template_coinbase,
     usd_to_micro,
+    vault_early_redeem_fee_zat,
+    vault_fee_zat,
     wait_for_rejection,
     wait_yed_healthy,
 )
@@ -292,10 +292,10 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         raise AssertionError('node holds %d cents, needs %d' % (total, cents))
 
     def live_vault(self, txid, node=None):
+        # every owner is post-quantum (rpcversion 7, quantum spec section 3.1): build_vault_spend_raw reads the
+        # owner id from ownerScheme/ownerHash and signs with the wallet's SLH-DSA key; there is no EC owner address
         node = node or self.nodes[USER]
-        v = dict(node.yed_getvault(txid))
-        v['ownerAddress'] = pubkey_to_address(hex_str_to_bytes(v['ownerPubKey']))
-        return v
+        return dict(node.yed_getvault(txid))
 
     def claimable(self):
         """The outpoints ``yed_listclaimable`` marks claimable (IT-7: it lists every open vault, the
@@ -424,7 +424,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         rows = []
         for i in YELLOWBACK:
             info = wait_yed_healthy(self.nodes[i], timeout=60)
-            assert_equal(info['rpcversion'], 6)   # in-term claims (IT-7)
+            assert_equal(info['rpcversion'], 8)   # the fee structure (D-Q-23, rpcversion 8); 7 was post-quantum owners, 6 in-term claims (IT-7)
             assert_equal(info['healthy'], True)
             assert_equal(info['height'], self.nodes[i].getblockcount())
             assert_equal(info['startHeight'], VAULT_ACTIVATION)
@@ -439,7 +439,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         off = overlay_off(stock)
         sub = stock.getnetworkinfo()['subversion']
         self.say(item, 'node 1 (stock, no attestor set): %s, height %d, %s' % (sub, stock.getblockcount(), off))
-        self.passed(item, 'every Yellowback node starts with the attestor set, syncs the index, rpcversion 6 healthy; node 1 has no yed_* command',
+        self.passed(item, 'every Yellowback node starts with the attestor set, syncs the index, rpcversion 8 healthy; node 1 has no yed_* command',
                     '7 Yellowback nodes at height %d, one state hash %s; node 1 stock (%s)' % (rows[0], short(h), sub))
 
     # ------------------------------------------------------------------ 2
@@ -586,7 +586,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         # the raw builders: D an ACTIVE mint, Z under-collateralised -- an invalid transaction, not a VOID vault (U-23)
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref = int(est['refHeight'])
-        payee = user.yed_getfeepayee(ref, int(est['requiredZat']))['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']        # rpcversion 8: a selector, no fee base (FEE-1' is in dollars at pMint, D-Q-23)
         d_hex, _ = build_mint_tx(user, CENTS, LOCK, ref, int(est['requiredZat']), fee_addr=payee)
         d_txid = user.sendrawtransaction(d_hex)
         # listunspent(1) does not see the mempool: lock D's inputs so Z cannot reuse them
@@ -617,12 +617,12 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         lock = max(mints['A']['lockHeight'], user.yed_getvault(d_txid)['lockHeight'])
         va = user.yed_getvault(mints['A']['txid'])
         assert_greater_than(va['lockHeight'], self.tip() + 1)
-        early = early_redeem_fee_zat(va['collateralZat'], mints['A']['termClass'])
+        early = vault_early_redeem_fee_zat(va)      # IT-9' (D-Q-23): bps of the debt at pMint, no longer of the collateral
         quote = user.yed_estimateredeem(mints['A']['txid'])
         assert_equal((quote['early'], quote['canRedeem'], quote['earlyRedeemFeeZat']), (True, True, early))
         red_at = self.tip() + 1
         red = user.yed_redeem(mints['A']['txid'])
-        assert_equal((red['burnedCents'], red['earlyRedeemFeeZat'], red['feeZat']), (CENTS, early, fee_zat(va['collateralZat']) + early))
+        assert_equal((red['burnedCents'], red['earlyRedeemFeeZat'], red['feeZat']), (CENTS, early, vault_fee_zat(va) + early))   # RED-3': FEE-1' at the vault's pMint
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(nodes[2].yed_getvault(mints['A']['txid'])['status'], 'CLOSED')
@@ -631,7 +631,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, max(0, lock - self.tip()))
         sweep = rpc_error('Method not found', user.yed_sweep, mints['C']['txid'], SWEEP_ACK)
         self.say(item, 'yed_redeem A in term (%d blocks before its lockHeight %d): %s, owner selector OP_2, burned %d, fee %d to %s '
-                 '(FEE-1 + the class %s early-redeem fee %d, IT-9), collateral %d back; yed_sweep: %s (retired with abandonment, upgrade plan section 6)'
+                 "(FEE-1' + the class %s early-redeem fee %d, IT-9', both at the vault's pMint), collateral %d back; yed_sweep: %s (retired with abandonment, upgrade plan section 6)"
                  % (va['lockHeight'] - red_at, va['lockHeight'], red['txid'],
                     red['burnedCents'], red['feeZat'], red['payee'], mints['A']['termClass'], early, red['collateralOut'], sweep))
         assert_equal(user.yed_estimateredeem(d_txid)['earlyRedeemFeeZat'], 0)            # past D's lockHeight: no early-redeem fee
@@ -730,8 +730,8 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         carrier = build_carrier_tx(user, stale)
         self.sync_all()
         self.mine(POOLS[0])
-        payee = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
-        attest_fee = fee_zat(required) * ATTEST_FEE_BPS // BPS
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
+        attest_fee = protocol_fee_zat(CENTS, int(user.yed_getprice(ref)['pMint'])) * ATTEST_FEE_BPS // BPS   # AFEE-1': a share of FEE-1' at pMint
         bad_hex, _ = build_mint_tx_v3(user, CENTS, LOCK, ref, required, fee_addr=payee, carrier=carrier,
                                       attest_fee=(recs[selected[0]]['bondKeyAddress'], attest_fee))
         bad_txid = user.decoderawtransaction(bad_hex)['txid']
@@ -749,10 +749,10 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         live = self.live_vault(e_txid)
         assert_greater_than(self.tip() + 1, int(live['claimHeight']))
         ref = self.tip() - REF_LAG
-        fee = user.yed_getfeepayee(ref, int(live['collateralZat']))
+        fee = user.yed_getfeepayee(ref, outpoint_selector(e_txid, 0).hex())         # FEE-W for the vault's outpoint selector
         burn, _total = self.coins_for(user, CENTS)
         claim_hex = build_vault_spend_raw(user, live, 'claim', burn, payload=ym.encode_redeem(ref, 1, []),
-                                          fee=(fee['default']['payoutAddress'], int(fee['feeZat'])), ref_height=ref, expiry=0)
+                                          fee=(fee['default']['payoutAddress'], vault_fee_zat(live)), ref_height=ref, expiry=0)
         check = user.yed_validaterawtransaction(claim_hex)
         assert_equal((check['blockValid'], check['verdict'], check['wouldBeRejected']), (False, 'red1-bundle-shape', True))
         result2, blockhash2 = self.expect_invalid(claim_hex, 'red1-bundle-shape', POOLS[2], 'bundle-less claim')
@@ -980,7 +980,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
 
     def item10_pointer(self):
         msg = ('every vault_*.py and yellowback_*.py (unarmed and --armed), the full test_bitcoin, the audit script (registration, '
-               'attribution, naming, the DoS gate, determinism, the rpcversion 6 contract, vault_vectors.json and '
+               'attribution, naming, the DoS gate, determinism, the rpcversion 8 contract, vault_vectors.json and '
                'yellowback_golden.json byte-identical to ycash-dd, the consensus-diff report for the two-reviewer gate; the frozen-file '
                'and budget legs report-only on the upgrade line) and the lockorder / sanitizer / coverage jobs are the CI gates '
                '(.github/workflows/yellowback-tests.yml, qa/yellowback-audit.sh) -- not run here')
