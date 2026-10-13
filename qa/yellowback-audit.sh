@@ -23,7 +23,8 @@ if ! git diff --quiet "$base" -- $frozen; then
 fi
 # configure.ac is frozen except its version defines: a release (doc/yellowback-release.md) must
 # bump _CLIENT_VERSION_* there and in src/clientversion.h; any other configure.ac line fails.
-if git diff -U0 "$base" -- configure.ac | grep -E '^[-+]' | grep -Ev '^(\+\+\+|---) (a\/|b\/|\/dev\/null)' | grep -Eqv '^[-+]define\(_CLIENT_VERSION_(MAJOR|MINOR|REVISION|BUILD), [0-9]+\)$'; then
+# (counted with grep -c: `cmd | grep -q` under pipefail SIGPIPEs cmd and turns a match into a failure)
+if [ "$(git diff -U0 "$base" -- configure.ac | grep -E '^[-+]' | grep -Ev '^(\+\+\+|---) (a\/|b\/|\/dev\/null)' | grep -Ecv '^[-+]define\(_CLIENT_VERSION_(MAJOR|MINOR|REVISION|BUILD), [0-9]+\)$')" -gt 0 ]; then
   echo "FROZEN SET CHANGED vs $base: configure.ac beyond the _CLIENT_VERSION_* defines"; git --no-pager diff "$base" -- configure.ac
   [ "$report" = 1 ] || exit 1
 fi
@@ -66,9 +67,9 @@ fi
 gbad=""; gn=0
 for c in $(git rev-list "$gbase..HEAD"); do
   files=$(git diff-tree --no-commit-id --name-only -r "$c")
-  printf '%s\n' "$files" | grep -qE '^(src/test/data|qa/rpc-tests/test_framework)/yellowback_golden\.json$' || continue
+  grep -qE '^(src/test/data|qa/rpc-tests/test_framework)/yellowback_golden\.json$' <<< "$files" || continue
   gn=$((gn + 1))
-  if printf '%s\n' "$files" | grep -qE '^src/yellowback/|^qa/rpc-tests/test_framework/yellowback_model\.py$'; then
+  if grep -qE '^src/yellowback/|^qa/rpc-tests/test_framework/yellowback_model\.py$' <<< "$files"; then
     gbad="$gbad
   $(git log -1 --format='%h %s' "$c")"
   fi
