@@ -65,6 +65,7 @@ const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
 const char* const INTENT_CANCEL_NO_REFUND = "intent-cancel-no-refund";
+const char* const INTENT_CANCEL_COSIGN = "intent-cancel-cosign";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
@@ -786,6 +787,7 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
             ir.vault = active[0].outpoint;
             ir.role = (uint8_t)(j == facts.claimantVout ? IntentRole::CLAIMANT : IntentRole::RESIDUAL);
             ir.height = ctx.height;
+            ir.claimRefHeight = (int32_t)p.refHeight;   // C4b: the height a cancel's statements cite
             // CAN-1: the refund holder is the token spent at the claim's lowest-index YED input (spentTokens is in vin order)
             if (ir.Role() == IntentRole::CLAIMANT) ir.refundScript.assign(log.spentTokens[0].scriptPubKey.begin(), log.spentTokens[0].scriptPubKey.end());
             ctx.st.Put(keys::Intent(COutPoint(txid, (uint32_t)j)), ir);
@@ -796,6 +798,8 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
     return false;
 }
 
+std::optional<std::pair<uint16_t, AttestorRecord>> LatestRecord(const State& st, const std::vector<unsigned char>& key);
+
 /** A spent claim intent (U-23). */
 struct SpentIntent
 {
@@ -803,6 +807,63 @@ struct SpentIntent
     IntentRecord record;
     size_t vin;
 };
+
+/** CAN-2: q, the position's recent cancels (0 once CANCEL_QUIET has passed since its last one). */
+int64_t CancelQ(const VaultRecord& v, const Params& P, int64_t h)
+{
+    return h - (int64_t)v.lastCancelHeight < (int64_t)P.cancelQuiet ? (int64_t)v.cancelCount : 0;
+}
+
+/**
+ * The seq of `key` when it is a current member of the attestor set at `h` on the module's mirror (the primitive's
+ * IsCurrent, vault/state.cpp: an ACTIVE member whose join has matured): its key's newest Attestors record, neither
+ * EJECTED nor WITHDRAWN, bond unspent and unfrozen, h >= registerHeight + the set's maturity. nullopt otherwise.
+ */
+std::optional<uint16_t> CurrentMemberSeq(const State& st, const CPubKey& key, int64_t h)
+{
+    std::optional<AttestorSetRecord> set = st.GetAttestorSet();
+    if (!set.has_value()) return std::nullopt;
+    std::optional<std::pair<uint16_t, AttestorRecord>> r = LatestRecord(st, std::vector<unsigned char>(key.begin(), key.end()));
+    if (!r.has_value()) return std::nullopt;
+    const AttestorRecord& rec = r->second;
+    if (rec.Status() == AttestorStatus::EJECTED || rec.Status() == AttestorStatus::WITHDRAWN) return std::nullopt;
+    if (rec.bondSpentHeight != 0 || rec.Frozen()) return std::nullopt;
+    if (h < (int64_t)rec.registerHeight + (int64_t)set->maturity) return std::nullopt;
+    return r->first;
+}
+
+/**
+ * CAN-2 + C4b (cancel-limit design §2 C2, C4b; owner 2026-10-13): the cancel's carrier holds "YC" co-signatures
+ * (bundle.h), at least `required` of them, and every one recovers (vault::RecoverSig) over CancelCosignMessage(the
+ * attestor set, the claimant intent, the claim's refHeight, its price, blockHash(refHeight)) to a distinct current
+ * member, with a price in [PRICE_MIN, PRICE_MAX] at which the CLAIMING vault is not claimable (collateral x price >=
+ * debt x CLAIM_THRESHOLD: !IsUnderwater). `seqs` receives the co-signers' seqs in carrier order.
+ */
+bool CancelCosignsHold(EvalContext& ctx, const CTransaction& tx, const SpentIntent& in, const VaultRecord& vault, int required,
+                       std::vector<uint16_t>& seqs)
+{
+    const Params& P = ctx.params;
+    auto extracted = ExtractBundle(tx, P.bundleCarrier, false, std::vector<unsigned char>());
+    if (!extracted) return false;
+    std::optional<std::vector<CancelCosignEntry>> entries = DecodeCancelCosigns(extracted->first);
+    if (!entries.has_value() || entries->size() < (size_t)required) return false;
+    const int64_t R = in.record.claimRefHeight;
+    std::optional<uint256> blockHash = BlockHashAt(ctx.st.View(), P, R);
+    if (!blockHash.has_value()) return false;
+    std::set<CPubKey> seen;
+    for (const CancelCosignEntry& e : entries.value()) {
+        if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX) return false;
+        if (IsUnderwater(vault.collateralZat, (MicroUsd)e.priceMicroUsd, vault.mintedCents, P.claimThresholdBps)) return false;
+        CPubKey key;
+        const uint256 msg = CancelCosignMessage(P.attestorSetId, in.outpoint.hash, in.outpoint.n, (uint32_t)R, e.priceMicroUsd, blockHash.value());
+        if (!vault::RecoverSig(msg, e.sig, key)) return false;
+        if (!seen.insert(key).second) return false;
+        std::optional<uint16_t> seq = CurrentMemberSeq(ctx.st, key, ctx.height);
+        if (!seq.has_value()) return false;
+        seqs.push_back(seq.value());
+    }
+    return true;
+}
 
 /**
  * U-23, U-24, CAN-1: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
@@ -826,8 +887,9 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     const Params& P = ctx.params;
     std::optional<uint8_t> selector = vault::ParseSelector(tx.vin[in.vin].scriptSig);
     if (!selector.has_value() || !(selector.value() == vault::SEL_UNLOCK || selector.value() == vault::SEL_OWNER)) return verdict::INTENT_SPEND_MALFORMED;
-    if (fp.has_value()) return verdict::INTENT_SPEND_MALFORMED;           // a release or cancel carries no Yellowback payload
     const bool cancel = selector.value() == vault::SEL_OWNER;
+    // a release carries no Yellowback payload; a cancel none but CAN-2's CANCEL_COSIGN marker
+    if (fp.has_value() && !(cancel && fp->payload.type == PayloadType::CANCEL_COSIGN)) return verdict::INTENT_SPEND_MALFORMED;
     if (cancel && in.record.Role() == IntentRole::RESIDUAL) return verdict::INTENT_CANCEL_RESIDUAL;
     std::optional<VaultRecord> vault = ctx.st.GetVault(in.record.vault);
     ctx.st.EraseKey(keys::Intent(in.outpoint));
@@ -861,6 +923,12 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         if (tx.vout[j].scriptPubKey == holder && tx.vout[j].nValue > 0) { refundVout = (int)j; break; }
     }
     if (refundVout < 0) return verdict::INTENT_CANCEL_NO_REFUND;
+    // CAN-2 + C4b: at least CancelsRequired distinct current members, each with its price statement at the claim's refHeight
+    std::vector<uint16_t> cosigners;
+    if (!fp.has_value() || !CancelCosignsHold(ctx, tx, in, vault.value(), CancelsRequired(vault.value(), P, ctx.height), cosigners)) {
+        return verdict::INTENT_CANCEL_COSIGN;
+    }
+    log.bundleSeqs = cosigners;
     const COutPoint refundOut(txid, (uint32_t)refundVout);
     TokenRecord tok;
     tok.cents = refund;
@@ -882,6 +950,8 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     v.closeHeight = 0;
     v.closingTxid = uint256();
     v.burnedCents = 0;
+    v.cancelCount = (uint8_t)std::min<int64_t>(CancelQ(vault.value(), P, ctx.height) + 1, 255);   // CAN-2
+    v.lastCancelHeight = ctx.height;
     ctx.st.EraseKey(keys::Vault(in.record.vault));
     ctx.st.Put(keys::Vault(reopened), v);
     if (ctx.st.Has(keys::Notice(in.record.vault))) ctx.st.EraseKey(keys::Notice(in.record.vault));
@@ -1857,6 +1927,11 @@ bool EquivocatedBy(const std::pair<Attestation, Attestation>& e, const CPubKey& 
     const Attestation& b = e.second;
     return VerifyCompactSig(key, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig) &&
            VerifyCompactSig(key, AttestMessage(b.seq, b.priceMicroUsd, b.citedHeight, blockHash), b.sig);
+}
+
+int CancelsRequired(const VaultRecord& vault, const Params& P, int64_t height)
+{
+    return (int)std::min<int64_t>(CancelQ(vault, P, height) + 1, std::max(1, P.cancelSignersMax));
 }
 
 bool ArmedAt(const StateView& view, const Params& P, int refHeight)

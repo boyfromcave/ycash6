@@ -23,7 +23,7 @@
  *   magic   2 bytes   0x59 0x42 ("YB")
  *   version 1 byte    0x04 for MINT, 0x03 for every other type (another version => non-Yellowback)
  *   type    1 byte    0x01 MINT | 0x02 TRANSFER | 0x03 REDEEM | 0x05 ATTESTOR_REGISTER |
- *                     0x06 CLAIM_NOTICE | 0x07 EQUIVOCATION | 0x08 ATTESTOR_REVIVE
+ *                     0x06 CLAIM_NOTICE | 0x07 EQUIVOCATION | 0x08 ATTESTOR_REVIVE | 0x09 CANCEL_COSIGN
  *   body    per type; total <= 80 bytes; trailing bytes => malformed
  *
  *   MINT (v4)          termClass u8, cents u32, lockHeight u32, refHeight u32,
@@ -35,6 +35,7 @@
  *   CLAIM_NOTICE       vaultTxid 32, vaultVout u8, refHeight u32                               (41)
  *   EQUIVOCATION       (empty; the carrier holds the two attestations)                         (4)
  *   ATTESTOR_REVIVE    seq u16, priceMicroUsd u32, citedHeight u32, sig 64                     (78)
+ *   CANCEL_COSIGN      (empty; the carrier holds the co-signatures, bundle.h "YC")            (4)
  *
  * Type 0x04, types 0x10-0x1F (the prototype's; 0x10 PRICE retired) and
  * 0x20-0xFF are reserved: unknown type or version => non-Yellowback (the
@@ -68,6 +69,7 @@ enum class PayloadType : uint8_t {
     CLAIM_NOTICE      = 0x06,
     EQUIVOCATION      = 0x07,
     ATTESTOR_REVIVE   = 0x08,
+    CANCEL_COSIGN     = 0x09,   //!< CAN-2 + C4b (cancel-limit design, owner 2026-10-13): a YED claimant intent's cancel
 };
 
 /** One (vout, cents) assignment of a TRANSFER or REDEEM body. */
@@ -138,6 +140,9 @@ struct Payload
     static Payload ClaimNotice(const uint256& vaultTxid, uint8_t vaultVout, uint32_t refHeight);
     static Payload ClaimNotice(const COutPoint& vault, uint32_t refHeight);
     static Payload Equivocation();
+    /** CAN-2 + C4b: the cancel's marker; its body is empty so the outputs (the set signature's ANYONECANPAY digest)
+     *  do not depend on how many co-signatures the carrier input brings. */
+    static Payload CancelCosign();
     static Payload AttestorRevive(uint16_t seq, uint32_t priceMicroUsd, uint32_t citedHeight, const std::array<unsigned char, COMPACT_SIG_SIZE>& sig);
 
     /** CLAIM_NOTICE: the vault outpoint (vaultTxid, vaultVout); the §3.7 selector is its 36-byte serialisation (R13). */

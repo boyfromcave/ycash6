@@ -110,6 +110,8 @@ void SetCommon(Params& p)
     p.attestorCancelThreshold = 1;  // 03/I-3: the adopted set's cancelThreshold (one watcher can cancel; CAN-1 makes that a delay only)
     p.attestorUnlockThreshold = 1;  // 03/I-3: the adopted set's unlockThreshold
     p.attestorLivenessMin = 1152;   // seats review B3: the adopted set's livenessWindow is at least one day
+    p.cancelSignersMax    = 5;      // CAN-2 (owner 2026-10-13): the escalation schedule 1, 2, 3, 4, 5, 5, ... caps at five co-signers
+    p.cancelQuiet         = 8064;   // CAN-2/CAN-3: 7 d without a cancel resets the schedule; a held residual's longest wait
     p.dormancyBlocks      = 16128;
     p.dormancyMinBundles  = 20;
     p.dormancyCheck       = 48;     // S15
@@ -135,7 +137,7 @@ Params::Params()
       pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
       emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), residualMinCents(0), attestFeeBps(0),
       bondMinFloorZat(0), bondMinCapZat(0), bondShareBps(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
-      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0), attestorCancelThreshold(0), attestorUnlockThreshold(0), attestorLivenessMin(0),
+      seatAgeUnit(0), seatAgeCap(0), seatMarginBps(0), evictMarginBps(0), attestorSeats(0), attestorCancelThreshold(0), attestorUnlockThreshold(0), cancelSignersMax(0), cancelQuiet(0), attestorLivenessMin(0),
       dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0),
       mintRequiresArmed(false), pqFalconHeight(-1)
 {
@@ -256,6 +258,8 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.bondMinCapZat       = 10 * COIN;
     r.bondMinLock         = 0;
     r.attestorLivenessMin = 16;     // seats review B3 at regtest scale (two ATTEST_MAX_AGE windows)
+    r.cancelSignersMax    = 3;      // CAN-2 at regtest scale (schedule 1, 2, 3, 3, ...)
+    r.cancelQuiet         = 40;     // CAN-2/CAN-3 at regtest scale (four CLAIM_DELAYs)
     r.bondMaturity        = 8;
     r.ageCap              = 64;
     r.foundingWindow      = 16;

@@ -15,6 +15,7 @@ namespace yellowback {
 namespace {
 
 const unsigned char ATTEST_PREFIX[9] = { 'Y', 'B', 'A', 'T', 'T', 'E', 'S', 'T', '1' };
+const unsigned char CANCEL_COSIGN_PREFIX[15] = { 'Y', 'e', 'd', 'C', 'a', 'n', 'c', 'e', 'l', 'C', 'o', 's', 'i', 'g', 'n' };
 
 void WriteLE16(unsigned char* p, uint16_t v) { p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; }
 void WriteLE32(unsigned char* p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (v >> (8 * i)) & 0xff; }
@@ -45,6 +46,24 @@ uint256 AttestMessage(uint16_t seq, uint32_t priceMicroUsd, uint32_t citedHeight
     memcpy(buf + 19, blockHash.begin(), 32);
     uint256 out;
     CSHA256().Write(buf, sizeof(buf)).Finalize(out.begin());
+    return out;
+}
+
+uint256 CancelCosignMessage(const uint256& attestorSetId, const uint256& intentTxid, uint32_t intentN, uint32_t citedHeight,
+                            uint32_t priceMicroUsd, const uint256& blockHash)
+{
+    unsigned char buf[15 + 32 + 32 + 4 + 4 + 4 + 32];
+    memcpy(buf, CANCEL_COSIGN_PREFIX, 15);
+    memcpy(buf + 15, attestorSetId.begin(), 32);
+    memcpy(buf + 47, intentTxid.begin(), 32);
+    WriteLE32(buf + 79, intentN);
+    WriteLE32(buf + 83, citedHeight);
+    WriteLE32(buf + 87, priceMicroUsd);
+    memcpy(buf + 91, blockHash.begin(), 32);
+    unsigned char once[32];
+    CSHA256().Write(buf, sizeof(buf)).Finalize(once);
+    uint256 out;
+    CSHA256().Write(once, sizeof(once)).Finalize(out.begin());
     return out;
 }
 

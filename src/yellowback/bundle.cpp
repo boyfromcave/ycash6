@@ -68,6 +68,41 @@ std::optional<Bundle> DecodeBundle(const std::vector<unsigned char>& data, size_
     return b;
 }
 
+namespace {
+const unsigned char COSIGN_MAGIC[2] = { 'Y', 'C' };
+
+void PutLE32(std::vector<unsigned char>& out, uint32_t v) { for (int i = 0; i < 4; i++) out.push_back((v >> (8 * i)) & 0xff); }
+uint32_t GetLE32(const unsigned char* p) { uint32_t v = 0; for (int i = 3; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+} // namespace
+
+std::vector<unsigned char> EncodeCancelCosigns(const std::vector<CancelCosignEntry>& entries)
+{
+    if (entries.empty() || entries.size() > CANCEL_COSIGN_MAX) return {};
+    std::vector<unsigned char> out{ COSIGN_MAGIC[0], COSIGN_MAGIC[1], CANCEL_COSIGN_VERSION, (unsigned char)entries.size() };
+    for (const CancelCosignEntry& e : entries) {
+        if (e.sig.size() != 65) return {};
+        PutLE32(out, e.priceMicroUsd);
+        out.insert(out.end(), e.sig.begin(), e.sig.end());
+    }
+    return out;
+}
+
+std::optional<std::vector<CancelCosignEntry>> DecodeCancelCosigns(const std::vector<unsigned char>& data)
+{
+    if (data.size() < 4 || data[0] != COSIGN_MAGIC[0] || data[1] != COSIGN_MAGIC[1] || data[2] != CANCEL_COSIGN_VERSION) return std::nullopt;
+    const size_t count = data[3];
+    if (count < 1 || count > CANCEL_COSIGN_MAX || data.size() != 4 + CANCEL_COSIGN_ENTRY_SIZE * count) return std::nullopt;
+    std::vector<CancelCosignEntry> out;
+    for (size_t i = 0; i < count; i++) {
+        const unsigned char* p = data.data() + 4 + CANCEL_COSIGN_ENTRY_SIZE * i;
+        CancelCosignEntry e;
+        e.priceMicroUsd = GetLE32(p);
+        e.sig.assign(p + 4, p + CANCEL_COSIGN_ENTRY_SIZE);
+        out.push_back(e);
+    }
+    return out;
+}
+
 std::optional<std::pair<std::vector<unsigned char>, BundleSource>>
 ExtractBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
               const std::vector<unsigned char>& payloadTail, std::string* reason)

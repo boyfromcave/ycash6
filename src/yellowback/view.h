@@ -81,7 +81,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 13;  //!< 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 14;  //!< 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2) and IntentRecord.claimRefHeight (C4b) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -234,9 +234,13 @@ struct VaultRecord
     int32_t ownerHeight;                      //!< the V's ownerHeight: refHeight + 1 (IT-1 extended: the owner redeems in term); lockHeight for a pre-plan vault
     int64_t pMint;                            //!< FEE-1' (D-Q-23): MINT-5's price at the mint, micro-USD per YEC (min(xMint, aMint) when ARMED,
                                               //!< xMint otherwise; 1..PRICE_MAX); the fee price of every later spend. Appended last (SERIALISATION.md §1 row 5)
+    uint8_t cancelCount;                      //!< CAN-2 (cancel-limit design §2 C2): the position's cancels counted by the escalation schedule,
+                                              //!< min(q + 1, 255) after each cancel; 0 at the mint. Carried by every re-creation
+    int32_t lastCancelHeight;                 //!< CAN-2: the height of the position's last cancel; 0 = none. Appended last with cancelCount
 
     VaultRecord() : termClass(0), lockHeight(0), claimHeight(0), collateralZat(0), mintedCents(0), mintHeight(0), refHeight(0),
-                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false), appHeight(0), ownerHeight(0), pMint(0) {}
+                    status((uint8_t)VaultStatus::VOIDED), closeHeight(0), burnedCents(0), feePaidZat(0), unbacked(false), appHeight(0), ownerHeight(0), pMint(0),
+                    cancelCount(0), lastCancelHeight(0) {}
 
     VaultStatus Status() const { return (VaultStatus)status; }
     bool IsOpen() const { return Status() == VaultStatus::ACTIVE || Status() == VaultStatus::VOIDED; }
@@ -269,6 +273,8 @@ struct VaultRecord
         READWRITE(appHeight);
         READWRITE(ownerHeight);
         READWRITE(pMint);
+        READWRITE(cancelCount);
+        READWRITE(lastCancelHeight);
     }
 };
 
@@ -608,8 +614,10 @@ struct IntentRecord
     std::vector<unsigned char> refundScript;   //!< CAN-1 (03/H-1): on the claimant intent, the scriptPubKey of the YED token the
                                                //!< claim spent at its lowest-index YED input -- the holder a cancel refunds the burn
                                                //!< to; empty on the residual intent. Appended last (SERIALISATION.md append rule)
+    int32_t claimRefHeight;  //!< C4b (cancel-limit design): the claim's REDEEM refHeight, on both intents -- the height a cancel's
+                             //!< CANCEL_COSIGN statements cite. Appended last
 
-    IntentRecord() : role((uint8_t)IntentRole::CLAIMANT), height(0) {}
+    IntentRecord() : role((uint8_t)IntentRole::CLAIMANT), height(0), claimRefHeight(0) {}
 
     IntentRole Role() const { return (IntentRole)role; }
 
@@ -620,6 +628,7 @@ struct IntentRecord
         READWRITE(role);
         READWRITE(height);
         READWRITE(refundScript);
+        READWRITE(claimRefHeight);
     }
 };
 

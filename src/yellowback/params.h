@@ -246,6 +246,11 @@ struct Params
                                          //!< can delay a liquidation, never charge for it); consensus constant, not hashed
     int attestorUnlockThreshold;         //!< ATTESTOR_UNLOCK_THRESHOLD 1 (03/I-3): ... and of this unlockThreshold (UNLOCK of a YED V is
                                          //!< refused by ValidateSpend anyway); consensus constant, not hashed
+    int cancelSignersMax;                //!< CANCEL_SIGNERS_MAX 5 (regtest 3; CAN-2, cancel-limit design, owner 2026-10-13): a cancel
+                                         //!< of a YED claimant intent needs min(q + 1, this) distinct current members' CANCEL_COSIGN
+                                         //!< statements, q the vault's recent cancels; consensus constant, not hashed (03/I-3 precedent)
+    int cancelQuiet;                     //!< CANCEL_QUIET 8,064 (7 d; regtest 40; CAN-2/CAN-3): a cancel this long after the vault's
+                                         //!< last one counts from q = 0 again, and a held residual is released after it; not hashed
     int attestorLivenessMin;             //!< ATTESTOR_LIVENESS_MIN 1,152 (one day; regtest 16): the module adopts only an attestor
                                          //!< set whose livenessWindow is at least this (seats review B3, 2026-10-11)
     int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128

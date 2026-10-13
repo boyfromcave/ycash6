@@ -6,6 +6,7 @@
 #define YCASH_YELLOWBACK_BUNDLE_H
 
 #include "arith_uint256.h"
+#include "primitives/transaction.h"
 #include "pubkey.h"
 #include "uint256.h"
 #include "yellowback/attest.h"
@@ -51,6 +52,33 @@ std::vector<unsigned char> EncodeBundle(const Bundle& b);
 /** nullopt unless magic, version 1, count <= maxCount and the length is exactly 4 + 74 * count. */
 // A1: read maxCount's default from Params (BUNDLE_MAX = 6).
 std::optional<Bundle> DecodeBundle(const std::vector<unsigned char>& data, size_t maxCount = 6);
+
+/**
+ * CAN-2 + C4b (cancel-limit design §2, owner 2026-10-13): the carrier bytes of a cancel's CANCEL_COSIGN payload.
+ *
+ *   "YC" | version u8 (= 1) | count u8 | count x (priceMicroUsd u32 LE | sig 65)
+ *
+ * Each entry is one member's co-signature of the cancel and its price statement at the claim's refHeight
+ * (attest.h CancelCosignMessage; the key is recovered). 1 <= count <= CANCEL_COSIGN_MAX: seven entries are 487
+ * bytes, inside the 520-byte push the carrier's first push is.
+ */
+static const uint8_t CANCEL_COSIGN_VERSION = 1;
+static const size_t CANCEL_COSIGN_ENTRY_SIZE = 4 + 65;
+static const size_t CANCEL_COSIGN_MAX = 7;
+
+struct CancelCosignEntry
+{
+    uint32_t priceMicroUsd;
+    std::vector<unsigned char> sig;     //!< 65 bytes, recoverable
+
+    CancelCosignEntry() : priceMicroUsd(0) {}
+    bool operator==(const CancelCosignEntry& o) const { return priceMicroUsd == o.priceMicroUsd && sig == o.sig; }
+};
+
+/** Empty if count is 0 or above CANCEL_COSIGN_MAX or a signature is not 65 bytes. */
+std::vector<unsigned char> EncodeCancelCosigns(const std::vector<CancelCosignEntry>& entries);
+/** nullopt unless magic "YC", version 1, 1 <= count <= CANCEL_COSIGN_MAX and the length is exactly 4 + 69 * count. */
+std::optional<std::vector<CancelCosignEntry>> DecodeCancelCosigns(const std::vector<unsigned char>& data);
 
 /** Where a bundle rides: params.h BundleCarrier (BUNDLE_CARRIER, W2). */
 enum class BundleSource { SCRIPTSIG, OP_RETURN };
