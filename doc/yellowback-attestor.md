@@ -81,8 +81,10 @@ EJECTED and its bond frozen. The node's wallet refuses a second, different signa
 from the **sign-once record in its own `wallet.dat`** (`doc/vault-rpc.md`, "Sign once"). The seed
 does not carry it, so:
 
-- **One signing host per member key.** Never run two nodes (an HA pair, a test copy) with one member
-  key in their wallets.
+- **One wallet, on one signing host, per member key.** Never run two nodes (an HA pair, a test copy)
+  with one member key in their wallets, and never restore a `wallet.dat` by copying an old backup
+  over a live one: the node cannot detect either (an old file carries an old record and no restore
+  marker).
 - **Back up `wallet.dat` after every `set_signunlock` / `set_signcancel`** — the seed is not enough.
   A bridge attestor backs up Hawkeye's `hawkeye.db` together with the node's `wallet.dat`, as one
   unit (Hawkeye's operations runbook owns the full procedure).
@@ -90,14 +92,21 @@ does not carry it, so:
   that imported the key with `importwallet` / `z_importwallet` / `importprivkey`) signs, import the
   record: `set_listsigned` on the old wallet, or its `dumpwallet` / `z_exportwallet` dump, whose
   `vaultsetsig=` lines carry it, then `set_importsigned` (or `importwallet` / `z_importwallet` of the
-  dump) on the new one, and check it with `set_listsigned`. The node enforces this: such a wallet
-  refuses with `set-sign-restored` until the record is imported, unless a call passes
-  `{"acknowledgerestore": true}` — your statement that the key never signed a spend of that
-  outpoint.
+  dump) on the new one, check it with `set_listsigned`, and only then `set_acknowledgerestore` —
+  your confirmation that no other host or backup has signed since that history was taken. The
+  node enforces this: such a wallet (and one whose imported key joins a set later, e.g. during
+  IBD) refuses with `set-sign-restored` until the acknowledgement — importing alone never clears
+  it — unless a call passes `{"acknowledgerestore": true}`, your statement that the key never
+  signed a spend of that outpoint.
 - Re-funding is safe: set signatures are over `SIGHASH_ALL|ANYONECANPAY` and bind the template input
   and the outputs, not the fee inputs, so a spend re-funded with `vault_refee` (or returned
   re-funded by `vault_buildcancel`) has the same sighash and re-signing it is idempotent. The hazard
   is a *different* build.
+- **Broadcast cancels early and watch them.** Anyone may re-fund a signed cancel, so a wrong-price
+  claimant can broadcast a variant of it that chains on a low-fee, unconfirmed parent and pin it
+  (no replace-by-fee) until the intent's delay passes. Send a cancel as soon as it is signed,
+  directly to well-connected peers and miners, monitor its confirmation, and if it lingers re-fund
+  it from a confirmed coin with `vault_refee` and send that.
 
 ## What you are NOT asked to do
 

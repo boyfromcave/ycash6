@@ -202,7 +202,7 @@ UniValue importprivkey(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_WALLET_ERROR, "Error adding key to wallet");
         // 07/F-5: an imported vault set member key brings no sign-once history; set_signunlock/set_signcancel refuse
         // until it is imported (set_importsigned) or the call acknowledges the restore.
-        if (IsVaultSetMemberKey(pubkey) && !CWalletDB(pwalletMain->strWalletFile).WriteVaultSignRestored())
+        if (!MarkVaultKeyImported(*pwalletMain, pubkey))
             throw JSONRPCError(RPC_WALLET_ERROR, "cannot write the vault sign-once restore marker");
 
         // whenever a key is imported, we need to scan the whole chain
@@ -599,8 +599,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
     int64_t nFilesize = std::max((int64_t)1, (int64_t)file.tellg());
     file.seekg(0, file.beg);
 
-    bool fVaultHistory = false;                     // the dump carries the set sign-once history (07/F-5)
-    bool fVaultMemberKey = false;                   // a key this import added is a vault set member key
+    bool fVaultMarkFailed = false;                  // MarkVaultKeyImported could not write (07/F-5)
     std::vector<VaultSetSigRecord> vVaultSetSigs;
 
     const auto& chainparams = Params();
@@ -628,8 +627,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
         // "vaultsetsigs=<n>", "vaultsetsig=<setid>:<txid>:<n>:<role>:<sighash>", "vaultbuild=<txid>:<n>:<hex>" and
         // "vaultrecipient=<hash>:<script hex>" lines. Older nodes skip them.
         if (boost::algorithm::starts_with(vstr[0], "vaultsetsigs=")) {
-            fVaultHistory = true;
-            continue;
+            continue;                               // informative only: an import never clears the restore marker (S2)
         }
         if (boost::algorithm::starts_with(vstr[0], "vaultsetsig=")) {
             std::vector<std::string> f;
@@ -766,7 +764,7 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
             fGood = false;
             continue;
         }
-        if (IsVaultSetMemberKey(pubkey)) fVaultMemberKey = true;
+        if (!MarkVaultKeyImported(*pwalletMain, pubkey)) fVaultMarkFailed = true;
         pwalletMain->mapKeyMetadata[keyid].nCreateTime = nTime;
         if (fLabel)
             pwalletMain->SetAddressBook(keyid, strLabel, "receive");
@@ -776,14 +774,14 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
     pwalletMain->ShowProgress("", 100); // hide progress dialog in GUI
 
     // 07/F-5: the set sign-once history. A record that conflicts with this wallet's refuses the import (two signing
-    // histories for one key are never merged); a dump that carries the history (its vaultsetsigs= line) clears the
-    // restore marker; an imported member key without it sets the marker.
+    // histories for one key are never merged). An imported member key sets the restore marker (MarkVaultKeyImported,
+    // above); importing a history never clears it -- the dump may be stale (review S2): set_acknowledgerestore does.
     {
         int added = 0, present = 0;
         std::string conflict;
-        if (!ImportVaultSetSigs(*pwalletMain, vVaultSetSigs, fVaultHistory, added, present, conflict))
+        if (!ImportVaultSetSigs(*pwalletMain, vVaultSetSigs, added, present, conflict))
             throw JSONRPCError(RPC_WALLET_ERROR, conflict);
-        if (fVaultMemberKey && !fVaultHistory && !CWalletDB(pwalletMain->strWalletFile).WriteVaultSignRestored())
+        if (fVaultMarkFailed)
             throw JSONRPCError(RPC_WALLET_ERROR, "cannot write the vault sign-once restore marker");
         if (added || present) LogPrintf("Imported %d vault set sign-once records (%d already present)\n", added, present);
     }

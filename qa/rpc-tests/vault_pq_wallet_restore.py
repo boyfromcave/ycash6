@@ -27,9 +27,11 @@ a wallet re-created from the phrase holds before it rescans.
   (a) its backup on node 2 re-signs the identical hex and refuses a different build (set-sign-once);
   (b) a wallet restored from node 1's seed (-mnemonicfile) carries the restore marker: after importing the member key it
   refuses (set-sign-restored), acknowledgerestore overrides it for a vault the key never signed, and after
-  set_importsigned of node 1's set_listsigned the refusal is set-sign-once and the identical hex signs;
-  (c) z_exportwallet writes the vaultsetsig= lines, z_importwallet on a fresh wallet restores them (and clears
-  nothing it should not), and a conflicting line aborts the import.
+  set_importsigned of node 1's set_listsigned the refusal is set-sign-once and the identical hex signs; neither
+  an empty import, a stale dump nor the full history clears the marker: only set_acknowledgerestore does (S2);
+  (c) z_exportwallet writes the vaultsetsig= lines, z_importwallet on a fresh wallet restores them (the marker
+  stays set), and a conflicting line aborts the import;
+  (d) a key imported before it is a set member is pending: its SET_JOIN, when it connects, sets the marker (S3).
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_wallet_restore.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -224,6 +226,7 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         va = self.lock(sid, h + 1000, owner)
         vb = self.lock(sid, h + 1000, owner)
         addr = n0.getnewaddress()
+        stale = n1.z_exportwallet('n1stale')      # a dump taken before the member signed: its history is stale
         bu = n1.vault_buildunlock(va, [{'address': addr, 'amount': 1}])
         signed = n1.set_signunlock(bu['hex'])
         assert_equal((signed['complete'], signed['sighash']), (True, bu['sighash']))
@@ -253,12 +256,19 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         acked = n2.set_signunlock(bub['hex'], {'acknowledgerestore': True})
         assert_equal(acked['complete'], True)
         assert_equal(n2.set_listsigned()['restored'], True)                  # the override does not clear it
+        # review S2: no import clears the marker -- not an empty one, not a stale dump, not the full history
+        assert_equal(n2.set_importsigned([]), {'imported': 0, 'present': 0})
+        n2.z_importwallet(stale)
+        assert_equal(n2.set_listsigned()['restored'], True)
+        assert_raises_rpc('set-sign-restored', n2.set_signunlock, bu2['hex'])
         imp = n2.set_importsigned(listed['records'])
         assert_equal((imp['imported'], imp['present']), (1, 0))
-        assert_equal(n2.set_listsigned()['restored'], False)
-        assert_raises_rpc('set-sign-once', n2.set_signunlock, bu2['hex'])   # now the real guard
+        assert_equal(n2.set_listsigned()['restored'], True)
+        assert_raises_rpc('set-sign-once', n2.set_signunlock, bu2['hex'])   # the record is the real guard
         assert_equal(n2.set_signunlock(bu['hex'])['sighash'], bu['sighash'])
         assert_equal(n2.set_importsigned(listed['records']), {'imported': 0, 'present': 1})
+        assert_equal(n2.set_acknowledgerestore()['restored'], False)        # only the operator clears it
+        assert_equal(n2.set_listsigned()['restored'], False)
 
         print('(c) the wallet dump carries the record; a fresh wallet imports it; a conflict aborts')
         dump = n1.z_exportwallet('n1signoncedump')
@@ -272,7 +282,7 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         n2 = self.restart_node2(wipe=True)
         n2.z_importwallet(dump)
         got = n2.set_listsigned()
-        assert_equal(got, {'restored': False, 'records': [record]})
+        assert_equal(got, {'restored': True, 'records': [record]})          # the member key came in: marked (S2)
         assert_raises_rpc('set-sign-once', n2.set_signunlock, bu2['hex'])
         conflict = os.path.join(export_dir, 'conflict')
         with open(conflict, 'w') as f:
@@ -280,6 +290,19 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
             f.write('vaultsetsig=%s:%s:%s:1:%s # conflicting\n' % (sid, txid, n, '00' * 32))
         assert_raises_rpc('set-sign-once', n2.z_importwallet, conflict)
         assert_equal(n2.set_listsigned(), got)
+
+        print('(d) a key imported before it is a member: its SET_JOIN, once connected, sets the marker (S3)')
+        n2.set_acknowledgerestore()
+        new_addr = n0.getnewaddress()
+        new_key = n0.validateaddress(new_addr)['pubkey']
+        n2.importprivkey(n0.dumpprivkey(new_addr), '', False)
+        assert_equal(n2.set_listsigned()['restored'], False)                 # not a member yet: pending
+        assert_equal(n2.set_acknowledgerestore()['pendingkeys'] >= 1, True)
+        jn = n0.set_join(sid, 1, n0.getblockcount() + 1000, new_key)
+        if not jn['complete']:                     # a set with a current member admits by its signature
+            n0.set_sendact(n1.set_signact(jn['hex'], sid)['hex'])
+        self.mine(1)
+        assert_equal(n2.set_listsigned()['restored'], True)
 
 
 if __name__ == '__main__':

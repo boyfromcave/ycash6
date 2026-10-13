@@ -195,9 +195,12 @@ class VaultRpcContractTest(BitcoinTestFramework):
         listed = c.call(n, 'set_listsigned')
         assert_equal(listed['restored'], False)
         assert {'setid': setid, 'prevout': relock, 'role': 1, 'sighash': a['sighash']} in listed['records'], listed
+        assert_equal(c.call(m, 'set_importsigned', []), {'imported': 0, 'present': 0})
+        assert_equal(c.call(m, 'set_listsigned')['restored'], True)          # an empty import clears nothing (S2)
         imp = c.call(m, 'set_importsigned', listed['records'])
         assert_equal((imp['imported'], imp['present']), (len(listed['records']), 0))
-        assert_equal(c.call(m, 'set_listsigned')['restored'], False)
+        assert_equal(c.call(m, 'set_listsigned')['restored'], True)          # nor does a real one: it may be stale
+        assert_equal(c.call(m, 'set_acknowledgerestore')['restored'], False) # only the operator's acknowledgement
         c.error('set-sign-once', m, 'set_signunlock', bu_b['hex'])         # now the real guard
         assert_equal(c.call(m, 'set_signunlock', bu_a['hex'])['sighash'], a['sighash'])   # identical: idempotent
         conflict = dict(listed['records'][-1], sighash='00' * 32)

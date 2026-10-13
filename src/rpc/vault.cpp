@@ -1645,8 +1645,8 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
             // or the caller states this key never signed a spend of this outpoint.
             if (!ackRestore && walletdb.ReadVaultSignRestored())
                 throw JSONRPCError(RPC_WALLET_ERROR, "set-sign-restored: this wallet was restored or imported a member key and has no sign-once history; "
-                                                     "import it with set_importsigned (or a wallet dump), or pass {\"acknowledgerestore\": true} if this "
-                                                     "key has never signed a set spend of " + prevout.ToString());
+                                                     "import it with set_importsigned (or a wallet dump) and then set_acknowledgerestore, or pass "
+                                                     "{\"acknowledgerestore\": true} if this key has never signed a set spend of " + prevout.ToString());
             if (!walletdb.WriteVaultSetSig(setId, prevout, role, sighash))
                 throw JSONRPCError(RPC_WALLET_ERROR, "set-sign-once: cannot record the signature in the wallet; nothing was signed");
             recorded = true;
@@ -1761,8 +1761,9 @@ UniValue set_signunlock(const UniValue& params, bool fHelp)
             "UNLOCK spend, up to the set's unlockthreshold. The signatures bind the vault input and every output, not the fee\n"
             "inputs (SIGHASH_ALL|ANYONECANPAY), so build first; a re-funded build (vault_refee) keeps them valid. Sign once:\n"
             "the wallet records (setid, prevout) -> (role, sighash) before signing and refuses a different spend of the\n"
-            "prevout. A wallet restored from a seed or that imported a member key refuses (set-sign-restored) until its\n"
-            "sign-once history is imported (set_importsigned) or acknowledgerestore=true states the key never signed one.\n"
+            "prevout. A wallet restored from a seed or that imported a member key refuses (set-sign-restored) a prevout it\n"
+            "has no record for until set_acknowledgerestore (after importing its history with set_importsigned), or\n"
+            "acknowledgerestore=true states this key never signed a spend of that prevout.\n"
             "\nResult: {\"hex\", \"complete\", \"signatures\", \"required\", \"sighash\", \"setsigs\": [{\"key\",\"sig\"}]}\n"
             + HelpExampleCli("set_signunlock", "\"hex\"") + HelpExampleRpc("set_signunlock", "\"hex\""));
     EnsureWallet(fHelp);
@@ -1979,7 +1980,8 @@ UniValue set_listsigned(const UniValue& params, bool fHelp)
             "set_listsigned\n"
             "\nThe wallet's set sign-once records (07/F-5): for every (setid, prevout) its member keys signed a spend of, the\n"
             "role (1 unlock, 2 cancel) and the sighash signed. Back them up with wallet.dat (the seed does not carry them);\n"
-            "import them on a restored wallet with set_importsigned before it signs. dumpwallet / z_exportwallet write them\n"
+            "import them on a restored wallet with set_importsigned, then set_acknowledgerestore. dumpwallet / z_exportwallet\n"
+            "write them\n"
             "as vaultsetsig= lines, and \"restored\" says whether set_signunlock / set_signcancel refuse (set-sign-restored).\n"
             "\nResult: {\"restored\", \"records\": [{\"setid\", \"prevout\", \"role\", \"sighash\"}]}\n"
             + HelpExampleCli("set_listsigned", "") + HelpExampleRpc("set_listsigned", ""));
@@ -2001,9 +2003,10 @@ UniValue set_importsigned(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "set_importsigned [{\"setid\", \"prevout\", \"role\", \"sighash\"}, ...]\n"
-            "\nImport set sign-once records (07/F-5), as set_listsigned printed them on the wallet that signed, and clear the\n"
-            "restore marker. A record that differs from one this wallet holds for the same (setid, prevout) refuses the whole\n"
-            "import: two signing histories for one key are never merged silently. Identical records are skipped.\n"
+            "\nImport set sign-once records (07/F-5), as set_listsigned printed them on the wallet that signed. A record that\n"
+            "differs from one this wallet holds for the same (setid, prevout) refuses the whole import: two signing histories\n"
+            "for one key are never merged silently. Identical records are skipped. The import does NOT clear the restore\n"
+            "marker (the history may be stale): set_acknowledgerestore does, once the operator has checked it is complete.\n"
             "\nResult: {\"imported\", \"present\"}\n"
             + HelpExampleCli("set_importsigned", "'[{\"setid\":\"..\",\"prevout\":\"txid:0\",\"role\":1,\"sighash\":\"..\"}]'")
             + HelpExampleRpc("set_importsigned", "[{\"setid\":\"..\",\"prevout\":\"txid:0\",\"role\":1,\"sighash\":\"..\"}]"));
@@ -2025,11 +2028,35 @@ UniValue set_importsigned(const UniValue& params, bool fHelp)
     }
     int added = 0, present = 0;
     std::string conflict;
-    if (!ImportVaultSetSigs(*pwalletMain, recs, true, added, present, conflict))
+    if (!ImportVaultSetSigs(*pwalletMain, recs, added, present, conflict))
         throw JSONRPCError(RPC_WALLET_ERROR, conflict);
     UniValue o(UniValue::VOBJ);
     o.pushKV("imported", added);
     o.pushKV("present", present);
+    return o;
+}
+
+UniValue set_acknowledgerestore(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "set_acknowledgerestore\n"
+            "\nClear the restore marker (07/F-5, review S2): the operator confirms that this wallet's sign-once history\n"
+            "(set_listsigned) is complete -- every set signature its member keys ever made is recorded here, because no\n"
+            "other host, wallet copy or backup has signed with them since the history was taken. set_signunlock /\n"
+            "set_signcancel then sign wherever the record allows. Imports never clear the marker. Imported keys that are\n"
+            "not yet a set member stay pending: a later SET_JOIN of one sets the marker again.\n"
+            "\nResult: {\"restored\" (false), \"pendingkeys\" (imported keys still watched for a SET_JOIN)}\n"
+            + HelpExampleCli("set_acknowledgerestore", "") + HelpExampleRpc("set_acknowledgerestore", ""));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    if (walletdb.ReadVaultSignRestored() && !walletdb.EraseVaultSignRestored())
+        throw JSONRPCError(RPC_WALLET_ERROR, "cannot clear the vault sign-once restore marker");
+    LogPrintf("vault: the operator acknowledged the restore (set_acknowledgerestore): restore marker cleared\n");
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("restored", walletdb.ReadVaultSignRestored());
+    o.pushKV("pendingkeys", (int)pwalletMain->setVaultPendingKeys.size());
     return o;
 }
 
@@ -2265,6 +2292,7 @@ static const CRPCCommand commands[] =
     { "vault",   "vault_refee",         &vault_refee,          false },
     { "vault",   "set_listsigned",      &set_listsigned,       false },
     { "vault",   "set_importsigned",    &set_importsigned,     false },
+    { "vault",   "set_acknowledgerestore", &set_acknowledgerestore, false },
     { "vault",   "vault_send",          &vault_send,           false },
     { "vault",   "vault_release",       &vault_release,        false },
     { "vault",   "vault_ownerspend",    &vault_ownerspend,     false },

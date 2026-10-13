@@ -323,20 +323,29 @@ a wallet restored from its seed (`-hdseedfile`; `-mnemonicfile` on 6.20.0), a wa
 imports the member key (`importwallet`, `z_importwallet`, `importprivkey`) or a second host with
 the same key has no record: asked to sign a different spend of an outpoint the key already
 signed, it would sign, and anyone can then submit `set_equivocation` — the member is EJECTED
-and its bond frozen. The rules: **one signing host per member key; back up `wallet.dat` after
-every `set_signunlock` / `set_signcancel` (the seed is not enough); never sign on a restored
-wallet before importing the record** — `set_listsigned` on the old wallet (or its `dumpwallet` /
-`z_exportwallet` dump, whose `vaultsetsig=` lines carry it) and `set_importsigned` (or
-`importwallet` / `z_importwallet` of the dump) on the new one, then verify with
-`set_listsigned`. The node enforces the last rule: a wallet created from a seed, or one that
-imported a key that is a member of a set at the tip, carries a restore marker, and while it is
-set the sign RPCs refuse with `set-sign-restored` (`RPC_WALLET_ERROR`) instead of signing — unless
-the record for that `(setid, prevout)` is already present (idempotent re-signing), or the call
-passes `{"acknowledgerestore": true}`, the operator's statement that this key never signed a set
-spend of that outpoint. `set_importsigned` and a dump import that carries the history (its
-`vaultsetsigs=` line) clear the marker; the node logs a warning at startup while it is set and
-the wallet holds a member key. With SIGHASH_ALL|ANYONECANPAY a re-funded build has the same
-sighash, so the record stays valid across re-funding; the hazard is a *different* build.
+and its bond frozen. The rules: **a member key lives in exactly one wallet on one signing host;
+back up `wallet.dat` after every `set_signunlock` / `set_signcancel` (the seed is not enough);
+never sign on a restored wallet before importing the record and confirming it is complete** —
+`set_listsigned` on the old wallet (or its `dumpwallet` / `z_exportwallet` dump, whose
+`vaultsetsig=` lines carry it) and `set_importsigned` (or `importwallet` / `z_importwallet` of the
+dump) on the new one, check with `set_listsigned`, then `set_acknowledgerestore`.
+
+The node enforces what it can see. A wallet created from a seed, or one that imports a key that is
+a member of a set at the tip, carries a **restore marker**; a key imported while it is not (yet)
+a member — during IBD or `-reindex`, or before its `SET_JOIN` is mined — is remembered as pending,
+and when a `SET_JOIN` of it connects the marker is set then. While the marker is set the sign
+RPCs refuse with `set-sign-restored` (`RPC_WALLET_ERROR`) any `(setid, prevout)` the wallet has no
+record for, unless the call passes `{"acknowledgerestore": true}` — the operator's statement that
+this key never signed a set spend of that outpoint; a prevout with a record follows the record
+(`set-sign-once`, or idempotent re-signing). **Importing a history never clears the marker** (a
+dump may be stale: taken before the old host's last signature): only `set_acknowledgerestore`
+does, the operator's confirmation that no other host, wallet copy or backup has signed with these
+keys since the imported history was taken (review S2). The node logs a warning at startup while
+the marker is set and the wallet holds a member key. **Not protected:** a `wallet.dat` restored by
+copying the file (an old backup carries an old record and no marker) and two live wallets sharing
+a member key (an HA pair) — the node cannot tell either from the original; the
+one-wallet-per-key rule is the only defence. With SIGHASH_ALL|ANYONECANPAY a re-funded build has
+the same sighash, so the record stays valid across re-funding; the hazard is a *different* build.
 
 ### `vault_buildcancel "intentoutpoint" ( rebuild )`
 Params: `["intentoutpoint": outpoint, "rebuild"?: bool]`
@@ -389,6 +398,12 @@ re-funded spend chains on in the mempool. The fee never comes from the vault's v
 I-2). The new input is unsigned and locked; `vault_send` on this node signs it. When this wallet built the spend, its remembered build
 follows the re-funded transaction. Re-funding changes the txid (third-party malleability by
 input replacement, as the selector case 01/V-4).
+**Pinning (review S1):** because anyone may re-fund, a third party can also broadcast its own
+variant of a signed spend first — for example a wrong-price claimant re-funding the attestors'
+cancel from a low-fee, unconfirmed parent — and without replace-by-fee the first variant a node
+sees is the one it keeps, possibly until the intent's `delay` has passed. Cancel signers should
+broadcast a cancel early, send it directly to well-connected peers and miners, and watch it
+confirm; if it lingers, re-fund it with `vault_refee` from a confirmed coin and send that.
 
 ### `set_listsigned`
 Params: `[]`
@@ -406,12 +421,23 @@ Params: `["records": [{"setid": hash, "prevout": outpoint, "role": int, "sighash
 
 Result: `{"imported": int, "present": int}`
 
-Imports sign-once records as `set_listsigned` printed them on the wallet that signed, then clears
-the restore marker. A record that differs from one this wallet holds for the same `(setid,
-prevout)` refuses the whole import (`set-sign-once`, nothing imported): two signing histories for
-one key are never merged silently. Identical records count as `present`. Importing a dump with
-`importwallet` / `z_importwallet` applies the same rule to its `vaultsetsig=` lines. There is no
-RPC that deletes a record.
+Imports sign-once records as `set_listsigned` printed them on the wallet that signed. A record
+that differs from one this wallet holds for the same `(setid, prevout)` refuses the whole import
+(`set-sign-once`, nothing imported): two signing histories for one key are never merged
+silently. Identical records count as `present`. Importing a dump with `importwallet` /
+`z_importwallet` applies the same rule to its `vaultsetsig=` lines. Neither clears the restore
+marker (an imported history may be stale); `set_acknowledgerestore` does. There is no RPC that
+deletes a record.
+
+### `set_acknowledgerestore`
+Params: `[]`
+
+Result: `{"restored": bool, "pendingkeys": int}`
+
+Clears the restore marker: the operator confirms that the wallet's sign-once history
+(`set_listsigned`) is complete — no other host, wallet copy or backup has signed with its member
+keys since that history was taken. `restored` is then false; `pendingkeys` counts imported keys
+still watched for a `SET_JOIN` (one connecting sets the marker again).
 
 ### `vault_send "hex"`
 Params: `["hex": hex]`

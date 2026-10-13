@@ -293,6 +293,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "vault_refee",                 {{s}, {}} },
     { "set_listsigned",              {{}, {}} },
     { "set_importsigned",            {{o}, {}} },
+    { "set_acknowledgerestore",      {{}, {}} },
     { "vault_send",                  {{s}, {}} },
     { "vault_release",               {{s}, {s}} },
     { "vault_ownerspend",            {{s, s}, {}} },

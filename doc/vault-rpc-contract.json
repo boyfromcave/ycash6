@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "498bf759acf3b55aa5a918937ede3705a464d94d429196e095b19ca041f69f29"
+    "sha256": "c32240dc4b8bfd1ff0b56348e306ea9aa57c4584501c670d97f218f29aa89c6c"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2155,6 +2155,23 @@
             "type": "int"
           },
           "present": {
+            "type": "int"
+          }
+        },
+        "optional": []
+      }
+    },
+    "set_acknowledgerestore": {
+      "wallet": true,
+      "signature": "set_acknowledgerestore",
+      "params": [],
+      "result": {
+        "type": "object",
+        "fields": {
+          "restored": {
+            "type": "bool"
+          },
+          "pendingkeys": {
             "type": "int"
           }
         },

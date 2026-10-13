@@ -1816,6 +1816,10 @@ public:
     std::map<uint256, CScript> mapVaultRecipients;
     //! Remember a loaded vault build and lock its fee inputs (every input but the template input).
     void LoadVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx);
+    //! Imported keys not yet a vault set member when imported ("vaultpendingkey", S3).
+    std::set<CKeyID> setVaultPendingKeys;
+    //! S3: a SET_JOIN of a pending imported key in a connected block sets the restore marker (07/F-5).
+    void VaultCheckJoins(const CTransaction& tx, const CBlock* pblock);
 
     std::map<uint256, std::vector<RecipientMapping>> sendRecipients;
 
@@ -2766,8 +2770,13 @@ bool IsVaultSetMemberKey(const CPubKey& key);
 bool WalletHoldsVaultMemberKey(const CWallet& wallet);
 /** Import set sign-once records (07/F-5: set_importsigned, a wallet dump's vaultsetsig= lines). A record that differs
  *  from one the wallet holds for the same (setId, prevout) refuses the whole import (conflict names it); identical
- *  ones are skipped. When clearRestored, the restore marker is erased after the import. */
-bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, bool clearRestored, int& added,
-                        int& present, std::string& conflict);
+ *  ones are skipped. An import never clears the restore marker: an imported history may be stale or incomplete
+ *  (review S2); only set_acknowledgerestore does. */
+bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, int& added, int& present,
+                        std::string& conflict);
+/** A key was imported (importprivkey, importwallet, z_importwallet; 07/F-5, S3): a member of a set at the tip sets the
+ *  restore marker now; any other key is remembered as pending, and a later SET_JOIN of it in a connected block (IBD,
+ *  reindex, a join not yet mined) sets the marker then. False when the wallet database cannot be written. */
+bool MarkVaultKeyImported(CWallet& wallet, const CPubKey& key);
 
 #endif // BITCOIN_WALLET_WALLET_H
