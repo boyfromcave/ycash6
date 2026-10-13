@@ -331,6 +331,12 @@ mint lives only in `wallet.dat`. **Back up `wallet.dat` after every mint.** Wall
 Ycash is experimental; protect the file with full-disk encryption, keep RPC on localhost and hold an
 offline copy.
 
+On an encrypted wallet the post-quantum keys are stored as encrypted seeds; rebuilding one is a full key
+generation (~90 ms for an SLH-DSA owner key, ~12 ms for a Falcon key). The wallet keeps each key it rebuilds in
+memory until `walletlock` (or the `walletpassphrase` timeout) locks it again, so only the first signature or
+export of a key per unlock pays that cost (audit 02/PQ-4). The first unlock of a wallet created before the
+PQ lookahead record (`pqissued`) derives every PQ key it holds once.
+
 ## History
 
 Earlier designs: Yellowback began as a federation prototype, being replaced from 2026-09-10 by a

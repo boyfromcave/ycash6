@@ -21,6 +21,7 @@
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
+#include "util/time.h"
 #include "vault/template.h"
 #include "wallet/crypter.h"
 #include "wallet/db.h"
@@ -236,6 +237,61 @@ BOOST_AUTO_TEST_CASE(crypto_keystore)
     BOOST_CHECK(!ks.Unlock(MasterKey(0x43)));
     BOOST_CHECK(ks.Unlock(mk));
     BOOST_CHECK(ks.GetPQKey(a.GetID(), out) && out == a);
+}
+
+BOOST_AUTO_TEST_CASE(crypto_keystore_decrypt_cache)
+{
+    // Audit 02/PQ-4: an encrypted, unlocked store rebuilds a PQ key (pq::KeyGen) once per unlock, then
+    // serves it from mapDecryptedPQKeys; Lock() clears the cache; a re-added record is never served stale.
+    TestCryptoKeyStore ks;
+    const CPQKey a = Derived(1, 0), b = Derived(2, 0), c = Derived(2, 1);
+    BOOST_REQUIRE(ks.AddPQKey(a) && ks.AddPQKey(b) && ks.AddPQKey(c));
+    CKeyingMaterial mk = MasterKey(0x42);
+    BOOST_REQUIRE(ks.EncryptKeys(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    // the first unlock checks every key and keeps the keys it rebuilt
+    BOOST_REQUIRE(ks.Unlock(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), 3U);
+    // (b) locked: the cache is empty and no secret is served
+    BOOST_REQUIRE(ks.Lock());
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    CPQKey out;
+    BOOST_CHECK(!ks.GetPQKey(a.GetID(), out));
+    BOOST_CHECK(!ks.GetPQKey(b.GetID(), out));
+    // (c) a wrong master key leaves the cache empty
+    BOOST_CHECK(!ks.Unlock(MasterKey(0x43)));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    // a thoroughly-checked unlock rebuilds one key, which it keeps
+    BOOST_REQUIRE(ks.Unlock(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 1U);
+    const uint64_t before = ks.PQKeyDecryptCount();
+    // (a) the first GetPQKey of each key rebuilds it (two of three: one came with the unlock), the second
+    // is served from the cache: equal keys, no further decryption
+    for (const CPQKey* k : {&a, &b, &c}) {
+        CPQKey first, second;
+        BOOST_CHECK(ks.GetPQKey(k->GetID(), first) && first == *k);
+        BOOST_CHECK(ks.GetPQKey(k->GetID(), second) && second == *k && first == second);
+    }
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 2);
+    const int64_t t0 = GetTimeMicros();
+    BOOST_CHECK(ks.GetPQKey(a.GetID(), out) && out == a);
+    BOOST_TEST_MESSAGE("cached GetPQKey (SLH-DSA): " << (GetTimeMicros() - t0) << " us");
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 2);
+    // (d) a key added while unlocked is served; re-adding a record drops its cached copy
+    const CPQKey d = Derived(2, 2);
+    BOOST_REQUIRE(ks.AddPQKey(d));
+    BOOST_CHECK(ks.GetPQKey(d.GetID(), out) && out == d);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 3);
+    BOOST_REQUIRE(ks.AddPQKey(b));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK(ks.GetPQKey(b.GetID(), out) && out == b);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 4);
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 4U);
+    BOOST_REQUIRE(ks.Lock());
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    BOOST_CHECK(!ks.GetPQKey(d.GetID(), out));
 }
 
 BOOST_AUTO_TEST_CASE(pqpkh_sign_and_size)
