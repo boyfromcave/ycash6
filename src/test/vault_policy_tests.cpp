@@ -25,11 +25,15 @@
 #include "vault/state.h"
 #include "vault/template.h"
 
+#include <functional>
+
 #include <boost/test/unit_test.hpp>
 
 // AcceptToMemoryPool's DoS classification of a failed template-input script check (main.cpp, audit 07/F-1).
 extern std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const CCoinsViewCache& view);
 extern bool IsVaultSetStateScriptError(const CScript& templateScriptSig, ScriptError err);
+extern bool VaultTemplateFailsOnSetState(const CScript& templateScriptSig, uint32_t consensusBranchId,
+                                         uint32_t prevConsensusBranchId, const std::function<ScriptError(uint32_t)>& run);
 
 using namespace vault;
 
@@ -546,6 +550,45 @@ BOOST_AUTO_TEST_CASE(mempool_set_state_failure_classification)
         for (const CScript* ss : {&sel1, &sel2, &sel3})
             BOOST_CHECK_MESSAGE(!IsVaultSetStateScriptError(*ss, e), ScriptErrorString(e));
     }
+}
+
+// The isolated check keeps the stock old-consensus-branch-id diagnosis (review of the 07/F-1 integration): a
+// set-state error that disappears under the previous epoch's branch ID takes the stock route (false); the check
+// runs at most twice, and only once for an error that is not set-state-dependent.
+BOOST_AUTO_TEST_CASE(mempool_set_state_previous_branch)
+{
+    const uint32_t cur = 0x6d5b7a31, prev = 0xe9ff75a6;
+    const CScript sel1 = CScript() << valtype(65, 9) << OP_1;
+    const CScript sel3 = CScript() << valtype(64, 7) << OP_1 << valtype(32, 8) << OP_1 << OP_3;
+    std::vector<uint32_t> calls;
+    auto runner = [&calls](ScriptError atCur, ScriptError atPrev) {
+        return [&calls, atCur, atPrev, cur = 0x6d5b7a31u](uint32_t b) { calls.push_back(b); return b == cur ? atCur : atPrev; };
+    };
+    // set signatures made for the previous epoch: stock route (ContextualCheckInputs answers DoS 10)
+    calls.clear();
+    BOOST_CHECK(!VaultTemplateFailsOnSetState(sel1, cur, prev, runner(SCRIPT_ERR_SETSIG, SCRIPT_ERR_OK)));
+    BOOST_CHECK(calls == std::vector<uint32_t>({cur, prev}));
+    // a set-state failure under both branch IDs: DoS 0
+    calls.clear();
+    BOOST_CHECK(VaultTemplateFailsOnSetState(sel1, cur, prev, runner(SCRIPT_ERR_SETSIG, SCRIPT_ERR_SETSIG)));
+    BOOST_CHECK_EQUAL(calls.size(), 2U);
+    calls.clear();
+    BOOST_CHECK(VaultTemplateFailsOnSetState(sel3, cur, prev, runner(SCRIPT_ERR_VERIFY, SCRIPT_ERR_VERIFY)));
+    // ... whatever else the previous branch ID yields
+    BOOST_CHECK(VaultTemplateFailsOnSetState(sel1, cur, prev, runner(SCRIPT_ERR_SETSIG, SCRIPT_ERR_EVAL_FALSE)));
+    // no previous epoch (prev == cur): one run
+    calls.clear();
+    BOOST_CHECK(VaultTemplateFailsOnSetState(sel1, cur, cur, runner(SCRIPT_ERR_SETSIG, SCRIPT_ERR_OK)));
+    BOOST_CHECK_EQUAL(calls.size(), 1U);
+    // success or a state-independent error: one run, stock route
+    for (ScriptError e : {SCRIPT_ERR_OK, SCRIPT_ERR_EVAL_FALSE, SCRIPT_ERR_SETSIG_COUNT}) {
+        calls.clear();
+        BOOST_CHECK(!VaultTemplateFailsOnSetState(sel1, cur, prev, runner(e, SCRIPT_ERR_OK)));
+        BOOST_CHECK_EQUAL(calls.size(), 1U);
+    }
+    calls.clear();
+    BOOST_CHECK(!VaultTemplateFailsOnSetState(sel1, cur, prev, runner(SCRIPT_ERR_VERIFY, SCRIPT_ERR_OK)));   // VERIFY needs selector 3
+    BOOST_CHECK_EQUAL(calls.size(), 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
