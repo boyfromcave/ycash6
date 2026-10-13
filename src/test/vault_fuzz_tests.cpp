@@ -6,10 +6,13 @@
 // crashes/ directory, through the fuzz target's body (src/test/vault_fuzz_harness.h), so
 // `make check` covers them without a fuzzing build. The table between the markers is written by
 // src/test/gen_vault_corpus.py (--write) and compared with the input/ files by its --check.
+// Likewise src/fuzzing/PQScript (gen_pq_corpus.py) and src/fuzzing/VaultState, the state rules
+// (src/test/vault_state_fuzz_harness.h, gen_vault_state_corpus.py).
 
 #include "test/test_bitcoin.h"
 #include "test/pq_fuzz_harness.h"
 #include "test/vault_fuzz_harness.h"
+#include "test/vault_state_fuzz_harness.h"
 #include "tinyformat.h"
 #include "util/strencodings.h"
 
@@ -110,6 +113,82 @@ static const std::vector<std::pair<std::string, std::string>> PQ_CRASHES = {
 };
 // END GENERATED PQ CORPUS
 
+// BEGIN GENERATED VAULT STATE CORPUS (src/test/gen_vault_state_corpus.py; do not edit by hand)
+static const std::vector<std::pair<std::string, std::string>> VAULT_STATE_CORPUS = {
+    {"base_only", "0301000100310204"},
+    {"empty", ""},
+    {"one_byte", "07"},
+    {"join_heartbeat", "03010001003102040200020064000a00000303000202"},
+    {"heartbeat_immature", "03010001003102040200020064000a0003000202"},
+    {"heartbeat_other_signer", "030100010031020403000001"},
+    {"join_wrong_prevout", "03010001003102040200030064000a04"},
+    {"join_bad_vout", "03010001003102040200030064000a02"},
+    {"join_bond_below_min", "03010001003102040200030001000a00"},
+    {"join_twice", "03010001003102040200030064000a000200030064000a00"},
+    {"join_seats_full", "00010001003102040200030064000a00"},
+    {"create_then_join", "03010001003102040103020102000a321100000201040064000a00"},
+    {"create_invalid", "03010001003102040100010101000a32210103040101000a3221010301010100003221"},
+    {"create_stray_sig", "03010001003102040103020102000a3223"},
+    {"create_closed_join", "03010001003102040103020102000a322000000201040064000a000201050064000a01"},
+    {"winddown", "030100010031020404000300000200030064000a00040003"},
+    {"winddown_short", "0301000100310204040001"},
+    {"remove_burn", "03010001003102040500010103"},
+    {"remove_self", "03010001003102040500010002"},
+    {"remove_burn_2", "03010001003102040500010203"},
+    {"equivocation", "030100010031020409000000000900000000"},
+    {"equivocation_same", "03010001003102040900010001"},
+    {"equivocation_other_key", "03010001003102040900010002"},
+    {"equivocation_nonmember", "03010001003102040900050000"},
+    {"bond_locked", "0301000100310204080000"},
+    {"bond_exit", "030100010031020405000100020003080101"},
+    {"bond_frozen", "030100010031020409000000000009080000"},
+    {"lock", "030100010031020406000005000000c2eb0b"},
+    {"lock_two", "030100010031020406040005000000c2eb0b"},
+    {"lock_yed", "030100010031020406010005000000c2eb0b"},
+    {"lock_other_tag", "030100010031020406030005000000c2eb0b"},
+    {"lock_malformed", "030100010031020406080005000008000000"},
+    {"lock_byte_flipped", "030100010031020406080005000007000000"},
+    {"lock_cancel_set", "03010001003102040103020102000a3221000006300005000000c2eb0b"},
+    {"lock_new_set_same_block", "03010001003102040103020102000a322106000105000000c2eb0b"},
+    {"lock_delay_zero", "030100010031020406000000000000c2eb0b"},
+    {"unlock_release", "03010001003102040700010300a3e11100050700010800000000"},
+    {"unlock_cancel", "03010001003102040700010300a3e1110700021000000000"},
+    {"unlock_cancel_late", "03010001003102040700010300a3e11100090700021000000000"},
+    {"unlock_whole", "03010001003102040700010100ca9a3b00020700030400000000"},
+    {"unlock_short", "03010001003102040700010300a3e1110701010100e1f505"},
+    {"unlock_value", "03010001003102040700010100e1f505"},
+    {"unlock_other_v", "03010001003102040700010b00e1f505"},
+    {"owner_spend_other_v", "0301000100310204070002080084d717"},
+    {"unlock_plain_out", "03010001003102040700010500ca9a3b"},
+    {"unlock_two_templates", "030100010031020406000005000000c2eb0b0700012300e1f505"},
+    {"unlock_fee_input", "03010001003102040700014300e1f505"},
+    {"unlock_over_value", "030100010031020407000103ffffffff"},
+    {"rate_limit", "03010001193102040700010300a3e1110700010380f0fa02"},
+    {"rate_limit_epoch", "03010001190402040700010380f0fa0200090701010380f0fa02"},
+    {"owner_spend", "03010001003102040700020400000000"},
+    {"released_spend", "03010001003102040700034400000000"},
+    {"selector_0_5", "030100010031020407000004000000000700050400000000"},
+    {"app_without_height", "03010001003102040700040300e1f505"},
+    {"app_branch", "030100010031020406000005000900c2eb0b00000701040300e1f505"},
+    {"intent_without_unlock", "03010001003102040700020100e1f505"},
+    {"intent_selector_4", "03010001003102040700010300a3e1110700040800000000"},
+    {"intent_released", "03010001003102040700010300a3e11100010700030400000000"},
+    {"release_unpaid", "03010001003102040700010300a3e11100050700010400000000"},
+    {"long_walk", "03010001003102040200020064000a000700010300c2eb0b000403000202070001080000000006000005000000e1f505000105000200030700010340787d010014040003003c0700030400000000"},
+};
+static const std::vector<std::pair<std::string, std::string>> VAULT_STATE_CRASHES = {
+};
+// END GENERATED VAULT STATE CORPUS
+
+/** Reject reasons the VaultState seeds must keep reaching (a seed that silently stops testing its rule fails). */
+static const char* const VAULT_STATE_REASONS_REACHED[] = {
+    "bad-txns-vault-rate", "bad-txns-vault-app", "bad-txns-vault-malformed", "bad-txns-vault-multi",
+    "bad-txns-vault-covenant", "bad-txns-vault-value", "bad-txns-vault-intent", "bad-txns-vault-release",
+    "bad-txns-vault-cancel", "bad-txns-vault-selector", "bad-txns-vault-noset", "bad-vault-bond-locked",
+    "bad-vault-act-params", "bad-vault-act-sig", "bad-vault-act-heartbeat", "bad-vault-act-join",
+    "bad-vault-act-equivocation", "bad-vault-act-winddown", "bad-vault-act-sigs",
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(vault_fuzz_tests, BasicTestingSetup)
@@ -159,6 +238,38 @@ BOOST_AUTO_TEST_CASE(pq_corpus_replay)
         BOOST_REQUIRE_NO_THROW(rc = pq_fuzz::RunPQScript(ParseHex(e.second)));
         BOOST_CHECK_MESSAGE(rc == 0, "crash:" + e.first);
     }
+}
+
+// The state rules (ApplyTx / ApplyBlock, undo, the state hash) against the harness's invariants:
+// src/fuzzing/VaultState (01/T-5).
+BOOST_AUTO_TEST_CASE(vault_state_corpus_replay)
+{
+    BOOST_CHECK(!VAULT_STATE_CORPUS.empty());
+    vault_state_fuzz::Stats all;
+    for (const auto& e : VAULT_STATE_CORPUS) {
+        int rc = -99;
+        vault_state_fuzz::Stats st;
+        BOOST_REQUIRE_NO_THROW(rc = vault_state_fuzz::RunVaultState(ParseHex(e.second), &st));
+        BOOST_CHECK_MESSAGE(rc == 0, e.first + strprintf(": property %d violated", -rc));
+        all.accepted += st.accepted;
+        all.refused += st.refused;
+        all.blocks += st.blocks;
+        all.reasons.insert(st.reasons.begin(), st.reasons.end());
+    }
+    // The seeds reach the accepting paths and the rules' refusals (gen_vault_state_corpus.py names them).
+    BOOST_TEST_MESSAGE(strprintf("vault state corpus: %d accepted, %d refused, %d blocks, %d reasons", all.accepted, all.refused, all.blocks, all.reasons.size()));
+    BOOST_CHECK(all.accepted >= 40);
+    for (const char* reason : VAULT_STATE_REASONS_REACHED) {
+        BOOST_CHECK_MESSAGE(all.reasons.count(reason), std::string("the corpus no longer reaches ") + reason);
+    }
+    for (const auto& e : VAULT_STATE_CRASHES) {
+        int rc = -99;
+        BOOST_REQUIRE_NO_THROW(rc = vault_state_fuzz::RunVaultState(ParseHex(e.second)));
+        BOOST_CHECK_MESSAGE(rc == 0, "crash:" + e.first + strprintf(": property %d violated", -rc));
+    }
+    // A known reason is still enforced as the set of the rules' reasons (property -2).
+    BOOST_CHECK(vault_state_fuzz::KnownReason("bad-txns-vault-rate"));
+    BOOST_CHECK(!vault_state_fuzz::KnownReason("bad-txns-vault-unheard-of"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
