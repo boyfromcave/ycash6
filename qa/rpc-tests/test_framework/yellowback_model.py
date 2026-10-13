@@ -3763,6 +3763,8 @@ def replay_golden(doc):
     params = Params.regtest(int(p['startHeight']), int(p['sigmaRefBps']), int(p['supplyCapBps']), p['attestorSetId'],
                             int(p.get('attestArmMin', 3)), int(p.get('bundleCarrier', CARRIER_SCRIPTSIG)),
                             bool(p.get('mintRequiresArmed', False)))
+    if p.get('pqFalconHeight') is not None:
+        params.pq_falcon_height = int(p['pqFalconHeight'])     # TOK-PQ from this height (not hashed, quantum spec section 3.4)
     model = YellowbackModel(params)
     for b in doc['blocks']:
         txs = [tx_from_hex(h) for h in b['txs']]
