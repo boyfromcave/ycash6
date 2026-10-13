@@ -1635,8 +1635,8 @@ impl CancelAgent {
         std::mem::take(&mut self.announces_out)
     }
 
-    /// What a self-introduction at height `tip` is verified against (review N-A): this agent's network, set, TTL and
-    /// current members.
+    /// What a self-introduction at height `tip` is verified against (review N-A): this agent's network, set, TTL,
+    /// current members, and the `issued` height of the binding held per seat.
     pub fn intro_ctx(&self, tip: u32) -> crate::direct::IntroCtx {
         crate::direct::IntroCtx {
             network: self.network.clone(),
@@ -1644,6 +1644,13 @@ impl CancelAgent {
             tip,
             ttl: self.cfg.binding_ttl_blocks,
             members: self.view.members.clone(),
+            held: self
+                .state
+                .bindings
+                .by_seq
+                .iter()
+                .map(|(seq, h)| (*seq, h.statement.issued))
+                .collect(),
         }
     }
 
@@ -3894,6 +3901,8 @@ mod tests {
         a.take_binding(valid(2, 9, h));
         a.tick(h).await;
         assert!(a.state.bindings.by_seq.contains_key(&2));
+        // the held binding's height goes to the self-introduction check (review 5, note 3)
+        assert_eq!(a.intro_ctx(h).held.get(&2), Some(&h));
         let _ = a.take_announces();
         a.tick(h + 1).await;
         assert!(!a.take_announces().is_empty(), "announced at once to the new member");

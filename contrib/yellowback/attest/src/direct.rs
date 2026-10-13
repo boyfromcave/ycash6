@@ -20,7 +20,7 @@
 //!   a cached connection (dialled by id with the address hints of its binding), on a fresh uni stream.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -40,11 +40,19 @@ pub const KIND_ANNOUNCE: u8 = 0x02;
 pub const KIND_INTRO: u8 = 0x03;
 /// An unbound connection must introduce itself within this.
 pub const INTRO_DEADLINE: Duration = Duration::from_secs(3);
-/// Self-introductions per source address: a burst, then one per this many seconds ...
+/// Self-introductions per source -- an IPv4 address, an IPv6 /64, or for a relay arrival its endpoint id (the relay
+/// URL is shared by everyone behind it) -- a burst, then one per this many seconds ...
 pub const INTRO_SOURCE_BURST: f64 = 4.0;
 pub const INTRO_SOURCE_SECONDS: f64 = 10.0;
-/// ... and at most this many unverified connections at once, whatever the source.
-pub const INTRO_PENDING_MAX: usize = 16;
+/// ... relay arrivals together under a ceiling (endpoint ids cost nothing to mint) ...
+pub const INTRO_RELAY_BURST: f64 = 200.0;
+pub const INTRO_RELAY_PER_SECOND: f64 = 50.0;
+/// ... every self-introduction under a global one ...
+pub const INTRO_GLOBAL_BURST: f64 = 400.0;
+pub const INTRO_GLOBAL_PER_SECOND: f64 = 100.0;
+/// ... and at most this many unverified connections held at once, counted until each verifies or closes; a new one
+/// past it evicts (closes) the oldest, so holding connections open cannot shut newcomers out (review 5, note 2).
+pub const INTRO_PENDING_MAX: usize = 64;
 /// A verified self-introduction stands in for the binding this long, until the agent has taken it into its table.
 pub const INTRO_VERIFIED_FOR: Duration = Duration::from_secs(120);
 /// A stream is at most this long (an announce is at most 1,024 bytes).
@@ -90,6 +98,79 @@ pub struct IntroCtx {
     pub tip: u32,
     pub ttl: u32,
     pub members: BTreeMap<u16, [u8; 33]>,
+    /// The `issued` height of the binding held per seat: an introduction with an older binding is refused, so an
+    /// endpoint key retired by a rotation cannot introduce itself again (review 5, note 3).
+    pub held: BTreeMap<u16, u32>,
+}
+
+/// Where a self-introduction came from, as the limiter keys it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// An IPv4 address, or an IPv6 /64 (`ip6:<first four groups>::/64`).
+    Ip(String),
+    /// By a relay: keyed by the arriving endpoint id, under the relay ceiling.
+    Relay(EndpointId),
+}
+
+impl Source {
+    pub fn of(addr: Option<&TransportAddr>, id: EndpointId) -> Source {
+        match addr {
+            Some(TransportAddr::Ip(a)) => Source::Ip(ip_key(a.ip())),
+            Some(TransportAddr::Relay(_)) => Source::Relay(id),
+            _ => Source::Ip("unknown".to_string()),
+        }
+    }
+
+    fn key(&self) -> String {
+        match self {
+            Source::Ip(k) => k.clone(),
+            Source::Relay(id) => format!("relay:{id}"),
+        }
+    }
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Ip(k) => write!(f, "{k}"),
+            Source::Relay(id) => write!(f, "a relay (endpoint {})", id.fmt_short()),
+        }
+    }
+}
+
+/// An IPv4 address as is (an IPv4-mapped IPv6 one too); an IPv6 address by its /64.
+pub fn ip_key(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let g = v6.segments();
+                format!("ip6:{:x}:{:x}:{:x}:{:x}::/64", g[0], g[1], g[2], g[3])
+            }
+        },
+    }
+}
+
+/// Refill a token bucket of `burst` at `per_second` to `now`.
+fn refill(q: &mut Quota, burst: f64, per_second: f64, now: Instant) {
+    let elapsed = now.saturating_duration_since(q.1).as_secs_f64();
+    q.0 = (q.0 + elapsed * per_second).min(burst);
+    q.1 = now;
+}
+
+#[derive(Debug)]
+struct Pending {
+    since: Instant,
+    generation: u64,
+    evict: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Debug)]
+struct Limits {
+    sources: HashMap<String, Quota>,
+    relay: Quota,
+    global: Quota,
 }
 
 /// Self-introduction state shared by the gate and the handler (review N-A): the view, the connections admitted
@@ -97,9 +178,28 @@ pub struct IntroCtx {
 #[derive(Debug, Default)]
 pub struct Intro {
     ctx: RwLock<Option<IntroCtx>>,
-    pending: Mutex<HashMap<EndpointId, Instant>>,
+    pending: Mutex<(u64, HashMap<EndpointId, Pending>)>,
     verified: Mutex<HashMap<EndpointId, (u16, Instant)>>,
-    sources: Mutex<HashMap<String, Quota>>,
+    limits: Mutex<Option<Limits>>,
+}
+
+/// An unverified connection's place in the pending table, released when the handler is done with it (verified or
+/// refused) -- and only its own entry, should the same id have been admitted again since.
+pub struct PendingGuard<'a> {
+    intro: &'a Intro,
+    id: EndpointId,
+    generation: u64,
+    pub evict: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut p) = self.intro.pending.lock() {
+            if p.1.get(&self.id).is_some_and(|e| e.generation == self.generation) {
+                p.1.remove(&self.id);
+            }
+        }
+    }
 }
 
 impl Intro {
@@ -109,36 +209,69 @@ impl Intro {
         }
     }
 
-    /// Admit `id` from `source` unverified: a view exists, fewer than INTRO_PENDING_MAX wait, the source has a token.
-    pub fn admit(&self, id: EndpointId, source: &str, now: Instant) -> bool {
+    /// Admit `id` from `source` unverified: a view exists, and the source's bucket, the relay ceiling (a relay
+    /// arrival) and the global ceiling each have a token -- all checked before any is spent. A full pending table
+    /// evicts its oldest entry.
+    pub fn admit(&self, id: EndpointId, source: &Source, now: Instant) -> bool {
         if self.ctx.read().map(|c| c.is_none()).unwrap_or(true) {
             return false;
         }
-        let Ok(mut pending) = self.pending.lock() else {
+        let Ok(mut limits) = self.limits.lock() else {
             return false;
         };
-        pending.retain(|_, t| now.saturating_duration_since(*t) < INTRO_DEADLINE * 2);
-        if pending.len() >= INTRO_PENDING_MAX {
-            return false;
+        let l = limits.get_or_insert_with(|| Limits {
+            sources: HashMap::new(),
+            relay: Quota(INTRO_RELAY_BURST, now),
+            global: Quota(INTRO_GLOBAL_BURST, now),
+        });
+        if l.sources.len() > 4_096 {
+            l.sources.retain(|_, q| {
+                now.saturating_duration_since(q.1).as_secs_f64() < INTRO_SOURCE_SECONDS * INTRO_SOURCE_BURST
+            });
         }
-        let Ok(mut sources) = self.sources.lock() else {
-            return false;
-        };
-        if sources.len() > 4_096 {
-            sources.retain(|_, q| now.saturating_duration_since(q.1).as_secs_f64() < INTRO_SOURCE_SECONDS * 10.0);
-        }
-        let q = sources
-            .entry(source.to_string())
-            .or_insert(Quota(INTRO_SOURCE_BURST, now));
-        let elapsed = now.saturating_duration_since(q.1).as_secs_f64();
-        q.0 = (q.0 + elapsed / INTRO_SOURCE_SECONDS).min(INTRO_SOURCE_BURST);
-        q.1 = now;
-        if q.0 < 1.0 {
+        let relay = matches!(source, Source::Relay(_));
+        refill(&mut l.global, INTRO_GLOBAL_BURST, INTRO_GLOBAL_PER_SECOND, now);
+        refill(&mut l.relay, INTRO_RELAY_BURST, INTRO_RELAY_PER_SECOND, now);
+        let q = l.sources.entry(source.key()).or_insert(Quota(INTRO_SOURCE_BURST, now));
+        refill(q, INTRO_SOURCE_BURST, 1.0 / INTRO_SOURCE_SECONDS, now);
+        if q.0 < 1.0 || l.global.0 < 1.0 || (relay && l.relay.0 < 1.0) {
             return false;
         }
         q.0 -= 1.0;
-        pending.insert(id, now);
+        l.global.0 -= 1.0;
+        if relay {
+            l.relay.0 -= 1.0;
+        }
+        drop(limits);
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        let (generation, table) = &mut *pending;
+        // an entry whose handler never ran (the connection died before it) is stale after twice the deadline
+        table.retain(|_, e| now.saturating_duration_since(e.since) < INTRO_DEADLINE * 2);
+        if table.len() >= INTRO_PENDING_MAX {
+            if let Some(oldest) = table.iter().min_by_key(|(_, e)| e.since).map(|(k, _)| *k) {
+                if let Some(e) = table.remove(&oldest) {
+                    e.evict.notify_one();
+                }
+            }
+        }
+        *generation += 1;
+        table.insert(
+            id,
+            Pending {
+                since: now,
+                generation: *generation,
+                evict: Arc::new(tokio::sync::Notify::new()),
+            },
+        );
         true
+    }
+
+    /// Unverified connections held now.
+    #[cfg(test)]
+    pub fn pending_len(&self) -> usize {
+        self.pending.lock().map(|p| p.1.len()).unwrap_or(0)
     }
 
     /// The seat of a connection admitted by a verified self-introduction within INTRO_VERIFIED_FOR.
@@ -148,32 +281,43 @@ impl Intro {
         v.get(id).map(|(seq, _)| *seq)
     }
 
-    fn take_pending(&self, id: &EndpointId) -> bool {
-        self.pending.lock().map(|mut p| p.remove(id).is_some()).unwrap_or(false)
+    /// The pending entry of `id`, held (counted) until the guard drops.
+    fn hold_pending(&self, id: &EndpointId) -> Option<PendingGuard<'_>> {
+        let p = self.pending.lock().ok()?;
+        let e = p.1.get(id)?;
+        Some(PendingGuard {
+            intro: self,
+            id: *id,
+            generation: e.generation,
+            evict: e.evict.clone(),
+        })
     }
 
     /// Verify a self-introduction from `remote`: a valid binding of a current member's seat to exactly this
-    /// endpoint id, with its proof of possession (one recovery, once per connection). The seat on success.
+    /// endpoint id, with its proof of possession (one recovery, once per connection), not older than the binding
+    /// held for that seat. The seat on success.
     pub fn verify(&self, remote: &EndpointId, announce: &crate::binding::Announce) -> Option<u16> {
         let ctx = self.ctx.read().ok()?.clone()?;
         let st = announce
             .binding
+            .precheck(&ctx.network, &ctx.set_hex, ctx.tip, ctx.ttl, &ctx.members)
+            .ok()?;
+        if st.endpoint != *remote.as_bytes() || ctx.held.get(&st.seq).is_some_and(|h| st.issued < *h) {
+            return None;
+        }
+        let st = announce
+            .binding
             .verify(&ctx.network, &ctx.set_hex, ctx.tip, ctx.ttl, &ctx.members)
             .ok()?;
-        (st.endpoint == *remote.as_bytes() && announce.possession_ok(&st)).then_some(st.seq)
+        announce.possession_ok(&st).then_some(st.seq)
     }
 }
 
-/// The source address of a connection, for the self-introduction limiter: the remote IP, or the relay it came by.
-fn source_of(conn: &Connection) -> String {
+/// The source of a connection, for the self-introduction limiter.
+fn source_of(conn: &Connection) -> Source {
     let paths = conn.paths();
     let first = paths.iter().next().map(|p| p.remote_addr().clone());
-    match first {
-        Some(TransportAddr::Ip(a)) => a.ip().to_string(),
-        Some(TransportAddr::Relay(u)) => format!("relay:{u}"),
-        Some(other) => format!("{other:?}"),
-        None => "unknown".to_string(),
-    }
+    Source::of(first.as_ref(), conn.remote_id())
 }
 
 /// The members-only gate (an `EndpointHooks`): on [`ALPN`] only, an endpoint id that is not bound to a current member
@@ -252,15 +396,20 @@ impl Handler {
 impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
-        if self.members.seq_of(&remote).is_none() && self.intro.take_pending(&remote) {
-            // self-introduction (review N-A): the first stream, within the deadline, is this endpoint's own binding
-            let first = tokio::time::timeout(INTRO_DEADLINE, async {
-                let mut r = conn.accept_uni().await.ok()?;
-                r.read_to_end(STREAM_MAX).await.ok()
-            })
-            .await
-            .ok()
-            .flatten();
+        let guard = match self.members.seq_of(&remote) {
+            Some(_) => None,
+            None => self.intro.hold_pending(&remote),
+        };
+        if let Some(guard) = guard {
+            // self-introduction (review N-A): the first stream, within the deadline, is this endpoint's own binding;
+            // the connection counts as pending until this is decided (the guard), or until a newer one evicts it
+            let first = tokio::select! {
+                r = tokio::time::timeout(INTRO_DEADLINE, async {
+                    let mut r = conn.accept_uni().await.ok()?;
+                    r.read_to_end(STREAM_MAX).await.ok()
+                }) => r.ok().flatten(),
+                _ = guard.evict.notified() => None,
+            };
             let admitted = first.as_deref().and_then(|d| {
                 let (&kind, body) = d.split_first()?;
                 if kind != KIND_INTRO {
@@ -289,6 +438,11 @@ impl ProtocolHandler for Handler {
                     return Ok(());
                 }
             }
+            drop(guard);
+        } else if self.members.seq_of(&remote).is_none() {
+            // admitted by the gate, but evicted (or stale) before its handler ran
+            conn.close(VarInt::from_u32(REFUSED), b"not a bound member");
+            return Ok(());
         }
         loop {
             // the gate admitted it; a member removed meanwhile is dropped at its next stream
@@ -960,6 +1114,7 @@ mod tests {
                 .iter()
                 .map(|s| (*s, ck::pubkey(&ck::key(10 + *s as u8))))
                 .collect(),
+            held: BTreeMap::new(),
         }
     }
 
@@ -1079,31 +1234,184 @@ mod tests {
         a.shutdown().await;
     }
 
+    fn ip(a: &str) -> Source {
+        Source::Ip(ip_key(a.parse().unwrap()))
+    }
+
+    fn id(i: u16) -> EndpointId {
+        let mut b = [0u8; 32];
+        b[..2].copy_from_slice(&i.to_le_bytes());
+        b[2] = 1;
+        iroh::SecretKey::from_bytes(&b).public()
+    }
+
     /// The limiter: no view, no admission; a burst per source address, then one per INTRO_SOURCE_SECONDS; other
-    /// sources unaffected; at most INTRO_PENDING_MAX unverified at once.
+    /// sources unaffected.
     #[test]
     fn self_introductions_are_rate_limited_per_source() {
         let intro = Intro::default();
         let t0 = Instant::now();
-        let id = |i: u8| bk::endpoint_key(i).public();
-        assert!(!intro.admit(id(1), "10.0.0.1", t0), "no view yet");
+        assert!(!intro.admit(id(1), &ip("10.0.0.1"), t0), "no view yet");
         intro.set_ctx(intro_ctx());
-        for i in 0..INTRO_SOURCE_BURST as u8 {
-            assert!(intro.admit(id(10 + i), "10.0.0.1", t0));
+        for i in 0..INTRO_SOURCE_BURST as u16 {
+            assert!(intro.admit(id(10 + i), &ip("10.0.0.1"), t0));
         }
-        assert!(!intro.admit(id(20), "10.0.0.1", t0), "over the source's burst");
-        assert!(intro.admit(id(21), "10.0.0.2", t0), "another source is unaffected");
+        assert!(!intro.admit(id(20), &ip("10.0.0.1"), t0), "over the source's burst");
+        assert!(intro.admit(id(21), &ip("10.0.0.2"), t0), "another source is unaffected");
         let later = t0 + Duration::from_secs_f64(INTRO_SOURCE_SECONDS);
-        assert!(intro.admit(id(22), "10.0.0.1", later), "one more after the refill");
-        // pending cap: the t0 entries are past twice the deadline, so one is pending; fill to the cap from fresh sources
-        let mut n = 1;
-        for i in 0..40u8 {
-            if intro.admit(id(30 + i), &format!("10.1.0.{i}"), later) {
-                n += 1;
+        assert!(intro.admit(id(22), &ip("10.0.0.1"), later), "one more after the refill");
+    }
+
+    /// Review 5, note 2: IPv4 sources by address, IPv6 ones by their /64 (one host's /64 is one source), IPv4-mapped
+    /// IPv6 as its IPv4 address.
+    #[test]
+    fn ip_sources_are_keyed_per_ipv4_and_ipv6_slash_64() {
+        let k = |a: &str| ip_key(a.parse().unwrap());
+        assert_ne!(k("10.0.0.1"), k("10.0.0.2"));
+        assert_eq!(k("2001:db8:1:2::1"), k("2001:db8:1:2:ffff:ffff:ffff:fffe"));
+        assert_ne!(k("2001:db8:1:2::1"), k("2001:db8:1:3::1"));
+        assert_eq!(k("::ffff:10.0.0.1"), k("10.0.0.1"));
+        // a whole /64 spends one bucket
+        let intro = Intro::default();
+        intro.set_ctx(intro_ctx());
+        let t0 = Instant::now();
+        for i in 0..INTRO_SOURCE_BURST as u16 {
+            assert!(intro.admit(id(i), &ip(&format!("2001:db8:1:2::{:x}", i + 1)), t0));
+        }
+        assert!(
+            !intro.admit(id(99), &ip("2001:db8:1:2::abcd"), t0),
+            "the /64's burst is spent"
+        );
+        assert!(intro.admit(id(98), &ip("2001:db8:1:3::1"), t0), "the next /64 is not");
+    }
+
+    /// Review 5, note 1: relay arrivals are keyed by endpoint id, so one outsider's flood through a relay spends its
+    /// own bucket, not the newcomers' -- until the relay ceiling (endpoint ids are free to mint), which leaves direct
+    /// IP arrivals untouched.
+    #[test]
+    fn relay_introductions_are_keyed_by_endpoint_id_under_a_ceiling() {
+        let intro = Intro::default();
+        intro.set_ctx(intro_ctx());
+        let t0 = Instant::now();
+        let flooder = id(1);
+        for _ in 0..INTRO_SOURCE_BURST as u16 {
+            assert!(intro.admit(flooder, &Source::Relay(flooder), t0));
+        }
+        assert!(
+            !intro.admit(flooder, &Source::Relay(flooder), t0),
+            "the flooder's own bucket is spent"
+        );
+        assert!(
+            intro.admit(id(2), &Source::Relay(id(2)), t0),
+            "a newcomer by the same relay is admitted"
+        );
+        // the ceiling: INTRO_RELAY_BURST relay admissions in all, then none, whatever the id
+        let mut admitted = INTRO_SOURCE_BURST as usize + 1;
+        for i in 3..1_000u16 {
+            if intro.admit(id(i), &Source::Relay(id(i)), t0) {
+                admitted += 1;
             }
         }
-        assert_eq!(n, INTRO_PENDING_MAX);
-        // an expired pending entry frees its slot
-        assert!(intro.admit(id(99), "10.2.0.1", later + INTRO_DEADLINE * 2));
+        assert_eq!(admitted, INTRO_RELAY_BURST as usize);
+        assert!(
+            intro.admit(id(1_001), &ip("10.9.0.1"), t0),
+            "direct IP arrivals are outside the relay ceiling"
+        );
+        // it refills at INTRO_RELAY_PER_SECOND
+        assert!(intro.admit(id(1_002), &Source::Relay(id(1_002)), t0 + Duration::from_secs(1)));
+    }
+
+    /// Review 5, note 2: the global ceiling covers every source.
+    #[test]
+    fn every_self_introduction_is_under_a_global_ceiling() {
+        let intro = Intro::default();
+        intro.set_ctx(intro_ctx());
+        let t0 = Instant::now();
+        let mut admitted = 0;
+        for i in 0..1_000u16 {
+            if intro.admit(id(i), &ip(&format!("10.{}.{}.1", i / 250, i % 250)), t0) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, INTRO_GLOBAL_BURST as usize);
+    }
+
+    /// Review 5, note 2: a connection counts as pending until it verifies or closes (the guard), and past
+    /// INTRO_PENDING_MAX a new admission evicts the oldest, whose handler is told to close it.
+    #[tokio::test]
+    async fn held_connections_count_until_decided_and_the_oldest_is_evicted() {
+        let intro = Intro::default();
+        intro.set_ctx(intro_ctx());
+        let t0 = Instant::now();
+        let at = |i: u16| t0 + Duration::from_millis(i as u64);
+        for i in 0..INTRO_PENDING_MAX as u16 {
+            assert!(intro.admit(id(i), &ip(&format!("10.0.{}.{}", i / 250, i % 250)), at(i)));
+        }
+        assert_eq!(intro.pending_len(), INTRO_PENDING_MAX);
+        let oldest = intro.hold_pending(&id(0)).unwrap();
+        let held = intro.hold_pending(&id(1)).unwrap();
+        // one more: the oldest is evicted and told so
+        let n = INTRO_PENDING_MAX as u16;
+        assert!(intro.admit(id(n), &ip("10.1.0.1"), at(n)));
+        assert_eq!(intro.pending_len(), INTRO_PENDING_MAX);
+        tokio::time::timeout(Duration::from_secs(1), oldest.evict.notified())
+            .await
+            .expect("the oldest pending connection is told to close");
+        drop(oldest); // its entry is already gone: nothing else is released
+        assert_eq!(intro.pending_len(), INTRO_PENDING_MAX);
+        assert!(intro.hold_pending(&id(0)).is_none());
+        // a decided connection releases its place
+        drop(held);
+        assert_eq!(intro.pending_len(), INTRO_PENDING_MAX - 1);
+    }
+
+    /// Review 5, note 2, end to end: a silent connection is held in the pending table for the deadline, then refused
+    /// and released.
+    #[tokio::test]
+    async fn a_silent_connection_counts_as_pending_until_it_is_refused() {
+        let (a, _f, _ann) = DirectNode::open(None, &["none".to_string()], &[]).await.unwrap();
+        a.intro.set_ctx(intro_ctx());
+        let e = plain().await;
+        let c = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            e.connect(endpoint_addr(a.id(), &local(&a), None), ALPN),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::sleep(INTRO_DEADLINE / 3).await;
+        assert_eq!(a.intro.pending_len(), 1, "held while it has not introduced itself");
+        let closed = tokio::time::timeout(INTRO_DEADLINE * 2, c.closed()).await;
+        assert!(closed.is_ok_and(|e| format!("{e:?}").contains(&REFUSED.to_string())));
+        assert_eq!(a.intro.pending_len(), 0, "released once refused");
+        e.close().await;
+        a.shutdown().await;
+    }
+
+    /// Review 5, note 3: an introduction whose binding is older than the one held for its seat is refused (an
+    /// endpoint key retired by a rotation); the same or a newer one is taken.
+    #[test]
+    fn an_introduction_older_than_the_held_binding_is_refused() {
+        let key = bk::endpoint_key(9);
+        let a = crate::binding::Announce::decode(&intro_for(&key, bk::endpoint_id(9), 12)).unwrap(); // issued 100
+        let intro = Intro::default();
+        for (held, want) in [
+            (None, Some(2)),
+            (Some(90), Some(2)),
+            (Some(100), Some(2)),
+            (Some(101), None),
+        ] {
+            let mut ctx = intro_ctx();
+            if let Some(h) = held {
+                ctx.held.insert(2, h);
+            }
+            intro.set_ctx(ctx);
+            assert_eq!(intro.verify(&key.public(), &a), want, "held {held:?}");
+        }
+        // another seat's held binding does not matter
+        let mut ctx = intro_ctx();
+        ctx.held.insert(3, 1_000);
+        intro.set_ctx(ctx);
+        assert_eq!(intro.verify(&key.public(), &a), Some(2));
     }
 }
