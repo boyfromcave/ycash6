@@ -1,4 +1,8 @@
-# Running a Yellowback attestor
+# Running a YED price attestor
+
+This is the **YED price attestor** (`yellowback-attest`, `yed_signattestation`). The **wYEC bridge
+attestor** (Hawkeye) is a different program with a different key: see `hawkeye/docs/operations.md`
+in the Hawkeye repository.
 
 **One hot key, one node — ever.** The attestor hot key (`attestorPubKey`) must be held by exactly
 one `ycashd` wallet, and only that node's `yed_signattestation` may sign with it. Two prices signed
@@ -89,8 +93,8 @@ system; YED is the unit.
   or claimant carries them (or someone proves an equivocation with them).
 - **No hot wallet beyond the node's own.** The node holds the hot key and signs; the only spend
   it may ever make on your behalf is the rare `yed_revive`, funded from whatever confirmed YEC
-  the wallet holds — a few YEC of change is enough. Fees accrue to the bond key, which should be
-  cold (below).
+  the wallet holds — a few YEC of change is enough. Fees accrue to the bond key, which since the
+  vault upgrade is the member key itself (v3 kept it cold: the obsolete section below).
 - **No mining, no payout address, no `-yellowbackpayout…` flag**, and no pool membership. An
   attestor node is a plain upgraded `ycashd` on a network where Yellowback is live.
 - **No price of your own.** The agent aggregates public sources; the node never reads a socket
@@ -152,6 +156,10 @@ approval (proposal §5.3). Duplicate hot keys are refused (REG-A1) unless the ea
 `WITHDRAWN`; an `EJECTED` key is barred for good.
 
 ## Bond key hygiene
+
+**Obsolete since the vault upgrade (P4-b):** the bond key *is* the member key and cannot be kept
+cold (see "Since the vault upgrade" above). This section describes the v3 registry and applies to
+no running network; it is kept for the record.
 
 The registering wallet holds both keys. The hot key must stay in it — `yed_signattestation` uses
 it every ten blocks. The bond key is used by exactly one command, `yed_withdrawbond`, 14 days
@@ -346,9 +354,11 @@ subscriber's node tells you whether your attestations arrive), then revive; a re
 that keeps missing goes dormant again after another fortnight.
 
 **Ejection** (`EJECTED`) has one cause: equivocation, the first paragraph of this document. It is
-terminal for the key and the outpoint. A stolen hot key can only grief (sign wrong prices; it is
-bounded like a colluding attestor) or get your seat ejected by equivocating; the bond key is
-separate and stays safe if it stayed cold.
+terminal for the key and the outpoint. A stolen hot key can grief (sign wrong prices; it is
+bounded like a colluding attestor) or get your seat ejected by equivocating. Since the vault
+upgrade the bond key is the same key, so a thief also takes the bond once its exit delay has passed
+(v3 kept the bond key separate and cold). (The bridge attestor's key is different: see
+hawkeye/README.md.)
 
 ## Withdrawal
 
@@ -382,7 +392,7 @@ The hot key is then free to be discarded; a withdrawn attestor's key may registe
 | return from dormancy | `yed_revive <seq> <priceMicroUsd>` | `not-dormant`, `attest-key-not-held`, `equivocation-guard` |
 | report someone's equivocation | `yed_reportequivocation <hexA> <hexB>` | `not-equivocation` |
 | leave the set (starts the 14-day delay) | `set_leave <attestorSetId> [memberkey]` | `bad-vault-act-remove` (not an active member) |
-| withdraw the bond | `yed_withdrawbond <seq> [to]` | `bond-locked`, `bond-spent`, `attest-key-not-held` |
+| withdraw the bond (after `set_leave` and `BOND_MATURITY`; still the bond spend on the vault upgrade) | `yed_withdrawbond <seq> [to]` | `bond-locked`, `bond-spent`, `attest-key-not-held` |
 
 Every identifier is defined in `doc/yellowback-rpc.md`. The two calibration measurements that
 precede the first mainnet registration (`DIVERGE_BPS_ATTEST`, `PIN_DELTA_BPS`) are the release's
