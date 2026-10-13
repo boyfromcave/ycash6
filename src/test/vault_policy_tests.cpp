@@ -17,12 +17,16 @@
 #include "key.h"
 #include "main.h"
 #include "policy/policy.h"
+#include "script/script_error.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
 #include "vault/act.h"
 #include "vault/template.h"
 
 #include <boost/test/unit_test.hpp>
+
+// AcceptToMemoryPool's DoS classification of a failed template-input script check (main.cpp, audit 07/F-1).
+extern bool IsVaultSetStateFailure(const CTransaction& tx, const CCoinsViewCache& view, const std::string& strRejectReason);
 
 using namespace vault;
 
@@ -411,6 +415,67 @@ BOOST_AUTO_TEST_CASE(pqpkh_dust_uses_the_real_spend_size)
     m.vout[0].nValue = t;
     reason.clear();
     BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(m), reason, Params(), 10), reason);
+}
+
+// Audit 07/F-1: AcceptToMemoryPool scores a failed script check of a transaction spending a V or I DoS 0 only for
+// the set-state-dependent errors; it matches them in ContextualCheckInputs' reject reason, so the strings are pinned
+// here (script/script_error.cpp) and must not collide with another error's.
+BOOST_AUTO_TEST_CASE(mempool_set_state_failure_classification)
+{
+    BOOST_CHECK_EQUAL(std::string(ScriptErrorString(SCRIPT_ERR_SETSIG)), "OP_CHECKSETSIG or OP_CHECKSETDORMANT failed");
+    BOOST_CHECK_EQUAL(std::string(ScriptErrorString(SCRIPT_ERR_SETSIG_COUNT)), "More than one OP_CHECKSETSIG in a script evaluation");
+    BOOST_CHECK_EQUAL(std::string(ScriptErrorString(SCRIPT_ERR_VERIFY)), "Script failed an OP_VERIFY operation");
+    for (int e = 0; e < SCRIPT_ERR_ERROR_COUNT; e++) {
+        if (e == SCRIPT_ERR_SETSIG || e == SCRIPT_ERR_SETSIG_COUNT || e == SCRIPT_ERR_VERIFY) continue;
+        const std::string other = ScriptErrorString((ScriptError)e);
+        for (ScriptError mine : {SCRIPT_ERR_SETSIG, SCRIPT_ERR_SETSIG_COUNT, SCRIPT_ERR_VERIFY})
+            BOOST_CHECK_MESSAGE(other != ScriptErrorString(mine), other);
+    }
+    auto mandatory = [](ScriptError e) { return strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(e)); };
+
+    VaultParams vp = Params1();
+    const CScript vspk = BuildVault(vp);
+    const CScript ispk = BuildIntent(IntentFor(vp, vspk, GetScriptForDestination(Key(3).GetID())));
+    const CScript p2pkh = GetScriptForDestination(Key(4).GetID());
+    CCoinsViewDummy base; // 6.20.0: CCoinsView is abstract
+    CCoinsViewCache view(&base);
+    AddCoin(view, uint256S("0x51"), vspk);
+    AddCoin(view, uint256S("0x52"), ispk);
+    AddCoin(view, uint256S("0x53"), p2pkh);
+    auto spend = [](std::vector<std::pair<uint256, CScript>> ins) {
+        CMutableTransaction m;
+        for (const auto& in : ins)
+            m.vin.push_back(CTxIn(COutPoint(in.first, 0), in.second));
+        m.vout.push_back(CTxOut(1000, CScript() << OP_TRUE));
+        return CTransaction(m);
+    };
+    const CScript ownerSig = CScript() << valtype(64, 7) << OP_1 << valtype(32, 8) << OP_1;   // shape only
+    const CScript ecdsa = CScript() << valtype(72, 1) << valtype(33, 2);
+    const CTransaction vOwner = spend({{uint256S("0x51"), CScript(ownerSig) << OP_2}});
+    const CTransaction vReleased = spend({{uint256S("0x51"), CScript(ownerSig) << OP_3}});
+    const CTransaction iReleased = spend({{uint256S("0x52"), CScript(ownerSig) << OP_3}});
+    const CTransaction siblingThenV = spend({{uint256S("0x53"), ecdsa}, {uint256S("0x51"), CScript(ownerSig) << OP_2}});
+
+    // the set opcodes' own errors: state-dependent whatever the input
+    for (const CTransaction* tx : {&vOwner, &vReleased, &siblingThenV}) {
+        BOOST_CHECK(IsVaultSetStateFailure(*tx, view, mandatory(SCRIPT_ERR_SETSIG)));
+        BOOST_CHECK(IsVaultSetStateFailure(*tx, view, mandatory(SCRIPT_ERR_SETSIG_COUNT)));
+        BOOST_CHECK(IsVaultSetStateFailure(*tx, view,
+            strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(SCRIPT_ERR_SETSIG))));
+    }
+    // OP_VERIFY: only with a selector-3 (OWNER-RELEASED) template input, whose OP_VERIFY follows OP_CHECKSETDORMANT
+    BOOST_CHECK(IsVaultSetStateFailure(vReleased, view, mandatory(SCRIPT_ERR_VERIFY)));
+    BOOST_CHECK(IsVaultSetStateFailure(iReleased, view, mandatory(SCRIPT_ERR_VERIFY)));
+    BOOST_CHECK(!IsVaultSetStateFailure(vOwner, view, mandatory(SCRIPT_ERR_VERIFY)));
+    BOOST_CHECK(!IsVaultSetStateFailure(siblingThenV, view, mandatory(SCRIPT_ERR_VERIFY)));
+    // everything else keeps its stock score: an owner's or a sibling's bad signature, a malformed spend
+    for (ScriptError e : {SCRIPT_ERR_EVAL_FALSE, SCRIPT_ERR_PQ_SIZE, SCRIPT_ERR_CHECKSIGVERIFY, SCRIPT_ERR_EQUALVERIFY,
+                          SCRIPT_ERR_UNSATISFIED_LOCKTIME, SCRIPT_ERR_SIG_DER, SCRIPT_ERR_INVALID_STACK_OPERATION}) {
+        for (const CTransaction* tx : {&vOwner, &vReleased, &iReleased, &siblingThenV})
+            BOOST_CHECK_MESSAGE(!IsVaultSetStateFailure(*tx, view, mandatory(e)), ScriptErrorString(e));
+    }
+    BOOST_CHECK(!IsVaultSetStateFailure(vReleased, view, "old-consensus-branch-id (Expected 6d5b7a31, found 76b809bb)"));
+    BOOST_CHECK(!IsVaultSetStateFailure(vReleased, view, "bad-txns-inputs-missingorspent"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
