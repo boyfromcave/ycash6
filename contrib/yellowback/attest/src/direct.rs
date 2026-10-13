@@ -427,10 +427,12 @@ mod tests {
             .expect("a member's frame within 20 s")
             .unwrap();
         assert_eq!(got, (vec![0x42; 115], 2));
-        // the outsider: refused by a's gate
+        // the outsider: refused by a's gate. It dials from a plain endpoint (no gate of its own: a DirectNode would
+        // refuse to dial an unbound id itself, which would prove nothing about a's gate)
         let target = endpoint_addr(a.id(), &a_addrs, None);
+        let plain_outsider = plain().await;
         let refused = {
-            let conn = tokio::time::timeout(CONNECT_TIMEOUT, outsider.endpoint.connect(target.clone(), ALPN)).await;
+            let conn = tokio::time::timeout(CONNECT_TIMEOUT, plain_outsider.connect(target.clone(), ALPN)).await;
             match conn {
                 Ok(Ok(c)) => {
                     let r = tokio::time::timeout(Duration::from_secs(5), c.closed()).await;
@@ -450,5 +452,257 @@ mod tests {
         a.shutdown().await;
         b.shutdown().await;
         outsider.shutdown().await;
+        plain_outsider.close().await;
+    }
+
+    // ---- M5 adversarial tests (docs/plans/yellowback-attest-gossip-evaluation.md §7 M5)
+
+    /// A plain iroh endpoint on loopback with no gate: what an outsider runs.
+    async fn plain() -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap()
+    }
+
+    /// This process's CPU time (user + system) in seconds, from `ps` (macOS and Linux).
+    fn cpu_seconds() -> Option<f64> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "time=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // [[dd-]hh:]mm:ss[.ff]
+        let (days, rest) = match text.split_once('-') {
+            Some((d, r)) => (d.parse::<f64>().ok()?, r.to_string()),
+            None => (0.0, text),
+        };
+        let mut secs = 0.0;
+        for part in rest.split(':') {
+            secs = secs * 60.0 + part.parse::<f64>().ok()?;
+        }
+        Some(days * 86_400.0 + secs)
+    }
+
+    /// Two bound members (a = seq 1 receiving, b = seq 2 sending), plus extra bound members.
+    async fn pair(
+        extra: &[(u16, &DirectNode)],
+    ) -> (DirectNode, tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>, DirectNode) {
+        let (a, a_frames) = node().await;
+        let (b, _) = node().await;
+        let mut m = HashMap::new();
+        m.insert(
+            a.id(),
+            Peer {
+                seq: 1,
+                addrs: local(&a),
+                relay: None,
+            },
+        );
+        m.insert(
+            b.id(),
+            Peer {
+                seq: 2,
+                addrs: local(&b),
+                relay: None,
+            },
+        );
+        for (seq, n) in extra {
+            m.insert(
+                n.id(),
+                Peer {
+                    seq: *seq,
+                    addrs: local(n),
+                    relay: None,
+                },
+            );
+        }
+        a.members.set(m.clone());
+        b.members.set(m.clone());
+        for (_, n) in extra {
+            n.members.set(m.clone());
+        }
+        (a, a_frames, b)
+    }
+
+    /// Normal traffic at a member is the other members' connections: 14 with a full 15-seat set. The flood is
+    /// `factor` × 14 handshakes from unbound endpoints, all at once, while member b keeps delivering.
+    async fn outsider_flood(factor: usize) -> (usize, Duration, f64) {
+        let (a, mut a_frames, b) = pair(&[]).await;
+        let target = endpoint_addr(a.id(), &local(&a), None);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        b.spawn_sender(rx);
+        // warm b's connection, as a live member's is
+        tx.send(Out::Frame(vec![0; 115])).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(20), a_frames.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            2
+        );
+        let handshakes = factor * 14;
+        let endpoints = handshakes.div_ceil(10).min(70);
+        let mut outsiders = Vec::new();
+        for _ in 0..endpoints {
+            outsiders.push(plain().await);
+        }
+        let cpu0 = cpu_seconds();
+        let t0 = Instant::now();
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for i in 0..handshakes {
+            let ep = outsiders[i % endpoints].clone();
+            let (target, refused) = (target.clone(), refused.clone());
+            tasks.push(tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(30), ep.connect(target, ALPN)).await {
+                    Ok(Ok(c)) => {
+                        // try to push a frame through anyway: the gate closed the connection after the handshake
+                        if let Ok(mut s) = c.open_uni().await {
+                            let _ = s.write_all(&[KIND_FRAME; 116]).await;
+                            let _ = s.finish();
+                        }
+                        let r = tokio::time::timeout(Duration::from_secs(10), c.closed()).await;
+                        if matches!(r, Ok(ref e) if format!("{e:?}").contains(&REFUSED.to_string())) {
+                            refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        // the honest member delivers throughout: 5 frames, one every 200 ms ("every block"), each must arrive
+        let mut worst = Duration::ZERO;
+        for k in 1..=5u8 {
+            let sent = Instant::now();
+            tx.send(Out::Frame(vec![k; 115])).await.unwrap();
+            loop {
+                let (body, seq) = tokio::time::timeout(Duration::from_secs(20), a_frames.recv())
+                    .await
+                    .expect("the honest member's frame within 20 s under the flood")
+                    .unwrap();
+                assert_eq!(seq, 2, "only bound members reach the handler");
+                if body[0] == k {
+                    worst = worst.max(sent.elapsed());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        for t in tasks {
+            let _ = t.await;
+        }
+        let elapsed = t0.elapsed();
+        let cpu = match (cpu0, cpu_seconds()) {
+            (Some(x), Some(y)) => y - x,
+            _ => 0.0,
+        };
+        // nothing an outsider sent reached the handler
+        while let Ok((_, seq)) = a_frames.try_recv() {
+            assert_eq!(seq, 2);
+        }
+        let n = refused.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(n, handshakes, "every outsider handshake was refused");
+        eprintln!(
+            "outsider flood {factor}x: {handshakes} handshakes refused in {elapsed:?}, honest worst latency {worst:?}, \
+             process CPU {cpu:.2} s (attacker and member in one process)"
+        );
+        for o in outsiders {
+            o.close().await;
+        }
+        a.shutdown().await;
+        b.shutdown().await;
+        (handshakes, worst, cpu)
+    }
+
+    /// M5: an outsider flood at 10x and 100x a member's normal connection count. Every handshake is refused by the
+    /// gate, nothing reaches the frame handler, the honest member's frames keep arriving within seconds (well inside
+    /// one block), and the CPU spent is bounded by the handshakes (one TLS handshake each: no stream, no signature).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_outsider_flood_is_refused_at_the_handshake() {
+        for factor in [10usize, 100] {
+            let (handshakes, worst, cpu) = outsider_flood(factor).await;
+            assert!(worst < Duration::from_secs(10), "{factor}x: honest latency {worst:?}");
+            // a generous bound (debug build, both sides of every handshake in this one process): 20 ms a handshake
+            assert!(
+                cpu < 2.0 + 0.02 * handshakes as f64,
+                "{factor}x: {cpu:.2} s of CPU for {handshakes} handshakes"
+            );
+        }
+    }
+
+    /// M5: one bound member floods at 10x and 100x its quota. Its frames beyond the quota are dropped at the
+    /// handler (before any signature work); the other members' frames keep arriving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_flood_spends_only_its_own_quota() {
+        for factor in [10usize, 100] {
+            let (m, _) = node().await;
+            let (a, mut a_frames, b) = pair(&[(3, &m)]).await;
+            let (btx, brx) = tokio::sync::mpsc::channel(64);
+            b.spawn_sender(brx);
+            let (mtx, mrx) = tokio::sync::mpsc::channel(10_000);
+            m.spawn_sender(mrx);
+            let flood = factor * AUTHOR_BURST as usize;
+            let t0 = Instant::now();
+            let feeder = tokio::spawn(async move {
+                for i in 0..flood {
+                    let mut f = vec![0x33; 115];
+                    f[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+                    if mtx.send(Out::Frame(f)).await.is_err() {
+                        break;
+                    }
+                }
+                mtx
+            });
+            // the honest member sends 5 frames while the flood runs; all must arrive
+            let mut honest = 0;
+            let mut from_m = 0usize;
+            for k in 1..=5u8 {
+                btx.send(Out::Frame(vec![k; 115])).await.unwrap();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let (body, seq) = tokio::time::timeout(left, a_frames.recv())
+                        .await
+                        .unwrap_or_else(|_| panic!("{factor}x: honest frame {k} did not arrive under the member flood"))
+                        .unwrap();
+                    match seq {
+                        2 if body[0] == k => {
+                            honest += 1;
+                            break;
+                        }
+                        3 => from_m += 1,
+                        _ => {}
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            let _mtx = feeder.await.unwrap();
+            // let the flood drain, then count what of m's got through
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            while let Ok((_, seq)) = a_frames.try_recv() {
+                if seq == 3 {
+                    from_m += 1;
+                }
+            }
+            let elapsed = t0.elapsed().as_secs_f64();
+            let allowed = AUTHOR_BURST + AUTHOR_RATE * elapsed + 1.0;
+            eprintln!(
+                "member flood {factor}x: {flood} frames sent, {from_m} passed the quota (allowed {allowed:.0} in \
+                 {elapsed:.1} s), honest {honest}/5"
+            );
+            assert_eq!(honest, 5);
+            assert!(
+                (from_m as f64) <= allowed,
+                "{factor}x: {from_m} of m's frames passed, quota {allowed:.0}"
+            );
+            a.shutdown().await;
+            b.shutdown().await;
+            m.shutdown().await;
+        }
     }
 }

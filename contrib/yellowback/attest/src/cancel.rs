@@ -3350,4 +3350,116 @@ mod tests {
         x.own = false;
         assert_eq!(decide(&c, &x), Decision::Idle("short of co-signatures"));
     }
+
+    // ---- M5: the binding topic under a flood (docs/plans/yellowback-attest-gossip-evaluation.md §7 M5)
+
+    fn announce(seq: u16, key: u8, endpoint: u8, issued: u32, expiry: u32) -> Vec<u8> {
+        let st = crate::binding::Statement {
+            network: "regtest".into(),
+            set_id_hex: cosig::display_of_internal(&[0x75; 32]),
+            seq,
+            endpoint: [endpoint; 32],
+            issued,
+            expiry,
+        };
+        let msg = st.message();
+        crate::binding::Announce {
+            binding: crate::binding::Binding {
+                sig: testkit::sign(&testkit::key(key), &crate::binding::message_hash(&msg)),
+                message: msg,
+            },
+            addrs: vec!["127.0.0.1:1".into()],
+            relay: None,
+        }
+        .encode()
+    }
+
+    /// Forged announces that pass every cheap check: a member's seq, our network and set, a future expiry, an issued
+    /// height newer than anything held (so the store cannot skip them unverified), signed by a key that is no member's.
+    fn forged_announces(n: usize, base: u32) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| announce(2, 99, (i % 250) as u8, base + (i as u32 % 2), base + 1_000))
+            .collect()
+    }
+
+    /// M5: the per-poll recovery cap holds under a flood: a poll takes at most 64 announces, whatever arrived, and
+    /// drops the rest (the queue holds 512 at most, with random replacement).
+    #[tokio::test]
+    async fn a_binding_flood_is_capped_per_poll() {
+        let ch = chain(1);
+        ch.lock().unwrap().claiming = false;
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
+        a.tick(100).await; // the view (members, set, network)
+        for f in forged_announces(5_000, 100) {
+            a.take_binding(f);
+        }
+        assert!(a.bindings_in.len() <= 512, "the queue is bounded");
+        let t0 = Instant::now();
+        a.tick(101).await;
+        let took = t0.elapsed();
+        assert!(a.bindings_in.is_empty(), "a poll drains the queue");
+        assert!(a.state.bindings.by_seq.is_empty(), "no forged binding is taken");
+        // 64 recoveries are a few ms even in a debug build; 5,000 would not be
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        // stale ones (expired, another network) cost nothing and change nothing either
+        for i in 0..1_000u32 {
+            a.take_binding(announce(1, 11, 1, 10 + i % 50, 60));
+        }
+        a.tick(102).await;
+        assert!(a.state.bindings.by_seq.is_empty());
+    }
+
+    /// M5: a valid binding still propagates through a flood of 10x normal traffic (normal: 15 members announcing every
+    /// 10 blocks, 1.5 a poll; 10x = 15 a poll, under the 64-a-poll cap) even when it arrives last in every poll.
+    #[tokio::test]
+    async fn a_valid_binding_propagates_through_a_10x_flood() {
+        let ch = chain(1);
+        ch.lock().unwrap().claiming = false;
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
+        a.tick(100).await;
+        for f in forged_announces(15, 100) {
+            a.take_binding(f);
+        }
+        a.take_binding(announce(1, 11, 7, 100, 1_100)); // the honest announce, last
+        a.tick(101).await;
+        assert!(a.state.bindings.by_seq.contains_key(&1), "the valid binding was taken");
+    }
+
+    /// M5: the same at 100x (150 forged a poll), the honest member re-announcing every 10 polls and its announce
+    /// arriving after the attacker's. EXPOSES DEFECT M5-1 (reported, not fixed): a poll takes the FIRST 64 queued
+    /// announces in arrival order and drops the rest, so an honest announce queued behind 64 or more forged ones in
+    /// the same poll is never checked, however often it is repeated. Taking a uniform sample of the poll's queue (as
+    /// gossip.rs does for co-signatures) instead of its head would give it a 64/151 chance per announce here.
+    #[tokio::test]
+    #[ignore = "exposes defect M5-1 (reported to the coordinator): bindings_step takes the head of the queue, not a sample"]
+    async fn a_valid_binding_propagates_through_a_100x_flood() {
+        let ch = chain(1);
+        ch.lock().unwrap().claiming = false;
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
+        a.tick(100).await;
+        let mut taken_at = None;
+        for round in 0..10u32 {
+            let h = 101 + round * 10;
+            // the honest announce arrives after the attacker's (its worst case, which a sustained flood produces)
+            for f in forged_announces(150, h) {
+                a.take_binding(f);
+            }
+            a.take_binding(announce(1, 11, 7, h, h + 1_000));
+            a.tick(h).await;
+            if a.state.bindings.by_seq.contains_key(&1) {
+                taken_at = Some(round);
+                break;
+            }
+        }
+        assert!(
+            taken_at.is_some(),
+            "the valid binding never got through 10 re-announcements under a 100x flood"
+        );
+    }
 }
