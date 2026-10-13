@@ -1990,11 +1990,12 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             "cancel spends it as its last input, signed (the CANCEL_COSIGN marker is the last output, so the set signature's\n"
             "SIGHASH_ALL|ANYONECANPAY digest is the same whatever co-signatures arrive: members still sign once). Collect more\n"
             "than required when you can: consensus counts the distinct valid entries and ignores the rest, so spares keep the\n"
-            "cancel valid when a co-signer leaves before it confirms or a reorg adds an earlier cancel (this RPC still refuses\n"
-            "an entry it can already see is bad, naming it and why).\n"
+            "cancel valid when a co-signer leaves before it confirms or a reorg adds an earlier cancel. An entry this RPC can\n"
+            "already see would not count (malformed, another intent, a repeat, not a current member, a price out of range or\n"
+            "claimable) is dropped and named in warnings; the call is refused only when fewer than cancelsRequired remain.\n"
             "\nResult: vault_buildcancel's {\"hex\", \"required\", \"cancelsetid\", \"deadline\", \"intentconfirmed\"} plus\n"
             "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)},\n"
-            "\"cancelsRequired\", \"cosigners\" (seqs, carrier order), \"carrierTxid\"\n"
+            "\"cancelsRequired\", \"cosigners\" (seqs, carrier order), \"carrierTxid\", \"warnings\" (optional: the dropped entries)\n"
             + HelpExampleCli("yed_buildcancel", "\"txid:0\"") + HelpExampleRpc("yed_buildcancel", "\"txid:0\""));
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -2006,6 +2007,7 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
     Cents cents = 0;
     std::vector<CancelCosignEntry> entries;
     std::vector<uint16_t> cosigners;
+    std::vector<std::string> warnings;
     int required = 0;
     int carrierRef = 0;
     {
@@ -2060,8 +2062,11 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
         if (!snap.has_value()) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the claim's refHeight %d is not indexed", t.refHeight));
         std::set<CPubKey> seen;
         const UniValue cos = params.size() > 1 && !params[1].isNull() ? params[1].get_array() : UniValue(UniValue::VARR);
+        // round 2 (coordinator): an entry that would not count is dropped with a warning naming it and why; the call is
+        // refused only when fewer than cancelsRequired remain
+        auto drop = [&](size_t i, const std::string& why) { warnings.push_back(strprintf("cosigs[%u] dropped: %s", (unsigned)i, why)); };
         for (size_t i = 0; i < cos.size(); i++) {
-            const std::string h = cos[i].get_str();
+            const std::string h = cos[i].isStr() ? cos[i].get_str() : std::string();
             std::optional<std::vector<CancelCosignEntry>> one;
             if (IsHex(h)) {
                 std::vector<unsigned char> blob{ 'Y', 'C', CANCEL_COSIGN_VERSION, 1 };
@@ -2069,28 +2074,37 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
                 blob.insert(blob.end(), b.begin(), b.end());
                 one = DecodeCancelCosigns(blob);
             }
-            if (!one.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-malformed: cosigs[%u] is not a 69-byte co-signature", (unsigned)i));
+            if (!one.has_value()) { drop(i, "cancel-cosign-malformed: not a 69-byte co-signature"); continue; }
             const CancelCosignEntry& e = one->front();
             CPubKey key;
             const uint256 msg = CancelCosignMessage(p.attestorSetId, op.hash, op.n, (uint32_t)t.refHeight, e.priceMicroUsd, snap->blockHash);
-            if (!vault::RecoverSig(msg, e.sig, key)) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-malformed: cosigs[%u] does not sign this intent's cancel", (unsigned)i));
-            if (!seen.insert(key).second) continue;                     // a repeat of the same key is dropped, never sent
+            if (!vault::RecoverSig(msg, e.sig, key)) { drop(i, "cancel-cosign-malformed: does not sign this intent's cancel"); continue; }
+            if (seen.count(key)) { drop(i, strprintf("a repeat of key %s", HexStr(key.begin(), key.end()))); continue; }
             std::optional<uint16_t> seq = CurrentMember(st, key, next);
-            if (!seq.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-not-member: cosigs[%u] (key %s) is not from a current member of the attestor set at height %d",
-                                                                                      (unsigned)i, HexStr(key.begin(), key.end()), (int)next));
-            if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX)
-                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-range: cosigs[%u] (seq %u) states %u micro-USD, outside [%d, %d]",
-                                                                    (unsigned)i, (unsigned)seq.value(), e.priceMicroUsd, PRICE_MIN, PRICE_MAX));
-            if (IsUnderwater(t.vault.collateralZat, (MicroUsd)e.priceMicroUsd, t.vault.mintedCents, p.claimThresholdBps))
-                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-statement-claimable: cosigs[%u] (seq %u) states %u micro-USD, at which the vault was claimable at refHeight %d",
-                                                                    (unsigned)i, (unsigned)seq.value(), e.priceMicroUsd, t.refHeight));
-            if (entries.size() >= CANCEL_COSIGN_MAX) break;
+            if (!seq.has_value()) {
+                drop(i, strprintf("cancel-cosign-not-member: key %s is not a current member of the attestor set at height %d", HexStr(key.begin(), key.end()), (int)next));
+                continue;
+            }
+            if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX) {
+                drop(i, strprintf("attest-range: seq %u states %u micro-USD, outside [%d, %d]", (unsigned)seq.value(), e.priceMicroUsd, PRICE_MIN, PRICE_MAX));
+                continue;
+            }
+            if (IsUnderwater(t.vault.collateralZat, (MicroUsd)e.priceMicroUsd, t.vault.mintedCents, p.claimThresholdBps)) {
+                drop(i, strprintf("cancel-statement-claimable: seq %u states %u micro-USD, at which the vault was claimable at refHeight %d",
+                                  (unsigned)seq.value(), e.priceMicroUsd, t.refHeight));
+                continue;
+            }
+            if (entries.size() >= CANCEL_COSIGN_MAX) { drop(i, strprintf("beyond the carrier's %u entries", (unsigned)CANCEL_COSIGN_MAX)); continue; }
+            seen.insert(key);
             entries.push_back(e);
             cosigners.push_back(seq.value());
         }
-        if ((int)entries.size() < required)
-            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-needed: this cancel needs %d co-signature(s) of distinct current members (cancelsRequired), %d given (yed_signcancelcosign)",
-                                                                required, (int)entries.size()));
+        if ((int)entries.size() < required) {
+            std::string why;
+            for (const std::string& w : warnings) why += "; " + w;
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-needed: this cancel needs %d co-signature(s) of distinct current members (cancelsRequired), %d valid given (yed_signcancelcosign)%s",
+                                                                required, (int)entries.size(), why));
+        }
         carrierRef = IndexHeight(index);
     }
     // the cancel itself first (its fee inputs chosen and locked by the sign-once build memo), then the carrier
@@ -2144,6 +2158,11 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
     for (uint16_t q : cosigners) cs.push_back((int)q);
     o.pushKV("cosigners", cs);
     o.pushKV("carrierTxid", carrier.outpoint.hash.GetHex());
+    if (!warnings.empty()) {
+        UniValue w(UniValue::VARR);
+        for (const std::string& x : warnings) w.push_back(x);
+        o.pushKV("warnings", w);
+    }
     return o;
 }
 

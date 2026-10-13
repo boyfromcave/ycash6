@@ -182,10 +182,11 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   carry no Yellowback payload -- a cancel none but `CANCEL_COSIGN` (type `0x09`, empty body) --
   (`intent-spend-malformed`). The residual's cancel is `intent-cancel-residual`. **(CAN-3)** The release
   of a residual whose `heldBy` is set is `intent-residual-held` unless `Vaults[heldBy]` is `CLOSED` or
-  `CLAIMED`, or `ACTIVE` with `H - lastCancelHeight >= CANCEL_QUIET` (regtest 40, mainnet 8,064) **and** (round 2) not
-  claimable at `Snapshots[H - 1]`: not underwater at its `pClaim` under `CLAIM_THRESHOLD_BPS`, and no standing notice of
-  the position with `EMERGENCY_PERSIST ≤ H - 1 - notice.refHeight ≤ EMERGENCY_NOTICE_TTL` and the position underwater at
-  `notice.pEmerg` under `EMERGENCY_RATIO_BPS` (an undefined price never makes it claimable).
+  `CLAIMED`, or `ACTIVE` with `H - lastCancelHeight >= CANCEL_QUIET` (regtest 40, mainnet 8,064) **and** (round 2, as fixed
+  after the review) no claim at `H` could pass at any citable `R` in `[max(H - REF_WINDOW, START_HEIGHT), H - 1]`, judged
+  fail-closed: claimable when `Snapshots[R]` is missing or its `pClaim` undefined, when the position is underwater at
+  that `pClaim` (xClaim) under `CLAIM_THRESHOLD_BPS`, or when `R` is ARMED and a standing notice of the position has
+  `EMERGENCY_PERSIST ≤ R - notice.refHeight ≤ EMERGENCY_NOTICE_TTL`.
   The record is erased (after those checks); the residual's release changes nothing else. The claimant's release
   makes the vault `CLAIMED`. The claimant's cancel must create exactly one output equal to the
   vault's V, at `vout[0]` (`intent-cancel-no-vault`): the vault record moves to `(cancelTxid, 0)`
@@ -198,7 +199,7 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   and `Totals.supplyCents += burnedCents`; IN-3 treats a `CLAIM_CANCEL` like a MINT (its `yedOut` is not
   carried from its inputs, so YED inputs of a cancel burn). TOK-PQ is not applied to the refund.
   **(CAN-2 + C4b, checked after the refund)** `q = cancelCount` when `H - lastCancelHeight < CANCEL_QUIET`, else 0;
-  `required = min(q + 1, CANCEL_SIGNERS_MAX)` (regtest 3, mainnet 5). The cancel must carry `CANCEL_COSIGN` and its
+  `required = min(q + 1, CANCEL_SIGNERS_MAX)` (regtest 3, mainnet 4). The cancel must carry `CANCEL_COSIGN` and its
   scriptsig carrier (any input, `skipVin0` false) must hold `"YC" | 1 | count | count × (u32 price | sig65)`,
   `1 ≤ count ≤ 7` (else `intent-cancel-cosign`), and at least `required` **distinct valid** entries (round 2: an entry that
   fails any test below, or repeats a counted key, is ignored), an entry being valid when it has `PRICE_MIN ≤ price ≤ PRICE_MAX`, is not claimable

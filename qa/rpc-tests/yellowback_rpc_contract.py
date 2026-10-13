@@ -77,6 +77,7 @@ CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 
 
 # Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
+    'yed_buildcancel': {'warnings'},                      # the dropped co-signatures (cancel-limit round 2)
     'yed_getvault': {'intents', 'refundHolder', 'heldResiduals'},   # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1); CAN-3's held residuals
     'yed_listpositions': {'intents', 'heldResiduals'},
     'yed_listvaults': {'intents', 'refundHolder', 'heldResiduals'},
@@ -729,6 +730,11 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal((cancel['cancelsRequired'], cancel['cosigners'], cancel['refund']['cents'], cancel['refund']['script']),
                      (1, [wseq], 10000, claiming['refundHolder']))
         assert_equal(claimant.yed_buildcancel(intent, [cos['cosig']])['hex'], cancel['hex'])          # sign once: the same transaction
+        # an entry that would not count is dropped with a warning; the same valid list builds the same transaction
+        dropped = c.check('yed_buildcancel', claimant.yed_buildcancel(intent, [cos['cosig'][:-2], cos['cosig'], cos['cosig']]))
+        assert_equal(dropped['hex'], cancel['hex'])
+        assert_equal(len(dropped['warnings']), 2)
+        assert 'cancel-cosign-malformed' in dropped['warnings'][0] and 'a repeat of key' in dropped['warnings'][1], dropped['warnings']
         built = claimant.decoderawtransaction(cancel['hex'])
         assert_equal(built['vin'][-1]['txid'], cancel['carrierTxid'])
         fee_inputs = [{'txid': i['txid'], 'vout': i['vout']} for i in built['vin'][1:-1]]

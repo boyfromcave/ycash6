@@ -1694,7 +1694,6 @@ class CancelLimitTests(CancelTests):
     # Rule: C4b
     def test_cosign_refusals(self):
         c, m = self.c, self.c.model
-        relock, refund = c.relock(self.vault, self.coll), c.refund_out(self.intent)
         bad = 'intent-cancel-cosign'
         self.assertEqual(self.mine(self.cancel(cosigns=None)), bad)                          # no statement at all
         no_marker = c.cancel_tx(self.intent, self.vault, self.coll, refund=True, cosigns=None,
@@ -1719,17 +1718,49 @@ class CancelLimitTests(CancelTests):
     # Rule: CAN-3
     # Rule: NOT-1
     def test_residual_held_while_claimable_by_path_b(self):
-        """Round 2: healthy at the snapshot price, but a persisted notice on the position under EMERGENCY_RATIO holds it."""
+        """Round 2: path (b) needs an ARMED reference: on this unarmed chain a persisted notice does not hold the residual
+        (the C++ ResidualFixture, armed, shows it does there)."""
+        c, m = self.c, self.c.model
+        self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        c.mine_n(128, price_fn=lambda h: 50_000)
+        m.notices[pos] = ym.NoticeRecord(c.height - 4, c.height - c.params.emergency_persist, 1_000)
+        self.assertFalse(m.armed_at(c.height))
+        self.assertFalse(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+        for snap in m.snapshots.values():                         # the same notice at an ARMED reference holds it
+            snap.attest = ym.AttestState(ym.ARMED, 0, 0)
+        self.assertTrue(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+
+    # Rule: CAN-3
+    def test_residual_release_mirrors_every_citable_ref(self):
+        """The round-2 fix: an undefined price, or a claimable price at any citable ref, holds the residual; an older ref
+        does not."""
         c, m = self.c, self.c.model
         res = self.fake_residual()
         raw = self.cancel()
         self.assertEqual(self.mine(raw), '')
-        pos = (txid_of(raw), 0)
-        c.mine_n(64, price_fn=lambda h: 50_000)
-        m.notices[pos] = ym.NoticeRecord(c.height - 4, c.height - c.params.emergency_persist, 1_000)
-        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
-        m.notices[pos] = ym.NoticeRecord(c.height, c.height, 1_000)       # not yet persisted at H - 1
-        self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
+        c.mine_n(128, price_fn=lambda h: 50_000)
+
+        def attempt(back, p_claim):
+            h = c.height + 1 - back
+            orig = m.snapshots[h].p_claim
+            m.snapshots[h].p_claim = p_claim
+            try:
+                return self.mine(c.release_tx(res, 1000))
+            finally:
+                m.snapshots[h].p_claim = orig      # the dict may have been restored from a copy by a rejected block
+        self.assertEqual(attempt(1, 0), 'intent-residual-held')
+        self.assertEqual(attempt(10, 9_000), 'intent-residual-held')
+        self.assertEqual(attempt(c.params.ref_window, 9_000), 'intent-residual-held')
+        self.assertEqual(attempt(c.params.ref_window + 1, 9_000), '')
+
+    # Rule: CAN-2
+    def test_cancel_constants_per_network(self):
+        for net in (ym.Params.mainnet(1),):
+            self.assertEqual((net.cancel_signers_max, net.cancel_quiet), (4, 8_064))
+        self.assertEqual((self.c.params.cancel_signers_max, self.c.params.cancel_quiet), (3, 40))
 
     # Rule: CAN-2
     def test_counts_distinct_valid_entries(self):
@@ -1773,7 +1804,7 @@ class CancelLimitTests(CancelTests):
         # round 2: past CANCEL_QUIET the position (300 % at $0.05) is claimable at $0.009: still held
         self.assertTrue(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
         self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
-        c.mine_n(64, price_fn=lambda h: 50_000)                 # the price recovers for a slow window
+        c.mine_n(128, price_fn=lambda h: 50_000)                # the price recovers at every citable ref
         self.assertFalse(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
         self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
         self.assertNotIn(res, m.intents)

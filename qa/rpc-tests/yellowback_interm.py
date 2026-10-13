@@ -378,7 +378,7 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         user, claimant = nodes[0], nodes[5]
         print("--armed: the attestor set cancels the claimant's in-term claim of the class-A vault three times (1, 2, 3 co-signers)")
         from test_framework import yellowback_attest as ya
-        from test_framework.yellowback_attest import ATTESTOR_WIFS, attestor_keys
+        from test_framework.yellowback_attest import ATTESTOR_WIFS
         members = [0, 1, 2]
         secrets = dict((i, hot_secret_for(user, i)) for i in members)
         for i in members:                                  # the wallet path: the member keys in node 0's wallet

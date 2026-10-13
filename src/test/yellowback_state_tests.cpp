@@ -5007,6 +5007,23 @@ std::vector<int> FirstSeqs(int n)
 } // namespace
 
 // Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_limit_constants_per_network)
+{
+    // owner round 2: CANCEL_SIGNERS_MAX 4 on mainnet and testnet, 3 on regtest; CANCEL_QUIET 8,064 / 40
+    for (const char* net : { "main", "test" }) {
+        BOOST_CHECK_EQUAL(ParamsForNetwork(net).cancelSignersMax, 4);
+        BOOST_CHECK_EQUAL(ParamsForNetwork(net).cancelQuiet, 8064);
+    }
+    BOOST_CHECK_EQUAL(ParamsForNetwork("regtest").cancelSignersMax, 3);
+    BOOST_CHECK_EQUAL(ParamsForNetwork("regtest").cancelQuiet, 40);
+    VaultRecord v;
+    v.cancelCount = 9;
+    v.lastCancelHeight = 100;
+    BOOST_CHECK_EQUAL(CancelsRequired(v, ParamsForNetwork("main"), 101), 4);       // the schedule caps at four
+    BOOST_CHECK_EQUAL(CancelsRequired(v, ParamsForNetwork("main"), 100 + 8064), 1);
+}
+
+// Rule: CAN-2
 BOOST_AUTO_TEST_CASE(cancel_limit_escalation_schedule_and_cap)
 {
     RoundsFixture c;
@@ -5261,10 +5278,55 @@ BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_until_quiet)
     BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
     // the price recovers for a whole slow window: the position is no longer claimable, the residual is released
     r.g.poolPrice = 50000;
-    for (int i = 0; i < 64; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));   // every citable ref recovers
     BOOST_REQUIRE(!IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
     BOOST_CHECK_EQUAL(r.Release(), "");
     BOOST_CHECK(!State(r.g.f.view).GetIntent(r.residual).has_value());
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_release_mirrors_every_citable_ref)
+{
+    // the round-2 fix: past CANCEL_QUIET and healthy at the latest snapshot, the residual is still held when a claim in
+    // the release's block could cite an earlier reference height at which the position is claimable, or one whose price
+    // is undefined (fail closed); a height older than REF_WINDOW cannot be cited and does not hold it
+    ResidualFixture r;
+    r.CancelFirst();
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    const int refWindow = r.g.f.P.refWindow;
+    BOOST_REQUIRE_EQUAL(refWindow, 40);
+    // each attempt sets one snapshot's pClaim relative to the release's block H = tip + 1, then restores it (a refused
+    // release still mines a block, so H moves on by one)
+    auto attempt = [&](int back, int64_t pClaim) {
+        const int h = r.g.f.tip + 1 - back;
+        const Snapshot orig = r.g.f.Snap(h);
+        Snapshot s = orig;
+        s.pClaim = pClaim;
+        State(r.g.f.view).Put(keys::Snapshot((uint32_t)h), s);
+        const std::string v = r.Release();
+        State(r.g.f.view).Put(keys::Snapshot((uint32_t)h), orig);
+        return v;
+    };
+    BOOST_CHECK_EQUAL(attempt(1, 0), verdict::INTENT_RESIDUAL_HELD);               // undefined price at H - 1
+    BOOST_CHECK_EQUAL(attempt(10, 9000), verdict::INTENT_RESIDUAL_HELD);           // claimable at an earlier citable ref only
+    BOOST_CHECK_EQUAL(attempt(refWindow, 9000), verdict::INTENT_RESIDUAL_HELD);    // the oldest citable ref
+    BOOST_CHECK_EQUAL(attempt(refWindow + 1, 9000), "");                           // too old to cite: released
+}
+
+// Rule: CAN-3
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_armed_pool_low_fails_closed)
+{
+    // the round-2 fix at an ARMED reference: the pools under theta and the attestors high (pClaim = max(x, a) would keep a
+    // claim out only with a high bundle, but a claim may carry a low one): the residual is held, fail-closed, until the
+    // position closes or the pools recover for the whole REF_WINDOW
+    ResidualFixture r;
+    r.CancelFirst();
+    BOOST_REQUIRE(ArmedAt(r.g.f.view, r.g.f.P, r.g.f.tip));
+    while (r.g.f.tip + 1 < r.g.f.Vault(r.pos.hash)->lastCancelHeight + r.g.f.P.cancelQuiet) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    const VaultRecord pos = r.g.f.Vault(r.pos.hash).value();
+    BOOST_REQUIRE(IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
 }
 
 // Rule: CAN-3
@@ -5277,16 +5339,14 @@ BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_while_claimable_by_path_b)
     ResidualFixture r;
     r.CancelFirst();
     r.g.poolPrice = 50000;
-    for (int i = 0; i < 64; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
-    const MemoryStateView healthy = r.g.f.view;
+    for (int i = 0; i < 128; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
     NoticeRecord n;
     n.height = r.g.f.tip - 4;
     n.refHeight = r.g.f.tip - r.g.f.P.emergencyPersist;      // persisted at H - 1 = tip
     n.pEmerg = 10000;                                          // ~48 % at $0.01: under 105 %
     State(r.g.f.view).Put(keys::Notice(r.pos), n);
     BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
-    r.g.f.view = healthy;
-    n.refHeight = r.g.f.tip;                                   // not yet persisted at H - 1
+    n.refHeight = r.g.f.tip;                                   // not yet persisted at any citable ref
     State(r.g.f.view).Put(keys::Notice(r.pos), n);
     BOOST_CHECK_EQUAL(r.Release(), "");
 }
