@@ -371,6 +371,7 @@ std::optional<std::string> VaultState::ApplyTx(const CTransaction& tx, int64_t h
 {
     VaultState child(*this);
     child.blockHashes = blockHashes;
+    child.activationHeight = activationHeight;
     auto err = child.ApplyTxInner(tx, height, coins);
     if (err) return err;
     MergeFrom(child);
@@ -470,6 +471,10 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
             } else {
                 continue;
             }
+            // S-0 (audit 01/V-1): a template input's coin was created at or above the activation
+            // height. A coin from before the rules is not theirs to admit, and its height is never
+            // their input (replay derives 0 for a coin the template-output index does not hold).
+            if (c.height < activationHeight) return std::string("bad-txns-vault-preactivation");
             if (tin) return std::string("bad-txns-vault-multi");
             auto sel = ParseSelector(tx.vin[i].scriptSig, &ts.sigs);
             if (!sel) return std::string("bad-txns-vault-selector");
@@ -551,6 +556,9 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
     for (size_t o = 0; o < outs.size(); o++) {
         if (outs[o].kind != OutClass::VAULT) continue;
         const VaultParams& v = outs[o].v;
+        // V-1 (audit 01/V-5): the APP branch (selector 4) has no signer; it exists for a module to govern.
+        // A V with an APP branch on a tag no module governs would be anyone-can-spend-into-intents from appHeight.
+        if (v.appHeight != 0 && !FindModule(v.tag)) return std::string("bad-txns-vault-app");
         auto set = GetSet(*this, v.setId);
         if (!set || set->createHeight >= h) return std::string("bad-txns-vault-noset");
         auto cset = GetSet(*this, v.cancelSetId);
@@ -876,10 +884,11 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
 }
 
 std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot,
-                                   const BlockHashFn& blockHashes)
+                                   const BlockHashFn& blockHashes, int64_t activationHeight)
 {
     VaultState tmp(snapshot.Base());
     tmp.SetBlockHashes(blockHashes);
+    tmp.SetActivationHeight(activationHeight);
     return tmp.ApplyTx(tx, height, coins);
 }
 

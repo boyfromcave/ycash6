@@ -96,6 +96,10 @@ BASE_SCRIPTS= [
     'vault_bridge.py',
     # A reorg below Falcon's height evicts Falcon (OP_CHECKPQSIG scheme 0x02) spends (quantum review F-1).
     'vault_pq_reorg.py',
+    # The vault database prunes its undo records UNDO_KEEP blocks back (audit 07/F-7): 4,100 blocks, restarts.
+    'vault_undo_prune.py',
+    # Template-spend relay policy with standardness enforced (-acceptnonstdtxn=0; audit 01/V-4).
+    'vault_policy.py',
     # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',

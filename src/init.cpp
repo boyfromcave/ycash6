@@ -392,7 +392,7 @@ std::string HelpMessage(HelpMessageMode mode)
 #ifndef WIN32
     strUsage += HelpMessageOpt("-pid=<file>", strprintf(_("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)"), BITCOIN_PID_FILENAME));
 #endif
-    strUsage += HelpMessageOpt("-prune=<n>", strprintf(_("Reduce storage requirements by pruning (deleting) old blocks. This mode disables wallet support and is incompatible with -txindex. "
+    strUsage += HelpMessageOpt("-prune=<n>", strprintf(_("Reduce storage requirements by pruning (deleting) old blocks. This mode disables wallet support and is incompatible with -txindex and with the vault upgrade (on any network where it has an activation height). "
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
             "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
 #ifdef ENABLE_WALLET
@@ -507,6 +507,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-limitdescendantcount=<n>", strprintf("Do not accept transactions if any ancestor would have <n> or more in-mempool descendants (default: %u)", DEFAULT_DESCENDANT_LIMIT));
         strUsage += HelpMessageOpt("-limitdescendantsize=<n>", strprintf("Do not accept transactions if any ancestor would have more than <n> kilobytes of in-mempool descendants (default: %u).", DEFAULT_DESCENDANT_SIZE_LIMIT));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
+        strUsage += HelpMessageOpt("-acceptnonstdtxn", "Accept non-standard transactions into the mempool (regtest-only) (default: 1; 0 enforces the standardness policy)");
         strUsage += HelpMessageOpt("-pqfalcon", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from the vault upgrade, as -pqfalconheight=0 (regtest-only) (default: 0)");
         strUsage += HelpMessageOpt("-pqfalconheight=<h>", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from height <h> once the vault upgrade is active (regtest-only)");
         strUsage += HelpMessageOpt("-nurejectoldversions", strprintf("Reject peers that don't know about the current epoch (regtest-only) (default: %u)", DEFAULT_NU_REJECT_OLD_VERSIONS));
@@ -1426,6 +1427,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return InitError("-regtestenablezip209 may only be used on regtest.");
     }
 
+    // -acceptnonstdtxn (regtest only; chainparams read it): =0 enforces relay policy on regtest (audit 01/V-4 tests).
+    if (mapArgs.count("-acceptnonstdtxn") && chainparams.NetworkIDString() != "regtest") {
+        return InitError("-acceptnonstdtxn may only be used on regtest.");
+    }
     // Falcon activation (quantum spec R-A2, R-B3): regtest only; chainparams read the value.
     if (mapArgs.count("-pqfalcon") || mapArgs.count("-pqfalconheight")) {
         if (chainparams.NetworkIDString() != "regtest") {
@@ -1537,6 +1542,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return InitError(_("This datadir holds a Yellowback index, so this wallet may hold YED, but Yellowback is not live with these options. "
                            "Start with the network's attestor set (regtest -yellowbackattestorset) to keep those outputs locked, "
                            "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
+    }
+    // Audit 01/N-1: the vault set-state database is rebuilt from blocks and undo data (Reconcile: an unclean
+    // shutdown, a wiped vaults/, a VAULT_DB_VERSION bump, a reorg past the undo horizon), so -prune is refused
+    // wherever the upgrade has a height — independent of Yellowback (-yellowbackattestorset).
+    if (fPruneMode && chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+        return InitError(_("The vault upgrade is configured on this network and incompatible with -prune: the vault database is rebuilt from blocks and undo data. "
+                           "Re-download the block chain without -prune."));
     }
     if (yellowback::g_yellowbackLive) {
         if (fPruneMode) {

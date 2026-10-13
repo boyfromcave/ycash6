@@ -20,6 +20,7 @@
 #include "yellowback/script.h"
 #include "vault/template.h"
 
+#include "arith_uint256.h"
 #include "chain.h"
 #include "consensus/params.h"
 #include "crypto/sha256.h"
@@ -82,6 +83,7 @@ struct Chain {
     MemoryKV kv;
     MapCoinAccessor coins;
     int64_t h = 100;
+    int64_t activation = 0;   // S-0's floor (VaultState::SetActivationHeight); 0 = none, the suite's default
     uint32_t fundCounter = 0;
     std::vector<std::pair<std::map<std::string, std::string>, BlockUndo>> history;
 
@@ -106,6 +108,7 @@ struct Chain {
         CBlock block;
         for (const auto& m : txs) block.vtx.push_back(CTransaction(m));
         VaultState st(kv);
+        st.SetActivationHeight(activation);
         BlockUndo undo;
         auto err = st.ApplyBlock(block, h, coins, undo);
         if (err) return err;
@@ -132,6 +135,7 @@ struct Chain {
     Res Try(const CMutableTransaction& tx)
     {
         VaultState st(kv);
+        st.SetActivationHeight(activation);
         return st.ApplyTx(CTransaction(tx), h, coins);
     }
 };
@@ -943,13 +947,147 @@ BOOST_AUTO_TEST_CASE(coins_from_undo)
     BOOST_REQUIRE(coins2.GetSpentCoin(iout, got));
     BOOST_CHECK_EQUAL(got.height, 7);
 
-    // An intent with no height anywhere cannot be replayed; a mismatched undo is refused.
+    // An intent with no height anywhere (created before activation: never indexed, the undo of a
+    // non-emptying spend has no height) replays with height 0 (audit 01/T-1: this used to be
+    // `return false`, i.e. a node that could not start); S-0 then rejects its RELEASE and its
+    // CANCEL exactly as the live path does with the real pre-activation height.
     undo.vtxundo[0].vprevout[0].nHeight = 0;
     MemoryKV empty;
     MapCoinAccessor coins3;
-    BOOST_CHECK(!CoinsFromUndo(block, undo, c.h, empty, coins3));
+    BOOST_REQUIRE(CoinsFromUndo(block, undo, c.h, empty, coins3));
+    BOOST_REQUIRE(coins3.GetSpentCoin(iout, got));
+    BOOST_CHECK_EQUAL(got.height, 0);
+    BOOST_CHECK(got.scriptPubKey == ispk);
+    {
+        VaultState st(c.kv);
+        st.SetActivationHeight(c.h - 1);
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(SpendTx(c, iout, 1, {CTxOut(10000, Recipient(60))}, false)), c.h, coins3)),
+                          "bad-txns-vault-preactivation");
+        BOOST_CHECK_EQUAL(*Res(st.ApplyTx(CTransaction(cancel), c.h, coins3)), "bad-txns-vault-preactivation");
+    }
+    // A mismatched undo is still refused (the two structural checks).
     undo.vtxundo.pop_back();
     BOOST_CHECK(!CoinsFromUndo(block, undo, c.h, c.kv, coins3));
+    CBlockUndo short_undo;
+    short_undo.vtxundo.resize(2);
+    short_undo.vtxundo[1].vprevout.push_back(CTxInUndo(CTxOut(10000, vspk)));
+    BOOST_CHECK(!CoinsFromUndo(block, short_undo, c.h, c.kv, coins3));
+}
+
+BOOST_AUTO_TEST_CASE(preactivation_floor)
+{
+    // S-0 (audit 01/V-1, 01/V-3): a template input whose coin was created below the activation height is invalid.
+    Chain c; // h = 100
+    CKey owner = MakeKey(50);
+    SetId s = SetWithMembers(c, {MakeKey(1)});
+    const int64_t activation = c.h;
+    c.activation = activation;
+
+    // MATCH V and I coins created at activation - 1 (a miner's pre-activation preparation: policy refused them).
+    VaultParams vp = VaultFor(s, owner, /*appHeight=*/activation + 1);  // an APP branch, for selector 4
+    vp.ownerHeight = activation;
+    CScript vspk = BuildVault(vp);
+    CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    auto inject = [&](const CScript& spk, CAmount value, int64_t height, unsigned char seed) {
+        uint256 hash;
+        hash.begin()[0] = seed;
+        hash.begin()[31] = 0xab;
+        COutPoint op(hash, 0);
+        SpentCoin coin;
+        coin.scriptPubKey = spk;
+        coin.value = value;
+        coin.height = height;
+        c.coins.coins[op] = coin;
+        return op;
+    };
+    const COutPoint preV = inject(vspk, 5000, activation - 1, 1);
+    const COutPoint preI = inject(ispk, 5000, activation - 1, 2);
+    c.Empty(10);
+    // V: OWNER (2), OWNER-RELEASED (3), APP (4) — the UNLOCK (1) too.
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preV, 1, {CTxOut(5000, ispk)})), "bad-txns-vault-preactivation");
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preV, 2, {CTxOut(5000, Recipient(70))})), "bad-txns-vault-preactivation");
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preV, 3, {CTxOut(5000, Recipient(70))})), "bad-txns-vault-preactivation");
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preV, 4, {CTxOut(5000, ispk)})), "bad-txns-vault-preactivation");
+    // I: RELEASE (1), CANCEL (2), OWNER-RELEASED (3).
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preI, 1, {CTxOut(5000, Recipient(60))})), "bad-txns-vault-preactivation");
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preI, 2, {CTxOut(5000, vspk)})), "bad-txns-vault-preactivation");
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, preI, 3, {CTxOut(5000, Recipient(70))})), "bad-txns-vault-preactivation");
+    // In a block too.
+    BOOST_CHECK_EQUAL(*c.Block1(SpendTx(c, preI, 1, {CTxOut(5000, Recipient(60))})), "bad-txns-vault-preactivation");
+
+    // The same shapes at the activation height pass the floor (and their rules apply as ever).
+    const COutPoint atI = inject(ispk, 5000, activation, 3);
+    BOOST_CHECK(!c.Try(SpendTx(c, atI, 1, {CTxOut(5000, Recipient(60))})));
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, atI, 1, {CTxOut(4999, Recipient(60))})), "bad-txns-vault-release");
+    VaultParams vp0 = VaultFor(s, owner);   // a V locked at h >= activation: indexed, counted, spendable
+    vp0.ownerHeight = activation;
+    COutPoint atV = Lock(c, vp0, 7000);
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 7000);
+    BOOST_CHECK(!c.Block1(SpendTx(c, atV, 2, {CTxOut(7000, Recipient(70))})));
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 0);
+
+    // A MALFORMED-shaped pre-activation coin (delay 5 pushed non-minimally) is not a template input: no floor, no rule.
+    valtype nmBytes(vspk.begin(), vspk.begin() + 38);    // tag, cancelSetId; then delay 5 as 01 05, not OP_5
+    nmBytes.push_back(0x01);
+    nmBytes.push_back(0x05);
+    nmBytes.insert(nmBytes.end(), vspk.begin() + 39, vspk.end());
+    const CScript nm(nmBytes.begin(), nmBytes.end());
+    VaultParams q;
+    BOOST_REQUIRE(MatchVault(nm, q) == Shape::MALFORMED);
+    const COutPoint preM = inject(nm, 5000, activation - 1, 4);
+    BOOST_CHECK(!c.Try(SpendTx(c, preM, 1, {CTxOut(5000, Recipient(70))})));
+
+    // SetActivationHeight unset (0): no floor — the default every other case in this suite runs under.
+    c.activation = 0;
+    BOOST_CHECK(!c.Try(SpendTx(c, preV, 2, {CTxOut(5000, Recipient(70))})));
+}
+
+BOOST_AUTO_TEST_CASE(replay_parity)
+{
+    // A post-activation V whose creating transaction is only partly spent: the template spend's undo
+    // has no height (CCoins undo: only the emptying spend carries one), CoinsFromUndo takes it from the
+    // 'v' index, and the block applies over the replay accessor exactly as over the live coins.
+    Chain c;
+    CKey owner = MakeKey(50);
+    SetId s = SetWithMembers(c, {MakeKey(1)});
+    c.activation = 100;
+    VaultParams vp = VaultFor(s, owner);
+    CScript vspk = BuildVault(vp);
+    CMutableTransaction lock;
+    lock.vin.push_back(CTxIn(c.Fund(20000), CScript(), 0xffffffff));
+    lock.vout.push_back(CTxOut(10000, vspk));
+    lock.vout.push_back(CTxOut(9000, Recipient(80)));   // stays unspent
+    BOOST_REQUIRE(!c.Block1(lock));
+    const COutPoint vout(CTransaction(lock).GetHash(), 0);
+    const int64_t vh = c.h - 1;
+    c.Empty(2);
+    CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    CMutableTransaction unlock = SpendTx(c, vout, 1, {CTxOut(10000, ispk)}, false);
+    CMutableTransaction coinbase;
+    coinbase.vin.push_back(CTxIn());
+    coinbase.vout.push_back(CTxOut(1, Recipient(70)));
+    CBlock block;
+    block.vtx = {CTransaction(coinbase), CTransaction(unlock)};
+    CBlockUndo undo;
+    undo.vtxundo.resize(1);
+    undo.vtxundo[0].vprevout.push_back(CTxInUndo(CTxOut(10000, vspk)));   // nHeight 0: not the emptying spend
+    MapCoinAccessor replay;
+    BOOST_REQUIRE(CoinsFromUndo(block, undo, c.h, c.kv, replay));
+    SpentCoin got;
+    BOOST_REQUIRE(replay.GetSpentCoin(vout, got));
+    BOOST_CHECK_EQUAL(got.height, vh);
+
+    VaultState live(c.kv), rep(c.kv);
+    live.SetActivationHeight(c.activation);
+    rep.SetActivationHeight(c.activation);
+    BlockUndo u1, u2;
+    BOOST_REQUIRE(!live.ApplyBlock(block, c.h, c.coins, u1));
+    BOOST_REQUIRE(!rep.ApplyBlock(block, c.h, replay, u2));
+    BOOST_CHECK(live.Changes() == rep.Changes());
+    MemoryKV a = c.kv, b = c.kv;
+    a.Apply(live.Changes());
+    b.Apply(rep.Changes());
+    BOOST_CHECK(StateHash(a) == StateHash(b));
 }
 
 BOOST_AUTO_TEST_CASE(app_branch)
@@ -957,14 +1095,29 @@ BOOST_AUTO_TEST_CASE(app_branch)
     Chain c;
     CKey owner = MakeKey(50);
     SetId s = SetWithMembers(c, {MakeKey(1)});
+    // V-1 (audit 01/V-5): an APP branch only on a tag a module governs. TEST has none: refused.
+    VaultParams bad = VaultFor(s, owner, /*appHeight=*/500);
+    CMutableTransaction lockBad;
+    lockBad.vin.push_back(CTxIn(c.Fund(9000), CScript(), 0xffffffff));
+    lockBad.vout.push_back(CTxOut(8000, BuildVault(bad)));
+    BOOST_CHECK_EQUAL(*c.Try(lockBad), "bad-txns-vault-app");
+    // ... also when a template spend creates it (any V output: here an owner spend paying into it).
+    bad.appHeight = 0;
+    COutPoint plain = Lock(c, bad, 8000);
+    VaultParams badOut = bad;
+    badOut.appHeight = 500;
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, plain, 2, {CTxOut(8000, BuildVault(badOut))})), "bad-txns-vault-app");
+    // YED\0 has a registered module (its rules are not configured in this suite, so it governs nothing else here).
     VaultParams vp = VaultFor(s, owner, /*appHeight=*/500);
+    vp.tag = yellowback::YED_TAG;
+    BOOST_REQUIRE(FindModule(vp.tag));
     CScript vspk = BuildVault(vp);
     COutPoint vout = Lock(c, vp, 8000);
     CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
     // Selector 4 obeys S-2 like an unlock.
     BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, vout, 4, {CTxOut(8000, Recipient(60))})), "bad-txns-vault-value");
     BOOST_REQUIRE(!c.Block1(SpendTx(c, vout, 4, {CTxOut(8000, ispk)})));
-    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 0);
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 8000);   // only the plain V remains
 }
 
 BOOST_AUTO_TEST_CASE(rate_limit_epochs)
@@ -1135,11 +1288,12 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
     CMutableTransaction create = ActTx(c, a, {});
     SetId s = CTransaction(create).GetHash();
     BOOST_CHECK_EQUAL(db.GetVersion(), 1u);                 // no version key: a database from before it (review A3)
+    BOOST_CHECK(!GetSet(db, s));                            // a miss, cached as absent (audit 01/V-6 contract) ...
     connect({create}, h1, h0, 100);
     BOOST_CHECK_EQUAL(db.GetVersion(), VAULT_DB_VERSION);   // written with every connected block
     BOOST_CHECK_EQUAL(VAULT_DB_VERSION, 3u);
     BOOST_CHECK(db.GetTip(tip, tipHeight) && tip == h1 && tipHeight == 100);
-    BOOST_CHECK(!!GetSet(db, s));
+    BOOST_CHECK(!!GetSet(db, s));                           // ... replaced by the commit's value, never the stale read
     const auto afterCreate = snapshotAll();
 
     c.h = 101;
@@ -1171,6 +1325,44 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
     BOOST_CHECK(db.Flush());
     BOOST_CHECK(db.Wipe());
     BOOST_CHECK(!db.GetTip(tip, tipHeight));
+}
+
+BOOST_AUTO_TEST_CASE(db_undo_prune)
+{
+    // Audit 07/F-7: connecting block h erases the undo of block h - UNDO_KEEP in the same batch (the caller,
+    // UndoToPrune, names it); disconnects within the horizon work, one past it fails on the missing undo —
+    // the condition Reconcile turns into a wipe + replay.
+    VaultDB db(fs::temp_directory_path() / "vault_db_prune_test", 1 << 20, /*fMemory=*/true, /*fWipe=*/true);
+    const int64_t start = 100;
+    auto hashAt = [](int64_t h) { return ArithToUint256(arith_uint256((uint64_t)h + 0x10000)); };
+    const int n = UNDO_KEEP + 2;
+    for (int64_t h = start; h < start + n; h++) {
+        VaultState st(db);
+        BlockUndo undo;
+        BOOST_REQUIRE(!st.ApplyBlock(CBlock(), h, MapCoinAccessor(), undo));
+        std::optional<uint256> prune;
+        if (h - UNDO_KEEP >= start) prune = hashAt(h - UNDO_KEEP);
+        BOOST_REQUIRE(db.ConnectBlock(hashAt(h), h, hashAt(h - 1), st, undo, prune));
+    }
+    const int64_t tipH = start + n - 1;
+    BlockUndo u;
+    BOOST_CHECK(!db.ReadUndo(hashAt(start), u));
+    BOOST_CHECK(!db.ReadUndo(hashAt(start + 1), u));
+    BOOST_CHECK(db.ReadUndo(hashAt(start + 2), u));
+    BOOST_CHECK(db.ReadUndo(hashAt(tipH), u));
+    size_t undos = 0;
+    db.Iterate(std::string(1, KEY_UNDO), [&](const std::string&, const std::string&) { undos++; return true; });
+    BOOST_CHECK_EQUAL(undos, (size_t)UNDO_KEEP);
+    // Disconnect back through the horizon: every block still holding its undo, then the first without one.
+    int64_t h = tipH;
+    for (; h > tipH - UNDO_KEEP; h--) {
+        BOOST_REQUIRE_MESSAGE(db.DisconnectBlock(hashAt(h), hashAt(h - 1), h - 1), "disconnect at " << h);
+    }
+    BOOST_CHECK_EQUAL(h, start + 1);
+    BOOST_CHECK(!db.DisconnectBlock(hashAt(h), hashAt(h - 1), h - 1));   // pruned: Reconcile wipes and replays
+    uint256 tip;
+    int64_t tipHeight;
+    BOOST_CHECK(db.GetTip(tip, tipHeight) && tip == hashAt(start + 1) && tipHeight == start + 1);
 }
 
 BOOST_AUTO_TEST_CASE(set_sig_checker)

@@ -17,6 +17,7 @@
 #include "util/system.h"
 #include "util/strencodings.h"
 #include "vault/act.h"
+#include "vault/state.h"
 #include "vault/template.h"
 #include "yellowback/payload.h"
 
@@ -196,7 +197,68 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
     return true;
 }
 
-bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, uint32_t consensusBranchId)
+namespace {
+
+/** s + p + 2: the pushes of a post-quantum owner/holder stack <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p> (A-14); 0 for
+ *  an unregistered scheme. */
+size_t PQStackPushes(uint8_t scheme)
+{
+    const size_t sigLen = pq::SigSize(scheme) + 1, pkLen = pq::PubKeySize(scheme);
+    if (sigLen == 1 || pkLen == 0) return 0;
+    return (sigLen + pq::MAX_CHUNK - 1) / pq::MAX_CHUNK + (pkLen + pq::MAX_CHUNK - 1) / pq::MAX_CHUNK + 2;
+}
+
+/**
+ * A template input's scriptSig carries no more than its selector's branch consumes (audit 01/V-4): the
+ * selector and any extra push are outside every signature, so a relay could otherwise add pushes (a new
+ * txid). Set-signed branches (V selector 1, I selector 2): only 65-byte signatures, at most the role's
+ * threshold when the set state is at hand (OP_CHECKSETSIG pops exactly k, CLEANSTACK is policy); owner
+ * branches (V 2/3, I 3): at most the owner scheme's s + p + 2 pushes; the APP branch (V 4) and the RELEASE
+ * (I 1): the selector alone. Fewer pushes than a branch consumes fail its script (the reason a client sees
+ * stays the script's). Relay policy only: a miner may still re-encode, and selector 2 vs 3 on a V (both the
+ * owner's legitimately) is not canonicalised — a template spend's txid is malleable until it confirms
+ * (upgrade plan §15.3).
+ */
+bool IsStandardTemplateScriptSig(const CScript& spk, const CScript& scriptSig, const vault::SetSnapshot* snapshot)
+{
+    std::optional<vault::TemplateSpend> ts = vault::ParseTemplateSpend(spk, scriptSig);
+    if (!ts) {
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        // a MALFORMED-shaped coin is no template input: the size bound only; a template one needs a selector
+        return !vault::ParseVault(spk, vp) && !vault::ParseIntent(spk, ip);
+    }
+    const std::vector<std::vector<unsigned char>>& pushes = ts->sigs;
+    auto setSigned = [&](const vault::SetId& setId, uint8_t role) {
+        if (pushes.empty()) return false;
+        for (const auto& sig : pushes) {
+            if (sig.size() != vault::RECOVERABLE_SIG_SIZE) return false;
+        }
+        if (!snapshot) return true;
+        std::optional<int> k = snapshot->Threshold(setId, role);
+        return !k || pushes.size() <= (size_t)*k;   // an unknown set fails the script anyway
+    };
+    if (ts->kind == vault::TemplateKind::VAULT) {
+        switch (ts->selector) {
+        case vault::SEL_UNLOCK: return setSigned(ts->vault.setId, vault::ROLE_UNLOCK);
+        case vault::SEL_OWNER:
+        case vault::SEL_RELEASED: return pushes.size() <= PQStackPushes(ts->vault.owner.scheme);
+        case vault::SEL_APP: return pushes.empty();
+        }
+        return false;
+    }
+    switch (ts->selector) {
+    case vault::SEL_UNLOCK: return pushes.empty();
+    case vault::SEL_OWNER: return setSigned(ts->intent.cancelSetId, vault::ROLE_CANCEL);
+    case vault::SEL_RELEASED: return pushes.size() <= PQStackPushes(ts->intent.owner.scheme);
+    }
+    return false;
+}
+
+} // namespace
+
+bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, uint32_t consensusBranchId,
+                       const vault::SetSnapshot* vaultSnapshot)
 {
     if (tx.IsCoinBase())
         return true; // Coinbases don't use vin normally
@@ -216,9 +278,13 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
         const bool pqSpend = whichType == TX_PQPKH || whichType == TX_VAULT || whichType == TX_VAULT_INTENT || whichType == TX_PQCHANNEL;
         if (tx.vin[i].scriptSig.size() > (pqSpend ? MAX_STANDARD_PQ_SCRIPTSIG : MAX_STANDARD_SCRIPTSIG))
             return false;
-        // A template input's scriptSig (push-only, IsStandardTx) is checked by the vault rules (S-1).
-        if (whichType == TX_VAULT || whichType == TX_VAULT_INTENT)
+        // A template input's scriptSig (push-only, IsStandardTx) is checked by the vault rules (S-1) and, as
+        // relay policy, for its exact shape (audit 01/V-4).
+        if (whichType == TX_VAULT || whichType == TX_VAULT_INTENT) {
+            if (!IsStandardTemplateScriptSig(prevScript, tx.vin[i].scriptSig, vaultSnapshot))
+                return false;
             continue;
+        }
         if (whichType == TX_PQPKH) {
             // <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p>: exactly s + p + 2 pushes for the scheme (A-14).
             const uint8_t scheme = vSolutions[0][0];

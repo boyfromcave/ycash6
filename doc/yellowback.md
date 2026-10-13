@@ -272,6 +272,18 @@ names the reason (`unhealthyReason`) and always means "restart with `-reindex-ye
 verdict is consensus, a node whose index is unhealthy stops (`AbortNode`) rather than validate
 blocks without it; restart with `-reindex-yellowback`.
 
+After a crash, the Yellowback index and the vault set-state database (`<datadir>/vaults/`) each walk
+back their own undo records for at most 4,096 blocks (`UNDO_KEEP` in `src/yellowback/index.h` and
+`src/vault/db.h`; each prunes older records as it connects blocks). A chainstate more than 4,096
+blocks older than either at the crash (the chainstate flushes hourly, or when `-dbcache` fills
+during a long sync) is a full rebuild from the activation height instead: the correct outcome, but
+minutes to hours of downtime. On a node where downtime matters, flush more often (a smaller
+`-dbcache`); a node killed during a long initial sync with a large `-dbcache` can take the same rebuild.
+After connecting block H the vault database keeps the undo records of H − 4,095 … H. A live reorg is
+refused beyond 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` that would disconnect a block below
+H − 4,095 finds no undo record and stops the node, and a plain restart stops again: restart with
+`-reindex`, which rebuilds everything from the block files (and forgets the invalidation).
+
 ## How your YED is protected from being spent as plain YEC
 
 A YED output is an ordinary 10,000-zatoshi P2PKH output; the dollars it carries live in the

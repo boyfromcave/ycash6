@@ -120,8 +120,21 @@ class VaultRpcContractTest(BitcoinTestFramework):
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,
                                       'owner': OWNER_ID})
         app_height = h + 12
-        lk_app = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200,
-                                          'appheight': app_height, 'amount': 2})      # a new wallet owner
+        c.error('appheight on a tag no module governs', n, 'vault_lock',
+                {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'appheight': app_height, 'amount': 2})
+        # YED\0 is registered but governs no set on this node (no attestor set): the wallet refuses too
+        c.error('appheight on a tag no module governs', n, 'vault_lock',
+                {'tag': '59454400', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'appheight': app_height, 'amount': 2})
+        # The APP vault for vault_app below, built raw (consensus admits an APP branch on the registered YED\0, V-1;
+        # this test's node has no attestor set, so nothing governs it -- the residual the wallet refuses to build).
+        app_owner = c.call(n, 'vault_getnewowner')['owner']          # a wallet owner (vault_ownerspend below)
+        app_vp = vault.VaultParams(b'YED\x00', bytes.fromhex(setid)[::-1], bytes.fromhex(setid)[::-1], DELAY, h + 200,
+                                   app_height, bytes.fromhex(app_owner))
+        fund, total = vault.node_funding(n, 2 * vault.COIN + vault.VAULT_FEE)
+        change = (total - 2 * vault.COIN - vault.VAULT_FEE, vault.node_spk(n))
+        app_txid = vault.node_send(n, vault.node_sign(n, vault.build_lock_tx(fund, app_vp, 2 * vault.COIN, change)))
+        lk_app = {'outpoint': '%s:0' % app_txid, 'owner': app_owner}
+        assert_equal(c.call(n, 'vault_decodescript', vault.vault_script(app_vp).hex())['setid'], setid)
         mine(1)
         vaults = c.call(n, 'vault_list', {'kind': 'vault'})
         assert_equal(sorted(v['valuezat'] for v in vaults), [200000000, 500000000])

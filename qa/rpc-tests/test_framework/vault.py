@@ -1599,6 +1599,11 @@ class SetState(object):
                 'params': {k: v for k, v in self.p.items() if k not in ('type', 'name')}}
 
 
+# The compile-time module table (C++ vault/module.cpp Modules()): the tags a module governs. V-1 admits an APP
+# branch (appHeight != 0) only on these (audit 01/V-5).
+MODULE_TAGS = (b'YED\x00',)
+
+
 class Coin(object):
     __slots__ = ('value', 'spk', 'height')
 
@@ -1758,9 +1763,11 @@ class VaultModel(object):
                 continue
             vp, ip = parse_vault(coin.spk), parse_intent(coin.spk)
             if vp is not None or ip is not None:
+                if coin.height < self.activation_height:
+                    raise VaultError('bad-txns-vault-preactivation')              # S-0 (audit 01/V-1)
+                if tins:
+                    raise VaultError('bad-txns-vault-multi')                  # S-1
                 tins.append((i, key, coin, vp, ip))
-        if len(tins) > 1:
-            raise VaultError('bad-vault-template-count')                          # S-1
         v_outs = [(n, o, parse_vault(o.scriptPubKey)) for n, o in enumerate(tx.vout)]
         v_outs = [(n, o, p) for n, o, p in v_outs if p is not None]
         i_outs = [(n, o, parse_intent(o.scriptPubKey)) for n, o in enumerate(tx.vout)]
@@ -1779,6 +1786,8 @@ class VaultModel(object):
         if i_outs and not covenant:
             raise VaultError('bad-vault-intent-create')                           # I-0
         for n, o, p in v_outs:                                                    # V-1
+            if p.app_height != 0 and bytes(p.tag) not in MODULE_TAGS:
+                raise VaultError('bad-txns-vault-app')                            # audit 01/V-5
             for sid in (p.set_id, p.cancel_set_id):
                 s = self.sets.get(sid)
                 if s is None or s.create_height >= h:

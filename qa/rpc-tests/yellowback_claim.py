@@ -78,6 +78,11 @@ def coin_of(node, cents):
 
 class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
 
+    def node_args(self, i, extra=None):
+        # Relay policy enforced (-acceptnonstdtxn=0, audit 01/V-4): every claim, mint and redeem here goes through
+        # AcceptToMemoryPool with standardness on, the template-input scriptSig shape check included.
+        return super().node_args(i, list(extra or []) + ['-acceptnonstdtxn=0'])
+
     def sync_all(self, blocks_only=False):
         """Blocks everywhere; mempools among the overlay nodes only — the stock node keeps the raw
         claim of a healthy vault that every overlay mempool refuses (MP-1), so a six-node mempool
