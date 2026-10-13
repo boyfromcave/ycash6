@@ -789,7 +789,16 @@ the first height `vault_release` can spend it. Releasing the claimant intent mak
 (the same position under that outpoint) and **refunds the claim's burn** (CAN-1, audit 03/H-1, U-24
 revised): a CLAIMING vault also carries **`refundHolder`** (**optional**, absent otherwise; hex), the
 scriptPubKey the claim's burned YED came from, which a cancel must pay a token carrier at an output
-`≥ 1` (`yed_buildcancel`). `burnedCents` of a CLAIMING vault is the amount that cancel re-issues. A VOID vault is
+`≥ 1` (`yed_buildcancel`). `burnedCents` of a CLAIMING vault is the amount that cancel re-issues. **The per-vault cancel limit**
+(docs/plans/yellowback-cancel-limit-design.md, owner 2026-10-13; additive, `rpcversion` unchanged): `cancelCount` is
+the position's cancels counted by CAN-2's escalation schedule (it survives every re-creation; `0` at the mint),
+`cancelsRequired` the number of distinct current attestor-set members whose co-signatures a cancel of its claim would
+need if it confirmed in the next block (`min(q + 1, CANCEL_SIGNERS_MAX)`, `q` = `cancelCount` while inside the quiet
+period, else 0; `CANCEL_SIGNERS_MAX` 5, regtest 3), and `cancelQuietUntil` the first height at which the schedule
+starts from one again (`lastCancelHeight + CANCEL_QUIET`, 8,064 blocks, regtest 40; *null when the vault was never
+cancelled*). **`heldResiduals`** (**optional**, absent when none): `[{txid, vout}]`, the residual intents of cancelled
+claims this position holds (CAN-3): `vault_release` of one is refused (`intent-residual-held`) until the position is
+CLOSED or CLAIMED, or ACTIVE at or after `cancelQuietUntil`. A VOID vault is
 no longer produced (a failing mint is an invalid transaction); `VOID` stays a valid status
 filter for a chain indexed before the upgrade. The prototype's `tier`, `rosterIndex`, `errBpsAtClose`, `requiredBurnCents`, `indexHeight` are
 gone. Refuses with `vault-not-found`.
@@ -824,6 +833,9 @@ Result of `yed_getvault`:
   "closingTxid": "",
   "burnedCents": 0,
   "unbacked": false,
+  "cancelCount": 0,
+  "cancelsRequired": 1,
+  "cancelQuietUntil": null,
   "claimable": false,
   "underwaterAt": 436700,
   "voidReason": "",
@@ -870,6 +882,9 @@ Result of `yed_listvaults`:
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
+    "cancelCount": 0,
+    "cancelsRequired": 1,
+    "cancelQuietUntil": null,
     "claimable": false,
     "underwaterAt": 436700,
     "voidReason": "",
@@ -1057,7 +1072,8 @@ Type-specific fields: MINT `termClass`, `cents`, `lockHeight`, `refHeight`, `own
 `assignments`, `assignedCents`; **v3** `register` (`0x05`) `attestorPubKey`, `bondPubKey`,
 `bondAddress`, `bondKeyAddress`, `bondLocktime`, `flags {tier, pool}`; `notice` (`0x06`) `vault {txid, vout}`,
 `refHeight`; `equivocation` (`0x07`) nothing; `revive` (`0x08`) `attestation {seq,
-priceMicroUsd, citedHeight, sig, hex}`. Fields of the other types are absent (**optional** — the
+priceMicroUsd, citedHeight, sig, hex}`; `cancelcosign` (`0x09`, the cancel-limit design's CANCEL_COSIGN marker; its
+co-signatures ride the carrier) `cancelCosign` (an empty object). Fields of the other types are absent (**optional** — the
 checker decodes a MINT payload, the example). When `hex` is a **raw transaction** that has a
 carrier-shaped input (v3 §3.4), `bundle` (**optional**) is the decoded bundle — `{vin, hash,
 version, count, attestations: [{seq, priceMicroUsd, citedHeight, sig, hex}]}` — decoded only,
@@ -1966,7 +1982,7 @@ Result of `yed_claim`:
 }
 ```
 
-### `yed_buildcancel <intentOutpoint>`
+### `yed_buildcancel <intentOutpoint> [cosigs]`
 
 Arguments: `intentOutpoint` (string, `"txid:n"`): a YED **claimant** intent (a `CLAIMING` vault's
 `intents[]` row with `role` `"claimant"`), confirmed or still in the mempool (a mempool claim only once
@@ -1995,6 +2011,24 @@ Refusals: `RPC_INVALID_PARAMETER` for a residual intent (it is never cancelled,
 `intent-cancel-residual`), an outpoint that is not a YED claim intent, or a vault that is not
 `CLAIMING`; `vault_buildcancel`'s own (`not an unspent intent output`, `can no longer be cancelled`).
 
+**The per-vault cancel limit** (CAN-2 + C4b, docs/plans/yellowback-cancel-limit-design.md, owner 2026-10-13):
+`cosigs` (array of strings, optional) are `yed_signcancelcosign` results (`cosig`, 69 bytes of hex each: a member's
+co-signature of this cancel and its price statement at the claim's `refHeight`). The cancel needs at least
+`cancelsRequired` (`yed_getvault`) of them from **distinct current members** of the attestor set: 1 for a position's
+first cancel (so the first response stays one watcher), one more for each cancel within `CANCEL_QUIET`, at most
+`CANCEL_SIGNERS_MAX`. Each statement's price must say the vault was **not** claimable at that height. With fewer the
+call is refused before anything is built (`cancel-cosign-needed`, naming the number); a co-signature that does not
+recover over this intent (`cancel-cosign-malformed`), is not from a current member (`cancel-cosign-not-member`) or
+states a claimable price (`cancel-statement-claimable`) is refused; a repeat of one key is dropped. With enough, a
+carrier holding them (`"YC" ‖ 1 ‖ count ‖ count × (price ‖ sig65)`) is broadcast (`CARRIER_VALUE`, `carrierTxid`; an
+outstanding carrier of this wallet with the same bytes is reused, so the same co-signatures give the same
+transaction) and the cancel spends it as its **last input, already signed**; the CANCEL_COSIGN marker (`0x09`, an
+empty-bodied payload) is its last output before the change. The set signature (`SIGHASH_ALL|ANYONECANPAY`) covers
+the outputs only, so it is the same whatever co-signatures arrive — members still sign once — and collecting more
+than required is wise (a reorg that adds an earlier cancel raises the count). `vault_refee` replaces every
+non-template input, the carrier included: after it, call `yed_buildcancel` again with the same `cosigs` to re-attach
+the carrier. `cancelsRequired` and `cosigners` (the co-signers' `seq`s, carrier order) report what was built.
+
 Result of `yed_buildcancel`:
 
 ```json
@@ -2008,7 +2042,38 @@ Result of `yed_buildcancel`:
     "vout": 1,
     "script": "76a914a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d488ac",
     "cents": 100000
-  }
+  },
+  "cancelsRequired": 1,
+  "cosigners": [0],
+  "carrierTxid": "c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1"
+}
+```
+
+### `yed_signcancelcosign <intentOutpoint> [priceMicroUsd] [seq]`
+
+Arguments: `intentOutpoint` (string, `"txid:n"`, as `yed_buildcancel`), `priceMicroUsd` (number, optional), `seq`
+(number, optional; default the first current member whose key this wallet holds). CAN-2 + C4b (the cancel-limit
+design): one 65-byte recoverable signature, with the attestor member key this wallet holds, over
+`SHA256d("YedCancelCosign" ‖ attestorSetId ‖ intent txid ‖ n ‖ refHeight ‖ price ‖ blockHash(refHeight))` (`refHeight`
+the claim's) — the member's co-signature of the cancel **and** its signed price statement at that height. EQV-1 ejects
+a member and freezes its bond when its regular attestation at that height carries another price, so the price is
+locked through the equivocation guard (`attest-signed.dat`, as `yed_signattestation`): by default it is the price this
+key already signed for `refHeight`; a different price is refused (`equivocation-guard`); with no prior signature the
+price must be given (`price-required`) and is recorded for that height. The price must say the vault was not
+claimable (`collateralZat · price ≥ mintedCents · CLAIM_THRESHOLD_BPS · COIN`), else `cancel-statement-claimable`.
+Refuses also `attest-unknown-seq`, `attest-not-eligible` (not a current member), `attest-key-not-held`,
+`attest-range`, and `yed_buildcancel`'s intent refusals. `cosig` is what `yed_buildcancel` takes (69 bytes: price LE32
+‖ sig65); `reused` whether the guard already held the price.
+
+Result of `yed_signcancelcosign`:
+
+```json
+{
+  "cosig": "50c300001f5a1c2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9001",
+  "seq": 0,
+  "priceMicroUsd": 50000,
+  "citedHeight": 978,
+  "reused": false
 }
 ```
 
@@ -2266,6 +2331,9 @@ Result of `yed_listpositions`:
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
+    "cancelCount": 0,
+    "cancelsRequired": 1,
+    "cancelQuietUntil": null,
     "claimable": false,
     "underwaterAt": 436700,
     "voidReason": "",
@@ -2406,6 +2474,10 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `claim-burn-above-max` | `yed_claim` | maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1 |
 | `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
 | `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
+| `cancel-cosign-needed` | `yed_buildcancel` | fewer co-signatures of distinct current members than `cancelsRequired` (the cancel-limit design, CAN-2; `RPC_INVALID_PARAMETER`, before any transaction). Message grammar: `cancel-cosign-needed: this cancel needs <n> co-signature(s) of distinct current members (cancelsRequired), <m> given`: call it with no `cosigs` |
+| `cancel-cosign-malformed`, `cancel-cosign-not-member` | `yed_buildcancel` | a `cosigs` entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set |
+| `cancel-statement-claimable` | `yed_buildcancel`, `yed_signcancelcosign` | the statement's price says the vault was claimable at the claim's `refHeight` (C4b): co-sign at the vault's `underwaterAt − 1` |
+| `price-required` | `yed_signcancelcosign` | no `priceMicroUsd` given and the guard holds no price of this key for the claim's `refHeight` |
 
 ## `rpc/client.cpp` conversion rows (Phase 3)
 
@@ -2443,6 +2515,8 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_revive` | 0, 1 (**v3**) |
 | `yed_reportequivocation` | 2 (**v3**; `wait`) |
 | `yed_signattestation` | 0, 1, 2 (**v3**) |
+| `yed_buildcancel` | 1 (the cancel-limit design: the `cosigs` array) |
+| `yed_signcancelcosign` | 1, 2 (the cancel-limit design: `priceMicroUsd`, `seq`) |
 | `yed_getattestations`, `yed_addattestation`, `yed_getnotice`, `yed_sweepcarriers` | none (**v3**) |
 
 ## Configuration the contract depends on

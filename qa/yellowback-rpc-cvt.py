@@ -35,6 +35,7 @@ JSON_POSITIONS = {
     "yed_registerattestor": {0, 1, 2}, "yed_reportequivocation": {2}, "yed_revive": {0, 1}, "yed_send": {1},
     "yed_sendmany": {0}, "yed_setquote": {0, 1}, "yed_signattestation": {0, 1, 2}, "yed_unlockcoin": {1},
     "yed_withdrawbond": {0},
+    "yed_buildcancel": {1}, "yed_signcancelcosign": {1, 2},   # the cancel-limit design (cosigs; priceMicroUsd, seq)
 }
 
 

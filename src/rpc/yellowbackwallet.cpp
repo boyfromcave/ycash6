@@ -37,6 +37,7 @@
 #include "rpc/yellowbackrpc.h"
 #include "script/standard.h"
 #include "txmempool.h"
+#include "vault/act.h"
 #include "util/moneystr.h"
 #include "util/strencodings.h"
 #include "wallet/wallet.h"
@@ -197,7 +198,7 @@ std::optional<int64_t> UnderwaterAt(const VaultRecord& v, const yellowback::Para
  * Mirrors VaultToJSON in rpc/yellowback.cpp (Phase 3) field for field; `claimable` is the
  * caller's EstimateClaim verdict (RED-4 by either clause), as VaultToJSON reads it.
  */
-UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::Params& p, bool claimable)
+UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::Params& p, bool claimable, int64_t nextHeight)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", out.hash.GetHex());
@@ -223,6 +224,10 @@ UniValue VaultRow(const COutPoint& out, const VaultRecord& v, const yellowback::
     o.pushKV("closingTxid", v.IsOpen() ? "" : v.closingTxid.GetHex());
     o.pushKV("burnedCents", v.burnedCents);
     o.pushKV("unbacked", v.unbacked);
+    // the cancel-limit design (CAN-2), as yed_getvault: recent cancels, the co-signers a cancel at nextHeight needs, the quiet end
+    o.pushKV("cancelCount", (int)v.cancelCount);
+    o.pushKV("cancelsRequired", CancelsRequired(v, p, nextHeight));
+    o.pushKV("cancelQuietUntil", v.lastCancelHeight > 0 ? UniValue((int64_t)v.lastCancelHeight + p.cancelQuiet) : NullUniValue);
     o.pushKV("claimable", claimable);
     std::optional<int64_t> at = UnderwaterAt(v, p);
     o.pushKV("underwaterAt", at.has_value() ? UniValue(at.value()) : NullUniValue);
@@ -1506,7 +1511,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         if (!status.empty() && status != VaultStatusName(v.Status())) return true;
         const COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
-        UniValue o = VaultRow(out, v, p, est.claimable);
+        UniValue o = VaultRow(out, v, p, est.claimable, (int64_t)h + 1);
         if (v.Status() == VaultStatus::CLAIMING) o.pushKV("intents", ClaimIntentsJSON(index, out, p));   // as yed_getvault (U-23)
         const bool active = v.Status() == VaultStatus::ACTIVE;
         std::optional<NoticeRecord> notice = active ? st.GetNotice(out) : std::nullopt;
@@ -1802,11 +1807,154 @@ UniValue yed_unlockcoin(const UniValue& params, bool fHelp)
     return o;
 }
 
+/** The CLAIM a cancel of `op` answers (CAN-2 + C4b, wallet side): the claim's refHeight R and the vault record a cancel
+ *  is judged against (the CLAIMING record for a confirmed claim; the ACTIVE one a mempool claim spends). cs_main,
+ *  mempool.cs and cs_yellowback held. Throws the RPC errors yed_buildcancel documents. */
+struct CancelTarget
+{
+    int refHeight = 0;
+    VaultRecord vault;
+    bool confirmed = false;
+};
+
+CancelTarget CancelTargetOf(const State& st, const COutPoint& op)
+{
+    CancelTarget t;
+    if (std::optional<IntentRecord> ir = st.GetIntent(op)) {
+        if (ir->Role() != IntentRole::CLAIMANT) throw JSONRPCError(RPC_INVALID_PARAMETER, "the owner's residual intent is never cancelled (intent-cancel-residual)");
+        std::optional<VaultRecord> v = st.GetVault(ir->vault);
+        if (!v || v->Status() != VaultStatus::CLAIMING) throw JSONRPCError(RPC_INVALID_PARAMETER, "the intent's vault is not CLAIMING");
+        t.refHeight = ir->claimRefHeight;
+        t.vault = v.value();
+        t.confirmed = true;
+        return t;
+    }
+    std::shared_ptr<const CTransaction> claimp = mempool.get(op.hash);   // 6.20.0: mempool.get, not lookup
+    vault::IntentParams ip;
+    if (!claimp || op.n >= claimp->vout.size() || !vault::ParseIntent(claimp->vout[op.n].scriptPubKey, ip) || !(ip.tag == YED_TAG)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "not a YED claim intent (confirmed in the index or in the mempool)");
+    }
+    const CTransaction& claim = *claimp;
+    std::optional<FoundPayload> fp = FindPayload(claim);
+    std::optional<VaultRecord> v = claim.vin.empty() ? std::nullopt : st.GetVault(claim.vin[0].prevout);
+    if (!fp.has_value() || fp->payload.type != PayloadType::REDEEM || !v.has_value() || v->Status() != VaultStatus::ACTIVE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "not a YED claim intent (confirmed in the index or in the mempool)");
+    }
+    t.refHeight = (int)fp->payload.refHeight;
+    t.vault = v.value();
+    return t;
+}
+
+/** The seq of `key` when it is a current member of the attestor set at `height` on the index's mirror (state.cpp
+ *  CurrentMemberSeq, the primitive's IsCurrent), else nullopt. */
+std::optional<uint16_t> CurrentMember(const State& st, const CPubKey& key, int64_t height)
+{
+    std::optional<AttestorSetRecord> set = st.GetAttestorSet();
+    if (!set.has_value()) return std::nullopt;
+    std::optional<std::pair<uint16_t, AttestorRecord>> found;
+    for (const auto& r : st.Attestors()) {
+        if (r.second.AttestorKey() == key) found = r;
+    }
+    if (!found.has_value()) return std::nullopt;
+    const AttestorRecord& rec = found->second;
+    if (rec.Status() == AttestorStatus::EJECTED || rec.Status() == AttestorStatus::WITHDRAWN || rec.bondSpentHeight != 0 || rec.Frozen()) return std::nullopt;
+    if (height < (int64_t)rec.registerHeight + (int64_t)set->maturity) return std::nullopt;
+    return found->first;
+}
+
+/** The 69-byte co-signature entry (price LE32 || sig65), as yed_signcancelcosign returns it and yed_buildcancel takes it. */
+std::vector<unsigned char> CosignEntryBytes(const CancelCosignEntry& e)
+{
+    const std::vector<unsigned char> blob = EncodeCancelCosigns({ e });
+    return std::vector<unsigned char>(blob.begin() + 4, blob.end());
+}
+
+UniValue yed_signcancelcosign(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 3)
+        throw std::runtime_error(
+            "yed_signcancelcosign \"intentoutpoint\" ( priceMicroUsd seq )\n"
+            "\nCo-sign the attestor CANCEL of a YED claimant intent with the attestor member key held in this wallet (CAN-2 + C4b,\n"
+            "the cancel-limit design): one 65-byte recoverable signature over (attestor set, intent, the claim's refHeight R,\n"
+            "priceMicroUsd, blockHash(R)) -- the member's co-signature AND its signed price statement at R. A member whose regular\n"
+            "attestation at R carries another price is slashable by EQV-1, so the price is locked through the equivocation guard\n"
+            "(S16, yed_signattestation's): the default is the price this key already signed for R; a different price is refused\n"
+            "(equivocation-guard); with no prior signature the price must be given and is recorded for R. The price must say the\n"
+            "vault was NOT claimable (collateral x price >= debt x CLAIM_THRESHOLD), else cancel-statement-claimable. seq defaults to\n"
+            "the first current member whose key this wallet holds. Hand the result's cosig to whoever builds the cancel\n"
+            "(yed_buildcancel's cosigs).\n"
+            "\nResult: { \"cosig\" (hex, 69 bytes), \"seq\", \"priceMicroUsd\", \"citedHeight\", \"reused\" }\n"
+            + HelpExampleCli("yed_signcancelcosign", "\"txid:0\" 50000") + HelpExampleRpc("yed_signcancelcosign", "\"txid:0\", 50000"));
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const std::string s = params[0].get_str();
+    const size_t colon = s.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size()) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
+    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)atoi(s.substr(colon + 1)));
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const yellowback::Params& p = index.GetParams();
+    const CancelTarget t = CancelTargetOf(st, op);
+    const int64_t next = (int64_t)IndexHeight(index) + 1;
+    std::optional<uint16_t> seq;
+    if (params.size() > 2 && !params[2].isNull()) {
+        const int a = params[2].get_int();
+        if (a < 0 || a > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
+        seq = (uint16_t)a;
+    } else {
+        for (const auto& r : st.Attestors()) {
+            if (pwalletMain->HaveKey(r.second.AttestorKey().GetID()) && CurrentMember(st, r.second.AttestorKey(), next) == r.first) { seq = r.first; break; }
+        }
+        if (!seq.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "attest-key-not-held: this wallet holds no current member key of the attestor set");
+    }
+    std::optional<AttestorRecord> rec = st.GetAttestor(seq.value());
+    if (!rec.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-unknown-seq: no attestor with seq %u", (unsigned)seq.value()));
+    if (CurrentMember(st, rec->AttestorKey(), next) != seq) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-not-eligible: seq %u is not a current member of the attestor set", (unsigned)seq.value()));
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)t.refHeight);
+    if (!snap.has_value()) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the claim's refHeight %d is not indexed", t.refHeight));
+    const uint256 blockHash = snap->blockHash;
+    int64_t price = 0;
+    if (params.size() > 1 && !params[1].isNull()) {
+        price = params[1].get_int64();
+    } else {
+        std::optional<SignedAttestation> prior = yw.LookupSigned(seq.value(), (uint32_t)t.refHeight, blockHash);
+        if (!prior.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("price-required: seq %u signed no price for the claim's refHeight %d; pass priceMicroUsd", (unsigned)seq.value(), t.refHeight));
+        price = prior->priceMicroUsd;
+    }
+    if (price < PRICE_MIN || price > PRICE_MAX) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-range: priceMicroUsd must be in [%d, %d]", PRICE_MIN, PRICE_MAX));
+    if (IsUnderwater(t.vault.collateralZat, (MicroUsd)price, t.vault.mintedCents, p.claimThresholdBps))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-statement-claimable: at %d micro-USD the vault was claimable at refHeight %d; a cancel co-signature states it was not", price, t.refHeight));
+    bool reused = false;
+    try {
+        SignAttestationGuarded(yw, seq.value(), price, t.refHeight, reused);   // S16: lock this key's price for R
+    } catch (const std::runtime_error& e) {
+        ThrowBuildError(e);
+    }
+    CKey key;
+    if (!pwalletMain->GetKey(rec->AttestorKey().GetID(), key)) throw JSONRPCError(RPC_INVALID_PARAMETER, "attest-key-not-held: the member key is not in this wallet");
+    CancelCosignEntry e;
+    e.priceMicroUsd = (uint32_t)price;
+    if (!vault::SignRecoverable(key, CancelCosignMessage(p.attestorSetId, op.hash, op.n, (uint32_t)t.refHeight, (uint32_t)price, blockHash), e.sig))
+        throw JSONRPCError(RPC_WALLET_ERROR, "the co-signature failed");
+    const std::vector<unsigned char> bytes = CosignEntryBytes(e);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("cosig", HexStr(bytes.begin(), bytes.end()));
+    o.pushKV("seq", (int)seq.value());
+    o.pushKV("priceMicroUsd", price);
+    o.pushKV("citedHeight", t.refHeight);
+    o.pushKV("reused", reused);
+    return o;
+}
+
 UniValue yed_buildcancel(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "yed_buildcancel \"intentoutpoint\"\n"
+            "yed_buildcancel \"intentoutpoint\" ( [\"cosig\",...] )\n"
             "\nBuild the attestor CANCEL of a YED claimant intent before it matures (U-23, CAN-1): vault_buildcancel's\n"
             "transaction -- the claimed vault re-created at vout[0] -- with the refund of the claim's burn at vout[1], a token\n"
             "carrier paying the holder the burned YED came from (yed_getvault.refundHolder), then this wallet's fee inputs and\n"
@@ -1816,8 +1964,16 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             "them; refused while one is unconfirmed or the index lags the tip). The whole burn goes to the holder of the\n"
             "claim's lowest-index YED input. Called again for\n"
             "the same intent it returns the same transaction while its fee inputs are unspent (members sign once).\n"
+            "CAN-2 + C4b (the cancel-limit design): the cancel must also carry at least cancelsRequired co-signatures\n"
+            "(yed_getvault.cancelsRequired: 1 for a vault's first cancel, one more for each cancel within CANCEL_QUIET, at most\n"
+            "CANCEL_SIGNERS_MAX), each a distinct current member's yed_signcancelcosign result. With fewer it is refused\n"
+            "(cancel-cosign-needed, naming how many). With enough, a carrier holding them is broadcast (CARRIER_VALUE) and the\n"
+            "cancel spends it as its last input, signed (the CANCEL_COSIGN marker is the last output, so the set signature's\n"
+            "SIGHASH_ALL|ANYONECANPAY digest is the same whatever co-signatures arrive: members still sign once). Collect more\n"
+            "than required when you can: a reorg that adds an earlier cancel raises the count.\n"
             "\nResult: vault_buildcancel's {\"hex\", \"required\", \"cancelsetid\", \"deadline\", \"intentconfirmed\"} plus\n"
-            "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)}\n"
+            "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)},\n"
+            "\"cancelsRequired\", \"cosigners\" (seqs, carrier order), \"carrierTxid\"\n"
             + HelpExampleCli("yed_buildcancel", "\"txid:0\"") + HelpExampleRpc("yed_buildcancel", "\"txid:0\""));
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -1827,6 +1983,10 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
     const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)atoi(s.substr(colon + 1)));
     std::vector<unsigned char> holder;
     Cents cents = 0;
+    std::vector<CancelCosignEntry> entries;
+    std::vector<uint16_t> cosigners;
+    int required = 0;
+    int carrierRef = 0;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
@@ -1870,14 +2030,94 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             cents = yedIn - (fp.has_value() ? fp->payload.AssignedCents() : 0);
         }
         if (holder.empty() || cents <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "the claim recorded no refund holder");
+        // CAN-2 + C4b: the co-signatures, checked as state.cpp's CancelCosignsHold will at tip + 1 (wallet side)
+        const yellowback::Params& p = index.GetParams();
+        const CancelTarget t = CancelTargetOf(st, op);
+        const int64_t next = (int64_t)IndexHeight(index) + 1;
+        required = CancelsRequired(t.vault, p, next);
+        std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)t.refHeight);
+        if (!snap.has_value()) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the claim's refHeight %d is not indexed", t.refHeight));
+        std::set<CPubKey> seen;
+        const UniValue cos = params.size() > 1 && !params[1].isNull() ? params[1].get_array() : UniValue(UniValue::VARR);
+        for (size_t i = 0; i < cos.size(); i++) {
+            const std::string h = cos[i].get_str();
+            std::optional<std::vector<CancelCosignEntry>> one;
+            if (IsHex(h)) {
+                std::vector<unsigned char> blob{ 'Y', 'C', CANCEL_COSIGN_VERSION, 1 };
+                const std::vector<unsigned char> b = ParseHex(h);
+                blob.insert(blob.end(), b.begin(), b.end());
+                one = DecodeCancelCosigns(blob);
+            }
+            if (!one.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-malformed: cosigs[%u] is not a 69-byte co-signature", (unsigned)i));
+            const CancelCosignEntry& e = one->front();
+            CPubKey key;
+            const uint256 msg = CancelCosignMessage(p.attestorSetId, op.hash, op.n, (uint32_t)t.refHeight, e.priceMicroUsd, snap->blockHash);
+            if (!vault::RecoverSig(msg, e.sig, key)) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-malformed: cosigs[%u] does not sign this intent's cancel", (unsigned)i));
+            if (!seen.insert(key).second) continue;                     // a repeat of the same key is dropped, never sent
+            std::optional<uint16_t> seq = CurrentMember(st, key, next);
+            if (!seq.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-not-member: cosigs[%u] is not from a current member of the attestor set", (unsigned)i));
+            if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || IsUnderwater(t.vault.collateralZat, (MicroUsd)e.priceMicroUsd, t.vault.mintedCents, p.claimThresholdBps))
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-statement-claimable: cosigs[%u] states a price at which the vault was claimable", (unsigned)i));
+            if (entries.size() >= CANCEL_COSIGN_MAX) break;
+            entries.push_back(e);
+            cosigners.push_back(seq.value());
+        }
+        if ((int)entries.size() < required)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-needed: this cancel needs %d co-signature(s) of distinct current members (cancelsRequired), %d given (yed_signcancelcosign)",
+                                                                required, (int)entries.size()));
+        carrierRef = IndexHeight(index);
     }
+    // the cancel itself first (its fee inputs chosen and locked by the sign-once build memo), then the carrier
     const CScript to(holder.begin(), holder.end());
-    UniValue o = BuildYedIntentCancel(op, CTxOut(index.GetParams().tokenValue, to));
+    UniValue o = BuildYedIntentCancel(op, { CTxOut(index.GetParams().tokenValue, to), CTxOut(0, PayloadScript(EncodePayload(Payload::CancelCosign()))) });
+    // the carrier holding the co-signatures (broadcast now; the cancel spends it as a mempool child). An outstanding
+    // carrier of this wallet with exactly these bytes is reused, so the same co-signatures give the same transaction
+    // (sign once; the carrier signature is deterministic)
+    const std::vector<unsigned char> blob = EncodeCancelCosigns(entries);
+    std::optional<CarrierRecord> reuse;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        for (const CarrierRecord& c : yw.OutstandingCarriers()) {
+            if (c.bundle != blob || !c.selector.empty()) continue;
+            const CCoins* coins = pcoinsTip->AccessCoins(c.outpoint.hash);
+            const bool unspentInChain = coins && coins->IsAvailable(c.outpoint.n);
+            const bool inMempool = mempool.exists(c.outpoint.hash);
+            bool spentInMempool = false;
+            {
+                LOCK(mempool.cs);
+                spentInMempool = mempool.mapNextTx.count(c.outpoint) > 0;
+            }
+            if ((unspentInChain || inMempool) && !spentInMempool) { reuse = c; break; }
+        }
+    }
+    const CarrierRecord carrier = reuse.has_value() ? reuse.value() : CarrierStep(yw, blob, carrierRef, std::vector<unsigned char>(), "");
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        CTransaction built;
+        try {
+            DecodeHexTx(built, o["hex"].get_str());      // 6.20.0: throws instead of returning false
+        } catch (const std::exception&) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "the cancel does not decode");
+        }
+        CMutableTransaction mtx(built);
+        mtx.vin.push_back(CTxIn(carrier.outpoint, CScript(), CTxIn::SEQUENCE_FINAL));
+        try {
+            SignCarrierInput(mtx, (unsigned int)mtx.vin.size() - 1, carrier, *pwalletMain, SignerBranchId());
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+        o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
+    }
     UniValue r(UniValue::VOBJ);
     r.pushKV("vout", 1);
     r.pushKV("script", HexStr(to.begin(), to.end()));
     r.pushKV("cents", cents);
     o.pushKV("refund", r);
+    o.pushKV("cancelsRequired", required);
+    UniValue cs(UniValue::VARR);
+    for (uint16_t q : cosigners) cs.push_back((int)q);
+    o.pushKV("cosigners", cs);
+    o.pushKV("carrierTxid", carrier.outpoint.hash.GetHex());
     return o;
 }
 
@@ -1899,7 +2139,8 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
     { "yellowback", "yed_estimateredeem",   &yed_estimateredeem,    false },   // IT-9
     { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
-    { "yellowback", "yed_buildcancel",      &yed_buildcancel,       false },   // CAN-1 (03/H-1)
+    { "yellowback", "yed_buildcancel",      &yed_buildcancel,       false },   // CAN-1 (03/H-1), CAN-2 (cosigs)
+    { "yellowback", "yed_signcancelcosign", &yed_signcancelcosign,  false },   // CAN-2 + C4b (the cancel-limit design)
     // v3 (plan §4.5)
     { "yellowback", "yed_claimnotice",      &yed_claimnotice,       false },
     { "yellowback", "yed_sweepcarriers",    &yed_sweepcarriers,     false },

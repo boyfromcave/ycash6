@@ -2322,10 +2322,11 @@ UniValue vault_app(const UniValue& params, bool fHelp)
 } // namespace
 
 #ifdef ENABLE_WALLET
-/** yed_buildcancel (rpc/yellowbackwallet.cpp, CAN-1): the I-2 cancel of a YED claimant intent with its refund output. */
-UniValue BuildYedIntentCancel(const COutPoint& intent, const CTxOut& refund)
+/** yed_buildcancel (rpc/yellowbackwallet.cpp, CAN-1): the I-2 cancel of a YED claimant intent with its refund output and,
+ *  since CAN-2, the CANCEL_COSIGN marker (`extra` follows vout[0] in order). */
+UniValue BuildYedIntentCancel(const COutPoint& intent, const std::vector<CTxOut>& extra)
 {
-    return BuildIntentCancel(intent, { refund }, true, false, false);
+    return BuildIntentCancel(intent, extra, true, false, false);
 }
 #endif
 
