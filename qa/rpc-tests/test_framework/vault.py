@@ -1341,14 +1341,15 @@ def build_release_tx(intent_outpoint, ip, intent_value, recipient_spk, fee_vin=(
 
 
 def build_cancel_tx(intent_outpoint, ip, intent_value, vp, fee_vin=(), change=None, member_secrets=(),
-                    branch_id=VAULT_BRANCH_ID):
+                    branch_id=VAULT_BRANCH_ID, extra=()):
     """CANCEL (I selector 2): vout[0] the originating V (``SHA256(spk) = vaultHash``) of the I's
-    value; scriptSig ``<sig_1..k> OP_2`` by the cancel set."""
+    value, then ``extra`` [(value, spk)] (a module's outputs: the YED module's CAN-1 refund, audit 03/H-1);
+    scriptSig ``<sig_1..k> OP_2`` by the cancel set."""
     v_spk = vault_script(vp)
     assert sha256(v_spk) == ip.vault_hash, 'vault does not match the intent'
     i_spk = intent_script(ip)
     vin = [(intent_outpoint[0], intent_outpoint[1], SEQUENCE_FINAL)] + list(fee_vin)
-    vout = [(intent_value, v_spk)]
+    vout = [(intent_value, v_spk)] + list(extra)
     if change is not None:
         vout.append(change)
     tx = make_tx(vin, vout)
@@ -1509,9 +1510,9 @@ def node_release(node, intent_outpoint, ip, intent_value, recipient_spk):
     return node_sign(node, tx, tx.vin[0].scriptSig)
 
 
-def node_cancel(node, intent_outpoint, ip, intent_value, vp, member_secrets, branch_id=VAULT_BRANCH_ID):
-    fee_vin, change = node_fee_inputs(node)
-    tx = build_cancel_tx(intent_outpoint, ip, intent_value, vp, fee_vin, change, member_secrets, branch_id)
+def node_cancel(node, intent_outpoint, ip, intent_value, vp, member_secrets, branch_id=VAULT_BRANCH_ID, extra=()):
+    fee_vin, change = node_fee_inputs(node, VAULT_FEE + sum(value for value, _spk in extra))
+    tx = build_cancel_tx(intent_outpoint, ip, intent_value, vp, fee_vin, change, member_secrets, branch_id, extra)
     return node_sign(node, tx, tx.vin[0].scriptSig)
 
 

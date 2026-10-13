@@ -77,9 +77,9 @@ CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 
 
 # Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
-    'yed_getvault': {'intents'},          # while CLAIMING (U-23)
+    'yed_getvault': {'intents', 'refundHolder'},          # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1)
     'yed_listpositions': {'intents'},
-    'yed_listvaults': {'intents'},
+    'yed_listvaults': {'intents', 'refundHolder'},
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
@@ -448,6 +448,13 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         claiming = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
         assert_equal((claiming['status'], [x['role'] for x in claiming['intents']]), ('CLAIMING', ['claimant']))
+        # CAN-1 (03/H-1): the refund holder a cancel must pay; yed_buildcancel builds that cancel (not sent here), and
+        # vault_buildcancel refuses a YED intent
+        cancel = c.check('yed_buildcancel', claimant.yed_buildcancel('%s:0' % claimed['txid']))
+        assert_equal((cancel['refund']['vout'], cancel['refund']['cents'], cancel['refund']['script']), (1, 10000, claiming['refundHolder']))
+        assert_equal(claimant.decoderawtransaction(cancel['hex'])['vout'][1]['scriptPubKey']['hex'], claiming['refundHolder'])
+        assert_equal(claimant.yed_buildcancel('%s:0' % claimed['txid'])['hex'], cancel['hex'])          # sign once: the same transaction
+        assert_rpc_error('is cancelled with yed_buildcancel', claimant.vault_buildcancel, '%s:0' % claimed['txid'])
         assert_equal([v['status'] for v in c.check('yed_listvaults', user.yed_listvaults('CLAIMING'))], ['CLAIMING'])
         c.check('yed_listtransactions', claimant.yed_listtransactions())
         self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())

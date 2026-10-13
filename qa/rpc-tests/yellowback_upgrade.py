@@ -18,9 +18,10 @@ Ycash Yellowback (YED) on the vault primitive, end to end (docs/plans/yellowback
   vault_release is refused before CLAIM_DELAY and pays the claimant after it (CLAIMED);
 - a reorg across the claim: the vault is ACTIVE again with no intent, and CLAIMING again after
   the reconsider, with one state hash on every node;
-- a wrong-price claim cancelled by the attestor set (vault_buildcancel + set_signcancel on the
-  member's node + vault_send): the collateral is back in a byte-identical vault, the position is
-  ACTIVE at the cancel's output 0 and the claimant's burn is not refunded (U-24);
+- a wrong-price claim cancelled by the attestor set (yed_buildcancel + set_signcancel on the
+  member's node + vault_send; vault_buildcancel refuses a YED intent): the collateral is back in a
+  byte-identical vault, the position is ACTIVE at the cancel's output 0 and the claimant's burn is
+  refunded at output 1 to the holder it came from, supply credited (CAN-1, audit 03/H-1);
 - an invalid mint (a $50 mint) is refused by the mempool (bad-yellowback-bad-mint-amount) and a
   block carrying it, built on node 3 (YED not configured there), is rejected by every
   Yellowback node with that reason; node 0 bans node 3 for relaying it (DoS 100).
@@ -301,12 +302,18 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_equal(self.tx_row(n0, claim_b, ('type',)), ('claimed',))
         self.assert_one_state('release B')
 
-        print('a wrong-price claim cancelled by the attestor set: the same position ACTIVE, the burn kept (U-24)')
+        print('a wrong-price claim cancelled by the attestor set: the same position ACTIVE, the burn refunded (CAN-1)')
         _res, claim_c = self.two_step(n2, 'yed_claim', mint_c, '')
         self.mine()
-        assert_equal(n0.yed_getvault(mint_c)['status'], 'CLAIMING')
+        claiming = n0.yed_getvault(mint_c)
+        assert_equal(claiming['status'], 'CLAIMING')
         before = n0.yed_getstats()
-        built = n2.vault_buildcancel('%s:0' % claim_c)
+        # CAN-1 (audit 03/H-1): the primitive's builder refuses a YED intent; yed_buildcancel adds the refund to the
+        # holder the claim's YED came from (refundHolder), so no member signs a cancel the module rejects
+        assert_raises_rpc('is cancelled with yed_buildcancel', n2.vault_buildcancel, '%s:0' % claim_c)
+        built = n2.yed_buildcancel('%s:0' % claim_c)
+        assert_equal((built['refund']['vout'], built['refund']['cents'], built['refund']['script']), (1, 10_000, claiming['refundHolder']))
+        assert n2.validateaddress(n2.decoderawtransaction(built['hex'])['vout'][1]['scriptPubKey']['addresses'][0])['ismine']
         signed = n1.set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
         # the OP_CHECKSETSIG input is complete; the fee inputs are not signed yet: invalid, naming one of them
@@ -328,14 +335,14 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_equal(vc['scriptPubKey'], spk_c)
         assert_equal(n0.getrawtransaction(cancel, 1)['vout'][0]['scriptPubKey']['hex'], spk_c)     # byte-identical
         after = n0.yed_getstats()
-        assert_equal(after['supplyCents'], before['supplyCents'])               # the claim burned the YED; the cancel refunds nothing
-        assert_equal(after['supplyCents'], 0)
+        assert_equal(after['supplyCents'], before['supplyCents'] + 10_000)      # CAN-1: the claim's burn is back in supply
+        assert_equal(after['supplyCents'], 10_000)
         assert_equal(after['activeVaults'], before['activeVaults'] + 1)
         log = n0.yed_gettxinfo(cancel)
-        assert_equal(log['type'], 'claim_cancel')
-        assert_equal(self.tx_row(n2, cancel, ('type', 'path', 'amountCents')), ('claim_cancel', 'claim', 0))
+        assert_equal((log['type'], log['assigned'], log['yedOut']), ('claim_cancel', [{'vout': 1, 'cents': 10_000}], 10_000))
+        assert_equal(self.tx_row(n2, cancel, ('type', 'path', 'amountCents')), ('claim_cancel', 'claim', 10_000))   # the refund
         assert_equal(self.tx_row(n0, cancel, ('type', 'path', 'amountCents')), ('claim_cancelled', 'claim', 0))
-        assert_equal(self.tx_row(n2, claim_c, ('type', 'amountCents')), ('claim', -10_000))   # the burn is kept (U-24)
+        assert_equal(self.tx_row(n2, claim_c, ('type', 'amountCents')), ('claim', -10_000))   # the claim row keeps its burn
         assert_equal(self.tx_row(n0, claim_c, ('type', 'amountCents')), ('claimed', 0))      # the moved vault is still node 0's
         self.assert_one_state('cancel C')
 
