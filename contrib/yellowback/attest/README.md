@@ -5,7 +5,7 @@ long-running modes, beside a `ycashd -yellowback`.
 
 | Mode | Runs beside | Loop |
 |---|---|---|
-| `attest` | an attestor's node (registered with `yed_registerattestor`: since P4-b a SET_JOIN to the attestor set, the vault primitive's signer set) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic; every `heartbeat_blocks` blocks send `set_heartbeat <attestorSetId> <memberKey>` (an attestor without an act inside the set's `livenesswindow` is DORMANT, and signing is not an act) |
+| `attest` | an attestor's node (registered with `yed_registerattestor`: since P4-b a SET_JOIN to the attestor set, the vault primitive's signer set) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic; every `heartbeat_blocks` blocks send `set_heartbeat <attestorSetId> <memberKey>` (an attestor without an act inside the set's `livenesswindow` is DORMANT, and signing is not an act); with `[cancel]` (on by default) also the cancel automation: judge every confirmed YED claim, co-sign and gossip the wrong-price ones, drive the cancel in turn ("Cancel automation" below) |
 | `subscribe` | any minting node (the devnet's node 0; YecWallet's bundled node) | join the topic; drop anything that is not 74 bytes, whose `seq` is not in `yed_listattestors` (refreshed every 60 s), that was already handed to the node (LRU of 4,096 frames), whose `citedHeight` is outside `[tip − 64, tip + 8]` of the node, or that exceeds the `seq`'s token bucket (`seq_burst`, `seq_refill_seconds`); push the rest with `yed_addattestation`; count acceptances; back off 1..60 s while the RPC is down; optionally poll `[subscribe] endpoints` over HTTPS as a second path |
 
 Plus three one-shot commands: `sources` (fetch every source once and show what resolved),
@@ -14,10 +14,9 @@ of a YED claimant intent with this seq's member key, `yed_signcancelcosign`; the
 price statement at the claim's reference height, which EQV-1 slashes if it contradicts the attestation the key signed
 there, so the node's equivocation guard states the price it already signed for that height, and only when it signed
 none does the agent state its aggregate now; prints the 69-byte hex that `yed_buildcancel` takes).
-**Not yet in the agent** (the design's §5 client impact): gossiping co-signatures on the topic, a watcher that
-co-signs confirmed claims its own price says are wrong, and a canceller that collects up to `CANCEL_SIGNERS_MAX`
-co-signatures and sends the cancel; an operator runs `cosign` on each member's agent and `yed_buildcancel` +
-`set_signcancel` + `vault_send` by hand.
+**The cancel-limit brake is automated** (owner 2026-10-13, the design's §5 client impact): `attest` also runs the
+watcher, the co-signature gossip and the collector of "Cancel automation" below, with no operator. `cosign` stays for an
+operator who wants to act by hand.
 
 **The agent never holds a key.** Signing happens inside the node, whose equivocation guard
 (`attest-signed.dat`, plan §4.5 S16) makes two prices for one height impossible from one node.
@@ -47,12 +46,14 @@ attest/
 ├── attest.toml.sample          every setting, documented
 ├── rustfmt.toml, .gitignore
 ├── src/
-│   ├── main.rs                 clap: attest | subscribe | sources | check-config
+│   ├── main.rs                 clap: attest | subscribe | sources | check-config | cosign
 │   ├── config.rs               attest.toml → Config (bad config = exit 2)
 │   ├── rpc.rs                  JSON-RPC 1.0 client (cookie or user/password), + a mock server for tests
 │   ├── price.rs                the aggregator: port of contrib/yellowback/yellowback_price.py
 │   ├── framing.rs              the 74-byte attestation (seq u16 ‖ price u32 ‖ citedHeight u32 ‖ sig 64, LE)
-│   ├── attest.rs               the attest loop and `sources`
+│   ├── attest.rs               the attest loop, `sources` and `cosign`
+│   ├── cancel.rs               the cancel automation: watcher, gossip filter, collector, persisted state
+│   ├── cosig.rs                the cancel co-signature: message, key recovery (k256), 115-byte gossip frame
 │   ├── subscribe.rs            the subscribe loop
 │   ├── transport/{mod,dir,iroh}.rs   the Transport trait and its two implementations
 │   ├── fixtures.rs             the Rust side of the Rust/Python cross-check
@@ -76,6 +77,10 @@ attest/
 - **`dir`** (tests, devnet, and any two processes on one machine): a shared directory. A publish
   writes `<path>/<seq>-<citedHeight>.att` through a temp file and one rename; a subscriber
   polls every 2 s and delivers each file once. No relay, no network.
+- **The cancel topic.** `attest` with `[cancel] enabled` (the default) opens a second topic on the same transport:
+  `"yellowback/cancel/<network>/1"` on the same iroh endpoint and `peers` (`<topic_override>/cancel` when the
+  attestation topic is overridden), or `<path>/cancel/` with digest file names on `dir`. It carries 115-byte frames,
+  nothing else (see below).
 
 ## The aggregator and the cross-check
 
@@ -135,3 +140,48 @@ ycash-cli -regtest yed_getattestations           # the pool fills as blocks are 
 ```
 
 `--mock-price FILE` is re-read every poll, so `echo 0.60 > price-1` is the divergence demo.
+
+## Cancel automation (the cancel-limit design, CAN-2 + C4b)
+
+A claimant intent can be cancelled by the attestor set until `CLAIM_DELAY`; the k-th cancel of one position within
+`CANCEL_QUIET` needs `min(k, CANCEL_SIGNERS_MAX)` co-signatures of distinct current members (`cancelsRequired`;
+`CANCEL_SIGNERS_MAX` 4, regtest 3; the rule counts the valid entries and ignores the rest). Each co-signature is the
+member's C4b price statement at the claim's refHeight, signed by the node (`yed_signcancelcosign`), whose equivocation
+guard locks it to the price that key attested at that height. `attest` automates the whole response, once per poll:
+
+1. **Watcher.** Every claim in `yed_listvaults CLAIMING` (confirmed claims only; `min_confirmations`) is judged at its
+   refHeight (`getrawtransaction` + `yed_decodepayload`) with this agent's own price: what this seq signed for that
+   height, else the aggregate it computed nearest it (`price_tolerance_blocks`), else its aggregate now while the
+   refHeight is recent. **Wrong-price**: `collateralZat · p · 10⁴ ≥ mintedCents · θ · COIN · (10⁴ + margin_bps)`, the
+   vault was not claimable at the agent's price with the margin to spare. It is logged as `ALERT wrong-price` (error
+   level; `alert_command` runs too) and, with `auto_cosign`, co-signed and published; republished every
+   `republish_blocks`. A claim the agent cannot judge (no price near its refHeight) is `ALERT unjudged` and never
+   co-signed; an honest one is logged and left alone.
+2. **Gossip.** A frame is `"YCG1" ‖ intent txid (internal order) ‖ n LE32 ‖ seq LE16 ‖ refHeight LE32 ‖ price LE32 ‖
+   sig65` (115 bytes). The receiver drops anything else, then duplicates (a digest LRU), then whatever exceeds a
+   global token bucket, parks frames for a claim its node does not know yet (256 at most, 10 minutes), and verifies
+   the rest locally: the signature must recover (secp256k1, the node's `RecoverSig` rules) over the co-sign message
+   rebuilt from its own node's view (set id, the claim's refHeight and block hash) to the current member key of the
+   frame's `seq` (ELIGIBLE or DORMANT, bond unspent and unfrozen, the newest record of that key); the price must say
+   the vault was not claimable. Only verified frames reach the per-seq bucket (`gossip_burst`,
+   `gossip_refill_seconds`), so a forged `seq` cannot spend a real member's allowance.
+3. **Collector.** One member drives each claim: the current members in seq order, rotated by SHA-256(txid ‖ n); the
+   member of rank r drives `r × takeover_blocks` blocks after the claim confirmed, so a missing leader is replaced
+   without coordination. The driver waits for `cancelsRequired` valid co-signatures plus `spares` (no longer than
+   `spare_wait_blocks` for the spares), calls `yed_buildcancel` with up to seven (an entry the node refuses is set
+   aside and the call retried), `set_signcancel` and `vault_send`, and pushes the carrier and the cancel to every
+   `broadcast_rpc` node. A cancel that lingers is pushed again every `refee_after_blocks`; one that left the mempool
+   unconfirmed is re-funded (`vault_refee`) and rebuilt with the co-signatures valid at that moment. Co-signers that
+   stop being current are set aside. Nothing is driven while another transaction spends the intent in the mempool.
+4. **State.** `state_file` (default `~/.ycash/yellowback-cancel-<network>-<seq>.json`, 0600, written by rename) holds
+   the claims, their co-signatures, the cancel sent, the price history and the signed prices: a restarted agent
+   neither co-signs again nor rebuilds. Read it with `jq '.claims' <file>`.
+
+What it needs from the operator: the member key in the node's wallet (as for `yed_signattestation`), a few YEC of
+confirmed coins in that wallet for the carrier and the fee, and, on a wallet that imported the key or was restored,
+`set_acknowledgerestore` once the sign-once history is complete (`doc/vault-rpc.md`); without it `set_signcancel`
+refuses and the agent raises `ALERT sign-refused`. Alerts to act on: `wrong-price` (informational: the agent is
+acting), `unjudged`, `cosign-refused` (the key signed a claimable price at that height), `cosign-within-margin`,
+`sign-refused`, `wrong-price-past-delay` and `wrong-price-released` (the brake failed: escalate). The end-to-end test is
+`qa/rpc-tests/yellowback_cancel_agent.py` (four agents, two cancels with 1 then 2 co-signatures, a leader takeover, and
+an honest claim left alone).

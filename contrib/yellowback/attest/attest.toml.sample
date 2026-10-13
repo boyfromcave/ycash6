@@ -111,3 +111,28 @@ listattestors_seconds = 60       # refresh the registered set and the node's tip
 # allow_insecure_endpoints = false   # http:// endpoints are refused except on loopback; true to insist
 # seq_burst = 8                  # per-seq token bucket: frames a seq may send at once ...
 # seq_refill_seconds = 15        # ... and the seconds per further frame (one legitimate frame per every_blocks blocks)
+
+# The cancel-limit design's safety brake, automated (CAN-2 + C4b; doc/yellowback-attestor.md "Cancelling wrong-price
+# claims"). Runs inside `attest`: a watcher that judges every confirmed YED claim with this agent's own price at the
+# claim's refHeight, co-signs the wrong-price ones (yed_signcancelcosign) and gossips the co-signatures on a second
+# topic ("yellowback/cancel/<network>/1", same peers), and a collector that, when this member's turn in the rota comes,
+# gathers cancelsRequired + spares co-signatures and sends the cancel (yed_buildcancel, set_signcancel, vault_send).
+# The node's wallet needs a few YEC of confirmed coins for the carrier and the fee.
+[cancel]
+# enabled = true                 # false: the attest loop only (no watcher, no cancel topic)
+# auto_cosign = true             # co-sign and publish wrong-price claims with no operator (false: alert only)
+# margin_bps = 500               # co-sign only when the vault is above theta at your price with 5 % to spare
+# drive = true                   # take your turn in the rota: build, sign and send the cancel
+# spares = 2                     # co-signatures beyond cancelsRequired to wait for (spares absorb a co-signer that leaves)
+# spare_wait_blocks = 1          # ... but no longer than this once cancelsRequired are in hand
+# takeover_blocks = 6            # rank r in the rota drives r x this many blocks after the claim confirmed (CLAIM_DELAY 576)
+# min_confirmations = 1          # only CONFIRMED claims are judged and co-signed
+# refee_after_blocks = 6         # a cancel unconfirmed this long is re-pushed; one gone from the mempool is re-funded and rebuilt
+# republish_blocks = 4           # republish your co-signature this often while the claim stands
+# price_tolerance_blocks = 24    # how far from the claim's refHeight your price history may be to judge it
+# state_file = "~/.ycash/yellowback-cancel-main-0.json"   # default ~/.ycash/yellowback-cancel-<network>-<seq>.json
+# broadcast_rpc = ["https://user:pass@miner.example:8832"]   # push the carrier and the cancel to these nodes too
+# allow_insecure_broadcast = false   # http:// with credentials to a host other than loopback is refused without this
+# alert_command = "/usr/local/bin/page-me"   # run as: <program> <kind> <intent> <message> on every alert
+# gossip_burst = 16              # per-seq token bucket on the cancel topic ...
+# gossip_refill_seconds = 10     # ... and the seconds per further frame

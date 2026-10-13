@@ -118,6 +118,66 @@ does not carry it, so:
   directly to well-connected peers and miners, monitor its confirmation, and if it lingers re-fund
   it from a confirmed coin with `vault_refee` and send that.
 
+## Cancelling wrong-price claims (the cancel limit, automated)
+
+The YED attestor set is the cancel set of every YED claim: until `CLAIM_DELAY` (576 blocks, 12 h) after a claim
+confirms, the set can cancel it, and the vault comes back as the same position with the claim's burn refunded
+(CAN-1). The cancel limit (docs/plans/yellowback-cancel-limit-design.md, owner 2026-10-13) makes repeated cancels of
+one position expensive: the k-th cancel within `CANCEL_QUIET` (8,064 blocks, 7 days) needs co-signatures of
+`min(k, CANCEL_SIGNERS_MAX)` distinct current members (`CANCEL_SIGNERS_MAX` 4; `cancelsRequired` in `yed_getvault`),
+and each co-signature is your **signed price statement at the claim's refHeight** (C4b): the node signs it
+(`yed_signcancelcosign`) with the price your key attested at that height, so it can never contradict your own
+attestation, and EQV-1 ejects a member whose attestation there says otherwise. Only **confirmed** claims are
+co-signed: a claim's txid can still change before it confirms.
+
+The owner decided that this brake is automated before release, so **the agent does it with no operator**: `attest`
+runs, beside its attestation loop and with `[cancel]` on by default,
+
+- a **watcher** that judges every confirmed YED claim with *your* price at the claim's refHeight (what you signed
+  there, else your aggregate nearest that height) and calls it **wrong-price** when the vault was not claimable at
+  that price with `margin_bps` (default 5 %) to spare. It raises an alert, co-signs (`auto_cosign`) and publishes
+  the co-signature on a second gossip topic, `yellowback/cancel/<network>/1`, carried by the same iroh endpoint and
+  the same `peers`. A claim that is claimable at your price is honest and left alone;
+- a **gossip filter** that takes only 115-byte frames whose signature recovers to the named seq's current member
+  key over the claim's own message, at a price saying the vault was not claimable, behind a dedup cache, a global
+  and a per-member rate limit;
+- a **collector** in which one member drives each claim: the members in seq order, rotated per claim; rank r takes
+  over `r × takeover_blocks` blocks after the claim confirmed. The driver gathers `cancelsRequired` co-signatures plus
+  `spares` (the rule counts the valid ones, so spares absorb a co-signer that leaves before the cancel confirms),
+  then `yed_buildcancel` → `set_signcancel` → `vault_send`, pushes the cancel and its carrier to `broadcast_rpc`,
+  re-pushes it if it lingers and re-funds and rebuilds it (`vault_refee`, then `yed_buildcancel`) if it falls out of
+  the mempool.
+
+Its state (claims, co-signatures, the cancel it sent, your price history) is in `state_file` (default
+`~/.ycash/yellowback-cancel-<network>-<seq>.json`); a restart resumes from it. Back it up with `wallet.dat` if you
+like, but it is not precious: a lost file means the agent co-signs again (the node's guard returns the same
+statement) and rebuilds the same cancel (the sign-once build memo).
+
+**What you do.** Keep a few YEC of confirmed coins in the node's wallet (the cancel's carrier and fee come from it);
+after importing your member key or restoring the wallet, complete the sign-once history and run
+`set_acknowledgerestore` (above), or `set_signcancel` refuses and the agent alerts `sign-refused`; give
+`broadcast_rpc` the RPC of a well-connected node or a pool you trust if you have one; and wire `alert_command` (or a
+log watcher on `ALERT`) to a pager. The alerts:
+
+| Alert | Meaning | Act |
+|---|---|---|
+| `wrong-price` | a confirmed claim is not claimable at your price; the agent co-signs and the rota cancels it | watch it close as `cancelled` |
+| `unjudged` | you have no price near the claim's refHeight (your feed was down): you do not co-sign | fix the feed; others may still cancel |
+| `cosign-refused` | your key signed, for that height, a price at which the vault *was* claimable | none: your own attestation says the claim is right |
+| `cosign-within-margin` | the price your key signed there is inside the margin | none, or review `margin_bps` |
+| `sign-refused` | `set_signcancel` refused (restore marker, locked wallet) | fix the wallet; the next member in the rota takes over |
+| `wrong-price-past-delay`, `wrong-price-released` | a claim you judged wrong-price reached its release height uncancelled | escalate: the brake failed (too few live members, censorship) |
+
+`auto_cosign = false` keeps the watcher and its alerts but leaves the co-signing to you (`yellowback-attest cosign
+<txid:n>` prints your co-signature; anyone with `cancelsRequired` of them runs `yed_buildcancel <intent> [cosigs]`,
+`set_signcancel`, `vault_send`). `drive = false` co-signs but never sends. `enabled = false` turns all of it off.
+
+**What it cannot do.** It cannot make a cancel confirm: a majority that censors cancels for `CLAIM_DELAY` still
+lets a wrong-price claim through (the design's A-7), and a pinned third-party variant of a signed cancel can only be
+outrun by sending early to well-connected peers (there is no replace-by-fee). Four colluding members can still
+cancel an honest claim every time (the design's stated captured-set residual), and a lone member can still delay one
+claim per vault per `CANCEL_QUIET`.
+
 ## What you are NOT asked to do
 
 - **No domain, no TLS certificate, no inbound port.** The agent publishes over an `iroh-gossip`
@@ -280,6 +340,10 @@ keys are refused, exit 2):
               secret_key_file = "~/.ycash/yellowback-attest.key"   keeps this agent's endpoint id stable across restarts
               topic_override = ""              default "yellowback/attest/<network>/3"; leave it
               kind = "dir"; path = "..."       tests and the regtest devnet: <seq>-<citedHeight>.att files in a shared directory
+[cancel]      enabled = true; auto_cosign = true; margin_bps = 500    the cancel automation ("Cancelling wrong-price claims")
+              drive = true; spares = 2; spare_wait_blocks = 1; takeover_blocks = 6; min_confirmations = 1
+              refee_after_blocks = 6; republish_blocks = 4; price_tolerance_blocks = 24; state_file = "..."
+              broadcast_rpc = [...]; allow_insecure_broadcast = false; alert_command = "..."; gossip_burst = 16; gossip_refill_seconds = 10
 [subscribe]   listattestors_seconds = 60; endpoints = [...]; endpoints_seconds = 30      subscriber side only
               allow_insecure_endpoints = false (endpoints are https://; http:// only on loopback without this)
               seq_burst = 8; seq_refill_seconds = 15   per-seq token bucket in front of yed_addattestation
@@ -434,6 +498,9 @@ The hot key is then free to be discarded; a withdrawn attestor's key may registe
 | sign (the agent does this) | `yed_signattestation <seq> <priceMicroUsd> [citedHeight]` | `attest-unknown-seq`, `attest-key-not-held`, `equivocation-guard`, `attest-range`, `attest-stale` |
 | return from dormancy | `yed_revive <seq> <priceMicroUsd>` | `not-dormant`, `attest-key-not-held`, `equivocation-guard` |
 | report someone's equivocation | `yed_reportequivocation <hexA> <hexB>` | `not-equivocation` |
+| cancel wrong-price claims (the agent does this) | `attest` with `[cancel]` on: watcher, gossip, collector | the alerts in "Cancelling wrong-price claims" |
+| co-sign a cancel by hand | `yellowback-attest cosign <txid:n>` (`yed_signcancelcosign <intent> [price] [seq]`) | `price-required`, `cancel-statement-claimable`, `equivocation-guard` |
+| build a cancel by hand | `yed_buildcancel <intent> [cosigs]`, `set_signcancel <hex>`, `vault_send <hex>` | `cancel-cosign-needed`, `cancel-cosign-not-member`, `set-sign-restored` |
 | leave the set (starts the 14-day delay) | `set_leave <attestorSetId> [memberkey]` | `bad-vault-act-remove` (not an active member) |
 | withdraw the bond (after `set_leave` and `BOND_MATURITY`; still the bond spend on the vault upgrade) | `yed_withdrawbond <seq> [to]` | `bond-locked`, `bond-spent`, `attest-key-not-held` |
 
