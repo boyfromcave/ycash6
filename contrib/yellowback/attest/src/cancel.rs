@@ -7,7 +7,7 @@
 //!
 //! 1. **Watcher.** Every confirmed YED claim (`yed_listvaults CLAIMING`: the index holds confirmed state only) is
 //!    judged at the claim's refHeight with this agent's own price: the price this seq signed for that height, else
-//!    the aggregate it computed nearest that height, else its aggregate now while the refHeight is recent. A claim is
+//!    the last aggregate it computed at or before that height, else its aggregate now while the refHeight is recent. A claim is
 //!    **wrong-price** when the vault was not claimable at that price with `margin_bps` to spare
 //!    ([`cosig::is_wrong_price`]). A wrong-price claim raises an alert and, with `auto_cosign`, is co-signed
 //!    (`yed_signcancelcosign`: the node's equivocation guard locks the statement to the price this key signed for
@@ -253,21 +253,23 @@ impl State {
 // ---------------------------------------------------------------------------------------------- pure decisions
 
 /// This agent's honest price at `ref_height`: what it signed for that height (the node's guard holds the same), else
-/// the aggregate it computed at the nearest height within `tolerance` (the lower one on a tie), else `current` when
-/// the refHeight is within `tolerance` of the tip. None: this agent cannot judge the claim.
+/// the last aggregate it computed while the tip was at or below the refHeight (within `tolerance`): what it knew at
+/// that height, never a later move (blocks can arrive in bursts between polls, and the price can change right after
+/// a claim). Only when it recorded none there, the first aggregate after the refHeight within `tolerance`, else
+/// `current` when the refHeight is within `tolerance` of the tip. None: this agent cannot judge the claim.
 pub fn honest_price(state: &State, ref_height: u32, tip: u32, tolerance: u32, current: Option<i64>) -> Option<i64> {
     if let Some(p) = state.signed.get(&ref_height) {
         return Some(*p);
     }
     let lo = ref_height.saturating_sub(tolerance);
     let hi = ref_height.saturating_add(tolerance);
-    let best = state
-        .prices
-        .range(lo..=hi)
-        .min_by_key(|(h, _)| (h.abs_diff(ref_height), **h))
-        .map(|(_, p)| *p);
-    if best.is_some() {
-        return best;
+    if let Some((_, p)) = state.prices.range(lo..=ref_height).next_back() {
+        return Some(*p);
+    }
+    if hi > ref_height {
+        if let Some((_, p)) = state.prices.range(ref_height + 1..=hi).next() {
+            return Some(*p);
+        }
     }
     if tip.abs_diff(ref_height) <= tolerance {
         return current;
@@ -1470,15 +1472,18 @@ mod tests {
     // ---- watcher
 
     #[test]
-    fn honest_price_prefers_the_signed_then_the_nearest_then_now() {
+    fn honest_price_prefers_the_signed_then_the_last_known_at_r() {
         let mut s = State::fresh();
         assert_eq!(honest_price(&s, 100, 101, 5, Some(7)), Some(7)); // recent: the aggregate now
         assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), None); // too old to judge with today's price
-        s.record_price(97, 3);
         s.record_price(104, 4);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(3)); // 97 is nearer than 104
-        s.record_price(103, 5);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(3)); // a tie (97, 103) takes the lower height
+        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(4)); // nothing at or before R: the first after it
+        s.record_price(96, 3);
+        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(3)); // what it knew at R wins over a later move
+        s.record_price(99, 5);
+        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(5)); // the last one at or before R
+        s.record_price(101, 8);
+        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(5)); // even when a later one is as near
         s.record_price(100, 6);
         assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(6));
         s.record_signed(100, 9);

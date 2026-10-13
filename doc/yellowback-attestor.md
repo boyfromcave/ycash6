@@ -134,7 +134,7 @@ The owner decided that this brake is automated before release, so **the agent do
 runs, beside its attestation loop and with `[cancel]` on by default,
 
 - a **watcher** that judges every confirmed YED claim with *your* price at the claim's refHeight (what you signed
-  there, else your aggregate nearest that height) and calls it **wrong-price** when the vault was not claimable at
+  there, else the last aggregate you computed at or before that height) and calls it **wrong-price** when the vault was not claimable at
   that price with `margin_bps` (default 5 %) to spare. It raises an alert, co-signs (`auto_cosign`) and publishes
   the co-signature on a second gossip topic, `yellowback/cancel/<network>/1`, carried by the same iroh endpoint and
   the same `peers`. A claim that is claimable at your price is honest and left alone;

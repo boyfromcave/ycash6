@@ -151,7 +151,7 @@ guard locks it to the price that key attested at that height. `attest` automates
 
 1. **Watcher.** Every claim in `yed_listvaults CLAIMING` (confirmed claims only; `min_confirmations`) is judged at its
    refHeight (`getrawtransaction` + `yed_decodepayload`) with this agent's own price: what this seq signed for that
-   height, else the aggregate it computed nearest it (`price_tolerance_blocks`), else its aggregate now while the
+   height, else the last aggregate it computed at or before that height (`price_tolerance_blocks`; the first after it only when it recorded none), else its aggregate now while the
    refHeight is recent. **Wrong-price**: `collateralZat · p · 10⁴ ≥ mintedCents · θ · COIN · (10⁴ + margin_bps)`, the
    vault was not claimable at the agent's price with the margin to spare. It is logged as `ALERT wrong-price` (error
    level; `alert_command` runs too) and, with `auto_cosign`, co-signed and published; republished every
