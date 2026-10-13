@@ -5078,7 +5078,6 @@ BOOST_AUTO_TEST_CASE(cancel_cosign_refusals)
     yaCarrier.vin.back() = c.f.CarrierIn(EncodeBundle(b));
     BOOST_CHECK(refused(yaCarrier));
     // a repeated key, a non-member, another intent, another height, another block hash
-    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0, 0 }))));
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 10 }))));
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.CosignsFor(COutPoint(c.claimTxid, 1), c.claimRef, { 0 }))));
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.CosignsFor(c.Intent(), c.claimRef - 1, { 0 }))));
@@ -5088,10 +5087,12 @@ BOOST_AUTO_TEST_CASE(cancel_cosign_refusals)
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, 9000))));
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, edge - 1))));
     BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, c.Cosigns({ 0 }, PRICE_MIN - 1))));
-    // every entry must hold, extras included
-    std::vector<CancelCosignEntry> mixed = c.Cosigns({ 0 });
-    mixed.push_back(c.f.Cosign(10, CancelFixture::HONEST, c.Intent(), c.claimRef));
-    BOOST_CHECK(refused(c.CancelOf(c.Intent(), outs, mixed)));
+    // a malformed list fails whatever it holds
+    CMutableTransaction junk = c.CancelTx();
+    valtype bad = EncodeCancelCosigns(c.Cosigns({ 0 }));
+    bad.push_back(0);
+    junk.vin.back() = c.f.CarrierIn(bad);
+    BOOST_CHECK(refused(junk));
     // a member whose bond was spent (WITHDRAWN) and a member that joined too recently (not current) cannot co-sign
     const AttestorRecord one = c.f.Attestor(1).value();
     CMutableTransaction exit;
@@ -5110,6 +5111,55 @@ BOOST_AUTO_TEST_CASE(cancel_cosign_refusals)
     BOOST_REQUIRE_EQUAL(c.Mine(ok), "");
     BOOST_CHECK(c.f.Log(CTransaction(ok).GetHash())->bundleSeqs == std::vector<uint16_t>({ 0, 2, 3 }));
     BOOST_CHECK_EQUAL(c.f.Vault(CTransaction(ok).GetHash())->cancelCount, 1);
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_cosign_counts_distinct_valid_entries)
+{
+    // round 2 (review M-2): invalid, non-current and repeated entries are ignored; the distinct valid ones must reach
+    // CancelsRequired
+    RoundsFixture c;
+    BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+    c.Reclaim();                                               // the second cancel needs two
+    auto mine = [&](const std::vector<CancelCosignEntry>& e) {
+        CMutableTransaction tx = c.CancelOf(c.intent, { RelockOf(c.f, c.pos, c.each), c.Refund() }, e);
+        const std::string v = c.Mine(tx);
+        if (v.empty()) c.pos = COutPoint(CTransaction(tx).GetHash(), 0);
+        return v;
+    };
+    BOOST_CHECK_EQUAL(mine(c.CosignsFor(c.intent, c.ref, { 0, 0 })), verdict::INTENT_CANCEL_COSIGN);          // one key twice
+    BOOST_CHECK_EQUAL(mine(c.CosignsFor(c.intent, c.ref, { 0, 10 })), verdict::INTENT_CANCEL_COSIGN);         // a non-member
+    std::vector<CancelCosignEntry> e = c.CosignsFor(c.intent, c.ref, { 0 });
+    e.push_back(c.f.Cosign(10, CancelFixture::HONEST, c.intent, c.ref));                                     // ignored
+    e.push_back(c.f.Cosign(2, 9000, c.intent, c.ref));                                                       // claimable: ignored
+    e.push_back(c.f.Cosign(0, CancelFixture::HONEST, c.intent, c.ref));                                      // a repeat: ignored
+    e.push_back(c.f.Cosign(1, CancelFixture::HONEST, c.intent, c.ref));
+    const COutPoint before = c.pos;
+    BOOST_REQUIRE_EQUAL(mine(e), "");
+    BOOST_CHECK(c.pos != before);
+    BOOST_CHECK(c.f.Log(c.pos.hash)->bundleSeqs == std::vector<uint16_t>({ 0, 1 }));
+    BOOST_CHECK_EQUAL(c.f.Vault(c.pos.hash)->cancelCount, 2);
+}
+
+// Rule: CAN-2
+BOOST_AUTO_TEST_CASE(cancel_cosign_holds_when_a_cosigner_leaves_in_the_same_block)
+{
+    // round 2: member 1 spends its bond (WITHDRAWN) earlier in the cancel's block; with a spare co-signature the cancel
+    // still holds, without one it fails
+    for (bool spare : { false, true }) {
+        RoundsFixture c;
+        BOOST_REQUIRE_EQUAL(c.MineCancel({ 0 }), "");
+        c.Reclaim();                                           // two needed
+        const AttestorRecord one = c.f.Attestor(1).value();
+        CMutableTransaction exit;
+        exit.vin.push_back(CTxIn(one.bondOutpoint));
+        exit.vout.push_back(CTxOut(one.bondZat - 1000, GetScriptForDestination(c.f.userKey.GetPubKey().GetID())));
+        CMutableTransaction cancel = c.Cancel(spare ? std::vector<int>{ 0, 1, 2 } : std::vector<int>{ 0, 1 });
+        c.f.Mine(Fixture::Quote(9000, (c.f.tip + 1) % 3), { exit, cancel });
+        BOOST_CHECK_EQUAL(c.f.Attestor(1)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+        BOOST_CHECK_EQUAL(c.f.Refused(CTransaction(cancel).GetHash()), spare ? "" : verdict::INTENT_CANCEL_COSIGN);
+        if (spare) BOOST_CHECK(c.f.Log(CTransaction(cancel).GetHash())->bundleSeqs == std::vector<uint16_t>({ 0, 2 }));
+    }
 }
 
 // Rule: CAN-2
@@ -5203,8 +5253,41 @@ BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_until_quiet)
     while (r.g.f.tip + 2 < cancelled + r.g.f.P.cancelQuiet) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
     BOOST_REQUIRE_EQUAL(r.g.f.tip + 1, cancelled + r.g.f.P.cancelQuiet - 1);
     BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);   // one block inside CANCEL_QUIET
-    BOOST_CHECK_EQUAL(r.Release(), "");                              // CANCEL_QUIET passed, the position ACTIVE
+    // round 2 (R-1c): CANCEL_QUIET has passed, but the re-created position (the claimant intent's value, ~100 % at
+    // $0.021) is claimable on path (a) at the latest snapshot: still held
+    const VaultRecord pos = r.g.f.Vault(r.pos.hash).value();
+    BOOST_REQUIRE(IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    // the price recovers for a whole slow window: the position is no longer claimable, the residual is released
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 64; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    BOOST_REQUIRE(!IsUnderwater(pos.collateralZat, r.g.f.Snap(r.g.f.tip).PClaim(), pos.mintedCents, r.g.f.P.claimThresholdBps));
+    BOOST_CHECK_EQUAL(r.Release(), "");
     BOOST_CHECK(!State(r.g.f.view).GetIntent(r.residual).has_value());
+}
+
+// Rule: CAN-3
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(cancel_limit_residual_held_while_claimable_by_path_b)
+{
+    // round 2: past CANCEL_QUIET and healthy at the snapshot price, but a persisted notice on the position whose pEmerg
+    // puts it under EMERGENCY_RATIO makes it claimable on path (b): held; without the notice, or before it persists,
+    // released
+    ResidualFixture r;
+    r.CancelFirst();
+    r.g.poolPrice = 50000;
+    for (int i = 0; i < 64; i++) r.g.f.Mine(Fixture::Quote(r.g.poolPrice, (r.g.f.tip + 1) % 3));
+    const MemoryStateView healthy = r.g.f.view;
+    NoticeRecord n;
+    n.height = r.g.f.tip - 4;
+    n.refHeight = r.g.f.tip - r.g.f.P.emergencyPersist;      // persisted at H - 1 = tip
+    n.pEmerg = 10000;                                          // ~48 % at $0.01: under 105 %
+    State(r.g.f.view).Put(keys::Notice(r.pos), n);
+    BOOST_CHECK_EQUAL(r.Release(), verdict::INTENT_RESIDUAL_HELD);
+    r.g.f.view = healthy;
+    n.refHeight = r.g.f.tip;                                   // not yet persisted at H - 1
+    State(r.g.f.view).Put(keys::Notice(r.pos), n);
+    BOOST_CHECK_EQUAL(r.Release(), "");
 }
 
 // Rule: CAN-3
