@@ -54,7 +54,10 @@ attest/
 │   ├── attest.rs               the attest loop, `sources` and `cosign`
 │   ├── cancel.rs               the cancel automation: watcher, gossip filter, collector, persisted state
 │   ├── cosig.rs                the cancel co-signature: message, key recovery (k256), 115-byte gossip frame
-│   ├── gossip.rs               the cancel topic's receiver task: cheap checks, uniform sampling, verification
+│   ├── gossip.rs               the co-signature receiver task: cheap checks, uniform sampling (topic), verification
+│   ├── direct.rs               the members-only direct path: iroh endpoint, handshake gate, handler, sender, probe
+│   ├── binding.rs              the signmessage binding of a member's direct endpoint id to its seat
+│   ├── onchain.rs              the on-chain fallback: the 79-byte OP_RETURN record, its transaction, the block scan
 │   ├── subscribe.rs            the subscribe loop
 │   ├── transport/{mod,dir,iroh}.rs   the Transport trait and its two implementations
 │   ├── fixtures.rs             the Rust side of the Rust/Python cross-check
@@ -168,7 +171,40 @@ guard locks it to the price that key attested at that height. `attest` automates
    claim is closed as `cancelled` or `released` only once its intent is spent in a confirmed block. A changed
    confirmation resets the claim (its co-signatures are restored when the refHeight and its hash are unchanged); a
    changed blockHash(refHeight) resets it and re-signs over the new hash.
-2. **Gossip** (its own task, `gossip.rs`, never waiting for a poll). A frame is `"YCG1" ‖ intent txid (internal order)
+2. **Delivery** (owner decisions 2026-10-13, docs/plans/yellowback-attest-gossip-evaluation.md). `[cancel] delivery`:
+   `"trial"` (default until the trial ends: the members-only direct path **and** the old gossip topic), `"direct"`
+   (the direct path only; the topic is not opened), `"gossip"` (the old topic only), `"onchain"` (neither: the
+   on-chain fallback alone).
+   - **Direct, members only** (`direct.rs`). A dedicated iroh endpoint (`direct_secret_key_file`, default
+     `<state_file>.direct.key`) serves one ALPN, `yellowback/cancel-cosig/1`. An `EndpointHooks::after_handshake` gate
+     refuses any connection on it whose authenticated endpoint id is not bound to a current member, and the agent
+     never dials one (`before_connect`). Each co-signature goes straight to every other bound member on a fresh uni
+     stream (`0x01 ‖ frame`); it is accepted only under the seq its connection is bound to and within that member's
+     quota (64 at once, 4 a second), then verified at once -- no sampler: the author is authenticated, so a member can
+     exhaust only its own allowance. Nothing is forwarded.
+   - **The binding** (`binding.rs`): `YED-IROH-1|<network>|<attestorSetId>|<seq>|<endpoint id>|<issued>|<expiry>`, signed
+     by the node's stock `signmessage` with the member key (`bondKeyAddress`), valid `binding_ttl_blocks` (8,064) and
+     re-signed at half of it. Agents announce it (with unsigned address hints) on the public binding topic
+     `yellowback/bindings/<network>/1` every 10 blocks and over every member connection (`0x02 ‖ announce`); each
+     announce is self-verifying (forged, expired, wrong-seq, other-set and other-network ones are refused; per seq the
+     latest valid one wins), at most 64 recoveries a poll. The table is persisted.
+   - **On-chain fallback** (`onchain.rs`, `onchain_fallback`, default on). A claim still short of `cancelsRequired`
+     `fallback_after_blocks` (192) after it confirmed: every co-signing agent publishes its co-signature once in a
+     standard transaction, `OP_RETURN OP_PUSHDATA1 79 ‖ "YF" ‖ short id (8) ‖ price ‖ sig65` (82-byte script, within
+     `MAX_OP_RETURN_RELAY` 83 on both lines; "YF" is not the Yellowback payload magic), funded from one confirmed
+     P2PKH coin (never a YED token or a bond), fee exactly `fallback_fee_zat` (10,000), at most `fallback_max_txs` (20)
+     a day; `ALERT onchain-fallback` each time. Every agent scans the claim's blocks for the tag (at most 20 blocks a
+     poll) and takes each record that recovers to a current member's key at a non-claimable price.
+   - **Relays.** The direct endpoint uses n0's public relays (and their pkarr/DNS lookup) by default;
+     `fallback_relays` adds the project's own relays to that set; `direct_relays = ["none"]` uses no relay and no
+     lookup (the binding's address hints only: a devnet or a LAN). `[transport] fallback_relays` does the same for the
+     gossip endpoint. Running a relay: `cargo install iroh-relay --features server` (the version matching iroh 1.2),
+     `iroh-relay --config-path relay.toml` with a `[tls]` table (`hostname = "<host>"`, `cert_mode = "LetsEncrypt"`),
+     80 and 443/TCP open (and 7842/UDP with `enable_quic_addr_discovery = true`), then publish `https://<host>` for
+     attestors' `fallback_relays`.
+   - `yellowback-attest direct-probe <endpoint id> --addr ip:port` dials a member's direct endpoint with a fresh,
+     unbound key: exit 3 "refused" is what any non-member sees (and how an operator checks its gate).
+3. **Gossip** (the old topic, during the trial; its own task, `gossip.rs`, never waiting for a poll). A frame is `"YCG1" ‖ intent txid (internal order)
    ‖ n LE32 ‖ seq LE16 ‖ refHeight LE32 ‖ price LE32 ‖ sig65` (115 bytes). The receiver drops anything else, then
    duplicates of frames already verified, then frames failing the cheap checks against the agent's latest view (a
    current member's seq -- the primitive's `current` from `set_getinfo`, maturity included --, a claim this node
@@ -181,7 +217,7 @@ guard locks it to the price that key attested at that height. `attest` automates
    The agent republishes its own co-signature **every block** while the claim is short of `cancelsRequired` (else
    every `republish_blocks`): against a 20,000 frames/s flood it gets through within 60 blocks with probability
    above 0.998 (`gossip::tests::a_flood_cannot_starve_an_honest_frame`).
-3. **Collector** (once per poll). One member drives each claim: the current members in seq order, rotated by
+4. **Collector** (once per poll). One member drives each claim: the current members in seq order, rotated by
    SHA-256(txid ‖ n); the member of rank r drives `r × takeover_blocks` blocks after the claim confirmed
    (`takeover_blocks` ≤ 36, shrunk at run time to `(claimDelay − spare_wait_blocks − 2) / (members − 1)`). The driver
    waits for `cancelsRequired` valid co-signatures of current members plus `spares` (no longer than
@@ -193,13 +229,13 @@ guard locks it to the price that key attested at that height. `attest` automates
    send and at most `max_sends` sends in all (`ALERT cancel-send-cap`); every attempt, a failed one included, is
    counted before it is tried. A spend of the intent in the mempool that is
    not the agent's and lingers raises `ALERT foreign-spend`.
-4. **State.** `state_file` (default: `yellowback-cancel-<seq>.json` beside the node's `rpc_cookie`, else
+5. **State.** `state_file` (default: `yellowback-cancel-<seq>.json` beside the node's `rpc_cookie`, else
    `~/.ycash/yellowback-cancel-<network>-<seq>.json`; 0600, written to a fresh O_EXCL temporary file and renamed)
    holds the claims, their co-signatures, the cancel sent, the price history, the signed prices and
    `recording_since` (set only once the node is out of initial block download and within two blocks of the best
    header): a restarted agent neither co-signs again nor rebuilds. Read it with `jq '.claims' <file>`.
-5. **Liveness.** If the gossip tasks die the agent exits non-zero (the packaged unit restarts it).
-6. **`auto_cosign = false`** never makes, stores or carries this member's own co-signature (not even through the
+6. **Liveness.** If the gossip tasks die the agent exits non-zero (the packaged unit restarts it).
+7. **`auto_cosign = false`** never makes, stores or carries this member's own co-signature (not even through the
    guard); the agent still alerts, and still drives on other members' co-signatures when `drive` is on.
 
 What it needs from the operator: the member key in the node's wallet (as for `yed_signattestation`) **and the node's

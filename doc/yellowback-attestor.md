@@ -154,6 +154,16 @@ runs, beside its attestation loop and with `[cancel]` on by default,
   relayed by anyone, only dilutes an honest frame's chance per copy), then the signature must recover to that seq's
   member key, then a per-member rate limit. Your agent republishes your co-signature every block while the claim is
   short of co-signatures, so it gets through a flood within a few blocks;
+- **delivery** of co-signatures (owner decisions 2026-10-13): straight to the other members over iroh on a
+  members-only protocol. A connection on it is refused at the handshake unless its endpoint id is bound to a current
+  member. You bind yours once (the agent does it): your node signs `YED-IROH-1|<network>|<set>|<seq>|<endpoint>|
+  <issued>|<expiry>` with your member key through the stock `signmessage` -- a statement about a network address,
+  never a price -- and re-signs it every few days. During the trial the old public cancel topic runs beside it
+  (`delivery = "trial"`); `delivery = "direct"` uses the direct path alone. If a claim is still short of
+  co-signatures `fallback_after_blocks` (192, a third of `CLAIM_DELAY`) after it confirmed, your agent also publishes
+  your co-signature on chain in one standard transaction (an 82-byte OP_RETURN, fee `fallback_fee_zat` = 10,000 zat,
+  at most `fallback_max_txs` = 20 a day; alert `onchain-fallback`), and every driver reads such records from the
+  chain. Keep a few small confirmed P2PKH coins in the node's wallet for it;
 - a **collector** in which one member drives each claim: the members in seq order, rotated per claim; rank r takes
   over `r × takeover_blocks` blocks after the claim confirmed (at most 36, and shrunk at run time so the last rank
   still fits in `CLAIM_DELAY`). The driver gathers `cancelsRequired` co-signatures plus `spares` (the rule counts the
@@ -173,6 +183,14 @@ and the node uses it to refuse a second, different price for a height (`yed_sign
 without it: a node that lost it can be made to state a price your key already contradicted, and EQV-1 then ejects the
 member and freezes the bond.
 
+**Relays.** The direct endpoint uses n0's public relays by default. Add the project's relay as a fallback with
+`[cancel] fallback_relays = ["https://relay.<project host>"]` (and `[transport] fallback_relays` for the price topic). To
+run a relay yourself: `cargo install iroh-relay --features server` at the version matching the agent's iroh (1.2),
+a `relay.toml` with a `[tls]` table (`hostname = "<host>"`, `cert_mode = "LetsEncrypt"`), ports 80 and 443/TCP open
+(7842/UDP too with `enable_quic_addr_discovery = true`), and `iroh-relay --config-path relay.toml` under systemd;
+members then list `https://<host>`. A relay only forwards
+encrypted QUIC: it cannot read, forge or admit anything, but it sees IP addresses and endpoint ids.
+
 **What you do.** Keep a few YEC of confirmed coins in the node's wallet (the cancel's carrier and fee come from it);
 after importing your member key or restoring the wallet, complete the sign-once history and run
 `set_acknowledgerestore` (above), or `set_signcancel` refuses and the agent alerts `sign-refused`; give
@@ -189,6 +207,8 @@ log watcher on `ALERT`) to a pager (at most four run at once, each killed after 
 | `sign-refused` | `set_signcancel` refused (restore marker, locked wallet) | fix the wallet; the next member in the rota takes over |
 | `claim-reorged` | the claim's block left the chain; the claim is held and followed again if re-mined | none; watch it |
 | `foreign-spend` | a transaction that is not yours has spent the claim's intent in the mempool for `refee_after_blocks` without confirming (a pinned cancel variant, or a release) | send a cancel directly to miners |
+| `onchain-fallback` | a claim was still short of co-signatures `fallback_after_blocks` after it confirmed: your co-signature went on chain | check your direct connectivity (`direct-probe` from another member, relays) |
+| `onchain-fallback-cap` | `fallback_max_txs` fallback transactions in a day: no more | investigate: a wrong-price campaign, or the direct path is down |
 | `cancel-send-cap` | your cancel left the mempool `max_sends` times | act by hand |
 | `wrong-price-past-delay`, `wrong-price-released` | a claim you judged wrong-price reached its release height uncancelled | escalate: the brake failed (too few live members, censorship) |
 
@@ -374,6 +394,8 @@ keys are refused, exit 2):
               topic_override = ""              default "yellowback/attest/<network>/3"; leave it
               kind = "dir"; path = "..."       tests and the regtest devnet: <seq>-<citedHeight>.att files in a shared directory
 [cancel]      enabled = true; auto_cosign = true; margin_bps = 500    the cancel automation ("Cancelling wrong-price claims")
+              delivery = "trial" (trial | direct | gossip | onchain); direct_secret_key_file; direct_relays = []; fallback_relays = []
+              binding_ttl_blocks = 8064; onchain_fallback = true; fallback_after_blocks = 192; fallback_fee_zat = 10000; fallback_max_txs = 20
               drive = true; spares = 2; spare_wait_blocks = 1; takeover_blocks = 6 (at most 36); min_confirmations = 1
               refee_after_blocks = 6; max_sends = 5; republish_blocks = 4; price_tolerance_blocks = 24; state_file = "..."
               broadcast_rpc = [...]; allow_insecure_broadcast = false; alert_command = "..."; gossip_burst = 16; gossip_refill_seconds = 10
