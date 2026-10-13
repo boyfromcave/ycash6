@@ -1899,6 +1899,8 @@ UniValue yed_signcancelcosign(const UniValue& params, bool fHelp)
     State st(index.View());
     const yellowback::Params& p = index.GetParams();
     const CancelTarget t = CancelTargetOf(st, op);
+    // review A L-5 (design A-6): co-sign only a CONFIRMED claim -- a template spend's txid is malleable until it confirms
+    if (!t.confirmed) throw JSONRPCError(RPC_MISC_ERROR, "claim-unconfirmed: co-sign the cancel once the claim has confirmed (its txid is malleable until then; re-sign after a reorg that re-mines it)");
     const int64_t next = (int64_t)IndexHeight(index) + 1;
     std::optional<uint16_t> seq;
     if (params.size() > 2 && !params[2].isNull()) {
@@ -1916,13 +1918,30 @@ UniValue yed_signcancelcosign(const UniValue& params, bool fHelp)
     if (CurrentMember(st, rec->AttestorKey(), next) != seq) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-not-eligible: seq %u is not a current member of the attestor set", (unsigned)seq.value()));
     std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)t.refHeight);
     if (!snap.has_value()) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the claim's refHeight %d is not indexed", t.refHeight));
+    // review A L-4: one block-hash source -- the index's Snapshots[R].blockHash (what consensus verifies against); the
+    // guard below is keyed on the active chain's hash, so the two must agree (they do whenever the index is at the tip)
     const uint256 blockHash = snap->blockHash;
+    const CBlockIndex* atR = (t.refHeight >= 0 && t.refHeight <= chainActive.Height()) ? chainActive[t.refHeight] : nullptr;
+    if (!atR || atR->GetBlockHash() != blockHash)
+        throw JSONRPCError(RPC_MISC_ERROR, "the Yellowback index and the active chain disagree at the claim's refHeight; retry when the index has caught up");
+    // review A L-3 / B6: the guard is looked up by KEY, not by seq -- EQV-1 binds a statement to the key, so an attestation
+    // this key signed at R under any seq (a member that left and rejoined with the same hot key) fixes the price
+    std::optional<SignedAttestation> prior;
+    for (const auto& r : st.Attestors()) {
+        if (r.second.AttestorKey() != rec->AttestorKey()) continue;
+        std::optional<SignedAttestation> one = yw.LookupSigned(r.first, (uint32_t)t.refHeight, blockHash);
+        if (!one.has_value()) continue;
+        if (prior.has_value() && prior->priceMicroUsd != one->priceMicroUsd)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("equivocation-guard: this key already signed two prices for height %d", t.refHeight));
+        prior = one;
+    }
     int64_t price = 0;
     if (params.size() > 1 && !params[1].isNull()) {
         price = params[1].get_int64();
+        if (prior.has_value() && prior->priceMicroUsd != (uint32_t)price)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("equivocation-guard: seq %u already signed %u for height %d", (unsigned)prior->seq, prior->priceMicroUsd, t.refHeight));
     } else {
-        std::optional<SignedAttestation> prior = yw.LookupSigned(seq.value(), (uint32_t)t.refHeight, blockHash);
-        if (!prior.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("price-required: seq %u signed no price for the claim's refHeight %d; pass priceMicroUsd", (unsigned)seq.value(), t.refHeight));
+        if (!prior.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("price-required: this key signed no price for the claim's refHeight %d; pass priceMicroUsd", t.refHeight));
         price = prior->priceMicroUsd;
     }
     if (price < PRICE_MIN || price > PRICE_MAX) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-range: priceMicroUsd must be in [%d, %d]", PRICE_MIN, PRICE_MAX));
@@ -1970,7 +1989,9 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             "(cancel-cosign-needed, naming how many). With enough, a carrier holding them is broadcast (CARRIER_VALUE) and the\n"
             "cancel spends it as its last input, signed (the CANCEL_COSIGN marker is the last output, so the set signature's\n"
             "SIGHASH_ALL|ANYONECANPAY digest is the same whatever co-signatures arrive: members still sign once). Collect more\n"
-            "than required when you can: a reorg that adds an earlier cancel raises the count.\n"
+            "than required when you can: consensus counts the distinct valid entries and ignores the rest, so spares keep the\n"
+            "cancel valid when a co-signer leaves before it confirms or a reorg adds an earlier cancel (this RPC still refuses\n"
+            "an entry it can already see is bad, naming it and why).\n"
             "\nResult: vault_buildcancel's {\"hex\", \"required\", \"cancelsetid\", \"deadline\", \"intentconfirmed\"} plus\n"
             "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)},\n"
             "\"cancelsRequired\", \"cosigners\" (seqs, carrier order), \"carrierTxid\"\n"
@@ -2055,9 +2076,14 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             if (!vault::RecoverSig(msg, e.sig, key)) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-malformed: cosigs[%u] does not sign this intent's cancel", (unsigned)i));
             if (!seen.insert(key).second) continue;                     // a repeat of the same key is dropped, never sent
             std::optional<uint16_t> seq = CurrentMember(st, key, next);
-            if (!seq.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-not-member: cosigs[%u] is not from a current member of the attestor set", (unsigned)i));
-            if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || IsUnderwater(t.vault.collateralZat, (MicroUsd)e.priceMicroUsd, t.vault.mintedCents, p.claimThresholdBps))
-                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-statement-claimable: cosigs[%u] states a price at which the vault was claimable", (unsigned)i));
+            if (!seq.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-cosign-not-member: cosigs[%u] (key %s) is not from a current member of the attestor set at height %d",
+                                                                                      (unsigned)i, HexStr(key.begin(), key.end()), (int)next));
+            if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-range: cosigs[%u] (seq %u) states %u micro-USD, outside [%d, %d]",
+                                                                    (unsigned)i, (unsigned)seq.value(), e.priceMicroUsd, PRICE_MIN, PRICE_MAX));
+            if (IsUnderwater(t.vault.collateralZat, (MicroUsd)e.priceMicroUsd, t.vault.mintedCents, p.claimThresholdBps))
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cancel-statement-claimable: cosigs[%u] (seq %u) states %u micro-USD, at which the vault was claimable at refHeight %d",
+                                                                    (unsigned)i, (unsigned)seq.value(), e.priceMicroUsd, t.refHeight));
             if (entries.size() >= CANCEL_COSIGN_MAX) break;
             entries.push_back(e);
             cosigners.push_back(seq.value());

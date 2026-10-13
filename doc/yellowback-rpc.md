@@ -2024,8 +2024,11 @@ carrier holding them (`"YC" ‖ 1 ‖ count ‖ count × (price ‖ sig65)`) is 
 outstanding carrier of this wallet with the same bytes is reused, so the same co-signatures give the same
 transaction) and the cancel spends it as its **last input, already signed**; the CANCEL_COSIGN marker (`0x09`, an
 empty-bodied payload) is its last output before the change. The set signature (`SIGHASH_ALL|ANYONECANPAY`) covers
-the outputs only, so it is the same whatever co-signatures arrive — members still sign once — and collecting more
-than required is wise (a reorg that adds an earlier cancel raises the count). `vault_refee` replaces every
+the outputs only, so it is the same whatever co-signatures arrive — members still sign once. **Add spare
+co-signatures** (round 2, review M-2): consensus counts the distinct valid entries and ignores the rest, so spares keep
+the cancel valid when a co-signer leaves, is evicted or ejected before it confirms, or a reorg adds an earlier cancel
+that raises the count; this RPC still refuses an entry it can already see is bad, naming its index, seq or key and the
+reason (`attest-range` for a price outside `[PRICE_MIN, PRICE_MAX]`). `vault_refee` replaces every
 non-template input, the carrier included: after it, call `yed_buildcancel` again with the same `cosigs` to re-attach
 the carrier. `cancelsRequired` and `cosigners` (the co-signers' `seq`s, carrier order) report what was built.
 
@@ -2061,6 +2064,11 @@ locked through the equivocation guard (`attest-signed.dat`, as `yed_signattestat
 key already signed for `refHeight`; a different price is refused (`equivocation-guard`); with no prior signature the
 price must be given (`price-required`) and is recorded for that height. The price must say the vault was not
 claimable (`collateralZat · price ≥ mintedCents · CLAIM_THRESHOLD_BPS · COIN`), else `cancel-statement-claimable`.
+Round 2 (review): it co-signs only a **confirmed** claim (`claim-unconfirmed` otherwise: a template spend's txid is
+malleable until it confirms; re-sign after a reorg re-mines the claim); the guard is looked up **by key** across every
+`seq` the key ever held (a member that left and rejoined with the same hot key cannot contradict an attestation of its
+old seq at that height); and the block hash is the index's `Snapshots[refHeight].blockHash`, which must equal the
+active chain's at that height (else retry).
 Refuses also `attest-unknown-seq`, `attest-not-eligible` (not a current member), `attest-key-not-held`,
 `attest-range`, and `yed_buildcancel`'s intent refusals. `cosig` is what `yed_buildcancel` takes (69 bytes: price LE32
 ‖ sig65); `reused` whether the guard already held the price.
@@ -2478,6 +2486,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `cancel-cosign-malformed`, `cancel-cosign-not-member` | `yed_buildcancel` | a `cosigs` entry that is not 69 bytes of hex or does not recover over this intent's cancel; one whose key is not a current member of the attestor set |
 | `cancel-statement-claimable` | `yed_buildcancel`, `yed_signcancelcosign` | the statement's price says the vault was claimable at the claim's `refHeight` (C4b): co-sign at the vault's `underwaterAt − 1` |
 | `price-required` | `yed_signcancelcosign` | no `priceMicroUsd` given and the guard holds no price of this key for the claim's `refHeight` |
+| `claim-unconfirmed` | `yed_signcancelcosign` | the claim is still in the mempool (co-sign only a confirmed claim, design A-6) |
 
 ## `rpc/client.cpp` conversion rows (Phase 3)
 

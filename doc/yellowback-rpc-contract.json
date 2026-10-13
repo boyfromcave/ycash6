@@ -184,6 +184,12 @@
       ],
       "when": "minOutZat > 0 and what reaches the destination (the claimant intent: the collateral less the RED-5 residual, U-23; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat"
     },
+    "claim-unconfirmed": {
+      "raisedBy": [
+        "yed_signcancelcosign"
+      ],
+      "when": "the claim is still in the mempool (co-sign only a confirmed claim, design A-6)"
+    },
     "collateral-above-max": {
       "raisedBy": [
         "yed_mint"
