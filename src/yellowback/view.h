@@ -81,7 +81,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 14;  //!< 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2) and IntentRecord.claimRefHeight (C4b) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 14;  //!< 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -616,6 +616,8 @@ struct IntentRecord
                                                //!< to; empty on the residual intent. Appended last (SERIALISATION.md append rule)
     int32_t claimRefHeight;  //!< C4b (cancel-limit design): the claim's REDEEM refHeight, on both intents -- the height a cancel's
                              //!< CANCEL_COSIGN statements cite. Appended last
+    COutPoint heldBy;        //!< CAN-3: on a residual intent whose claimant intent was cancelled, the outpoint of the re-created
+                             //!< position (moved on by each later cancel of that position); null otherwise. Appended last
 
     IntentRecord() : role((uint8_t)IntentRole::CLAIMANT), height(0), claimRefHeight(0) {}
 
@@ -629,6 +631,7 @@ struct IntentRecord
         READWRITE(height);
         READWRITE(refundScript);
         READWRITE(claimRefHeight);
+        READWRITE(heldBy);
     }
 };
 
@@ -866,6 +869,8 @@ public:
     std::optional<AttestorSetRecord> GetAttestorSet() const;
     /** Every Attestors record in seq order. */
     std::vector<std::pair<uint16_t, AttestorRecord>> Attestors() const;
+    /** Every Intents record in outpoint key order (CAN-3: a cancel moves the residuals its position holds). */
+    std::vector<std::pair<COutPoint, IntentRecord>> Intents() const;
 
     StateView& View() { return view; }
     const StateView& View() const { return view; }

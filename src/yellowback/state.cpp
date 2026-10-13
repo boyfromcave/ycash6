@@ -66,6 +66,7 @@ const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
 const char* const INTENT_CANCEL_NO_REFUND = "intent-cancel-no-refund";
 const char* const INTENT_CANCEL_COSIGN = "intent-cancel-cosign";
+const char* const INTENT_RESIDUAL_HELD = "intent-residual-held";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
@@ -814,6 +815,16 @@ int64_t CancelQ(const VaultRecord& v, const Params& P, int64_t h)
     return h - (int64_t)v.lastCancelHeight < (int64_t)P.cancelQuiet ? (int64_t)v.cancelCount : 0;
 }
 
+/** CAN-3: a held residual is released once its position is closed (CLOSED by the owner, CLAIMED by a later release),
+ *  or once it is ACTIVE with CANCEL_QUIET passed since its last cancel; never while it is CLAIMING. */
+bool ResidualReleasable(const std::optional<VaultRecord>& pos, const Params& P, int64_t h)
+{
+    if (!pos.has_value()) return false;     // cannot happen: every cancel moves heldBy to the position it re-creates
+    const VaultStatus s = pos->Status();
+    if (s == VaultStatus::CLOSED || s == VaultStatus::CLAIMED) return true;
+    return s == VaultStatus::ACTIVE && h - (int64_t)pos->lastCancelHeight >= (int64_t)P.cancelQuiet;
+}
+
 /**
  * The seq of `key` when it is a current member of the attestor set at `h` on the module's mirror (the primitive's
  * IsCurrent, vault/state.cpp: an ACTIVE member whose join has matured): its key's newest Attestors record, neither
@@ -891,6 +902,9 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     // a release carries no Yellowback payload; a cancel none but CAN-2's CANCEL_COSIGN marker
     if (fp.has_value() && !(cancel && fp->payload.type == PayloadType::CANCEL_COSIGN)) return verdict::INTENT_SPEND_MALFORMED;
     if (cancel && in.record.Role() == IntentRole::RESIDUAL) return verdict::INTENT_CANCEL_RESIDUAL;
+    // CAN-3: the residual of a cancelled claim is held while the re-created position lives
+    if (!cancel && in.record.Role() == IntentRole::RESIDUAL && !in.record.heldBy.IsNull() &&
+        !ResidualReleasable(ctx.st.GetVault(in.record.heldBy), P, ctx.height)) return verdict::INTENT_RESIDUAL_HELD;
     std::optional<VaultRecord> vault = ctx.st.GetVault(in.record.vault);
     ctx.st.EraseKey(keys::Intent(in.outpoint));
     log.type = (uint8_t)(cancel ? TxLogType::CLAIM_CANCEL : TxLogType::CLAIM_RELEASE);
@@ -954,6 +968,16 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     v.lastCancelHeight = ctx.height;
     ctx.st.EraseKey(keys::Vault(in.record.vault));
     ctx.st.Put(keys::Vault(reopened), v);
+    // CAN-3: this claim's residual, and any residual an earlier cancel of the position holds, is held by the re-created one
+    std::vector<std::pair<COutPoint, IntentRecord>> held;
+    for (const auto& r : ctx.st.Intents()) {
+        if (r.second.Role() != IntentRole::RESIDUAL) continue;
+        if ((r.second.heldBy.IsNull() ? r.second.vault : r.second.heldBy) == in.record.vault) held.push_back(r);
+    }
+    for (auto& r : held) {
+        r.second.heldBy = reopened;
+        ctx.st.Put(keys::Intent(r.first), r.second);
+    }
     if (ctx.st.Has(keys::Notice(in.record.vault))) ctx.st.EraseKey(keys::Notice(in.record.vault));
     totals.collateralZat += v.collateralZat - vault->collateralZat;    // IT-6: the CLAIMING collateral was still counted
     totals.activeVaults++;

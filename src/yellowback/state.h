@@ -117,6 +117,8 @@ extern const char* const INTENT_CANCEL_NO_REFUND; //!< CAN-1 (03/H-1): a cancel 
 extern const char* const INTENT_CANCEL_COSIGN;    //!< CAN-2 + C4b: a cancel whose CANCEL_COSIGN statements are missing, malformed, from a
                                                   //!< non-member or a repeated key, say the vault was claimable, or number fewer than
                                                   //!< CancelsRequired
+extern const char* const INTENT_RESIDUAL_HELD;    //!< CAN-3: the release of a residual intent whose claimant intent was cancelled, while
+                                                  //!< the re-created position is open and either CLAIMING or inside CANCEL_QUIET
 extern const char* const BAD_YED_HOLDER;         //!< TOK-PQ: from the Falcon height a token output that is not a Falcon TX_PQPKH
 extern const char* const YED_TEMPLATE_OUTPUT;    //!< a YED-tagged V or I output no mint, claim or cancel created
 extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUNDLE-1 held but the statistic is undefined
