@@ -556,6 +556,9 @@ std::optional<std::string> VaultState::ApplyTxInner(const CTransaction& tx, int6
     for (size_t o = 0; o < outs.size(); o++) {
         if (outs[o].kind != OutClass::VAULT) continue;
         const VaultParams& v = outs[o].v;
+        // V-1 (audit 01/V-5): the APP branch (selector 4) has no signer; it exists for a module to govern.
+        // A V with an APP branch on a tag no module governs would be anyone-can-spend-into-intents from appHeight.
+        if (v.appHeight != 0 && !FindModule(v.tag)) return std::string("bad-txns-vault-app");
         auto set = GetSet(*this, v.setId);
         if (!set || set->createHeight >= h) return std::string("bad-txns-vault-noset");
         auto cset = GetSet(*this, v.cancelSetId);
