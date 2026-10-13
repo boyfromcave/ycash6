@@ -183,16 +183,24 @@ guard locks it to the price that key attested at that height. `attest` automates
      quota (64 at once, 4 a second), then verified at once -- no sampler: the author is authenticated, so a member can
      exhaust only its own allowance. Nothing is forwarded.
    - **The binding** (`binding.rs`): `YED-IROH-1|<network>|<attestorSetId>|<seq>|<endpoint id>|<issued>|<expiry>`, signed
-     by the node's stock `signmessage` with the member key (`bondKeyAddress`), valid `binding_ttl_blocks` (8,064) and
-     re-signed at half of it. Agents announce it (with unsigned address hints) on the public binding topic
-     `yellowback/bindings/<network>/1` every 10 blocks and over every member connection (`0x02 ‖ announce`); each
-     announce is self-verifying (forged, expired, wrong-seq, other-set and other-network ones are refused; per seq the
-     latest valid one wins), at most 64 recoveries a poll. The table is persisted.
+     by the node's stock `signmessage` with the member key (its address, checked against `attestorPubKey` with
+     `validateaddress`), valid at most `binding_ttl_blocks` (8,064; a longer one is refused) and re-signed at half
+     of it. The endpoint key adds a **proof of possession** (ed25519 over `"YED-IROH-POP-1|" ‖ statement`), so no
+     member can bind another member's endpoint id; a binding of an endpoint id another current seat holds is
+     refused anyway (and two seats binding one id in the same poll are both refused), with `ALERT binding-conflict`.
+     Announces (`"YBD2"`: statement, member signature, proof of possession, unsigned address hints) travel on the
+     public binding topic `yellowback/bindings/<network>/1` and over each member's own direct connection, every 10
+     blocks. A member connection is taken only for that member's own seat, and first; the public topic keeps, per
+     claimed seat, a uniform sample of 4 announces a poll (an honest announce competes only with forgeries of its own
+     seat), seats without a binding or near expiry first, deduplicated by (seq, endpoint, issued), at most 64
+     signature checks a poll. Address hints are taken from the member's own connection, or from the topic only for a
+     seat that has none yet; a topic copy never replaces them. The table is persisted.
    - **On-chain fallback** (`onchain.rs`, `onchain_fallback`, default on). A claim still short of `cancelsRequired`
      `fallback_after_blocks` (192) after it confirmed: every co-signing agent publishes its co-signature once in a
      standard transaction, `OP_RETURN OP_PUSHDATA1 79 ‖ "YF" ‖ short id (8) ‖ price ‖ sig65` (82-byte script, within
      `MAX_OP_RETURN_RELAY` 83 on both lines; "YF" is not the Yellowback payload magic), funded from one confirmed
-     P2PKH coin (never a YED token or a bond), fee exactly `fallback_fee_zat` (10,000), at most `fallback_max_txs` (20)
+     P2PKH coin worth more than a YED token's 10,000 zat, never an outpoint the YED index lists as this wallet's
+     token, never a coinbase output and never a bond, fee exactly `fallback_fee_zat` (10,000), at most `fallback_max_txs` (20)
      a day; `ALERT onchain-fallback` each time. Every agent scans the claim's blocks for the tag (at most 20 blocks a
      poll) and takes each record that recovers to a current member's key at a non-claimable price.
    - **Relays.** The direct endpoint uses n0's public relays (and their pkarr/DNS lookup) by default;

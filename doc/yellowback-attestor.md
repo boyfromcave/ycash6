@@ -158,12 +158,14 @@ runs, beside its attestation loop and with `[cancel]` on by default,
   members-only protocol. A connection on it is refused at the handshake unless its endpoint id is bound to a current
   member. You bind yours once (the agent does it): your node signs `YED-IROH-1|<network>|<set>|<seq>|<endpoint>|
   <issued>|<expiry>` with your member key through the stock `signmessage` -- a statement about a network address,
-  never a price -- and re-signs it every few days. During the trial the old public cancel topic runs beside it
+  never a price -- and re-signs it every few days; the agent's endpoint key proves it holds that endpoint, so nobody
+  can bind your endpoint to another seat. During the trial the old public cancel topic runs beside it
   (`delivery = "trial"`); `delivery = "direct"` uses the direct path alone. If a claim is still short of
   co-signatures `fallback_after_blocks` (192, a third of `CLAIM_DELAY`) after it confirmed, your agent also publishes
   your co-signature on chain in one standard transaction (an 82-byte OP_RETURN, fee `fallback_fee_zat` = 10,000 zat,
   at most `fallback_max_txs` = 20 a day; alert `onchain-fallback`), and every driver reads such records from the
-  chain. Keep a few small confirmed P2PKH coins in the node's wallet for it;
+  chain. Keep a few small confirmed P2PKH coins (more than 10,000 zat each, not coinbase) in the node's wallet for it, and
+  give the direct endpoint its own key (`direct_secret_key_file` must not be `[transport] secret_key_file`);
 - a **collector** in which one member drives each claim: the members in seq order, rotated per claim; rank r takes
   over `r × takeover_blocks` blocks after the claim confirmed (at most 36, and shrunk at run time so the last rank
   still fits in `CLAIM_DELAY`). The driver gathers `cancelsRequired` co-signatures plus `spares` (the rule counts the
@@ -209,6 +211,7 @@ log watcher on `ALERT`) to a pager (at most four run at once, each killed after 
 | `foreign-spend` | a transaction that is not yours has spent the claim's intent in the mempool for `refee_after_blocks` without confirming (a pinned cancel variant, or a release) | send a cancel directly to miners |
 | `onchain-fallback` | a claim was still short of co-signatures `fallback_after_blocks` after it confirmed: your co-signature went on chain | check your direct connectivity (`direct-probe` from another member, relays) |
 | `onchain-fallback-cap` | `fallback_max_txs` fallback transactions in a day: no more | investigate: a wrong-price campaign, or the direct path is down |
+| `binding-conflict` | a seat tried to bind an endpoint id another seat holds (or two seats one id in the same poll): refused | investigate the seats named; a stolen endpoint key means a new `direct_secret_key_file` |
 | `cancel-send-cap` | your cancel left the mempool `max_sends` times | act by hand |
 | `wrong-price-past-delay`, `wrong-price-released` | a claim you judged wrong-price reached its release height uncancelled | escalate: the brake failed (too few live members, censorship) |
 
