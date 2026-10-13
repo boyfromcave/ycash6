@@ -197,6 +197,23 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_regtest_activation)
     SelectParams(CBaseChainParams::MAIN);
 }
 
+BOOST_AUTO_TEST_CASE(vault_schedule_r_a3)
+{
+    // Quantum spec R-A3 on every network's compiled schedule (init.cpp checks the final schedule,
+    // -nuparams included, at start-up): where Vault has a height, Sapling is active at or below it
+    // (the vault opcodes are defined for v4 transactions only) and none of NU5..NU6.2 is scheduled.
+    for (const auto& net : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
+        const Consensus::Params& params = Params(net).GetConsensus();
+        const int vault = params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+        if (vault == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) continue;
+        const int sapling = params.vUpgrades[Consensus::UPGRADE_SAPLING].nActivationHeight;
+        BOOST_CHECK_MESSAGE(sapling != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT && sapling <= vault, net);
+        for (auto i = Consensus::UPGRADE_NU5; i <= Consensus::UPGRADE_NU6_2; i = Consensus::UpgradeIndex(i + 1)) {
+            BOOST_CHECK_MESSAGE(params.vUpgrades[i].nActivationHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT, net);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(vault_opnames)
 {
     BOOST_CHECK_EQUAL(std::string(GetOpName(OP_CHECKSETSIG)), "OP_CHECKSETSIG");

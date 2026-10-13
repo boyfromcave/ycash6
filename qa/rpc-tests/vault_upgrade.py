@@ -20,7 +20,8 @@ and Vault (branch ID 0x6d5b7a31) at ACT.  Checked on both sides of the activatio
 - BIP68: not enforced before; height-based relative locks from ACT in the mempool (tip+1) and in
   blocks, mempool parents counted at tip+1, the time flag (bit 22) invalid, eviction on reorg;
 - OP_CHECKSETSIG (0xc0) / OP_CHECKSETDORMANT (0xc1): bad opcodes before, evaluated after;
-- quantum spec R-A3: a regtest node refuses -nuparams scheduling NU5..NU6.2 together with Vault.
+- quantum spec R-A3: a regtest node refuses -nuparams scheduling NU5..NU6.2 together with Vault,
+  or Vault below Sapling.
 """
 
 from io import BytesIO
@@ -367,10 +368,13 @@ class VaultUpgradeTest(BitcoinTestFramework):
 
         print('quantum spec R-A3: a regtest node refuses NU5..NU6.2 scheduled with Vault')
         stop_node(self.nodes[1], 1)
-        r_a3 = '-nuparams: NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3'
+        r_a3 = 'NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3'
         for nu in ('f919a198:5', '5437f330:12'):          # Ycash NU5 below Vault; NU6.2 above it
             assert_start_raises_init_error(1, self.options.tmpdir,
                                            YCASH_UPGRADE_ARGS + ['-nuparams=' + nu, nuparams(VAULT_BRANCH_ID, 10)], r_a3)
+        print('quantum spec R-A3: a node refuses Vault scheduled below Sapling')
+        assert_start_raises_init_error(1, self.options.tmpdir, ['-nuparams=76b809bb:20', nuparams(VAULT_BRANCH_ID, 10)],
+                                       'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3')
         self.nodes[1] = start_node(1, self.options.tmpdir, YCASH_UPGRADE_ARGS + [nuparams(VAULT_BRANCH_ID, ACT), '-txindex'])
         connect_nodes_bi(self.nodes, 0, 1)
         sync_blocks(self.nodes)

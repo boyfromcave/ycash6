@@ -1503,15 +1503,28 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
             }
         }
+    }
 
-        // Quantum spec R-A3: under Vault a v5 transaction is invalid, and ycashd builds V1
-        // history-tree leaves in the Vault epoch while ConnectBlock builds V2 leaves under NU5,
-        // so no order of NU5..NU6.2 and Vault is usable. Refuse the whole configuration (this
-        // also catches NU5..NU6.2 back-filled from a higher -nuparams, e.g. ZFUTURE).
-        if (consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+    // Quantum spec R-A3, checked on every network's final upgrade schedule (compiled chainparams
+    // and regtest -nuparams alike):
+    // - the vault opcodes and templates are defined over the ZIP-243 sighash of v4 (Sapling)
+    //   transactions only, so Vault needs Sapling active at or below its height; otherwise a
+    //   pre-Sapling (Sprout / ZIP-143 sighash) transaction could spend a vault or OP_CHECKPQSIG;
+    // - under Vault a v5 transaction is invalid, and ycashd builds V1 history-tree leaves in the
+    //   Vault epoch while ConnectBlock builds V2 leaves under NU5, so no order of NU5..NU6.2 and
+    //   Vault is usable: the whole configuration is refused (including NU5..NU6.2 back-filled
+    //   from a higher -nuparams, e.g. ZFUTURE).
+    {
+        const auto& upgrades = chainparams.GetConsensus().vUpgrades;
+        const int vaultHeight = upgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+        if (vaultHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+            const int saplingHeight = upgrades[Consensus::UPGRADE_SAPLING].nActivationHeight;
+            if (saplingHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || saplingHeight > vaultHeight) {
+                return InitError("The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3: the vault opcodes are defined for v4 transactions only)");
+            }
             for (auto i = Consensus::UPGRADE_NU5; i <= Consensus::UPGRADE_NU6_2; i = Consensus::UpgradeIndex(i + 1)) {
-                if (consensus.vUpgrades[i].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
-                    return InitError("-nuparams: NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3; this node builds V1 history-tree leaves in the Vault epoch)");
+                if (upgrades[i].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+                    return InitError("NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3; this node builds V1 history-tree leaves in the Vault epoch)");
                 }
             }
         }
