@@ -337,23 +337,20 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         claim_raw = n2.getrawtransaction(claim_c, 1)
         pool = set(n2.getrawmempool())
         unconfirmed = [i for i in claim_raw['vin'] if i['txid'] in pool]
-        early = None
         # CAN-2 + C4b (the cancel-limit design): the first cancel needs one member's co-signature -- n1's, its price
         # statement at the claim's refHeight: the mint price, at which the vault is at 300 % (not claimable)
         honest = n0.yed_getvault(mint_c)['pMint']
         sync_mempools([n1, n2])
-        cosig = n1.yed_signcancelcosign('%s:0' % claim_c, honest)['cosig']
+        # round 2 (review A L-5, design A-6): a member co-signs only a confirmed claim (its txid is malleable until then),
+        # so a cancel of a claim still in the mempool cannot carry a co-signature yet
+        assert_raises_rpc('claim-unconfirmed', n1.yed_signcancelcosign, '%s:0' % claim_c, honest)
         if unconfirmed:
-            assert_raises_rpc('spends an unconfirmed output', n2.yed_buildcancel, '%s:0' % claim_c, [cosig])
+            assert_raises_rpc('spends an unconfirmed output', n2.yed_buildcancel, '%s:0' % claim_c)
         else:
             assert_raises_rpc('cancel-cosign-needed', n2.yed_buildcancel, '%s:0' % claim_c)
-            early = n2.yed_buildcancel('%s:0' % claim_c, [cosig])
-            assert_equal(early['intentconfirmed'], False)
         self.mine()
         claiming = n0.yed_getvault(mint_c)
-        if early is not None:
-            assert_equal((early['refund']['script'], early['refund']['cents']), (claiming['refundHolder'], claiming['burnedCents']))
-            assert_equal(n2.yed_buildcancel('%s:0' % claim_c, [cosig])['hex'], early['hex'])     # sign once across the confirmation
+        cosig = n1.yed_signcancelcosign('%s:0' % claim_c, honest)['cosig']
         assert_equal(claiming['status'], 'CLAIMING')
         assert_equal((claiming['cancelCount'], claiming['cancelsRequired']), (0, 1))
         before = n0.yed_getstats()
