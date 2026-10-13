@@ -1812,7 +1812,9 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
             "carrier paying the holder the burned YED came from (yed_getvault.refundHolder), then this wallet's fee inputs and\n"
             "change (unsigned). Collect the attestor set's signature with set_signcancel, then vault_send. A cancel without\n"
             "the refund is invalid (intent-cancel-no-refund), which is why vault_buildcancel refuses a YED intent. A claim\n"
-            "still in the mempool can be cancelled too (the holder and the burn are read from its inputs). Called again for\n"
+            "still in the mempool can be cancelled too once all its inputs are confirmed (the holder and the burn are read from\n"
+            "them; refused while one is unconfirmed or the index lags the tip). The whole burn goes to the holder of the\n"
+            "claim's lowest-index YED input. Called again for\n"
             "the same intent it returns the same transaction while its fee inputs are unspent (members sign once).\n"
             "\nResult: vault_buildcancel's {\"hex\", \"required\", \"cancelsetid\", \"deadline\", \"intentconfirmed\"} plus\n"
             "\"refund\": {\"vout\": 1, \"script\" (hex), \"cents\" (the claim's whole burn, re-issued to that script)}\n"
@@ -1846,6 +1848,17 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "not a YED claim intent (confirmed in the index or in the mempool)");
             }
             const CTransaction& claim = *claimp;
+            // The index holds only confirmed tokens: a YED input created by a mempool transaction would be invisible
+            // here, and the lowest-index YED input -- the holder consensus records -- could be misread, so the RPC would
+            // hand out a cancel that fails intent-cancel-no-refund (and a member's sign-once slot with it). Refuse until
+            // every input of the claim is confirmed and the index is at the chain tip; then GetToken sees exactly the
+            // tokens consensus will see, in vin order, and yedIn - assigned is the burn it will record.
+            for (const CTxIn& in : claim.vin) {
+                if (mempool.exists(in.prevout.hash))
+                    throw JSONRPCError(RPC_MISC_ERROR, "the mempool claim spends an unconfirmed output: its refund holder is known once its inputs confirm (or once the claim does)");
+            }
+            if (IndexHeight(index) != chainActive.Height())
+                throw JSONRPCError(RPC_MISC_ERROR, "the Yellowback index is behind the chain tip; retry when it has caught up");
             Cents yedIn = 0;
             for (const CTxIn& in : claim.vin) {
                 if (std::optional<TokenRecord> t = st.GetToken(in.prevout)) {

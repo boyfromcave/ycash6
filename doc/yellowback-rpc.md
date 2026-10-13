@@ -997,6 +997,10 @@ re-created as `ACTIVE` (U-24; the cancel's output 0, empty otherwise); `type` ga
 `"claim_release"` (the claimant or residual intent released after `CLAIM_DELAY`) and
 `"claim_cancel"`; a `"claim_cancel"` row's `assigned` is CAN-1's refund (`[{vout, cents}]`, the
 claim's whole burn re-issued to the holder it came from, audit 03/H-1) and its `yedOut` that amount.
+**Accounting of a `"claim_cancel"` row:** `yedOut` is re-issued, not carried from the inputs, so the
+usual `yedIn = yedOut + burned` does **not** hold: `burned = yedIn` (any YED the canceller spent is
+burned) and `yedOut` is the refund (supply moves by `yedOut − burned`). Index and client code that
+reconciles supply from TxLog rows must special-case this type, as it does `"mint"`.
 A failing transaction has no `TxLog` row: it is invalid, never confirmed.
 
 Result of `yed_gettxinfo`:
@@ -1909,7 +1913,12 @@ must be transparent (an intent pays a key; `bad-address` otherwise). The vault b
 intent to `to` and the vault becomes `CLAIMED`. Until then any `cancelThreshold` members of the
 YED attestor set may cancel it (`yed_buildcancel` + `set_signcancel` + `vault_send`), which
 re-creates the vault as `ACTIVE` at the cancel's output 0 and refunds the burn to the YED holder it
-came from (CAN-1, audit 03/H-1; U-24 revised): a cancel delays a claim, it never costs the claimant.
+came from (CAN-1, audit 03/H-1; U-24 revised): a cancel returns the claimant's YED, not its YEC fees.
+**Refund holder (CAN-1).** If the attestor set cancels the claim, the whole burn is refunded to the holder of
+the claim's lowest-index YED input; `yed_claim` therefore orders its YED inputs so that the first is one of the
+wallet's plain holder scripts (P2PKH, or TX_PQPKH from the Falcon height) whenever it has one. An external builder
+should do the same: a channel, HTLC or swap-script token as the first YED input would receive the refund under
+that script's spending conditions.
 `collateralOut` is the claimant intent's value. The v2 fields of `yed_redeem` (including
 `extraBurnCents`, H4, and `earlyRedeemFeeZat`, always `0` on a claim) plus the **v3** fields below. Refusals: `vault-not-found`,
 `vault-not-active`, `claim-not-yet` (tip below the vault's `appHeight`: only a vault minted before
@@ -1960,7 +1969,9 @@ Result of `yed_claim`:
 ### `yed_buildcancel <intentOutpoint>`
 
 Arguments: `intentOutpoint` (string, `"txid:n"`): a YED **claimant** intent (a `CLAIMING` vault's
-`intents[]` row with `role` `"claimant"`), confirmed or still in the mempool. The attestor set's
+`intents[]` row with `role` `"claimant"`), confirmed or still in the mempool (a mempool claim only once
+every one of its inputs is confirmed and the index is at the chain tip: the index sees confirmed tokens
+only, and the holder must be exactly the one consensus will record; refused otherwise, `RPC_MISC_ERROR`). The attestor set's
 CANCEL of that intent before it matures (U-23, I-2), with **CAN-1's refund** (audit 03/H-1): the
 primitive's `vault_buildcancel` transaction — the claimed vault's V re-created at output 0 with the
 intent's value — plus, at output 1, a token carrier (`TOKEN_VALUE`) paying `refundHolder`, the
@@ -1968,8 +1979,12 @@ scriptPubKey the claim's burned YED came from (the token at the claim's lowest-i
 then this wallet's fee inputs and change; unsigned. Collect the attestor set's signature with
 `set_signcancel` (one member: the module pins `cancelThreshold` 1, 03/I-3), then `vault_send`.
 When it confirms the vault is `ACTIVE` again at the cancel's output 0 and the claim's whole burn
-(`burnedCents`, any sub-dollar remainder included) is a YED token at output 1 of the holder it came
-from, `supplyCents` credited: a cancel delays a liquidation and never costs the claimant. A cancel
+(`burnedCents`, any over-burn included) is a YED token at output 1 of the holder of the claim's
+**lowest-index YED input** -- one holder gets the whole burn, whoever held the other inputs -- and
+`supplyCents` is credited. The refund token may exceed `MAX_OUTPUT` (it is re-issued, not assigned by a
+payload; XFER-1 applies when it is next spent, so split it with a TRANSFER). A cancel returns the
+claimant's YED; it does not return the claim's YEC costs (the protocol fee -- half of it to an attestor
+when one is paid -- and the network fees), which a claimant loses per cancelled round. A cancel
 without the refund is invalid (`intent-cancel-no-refund`), which is why `vault_buildcancel` refuses
 a YED intent. Called again for the same intent it returns the same transaction while its fee inputs
 are unspent (members sign once). `refund.cents` is the amount re-issued; `refund.vout` is always 1.
