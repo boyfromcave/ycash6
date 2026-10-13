@@ -92,11 +92,17 @@ ycash_falcon512_keygen_from_seed(uint8_t *pk, uint8_t *sk,
     ret = 0;
 
 done:
-    /* Ycash: wipe the secret polynomials and the keygen scratch. */
+    /*
+     * Ycash: wipe the secret polynomials, the keygen scratch and the DRBG
+     * state (the SHAKE256 context seeded with the keygen seed, which alone
+     * determines the key pair; inline since local patch P1, so the no-op
+     * release above leaves it in the frame).
+     */
     wipe(f, sizeof f);
     wipe(g, sizeof g);
     wipe(F, sizeof F);
     wipe(tmp.b, sizeof tmp.b);
+    wipe(&rng, sizeof rng);
     return ret;
 }
 
@@ -194,11 +200,18 @@ ycash_falcon512_sign(uint8_t *sigout, const uint8_t *m, size_t mlen,
     ret = 0;
 
 done:
-    /* Ycash: wipe the secret polynomials and the signing scratch. */
+    /*
+     * Ycash: wipe the secret polynomials, the signing scratch and the DRBG
+     * state (the sampler's SHAKE256 context, seeded from the caller's
+     * 48-byte seed). Here, not after the hash-to-point: sc is re-seeded and
+     * drives the sampler until the loop breaks; the early failure paths
+     * also land here.
+     */
     wipe(f, sizeof f);
     wipe(g, sizeof g);
     wipe(F, sizeof F);
     wipe(G, sizeof G);
     wipe(tmp.b, sizeof tmp.b);
+    wipe(&sc, sizeof sc);
     return ret;
 }

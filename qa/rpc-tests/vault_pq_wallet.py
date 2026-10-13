@@ -22,7 +22,9 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
   signs its owner spend;
 - an encrypted wallet: the PQ keys survive encryption, a locked wallet refuses vault_getnewowner, the
-  default-owner vault_lock and vault_ownerspend, and works again after walletpassphrase.
+  default-owner vault_lock and vault_ownerspend, and works again after walletpassphrase; audit 02/PQ-4 (the
+  per-unlock PQ key cache): two owner spends of one key and a z_exportwallet listing every PQ key after the unlock,
+  then walletlock refuses an owner spend and the export again (the cache is cleared).
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_wallet.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -319,6 +321,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         n2 = self.nodes[2]
         before = n2.vault_getnewowner()
         v2 = self.lock(n0, setid, h + 1000, 2, owner=before['owner'])
+        v2b = self.lock(n0, setid, h + 1000, 2, owner=before['owner'])     # 02/PQ-4: a second spend of the same key
         spend_to = n2.getnewaddress()            # 6.20.0: a locked wallet has no keypool to draw an address from
         n2.encryptwallet(PASS)
         bitcoind_processes[2].wait()
@@ -335,11 +338,33 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert after['owner'] != before['owner']
         r = n2.vault_ownerspend(v2['outpoint'], n2.getnewaddress())
         assert_equal(r['selector'], 3)
+        r2 = n2.vault_ownerspend(v2b['outpoint'], n2.getnewaddress())     # the same owner key, from the unlock's cache
+        assert_equal(r2['selector'], 3)
         self.mine(1)
         assert self.tx_of(r['txid'])['confirmations'] >= 1
+        assert self.tx_of(r2['txid'])['confirmations'] >= 1
         lk = n2.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 1000, 'amount': 1})
         self.mine(1)
         assert_equal({r['outpoint']: r['wallet'] for r in n2.vault_list({'setid': setid})}[lk['outpoint']], True)
+        print('02/PQ-4: z_exportwallet after the unlock lists every PQ key; walletlock clears the cache')
+        os.makedirs(os.path.join(self.options.tmpdir, 'export2'), exist_ok=True)
+        spend_to = n2.getnewaddress()
+        self.restart(2, ['-exportdir=%s' % os.path.join(self.options.tmpdir, 'export2')])
+        n2 = self.nodes[2]
+        assert_raises_rpc('walletpassphrase', n2.z_exportwallet, 'pqdump2')
+        n2.walletpassphrase(PASS, 600)
+        with open(n2.z_exportwallet('pqdump2')) as f:
+            text2 = f.read()
+        for key in (before, after, o1b, lk):
+            assert ('owner=' + key['owner']) in text2, key['owner']
+        n2.walletlock()
+        assert_raises_rpc('walletpassphrase', n2.vault_ownerspend, lk['outpoint'], spend_to)
+        assert_raises_rpc('walletpassphrase', n2.z_exportwallet, 'pqdump3')
+        n2.walletpassphrase(PASS, 600)
+        r3 = n2.vault_ownerspend(lk['outpoint'], spend_to)                # unlocked again: the key is rebuilt
+        assert_equal(r3['selector'], 3)
+        self.mine(1)
+        assert self.tx_of(r3['txid'])['confirmations'] >= 1
         n2.walletlock()
         print('ok')
 

@@ -137,6 +137,13 @@ private:
     std::optional<std::pair<uint256, std::vector<unsigned char>>> cryptedLegacySeed;
     CryptedKeyMap mapCryptedKeys;
     CryptedPQKeyMap mapCryptedPQKeys;
+    //! Decrypted PQ keys of this unlock: rebuilding a key from its seed is a full pq::KeyGen (~90 ms per
+    //! SLH-DSA-SHA2-128s key, ~12 ms per Falcon-512), so GetPQKey fills this lazily and later calls are
+    //! served from it. The keys' seed and sk live in secure_allocator vectors (wiped when freed). Cleared by
+    //! Lock(), the only path that clears vMasterKey, so no cached key outlives the master key (audit 02/PQ-4).
+    mutable PQKeyMap mapDecryptedPQKeys;
+    //! Number of PQ key decryptions (each one a pq::KeyGen) since construction; a test accessor.
+    mutable uint64_t nPQKeyDecrypts = 0;
     CryptedSproutSpendingKeyMap mapCryptedSproutSpendingKeys;
     CryptedSaplingSpendingKeyMap mapCryptedSaplingSpendingKeys;
 
@@ -220,6 +227,17 @@ public:
         return mapCryptedPQKeys.count(id) > 0;
     }
     bool GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const;
+    //! Test accessors for the per-unlock PQ key cache (mapDecryptedPQKeys).
+    size_t DecryptedPQKeyCount() const
+    {
+        LOCK(cs_KeyStore);
+        return mapDecryptedPQKeys.size();
+    }
+    uint64_t PQKeyDecryptCount() const
+    {
+        LOCK(cs_KeyStore);
+        return nPQKeyDecrypts;
+    }
     std::set<CPQKeyID> GetPQKeys() const
     {
         LOCK(cs_KeyStore);

@@ -188,6 +188,19 @@ release notes:
   both schemes take a 48-byte seed). **`vault_release`** refuses a 66-hex pqkeyid as the recipient
   (pass the address or the script).
 
+## Release notes: post-quantum fees and the ZIP-317 opt-in (audit 04/N-1)
+
+Say in the release notes, and in the operator section of the announcement:
+
+- **Relays and pools keep `-txunpaidactionlimit` / `-blockunpaidactionlimit` at their defaults**
+  (`SIZE_MAX`, ZIP-317's unpaid-action rule off; `doc/yellowback-mining.md` §2, §3.2). A node that opts
+  in (`=0`) refuses a post-quantum spend paying less than its ZIP-317 conventional fee (~27,000 zat for
+  an SLH-DSA input, ~5,500 for a Falcon one), which every other node relays; and the ZIP-401 limiter
+  ranks such spends first for eviction under `-mempooltxcostlimit` pressure on every 6.20.0 node.
+- **Wallets pay at least the conventional fee for a PQ input on both lines** (6.20.0 since the quantum
+  line; ycash-dd since audit 04/N-1). Clients that build their own PQ spends (YEW, Hawkeye; x402 already
+  does) should pay `max(their fee, the ZIP-317 conventional fee)`.
+
 ## Wallet (YecWallet) releases
 
 YecWallet bundles `ycashd`. Its release should take these packages as inputs rather than rebuild

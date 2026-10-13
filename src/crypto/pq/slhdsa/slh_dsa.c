@@ -10,6 +10,17 @@
 #include "slh_var.h"
 #include "slh_sys.h"
 
+/* YCASH LOCAL PATCH P3 (src/crypto/pq/README.md, "Local patches"): wipe a     */
+/* YCASH LOCAL PATCH P3   secret-bearing buffer (an slh_var_t holds SK.seed     */
+/* YCASH LOCAL PATCH P3   and SK.prf) before the frame dies; upstream slhdsa-c */
+/* YCASH LOCAL PATCH P3   has no zeroization. Volatile stores, not memset.    */
+static void slh_wipe(void *p, size_t sz)              /* YCASH LOCAL PATCH P3 */
+{                                                     /* YCASH LOCAL PATCH P3 */
+  volatile uint8_t *q = (volatile uint8_t *)p;        /* YCASH LOCAL PATCH P3 */
+  size_t i;                                           /* YCASH LOCAL PATCH P3 */
+  for (i = 0; i < sz; i++) q[i] = 0;                  /* YCASH LOCAL PATCH P3 */
+}                                                     /* YCASH LOCAL PATCH P3 */
+#define slh_wipe_var(v) slh_wipe((v), sizeof(*(v)))   /* YCASH LOCAL PATCH P3 */
 /* === Internal */
 
 /* helper functions to compute "len = len1 + len2" */
@@ -489,6 +500,7 @@ int slh_keygen_internal(uint8_t *sk, uint8_t *pk, const uint8_t *sk_seed,
   xmss_node(&var, pk + n, 0, prm->hp); /* PK.root in pk (compute) */
   memcpy(sk + 3 * n, pk + n, n);       /* PK.root in sk */
 
+  slh_wipe_var(&var); /* YCASH LOCAL PATCH P3 */
   return 0;
 }
 
@@ -514,6 +526,7 @@ int slh_keygen(uint8_t *sk, uint8_t *pk, int (*rbg)(uint8_t *x, size_t xlen),
   /* fill pk_root */
   memcpy(sk + 3 * n, pk_root, n);
   memcpy(pk + n, pk_root, n);
+  slh_wipe_var(&var); /* YCASH LOCAL PATCH P3 */
   return 0;
 }
 
@@ -601,6 +614,8 @@ size_t slh_sign_internal(uint8_t *sig, const uint8_t *m, size_t m_sz,
   /* create FORS and HT signature parts */
   sig_sz += slh_sign_digest(&var, sig + sig_sz, digest);
 
+  slh_wipe_var(&var);                  /* YCASH LOCAL PATCH P3 */
+  slh_wipe(digest, sizeof(digest));    /* YCASH LOCAL PATCH P3 */
   return sig_sz;
 }
 
@@ -640,6 +655,8 @@ size_t slh_sign(uint8_t *sig, const uint8_t *m, size_t m_sz, const uint8_t *ctx,
   /* create FORS and HT signature parts */
   sig_sz += slh_sign_digest(&var, sig + sig_sz, digest);
 
+  slh_wipe_var(&var);                  /* YCASH LOCAL PATCH P3 */
+  slh_wipe(digest, sizeof(digest));    /* YCASH LOCAL PATCH P3 */
   return sig_sz;
 }
 

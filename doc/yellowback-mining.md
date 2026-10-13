@@ -157,6 +157,20 @@ survive `-blockunpaidactionlimit=0` / `-txunpaidactionlimit=0` (proven by
 to the payee pool (FEE_MIN 0.5 YEC) is unchanged. A zero-fee transaction is refused at admission
 (`min relay fee not met`, `src/main.cpp:1955`).
 
+**Keep `-txunpaidactionlimit` / `-blockunpaidactionlimit` at their defaults on a Yellowback relay or
+pool** (`SIZE_MAX`, §2; audit 04/N-1). ZIP-317 counts a transparent input by its bytes (150 per
+action), so a post-quantum spend is large: an SLH-DSA input (~7,980 bytes, a vault owner's redeem) is
+~54 logical actions, a conventional fee of ~27,000 zat; a Falcon input (~1,600 bytes, a YED holder)
+~11 actions, ~5,500 zat. Both node lines' wallets and YED builders pay at least that for a
+transaction with a PQ input (ycash-dd since audit 04/N-1; before it, ycash-dd paid `max(1000, rate ×
+size)`), but transactions built by older ycash-dd releases or by a client that does not (YEW,
+Hawkeye, x402 build their own) relay on every node with the defaults and are **refused** by a node
+started with `-txunpaidactionlimit=0` (`tx unpaid action limit exceeded`). Even at the defaults, the
+ZIP-401 mempool limiter adds `LOW_FEE_PENALTY` (40,000) to the eviction weight of any transaction
+paying under its conventional fee (`src/mempool_limit.cpp`), so under `-mempooltxcostlimit` pressure
+such PQ spends are evicted first. `qa/rpc-tests/yellowback_mempool_limits.py` covers all three
+(relayed at the defaults, refused with the opt-in, evicted first).
+
 **A verified stack:** `yolo` (`boyfromcave/yolo`, Rust, the rewrite of the Perl
 `stratumsolo`/`stratumpool`/`cenote`, one program with `--payout` and `--text` flags) carries
 the tag in every flag combination and is exercised on regtest by

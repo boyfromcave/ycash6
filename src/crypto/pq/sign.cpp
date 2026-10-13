@@ -89,7 +89,14 @@ bool Sign(uint8_t scheme, const std::vector<unsigned char>& sk, const uint256& m
           std::vector<unsigned char>& sig)
 {
     if (scheme == SCHEME_SLH_DSA_SHA2_128S) {
-        return SignWithEntropy(scheme, sk, msg, std::vector<unsigned char>(), sig);
+        // FIPS 205 hedged variant: 16 fresh bytes of opt_rand, so a repeated signature over the
+        // same message takes a fresh FORS/hypertree path (no fault-attack repeat). The verifier is
+        // R-agnostic; vectors use SignWithEntropy with explicit entropy and are unaffected.
+        std::vector<unsigned char> entropy(SLH_N);
+        GetRandBytes(entropy.data(), entropy.size());
+        const bool ok = SignWithEntropy(scheme, sk, msg, entropy, sig);
+        memory_cleanse(entropy.data(), entropy.size());
+        return ok;
     }
     if (scheme == SCHEME_FN_DSA_512) {
         std::vector<unsigned char> entropy(FALCON_SIGN_ENTROPY_SIZE);

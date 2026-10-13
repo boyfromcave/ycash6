@@ -338,11 +338,20 @@ BOOST_AUTO_TEST_CASE(pq_round_trip_and_rejects)
         BOOST_REQUIRE(pq::Sign(scheme, kp.sk, msg, sig2));
         BOOST_CHECK(pq::Verify(scheme, kp.pk, sig2, msg));
         if (scheme == pq::SCHEME_SLH_DSA_SHA2_128S) {
-            // Deterministic (opt_rand = PK.seed); the hedged variant differs and verifies.
-            BOOST_CHECK(sig2 == sig);
+            // pq::Sign is hedged (audit 02/PQ-3: 16 bytes of opt_rand from GetRandBytes), so two
+            // signatures of one message differ and both verify. Empty entropy is the deterministic
+            // variant (opt_rand = PK.seed): repeatable, and different from every hedged signature.
+            BOOST_CHECK(sig2 != sig);
+            BOOST_CHECK(Bytes(sig.begin(), sig.begin() + 16) != Bytes(sig2.begin(), sig2.begin() + 16)); // R
+            Bytes det, det2;
+            BOOST_REQUIRE(pq::SignWithEntropy(scheme, kp.sk, msg, Bytes(), det));
+            BOOST_REQUIRE(pq::SignWithEntropy(scheme, kp.sk, msg, Bytes(), det2));
+            BOOST_CHECK(det == det2);
+            BOOST_CHECK(pq::Verify(scheme, kp.pk, det, msg));
+            BOOST_CHECK(det != sig && det != sig2);
             Bytes hedged;
             BOOST_REQUIRE(pq::SignWithEntropy(scheme, kp.sk, msg, Expand("opt_rand", 16), hedged));
-            BOOST_CHECK(hedged != sig);
+            BOOST_CHECK(hedged != det);
             BOOST_CHECK(pq::Verify(scheme, kp.pk, hedged, msg));
             BOOST_CHECK(!pq::SignWithEntropy(scheme, kp.sk, msg, Bytes(15), hedged));
         } else {

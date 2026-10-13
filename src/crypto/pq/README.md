@@ -9,8 +9,12 @@ The signature schemes behind `OP_CHECKPQSIG` (docs/plans/yellowback-quantum-plan
 
 * `scheme.{h,cpp}`: **consensus**. Sizes, `KeyHash = SHA256(scheme ‖ pk)`, `Verify`. Built into
   `libbitcoin_common` (beside the interpreter) and `libzcash_script`.
-* `sign.{h,cpp}`: **wallet**. `KeyGen` from a seed, `Sign` (SLH-DSA deterministic, `opt_rand = PK.seed`;
-  Falcon randomized from `GetRandBytes`), `SignWithEntropy` (explicit randomness, for tests and vectors).
+* `sign.{h,cpp}`: **wallet**. `KeyGen` from a seed, `Sign` (SLH-DSA **hedged**, FIPS 205 §9.2: 16 bytes of
+  `opt_rand` from `GetRandBytes`, cleansed after use, so a repeated signature over one message takes a fresh
+  FORS/hypertree path; Falcon randomized from `GetRandBytes`), `SignWithEntropy` (explicit randomness, for tests
+  and vectors; empty entropy is the deterministic SLH-DSA variant, `opt_rand = PK.seed`). The golden vectors and
+  the ACVP cases are produced through `SignWithEntropy` with their recorded entropy and are unaffected by
+  hedging; the verifier is `R`-agnostic, so deterministic and hedged signatures verify alike.
   Built into `libbitcoin_common`; never called from a consensus path.
 * The vendored C is built into `libbitcoin_crypto` (`PQ_VERIFY_SOURCES`, `PQ_SIGN_SOURCES` in `src/Makefile.am`);
   `libzcash_script` gets only the verify set.
@@ -67,8 +71,9 @@ checks them with **verify** only. Falcon keygen from a seed is reproducible only
 * Source: https://github.com/pq-code-package/slhdsa-c, commit `174c02e42257f95c210963272877c49dbb50070f`
   (2026-08-06).
 * Licence: `Apache-2.0 OR ISC OR MIT` (SPDX header in every file; `slhdsa/LICENSE` unchanged). Ycash uses it under MIT.
-* Files, **unmodified**: `slh_dsa.c slh_dsa.h slh_sha2.c sha2_256.c sha2_512.c sha2_api.h plat_local.h slh_adrs.h
-  slh_param.h slh_var.h slh_sys.h cbmc.h LICENSE`. Not vendored: the SHAKE parameter sets (`slh_shake.c`,
+* Files, **unmodified**: `slh_dsa.h slh_sha2.c sha2_256.c sha2_512.c sha2_api.h plat_local.h slh_adrs.h
+  slh_param.h slh_var.h slh_sys.h cbmc.h LICENSE`.
+  **Patched**: `slh_dsa.c` (local patch P3, zeroization; see "Local patches" below). Not vendored: the SHAKE parameter sets (`slh_shake.c`,
   `sha3_*`), prehash (`slh_prehash.*`), tests, CBMC proofs. `sha2_512.c` is needed only because `slh_sha2.c`
   also defines the 192/256 parameter sets.
 * Why this one: FIPS 205 final (pure and internal interfaces, context string, all 12 parameter sets), portable
@@ -93,7 +98,8 @@ checks them with **verify** only. Falcon keygen from a seed is reproducible only
   * `ycash_falcon_verify.c`: `do_verify` + `crypto_sign_verify`, logic unchanged (consensus) but for local patch
     P2 (exact lengths, below).
   * `ycash_falcon_sign.c`: `crypto_sign_keypair` / `do_sign` with the randomness as parameters (keygen seed of
-    any length; nonce 40 + sampler seed 48), plus wiping the secret polynomials and scratch on exit (wallet).
+    any length; nonce 40 + sampler seed 48), plus wiping the secret polynomials, the scratch and the SHAKE256 DRBG state (keygen `rng`, sampler `sc`)
+    on exit (wallet).
   * `ycash_falcon.h`: their declarations and the sizes.
   No `randombytes` symbol exists in the node.
 * PQClean's padded verifier also accepts the unpadded "compact" signature at its own shorter length;
@@ -148,7 +154,14 @@ SHAKE256 incremental API, and nothing else includes `fips202.h`). The same patch
 
 `slhdsa/` needs no such patch: for SLH-DSA-SHA2-128s it runs only SHA-256/SHA-512 (`slh_sha2.c`, `sha2_256.c`,
 `sha2_512.c`; the SHAKE parameter sets and `sha3_*` are not vendored), and no vendored `slhdsa/` file contains
-`malloc`, `calloc`, `free`, `exit` or `abort` (grep, 2026-10-10); its state lives on the stack.
+`malloc`, `calloc`, `free`, `exit` or `abort` (grep, 2026-10-10); its state lives on the stack. That stack state
+holds secrets in keygen and signing, which P3 below wipes.
+
+Because P1 put the SHAKE256 context inline and made its release a no-op, a Falcon keygen/sign frame keeps the
+DRBG state after return unless it is wiped: `ycash_falcon_sign.c` (a Ycash file, not a patch) wipes `rng` in
+`ycash_falcon512_keygen_from_seed` (seeded with the keygen seed, which alone determines the key pair) and `sc` in
+`ycash_falcon512_sign` (the sampler state) in their `done:` blocks, with the volatile `wipe()` (audit 02/PQ-1,
+2026-10-12).
 
 ### P2: `falcon/ycash_falcon_verify.c` + `ycash_falcon.h`, exact lengths in the C entry point (2026-10-10)
 
@@ -157,6 +170,25 @@ Falcon consensus audit F-1 (`docs/audits/yellowback-falcon-consensus-audit-20261
 any decoding. PQClean's `do_verify` logic is otherwise unchanged; `pq::Verify` keeps its own size gate, so the
 consensus path checks the lengths twice. Changed lines are marked `YCASH LOCAL PATCH`; `pq_crypto_tests`
 calls the entry point directly with the compact form, a short and a long key (all rejected). Both node lines.
+
+### P3: `slhdsa/slh_dsa.c`, zeroization of `slh_var_t` (2026-10-12)
+
+Audit 02/PQ-2: `sha2_mk_var` (`slh_sha2.c`) copies `SK.seed` and `SK.prf` (the 32 bytes that fully determine an
+SLH-DSA key) into a stack-resident `slh_var_t`, and upstream never zeroizes it, so `slh_keygen_internal` and
+`slh_sign` returned with the copy in the dead frame. The patch, in full (every line marked `YCASH LOCAL PATCH P3`):
+
+* a static helper `slh_wipe(void *p, size_t sz)` after the includes (volatile byte stores, C90, the same
+  construction as `wipe()` in `ycash_falcon_sign.c`; not `memset`, which the optimiser may elide), and a macro
+  `slh_wipe_var(v)` = `slh_wipe((v), sizeof(*(v)))`;
+* `slh_wipe_var(&var);` immediately before the `return` of each function that builds `var` from a secret key:
+  `slh_keygen_internal`, `slh_keygen`, `slh_sign_internal` and `slh_sign`; the two signing functions also wipe
+  `digest` (public, but free).
+
+No function signature, constant or output changes: `pq_crypto_tests` (golden vectors, ACVP, round trip) pass
+byte-identically. The consensus path (`slh_verify`, `slh_verify_internal`) builds `var` from the public key only
+and is untouched. The provenance check is: every file listed as unmodified `cmp`s equal to upstream at the pinned
+commit, and `diff` of `slh_dsa.c` against upstream shows only lines marked `YCASH LOCAL PATCH P3`.
+`qa/yellowback-audit.sh` checks that the wipes are present. The same patch is carried on the 6.20.0 line.
 
 ## Conformance data (tests)
 

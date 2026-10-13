@@ -660,7 +660,9 @@ def keygen(scheme, seed):
 
 
 def sign(scheme, sk, msg32, processes=1, entropy=None):
-    """``pq::Sign`` / ``pq::SignWithEntropy``: SLH-DSA deterministic (``entropy`` must be None);
+    """``pq::SignWithEntropy``: SLH-DSA deterministic (``entropy`` must be None; the node's ``pq::Sign``
+    hedges with 16 random bytes of ``opt_rand``, which the R-agnostic verifier accepts alike, so this
+    signer never predicts the node's bytes);
     FN-DSA-512 through the optional C signer (``entropy`` = nonce || seed, None for os.urandom)."""
     if scheme == SCHEME_SLH_DSA_SHA2_128S:
         if entropy is not None:
