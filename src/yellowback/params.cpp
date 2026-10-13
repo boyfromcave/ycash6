@@ -110,7 +110,7 @@ void SetCommon(Params& p)
     p.attestorCancelThreshold = 1;  // 03/I-3: the adopted set's cancelThreshold (one watcher can cancel; CAN-1 makes that a delay only)
     p.attestorUnlockThreshold = 1;  // 03/I-3: the adopted set's unlockThreshold
     p.attestorLivenessMin = 1152;   // seats review B3: the adopted set's livenessWindow is at least one day
-    p.cancelSignersMax    = 5;      // CAN-2 (owner 2026-10-13): the escalation schedule 1, 2, 3, 4, 5, 5, ... caps at five co-signers
+    p.cancelSignersMax    = 4;      // CAN-2 (owner 2026-10-13, round 2: 4, was 5): the schedule 1, 2, 3, 4, 4, ... caps at four co-signers
     p.cancelQuiet         = 8064;   // CAN-2/CAN-3: 7 d without a cancel resets the schedule; a held residual's longest wait
     p.dormancyBlocks      = 16128;
     p.dormancyMinBundles  = 20;
