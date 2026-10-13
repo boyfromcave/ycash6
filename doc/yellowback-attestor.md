@@ -71,6 +71,34 @@ names are specified in `doc/yellowback-rpc.md`; the agent's every setting is doc
 `contrib/yellowback/attest/attest.toml.sample` and its README. Ycash Yellowback (YED) is the
 system; YED is the unit.
 
+## Member-key hosts (sign once)
+
+Your member key also signs set spends: the YED attestor set is the cancel set of every YED claim
+intent (`set_signcancel`), and a bridge attestor (Hawkeye) signs unlocks and cancels of the bridge
+vault with `set_signunlock` / `set_signcancel`. Two signatures by one key over two different spends
+of one outpoint are a provable equivocation: anyone submits `set_equivocation`, the member is
+EJECTED and its bond frozen. The node's wallet refuses a second, different signature — but only
+from the **sign-once record in its own `wallet.dat`** (`doc/vault-rpc.md`, "Sign once"). The seed
+does not carry it, so:
+
+- **One signing host per member key.** Never run two nodes (an HA pair, a test copy) with one member
+  key in their wallets.
+- **Back up `wallet.dat` after every `set_signunlock` / `set_signcancel`** — the seed is not enough.
+  A bridge attestor backs up Hawkeye's `hawkeye.db` together with the node's `wallet.dat`, as one
+  unit (Hawkeye's operations runbook owns the full procedure).
+- **Restoring from the seed alone is unsafe for a member key.** Before a restored wallet (or one
+  that imported the key with `importwallet` / `z_importwallet` / `importprivkey`) signs, import the
+  record: `set_listsigned` on the old wallet, or its `dumpwallet` / `z_exportwallet` dump, whose
+  `vaultsetsig=` lines carry it, then `set_importsigned` (or `importwallet` / `z_importwallet` of the
+  dump) on the new one, and check it with `set_listsigned`. The node enforces this: such a wallet
+  refuses with `set-sign-restored` until the record is imported, unless a call passes
+  `{"acknowledgerestore": true}` — your statement that the key never signed a spend of that
+  outpoint.
+- Re-funding is safe: set signatures are over `SIGHASH_ALL|ANYONECANPAY` and bind the template input
+  and the outputs, not the fee inputs, so a spend re-funded with `vault_refee` (or returned
+  re-funded by `vault_buildcancel`) has the same sighash and re-signing it is idempotent. The hazard
+  is a *different* build.
+
 ## What you are NOT asked to do
 
 - **No domain, no TLS certificate, no inbound port.** The agent publishes over an `iroh-gossip`

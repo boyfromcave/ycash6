@@ -282,32 +282,66 @@ a pqkeyid, a PQ address or `{"scheme": int, "keyhash": hex}` (any key: an extern
 allowed); without it the wallet draws a new SLH-DSA owner (as `vault_getnewowner`). The former
 `ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
 
-### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...]`
-Params: `["outpoint": outpoint, "recipients": [Recipient]]`
+### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...] ( rebuild )`
+Params: `["outpoint": outpoint, "recipients": [Recipient], "rebuild"?: bool]`
 
-Result: `{"hex": hex, "intents": [IntentOut], "required": int}`
+Result: `{"hex": hex, "intents": [IntentOut], "required": int, "sighash": hash, "build": "new"|"reused"|"refunded"}`
 
 The UNLOCK spend (selector 1) of a vault: an intent per recipient (exactly one of `address` or
 `script`), the remainder re-locked in a byte-identical vault (S-2), fee inputs from this wallet
-(unsigned). The rate limit (S-3) is checked when it is sent.
+(unsigned). **The fee is never taken from the vault's value**: S-2 (re-lock + intents ≥ the
+vault), I-1 and I-2 make that consensus-illegal, so it always comes from other inputs. The rate
+limit (S-3) is checked when it is sent. `sighash` is the set-signature sighash the members will
+sign (`set_signunlock` reports the same).
+**Call once.** The build is remembered in the wallet database per vault outpoint, across
+restarts, with its fee inputs locked (07/N-2): called again with the same recipients it returns
+the same transaction (`build` `"reused"`), or, when a fee input was spent meanwhile, the same
+transaction re-funded as `vault_refee` does (`"refunded"`, same `sighash`). Other recipients are
+refused while the build exists (members sign once); `rebuild` `true` discards it and builds anew
+— only before any member signed it, since a signature over the old build makes a signature over
+the new one an equivocation. The wallet picks the smallest single coin that covers the fee, so
+the change output, which the set signatures bind and a re-funder must pay, stays small.
 
-### `set_signunlock "hex"`
-Params: `["hex": hex]`
+### `set_signunlock "hex" ( {"acknowledgerestore": true} )`
+Params: `["hex": hex, "options"?: {"acknowledgerestore"?: bool}]`
 
 Result: `SetSigResult`
 
 Adds this wallet's current-member signatures over the set-signature message (plan §15.2 step 4)
 for the vault's `setid`, up to `unlockthreshold`. Signing two different spends of one outpoint
-is provable equivocation: sign only the transaction you mean.
+is provable equivocation: sign only the transaction you mean. The sighash is ZIP-243
+`SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL|SIGHASH_ANYONECANPAY, amount, branch)` (01/V-2):
+it binds the vault input (prevout, amount, sequence, script) and every output, not the other
+inputs, so the fee inputs may be replaced by anyone (`vault_refee`) without a new signature, and a
+re-funded transaction has the same sighash.
 **Sign once:** before handing out a signature the wallet records, in its wallet database, the
 role and sighash its members signed for `(setid, prevout)`, and refuses a different role or
 sighash for that pair with `set-sign-once` (`RPC_WALLET_ERROR`), across restarts; re-signing the
-identical transaction is idempotent. There is no override.
+identical transaction, or the same transaction re-funded, is idempotent. There is no override.
+**The record lives only in this `wallet.dat`** (07/F-5). Nothing derives it from the chain, and
+a wallet restored from its seed (`-hdseedfile`; `-mnemonicfile` on 6.20.0), a wallet that
+imports the member key (`importwallet`, `z_importwallet`, `importprivkey`) or a second host with
+the same key has no record: asked to sign a different spend of an outpoint the key already
+signed, it would sign, and anyone can then submit `set_equivocation` — the member is EJECTED
+and its bond frozen. The rules: **one signing host per member key; back up `wallet.dat` after
+every `set_signunlock` / `set_signcancel` (the seed is not enough); never sign on a restored
+wallet before importing the record** — `set_listsigned` on the old wallet (or its `dumpwallet` /
+`z_exportwallet` dump, whose `vaultsetsig=` lines carry it) and `set_importsigned` (or
+`importwallet` / `z_importwallet` of the dump) on the new one, then verify with
+`set_listsigned`. The node enforces the last rule: a wallet created from a seed, or one that
+imported a key that is a member of a set at the tip, carries a restore marker, and while it is
+set the sign RPCs refuse with `set-sign-restored` (`RPC_WALLET_ERROR`) instead of signing — unless
+the record for that `(setid, prevout)` is already present (idempotent re-signing), or the call
+passes `{"acknowledgerestore": true}`, the operator's statement that this key never signed a set
+spend of that outpoint. `set_importsigned` and a dump import that carries the history (its
+`vaultsetsigs=` line) clear the marker; the node logs a warning at startup while it is set and
+the wallet holds a member key. With SIGHASH_ALL|ANYONECANPAY a re-funded build has the same
+sighash, so the record stays valid across re-funding; the hazard is a *different* build.
 
-### `vault_buildcancel "intentoutpoint"`
-Params: `["intentoutpoint": outpoint]`
+### `vault_buildcancel "intentoutpoint" ( rebuild )`
+Params: `["intentoutpoint": outpoint, "rebuild"?: bool]`
 
-Result: `{"hex": hex, "required": int, "cancelsetid": hash, "deadline": height, "intentconfirmed": bool}`
+Result: `{"hex": hex, "required": int, "cancelsetid": hash, "deadline": height, "intentconfirmed": bool, "sighash": hash, "build": "new"|"reused"|"refunded"}`
 
 The CANCEL spend (selector 2) of an unmatured intent: its value back into the vault it was
 unlocked from (I-2). `deadline` is the last height a cancel can confirm at. An intent still in
@@ -317,16 +351,62 @@ next block. The mempool accepts the cancel as the intent's child (a mempool pare
 confirming in the next block, so I-2 holds), and both may confirm in one block; a cancel signed
 before the intent confirms stays valid after it. So a watcher can build and sign a cancel the
 moment an intent appears. Called again for the same intent it returns the same transaction
-(mempool or confirmed) while its fee inputs are unspent (remembered in memory until restart), so
-every member signs one sighash.
+(mempool or confirmed), remembered in the wallet database across restarts with its fee inputs
+locked; when a fee input was spent meanwhile it returns the same transaction re-funded
+(`vault_refee`, same `sighash`), so every member signs one sighash. `rebuild` and the fee: as
+`vault_buildunlock` (the fee never comes from the intent's value: I-2). A pre-built spend that
+chains on a re-funded parent (a cancel of a mempool intent whose unlock was re-funded) must be
+rebuilt: re-funding changes the parent's txid, not its sighash.
 
-### `set_signcancel "hex"`
-Params: `["hex": hex]`
+### `set_signcancel "hex" ( {"acknowledgerestore": true} )`
+Params: `["hex": hex, "options"?: {"acknowledgerestore"?: bool}]`
 
 Result: `SetSigResult`
 
 As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`, under the same
-sign-once record.
+sign-once record and restore marker.
+
+### `vault_refee "hex"`
+Params: `["hex": hex]`
+
+Result: `{"hex": hex, "sighash": hash, "fee": yec, "replaced": [outpoint]}`
+
+Re-funds a vault UNLOCK or CANCEL spend (01/V-2): every input but the vault/intent input is
+replaced by this wallet's coins; the template input — with any set signatures already on it —
+and every output stay byte-identical, so the signatures stay valid and `sighash` is unchanged.
+Use it when a fee input of a built or signed spend was spent elsewhere (the builder spent its own
+coin, a lock was released). **Anyone may re-fund**: the set signatures bind the template input
+and the outputs only. The outputs, the builder's change included, are bound, so there can be no
+new change output: the new input is one coin worth exactly what the outputs need beyond the
+template coin plus the fee (the 10,000-zatoshi vault fee) — an existing confirmed coin within
+1,000 zatoshi of it, else a self-send of exactly that amount that this call broadcasts and the
+re-funded spend chains on in the mempool. The fee never comes from the vault's value (S-2, I-1,
+I-2). The new input is unsigned and locked; `vault_send` on this node signs it. When this wallet built the spend, its remembered build
+follows the re-funded transaction. Re-funding changes the txid (third-party malleability by
+input replacement, as the selector case 01/V-4).
+
+### `set_listsigned`
+Params: `[]`
+
+Result: `{"restored": bool, "records": [{"setid": hash, "prevout": outpoint, "role": int, "sighash": hash}]}`
+
+The wallet's set sign-once records (07/F-5): for each `(setid, prevout)` its member keys signed
+a spend of, the role (1 unlock, 2 cancel) and the sighash. `restored` is the restore marker:
+while it is true the sign RPCs refuse with `set-sign-restored`. Back the records up with
+`wallet.dat`; `dumpwallet` / `z_exportwallet` write them as `vaultsetsig=` lines (with the
+remembered vault builds, `vaultbuild=`, and intent recipients, `vaultrecipient=`).
+
+### `set_importsigned [{"setid", "prevout", "role", "sighash"}, ...]`
+Params: `["records": [{"setid": hash, "prevout": outpoint, "role": int, "sighash": hash}]]`
+
+Result: `{"imported": int, "present": int}`
+
+Imports sign-once records as `set_listsigned` printed them on the wallet that signed, then clears
+the restore marker. A record that differs from one this wallet holds for the same `(setid,
+prevout)` refuses the whole import (`set-sign-once`, nothing imported): two signing histories for
+one key are never merged silently. Identical records count as `present`. Importing a dump with
+`importwallet` / `z_importwallet` applies the same rule to its `vaultsetsig=` lines. There is no
+RPC that deletes a record.
 
 ### `vault_send "hex"`
 Params: `["hex": hex]`
@@ -404,7 +484,9 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
 | -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
-| -4 | `set-sign-once` | `set_signunlock`, `set_signcancel` | a second, different unlock of a vault this wallet already signed |
+| -4 | `set-sign-once` | `set_signunlock`, `set_signcancel`, `set_importsigned` | a second, different unlock of a vault this wallet already signed |
+| -4 | `set-sign-restored` | `set_signunlock`, `set_signcancel` | signing on a wallet that imported a member key, before `set_importsigned` |
+| -8 | `already built a different unlock` | `vault_buildunlock` | a second build of one vault with other recipients, without `rebuild` |
 | -8 | `not an unspent intent output` | `vault_buildcancel`, `vault_release` | a released intent |
 | -1 | `can no longer be cancelled` | `vault_buildcancel` | an intent past its delay |
 | -1 | `matures at height` | `vault_release` | an intent before its delay |

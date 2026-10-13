@@ -102,6 +102,83 @@ bool CWalletDB::ReadVaultSetSig(const uint256& setId, const COutPoint& prevout, 
     return true;
 }
 
+bool CWalletDB::ListVaultSetSigs(std::vector<VaultSetSigRecord>& out)
+{
+    out.clear();
+    Dbc* pcursor = GetCursor();
+    if (!pcursor)
+        return false;
+    unsigned int fFlags = DB_SET_RANGE;
+    while (true)
+    {
+        CDataStream ssKey(SER_DISK, CLIENT_VERSION);
+        if (fFlags == DB_SET_RANGE)
+            ssKey << std::string("vaultsetsig");
+        CDataStream ssValue(SER_DISK, CLIENT_VERSION);
+        int ret = ReadAtCursor(pcursor, ssKey, ssValue, fFlags);
+        fFlags = DB_NEXT;
+        if (ret == DB_NOTFOUND)
+            break;
+        else if (ret != 0)
+        {
+            pcursor->close();
+            return false;
+        }
+        std::string strType;
+        ssKey >> strType;
+        if (strType != "vaultsetsig")
+            break;
+        std::pair<uint256, COutPoint> k;
+        std::pair<uint8_t, uint256> v;
+        ssKey >> k;
+        ssValue >> v;
+        VaultSetSigRecord r;
+        r.setId = k.first;
+        r.prevout = k.second;
+        r.role = v.first;
+        r.sighash = v.second;
+        out.push_back(r);
+    }
+    pcursor->close();
+    return true;
+}
+
+bool CWalletDB::WriteVaultSignRestored()
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("vaultsignrestored"), (uint8_t)1);
+}
+
+bool CWalletDB::ReadVaultSignRestored()
+{
+    uint8_t v = 0;
+    return Read(std::string("vaultsignrestored"), v) && v != 0;
+}
+
+bool CWalletDB::EraseVaultSignRestored()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("vaultsignrestored"));
+}
+
+bool CWalletDB::WriteVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("vaultbuild"), templ), mtx);
+}
+
+bool CWalletDB::EraseVaultBuild(const COutPoint& templ)
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::make_pair(std::string("vaultbuild"), templ));
+}
+
+bool CWalletDB::WriteVaultRecipient(const uint256& recipientHash, const CScript& script)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("vaultrecipient"), recipientHash), *(const CScriptBase*)(&script));
+}
+
 bool CWalletDB::WriteAtomicSwap(const std::string& swapId, const CAtomicSwapInfo& swapInfo)
 {
     nWalletDBUpdateCounter++;
@@ -502,6 +579,23 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             uint256 hash;
             ssKey >> hash;
             pwallet->AddToEx(hash, /*fFromLoadWallet=*/true);
+        }
+        else if (strType == "vaultbuild")
+        {
+            // 01/V-2, 07/N-2: a vault spend this wallet built for set signatures; its fee inputs stay locked.
+            COutPoint templ;
+            CMutableTransaction mtx;
+            ssKey >> templ;
+            ssValue >> mtx;
+            pwallet->LoadVaultBuild(templ, mtx);
+        }
+        else if (strType == "vaultrecipient")
+        {
+            uint256 recipientHash;
+            CScript script;
+            ssKey >> recipientHash;
+            ssValue >> *(CScriptBase*)(&script);
+            pwallet->mapVaultRecipients[recipientHash] = script;
         }
         else if (strType == "atomicswap")
         {

@@ -649,12 +649,11 @@ UniValue vault_decodescript(const UniValue& params, bool fHelp)
 
 // ---- wallet helpers ---------------------------------------------------------------------------
 
-/** Recipient scripts this process built intents for (vault_buildunlock / vault_app), so that
- *  vault_release can find a recipient the wallet does not own. In memory only. */
-std::map<uint256, CScript> g_recipients;
-/** The last CANCEL built per intent (vault_buildcancel): rebuilt byte-identical while its fee inputs are unspent,
- *  so members asked twice sign one sighash (sign once, SET_EQUIVOCATION). In memory only. */
-std::map<COutPoint, CMutableTransaction> g_cancelBuilds;
+// Recipient scripts this wallet built intents for (vault_buildunlock / vault_app), so that vault_release can find
+// a recipient the wallet does not own, and the last UNLOCK / CANCEL built per template outpoint (vault_buildunlock /
+// vault_buildcancel), returned byte-identical so members asked twice sign one sighash (sign once,
+// SET_EQUIVOCATION): CWallet::mapVaultRecipients / mapVaultBuilds, persisted in the wallet (01/V-2, 07/N-2), so a
+// restart keeps them and the builds' fee inputs stay locked.
 
 void EnsureWallet(bool fHelp)
 {
@@ -724,23 +723,19 @@ CMutableTransaction NewTx()
     return mtx;
 }
 
-/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + VAULT_RPC_FEE, given
- *  `inputValue` already provided by the transaction's existing inputs. Inputs are locked in the
- *  wallet so a following build does not pick them before this one confirms. */
-void Fund(CMutableTransaction& mtx, CAmount inputValue)
+/** How Fund picks coins: LARGEST_FIRST (fewest inputs); SMALL_CHANGE (the smallest single coin that covers the need,
+ *  else LARGEST_FIRST: a set-signed build's change output is bound by the set signatures, so whoever re-funds it
+ *  (vault_refee) pays it; keep it small). */
+enum class FundMode { LARGEST_FIRST, SMALL_CHANGE };
+
+/** This wallet's confirmed, spendable, unlocked P2PKH coins outside `used`, largest first. */
+std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used)
 {
-    CAmount out = 0;
-    for (const CTxOut& o : mtx.vout) out += o.nValue;
-    CAmount needed = out + VAULT_RPC_FEE - inputValue;
-    std::set<COutPoint> used;
-    for (const CTxIn& in : mtx.vin) used.insert(in.prevout);
     std::vector<COutput> coins;
     pwalletMain->AvailableCoins(coins, std::nullopt, true, NULL, false, true);
     std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() > b.Value(); });
-    CAmount got = 0;
-    std::vector<COutPoint> chosen;
+    std::vector<std::pair<COutPoint, CAmount>> eligible;
     for (const COutput& c : coins) {
-        if (needed <= 0 || got >= needed) break;
         if (!c.fSpendable || c.nDepth < 1) continue;
         const CScript& spk = c.tx->vout[c.i].scriptPubKey;
         txnouttype t;
@@ -748,18 +743,165 @@ void Fund(CMutableTransaction& mtx, CAmount inputValue)
         if (!Solver(spk, t, sol) || t != TX_PUBKEYHASH) continue;
         COutPoint op(c.tx->GetHash(), c.i);
         if (used.count(op)) continue;
-        mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
-        chosen.push_back(op);
-        got += c.Value();
+        eligible.emplace_back(op, c.Value());
+    }
+    return eligible;
+}
+
+/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + VAULT_RPC_FEE, given
+ *  `inputValue` already provided by the transaction's existing inputs. Inputs are locked in the
+ *  wallet so a following build does not pick them before this one confirms. */
+void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode::LARGEST_FIRST)
+{
+    CAmount out = 0;
+    for (const CTxOut& o : mtx.vout) out += o.nValue;
+    CAmount needed = out + VAULT_RPC_FEE - inputValue;
+    std::set<COutPoint> used;
+    for (const CTxIn& in : mtx.vin) used.insert(in.prevout);
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used);
+    CAmount got = 0;
+    std::vector<COutPoint> chosen;
+    if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
+        // the smallest single coin that covers the need (eligible is sorted largest first)
+        for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
+            if (it->second >= needed) { chosen.push_back(it->first); got = it->second; break; }
+        }
+    }
+    if (chosen.empty()) {
+        for (const auto& e : eligible) {
+            if (needed <= 0 || got >= needed) break;
+            chosen.push_back(e.first);
+            got += e.second;
+        }
     }
     if (got < needed)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more", FormatMoney(needed - got)));
+    for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
     const CAmount change = got - needed;
     if (change >= VAULT_RPC_MIN_CHANGE) {
         CPubKey ck = NewWalletKey();
         mtx.vout.push_back(CTxOut(change, GetScriptForDestination(ck.GetID())));
     }
     for (COutPoint& op : chosen) pwalletMain->LockCoin(op);
+}
+
+void RememberRecipient(const uint256& recipientHash, const CScript& dest)
+{
+    auto it = pwalletMain->mapVaultRecipients.find(recipientHash);
+    if (it != pwalletMain->mapVaultRecipients.end() && it->second == dest) return;
+    pwalletMain->mapVaultRecipients[recipientHash] = dest;
+    if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultRecipient(recipientHash, dest))
+        throw JSONRPCError(RPC_WALLET_ERROR, "cannot record the intent's recipient in the wallet");
+}
+
+/** OP_CHECKSETSIG's digest of template input idx (01/V-2): SIGHASH_ALL | SIGHASH_ANYONECANPAY, so the fee inputs are
+ *  not signed and a re-funded spend has the same sighash. */
+uint256 SetSighash(const CMutableTransaction& mtx, size_t idx, const CTxOut& coin)
+{
+    const CTransaction txc(mtx);
+    const PrecomputedTransactionData txdata = TxData(txc);
+    return SignatureHash(coin.scriptPubKey, txc, idx, SIGHASH_ALL | SIGHASH_ANYONECANPAY, coin.nValue, NextBranchId(), txdata);
+}
+
+/** The fee inputs of a remembered build are unspent: in the chain, the wallet and the mempool. */
+bool FeeInputsUnspent(const COutPoint& templ, const CMutableTransaction& c)
+{
+    for (const CTxIn& in : c.vin) {
+        if (in.prevout == templ) continue;
+        CTxOut fee;
+        int fh;
+        if (!GetCoin(in.prevout, fee, fh) || pwalletMain->IsSpent(in.prevout.hash, in.prevout.n, std::nullopt)) return false;
+        LOCK(mempool.cs);
+        if (mempool.mapNextTx.count(in.prevout)) return false;
+    }
+    return true;
+}
+
+/** Release the locks a build holds on its fee inputs (all inputs but the template input). */
+void UnlockBuildInputs(const COutPoint& templ, const CMutableTransaction& c)
+{
+    for (const CTxIn& in : c.vin) {
+        if (in.prevout == templ) continue;
+        COutPoint op = in.prevout;
+        pwalletMain->UnlockCoin(op);
+    }
+}
+
+/** Forget the remembered builds whose template coin is gone (spent, or reorged away), releasing their locks. */
+void PruneVaultBuilds()
+{
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    for (auto it = pwalletMain->mapVaultBuilds.begin(); it != pwalletMain->mapVaultBuilds.end();) {
+        CTxOut c;
+        int h;
+        if (GetCoin(it->first, c, h)) { ++it; continue; }
+        UnlockBuildInputs(it->first, it->second);
+        walletdb.EraseVaultBuild(it->first);
+        it = pwalletMain->mapVaultBuilds.erase(it);
+    }
+}
+
+/** Remember the build of templ (without any set signatures: they are not part of the sighash). */
+void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
+{
+    for (CTxIn& in : mtx.vin)
+        if (in.prevout == templ) in.scriptSig = CScript();
+    pwalletMain->mapVaultBuilds[templ] = mtx;
+    if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultBuild(templ, mtx))
+        throw JSONRPCError(RPC_WALLET_ERROR, "cannot record the vault build in the wallet");
+}
+
+void SignWalletInputs(CMutableTransaction& mtx);
+uint256 Broadcast(const CTransaction& tx);
+
+/** A wallet coin of exactly `value` for a re-funded spend, which can have no change output (its outputs are bound by
+ *  the set signatures): an existing confirmed coin within VAULT_RPC_MIN_CHANGE above it, else a self-send of exactly
+ *  `value` from this wallet's coins, broadcast now (the re-funded spend chains on it in the mempool). Locked. */
+COutPoint ExactCoin(CAmount value, const std::set<COutPoint>& exclude)
+{
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(exclude);
+    for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
+        if (it->second >= value && it->second < value + VAULT_RPC_MIN_CHANGE) {
+            COutPoint op = it->first;
+            pwalletMain->LockCoin(op);
+            return op;
+        }
+    }
+    CMutableTransaction split = NewTx();
+    split.vout.push_back(CTxOut(value, GetScriptForDestination(NewWalletKey().GetID())));
+    Fund(split, 0);
+    SignWalletInputs(split);
+    COutPoint op(Broadcast(CTransaction(split)), 0);
+    pwalletMain->LockCoin(op);
+    return op;
+}
+
+/** Re-fund a set-signed spend (01/V-2): every input but the template input (kept with its scriptSig, moved to index
+ *  0) is replaced by one coin of this wallet worth exactly what the outputs need beyond the template coin, plus
+ *  VAULT_RPC_FEE; every output stays, so the set signatures stay valid and the sighash is unchanged. The fee is never
+ *  taken from the template coin's value (S-2, I-1, I-2). */
+std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut& coin)
+{
+    const uint256 before = SetSighash(mtx, idx, coin);
+    std::vector<COutPoint> old;
+    std::set<COutPoint> exclude;
+    for (size_t i = 0; i < mtx.vin.size(); i++) {
+        exclude.insert(mtx.vin[i].prevout);
+        if (i != idx) old.push_back(mtx.vin[i].prevout);
+    }
+    const CTxIn templ = mtx.vin[idx];
+    mtx.vin.assign(1, templ);
+    CAmount out = 0;
+    for (const CTxOut& o : mtx.vout) out += o.nValue;
+    const CAmount needed = out + VAULT_RPC_FEE - coin.nValue;
+    if (needed > 0) mtx.vin.push_back(CTxIn(ExactCoin(needed, exclude), CScript(), CTxIn::SEQUENCE_FINAL));
+    if (SetSighash(mtx, 0, coin) != before)
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "re-funding changed the set sighash");
+    std::set<COutPoint> now;
+    for (const CTxIn& in : mtx.vin) now.insert(in.prevout);
+    for (COutPoint op : old)
+        if (!now.count(op)) pwalletMain->UnlockCoin(op);
+    return old;
 }
 
 /** Sign every input whose coin the wallet can sign (P2PKH and the like); template inputs and
@@ -1413,7 +1555,7 @@ UniValue AddIntents(CMutableTransaction& mtx, const VaultParams& vp, const CTxOu
         sum += amt;
         if (!MoneyRange(sum) || sum > coin.nValue) throw JSONRPCError(RPC_INVALID_PARAMETER, "the recipients' amounts exceed the vault's value");
         IntentParams ip = IntentFor(vp, coin.scriptPubKey, dest);
-        g_recipients[ip.recipientHash] = dest;
+        RememberRecipient(ip.recipientHash, dest);
         mtx.vout.push_back(CTxOut(amt, BuildIntent(ip)));
         UniValue io(UniValue::VOBJ);
         io.pushKV("vout", (int)mtx.vout.size() - 1);
@@ -1453,16 +1595,15 @@ size_t FindTemplateInput(const CMutableTransaction& mtx, CTxOut& coin, int& heig
 }
 
 /** Add this wallet's set signatures (role 1 unlock / 2 cancel of setId) to the template input. */
-UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin, const SetId& setId, uint8_t role)
+UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin, const SetId& setId, uint8_t role, bool ackRestore)
 {
     auto snap = Snapshot();
     const int64_t h = NextHeight();
     auto k = snap->Threshold(setId, role);
     auto s = snap->GetSet(setId);
     if (!k || !s) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "unknown set " + setId.GetHex());
-    const CTransaction txc(mtx);
-    const PrecomputedTransactionData txdata = TxData(txc);
-    const uint256 sighash = SignatureHash(coin.scriptPubKey, txc, idx, SIGHASH_ALL, coin.nValue, NextBranchId(), txdata);
+    // OP_CHECKSETSIG's digest (01/V-2): the fee inputs are not signed, so a re-funded build has the same sighash.
+    const uint256 sighash = SetSighash(mtx, idx, coin);
     const uint256 msg = SetSigMsg(setId, role, mtx.vin[idx].prevout, sighash);
     std::vector<std::vector<unsigned char>> sigs;
     if (!mtx.vin[idx].scriptSig.empty()) {
@@ -1499,6 +1640,13 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
         if (!pwalletMain->HaveKey(m.first.GetID())) continue;
         const CKey priv = WalletPrivKey(m.first);      // throws (nothing recorded) when the key is unavailable
         if (!recorded) {
+            // 07/F-5: a wallet restored from a seed, or one that imported a member key, may lack the record of a
+            // signature its key made elsewhere: refuse until the history is imported (set_importsigned, a dump)
+            // or the caller states this key never signed a spend of this outpoint.
+            if (!ackRestore && walletdb.ReadVaultSignRestored())
+                throw JSONRPCError(RPC_WALLET_ERROR, "set-sign-restored: this wallet was restored or imported a member key and has no sign-once history; "
+                                                     "import it with set_importsigned (or a wallet dump), or pass {\"acknowledgerestore\": true} if this "
+                                                     "key has never signed a set spend of " + prevout.ToString());
             if (!walletdb.WriteVaultSetSig(setId, prevout, role, sighash))
                 throw JSONRPCError(RPC_WALLET_ERROR, "set-sign-once: cannot record the signature in the wallet; nothing was signed");
             recorded = true;
@@ -1529,44 +1677,92 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
     return o;
 }
 
+/** set_signunlock / set_signcancel's options: {"acknowledgerestore": true} (07/F-5). */
+bool AckRestore(const UniValue& params)
+{
+    if (params.size() < 2 || params[1].isNull()) return false;
+    if (!params[1].isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "options must be an object");
+    const UniValue& a = find_value(params[1].get_obj(), "acknowledgerestore");
+    if (a.isNull()) return false;
+    if (!a.isBool()) throw JSONRPCError(RPC_INVALID_PARAMETER, "acknowledgerestore must be a boolean");
+    return a.get_bool();
+}
+
 UniValue vault_buildunlock(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 2)
+    if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
-            "vault_buildunlock \"outpoint\" [{\"address\"|\"script\": .., \"amount\": x}, ...]\n"
+            "vault_buildunlock \"outpoint\" [{\"address\"|\"script\": .., \"amount\": x}, ...] ( rebuild )\n"
             "\nBuild the UNLOCK spend of a vault: one intent I per recipient (released to it after the vault's delay), the\n"
-            "remainder re-locked in a byte-identical vault, the fee from this wallet's inputs (unsigned). Collect the set's\n"
-            "unlock signatures with set_signunlock on the members' nodes, then vault_send.\n"
-            "\nResult: {\"hex\", \"intents\": [{\"vout\", \"amount\", \"recipient\", \"recipienthash\"}], \"required\"}\n"
+            "remainder re-locked in a byte-identical vault, the fee from this wallet's inputs (unsigned; never from the\n"
+            "vault's value). Collect the set's unlock signatures with set_signunlock on the members' nodes, then vault_send.\n"
+            "Call once: the build is remembered in the wallet (across restarts) and returned byte-identical when called again\n"
+            "with the same recipients; if its fee inputs were spent meanwhile it is re-funded (vault_refee), keeping its\n"
+            "sighash. Other recipients are refused while a build exists: members sign once (a second, different unlock\n"
+            "signature is an equivocation). rebuild=true discards the remembered build (only before anyone signed it).\n"
+            "\nResult: {\"hex\", \"intents\": [{\"vout\", \"amount\", \"recipient\", \"recipienthash\"}], \"required\", \"sighash\",\n"
+            "\"build\" (\"new\", \"reused\" or \"refunded\")}\n"
             + HelpExampleCli("vault_buildunlock", "\"txid:0\" '[{\"address\":\"..\",\"amount\":1}]'")
             + HelpExampleRpc("vault_buildunlock", "\"txid:0\", [{\"address\":\"..\",\"amount\":1}]"));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureVaultActive();
     const COutPoint op = ParseOutPoint(params[0], "outpoint");
+    const bool rebuild = params.size() > 2 && !params[2].isNull() && params[2].get_bool();
     CTxOut coin;
     int h;
     VaultParams vp;
     if (!GetCoin(op, coin, h) || !ParseVault(coin.scriptPubKey, vp)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not an unspent vault output");
+    PruneVaultBuilds();
     CMutableTransaction mtx = NewTx();
     mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
     UniValue intents = AddIntents(mtx, vp, coin, params[1].get_array());
-    Fund(mtx, coin.nValue);
+    // 07/N-2: one build per vault outpoint (sign once). The remembered build is returned while its outputs are the
+    // requested ones (the intents and the re-lock, then at most the change output); a lost fee input is replaced
+    // without changing the sighash (01/V-2).
+    std::string build = "new";
+    auto memo = pwalletMain->mapVaultBuilds.find(op);
+    if (memo != pwalletMain->mapVaultBuilds.end() && rebuild) {
+        UnlockBuildInputs(op, memo->second);
+    } else if (memo != pwalletMain->mapVaultBuilds.end()) {
+        const CMutableTransaction& c = memo->second;
+        const bool same = c.vin.size() >= 1 && c.vin[0].prevout == op && c.vout.size() >= mtx.vout.size() && c.vout.size() <= mtx.vout.size() + 1 &&
+                          std::equal(mtx.vout.begin(), mtx.vout.end(), c.vout.begin());
+        if (!same)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("this wallet already built a different unlock of %s (sighash %s): members sign once, so "
+                                                               "collect signatures on that build (call again with its recipients), or pass rebuild=true "
+                                                               "if no member has signed it", OutPointStr(op), SetSighash(c, 0, coin).GetHex()));
+        mtx = c;
+        build = "reused";
+        if (!FeeInputsUnspent(op, mtx)) {
+            Refee(mtx, 0, coin);
+            build = "refunded";
+        }
+    }
+    if (build == "new") Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
+    RememberBuild(op, mtx);
     auto k = Snapshot()->Threshold(vp.setId, ROLE_UNLOCK);
+    const uint256 sighash = SetSighash(mtx, 0, coin);
     UniValue o(UniValue::VOBJ);
     o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
     o.pushKV("intents", intents);
     o.pushKV("required", k ? *k : 0);
+    o.pushKV("sighash", HexStr(sighash.begin(), sighash.end()));
+    o.pushKV("build", build);
     return o;
 }
 
 UniValue set_signunlock(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "set_signunlock \"hex\"\n"
+            "set_signunlock \"hex\" ( {\"acknowledgerestore\": true} )\n"
             "\nAdd this wallet's current-member unlock signatures (OP_CHECKSETSIG role 1 of the vault's setid) to a vault\n"
-            "UNLOCK spend, up to the set's unlockthreshold. The signatures bind the outputs, so build first.\n"
+            "UNLOCK spend, up to the set's unlockthreshold. The signatures bind the vault input and every output, not the fee\n"
+            "inputs (SIGHASH_ALL|ANYONECANPAY), so build first; a re-funded build (vault_refee) keeps them valid. Sign once:\n"
+            "the wallet records (setid, prevout) -> (role, sighash) before signing and refuses a different spend of the\n"
+            "prevout. A wallet restored from a seed or that imported a member key refuses (set-sign-restored) until its\n"
+            "sign-once history is imported (set_importsigned) or acknowledgerestore=true states the key never signed one.\n"
             "\nResult: {\"hex\", \"complete\", \"signatures\", \"required\", \"sighash\", \"setsigs\": [{\"key\",\"sig\"}]}\n"
             + HelpExampleCli("set_signunlock", "\"hex\"") + HelpExampleRpc("set_signunlock", "\"hex\""));
     EnsureWallet(fHelp);
@@ -1579,21 +1775,24 @@ UniValue set_signunlock(const UniValue& params, bool fHelp)
     TemplateKind kind;
     size_t idx = FindTemplateInput(mtx, coin, h, vp, ip, kind);
     if (kind != TemplateKind::VAULT) throw JSONRPCError(RPC_INVALID_PARAMETER, "the template input is not a vault");
-    return SignSetInPlace(mtx, idx, coin, vp.setId, ROLE_UNLOCK);
+    return SignSetInPlace(mtx, idx, coin, vp.setId, ROLE_UNLOCK, AckRestore(params));
 }
 
 UniValue vault_buildcancel(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "vault_buildcancel \"intentoutpoint\"\n"
+            "vault_buildcancel \"intentoutpoint\" ( rebuild )\n"
             "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
-            "(I-2), fee from this wallet (unsigned). Collect the cancel set's signatures with set_signcancel, then vault_send.\n"
+            "(I-2), fee from this wallet (unsigned; never from the intent's value). Collect the cancel set's signatures with\n"
+            "set_signcancel, then vault_send.\n"
             "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
-            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once: a second,\n"
-            "different cancel signature is an equivocation).\n"
+            "the same intent it returns the same transaction (remembered in the wallet, across restarts); if its fee inputs\n"
+            "were spent meanwhile it is re-funded (vault_refee) with the same sighash (members sign once: a second, different\n"
+            "cancel signature is an equivocation). rebuild=true discards the remembered build (only before anyone signed it).\n"
             "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
-            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\"}\n"
+            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\", \"sighash\", \"build\" (\"new\",\n"
+            "\"reused\" or \"refunded\")}\n"
             + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -1632,31 +1831,35 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
         coinHeight = NextHeight();
     }
     if (NextHeight() - coinHeight >= ip.delay) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the intent matured at height %d; it can no longer be cancelled", coinHeight + ip.delay));
-    // Rebuilt byte-identical while the remembered build's fee inputs are unspent (sign once): the same
-    // transaction whether the intent was in the mempool or has confirmed since.
+    // The remembered build, byte-identical (sign once): the same transaction whether the intent was in the mempool
+    // or has confirmed since, and across restarts (07/N-2); a lost fee input is replaced without changing the
+    // sighash (01/V-2).
+    const bool rebuild = params.size() > 1 && !params[1].isNull() && params[1].get_bool();
+    PruneVaultBuilds();
     CMutableTransaction mtx;
-    bool reused = false;
-    auto cached = g_cancelBuilds.find(op);
-    if (cached != g_cancelBuilds.end() && cached->second.vout.size() > 0 && cached->second.vout[0].scriptPubKey == origin) {
-        reused = true;
+    std::string build = "new";
+    auto cached = pwalletMain->mapVaultBuilds.find(op);
+    if (cached != pwalletMain->mapVaultBuilds.end()) {
         const CMutableTransaction& c = cached->second;
-        for (size_t i = 1; i < c.vin.size() && reused; i++) {
-            CTxOut fee;
-            int fh;
-            const COutPoint& f = c.vin[i].prevout;
-            if (!GetCoin(f, fee, fh) || pwalletMain->IsSpent(f.hash, f.n, std::nullopt)) { reused = false; break; }   // 6.20.0: asOfHeight (nullopt = now)
-            LOCK(mempool.cs);
-            if (mempool.mapNextTx.count(f)) reused = false;
+        if (rebuild || c.vin.empty() || c.vin[0].prevout != op || c.vout.empty() || c.vout[0].scriptPubKey != origin || c.vout[0].nValue != coin.nValue) {
+            UnlockBuildInputs(op, c);
+        } else {
+            mtx = c;
+            build = "reused";
+            if (!FeeInputsUnspent(op, mtx)) {
+                Refee(mtx, 0, coin);
+                build = "refunded";
+            }
         }
-        if (reused) mtx = c;
     }
-    if (!reused) {
+    if (build == "new") {
         mtx = NewTx();
         mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
         mtx.vout.push_back(CTxOut(coin.nValue, origin));
-        Fund(mtx, coin.nValue);
-        g_cancelBuilds[op] = mtx;
+        Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
     }
+    RememberBuild(op, mtx);
+    const uint256 sighash = SetSighash(mtx, 0, coin);
     auto k = Snapshot()->Threshold(ip.cancelSetId, ROLE_CANCEL);
     UniValue o(UniValue::VOBJ);
     o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
@@ -1664,16 +1867,18 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     o.pushKV("cancelsetid", ip.cancelSetId.GetHex());
     o.pushKV("deadline", coinHeight + ip.delay - 1);
     o.pushKV("intentconfirmed", confirmed);
+    o.pushKV("sighash", HexStr(sighash.begin(), sighash.end()));
+    o.pushKV("build", build);
     return o;
 }
 
 UniValue set_signcancel(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "set_signcancel \"hex\"\n"
+            "set_signcancel \"hex\" ( {\"acknowledgerestore\": true} )\n"
             "\nAdd this wallet's current-member cancel signatures (OP_CHECKSETSIG role 2 of the intent's cancelsetid) to an\n"
-            "intent CANCEL spend, up to the cancel set's cancelthreshold.\n"
+            "intent CANCEL spend, up to the cancel set's cancelthreshold. Sign once, acknowledgerestore: as set_signunlock.\n"
             "\nResult: as set_signunlock\n"
             + HelpExampleCli("set_signcancel", "\"hex\"") + HelpExampleRpc("set_signcancel", "\"hex\""));
     EnsureWallet(fHelp);
@@ -1686,7 +1891,125 @@ UniValue set_signcancel(const UniValue& params, bool fHelp)
     TemplateKind kind;
     size_t idx = FindTemplateInput(mtx, coin, h, vp, ip, kind);
     if (kind != TemplateKind::INTENT) throw JSONRPCError(RPC_INVALID_PARAMETER, "the template input is not an intent");
-    return SignSetInPlace(mtx, idx, coin, ip.cancelSetId, ROLE_CANCEL);
+    return SignSetInPlace(mtx, idx, coin, ip.cancelSetId, ROLE_CANCEL, AckRestore(params));
+}
+
+UniValue vault_refee(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "vault_refee \"hex\"\n"
+            "\nRe-fund a vault UNLOCK or CANCEL spend (01/V-2): every input but the vault/intent input is replaced by this\n"
+            "wallet's coins; the template input (with any set signatures already on it) and every output stay as they are,\n"
+            "so the signatures stay valid: they are over SIGHASH_ALL|ANYONECANPAY, which binds the template input and the\n"
+            "outputs, not the fee inputs. Anyone may re-fund. Use it when a fee input of a signed spend was spent elsewhere.\n"
+            "The outputs, the builder's change included, are bound, so there is no new change output: the new inputs pay\n"
+            "every output not covered by the template coin plus the fee, and any excess is fee. The fee never comes from the\n"
+            "vault's value (S-2, I-1, I-2). The new inputs are unsigned and locked: vault_send on this node signs them.\n"
+            "\nResult: {\"hex\", \"sighash\" (unchanged), \"fee\", \"replaced\": [\"txid:n\", ...]}\n"
+            + HelpExampleCli("vault_refee", "\"hex\"") + HelpExampleRpc("vault_refee", "\"hex\""));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureVaultActive();
+    CMutableTransaction mtx = DecodeMutable(params[0]);
+    CTxOut coin;
+    int h;
+    VaultParams vp;
+    IntentParams ip;
+    TemplateKind kind;
+    const size_t idx = FindTemplateInput(mtx, coin, h, vp, ip, kind);
+    const COutPoint templ = mtx.vin[idx].prevout;
+    PruneVaultBuilds();
+    const std::vector<COutPoint> replaced = Refee(mtx, idx, coin);
+    // This wallet's remembered build of the outpoint follows the re-funded transaction (same outputs, same sighash).
+    auto memo = pwalletMain->mapVaultBuilds.find(templ);
+    if (memo == pwalletMain->mapVaultBuilds.end() || memo->second.vout == mtx.vout) RememberBuild(templ, mtx);
+    CAmount in = coin.nValue;
+    for (size_t i = 1; i < mtx.vin.size(); i++) {
+        CTxOut prev;
+        int ph;
+        if (GetCoin(mtx.vin[i].prevout, prev, ph)) in += prev.nValue;
+    }
+    const uint256 sighash = SetSighash(mtx, 0, coin);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
+    o.pushKV("sighash", HexStr(sighash.begin(), sighash.end()));
+    o.pushKV("fee", ValueFromAmount(in - CTransaction(mtx).GetValueOut()));
+    UniValue r(UniValue::VARR);
+    for (const COutPoint& op : replaced) r.push_back(OutPointStr(op));
+    o.pushKV("replaced", r);
+    return o;
+}
+
+UniValue SetSigRecordJSON(const VaultSetSigRecord& r)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("setid", r.setId.GetHex());
+    o.pushKV("prevout", OutPointStr(r.prevout));
+    o.pushKV("role", (int)r.role);
+    o.pushKV("sighash", HexStr(r.sighash.begin(), r.sighash.end()));
+    return o;
+}
+
+UniValue set_listsigned(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "set_listsigned\n"
+            "\nThe wallet's set sign-once records (07/F-5): for every (setid, prevout) its member keys signed a spend of, the\n"
+            "role (1 unlock, 2 cancel) and the sighash signed. Back them up with wallet.dat (the seed does not carry them);\n"
+            "import them on a restored wallet with set_importsigned before it signs. dumpwallet / z_exportwallet write them\n"
+            "as vaultsetsig= lines, and \"restored\" says whether set_signunlock / set_signcancel refuse (set-sign-restored).\n"
+            "\nResult: {\"restored\", \"records\": [{\"setid\", \"prevout\", \"role\", \"sighash\"}]}\n"
+            + HelpExampleCli("set_listsigned", "") + HelpExampleRpc("set_listsigned", ""));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    std::vector<VaultSetSigRecord> recs;
+    if (!walletdb.ListVaultSetSigs(recs)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot read the sign-once records");
+    UniValue arr(UniValue::VARR);
+    for (const VaultSetSigRecord& r : recs) arr.push_back(SetSigRecordJSON(r));
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("restored", walletdb.ReadVaultSignRestored());
+    o.pushKV("records", arr);
+    return o;
+}
+
+UniValue set_importsigned(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "set_importsigned [{\"setid\", \"prevout\", \"role\", \"sighash\"}, ...]\n"
+            "\nImport set sign-once records (07/F-5), as set_listsigned printed them on the wallet that signed, and clear the\n"
+            "restore marker. A record that differs from one this wallet holds for the same (setid, prevout) refuses the whole\n"
+            "import: two signing histories for one key are never merged silently. Identical records are skipped.\n"
+            "\nResult: {\"imported\", \"present\"}\n"
+            + HelpExampleCli("set_importsigned", "'[{\"setid\":\"..\",\"prevout\":\"txid:0\",\"role\":1,\"sighash\":\"..\"}]'")
+            + HelpExampleRpc("set_importsigned", "[{\"setid\":\"..\",\"prevout\":\"txid:0\",\"role\":1,\"sighash\":\"..\"}]"));
+    EnsureWallet(fHelp);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    const UniValue& arr = params[0].get_array();
+    std::vector<VaultSetSigRecord> recs;
+    for (size_t i = 0; i < arr.size(); i++) {
+        const UniValue& o = arr[i].get_obj();
+        VaultSetSigRecord r;
+        r.setId = ParseSetId(find_value(o, "setid"), "setid");
+        r.prevout = ParseOutPoint(find_value(o, "prevout"), "prevout");
+        const UniValue& role = find_value(o, "role");
+        if (!role.isNum() || (role.get_int() != ROLE_UNLOCK && role.get_int() != ROLE_CANCEL))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "role must be 1 (unlock) or 2 (cancel)");
+        r.role = (uint8_t)role.get_int();
+        r.sighash = ParseRaw32(find_value(o, "sighash"), "sighash");
+        recs.push_back(r);
+    }
+    int added = 0, present = 0;
+    std::string conflict;
+    if (!ImportVaultSetSigs(*pwalletMain, recs, true, added, present, conflict))
+        throw JSONRPCError(RPC_WALLET_ERROR, conflict);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("imported", added);
+    o.pushKV("present", present);
+    return o;
 }
 
 UniValue vault_send(const UniValue& params, bool fHelp)
@@ -1694,7 +2017,8 @@ UniValue vault_send(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "vault_send \"hex\"\n"
-            "\nSign this wallet's (fee) inputs of a vault spend built by vault_buildunlock / vault_buildcancel / vault_app,\n"
+            "\nSign this wallet's (fee) inputs of a vault spend built by vault_buildunlock / vault_buildcancel / vault_app /\n"
+            "vault_refee,\n"
             "keeping the template input's scriptSig, and broadcast it.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_send", "\"hex\"") + HelpExampleRpc("vault_send", "\"hex\""));
@@ -1738,8 +2062,8 @@ UniValue vault_release(const UniValue& params, bool fHelp)
         // A 33-byte pqkeyid (scheme || keyhash, as vault_list and z_importpqkey print it) is not a script.
         if (ScriptHash256(*dest) != ip.recipientHash && a.size() == 66 && IsHex(a) && pq::IsKnownScheme(ParseHex(a)[0]))
             throw JSONRPCError(RPC_INVALID_PARAMETER, "that looks like a pqkeyid: pass the address or the script, not a pqkeyid");
-    } else if (g_recipients.count(ip.recipientHash)) {
-        dest = g_recipients[ip.recipientHash];
+    } else if (pwalletMain->mapVaultRecipients.count(ip.recipientHash)) {
+        dest = pwalletMain->mapVaultRecipients[ip.recipientHash];
     } else {
         for (const CKeyID& id : pwalletMain->GetKeys()) {
             CScript s = GetScriptForDestination(id);
@@ -1909,6 +2233,9 @@ static const CRPCCommand commands[] =
     { "vault",   "set_signunlock",      &set_signunlock,       false },
     { "vault",   "vault_buildcancel",   &vault_buildcancel,    false },
     { "vault",   "set_signcancel",      &set_signcancel,       false },
+    { "vault",   "vault_refee",         &vault_refee,          false },
+    { "vault",   "set_listsigned",      &set_listsigned,       false },
+    { "vault",   "set_importsigned",    &set_importsigned,     false },
     { "vault",   "vault_send",          &vault_send,           false },
     { "vault",   "vault_release",       &vault_release,        false },
     { "vault",   "vault_ownerspend",    &vault_ownerspend,     false },

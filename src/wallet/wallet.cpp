@@ -12,6 +12,8 @@
 #include "coincontrol.h"
 #include "core_io.h"
 #include "crypto/pq/scheme.h"
+#include "vault/node.h"
+#include "vault/state.h"
 #include "vault/template.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
@@ -3044,6 +3046,75 @@ bool CWallet::UpdateAtomicSwap(const CAtomicSwapInfo& swapInfo)
     }
     CWalletDB walletdb(strWalletFile);
     return walletdb.WriteAtomicSwap(swapId, swapInfo);
+}
+
+void CWallet::LoadVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx)
+{
+    LOCK(cs_wallet);
+    mapVaultBuilds[templ] = mtx;
+    for (const CTxIn& in : mtx.vin)
+        if (in.prevout != templ) setLockedCoins.insert(in.prevout);
+}
+
+bool IsVaultSetMemberKey(const CPubKey& key)
+{
+    auto snap = vault::TipSnapshot();
+    if (!snap) return false;
+    for (const vault::SetId& id : vault::ListSets(snap->Base()))
+        for (const auto& m : snap->GetMembers(id))
+            if (m.first == key) return true;
+    return false;
+}
+
+bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, bool clearRestored, int& added,
+                        int& present, std::string& conflict)
+{
+    added = present = 0;
+    CWalletDB walletdb(wallet.strWalletFile);
+    std::vector<const VaultSetSigRecord*> fresh;
+    std::map<std::pair<uint256, COutPoint>, std::pair<uint8_t, uint256>> batch;
+    for (const VaultSetSigRecord& r : recs) {
+        uint8_t role = 0;
+        uint256 sighash;
+        const auto key = std::make_pair(r.setId, r.prevout);
+        auto b = batch.find(key);
+        if (b != batch.end() || walletdb.ReadVaultSetSig(r.setId, r.prevout, role, sighash)) {
+            if (b != batch.end()) { role = b->second.first; sighash = b->second.second; }
+            if (role != r.role || sighash != r.sighash) {
+                conflict = strprintf("set-sign-once: the record for set %s, prevout %s (role %d, sighash %s) conflicts with (role %d, sighash %s): "
+                                     "two signing histories for one key are never merged; nothing was imported",
+                                     r.setId.GetHex(), r.prevout.ToString(), (int)r.role, HexStr(r.sighash.begin(), r.sighash.end()),
+                                     (int)role, HexStr(sighash.begin(), sighash.end()));
+                return false;
+            }
+            present++;
+            continue;
+        }
+        batch[key] = std::make_pair(r.role, r.sighash);
+        fresh.push_back(&r);
+    }
+    for (const VaultSetSigRecord* r : fresh) {
+        if (!walletdb.WriteVaultSetSig(r->setId, r->prevout, r->role, r->sighash)) {
+            conflict = "set-sign-once: cannot write a record to the wallet";
+            return false;
+        }
+        added++;
+    }
+    if (clearRestored && walletdb.ReadVaultSignRestored() && !walletdb.EraseVaultSignRestored()) {
+        conflict = "cannot clear the vault sign-once restore marker";
+        return false;
+    }
+    return true;
+}
+
+bool WalletHoldsVaultMemberKey(const CWallet& wallet)
+{
+    auto snap = vault::TipSnapshot();
+    if (!snap) return false;
+    for (const vault::SetId& id : vault::ListSets(snap->Base()))
+        for (const auto& m : snap->GetMembers(id))
+            if (wallet.HaveKey(m.first.GetID())) return true;
+    return false;
 }
 
 bool CWallet::LoadAtomicSwap(const CAtomicSwapInfo& swapInfo)
@@ -7862,6 +7933,10 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
             // z_getnewaddress, then rescanblockchain; PQ keys come from the lookahead (PQ_KEY_LOOKAHEAD).
             const libzcash::SaplingPaymentAddress first = walletInstance->GenerateNewLegacySaplingZKey();
             LogPrintf("Restored the first Sapling address %s\n", KeyIO(params).EncodePaymentAddress(first));
+            // 07/F-5: a seed carries no set sign-once history; mark the wallet so set_signunlock/set_signcancel refuse
+            // until the history is imported (set_importsigned, a dump) or the call acknowledges the restore.
+            if (!CWalletDB(walletFile).WriteVaultSignRestored())
+                return UIError(_("-mnemonicfile: cannot write the vault sign-once restore marker"));
             fRestoredSeed = true;
             LogPrintf("Wallet created from the recovery phrase in -mnemonicfile (fingerprint %s)\n", restored.Fingerprint().GetHex());
         }
@@ -7924,6 +7999,12 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);
+
+    // 07/F-5: a restored wallet that holds a vault set member key has no sign-once history until it imports one.
+    if (CWalletDB(walletFile).ReadVaultSignRestored() && WalletHoldsVaultMemberKey(*walletInstance))
+        LogPrintf("Warning: this wallet was restored from a seed or imported a vault set member key and has no set sign-once "
+                  "history: set_signunlock / set_signcancel refuse (set-sign-restored) until set_importsigned or a wallet dump "
+                  "imports it (doc/vault-rpc.md, \"Sign once\")\n");
 
     RegisterValidationInterface(walletInstance);
 

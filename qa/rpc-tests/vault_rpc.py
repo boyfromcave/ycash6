@@ -255,7 +255,8 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(signed['complete'], True)
         # sign once (SET_EQUIVOCATION): a different unlock of the same vault is refused by both signers,
         # also after a restart; re-signing the identical transaction is idempotent
-        bu_other = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 3}])
+        assert_raises_rpc('already built a different unlock', n0.vault_buildunlock, relock[0]['outpoint'], [{'address': addr1, 'amount': 3}])
+        bu_other = n0.vault_buildunlock(relock[0]['outpoint'], [{'address': addr1, 'amount': 3}], True)   # rebuild (07/N-2)
         assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
         assert_raises_rpc('set-sign-once', n0.set_signunlock, bu_other['hex'])
         assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
