@@ -25,6 +25,7 @@ vault_ownerspend.
 
 from decimal import Decimal
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import VAULT_BRANCH_ID, assert_equal, nuparams, start_nodes
 from test_framework import vault
@@ -69,8 +70,17 @@ class VaultRpcContractTest(BitcoinTestFramework):
         r = c.call(n, 'set_create', {'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
                                      'maturity': 2, 'livenesswindow': 100, 'bondmin': Decimal('0.5')})
         setid = r['setid']
+        # D-Q-31 (audit 07/F-9): set_create refuses a maturity below the network's minimum (2 on regtest) ...
+        try:
+            n.set_create({'seats': 1, 'unlockthreshold': 1, 'maturity': vault.MIN_SET_MATURITY_REGTEST - 1})
+            raise AssertionError('set_create accepted maturity 1')
+        except JSONRPCException as e:
+            assert_equal(e.error['code'], -8)   # RPC_INVALID_PARAMETER
+            assert 'maturity must be at least %d blocks' % vault.MIN_SET_MATURITY_REGTEST in e.error['message'], e.error
+        # ... and, given none, uses it (checked on `empty` below).
         empty = c.call(n, 'set_create', {'seats': 2, 'unlockthreshold': 1, 'ratelimitbps': 5000, 'ratewindow': 10})['setid']
         mine(1)
+        assert_equal(c.call(n, 'set_getinfo', empty)['maturity'], vault.MIN_SET_MATURITY_REGTEST)
         sets = c.call(n, 'set_list')
         assert_equal(sorted(s['setid'] for s in sets), sorted([setid, empty]))
         info = c.call(n, 'set_getinfo', setid)
