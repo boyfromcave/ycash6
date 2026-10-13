@@ -26,6 +26,8 @@
 #include "uint256.h"
 #include "util/system.h"
 #include "vault/checker.h"
+#include "vault/node.h"
+#include "vault/template.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -932,30 +934,10 @@ BOOST_AUTO_TEST_CASE(pq_hashtype_matrix_real)
         }
     }
 
-    // A v5 (ZIP-225) transaction takes ZIP-244, whose undefined-hashtype throw makes both opcodes
-    // false (6.20.0 only: ycash-dd has no v5; NU5 has no activation height on any Ycash network).
-    CMutableTransaction mtx5 = SaplingTx();
-    mtx5.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
-    mtx5.nVersion = ZIP225_TX_VERSION;
-    mtx5.nConsensusBranchId = NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId;
-    const CTransaction tx5(mtx5);
-    {
-        const PrecomputedTransactionData txdata(tx5, {CTxOut(amount, p2pkh)});
-        valtype ecSig;
-        BOOST_REQUIRE(ecKey.Sign(SignatureHash(p2pkh, tx5, 0, SIGHASH_ALL, amount, 0, txdata), ecSig));
-        ecSig.push_back(SIGHASH_ALL);
-        BOOST_CHECK_EQUAL(VerifyPQ(CScript() << ecSig << ToByteVector(ecKey.GetPubKey()), p2pkh, tx5, amount, consensusFlags), SCRIPT_ERR_OK);
-        ecSig.back() = 0x04;
-        BOOST_CHECK_EQUAL(VerifyPQ(CScript() << ecSig << ToByteVector(ecKey.GetPubKey()), p2pkh, tx5, amount, consensusFlags), SCRIPT_ERR_EVAL_FALSE);
-    }
-    for (uint8_t scheme : {SLH, FALCON}) {
-        const PQKey key = MakeKey(scheme, scheme == SLH ? 0x51 : 0x52);
-        const CScript spk = PQPKH(KeyHashBytes(scheme, key.pk), scheme);
-        valtype sig = SignPQ(key, spk, tx5, SIGHASH_ALL, amount, 0);
-        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(sig), Chunks(key.pk)), spk, tx5, amount, consensusFlags), SCRIPT_ERR_OK);
-        sig.back() = 0x04;
-        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(sig), Chunks(key.pk)), spk, tx5, amount, consensusFlags), SCRIPT_ERR_EVAL_FALSE);
-    }
+    // A v5 (ZIP-225) transaction is not covered here: OP_CHECKPQSIG (like the set opcodes) is defined
+    // over the ZIP-243 sighash of v4 transactions only, and under Vault a v5 transaction is invalid
+    // at the transaction layer (quantum spec R-A3; pq_v5_invalid_under_vault below). The script
+    // layer alone cannot see that rule, so no v5 behaviour of the opcode is asserted as expected.
 }
 
 namespace {
@@ -1128,6 +1110,137 @@ BOOST_AUTO_TEST_CASE(pq_p2sh_wrapped_real_signature)
     ss << ToByteVector(redeem);
     BOOST_CHECK_EQUAL(VerifyPQ(ss, p2sh, tx, amount, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS), SCRIPT_ERR_OK);
     BOOST_CHECK_EQUAL(VerifyPQ(ss, p2sh, tx, amount + 1, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS), SCRIPT_ERR_EVAL_FALSE);
+}
+
+BOOST_AUTO_TEST_CASE(pq_v5_invalid_under_vault)
+{
+    // Quantum spec R-A3: under UPGRADE_VAULT a transaction whose nVersionGroupId is not the Sapling
+    // group is invalid (bad-vault-tx-version-group-id), mempool and block alike. NU5 at 5 and Vault at
+    // 10 are set directly here (a regtest node refuses -nuparams scheduling both, init.cpp).
+    SelectParams(CBaseChainParams::REGTEST);
+    for (auto idx : {Consensus::UPGRADE_OVERWINTER, Consensus::UPGRADE_SAPLING, Consensus::UPGRADE_YCASH,
+                     Consensus::UPGRADE_BLOSSOM, Consensus::UPGRADE_HEARTWOOD, Consensus::UPGRADE_CANOPY}) {
+        UpdateNetworkUpgradeParameters(idx, 1);
+    }
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_NU5, 5);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, 10);
+    const CChainParams& chainparams = Params();
+    BOOST_CHECK_EQUAL(CurrentEpochBranchId(8, chainparams.GetConsensus()), NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId);
+    BOOST_CHECK_EQUAL(CurrentEpochBranchId(10, chainparams.GetConsensus()), VAULT_BRANCH_ID);
+
+    CMutableTransaction mtx4 = SaplingTx();
+    mtx4.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    const CTransaction tx4(mtx4);
+    auto v5 = [&](uint32_t branch) {
+        CMutableTransaction m = mtx4;
+        m.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+        m.nVersion = ZIP225_TX_VERSION;
+        m.nConsensusBranchId = branch;
+        return CTransaction(m);
+    };
+    const CTransaction tx5nu5 = v5(NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId);
+    const CTransaction tx5vault = v5(VAULT_BRANCH_ID);
+
+    for (bool isMined : {false, true}) {
+        // NU5 epoch (height 8): v5 passes the version-group rules, v4 passes.
+        CValidationState s8;
+        BOOST_CHECK(ContextualCheckTransaction(tx5nu5, s8, chainparams, 8, isMined));
+        BOOST_CHECK(s8.GetRejectReason() != "bad-vault-tx-version-group-id");
+        CValidationState s8v4;
+        BOOST_CHECK(ContextualCheckTransaction(tx4, s8v4, chainparams, 8, isMined));
+        // Vault epoch (height 10, 11): v5 is invalid whatever branch id it carries; v4 passes.
+        for (int h : {10, 11}) {
+            for (const CTransaction* t : {&tx5nu5, &tx5vault}) {
+                CValidationState s;
+                BOOST_CHECK(!ContextualCheckTransaction(*t, s, chainparams, h, isMined));
+                BOOST_CHECK_EQUAL(s.GetRejectReason(), "bad-vault-tx-version-group-id");
+                int dos = 0;
+                BOOST_CHECK(s.IsInvalid(dos));
+                BOOST_CHECK_EQUAL(dos, isMined ? 100 : 10);
+            }
+            CValidationState sv4;
+            BOOST_CHECK(ContextualCheckTransaction(tx4, sv4, chainparams, h, isMined));
+        }
+    }
+
+    for (auto idx : {Consensus::UPGRADE_OVERWINTER, Consensus::UPGRADE_SAPLING, Consensus::UPGRADE_YCASH,
+                     Consensus::UPGRADE_BLOSSOM, Consensus::UPGRADE_HEARTWOOD, Consensus::UPGRADE_CANOPY,
+                     Consensus::UPGRADE_NU5, Consensus::UPGRADE_VAULT}) {
+        UpdateNetworkUpgradeParameters(idx, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    }
+    SelectParams(CBaseChainParams::MAIN);
+}
+
+BOOST_AUTO_TEST_CASE(pq_rechecks_refuse_v5)
+{
+    // Quantum spec R-A3: the mempool/miner rechecks build their sighash data with placeholder coins for
+    // inputs the view cannot see, inert only for a v4 (ZIP-243) sighash. A non-v4 transaction with a PQ
+    // input (RecheckPQScripts) or a template input (RecheckTemplateScripts) is refused explicitly.
+    SelectParams(CBaseChainParams::REGTEST);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, 10);
+    const Consensus::Params& params = Params().GetConsensus();
+
+    const PQKey key = MakeKey(SLH, 0x51);
+    const CScript pqspk = PQPKH(KeyHashBytes(SLH, key.pk), SLH);
+    vault::VaultParams vp;
+    vp.tag = {'T', 'E', 'S', 'T'};
+    vp.setId = uint256S("0x11");
+    vp.cancelSetId = uint256S("0x22");
+    vp.delay = 5;
+    vp.ownerHeight = 1000;
+    vp.owner = CPQKeyID(SLH, uint256S("0x33"));
+    const CScript vspk = vault::BuildVault(vp);
+
+    CCoinsViewDummy dummy;
+    CCoinsViewCache view(&dummy);
+    CMutableTransaction fund = SaplingTx();
+    fund.vin[0].prevout = COutPoint(uint256S("02"), 0);
+    fund.vout.resize(3);
+    fund.vout[0].scriptPubKey = pqspk;
+    fund.vout[1].scriptPubKey = vspk;
+    fund.vout[2].scriptPubKey = CScript() << OP_TRUE;
+    for (auto& o : fund.vout) o.nValue = 5000;
+    const CTransaction fundTx(fund);
+    view.ModifyCoins(fundTx.GetHash())->FromTx(fundTx, 1);
+
+    auto spend = [&](uint32_t n, bool v5) {
+        CMutableTransaction m = SaplingTx();
+        m.vin[0].prevout = COutPoint(fundTx.GetHash(), n);
+        if (v5) {
+            m.nVersionGroupId = ZIP225_VERSION_GROUP_ID;
+            m.nVersion = ZIP225_TX_VERSION;
+            m.nConsensusBranchId = VAULT_BRANCH_ID;
+        }
+        return CTransaction(m);
+    };
+    const std::string R_A3 = "non-v4 transaction (R-A3)";
+    // PQ input: v5 refused before any digest; v4 reaches the script (an empty scriptSig fails there).
+    std::optional<std::string> pq5 = vault::RecheckPQScripts(spend(0, true), view, 10, nullptr, params);
+    BOOST_REQUIRE(pq5);
+    BOOST_CHECK_EQUAL(*pq5, R_A3);
+    std::optional<std::string> pq4 = vault::RecheckPQScripts(spend(0, false), view, 10, nullptr, params);
+    BOOST_REQUIRE(pq4);
+    BOOST_CHECK(*pq4 != R_A3);
+    // Template input: the same.
+    std::optional<std::string> t5 = vault::RecheckTemplateScripts(spend(1, true), view, 10, nullptr, params);
+    BOOST_REQUIRE(t5);
+    BOOST_CHECK_EQUAL(*t5, R_A3);
+    std::optional<std::string> t4 = vault::RecheckTemplateScripts(spend(1, false), view, 10, nullptr, params);
+    BOOST_REQUIRE(t4);
+    BOOST_CHECK(*t4 != R_A3);
+    // The vault template carries OP_CHECKPQSIG (its owner selectors), so a v5 spend of it is refused
+    // by both rechecks; neither refuses a transaction that does not reach it (no PQ, no template input).
+    BOOST_CHECK(vault::RecheckPQScripts(spend(1, true), view, 10, nullptr, params) == R_A3);
+    BOOST_CHECK(!vault::RecheckTemplateScripts(spend(0, true), view, 10, nullptr, params));
+    BOOST_CHECK(!vault::RecheckPQScripts(spend(2, true), view, 10, nullptr, params));
+    BOOST_CHECK(!vault::RecheckTemplateScripts(spend(2, true), view, 10, nullptr, params));
+
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    SelectParams(CBaseChainParams::MAIN);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

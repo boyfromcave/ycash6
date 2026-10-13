@@ -160,6 +160,8 @@ bool TouchesTemplate(const CTransaction& tx, const CCoinsViewCache& view)
     return false;
 }
 
+} // namespace
+
 /** Re-run every input script of `tx` at `height`'s flags when `tx` carries an OP_CHECKPQSIG
  *  (GetPQSigOpCount). Falcon (scheme 0x02) activates at pqFalconHeight with no branch-ID change
  *  (quantum spec R-A2), so the branch-ID eviction of a reorg does not reach a Falcon spend
@@ -168,7 +170,11 @@ std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoins
                                             const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
 {
     if (tx.IsCoinBase() || GetPQSigOpCount(tx, view) == 0) return std::nullopt;
-    // 6.20.0: the precomputed data takes every input's coin (a v4 sighash ignores them).
+    // Quantum spec R-A3: OP_CHECKPQSIG is defined over the ZIP-243 sighash of v4 transactions only.
+    // Refuse anything else explicitly rather than compute a ZIP-244 digest from the placeholders below.
+    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
+    // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a placeholder,
+    // inert because only a v4 (ZIP-243) sighash is computed here (checked above).
     std::vector<CTxOut> allPrevOutputs;
     for (const CTxIn& in : tx.vin) {
         const CCoins* c = view.AccessCoins(in.prevout.hash);
@@ -190,8 +196,6 @@ std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoins
     return std::nullopt;
 }
 
-} // namespace
-
 std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
                                                   const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
 {
@@ -207,7 +211,12 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
         IntentParams ip;
         if (MatchVault(prev.scriptPubKey, vp) == Shape::NONE && MatchIntent(prev.scriptPubKey, ip) == Shape::NONE) continue;
         if (!txdata) {
-            // 6.20.0: the precomputed data takes every input's coin (a v4 sighash ignores them).
+            // Quantum spec R-A3: the vault templates are defined over the ZIP-243 sighash of v4
+            // transactions only; refuse anything else explicitly rather than compute a ZIP-244
+            // digest from the placeholders below.
+            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
+            // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a
+            // placeholder, inert because only a v4 (ZIP-243) sighash is computed here.
             std::vector<CTxOut> allPrevOutputs;
             for (const CTxIn& in : tx.vin) {
                 const CCoins* c = view.AccessCoins(in.prevout.hash);

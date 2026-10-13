@@ -1503,6 +1503,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
             }
         }
+
+        // Quantum spec R-A3: under Vault a v5 transaction is invalid, and ycashd builds V1
+        // history-tree leaves in the Vault epoch while ConnectBlock builds V2 leaves under NU5,
+        // so no order of NU5..NU6.2 and Vault is usable. Refuse the whole configuration (this
+        // also catches NU5..NU6.2 back-filled from a higher -nuparams, e.g. ZFUTURE).
+        if (consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+            for (auto i = Consensus::UPGRADE_NU5; i <= Consensus::UPGRADE_NU6_2; i = Consensus::UpgradeIndex(i + 1)) {
+                if (consensus.vUpgrades[i].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+                    return InitError("-nuparams: NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3; this node builds V1 history-tree leaves in the Vault epoch)");
+                }
+            }
+        }
     }
 
     if (mapArgs.count("-nurejectoldversions")) {
