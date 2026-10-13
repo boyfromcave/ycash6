@@ -553,7 +553,8 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     if (IsExpiredTx(iter->GetTx(), nHeight))
         return false;
 
-    // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx
+    // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx.
+    // Try also rechecks PQ input scripts and BIP68 sequence locks at nHeight (parity with v4.5.0, audit 04/F-4; see vault/node.cpp).
     if (vaultRun) {
         if (auto vaultBad = vaultRun->Try(iter->GetTx())) {
             LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", iter->GetTx().GetHash().ToString(), vaultBad->c_str());

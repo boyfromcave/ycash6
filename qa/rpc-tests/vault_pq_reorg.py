@@ -14,7 +14,8 @@ drops the next block below Falcon's height, and evicts failures with their desce
 - Before: a Falcon spend for the block below Falcon's height is refused ("scheme unknown or not
   active"); for the block at it, accepted, with a P2PKH child, and in getblocktemplate.
 - invalidateblock of the tip below Falcon's height: both are evicted, getblocktemplate has no
-  Falcon transaction, and the node keeps mining (two blocks).
+  Falcon transaction (asserted explicitly per template input, audit 04/F-4: the miner rechecks PQ
+  input scripts per candidate too), and the node keeps mining (two blocks).
 - reconsiderblock: the old chain is back, the spend is accepted again and mined at Falcon's height.
 - A mined Falcon spend resurrected by a reorg stays while the next block is at Falcon's height
   and is evicted one block lower; re-mining over the height includes it again.
@@ -79,6 +80,14 @@ class VaultPQReorgTest(BitcoinTestFramework):
         t = self.node.getblocktemplate()
         return t['height'], set(x['hash'] for x in t['transactions'])
 
+    def assert_template_has_no_falcon_input(self):
+        """The explicit negative (audit 04/F-4): no getblocktemplate transaction spends a Falcon
+        TX_PQPKH coin (the miner's TemplateRun::Try rechecks PQ input scripts at the template height)."""
+        for t in self.node.getblocktemplate()['transactions']:
+            for vin in self.node.decoderawtransaction(t['data'])['vin']:
+                assert (vin.get('txid'), vin.get('vout')) not in self.falcon_coins, \
+                    'the template carries a Falcon spend %s below Falcon\'s height' % t['hash']
+
     def fund(self, spk):
         """A confirmed VALUE output paying ``spk``, from a mature coinbase signed in Python."""
         n = self.node
@@ -127,6 +136,7 @@ class VaultPQReorgTest(BitcoinTestFramework):
         n.generate(120)
         f1 = self.fund(pq.pqpkh_script(pq.SCHEME_FN_DSA_512, pq.key_hash(pq.SCHEME_FN_DSA_512, self.falcon.pk)))
         f2 = self.fund(pq.pqpkh_script(pq.SCHEME_FN_DSA_512, pq.key_hash(pq.SCHEME_FN_DSA_512, self.falcon.pk)))
+        self.falcon_coins = {(f1, 0), (f2, 0)}
 
         print('A. a Falcon spend is refused below Falcon\'s height, accepted for the block at it')
         n.generate(FALCON - 2 - n.getblockcount())
@@ -152,6 +162,7 @@ class VaultPQReorgTest(BitcoinTestFramework):
         assert_equal(self.mempool(), set())
         height, txids = self.template_txids()
         assert_equal((height, txids), (FALCON - 1, set()))
+        self.assert_template_has_no_falcon_input()
         blocks = n.generate(2)
         assert_equal(n.getblockcount(), FALCON)
         for h in blocks:
@@ -175,6 +186,7 @@ class VaultPQReorgTest(BitcoinTestFramework):
         n.invalidateblock(old_tip)
         assert_equal(self.mempool(), set())
         assert_equal(self.template_txids(), (FALCON - 1, set()))
+        self.assert_template_has_no_falcon_input()
         n.generate(1)
         assert_equal(n.getblockcount() + 1, FALCON)
         ptxid2, ctxid2 = self.send_pair(f2)

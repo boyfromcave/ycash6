@@ -305,6 +305,18 @@ std::optional<std::string> TemplateRun::Try(const CTransaction& tx)
     trial.emplace(running);
     std::optional<std::string> bad = trial->ApplyTx(tx, height, coins);
     if (!bad) bad = RecheckTemplateScripts(tx, view, height, snapshot, params);
+    // Parity with ycash-dd's per-candidate ContextualCheckInputs / ContextualCheckSequenceLocks
+    // (audit 04/F-4): PQ input scripts at the template height's flags and branch (a Falcon spend a
+    // reorg below pqFalconHeight left behind), and BIP68 at the template height (an intent RELEASE
+    // that became too young). TemplateRun exists only where UPGRADE_VAULT is active at `height`.
+    if (!bad) bad = RecheckPQScripts(tx, view, height, snapshot, params);
+    if (!bad && !tx.IsCoinBase()) {
+        for (const CTxIn& in : tx.vin) {
+            if (!view.HaveCoins(in.prevout.hash)) { bad = std::string("sequence-locks: missing input"); break; }
+        }
+        CValidationState s;
+        if (!bad && !ContextualCheckSequenceLocks(tx, view, height, s, false)) bad = "sequence-locks: " + s.GetRejectReason();
+    }
     if (bad) trial.reset();
     return bad;
 }
