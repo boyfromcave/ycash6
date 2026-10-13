@@ -24,6 +24,7 @@ and Vault (branch ID 0x6d5b7a31) at ACT.  Checked on both sides of the activatio
   or Vault below Sapling.
 """
 
+import os
 from io import BytesIO
 from decimal import Decimal
 
@@ -58,6 +59,7 @@ from test_framework.util import (
     hex_str_to_bytes,
     nuparams,
     start_node,
+    zcashd_binary,
     start_nodes,
     stop_node,
     sync_blocks,
@@ -71,6 +73,17 @@ FEE = 10000
 NULL_FIELD = '00' * 32
 SEQ_TYPE_FLAG = 1 << 22
 
+
+
+def assert_vault_alone_refused(binary, datadir, extra=()):
+    """Quantum spec R-A3: the plain -nuparams=6d5b7a31:<h> with no Sapling at all (start_node always adds
+    Overwinter and Sapling, so ycashd is run directly here) must not start."""
+    import subprocess
+    p = subprocess.run([binary, '-datadir=' + datadir, '-discover=0', '-listen=0'] + list(extra)
+                       + ['-nuparams=6d5b7a31:10'], capture_output=True, timeout=120)
+    out = (p.stdout + p.stderr).decode('utf-8', 'replace')
+    assert p.returncode != 0, out
+    assert 'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3' in out, out
 
 class VaultUpgradeTest(BitcoinTestFramework):
 
@@ -372,7 +385,8 @@ class VaultUpgradeTest(BitcoinTestFramework):
         for nu in ('f919a198:5', '5437f330:12'):          # Ycash NU5 below Vault; NU6.2 above it
             assert_start_raises_init_error(1, self.options.tmpdir,
                                            YCASH_UPGRADE_ARGS + ['-nuparams=' + nu, nuparams(VAULT_BRANCH_ID, 10)], r_a3)
-        print('quantum spec R-A3: a node refuses Vault scheduled below Sapling')
+        print('quantum spec R-A3: a node refuses Vault scheduled below Sapling, or with no Sapling at all')
+        assert_vault_alone_refused(zcashd_binary(), os.path.join(self.options.tmpdir, 'node1'), ['-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025'])
         assert_start_raises_init_error(1, self.options.tmpdir, ['-nuparams=76b809bb:20', nuparams(VAULT_BRANCH_ID, 10)],
                                        'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3')
         self.nodes[1] = start_node(1, self.options.tmpdir, YCASH_UPGRADE_ARGS + [nuparams(VAULT_BRANCH_ID, ACT), '-txindex'])

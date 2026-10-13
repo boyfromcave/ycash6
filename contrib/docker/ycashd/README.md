@@ -18,7 +18,7 @@ Variables (unset = default):
 | `YCASHD_RPC_THREADS`, `YCASHD_RPC_WORKQUEUE` | 16, 64 | raise for a light-wallet backend |
 | `YCASHD_INSIGHT` | 1 | `experimentalfeatures` + `insightexplorer` + `txindex` (needed by lightwalletd's address RPCs; set before first sync) |
 | `YCASHD_LISTEN` | 1 | P2P listen |
-| `YCASHD_VAULT_HEIGHT` | unset | regtest only: `nuparams=6d5b7a31:<h>` |
+| `YCASHD_VAULT_HEIGHT` | unset | regtest only: `nuparams=6d5b7a31:<h>`, plus Overwinter, Sapling, Ycash, Blossom, Heartwood and Canopy (`5ba81b19 76b809bb 374d694f 8e471bd6 66314da3 19bd2d2f`) at `min(1, h)`: Vault needs Sapling active at or below its height (quantum spec R-A3), or ycashd refuses to start |
 | `YCASHD_YELLOWBACK_ATTESTOR_SET` | unset | regtest only: `yellowbackattestorset=<setid>` |
 | `YCASHD_PQ_FALCON_HEIGHT` | `0` | regtest only: `pqfalconheight=<h>`, OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from `<h>` once the vault upgrade is active. `0` mirrors mainnet/testnet (Falcon from the vault activation, D-Q-2); `off` = SLH-DSA only |
 | `YCASHD_PQ_FEERATE` | unset (= the relay floor) | `pqfeerate=<YEC/kB>`, the wallet's fallback fee rate for a post-quantum input |
