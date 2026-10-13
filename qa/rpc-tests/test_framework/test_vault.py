@@ -437,7 +437,7 @@ class ModelTests(unittest.TestCase):
         o2, _ = c.lock(vp)
         tx = v.make_tx([(o1[0], o1[1], 0xFFFFFFFE), (o2[0], o2[1], 0xFFFFFFFE)], [(2 * val - v.VAULT_FEE, c.dest)],
                        lock_time=60)
-        self.assertEqual(c.reject(tx), 'bad-vault-template-count')
+        self.assertEqual(c.reject(tx), 'bad-txns-vault-multi')
 
     def test_dormancy_owner_released(self):
         c = Chain()

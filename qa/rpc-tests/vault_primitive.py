@@ -300,7 +300,7 @@ class VaultPrimitiveTest(VaultTestBase):
         ss1 = v.vault_unlock_scriptsig(v.set_sigs_for(two, 1, spk2, 2 * COIN, sid, v.ROLE_UNLOCK, m[:2]))
         t = v.tx_from_hex(v.node_sign(self.node, two, ss0, 0))
         t.vin[1].scriptSig = ss1
-        self.reject(v.tx_hex(t), 'bad-txns-vault-multi', 'bad-vault-template-count', 'two template inputs')
+        self.reject(v.tx_hex(t), 'bad-txns-vault-multi', 'bad-txns-vault-multi', 'two template inputs')
         # the selector as a data push after valid signatures: the script would pass, S-1 does not
         tx = self.unlock_tx(out, vp, val, recips, COIN)
         sigs = v.set_sigs_for(tx, 0, spk, val, sid, v.ROLE_UNLOCK, m[:2])

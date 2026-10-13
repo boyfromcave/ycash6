@@ -1766,7 +1766,7 @@ class VaultModel(object):
                 if coin.height < self.activation_height:
                     raise VaultError('bad-txns-vault-preactivation')              # S-0 (audit 01/V-1)
                 if tins:
-                    raise VaultError('bad-vault-template-count')                  # S-1
+                    raise VaultError('bad-txns-vault-multi')                  # S-1
                 tins.append((i, key, coin, vp, ip))
         v_outs = [(n, o, parse_vault(o.scriptPubKey)) for n, o in enumerate(tx.vout)]
         v_outs = [(n, o, p) for n, o, p in v_outs if p is not None]
