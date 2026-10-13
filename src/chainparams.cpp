@@ -852,6 +852,10 @@ public:
     void SetRegTestPqFalconHeight(int height) {
         consensus.pqFalconHeight = height;
     }
+
+    void SetRegTestRequireStandard(bool requireStandard) {
+        fRequireStandard = requireStandard;
+    }
 };
 static CRegTestParams regTestParams;
 
@@ -909,6 +913,12 @@ void SelectParams(const std::string& network)
     if (network == CBaseChainParams::REGTEST) {
         int height = GetBoolArg("-pqfalcon", false) ? 0 : Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         regTestParams.SetRegTestPqFalconHeight(GetArg("-pqfalconheight", height));
+    }
+
+    // Relay policy on regtest (default off, as ever): -acceptnonstdtxn=0 enforces IsStandardTx / AreInputsStandard
+    // so a functional test can exercise standardness (audit 01/V-4, vault_policy.py); init.cpp refuses it elsewhere.
+    if (network == CBaseChainParams::REGTEST && mapArgs.count("-acceptnonstdtxn")) {
+        regTestParams.SetRegTestRequireStandard(!GetBoolArg("-acceptnonstdtxn", true));
     }
 }
 
