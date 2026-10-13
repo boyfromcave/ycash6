@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "9500203d0309d1588804f06ba9f3197efe9aa3d91d692e775e2fcea08b8002a1"
+    "sha256": "4d81931a8a7514489c538eb62a3a2ff3a61ec0c480e2c6548e5c01dfaf4d20d3"
   },
   "branchid": "6d5b7a31",
   "units": {

@@ -743,9 +743,12 @@ CMutableTransaction NewTx()
  *  (vault_refee) pays it; keep it small). */
 enum class FundMode { LARGEST_FIRST, SMALL_CHANGE };
 
-/** This wallet's confirmed, spendable, unlocked P2PKH coins outside `used`, largest first. */
+/** This wallet's confirmed, spendable, unlocked P2PKH coins outside `used`, largest first -- each also unspent in the
+ *  node's UTXO view (pcoinsTip + mempool, GetCoin): the wallet learns of a block's spends on its own notification
+ *  thread, so right after a block it can still count a coin the block spent as unspent (refee-utxo). */
 std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used)
 {
+    AssertLockHeld(cs_main);
     std::vector<COutput> coins;
     pwalletMain->AvailableCoins(coins, std::nullopt, true, NULL, false, true);
     std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() > b.Value(); });
@@ -758,6 +761,9 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
         if (!Solver(spk, t, sol) || t != TX_PUBKEYHASH) continue;
         COutPoint op(c.tx->GetHash(), c.i);
         if (used.count(op)) continue;
+        CTxOut utxo;
+        int height;
+        if (!GetCoin(op, utxo, height) || height < 0 || utxo != c.tx->vout[c.i]) continue;   // spent, or not confirmed
         eligible.emplace_back(op, c.Value());
     }
     return eligible;
@@ -870,11 +876,15 @@ void SignWalletInputs(CMutableTransaction& mtx);
 uint256 Broadcast(const CTransaction& tx);
 
 /** A wallet coin of exactly `value` for a re-funded spend, which can have no change output (its outputs are bound by
- *  the set signatures): an existing confirmed coin within VAULT_RPC_MIN_CHANGE above it, else a self-send of exactly
- *  `value` from this wallet's coins, broadcast now (the re-funded spend chains on it in the mempool). Locked. */
-COutPoint ExactCoin(CAmount value, const std::set<COutPoint>& exclude)
+ *  the set signatures): an existing confirmed coin within VAULT_RPC_MIN_CHANGE above it, never one of `replacing`
+ *  (the inputs being replaced), else a self-send of exactly `value` from this wallet's unspent coins (which may
+ *  spend a still-unspent replaced input: the new coin differs from it), broadcast now (the re-funded spend chains on
+ *  it in the mempool). Locked. */
+COutPoint ExactCoin(CAmount value, const std::set<COutPoint>& exclude, const std::set<COutPoint>& replacing)
 {
-    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(exclude);
+    std::set<COutPoint> notExact = exclude;
+    notExact.insert(replacing.begin(), replacing.end());
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(notExact);
     for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
         if (it->second >= value && it->second < value + VAULT_RPC_MIN_CHANGE) {
             COutPoint op = it->first;
@@ -913,13 +923,35 @@ std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut&
     for (const CTxOut& o : mtx.vout) out += o.nValue;
     const CAmount needed = out + VAULT_RPC_FEE - coin.nValue;
     try {
-        if (needed > 0) mtx.vin.push_back(CTxIn(ExactCoin(needed, {templ.prevout}), CScript(), CTxIn::SEQUENCE_FINAL));
+        if (needed > 0)
+            mtx.vin.push_back(CTxIn(ExactCoin(needed, {templ.prevout}, std::set<COutPoint>(old.begin(), old.end())), CScript(), CTxIn::SEQUENCE_FINAL));
     } catch (...) {
         for (COutPoint op : released) pwalletMain->LockCoin(op);
         throw;
     }
     if (SetSighash(mtx, 0, coin) != before)
         throw JSONRPCError(RPC_INTERNAL_ERROR, "re-funding changed the set sighash");
+    // Sanity (refee-utxo): every new input unspent in the node's view, none of them a replaced one, and a fee in
+    // (0, cap]. Refused otherwise (the new input's lock is released).
+    CAmount in = coin.nValue;
+    for (size_t i = 1; i < mtx.vin.size(); i++) {
+        CTxOut prev;
+        int ph;
+        const COutPoint& op = mtx.vin[i].prevout;
+        if (!GetCoin(op, prev, ph) || std::find(old.begin(), old.end(), op) != old.end()) {
+            UnlockBuildInputs(templ.prevout, mtx);
+            for (COutPoint r : released) pwalletMain->LockCoin(r);
+            throw JSONRPCError(RPC_WALLET_ERROR, "vault_refee: the new fee input " + op.ToString() + " is spent or is a replaced input; nothing was changed");
+        }
+        in += prev.nValue;
+    }
+    const CAmount fee = in - CTransaction(mtx).GetValueOut();
+    if (fee <= 0 || fee > YedMaxTxFee()) {
+        UnlockBuildInputs(templ.prevout, mtx);
+        for (COutPoint r : released) pwalletMain->LockCoin(r);
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("vault_refee: the re-funded spend would pay a fee of %s (allowed: above 0, at most %s); nothing was changed",
+                                                       FormatMoney(fee), FormatMoney(YedMaxTxFee())));
+    }
     std::set<COutPoint> now;
     for (const CTxIn& in : mtx.vin) now.insert(in.prevout);
     for (COutPoint op : old)
