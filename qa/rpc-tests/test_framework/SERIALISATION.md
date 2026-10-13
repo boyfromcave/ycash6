@@ -17,15 +17,17 @@ primitive's set `attestorSetId`) is marked **(P4-b)**. In-term claims
 and the vault record remembers it; RED-4 decides a claim at every height; CLAIMING collateral stays in the
 system ratio until release) are marked **(IT-n)**.
 
-The golden vector `yellowback_golden.json` (440 synthetic heights, 444 block entries, regtest
+The golden vector `yellowback_golden.json` (440 synthetic heights, 454 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false}`) pins the result of all of these choices: state hash
-`ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64`. Four entries are flagged
-`"invalid"` (heights 137, 217, 231, 251): they are rejected and not applied, and the next entry is
+`ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64`. Fourteen entries are flagged
+`"invalid"`, one per consensus verdict the vector covers (audit 03/T-1; `golden_rejected` in
+`test_yellowback_model.py` lists them): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
-Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change,
-and update `GOLDEN_STATE_HASH` in the test and the C++ `statehash_golden_vector` together.
+Regenerate with `python test_yellowback_model.py --write-golden` only after a deliberate change, in a commit
+of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of rejected blocks
+(`doc/yellowback-testing.md`); `--check-golden` compares the committed file with the model's output byte for byte.
 
 ## 1. State-hash preimage (§3.6 *State hash*, N18)
 

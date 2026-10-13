@@ -107,6 +107,8 @@ class Chain(object):
         self.funding = 0
         self.refused = {}      # U-21: txid -> the verdict that made it invalid (its block was rejected and mined again without it)
         self.refused_logs = {}  # txid -> the model's TxLogRecord of the refused evaluation
+        self.side = False       # rejected(): fund inputs come from a separate namespace
+        self.side_funding = 0
 
     def block_hash(self, h):
         return ym.sha256(b'golden-block-%d' % h)[::-1].hex()
@@ -162,8 +164,20 @@ class Chain(object):
             self.mine((1 if signal else 0, price, 0, key))
 
     def fund_input(self):
+        if self.side:
+            self.side_funding += 1
+            return (ym.sha256(b'rejected-funding-%d' % self.side_funding)[::-1].hex(), 0, b'', 0xFFFFFFFF)
         self.funding += 1
         return (outpoint_hex(self.funding), 0, b'', 0xFFFFFFFF)
+
+    def rejected(self, build):
+        """Build a transaction the module must refuse (U-21) with fund and carrier inputs from a separate namespace,
+        so adding it to a block leaves every accepted transaction -- and so the state hash -- byte-identical."""
+        self.side = True
+        try:
+            return build()
+        finally:
+            self.side = False
 
     # -- transaction builders (section 3.5 shapes) --------------------------
 
@@ -1520,9 +1534,17 @@ class CancelTests(unittest.TestCase):
 # section 3.6  State hash and the golden vector
 
 GOLDEN_BLOCKS = 440
+
+
+def golden_rejected(claim_height):
+    """The golden's rejected blocks in order, (height, verdict) -- the vector's manifest (doc/yellowback-testing.md); the
+    C++ statehash_golden_vector carries the same list.  claim_height is where build_golden's emergency claim landed."""
+    return [(137, 'bad-mint-amount'), (141, 'bad-mint-collateral'), (146, 'yed-template-output'), (150, 'bad-redeem-early-fee'),
+            (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
+            (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
+            (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 9, 'intent-cancel-residual')]
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
-
 
 
 def build_golden():
@@ -1530,9 +1552,15 @@ def build_golden():
     lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
     mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
     intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
-    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Three blocks are rejected and
-    mined again without the offending transaction (U-21): 137 (a mint of $50), 217 (an owner spend
-    with no payload) and 251 (an armed mint without a bundle)."""
+    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Fourteen blocks are
+    rejected and mined again without the offending transaction (U-21), one per consensus verdict the vector covers
+    (audit 03/T-1; GOLDEN_REJECTED lists them): the original four -- 137 (a mint of $50), 217 (an owner spend with no
+    payload), 231 (a v3 ATTESTOR_REGISTER) and 251 (an armed mint without a bundle) -- and, each built by
+    Chain.rejected() so the accepted chain is unchanged, an over-mint at required - 1 (141), a YED V output no rule
+    created (146), an early owner redeem without the early fee (150), a short burn (185), a bundle with a bad
+    signature (252), a bundle drawn for another selector replayed on a mint (253), a non-held notice carrying a fresh
+    attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 (claim + 1)
+    and a cancel of the owner's residual intent (claim + 9)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
     c = Chain(params)
     # IT-2 keeps the v3 tail on RED-4's path (b): at 300 % collateral minted at $0.009 the vault sits at ~127 %
@@ -1687,6 +1715,67 @@ def build_golden():
                 rec = c.model.attestors[q]
                 txs_at[name] = c.bond_spend_tx(rec.bond_outpoint, ya.bond_script(BONDS[q][1], rec.bond_locktime), rec.bond_locktime)
                 txs.append(txs_at[name])
+        # ---- audit 03/T-1: one rejected block per verdict, the refused transaction first in its block
+        bad = []
+        if h == 141:                                            # MINT-5: collateral one zat below the requirement
+            s141 = c.model.snapshot(139)
+            req = ym.required_zat(10_000, ym.min_ratio_bps(params.base_ratio_bps[0], s141.sigma_mult_bps), s141.p_mint)
+            bad.append(c.rejected(lambda: c.mint_tx(10_000, 48, 139, req - 1, fee_key=KEY3)))
+        elif h == 146:                                          # U-23: a YED V output that no mint, claim or cancel created
+            bad.append(c.rejected(lambda: ym.serialize_tx_v4([c.fund_input()], [(10 ** 9, ym.yed_vault_script(params, G_OWNER, 144))]).hex()))
+        elif h == 150:                                          # IT-9': an owner redeem before lockHeight paying only the protocol fee
+            op4 = (txid_of(txs_at['mint4']), 0)
+            v = c.model.vaults[op4]
+            payee = c.model.eligible_payees(148)[0]
+            bad.append(c.rejected(lambda: c.spend_tx(op4, None, 'owner', [(txid_of(txs_at['mint4']), 1)], 148, payee,
+                                                     c.vault_fee(op4), [], collateral_out=v.collateral_zat - 10 ** 9)))
+        elif h == 185:                                          # RED-2: 6,000 cents burned for a 10,000-cent debt
+            op1 = (txid_of(txs_at['mint1']), 0)
+            v = c.model.vaults[op1]
+            bad.append(c.rejected(lambda: c.spend_tx(op1, None, 'owner', [(txid_of(txs_at['xfer1']), 0)], 183, KEY2,
+                                                     c.vault_fee(op1, h), [], collateral_out=v.collateral_zat - 10 ** 9)))
+        elif h in (252, 253):                                   # BUNDLE-1: a bad signature (252); a vault selector's bundle replayed on a mint (253)
+            ref = h - 2
+            x = c.model.snapshot(ref).p_mint
+            if h == 252:
+                bundle, sel = c.bundle_for(ref, b'', {'*': 9_000})
+                atts = ya.decode_bundle(bundle)
+                seq0 = sel[0]
+                atts[0] = ya.sign_attestation(ATTESTORS[seq0][0], seq0, 9_000, ref, c.block_hash(ref - 1))   # signs the wrong block hash
+                bundle = ya.encode_bundle(atts)
+            else:                                               # the bundle mint5's vault would get as a claim selector, replayed on a mint
+                bundle, sel = c.bundle_for(ref, ya.outpoint_selector(txid_of(txs_at['mint5']), 0), {'*': 9_000})
+            fee = c.mint_fee(10_000, ref, p_mint=min(x, 9_000))
+            bad.append(c.rejected(lambda: c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref, p_mint=min(x, 9_000)), fee_key=KEY1,
+                                                    carrier=bundle, p_mint=min(x, 9_000),
+                                                    attest_fee=(ym.hash160(BONDS[sel[0]][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)))))
+        elif h == 292:                                          # liveness: a notice that does not hold (one stands) with a fresh attestation
+            vault = (txid_of(txs_at['mint5']), 0)
+            bundle, _ = c.bundle_for(290, ya.outpoint_selector(*vault), {'*': 3_000})
+            bad.append(c.rejected(lambda: c.notice_tx(vault, 290, bundle)))
+        elif 'claim5' in txs_at and txs_at['claim5'] in txs:    # RED-5: the same claim one zat short of the residual
+            vault = (txid_of(txs_at['mint5']), 0)
+            v = c.model.vaults[vault]
+            ref = h - 2
+            selector = ya.outpoint_selector(*vault)
+            sel = c.model.selected(ref, selector)
+            bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
+            fee = c.vault_fee(vault, owner=False)
+            payee = [q for q in sel if q != v3['lazy']][0]
+            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
+                                                     carrier=bundle, collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
+                                                     attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
+                                                     residual=(ym.pqpkh_script(G_OWNER), v3['residual'] - 1))))
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1:     # I-2 / U-23: the cancel's re-lock at vout 1
+            vault = (txid_of(txs_at['mint5']), 0)
+            value = c.model.vaults[vault].collateral_zat - v3['residual']
+            bad.append(c.rejected(lambda: c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, value,
+                                                      vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(vault, value)])))
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 9:     # U-23: the owner's residual intent is never cancelled
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
+            bad.append(c.rejected(lambda: c.cancel_tx(res, (txid_of(txs_at['cancel5']), 0), v3['residual'])))
+        txs = bad + txs
         if h == 5:
             c.mine(None, txs)                                          # untagged
         elif h == 9:
@@ -1717,10 +1806,11 @@ def golden_document(c):
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
                        'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
                        'at exit + BOND_MATURITY). '
-                       'txs[0] of every block is the coinbase. Blocks flagged "invalid" (137 bad-mint-amount, 217 '
-                       'vault-spend-malformed, 231 attestor-register-retired, 251 mint9-no-bundle) are rejected and not applied '
-                       '(U-21); the next entry is the same height mined again without the offending transaction.'
-                       % (set_id, GOLDEN_LIVENESS, GOLDEN_BLOCKS),
+                       'txs[0] of every block is the coinbase. Blocks flagged "invalid" (%s; one per verdict, audit 03/T-1) are '
+                       'rejected and not applied (U-21); the next entry is the same height mined again without the offending '
+                       'transaction.'
+                       % (set_id, GOLDEN_LIVENESS, GOLDEN_BLOCKS,
+                          ', '.join('%d %s' % hv for hv in golden_rejected(c.v3['claim_height']))),
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': set_id,
                    'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
         'stateHash': c.model.state_hash(),
@@ -1849,13 +1939,16 @@ class StateHashTests(unittest.TestCase):
         self.assertIn(17, m.tags)
         self.assertFalse(m.tags[9].is_quote)
         self.assertEqual(m.vaults[(txid_of(txs_at['mint1']), 0)].status, ym.V_CLOSED)
-        # U-21: four blocks rejected, none applied; the same heights mined again without the offending transaction
-        self.assertEqual([(v.height, v.verdict) for v in m.rejected],
-                         [(137, 'bad-mint-amount'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
-                          (251, 'mint9-no-bundle')])
+        # U-21: one rejected block per verdict (audit 03/T-1), none applied; the same heights mined again without the
+        # offending transaction (the C++ statehash_golden_vector's `expected` map is this list)
+        v3 = c.v3
+        rejected = golden_rejected(v3['claim_height'])
+        self.assertEqual([(v.height, v.verdict) for v in m.rejected], rejected)
+        self.assertGreaterEqual(len(rejected), 14)
+        self.assertEqual(len(set(v for _h, v in rejected)), len(rejected))          # one block per verdict
         self.assertTrue(all(v.rejected for v in m.rejected))
-        self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [137, 217, 231, 251])
-        self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + 4)
+        self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [h for h, _v in rejected])
+        self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + len(rejected))
         self.assertEqual(c.refused[txid_of(txs_at['legacyreg'])], 'attestor-register-retired')   # P4-b
         self.assertNotIn((txid_of(txs_at['mint2']), 0), m.vaults)                      # no VOID vault (section 15.10)
         self.assertEqual(c.refused[txid_of(txs_at['mint2'])], 'bad-mint-amount')
