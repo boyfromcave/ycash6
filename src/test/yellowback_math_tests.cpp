@@ -10,7 +10,10 @@
 #include "yellowback/math.h"
 #include "yellowback/params.h"
 
+#include "test/data/yellowback_math_cases.json.h"
 #include "test/test_bitcoin.h"
+
+#include <univalue.h>
 
 #include <limits>
 
@@ -1087,6 +1090,63 @@ BOOST_AUTO_TEST_CASE(price2_combine_takes_the_conservative_side)
     // arith_uint256) gives the cap, never a wrapped value; HALT-3's int64 products stay below 4.3e13.
     BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MIN, PRICE_MAX }, 10000, 1152, 30000), 30000);
     BOOST_CHECK_EQUAL(SigmaMultBps({ PRICE_MAX, PRICE_MAX }, 10000, 1152, 30000), 10000);
+}
+
+// Rule: MINT-5
+// Rule: FEE-1
+// Rule: IT-9
+// Rule: AFEE-1
+// Rule: RED-4
+// Rule: RED-5
+// Rule: HALT-2
+// Rule: MINT-6
+// audit 03/T-3: src/test/data/yellowback_math_cases.json is computed in exact rationals from the spec text by
+// test_yellowback_math_spec.py (never by the model, which mirrors this file); math.h must reproduce every row.
+BOOST_AUTO_TEST_CASE(math_spec_rational_cases)
+{
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_math_cases, json_tests::yellowback_math_cases + sizeof(json_tests::yellowback_math_cases))));
+    const UniValue& rows = doc["cases"];
+    BOOST_REQUIRE(rows.size() >= 50);
+    const Params P = MainParams();
+    auto opt = [](const UniValue& e) -> std::optional<int64_t> { return e.isNull() ? std::nullopt : std::optional<int64_t>(e.get_int64()); };
+    int checked = 0;
+    for (size_t i = 0; i < rows.size(); i++) {
+        const UniValue& r = rows[i];
+        const std::string fn = r["fn"].get_str();
+        const UniValue& a = r["args"];
+        const UniValue& e = r["expect"];
+        auto arg = [&](size_t k) { return a[k].get_int64(); };
+        const std::string what = fn + " " + a.write();
+        if (fn == "RequiredCollateral") {
+            const std::optional<CAmount> got = RequiredCollateral(arg(0), (int)arg(1), arg(2));
+            BOOST_CHECK_MESSAGE(got == opt(e), what);
+        } else if (fn == "ProtocolFeeZat") {
+            BOOST_CHECK_MESSAGE(ProtocolFeeZat(arg(0), arg(1), P) == opt(e), what);
+        } else if (fn == "ProtocolFeeCents") {
+            BOOST_CHECK_MESSAGE(ProtocolFeeCents(arg(0), P) == e.get_int64(), what);
+        } else if (fn == "EarlyRedeemFeeZat") {
+            BOOST_CHECK_MESSAGE(EarlyRedeemFeeZat(arg(0), (int)arg(1), arg(2)) == e.get_int64(), what);
+        } else if (fn == "AttestFeeZat") {
+            BOOST_CHECK_MESSAGE(AttestFeeZat(arg(0), (int)arg(1)) == e.get_int64(), what);
+        } else if (fn == "ClaimantMaxZat") {
+            BOOST_CHECK_MESSAGE(ClaimantMaxZat(arg(0), (int)arg(1), arg(2)) == opt(e), what);
+        } else if (fn == "ResidualMinZat") {
+            BOOST_CHECK_MESSAGE(ResidualMinZat(arg(0), P) == e.get_int64(), what);
+        } else if (fn == "GlobalRatioBps") {
+            BOOST_CHECK_MESSAGE(GlobalRatioBps(arg(0), arg(1), arg(2)) == opt(e), what);
+        } else if (fn == "CapCents") {
+            BOOST_CHECK_MESSAGE(CapCents(arg(0), arg(1)) == opt(e), what);
+        } else if (fn == "SupplyCapCents") {
+            BOOST_CHECK_MESSAGE(SupplyCapCents(arg(0), arg(1), (int)arg(2)) == opt(e), what);
+        } else if (fn == "IsUnderwater") {
+            BOOST_CHECK_MESSAGE(IsUnderwater(arg(0), arg(1), arg(2), (int)arg(3)) == e.get_bool(), what);
+        } else {
+            BOOST_FAIL("unknown case " + fn);
+        }
+        checked++;
+    }
+    BOOST_CHECK_EQUAL(checked, (int)rows.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -4544,4 +4544,222 @@ BOOST_AUTO_TEST_CASE(in_term_halt_ratio_counts_claiming_vault)
     BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, each);
 }
 
+// ===========================================================================
+// The claim intent's attestor cancel (U-23, U-24, I-2; audit 03/T-2: the cancel path's verdicts, totals and undo)
+
+namespace {
+
+/**
+ * Two ACTIVE vaults; the pools fall to $0.009, so `w` (300 %) is under theta and is claimed on path (a) at the
+ * construction (its claimant intent at claim:0, no residual due). CancelTx builds the attestor CANCEL of that
+ * intent (selector 2; the set signature is a placeholder: EvaluateBlock reads the selector, the primitive checks
+ * the signature) with the re-created vault at vout[0] unless `outs` says otherwise.
+ */
+struct CancelFixture
+{
+    Fixture f;
+    uint256 v, w, claimTxid;
+    CAmount each;
+    Totals beforeClaim, afterClaim;
+
+    CancelFixture()
+    {
+        f.Activate();
+        v = f.MintActive(10000);
+        w = f.MintActive(10000);
+        each = f.Vault(w)->collateralZat;
+        for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+        beforeClaim = f.GetTotals();
+        SpendOpts o; o.ownerPath = false;
+        CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
+        BOOST_REQUIRE_EQUAL(Spend(f, w, claim).verdict, verdict::OK);
+        claimTxid = CTransaction(claim).GetHash();
+        afterClaim = f.GetTotals();
+        BOOST_REQUIRE_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMING);
+    }
+    COutPoint Intent() const { return COutPoint(claimTxid, 0); }
+    /** The claimed vault's V script: what a cancel must re-create at vout[0]. */
+    CScript VaultScript() const
+    {
+        const VaultRecord r = f.Vault(w).value();
+        return YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight);
+    }
+    CTxOut Relock() const { return CTxOut(each, VaultScript()); }
+    CMutableTransaction CancelTx(std::optional<std::vector<CTxOut>> outs = std::nullopt, CScript scriptSig = CScript() << valtype(65, 0) << OP_2)
+    {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(Intent(), scriptSig, 0xFFFFFFFF));
+        m.vin.push_back(CTxIn(f.FakeInput()));                 // the canceller's fee input
+        m.vout = outs.value_or(std::vector<CTxOut>{ Relock() });
+        return m;
+    }
+    /** Mine `tx` at tip + 1 (pools at $0.009); returns the verdict that refused it, "" when it was applied. */
+    std::string Mine(const CMutableTransaction& tx)
+    {
+        f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { tx });
+        return f.Refused(CTransaction(tx).GetHash());
+    }
+};
+
+} // namespace
+
+// Rule: U-23
+// Rule: U-24
+// Rule: I-2
+// Rule: IT-6
+BOOST_AUTO_TEST_CASE(intent_cancel_recreates_the_vault_at_vout0)
+{
+    CancelFixture c;
+    const VaultRecord claiming = c.f.Vault(c.w).value();
+    BOOST_CHECK_EQUAL(claiming.burnedCents, 10000);
+    BOOST_CHECK_EQUAL(c.afterClaim.supplyCents, c.beforeClaim.supplyCents - 10000);       // RED-2: the claim burned the debt
+    BOOST_CHECK_EQUAL(c.afterClaim.activeVaults, c.beforeClaim.activeVaults - 1);
+    BOOST_CHECK_EQUAL(c.afterClaim.collateralZat, c.beforeClaim.collateralZat);           // IT-6: still counted while CLAIMING
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    const uint256 txid = CTransaction(cancel).GetHash();
+    BOOST_CHECK(!c.f.Vault(c.w).has_value());                                             // the CLAIMING record moved
+    const std::optional<VaultRecord> back = c.f.Vault(txid);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK_EQUAL(back->status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(back->mintedCents, 10000);
+    BOOST_CHECK_EQUAL(back->burnedCents, 0);
+    BOOST_CHECK_EQUAL(back->collateralZat, c.each);                                       // the re-lock's value
+    BOOST_CHECK_EQUAL(back->closeHeight, 0);
+    BOOST_CHECK(back->closingTxid.IsNull());
+    BOOST_CHECK_EQUAL(back->pMint, claiming.pMint);                                       // FEE-1': the same position
+    BOOST_CHECK_EQUAL(back->mintHeight, claiming.mintHeight);
+    BOOST_CHECK(!State(c.f.view).GetIntent(c.Intent()).has_value());
+    const TxLogRecord log = c.f.Log(txid).value();
+    BOOST_CHECK_EQUAL(log.type, (uint8_t)TxLogType::CLAIM_CANCEL);
+    BOOST_CHECK_EQUAL(log.verdict, verdict::OK);
+    BOOST_CHECK(log.closedVaults == std::vector<COutPoint>({ COutPoint(c.w, 0) }));
+    BOOST_CHECK(log.reopenedVaults == std::vector<COutPoint>({ COutPoint(txid, 0) }));
+    const Totals t = c.f.GetTotals();
+    BOOST_CHECK_EQUAL(t.activeVaults, c.beforeClaim.activeVaults);                        // +1: the vault is ACTIVE again
+    BOOST_CHECK_EQUAL(t.claimedVaults, c.beforeClaim.claimedVaults);                      // a cancel never counts as a claim
+    BOOST_CHECK_EQUAL(t.collateralZat, c.afterClaim.collateralZat + c.each - claiming.collateralZat);
+    // U-24 / 03/M-1: the cancel does not credit supply -- the claim's burn is not refunded, so from here the
+    // re-created vault's mintedCents is not in supplyCents (sum of ACTIVE mintedCents = supplyCents is no invariant)
+    BOOST_CHECK_EQUAL(t.supplyCents, c.afterClaim.supplyCents);
+    BOOST_CHECK_EQUAL(log.burned, 0);
+}
+
+// Rule: U-23
+// Rule: U-24
+BOOST_AUTO_TEST_CASE(intent_cancel_of_residual_invalid)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    SpendOpts o; o.residualValue = g.Residual(g.f.tip - 1);
+    CMutableTransaction claim = g.Claim(o);
+    RedResult r = g.Mine(claim);
+    BOOST_REQUIRE_EQUAL(r.verdict, verdict::OK);
+    const uint256 claimTxid = CTransaction(claim).GetHash();
+    // the owner's residual intent is the claim's last output
+    const uint32_t resVout = (uint32_t)claim.vout.size() - 1;
+    std::optional<IntentRecord> ir = State(g.f.view).GetIntent(COutPoint(claimTxid, resVout));
+    BOOST_REQUIRE(ir.has_value());
+    BOOST_REQUIRE(ir->Role() == IntentRole::RESIDUAL);
+    const VaultRecord rec = g.f.Vault(g.w).value();
+    const CScript vs = YedVaultScriptAt(g.f.P, rec.Owner(), rec.ownerHeight, rec.appHeight);
+    CMutableTransaction cancel;
+    cancel.vin.push_back(CTxIn(COutPoint(claimTxid, resVout), CScript() << valtype(65, 0) << OP_2, 0xFFFFFFFF));
+    cancel.vin.push_back(CTxIn(g.f.FakeInput()));
+    cancel.vout.push_back(CTxOut(claim.vout[resVout].nValue, vs));
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { cancel });
+    BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(cancel).GetHash()), verdict::INTENT_CANCEL_RESIDUAL);
+    BOOST_CHECK(State(g.f.view).GetIntent(COutPoint(claimTxid, resVout)).has_value());      // U-21: nothing applied
+    BOOST_CHECK_EQUAL(g.f.Vault(g.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_relock_not_vout0_invalid)
+{
+    CancelFixture c;
+    const CTxOut change(1000, GetScriptForDestination(c.f.userKey.GetPubKey().GetID()));
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ change, c.Relock() });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);              // U-21: refused, not applied
+    BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_two_relocks_invalid)
+{
+    CancelFixture c;
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ c.Relock(), CTxOut(1000, c.VaultScript()) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: I-2
+BOOST_AUTO_TEST_CASE(intent_cancel_relock_script_differs_invalid)
+{
+    CancelFixture c;
+    // no output carries the claimed vault's script: the value goes to a P2PKH
+    CMutableTransaction cancel = c.CancelTx(std::vector<CTxOut>{ CTxOut(c.each, GetScriptForDestination(c.f.userKey.GetPubKey().GetID())) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel), verdict::INTENT_CANCEL_NO_VAULT);
+    // a V of another owner at vout[0] is not the claimed vault either
+    const VaultRecord r = c.f.Vault(c.w).value();
+    const CKey other = CKey::TestOnlyRandomKey(true);   // 6.20.0: no CKey::MakeNewKey
+    const CScript otherV = YedVaultScriptAt(c.f.P, TestPQOwner(other.GetPubKey()), r.ownerHeight, r.appHeight);
+    BOOST_REQUIRE(otherV != c.VaultScript());
+    CMutableTransaction cancel2 = c.CancelTx(std::vector<CTxOut>{ CTxOut(c.each, otherV) });
+    BOOST_CHECK_EQUAL(c.Mine(cancel2), verdict::INTENT_CANCEL_NO_VAULT);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+BOOST_AUTO_TEST_CASE(intent_cancel_payload_or_selector3_malformed)
+{
+    CancelFixture c;
+    // a release or cancel carries no Yellowback payload
+    std::vector<CTxOut> outs{ c.Relock(), CTxOut(0, PayloadScript(EncodePayload(Payload::Transfer({})))) };
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(outs)), verdict::INTENT_SPEND_MALFORMED);
+    // selector 3 (the owner's released path) is not an intent path
+    BOOST_CHECK_EQUAL(c.Mine(c.CancelTx(std::nullopt, CScript() << valtype(65, 0) << OP_3)), verdict::INTENT_SPEND_MALFORMED);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+}
+
+// Rule: U-23
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(intent_cancel_erases_the_notice)
+{
+    CancelFixture c;
+    // IN-2 erased any notice when the vault left ACTIVE at the claim; a record standing at the CLAIMING outpoint
+    // (forced in here) is erased by the cancel too, so the re-created vault starts without one
+    NoticeRecord n;
+    n.height = c.f.tip;
+    n.refHeight = c.f.tip - 2;
+    n.pEmerg = 9000;
+    State(c.f.view).Put(keys::Notice(COutPoint(c.w, 0)), n);
+    BOOST_REQUIRE(c.f.Notice(c.w).has_value());
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    BOOST_CHECK(!c.f.Notice(c.w).has_value());
+    BOOST_CHECK(!c.f.Notice(CTransaction(cancel).GetHash()).has_value());
+}
+
+// Rule: U-23
+// Rule: UNDO
+BOOST_AUTO_TEST_CASE(intent_cancel_undo_roundtrip)
+{
+    CancelFixture c;
+    const std::string claiming = Hash(c.f.view);
+    const MemoryStateView before = c.f.view;
+    CMutableTransaction cancel = c.CancelTx();
+    BOOST_REQUIRE_EQUAL(c.Mine(cancel), "");
+    BOOST_CHECK(Hash(c.f.view) != claiming);
+    c.f.Undo();
+    BOOST_CHECK_EQUAL(Hash(c.f.view), claiming);
+    BOOST_CHECK(c.f.view == before);
+    BOOST_CHECK_EQUAL(c.f.Vault(c.w)->status, (uint8_t)VaultStatus::CLAIMING);
+    BOOST_CHECK(State(c.f.view).GetIntent(c.Intent()).has_value());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

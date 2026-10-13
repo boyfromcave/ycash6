@@ -14,9 +14,15 @@ or from this directory:
 
     ../../../../.venv/bin/python test_yellowback_model.py -v
 
-Regenerate the golden vector (after a deliberate protocol or serialisation change only):
+Regenerate the golden vector (after a deliberate protocol or serialisation change only, in a commit of its own:
+doc/yellowback-testing.md, "The golden vector"):
 
     ../../../../.venv/bin/python test_yellowback_model.py --write-golden
+
+Check that the committed golden is exactly what the model and build_golden produce (byte for byte, the whole
+document; CI's python job, audit 03/T-1):
+
+    ../../../../.venv/bin/python test_yellowback_model.py --check-golden
 
 Every test case is tagged ``# Rule: <ID>`` on the line before it (plan N36).
 """
@@ -40,9 +46,18 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
-# ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64'
+# The golden sequence's state hash is the committed file's ``stateHash`` (audit 03/T-4: one artifact, no third copy
+# here).  The reviewer-recomputed pin is the C++ ``GOLDEN_HASH`` in src/test/yellowback_state_tests.cpp, whose
+# ``statehash_golden_vector`` replays yellowback_golden.json; test_golden_vector asserts the model reproduces both.
+
+
+def cpp_golden_hash():
+    """The C++ pin (``GOLDEN_HASH`` in src/test/yellowback_state_tests.cpp), read from the source."""
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'src', 'test', 'yellowback_state_tests.cpp')
+    with open(path) as f:
+        m = re.search(r'^const std::string GOLDEN_HASH = "([0-9a-f]{64})";', f.read(), re.M)
+    return m.group(1)
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -270,13 +285,19 @@ class Chain(object):
         vin = [(intent_op[0], intent_op[1], bytes([ym.OP_1]), self.params.claim_delay), self.fund_input()]
         return ym.serialize_tx_v4(vin, [(value, recipient_spk or ym.p2pkh_script(OWNER_KEYHASH))]).hex()
 
-    def cancel_tx(self, intent_op, vault_op_of_record, value):
+    def cancel_tx(self, intent_op, vault_op_of_record, value, vouts=None, selector=ym.OP_2):
         """U-23: the attestor CANCEL of a claimant intent (selector 2; the set signatures are placeholders the model
-        does not verify) re-creating the byte-identical vault at vout[0]; a fee input."""
+        does not verify) re-creating the byte-identical vault at vout[0]; a fee input.  ``vouts`` = [(value, script)]
+        replaces the outputs (the re-lock is ``self.relock(vault_op_of_record, value)``); ``selector`` the last opcode."""
+        if vouts is None:
+            vouts = [self.relock(vault_op_of_record, value)]
+        vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([selector]), 0xFFFFFFFF), self.fund_input()]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def relock(self, vault_op_of_record, value):
+        """The output a cancel re-creates: the claimed vault's byte-identical V of ``value``."""
         v = self.model.vaults[vault_op_of_record]
-        spk = ym.yed_vault_script_at(self.params, v.owner_pubkey, v.owner_height, v.app_height)
-        vin = [(intent_op[0], intent_op[1], ym.push(bytes(65)) + bytes([ym.OP_2]), 0xFFFFFFFF), self.fund_input()]
-        return ym.serialize_tx_v4(vin, [(value, spk)]).hex()
+        return (value, ym.yed_vault_script_at(self.params, v.owner_pubkey, v.owner_height, v.app_height))
 
     # -- v3 builders (section 3.5) -------------------------------------------
 
@@ -1395,12 +1416,113 @@ class RedeemTests(unittest.TestCase):
         self.assertIsNone(c.model.snapshot(c.height - 1).p_claim)
         self.assertFails(self.spend(path='claim', fee_vout=0xFF, fee_key=None), 'vault-claim-not-underwater')
 
+class CancelTests(unittest.TestCase):
+    """U-23/U-24/I-2: the attestor cancel of a claim intent -- the model twins of yellowback_state_tests'
+    intent_cancel_* cases (audit 03/T-2)."""
+
+    def setUp(self):
+        self.c = c = activated_chain()
+        ref = c.height - 1
+        self.coll = collateral_for(c, 10_000, ref)
+        raw = c.mint_tx(10_000, 48, ref, self.coll, fee_key=KEY1)
+        c.mine((1, 50_000, 0, KEY2), [raw])
+        self.vault = (txid_of(raw), 0)
+        self.token = (txid_of(raw), 1)
+        c.mine_n(64, price_fn=lambda h: 9_000)
+        self.before = ym.Totals()
+        for k in self.before.__slots__:
+            setattr(self.before, k, getattr(c.model.totals, k))
+        claim = c.spend_tx(self.vault, None, 'claim', [self.token], c.height - 1, KEY1, c.vault_fee(self.vault, owner=False))
+        self.assertFalse(c.mine((1, 9_000, 0, KEY2), [claim]).block_invalid)
+        self.claim = txid_of(claim)
+        self.intent = (self.claim, 0)
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.after_claim = c.model.totals.supply_cents
+
+    def mine(self, raw):
+        """Returns the verdict that refused ``raw`` ('' when it was applied)."""
+        self.c.mine((1, 9_000, 0, KEY2), [raw])
+        return self.c.refused.get(txid_of(raw), '')
+
+    # Rule: U-23
+    # Rule: U-24
+    # Rule: I-2
+    # Rule: IT-6
+    def test_cancel_recreates_the_vault_at_vout0(self):
+        c, m = self.c, self.c.model
+        self.assertEqual(self.after_claim, self.before.supply_cents - 10_000)
+        raw = c.cancel_tx(self.intent, self.vault, self.coll)
+        self.assertEqual(self.mine(raw), '')
+        txid = txid_of(raw)
+        self.assertNotIn(self.vault, m.vaults)
+        v = m.vaults[(txid, 0)]
+        self.assertEqual((v.status, v.minted_cents, v.burned_cents, v.collateral_zat, v.close_height, v.closing_txid),
+                         (ym.V_ACTIVE, 10_000, 0, self.coll, 0, None))
+        rec = m.txlog[txid]
+        self.assertEqual((rec.type, rec.verdict, rec.closed_vaults, rec.reopened_vaults, rec.burned),
+                         ('CLAIM_CANCEL', 'ok', [self.vault], [(txid, 0)], 0))
+        self.assertEqual(m.intents, {})
+        t = m.totals
+        self.assertEqual((t.active_vaults, t.claimed_vaults, t.collateral_zat),
+                         (self.before.active_vaults, self.before.claimed_vaults, self.before.collateral_zat))
+        # U-24 / 03/M-1: the claim's burn is not refunded; supply stays where the claim left it
+        self.assertEqual(t.supply_cents, self.after_claim)
+
+    # Rule: U-23
+    # Rule: U-24
+    def test_cancel_of_residual_invalid(self):
+        c = self.c
+        c.model.intents[self.intent].role = ym.I_RESIDUAL      # the owner's residual intent (role flipped for the unit)
+        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll)), 'intent-cancel-residual')
+        self.assertIn(self.intent, c.model.intents)
+
+    # Rule: U-23
+    # Rule: I-2
+    def test_cancel_relock_shapes_invalid(self):
+        c = self.c
+        relock = c.relock(self.vault, self.coll)
+        change = (1000, ym.p2pkh_script(OWNER_KEYHASH))
+        other = ym.yed_vault_script_at(c.params, G2_OWNER, c.model.vaults[self.vault].owner_height, c.model.vaults[self.vault].app_height)
+        for vouts in ([change, relock], [relock, (1000, relock[1])], [(self.coll, ym.p2pkh_script(OWNER_KEYHASH))], [(self.coll, other)]):
+            self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, vouts=vouts)), 'intent-cancel-no-vault')
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+
+    # Rule: U-23
+    def test_cancel_payload_or_selector3_malformed(self):
+        c = self.c
+        payload = (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([])))
+        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, vouts=[c.relock(self.vault, self.coll), payload])),
+                         'intent-spend-malformed')
+        self.assertEqual(self.mine(c.cancel_tx(self.intent, self.vault, self.coll, selector=ym.OP_3)), 'intent-spend-malformed')
+
+    # Rule: U-23
+    # Rule: NOT-1
+    def test_cancel_erases_the_notice(self):
+        c = self.c
+        c.model.notices[self.vault] = ym.NoticeRecord(c.height, c.height - 2, 9_000)    # forced in at the CLAIMING outpoint
+        raw = c.cancel_tx(self.intent, self.vault, self.coll)
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(c.model.notices, {})
+
+    # Rule: U-23
+    # Rule: UNDO
+    def test_cancel_refused_leaves_the_state(self):
+        c = self.c
+        raw = c.cancel_tx(self.intent, self.vault, self.coll, vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(self.vault, self.coll)])
+        self.assertEqual(self.mine(raw), 'intent-cancel-no-vault')
+        # U-21: only the re-mined (empty) block moved the state: the CLAIMING record and the intent are untouched
+        self.assertEqual(c.model.vaults[self.vault].status, ym.V_CLAIMING)
+        self.assertIn(self.intent, c.model.intents)
+        self.assertEqual(c.model.txlog.get(txid_of(raw)), None)
+
+
 # ===========================================================================
 # section 3.6  State hash and the golden vector
 
 GOLDEN_BLOCKS = 440
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
+
 
 
 def build_golden():
@@ -1810,14 +1932,14 @@ class StateHashTests(unittest.TestCase):
         r4 = [q for q in range(4) if q not in (lazy, e, w)][0]
         self.assertEqual(m.attestors[r4].last_act, v3['claim_height'] - 2)
         self.assertEqual(m.attestors[r4].status, ym.A_ELIGIBLE)
-        # the pinned hash, the file on disk and a replay from the file all agree
-        self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
+        # the file on disk, the C++ pin, the model and a replay from the file all agree
         with open(GOLDEN_PATH) as f:
             doc = json.load(f)
-        self.assertEqual(doc['stateHash'], GOLDEN_STATE_HASH)
+        self.assertEqual(m.state_hash(), doc['stateHash'])
+        self.assertEqual(doc['stateHash'], cpp_golden_hash())
         self.assertEqual(doc['blocks'], c.blocks)
         replayed = ym.replay_golden(doc)
-        self.assertEqual(replayed.state_hash(), GOLDEN_STATE_HASH)
+        self.assertEqual(replayed.state_hash(), doc['stateHash'])
         self.assertEqual(replayed.state_hash_preimage(), m.state_hash_preimage())
 
     # Rule: N18
@@ -2048,18 +2170,44 @@ class PQVectorTests(unittest.TestCase):
         self.assertEqual(len(pinned['scripts']), 364)
 
 
-def write_golden():
+def golden_text():
+    """The golden document exactly as --write-golden writes it."""
     c, _ = build_golden()
     doc = golden_document(c)
+    return json.dumps(doc, indent=1) + '\n', doc
+
+
+def write_golden():
+    text, doc = golden_text()
     with open(GOLDEN_PATH, 'w') as f:
-        json.dump(doc, f, indent=1)
-        f.write('\n')
+        f.write(text)
     print('wrote %s: %d blocks, stateHash %s' % (GOLDEN_PATH, len(doc['blocks']), doc['stateHash']))
+    print('sha256 of the file: %s' % ym.sha256(text.encode()).hex())
+
+
+def check_golden():
+    """Rebuild the golden sequence and compare the whole document with the committed file, byte for byte (audit
+    03/T-1: stronger than the stateHash pin -- a hand "fix" of the hash, or of any block, fails here).  Exit 1 on
+    any difference."""
+    text, doc = golden_text()
+    with open(GOLDEN_PATH) as f:
+        committed = f.read()
+    if committed == text:
+        print('golden OK: %s is the model\'s output byte for byte (%d blocks, stateHash %s, sha256 %s)'
+              % (GOLDEN_PATH, len(doc['blocks']), doc['stateHash'], ym.sha256(text.encode()).hex()))
+        return 0
+    import difflib
+    diff = list(difflib.unified_diff(committed.splitlines(), text.splitlines(), 'committed', 'rebuilt', lineterm='', n=1))
+    print('golden STALE: %s differs from the model\'s output (%d diff lines; first 40):' % (GOLDEN_PATH, len(diff)))
+    print('\n'.join(diff[:40]))
+    return 1
 
 
 if __name__ == '__main__':
     if '--write-golden' in sys.argv:
         write_golden()
+    elif '--check-golden' in sys.argv:
+        sys.exit(check_golden())
     elif '--write-pq-vectors' in sys.argv:
         write_pq_vectors()
     else:

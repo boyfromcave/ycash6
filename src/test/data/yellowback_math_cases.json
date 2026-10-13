@@ -1,0 +1,566 @@
+{
+ "description": "YED module arithmetic cases computed in exact rationals from the spec text by qa/rpc-tests/test_framework/test_yellowback_math_spec.py (audit 03/T-3), never by the model; yellowback_math_tests.cpp math_spec_rational_cases replays them through math.h. null = undefined (no price, no supply, or above MAX_MONEY where the spec says so).",
+ "cases": [
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    10000,
+    30000,
+    50000
+   ],
+   "expect": 600000000000
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    10000,
+    30000,
+    18333
+   ],
+   "expect": 1636393388971
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    1,
+    1,
+    4294967295
+   ],
+   "expect": 1
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    10000000,
+    150000,
+    100
+   ],
+   "expect": null
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    10000000,
+    150000,
+    1
+   ],
+   "expect": null
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    12345,
+    40000,
+    1985000
+   ],
+   "expect": 24876574308
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    100,
+    10000,
+    1
+   ],
+   "expect": 100000000000000
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    99,
+    30000,
+    50000
+   ],
+   "expect": 5940000000
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    10000,
+    50000,
+    3
+   ],
+   "expect": null
+  },
+  {
+   "fn": "RequiredCollateral",
+   "args": [
+    7,
+    30001,
+    7
+   ],
+   "expect": 3000100000000
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    10000,
+    18000
+   ],
+   "expect": 5555555556
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    100000,
+    18000
+   ],
+   "expect": 55555555556
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    1000000,
+    18000
+   ],
+   "expect": 305555555556
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    10000000,
+    18000
+   ],
+   "expect": 805555555556
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    10000,
+    100
+   ],
+   "expect": 1000000000000
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    100001,
+    1985000
+   ],
+   "expect": 503780857
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    1000001,
+    4294967295
+   ],
+   "expect": 1280569
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    1,
+    400000
+   ],
+   "expect": 250000000
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    0,
+    400000
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "ProtocolFeeZat",
+   "args": [
+    10000000,
+    1
+   ],
+   "expect": 2100000000000000
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    0
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    1
+   ],
+   "expect": 100
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    9999
+   ],
+   "expect": 100
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    10000
+   ],
+   "expect": 100
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    100000
+   ],
+   "expect": 1000
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    100001
+   ],
+   "expect": 1001
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    1000000
+   ],
+   "expect": 5500
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    1000001
+   ],
+   "expect": 5501
+  },
+  {
+   "fn": "ProtocolFeeCents",
+   "args": [
+    10000000
+   ],
+   "expect": 14500
+  },
+  {
+   "fn": "EarlyRedeemFeeZat",
+   "args": [
+    10000,
+    500,
+    50000
+   ],
+   "expect": 10000000000
+  },
+  {
+   "fn": "EarlyRedeemFeeZat",
+   "args": [
+    10000,
+    250,
+    18333
+   ],
+   "expect": 13636611575
+  },
+  {
+   "fn": "EarlyRedeemFeeZat",
+   "args": [
+    10000,
+    100,
+    4294967295
+   ],
+   "expect": 23284
+  },
+  {
+   "fn": "EarlyRedeemFeeZat",
+   "args": [
+    10000000,
+    500,
+    1
+   ],
+   "expect": 2100000000000000
+  },
+  {
+   "fn": "EarlyRedeemFeeZat",
+   "args": [
+    1,
+    1,
+    4294967295
+   ],
+   "expect": 1
+  },
+  {
+   "fn": "AttestFeeZat",
+   "args": [
+    503778338,
+    5000
+   ],
+   "expect": 251889169
+  },
+  {
+   "fn": "AttestFeeZat",
+   "args": [
+    1,
+    5000
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "AttestFeeZat",
+   "args": [
+    3,
+    5000
+   ],
+   "expect": 1
+  },
+  {
+   "fn": "AttestFeeZat",
+   "args": [
+    2100000000000000,
+    5000
+   ],
+   "expect": 1050000000000000
+  },
+  {
+   "fn": "AttestFeeZat",
+   "args": [
+    10001,
+    2500
+   ],
+   "expect": 2500
+  },
+  {
+   "fn": "ClaimantMaxZat",
+   "args": [
+    10000,
+    11000,
+    18333
+   ],
+   "expect": 600010909290
+  },
+  {
+   "fn": "ClaimantMaxZat",
+   "args": [
+    10000,
+    10000,
+    17000
+   ],
+   "expect": 588235294118
+  },
+  {
+   "fn": "ClaimantMaxZat",
+   "args": [
+    10000000,
+    12500,
+    1
+   ],
+   "expect": null
+  },
+  {
+   "fn": "ClaimantMaxZat",
+   "args": [
+    1,
+    10000,
+    4294967295
+   ],
+   "expect": 233
+  },
+  {
+   "fn": "ClaimantMaxZat",
+   "args": [
+    10000,
+    12500,
+    3000
+   ],
+   "expect": 4166666666667
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    1
+   ],
+   "expect": 48000000000000
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    100
+   ],
+   "expect": 480000000000
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    50000
+   ],
+   "expect": 960000000
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    480000
+   ],
+   "expect": 100000000
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    480001
+   ],
+   "expect": 99999792
+  },
+  {
+   "fn": "ResidualMinZat",
+   "args": [
+    4294967295
+   ],
+   "expect": 100000
+  },
+  {
+   "fn": "GlobalRatioBps",
+   "args": [
+    600000000000,
+    50000,
+    10000
+   ],
+   "expect": 30000
+  },
+  {
+   "fn": "GlobalRatioBps",
+   "args": [
+    1,
+    1,
+    1
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "GlobalRatioBps",
+   "args": [
+    2100000000000000,
+    4294967295,
+    1
+   ],
+   "expect": 90194313195000000
+  },
+  {
+   "fn": "GlobalRatioBps",
+   "args": [
+    600000000000,
+    18333,
+    10000
+   ],
+   "expect": 10999
+  },
+  {
+   "fn": "GlobalRatioBps",
+   "args": [
+    999,
+    3,
+    7
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "CapCents",
+   "args": [
+    2100000000000000,
+    50000
+   ],
+   "expect": 105000000
+  },
+  {
+   "fn": "SupplyCapCents",
+   "args": [
+    2100000000000000,
+    50000,
+    1500
+   ],
+   "expect": 15750000
+  },
+  {
+   "fn": "CapCents",
+   "args": [
+    1234567800000000,
+    400000
+   ],
+   "expect": 493827120
+  },
+  {
+   "fn": "SupplyCapCents",
+   "args": [
+    1234567800000000,
+    400000,
+    1500
+   ],
+   "expect": 74074068
+  },
+  {
+   "fn": "CapCents",
+   "args": [
+    1,
+    1
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "SupplyCapCents",
+   "args": [
+    1,
+    1,
+    10000
+   ],
+   "expect": 0
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    100000000000,
+    110000,
+    10000,
+    11000
+   ],
+   "expect": false
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    99999999999,
+    110000,
+    10000,
+    11000
+   ],
+   "expect": true
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    600000000000,
+    18333,
+    10000,
+    11000
+   ],
+   "expect": true
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    600000000000,
+    18334,
+    10000,
+    11000
+   ],
+   "expect": false
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    0,
+    1,
+    1,
+    1
+   ],
+   "expect": true
+  },
+  {
+   "fn": "IsUnderwater",
+   "args": [
+    2100000000000000,
+    4294967295,
+    10000000,
+    150000
+   ],
+   "expect": false
+  }
+ ]
+}
