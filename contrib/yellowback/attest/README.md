@@ -8,8 +8,16 @@ long-running modes, beside a `ycashd -yellowback`.
 | `attest` | an attestor's node (registered with `yed_registerattestor`: since P4-b a SET_JOIN to the attestor set, the vault primitive's signer set) | poll `yed_getinfo` every 15 s; every `every_blocks` new blocks aggregate the price sources, ask the node to sign with `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74-byte attestation on the topic; every `heartbeat_blocks` blocks send `set_heartbeat <attestorSetId> <memberKey>` (an attestor without an act inside the set's `livenesswindow` is DORMANT, and signing is not an act) |
 | `subscribe` | any minting node (the devnet's node 0; YecWallet's bundled node) | join the topic; drop anything that is not 74 bytes, whose `seq` is not in `yed_listattestors` (refreshed every 60 s), that was already handed to the node (LRU of 4,096 frames), whose `citedHeight` is outside `[tip − 64, tip + 8]` of the node, or that exceeds the `seq`'s token bucket (`seq_burst`, `seq_refill_seconds`); push the rest with `yed_addattestation`; count acceptances; back off 1..60 s while the RPC is down; optionally poll `[subscribe] endpoints` over HTTPS as a second path |
 
-Plus two one-shot commands: `sources` (fetch every source once and show what resolved) and
-`check-config`.
+Plus three one-shot commands: `sources` (fetch every source once and show what resolved),
+`check-config`, and `cosign <txid:n> [--price µUSD]` (the cancel-limit design, CAN-2 + C4b: the node co-signs the cancel
+of a YED claimant intent with this seq's member key, `yed_signcancelcosign`; the co-signature is also this attestor's
+price statement at the claim's reference height, which EQV-1 slashes if it contradicts the attestation the key signed
+there, so the node's equivocation guard states the price it already signed for that height, and only when it signed
+none does the agent state its aggregate now; prints the 69-byte hex that `yed_buildcancel` takes).
+**Not yet in the agent** (the design's §5 client impact): gossiping co-signatures on the topic, a watcher that
+co-signs confirmed claims its own price says are wrong, and a canceller that collects up to `CANCEL_SIGNERS_MAX`
+co-signatures and sends the cancel; an operator runs `cosign` on each member's agent and `yed_buildcancel` +
+`set_signcancel` + `vault_send` by hand.
 
 **The agent never holds a key.** Signing happens inside the node, whose equivocation guard
 (`attest-signed.dat`, plan §4.5 S16) makes two prices for one height impossible from one node.

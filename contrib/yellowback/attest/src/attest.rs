@@ -350,6 +350,68 @@ impl Attestor {
     }
 
     /// The exit code: the loop runs until a signal (0); 2 is a bad configuration found at runtime.
+    /// The cancel-limit design (CAN-2 + C4b, owner 2026-10-13): co-sign the cancel of the YED claimant intent `intent`
+    /// ("txid:n") with this seq's member key, which the node holds (`yed_signcancelcosign`). The co-signature is at the
+    /// same time this attestor's signed price statement at the claim's refHeight, and EQV-1 ejects a member whose
+    /// regular attestation there carries another price, so the node's equivocation guard decides first: by default it
+    /// states the price this key already signed for that height. Only when the key signed none (`price-required`) does
+    /// the agent state its own aggregate now (`price` overrides it). Returns the 69-byte co-signature hex that
+    /// `yed_buildcancel` takes; a statement saying the vault was claimable is the node's `cancel-statement-claimable`.
+    pub async fn cosign(&mut self, intent: &str, price: Option<i64>) -> anyhow::Result<String> {
+        let first = self
+            .node
+            .call(
+                "yed_signcancelcosign",
+                vec![
+                    json!(intent),
+                    price.map(|p| json!(p)).unwrap_or(Value::Null),
+                    json!(self.seq),
+                ],
+            )
+            .await;
+        let reply = match first {
+            Ok(v) => v,
+            Err(RpcError::Node { message, .. }) if price.is_none() && message.starts_with("price-required") => {
+                let agg = poll_and_aggregate(&mut self.feed, &self.fetcher, self.mock.as_deref())
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("price-required and no aggregate: this agent has no price to state")
+                    })?;
+                tracing::info!(
+                    "seq {} signed no price at the claim's refHeight; stating the aggregate {} µUSD",
+                    self.seq,
+                    agg.micro_usd
+                );
+                self.node
+                    .call(
+                        "yed_signcancelcosign",
+                        vec![json!(intent), json!(agg.micro_usd), json!(self.seq)],
+                    )
+                    .await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        reply
+            .get("cosig")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("yed_signcancelcosign returned no cosig"))
+    }
+
+    /// `cosign`: the one-shot command around [`Attestor::cosign`]; prints the co-signature hex on stdout.
+    pub async fn cosign_command(mut self, intent: &str, price: Option<i64>) -> anyhow::Result<i32> {
+        let network = self.wait_network().await;
+        if !self.mock_allowed_on(&network) {
+            tracing::error!(
+                "bad configuration: --mock-price on network {network:?} would state the file's number; regtest only"
+            );
+            return Ok(crate::EXIT_BAD_CONFIG);
+        }
+        let cosig = self.cosign(intent, price).await?;
+        println!("{cosig}");
+        Ok(0)
+    }
+
     pub async fn run(mut self) -> anyhow::Result<i32> {
         let network = self.wait_network().await;
         if !self.mock_allowed_on(&network) {
@@ -664,6 +726,56 @@ mod tests {
         );
         let mut never = Attestor::new(config::parse(&text0).unwrap(), Some(PathBuf::from("/dev/null")), false).unwrap();
         assert!(!never.heartbeat(500).await);
+    }
+
+    /// The cancel-limit design: the node's guard states the price first; on price-required the agent states its own.
+    #[tokio::test]
+    async fn cosign_prefers_the_guard_then_the_aggregate() {
+        let m = MockNode::start(None, move |method, params| match method {
+            "yed_getinfo" => Ok(json!({"network": "regtest", "height": 50})),
+            "yed_signcancelcosign" => {
+                assert_eq!(params[2], json!(4));
+                match (params[0].as_str().unwrap(), &params[1]) {
+                    ("aa:0", Value::Null) => Ok(json!({"cosig": "11".repeat(69), "seq": 4, "reused": true})),
+                    ("bb:1", Value::Null) => Err((
+                        -8,
+                        "price-required: seq 4 signed no price for the claim's refHeight 40".into(),
+                    )),
+                    ("bb:1", p) => {
+                        Ok(json!({"cosig": format!("{:08x}", p.as_u64().unwrap()) + &"22".repeat(65), "seq": 4}))
+                    }
+                    _ => Err((-8, "not a YED claim intent".into())),
+                }
+            }
+            _ => Err((-32601, "Method not found".into())),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mock = dir.path().join("price");
+        std::fs::write(&mock, "0.5\n").unwrap();
+        let text = format!(
+            "[node]\nrpc_url = \"{}\"\n[attest]\nseq = 4\n[transport]\nkind = \"dir\"\npath = \"{}\"\n",
+            m.url,
+            dir.path().display()
+        );
+        let mut a = Attestor::new(config::parse(&text).unwrap(), Some(mock), false).unwrap();
+        assert_eq!(a.cosign("aa:0", None).await.unwrap(), "11".repeat(69)); // the guard's price, no aggregate
+        assert_eq!(
+            a.cosign("bb:1", None).await.unwrap(),
+            format!("{:08x}", 500_000) + &"22".repeat(65)
+        );
+        assert_eq!(
+            a.cosign("bb:1", Some(700_000)).await.unwrap(),
+            format!("{:08x}", 700_000) + &"22".repeat(65)
+        );
+        assert!(a.cosign("cc:0", None).await.is_err());
+        let calls = m
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "yed_signcancelcosign")
+            .count();
+        assert_eq!(calls, 5);
     }
 
     #[test]

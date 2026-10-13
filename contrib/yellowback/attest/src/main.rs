@@ -58,6 +58,20 @@ enum Command {
     Sources,
     /// Parse the configuration and exit 0 if the agent could run with it
     CheckConfig,
+    /// Co-sign the cancel of a YED claimant intent (the cancel-limit design): print the co-signature for yed_buildcancel
+    Cosign {
+        /// The claimant intent, "txid:n"
+        intent: String,
+        /// The price statement in µUSD; default the price this seq signed for the claim's refHeight, else the aggregate now
+        #[arg(long)]
+        price: Option<i64>,
+        /// TEST/DEVNET: read the USD price from FILE instead of the sources
+        #[arg(long, value_name = "FILE")]
+        mock_price: Option<PathBuf>,
+        /// Allow --mock-price although the node is not on regtest
+        #[arg(long, requires = "mock_price")]
+        i_know_this_is_not_regtest: bool,
+    },
 }
 
 fn init_logging(filter: &str) {
@@ -105,6 +119,18 @@ async fn main() {
             }
         },
         Command::Sources => attest::sources_command(&cfg).await,
+        Command::Cosign {
+            intent,
+            price,
+            mock_price,
+            i_know_this_is_not_regtest,
+        } => match attest::Attestor::new(cfg, mock_price, i_know_this_is_not_regtest) {
+            Ok(a) => a.cosign_command(&intent, price).await,
+            Err(e) => {
+                tracing::error!("bad configuration: {e}");
+                std::process::exit(EXIT_BAD_CONFIG);
+            }
+        },
         Command::CheckConfig => {
             println!(
                 "ok: {} source(s), {} BTC/USD reference(s), transport {}",
