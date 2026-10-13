@@ -1871,7 +1871,9 @@ std::string FormatStateMessage(const CValidationState &state)
 }
 
 // AcceptToMemoryPool policy (audit 07/F-1 and its review): the one template input (V or I) of a transaction,
-// if any (a second is bad-txns-vault-multi, refused before the script checks).
+// if any (a second is bad-txns-vault-multi, refused before the script checks). It is selected exactly as
+// vault::CheckTx counts template inputs (ParseVault / ParseIntent, a MATCH): a MALFORMED V-shaped coin is
+// no template there, so it is none here either and cannot stand in for the real one.
 std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const CCoinsViewCache& view)
 {
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
@@ -1881,7 +1883,7 @@ std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const
         const CScript& spk = coins->vout[tx.vin[i].prevout.n].scriptPubKey;
         vault::VaultParams vp;
         vault::IntentParams ip;
-        if (vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
+        if (vault::ParseVault(spk, vp) || vault::ParseIntent(spk, ip))
             return i;
     }
     return std::nullopt;
@@ -2166,7 +2168,10 @@ bool AcceptToMemoryPool(
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
         // A transaction spending a V or I has that template input's script checked alone first, with the
-        // same flags and set state. A failure of it that depends on the set state at this node's tip, which
+        // same flags and set state. This exit runs before Consensus::CheckTxInputs (inside
+        // ContextualCheckInputs): a transaction that is also value-invalid but fails OP_CHECKSETSIG on its
+        // template input scores 0, at a cost of at most one set-signature recovery (CheckSetSigs returns
+        // at the first bad signature). A failure of it that depends on the set state at this node's tip, which
         // the relaying peer's tip need not share, is no proof of misbehaviour (DoS 0). Every other outcome
         // goes on to the stock checks below, which score every other failure as stock: the error of the
         // first failing input of the whole transaction would not say which input failed (audit 07/F-1 and
