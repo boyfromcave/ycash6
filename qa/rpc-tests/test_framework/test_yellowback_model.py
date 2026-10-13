@@ -1625,9 +1625,11 @@ def golden_rejected(claim_height):
     return [(137, 'bad-mint-amount'), (141, 'bad-mint-collateral'), (146, 'yed-template-output'), (150, 'bad-redeem-early-fee'),
             (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
             (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
-            (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 9, 'intent-cancel-residual')]
+            (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
+            (claim_height + 9, 'intent-cancel-residual'), (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
+GOLDEN_FALCON = 400            # TOK-PQ binds from here (pqFalconHeight; not hashed): only the golden's TOK-PQ refusals come after it
 
 
 def build_golden():
@@ -1635,16 +1637,19 @@ def build_golden():
     lifecycle to 224 on the vault upgrade's V vaults, then the v3 one: four registrations, arming, a
     mint with a bundle, a price fall, a notice and an emergency claim into a claimant and a residual
     intent, an attestor cancel of the claimant intent (the vault back, the burn kept), the residual's
-    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends.  Fourteen blocks are
-    rejected and mined again without the offending transaction (U-21), one per consensus verdict the vector covers
-    (audit 03/T-1; GOLDEN_REJECTED lists them): the original four -- 137 (a mint of $50), 217 (an owner spend with no
+    release, dormancy, an equivocation, a revival, a member's own exit and two bond spends; the cancel refunds the
+    claim's burn (CAN-1) and a second, non-held notice at 293 leaves no BundleLog row (R12 hardened).  Seventeen blocks
+    are rejected and mined again without the offending transaction (U-21), one per consensus verdict the vector covers
+    (audit 03/T-1; golden_rejected() lists them): the original four -- 137 (a mint of $50), 217 (an owner spend with no
     payload), 231 (a v3 ATTESTOR_REGISTER) and 251 (an armed mint without a bundle) -- and, each built by
     Chain.rejected() so the accepted chain is unchanged, an over-mint at required - 1 (141), a YED V output no rule
     created (146), an early owner redeem without the early fee (150), a short burn (185), a bundle with a bad
     signature (252), a bundle drawn for another selector replayed on a mint (253), a non-held notice carrying a fresh
-    attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 (claim + 1)
-    and a cancel of the owner's residual intent (claim + 9)."""
+    attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 and one
+    without the refund (claim + 1), a cancel of the owner's residual intent (claim + 9), and from the Falcon height
+    (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
+    params.pq_falcon_height = GOLDEN_FALCON
     c = Chain(params)
     # IT-2 keeps the v3 tail on RED-4's path (b): at 300 % collateral minted at $0.009 the vault sits at ~127 %
     # when the pools quote $0.0038 (not under theta 125 %) and at 100 % at the attestors' $0.003 (under 105 %).
@@ -1737,6 +1742,12 @@ def build_golden():
             bundle, _ = c.bundle_for(ref, ya.outpoint_selector(*vault), {'*': 3_000}, skip=(v3['lazy'],))
             txs_at['notice5'] = c.notice_tx(vault, ref, bundle)
             txs.append(txs_at['notice5'])
+        elif h == 293:                                          # R12 hardened (03/M-2): a notice that does not hold (notice5 stands)
+            vault = (txid_of(txs_at['mint5']), 0)                # with notice5's bundle (cited 288, already credited): valid, no BundleLog row
+            sel = c.model.selected(288, ya.outpoint_selector(*vault))
+            bundle, _ = c.bundle_for(288, ya.outpoint_selector(*vault), {'*': 3_000}, skip=(sel[0],))
+            txs_at['notice5b'] = c.notice_tx(vault, 288, bundle)
+            txs.append(txs_at['notice5b'])
         elif h >= 298 and 'claim5' not in txs_at:               # RED-4(b) + RED-5 at the first R >= 296 that selects the lazy attestor
             ref = h - 2
             vault = (txid_of(txs_at['mint5']), 0)
@@ -1761,7 +1772,7 @@ def build_golden():
         elif 'claim_height' in v3 and h == v3['claim_height'] + 1:      # U-23/U-24: an attestor cancels the claimant intent
             vault = (txid_of(txs_at['mint5']), 0)
             v = c.model.vaults[vault]
-            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'])
+            txs_at['cancel5'] = c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, v.collateral_zat - v3['residual'], refund=True)   # CAN-1
             txs.append(txs_at['cancel5'])
         elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
             claim5 = txid_of(txs_at['claim5'])
@@ -1849,15 +1860,28 @@ def build_golden():
                                                      carrier=bundle, collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
                                                      attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
                                                      residual=(ym.pqpkh_script(G_OWNER), v3['residual'] - 1))))
-        elif 'claim_height' in v3 and h == v3['claim_height'] + 1:     # I-2 / U-23: the cancel's re-lock at vout 1
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1:     # I-2 / U-23: the cancel's re-lock at vout 1; CAN-1: no refund
             vault = (txid_of(txs_at['mint5']), 0)
             value = c.model.vaults[vault].collateral_zat - v3['residual']
-            bad.append(c.rejected(lambda: c.cancel_tx((txid_of(txs_at['claim5']), 0), vault, value,
-                                                      vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(vault, value)])))
+            intent = (txid_of(txs_at['claim5']), 0)
+            bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value, vouts=[(1000, ym.p2pkh_script(OWNER_KEYHASH)), c.relock(vault, value),
+                                                                                    c.refund_out(intent)])))
+            bad.append(c.rejected(lambda: c.cancel_tx(intent, vault, value)))
         elif 'claim_height' in v3 and h == v3['claim_height'] + 9:     # U-23: the owner's residual intent is never cancelled
             claim5 = txid_of(txs_at['claim5'])
             res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
             bad.append(c.rejected(lambda: c.cancel_tx(res, (txid_of(txs_at['cancel5']), 0), v3['residual'])))
+        elif h == GOLDEN_FALCON + 2:                            # TOK-PQ: a TRANSFER of the CAN-1 refund to a P2PKH after the Falcon height
+            refund = (txid_of(txs_at['cancel5']), 1)
+            bad.append(c.rejected(lambda: c.transfer_tx([refund], [(0, 10_000)])))
+        elif h == GOLDEN_FALCON + 3:                            # TOK-PQ: a REDEEM-type transfer whose change goes to a P2PKH
+            refund = (txid_of(txs_at['cancel5']), 1)
+            def change_tx():
+                vin = [(refund[0], refund[1], b'', 0xFFFFFFFF), c.fund_input()]
+                vouts = [(params.token_value, ym.p2pkh_script(OWNER_KEYHASH)),
+                         (0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_redeem(h - 1, ym.FEE_VOUT_NONE, [(0, 4_000)])))]
+                return ym.serialize_tx_v4(vin, vouts).hex()
+            bad.append(c.rejected(change_tx))
         txs = bad + txs
         if h == 5:
             c.mine(None, txs)                                          # untagged
@@ -1880,22 +1904,25 @@ def golden_document(c):
     return {
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
-                       'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
+                       'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false, pqFalconHeight %d (not hashed: TOK-PQ binds from it)}; '
+                       'SCHEMA_VERSION 13 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
+                       'CAN-1: a cancelled claim refunds its burn); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
-                       'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
-                       'cancel of the claimant intent, the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
+                       'a mint with a bundle, a notice, a second notice that does not hold (no BundleLog row, R12 hardened), an emergency '
+                       'claim into a claimant and a residual intent, an attestor cancel of the claimant intent refunding the burn '
+                       '(CAN-1), the residual release, S15 dormancy, an equivocation (EQV-1: ejected, bond '
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
                        'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0) and two bond spends (the leaver\'s '
                        'at exit + BOND_MATURITY). '
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (%s; one per verdict, audit 03/T-1) are '
                        'rejected and not applied (U-21); the next entry is the same height mined again without the offending '
                        'transaction.'
-                       % (set_id, GOLDEN_LIVENESS, GOLDEN_BLOCKS,
+                       % (set_id, GOLDEN_LIVENESS, GOLDEN_FALCON, GOLDEN_BLOCKS,
                           ', '.join('%d %s' % hv for hv in golden_rejected(c.v3['claim_height']))),
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': set_id,
-                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False},
+                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False,
+                   'pqFalconHeight': GOLDEN_FALCON},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
         'totals': c.model.totals.as_dict(),
@@ -2027,8 +2054,7 @@ class StateHashTests(unittest.TestCase):
         v3 = c.v3
         rejected = golden_rejected(v3['claim_height'])
         self.assertEqual([(v.height, v.verdict) for v in m.rejected], rejected)
-        self.assertGreaterEqual(len(rejected), 14)
-        self.assertEqual(len(set(v for _h, v in rejected)), len(rejected))          # one block per verdict
+        self.assertGreaterEqual(len(set(v for _h, v in rejected)), 16)               # one block per verdict (TOK-PQ: two shapes)
         self.assertTrue(all(v.rejected for v in m.rejected))
         self.assertEqual([b['height'] for b in c.blocks if b.get('invalid')], [h for h, _v in rejected])
         self.assertEqual(len(c.blocks), GOLDEN_BLOCKS + len(rejected))
@@ -2045,7 +2071,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity)
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -2075,7 +2101,8 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual((claim5.verdict, claim5.claim_path, claim5.residual_zat), ('ok', 'b', v3['residual']))
         self.assertTrue(claim5.residual_zat >= ym.Params.REGTEST_ATTEST['residual_min_zat'])
         # U-23/U-24: the attestor cancel re-created the vault at (cancel5, 0): the same position, ACTIVE, its
-        # collateral the claimant intent's value; the claim's 10,000-cent burn was not refunded
+        # collateral the claimant intent's value; CAN-1 (03/H-1): the claim's 10,000-cent burn was refunded at (cancel5, 1)
+        # to the holder it came from, and supply credited
         self.assertNotIn((txid_of(txs_at['mint5']), 0), m.vaults)
         cancel = m.txlog[txid_of(txs_at['cancel5'])]
         self.assertEqual(cancel.type, 'CLAIM_CANCEL')
@@ -2087,6 +2114,12 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(v5.p_mint, min(m.snapshots[248].p_mint, 9_000))
         self.assertEqual(v5.p_mint, 9_000)
         self.assertEqual(claim5.burned, 10_000)
+        self.assertEqual((cancel.assigned, cancel.yed_out, cancel.burned), ([(1, 10_000)], 10_000, 0))
+        refund = m.tokens[(txid_of(txs_at['cancel5']), 1)]
+        self.assertEqual((refund.cents, refund.script_pub_key), (10_000, ym.p2pkh_script(OWNER_KEYHASH)))
+        # R12 hardened (03/M-2): the notice at 293 did not hold (notice5 stands) and its verified bundle left no row
+        self.assertNotIn(293, m.bundle_log)
+        self.assertNotIn(txid_of(txs_at['notice5b']), m.txlog)
         self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
         self.assertEqual(m.intents, {})
         self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE

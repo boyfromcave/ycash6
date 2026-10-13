@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ad7b7be0a27061e3d23f4ff0b06568b8033a942f952b5b00d8b217cf35045a64";   // FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "0789e469827c35a43dc708b8059980b54b9f329e02bc54762553bc2880c81d05";   // SCHEMA_VERSION 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -707,6 +707,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), uint256S(pj["attestorSetId"].get_str()),
                                          pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
                                          pj["mintRequiresArmed"].get_bool());
+    if (pj.exists("pqFalconHeight")) P.pqFalconHeight = pj["pqFalconHeight"].get_int();   // TOK-PQ from here (not hashed)
     MemoryStateView view;
     const MemoryStateView empty = view;
     std::vector<UndoRecord> undos;
@@ -729,17 +730,19 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         if (ev.blockInvalid) {
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
-            // One rejected block per verdict (audit 03/T-1; test_yellowback_model.golden_rejected is the same list; the
-            // emergency claim of build_golden landed at 300).
-            static const std::map<int, std::string> expected = {
+            // One rejected block per verdict, in order (audit 03/T-1; test_yellowback_model.golden_rejected is the same list;
+            // the emergency claim of build_golden landed at 300, the Falcon height is 400).
+            static const std::vector<std::pair<int, std::string>> expected = {
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
                 { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
-                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 309, "intent-cancel-residual" } };
-            invalidBlocks++;
+                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" },
+                { 309, "intent-cancel-residual" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
-            BOOST_REQUIRE(expected.count(height));
-            BOOST_CHECK_EQUAL(ev.verdict, expected.at(height));
+            BOOST_REQUIRE((size_t)invalidBlocks < expected.size());
+            BOOST_CHECK_EQUAL(height, expected[invalidBlocks].first);
+            BOOST_CHECK_EQUAL(ev.verdict, expected[invalidBlocks].second);
+            invalidBlocks++;
             BOOST_CHECK_EQUAL(ev.reason.substr(0, ev.verdict.size() + 1), ev.verdict + ":");
             continue;
         }
@@ -749,7 +752,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 14);
+    BOOST_CHECK_EQUAL(invalidBlocks, 17);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
