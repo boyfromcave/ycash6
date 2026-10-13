@@ -143,6 +143,12 @@ class YellowbackCancelLimitTest(ArmedModeMixin, YellowbackTestFramework):
             pos = nodes[i].yed_getvault(cancel)
             assert_equal((pos['status'], pos['cancelCount']), ('ACTIVE', 1))
             assert_equal(pos['heldResiduals'], [{'txid': rows['residual']['txid'], 'vout': rows['residual']['vout']}])
+            # a listed row of the re-created position carries the cancel limit as yed_getvault does (a claimant's view)
+            listed = [r for r in nodes[i].yed_listclaimable() if r['vault'] == '%s:0' % cancel]
+            assert_equal(len(listed), 1)
+            assert_equal((listed[0]['cancelCount'], listed[0]['cancelsRequired'], listed[0]['cancelQuietUntil']),
+                         (pos['cancelCount'], pos['cancelsRequired'], pos['cancelQuietUntil']))
+            assert_equal(listed[0]['cancelsRequired'], 2)       # a second cancel inside CANCEL_QUIET needs two co-signers
         self.mine_to(claim_height + CLAIM_DELAY)                  # the residual intent has matured (BIP68)
 
         print('the residual is held inside CANCEL_QUIET')

@@ -956,6 +956,12 @@ When no bundle can be built (`bundle-insufficient` would be raised) the list is 
 the cross-section alone and every row carries `claimPath: ""` — the wallet must expect
 `yed_claim` to refuse until the pool refills.
 
+**The per-vault cancel limit** (docs/plans/yellowback-cancel-limit-design.md, CAN-2; additive, `rpcversion`
+unchanged): each row also carries `cancelCount`, `cancelsRequired` and `cancelQuietUntil`, exactly as `yed_getvault`
+reports them, so a claimant sees before it claims how many distinct current attestor-set members a cancel of its claim
+would need if it confirmed in the next block, and when the vault's schedule starts from one again (`null` when the
+vault was never cancelled). `heldResiduals` is the owner's and stays on `yed_getvault`.
+
 Result of `yed_listclaimable`:
 
 ```json
@@ -973,6 +979,9 @@ Result of `yed_listclaimable`:
     "underwaterAt": 436700,
     "pClaim": 400000,
     "claimPath": "a",
+    "cancelCount": 0,
+    "cancelsRequired": 1,
+    "cancelQuietUntil": null,
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null,
