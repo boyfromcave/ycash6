@@ -1048,7 +1048,22 @@ class Walk:
         self.fails(CANCELLER, "vault_buildcancel", claim + ":0", expect="is cancelled with yed_buildcancel")
         claimant_before = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])["confirmedCents"]
         holder = self.node(USER).yed_getvault(self.vaults["D"])["refundHolder"]
-        built = self.call(CANCELLER, "yed_buildcancel", claim + ":0", keys=["required", "cancelsetid", "deadline", "refund"])
+        # the cancel-limit design (CAN-2 + C4b): the first cancel of a vault needs one member's co-signature, which is its
+        # signed price statement at the claim's refHeight saying the vault was not claimable. The node's equivocation
+        # guard states the price this attestor already signed for that height; only when it signed none is $PRICE stated.
+        # A canceller whose own attestation at that height said "claimable" cannot co-sign (cancel-statement-claimable):
+        # under C4b that cancel is the slashable kind, so the scenario needs an attestor that did not attest the crash there.
+        self.fails(CANCELLER, "yed_buildcancel", claim + ":0", expect="cancel-cosign-needed")
+        try:
+            cos = self.node(CANCELLER).yed_signcancelcosign(claim + ":0")
+        except Exception as error:
+            if "price-required" not in str(getattr(error, "error", error)):
+                raise
+            cos = self.call(CANCELLER, "yed_signcancelcosign", claim + ":0", int(PRICE) * 1_000_000, keys=["cosig", "seq", "citedHeight"])
+        built = self.call(CANCELLER, "yed_buildcancel", claim + ":0", [cos["cosig"]],
+                          keys=["required", "cancelsetid", "deadline", "refund", "cancelsRequired", "cosigners"])
+        self.ok(built["cancelsRequired"] == 1 and built["cosigners"] == [cos["seq"]],
+                "the vault's first cancel needs one co-signer (CAN-2): seq %d, its statement citing %d" % (cos["seq"], cos["citedHeight"]))
         self.ok(built["refund"]["cents"] == MINT_CENTS and built["refund"]["script"] == holder and built["refund"]["vout"] == 1,
                 "yed_buildcancel adds CAN-1's refund of %d cents to the claim's YED holder at output 1" % MINT_CENTS)
         signed = self.call(CANCELLER, "set_signcancel", built["hex"], keys=["complete", "signatures", "required", "sighash"])
