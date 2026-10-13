@@ -15,15 +15,18 @@
 //! compact recoverable signature in base64. The prefix cannot collide with a sighash, an attestation or a cancel
 //! co-signature, and the statement says nothing about a price, so it cannot be used for EQV-1.
 //!
-//! **Proof of possession.** The endpoint's own key (ed25519) also signs `"YED-IROH-POP-1|" ‖ statement` (review
-//! B-1): a member cannot bind another member's endpoint id, because it does not hold that endpoint's key. On top of
-//! that, a binding whose endpoint id another current seq already holds is refused (`binding-conflict`).
+//! **Proof of possession.** The endpoint's own key (ed25519) also signs
+//! `"YED-IROH-POP-2|" ‖ statement ‖ "|" ‖ hintSeq ‖ "|" ‖ addrs ‖ "|" ‖ relay` (reviews B-1, N-B): a member cannot bind
+//! another member's endpoint id, because it does not hold that endpoint's key; and the dial hints are signed by the
+//! endpoint itself, so any copy of an announce carries authenticated hints, a replay with altered hints fails, and
+//! hints from a proof with a higher `hintSeq` replace older ones. The agent re-signs the proof locally whenever its
+//! addresses change (no node call; the `signmessage` statement is unchanged). On top of that, a binding whose
+//! endpoint id another current seq already holds is refused (`binding-conflict`).
 //!
 //! A binding is valid while its network and set are ours, it has not expired, its life is at most the configured TTL,
 //! its member signature recovers to the current member key of its seq, its proof of possession verifies, and (per
-//! seq) no binding with a later `issuedHeight` is held. On the wire ([`Announce`]) it travels with unsigned address
-//! hints; the hints are kept only from an announce delivered over that member's own authenticated direct connection,
-//! or, from the public topic, for a seat that has none yet (review B-3). The connection itself authenticates the id.
+//! seq) no binding with a later `issuedHeight` is held. On the wire ([`Announce`]) it travels with its endpoint-signed
+//! hints.
 
 use std::collections::BTreeMap;
 
@@ -33,9 +36,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const PREFIX: &str = "YED-IROH-1";
-pub const POP_PREFIX: &str = "YED-IROH-POP-1|";
+pub const POP_PREFIX: &str = "YED-IROH-POP-2|";
 pub const MESSAGE_MAGIC: &str = "Zcash Signed Message:\n";
-pub const ANNOUNCE_MAGIC: &[u8; 4] = b"YBD2";
+pub const ANNOUNCE_MAGIC: &[u8; 4] = b"YBD3";
 /// An announce never exceeds this (the message, both signatures, at most 8 short address hints and a relay URL).
 pub const ANNOUNCE_MAX: usize = 1024;
 pub const ADDRS_MAX: usize = 8;
@@ -108,10 +111,11 @@ pub fn message_hash(msg: &str) -> [u8; 32] {
     Sha256::digest(Sha256::digest(&buf)).into()
 }
 
-/// The bytes the endpoint key signs for the proof of possession.
-pub fn pop_message(msg: &str) -> Vec<u8> {
+/// The bytes the endpoint key signs for the proof of possession: the statement and the dial hints.
+pub fn pop_message(msg: &str, hint_seq: u64, addrs: &[String], relay: Option<&str>) -> Vec<u8> {
     let mut b = POP_PREFIX.as_bytes().to_vec();
     b.extend_from_slice(msg.as_bytes());
+    b.extend_from_slice(format!("|{hint_seq}|{}|{}", addrs.join(","), relay.unwrap_or("")).as_bytes());
     b
 }
 
@@ -233,10 +237,13 @@ impl Binding {
     }
 }
 
-/// A binding as announced: the signed binding, the endpoint key's proof of possession, unsigned address hints.
+/// A binding as announced: the signed binding, the dial hints, and the endpoint key's proof of possession over
+/// both.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Announce {
     pub binding: Binding,
+    /// Orders the endpoint's hint updates: a valid proof with a higher one replaces the hints held.
+    pub hint_seq: u64,
     #[serde(with = "hex_bytes")]
     pub pop: [u8; 64],
     /// Direct socket addresses, "ip:port".
@@ -245,30 +252,54 @@ pub struct Announce {
 }
 
 impl Announce {
-    /// Make an announce: `endpoint_key` signs the proof of possession.
-    pub fn new(binding: Binding, endpoint_key: &iroh::SecretKey, addrs: Vec<String>, relay: Option<String>) -> Self {
-        let pop = endpoint_key.sign(&pop_message(&binding.message)).to_bytes();
+    /// Make an announce: `endpoint_key` signs the proof of possession over the statement and the hints.
+    pub fn new(
+        binding: Binding,
+        endpoint_key: &iroh::SecretKey,
+        addrs: Vec<String>,
+        relay: Option<String>,
+        hint_seq: u64,
+    ) -> Self {
+        let addrs: Vec<String> = addrs.into_iter().filter(|a| a.len() < 64).take(ADDRS_MAX).collect();
+        let relay = relay.filter(|r| r.len() < 200);
+        let pop = endpoint_key
+            .sign(&pop_message(&binding.message, hint_seq, &addrs, relay.as_deref()))
+            .to_bytes();
         Announce {
             binding,
+            hint_seq,
             pop,
             addrs,
             relay,
         }
     }
 
-    /// The proof of possession verifies under the endpoint id the statement names.
+    /// Re-sign the proof for new hints (a higher `hint_seq`), the binding unchanged.
+    pub fn with_hints(
+        &self,
+        endpoint_key: &iroh::SecretKey,
+        addrs: Vec<String>,
+        relay: Option<String>,
+        hint_seq: u64,
+    ) -> Self {
+        Announce::new(self.binding.clone(), endpoint_key, addrs, relay, hint_seq)
+    }
+
+    /// The proof of possession -- over the statement and the hints -- verifies under the statement's endpoint id.
     pub fn possession_ok(&self, st: &Statement) -> bool {
         let Ok(pk) = iroh::PublicKey::from_bytes(&st.endpoint) else {
             return false;
         };
-        pk.verify(
-            &pop_message(&self.binding.message),
-            &iroh::Signature::from_bytes(&self.pop),
-        )
-        .is_ok()
+        let msg = pop_message(&self.binding.message, self.hint_seq, &self.addrs, self.relay.as_deref());
+        pk.verify(&msg, &iroh::Signature::from_bytes(&self.pop)).is_ok()
     }
 
-    /// `"YBD2" ‖ u16 len ‖ message ‖ sig65 ‖ pop64 ‖ u8 n ‖ n × (u8 len ‖ addr) ‖ u8 len ‖ relay`
+    /// SHA-256 of the encoding: the dedup key (review N-C: a look-alike never displaces the genuine copy).
+    pub fn digest(&self) -> [u8; 32] {
+        Sha256::digest(self.encode()).into()
+    }
+
+    /// `"YBD3" ‖ u16 len ‖ message ‖ sig65 ‖ hintSeq u64 ‖ pop64 ‖ u8 n ‖ n × (u8 len ‖ addr) ‖ u8 len ‖ relay`
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(320);
         out.extend_from_slice(ANNOUNCE_MAGIC);
@@ -276,6 +307,7 @@ impl Announce {
         out.extend_from_slice(&(m.len() as u16).to_le_bytes());
         out.extend_from_slice(m);
         out.extend_from_slice(&self.binding.sig);
+        out.extend_from_slice(&self.hint_seq.to_le_bytes());
         out.extend_from_slice(&self.pop);
         let addrs: Vec<&String> = self.addrs.iter().filter(|a| a.len() < 64).take(ADDRS_MAX).collect();
         out.push(addrs.len() as u8);
@@ -306,6 +338,7 @@ impl Announce {
         let mlen = u16::from_le_bytes(take(&mut i, 2)?.try_into().ok()?) as usize;
         let message = std::str::from_utf8(take(&mut i, mlen)?).ok()?.to_string();
         let sig: [u8; 65] = take(&mut i, 65)?.try_into().ok()?;
+        let hint_seq = u64::from_le_bytes(take(&mut i, 8)?.try_into().ok()?);
         let pop: [u8; 64] = take(&mut i, 64)?.try_into().ok()?;
         let n = *take(&mut i, 1)?.first()? as usize;
         if n > ADDRS_MAX {
@@ -327,6 +360,7 @@ impl Announce {
         }
         Some(Announce {
             binding: Binding { message, sig },
+            hint_seq,
             pop,
             addrs,
             relay,
@@ -334,19 +368,11 @@ impl Announce {
     }
 }
 
-/// Where an announce came from: the member's own authenticated direct connection, or the public topic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Source {
-    Member,
-    Topic,
-}
-
-/// One seat's binding, its hints and where the hints came from.
+/// One seat's binding and its (endpoint-signed) hints.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Held {
     pub statement: Statement,
     pub announce: Announce,
-    pub hints_from: Source,
 }
 
 /// The bindings an agent holds, by seq.
@@ -366,30 +392,29 @@ impl Store {
         self.by_seq.get(&seq).is_some_and(|h| h.announce.binding == a.binding)
     }
 
-    /// Hints for a held binding (review B-3): an announce over the member's own connection always updates them; a
-    /// topic copy only when the seat has none yet and none came from the member itself. True when they changed.
-    pub fn refresh_hints(&mut self, seq: u16, a: &Announce, source: Source) -> bool {
+    /// Newer hints for a held binding (review N-B): the caller has verified this announce's proof of possession;
+    /// they replace the held ones only when its `hint_seq` is higher. True when they changed.
+    pub fn refresh_hints(&mut self, seq: u16, a: &Announce) -> bool {
         let Some(h) = self.by_seq.get_mut(&seq) else {
             return false;
         };
-        if h.announce.binding != a.binding || (h.announce.addrs == a.addrs && h.announce.relay == a.relay) {
+        if h.announce.binding != a.binding || a.hint_seq <= h.announce.hint_seq {
             return false;
         }
-        let allowed = match source {
-            Source::Member => true,
-            Source::Topic => h.hints_from == Source::Topic && h.announce.addrs.is_empty() && h.announce.relay.is_none(),
-        };
-        if allowed {
-            h.announce.addrs = a.addrs.clone();
-            h.announce.relay = a.relay.clone();
-            h.hints_from = source;
-        }
-        allowed
+        h.announce = a.clone();
+        true
     }
 
-    /// Take a verified binding. Refused when another current seq holds the same endpoint id (review B-1: the
-    /// existing binding is kept). A rotation (a newer binding of the seq) takes the new hints as they came.
-    pub fn commit(&mut self, st: Statement, a: Announce, source: Source) -> Result<bool, Refusal> {
+    /// Whether `a` (the binding held) carries newer hints than those held, before its proof is checked.
+    pub fn newer_hints(&self, seq: u16, a: &Announce) -> bool {
+        self.by_seq
+            .get(&seq)
+            .is_some_and(|h| h.announce.binding == a.binding && a.hint_seq > h.announce.hint_seq)
+    }
+
+    /// Take a verified binding (member signature and proof of possession checked by the caller). Refused when another
+    /// current seq holds the same endpoint id (review B-1: the existing binding is kept).
+    pub fn commit(&mut self, st: Statement, a: Announce) -> Result<bool, Refusal> {
         if let Some((other, _)) = self
             .by_seq
             .iter()
@@ -407,7 +432,6 @@ impl Store {
             Held {
                 statement: st,
                 announce: a,
-                hints_from: source,
             },
         );
         Ok(true)
@@ -472,7 +496,7 @@ pub mod testkit {
             sig: ck::sign(&ck::key(member_key), &message_hash(&msg)),
             message: msg,
         };
-        Announce::new(b, pop_key, addrs, None)
+        Announce::new(b, pop_key, addrs, None, 1)
     }
 
     /// A valid announce: seq's member key `member_key`, its own endpoint `ep_seed`.
@@ -591,48 +615,48 @@ mod tests {
         let mut s = Store::default();
         let a1 = announce(1, 1, 7, 100, 200);
         let st1 = check(&a1, 150).unwrap();
-        assert_eq!(s.commit(st1, a1, Source::Topic), Ok(true));
+        assert_eq!(s.commit(st1, a1), Ok(true));
         // (bypassing the possession check, as if both held the key) seat 2 claims endpoint 7
         let a2 = announce_with(2, 2, endpoint_id(7), &endpoint_key(7), 101, 200, vec![]);
         let st2 = check(&a2, 150).unwrap();
-        assert_eq!(s.commit(st2, a2, Source::Topic), Err(Refusal::EndpointConflict(1)));
+        assert_eq!(s.commit(st2, a2), Err(Refusal::EndpointConflict(1)));
         assert_eq!(s.by_seq[&1].statement.seq, 1);
         assert!(!s.by_seq.contains_key(&2));
     }
 
-    /// Review B-3: hints are updated from the member's own connection; a topic copy sets them only for a seat with
-    /// none, and never replaces the member's own.
+    /// Review N-B: the hints are signed by the endpoint. A copy with altered hints fails the proof (whoever relays
+    /// it); a newer proof (higher hint_seq) replaces the hints held, an older or equal one does not.
     #[test]
-    fn unsigned_hints_come_from_the_member_itself() {
-        let mut s = Store::default();
-        let mut a = announce(1, 1, 7, 100, 200);
-        a.addrs.clear();
+    fn hints_are_signed_by_the_endpoint() {
+        let a = announce(1, 1, 7, 100, 200);
         let st = check(&a, 150).unwrap();
-        s.commit(st, a.clone(), Source::Topic).unwrap();
-        // a topic copy with hints fills the empty seat's hints
-        let mut t = a.clone();
-        t.addrs = vec!["10.0.0.1:1".into()];
-        assert!(s.refresh_hints(1, &t, Source::Topic));
-        // another topic copy cannot replace them
-        let mut evil = a.clone();
-        evil.addrs = vec!["6.6.6.6:6".into()];
-        assert!(!s.refresh_hints(1, &evil, Source::Topic));
-        assert_eq!(s.by_seq[&1].announce.addrs, vec!["10.0.0.1:1".to_string()]);
-        // the member's own connection can
-        let mut own = a.clone();
-        own.addrs = vec!["192.168.1.5:4433".into()];
-        assert!(s.refresh_hints(1, &own, Source::Member));
-        // and after that no topic copy can, even an empty one
-        assert!(!s.refresh_hints(1, &evil, Source::Topic));
-        assert_eq!(s.by_seq[&1].announce.addrs, vec!["192.168.1.5:4433".to_string()]);
-        assert_eq!(s.by_seq[&1].hints_from, Source::Member);
+        let mut fake = a.clone();
+        fake.addrs = vec!["6.6.6.6:6".into()];
+        assert!(!fake.possession_ok(&st), "a replay with fake hints fails");
+        let mut fake_relay = a.clone();
+        fake_relay.relay = Some("https://evil.example".into());
+        assert!(!fake_relay.possession_ok(&st));
+        let mut s = Store::default();
+        s.commit(st.clone(), a.clone()).unwrap();
+        let moved = a.with_hints(&endpoint_key(7), vec!["192.168.1.9:4433".into()], None, 2);
+        assert!(moved.possession_ok(&st));
+        assert!(s.newer_hints(1, &moved));
+        assert!(s.refresh_hints(1, &moved));
+        assert_eq!(s.by_seq[&1].announce.addrs, vec!["192.168.1.9:4433".to_string()]);
+        // a valid but older proof (an old copy replayed) does not roll the hints back
+        assert!(!s.newer_hints(1, &a));
+        assert!(!s.refresh_hints(1, &a));
+        assert_eq!(s.by_seq[&1].announce.hint_seq, 2);
     }
 
     #[test]
     fn announces_round_trip_and_are_bounded() {
-        let mut a = announce(1, 1, 7, 100, 200);
-        a.addrs = vec!["127.0.0.1:4433".into(), "[::1]:4433".into()];
-        a.relay = Some("https://relay.example".into());
+        let a = announce(1, 1, 7, 100, 200).with_hints(
+            &endpoint_key(7),
+            vec!["127.0.0.1:4433".into(), "[::1]:4433".into()],
+            Some("https://relay.example".into()),
+            5,
+        );
         let b = a.encode();
         assert!(b.len() < ANNOUNCE_MAX);
         assert_eq!(Announce::decode(&b), Some(a.clone()));
@@ -640,7 +664,8 @@ mod tests {
         long.push(0);
         assert_eq!(Announce::decode(&long), None);
         assert_eq!(Announce::decode(&b[..b.len() - 1]), None);
-        assert_eq!(Announce::decode(b"YBD1xxxxxx"), None);
+        assert_eq!(Announce::decode(b"YBD2xxxxxx"), None);
+        assert_ne!(a.digest(), announce(1, 1, 7, 100, 200).digest());
     }
 
     #[test]
@@ -648,7 +673,7 @@ mod tests {
         let mut s = Store::default();
         let add = |s: &mut Store, a: Announce| {
             let st = check(&a, 150)?;
-            s.commit(st, a, Source::Topic)
+            s.commit(st, a)
         };
         assert_eq!(add(&mut s, announce(1, 1, 7, 100, 200)), Ok(true));
         assert_eq!(add(&mut s, announce(1, 1, 7, 100, 200)), Ok(false));

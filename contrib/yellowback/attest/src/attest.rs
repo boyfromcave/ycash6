@@ -612,6 +612,10 @@ impl CancelRuntime {
                 })
                 .collect();
             node.members.set(map);
+            node.intro.set_ctx(self.agent.intro_ctx(height));
+            if let (Some(tx), Some(own)) = (&self.direct_tx, self.agent.own_announce()) {
+                let _ = tx.try_send(crate::direct::Out::Intro(own));
+            }
         }
         for frame in self.agent.take_outbox() {
             if let Some(tx) = &self.gossip_tx {

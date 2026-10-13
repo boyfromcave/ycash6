@@ -36,6 +36,17 @@ pub const ALPN: &[u8] = b"yellowback/cancel-cosig/1";
 pub const REFUSED: u32 = 0x5946;
 pub const KIND_FRAME: u8 = 0x01;
 pub const KIND_ANNOUNCE: u8 = 0x02;
+/// The first stream of an unbound connection: its own binding announce (review N-A, self-introduction).
+pub const KIND_INTRO: u8 = 0x03;
+/// An unbound connection must introduce itself within this.
+pub const INTRO_DEADLINE: Duration = Duration::from_secs(3);
+/// Self-introductions per source address: a burst, then one per this many seconds ...
+pub const INTRO_SOURCE_BURST: f64 = 4.0;
+pub const INTRO_SOURCE_SECONDS: f64 = 10.0;
+/// ... and at most this many unverified connections at once, whatever the source.
+pub const INTRO_PENDING_MAX: usize = 16;
+/// A verified self-introduction stands in for the binding this long, until the agent has taken it into its table.
+pub const INTRO_VERIFIED_FOR: Duration = Duration::from_secs(120);
 /// A stream is at most this long (an announce is at most 1,024 bytes).
 pub const STREAM_MAX: usize = 1_100;
 /// The per-author quota: a burst, then this many frames a second. A member co-signs a handful of claims at most.
@@ -71,11 +82,109 @@ impl Members {
     }
 }
 
+/// What a self-introduction is verified against: the agent's view, published after every poll.
+#[derive(Clone, Debug, Default)]
+pub struct IntroCtx {
+    pub network: String,
+    pub set_hex: String,
+    pub tip: u32,
+    pub ttl: u32,
+    pub members: BTreeMap<u16, [u8; 33]>,
+}
+
+/// Self-introduction state shared by the gate and the handler (review N-A): the view, the connections admitted
+/// unverified, and a token bucket per source address.
+#[derive(Debug, Default)]
+pub struct Intro {
+    ctx: RwLock<Option<IntroCtx>>,
+    pending: Mutex<HashMap<EndpointId, Instant>>,
+    verified: Mutex<HashMap<EndpointId, (u16, Instant)>>,
+    sources: Mutex<HashMap<String, Quota>>,
+}
+
+impl Intro {
+    pub fn set_ctx(&self, ctx: IntroCtx) {
+        if let Ok(mut c) = self.ctx.write() {
+            *c = Some(ctx);
+        }
+    }
+
+    /// Admit `id` from `source` unverified: a view exists, fewer than INTRO_PENDING_MAX wait, the source has a token.
+    pub fn admit(&self, id: EndpointId, source: &str, now: Instant) -> bool {
+        if self.ctx.read().map(|c| c.is_none()).unwrap_or(true) {
+            return false;
+        }
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        pending.retain(|_, t| now.saturating_duration_since(*t) < INTRO_DEADLINE * 2);
+        if pending.len() >= INTRO_PENDING_MAX {
+            return false;
+        }
+        let Ok(mut sources) = self.sources.lock() else {
+            return false;
+        };
+        if sources.len() > 4_096 {
+            sources.retain(|_, q| now.saturating_duration_since(q.1).as_secs_f64() < INTRO_SOURCE_SECONDS * 10.0);
+        }
+        let q = sources
+            .entry(source.to_string())
+            .or_insert(Quota(INTRO_SOURCE_BURST, now));
+        let elapsed = now.saturating_duration_since(q.1).as_secs_f64();
+        q.0 = (q.0 + elapsed / INTRO_SOURCE_SECONDS).min(INTRO_SOURCE_BURST);
+        q.1 = now;
+        if q.0 < 1.0 {
+            return false;
+        }
+        q.0 -= 1.0;
+        pending.insert(id, now);
+        true
+    }
+
+    /// The seat of a connection admitted by a verified self-introduction within INTRO_VERIFIED_FOR.
+    pub fn verified_seq(&self, id: &EndpointId, now: Instant) -> Option<u16> {
+        let mut v = self.verified.lock().ok()?;
+        v.retain(|_, (_, t)| now.saturating_duration_since(*t) < INTRO_VERIFIED_FOR);
+        v.get(id).map(|(seq, _)| *seq)
+    }
+
+    fn take_pending(&self, id: &EndpointId) -> bool {
+        self.pending.lock().map(|mut p| p.remove(id).is_some()).unwrap_or(false)
+    }
+
+    /// Verify a self-introduction from `remote`: a valid binding of a current member's seat to exactly this
+    /// endpoint id, with its proof of possession (one recovery, once per connection). The seat on success.
+    pub fn verify(&self, remote: &EndpointId, announce: &crate::binding::Announce) -> Option<u16> {
+        let ctx = self.ctx.read().ok()?.clone()?;
+        let st = announce
+            .binding
+            .verify(&ctx.network, &ctx.set_hex, ctx.tip, ctx.ttl, &ctx.members)
+            .ok()?;
+        (st.endpoint == *remote.as_bytes() && announce.possession_ok(&st)).then_some(st.seq)
+    }
+}
+
+/// The source address of a connection, for the self-introduction limiter: the remote IP, or the relay it came by.
+fn source_of(conn: &Connection) -> String {
+    let paths = conn.paths();
+    let first = paths.iter().next().map(|p| p.remote_addr().clone());
+    match first {
+        Some(TransportAddr::Ip(a)) => a.ip().to_string(),
+        Some(TransportAddr::Relay(u)) => format!("relay:{u}"),
+        Some(other) => format!("{other:?}"),
+        None => "unknown".to_string(),
+    }
+}
+
 /// The members-only gate (an `EndpointHooks`): on [`ALPN`] only, an endpoint id that is not bound to a current member
-/// is refused after the handshake and never dialled. Other ALPNs pass untouched.
+/// is refused after the handshake, unless it may introduce itself (review N-A: a view exists, the source address has
+/// a token, fewer than INTRO_PENDING_MAX wait) -- then the handler requires a valid self-introduction as its first
+/// stream within INTRO_DEADLINE, or closes it with the same refusal. The agent never dials an unbound id. Other ALPNs
+/// pass untouched.
 #[derive(Debug)]
 pub struct Gate {
     members: Members,
+    intro: Arc<Intro>,
 }
 
 impl EndpointHooks for Gate {
@@ -88,8 +197,16 @@ impl EndpointHooks for Gate {
 
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         if conn.alpn() == ALPN && self.members.seq_of(&conn.remote_id()).is_none() {
+            let source = source_of(conn);
+            if self.intro.admit(conn.remote_id(), &source, Instant::now()) {
+                tracing::debug!(
+                    "cancel direct: {} from {source} may introduce itself",
+                    conn.remote_id().fmt_short()
+                );
+                return AfterHandshakeOutcome::Accept;
+            }
             tracing::info!(
-                "cancel direct: refused {} (not bound to a current member)",
+                "cancel direct: refused {} from {source} (not bound to a current member)",
                 conn.remote_id().fmt_short()
             );
             return AfterHandshakeOutcome::Reject {
@@ -105,6 +222,7 @@ impl EndpointHooks for Gate {
 #[derive(Debug)]
 struct Handler {
     members: Members,
+    intro: Arc<Intro>,
     frames: tokio::sync::mpsc::Sender<(Vec<u8>, u16)>,
     announces: tokio::sync::mpsc::Sender<(Vec<u8>, u16)>,
     quotas: Arc<Mutex<BTreeMap<u16, Quota>>>,
@@ -134,9 +252,51 @@ impl Handler {
 impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
+        if self.members.seq_of(&remote).is_none() && self.intro.take_pending(&remote) {
+            // self-introduction (review N-A): the first stream, within the deadline, is this endpoint's own binding
+            let first = tokio::time::timeout(INTRO_DEADLINE, async {
+                let mut r = conn.accept_uni().await.ok()?;
+                r.read_to_end(STREAM_MAX).await.ok()
+            })
+            .await
+            .ok()
+            .flatten();
+            let admitted = first.as_deref().and_then(|d| {
+                let (&kind, body) = d.split_first()?;
+                if kind != KIND_INTRO {
+                    return None;
+                }
+                let a = crate::binding::Announce::decode(body)?;
+                let seq = self.intro.verify(&remote, &a)?;
+                Some((seq, body.to_vec()))
+            });
+            match admitted {
+                Some((seq, body)) => {
+                    tracing::info!("cancel direct: {} introduced itself as seq {seq}", remote.fmt_short());
+                    if let Ok(mut v) = self.intro.verified.lock() {
+                        v.insert(remote, (seq, Instant::now()));
+                    }
+                    // the agent takes the binding into its table (as from this member's own connection, verifying it
+                    // again there); until then the verified introduction stands in for it on this connection
+                    let _ = self.announces.try_send((body, seq));
+                }
+                None => {
+                    tracing::info!(
+                        "cancel direct: {} gave no valid self-introduction; refused",
+                        remote.fmt_short()
+                    );
+                    conn.close(VarInt::from_u32(REFUSED), b"not a bound member");
+                    return Ok(());
+                }
+            }
+        }
         loop {
             // the gate admitted it; a member removed meanwhile is dropped at its next stream
-            let Some(seq) = self.members.seq_of(&remote) else {
+            let Some(seq) = self
+                .members
+                .seq_of(&remote)
+                .or_else(|| self.intro.verified_seq(&remote, Instant::now()))
+            else {
                 conn.close(VarInt::from_u32(REFUSED), b"no longer a bound member");
                 return Ok(());
             };
@@ -160,7 +320,7 @@ impl ProtocolHandler for Handler {
                         tracing::debug!("cancel direct: frame queue full");
                     }
                 }
-                KIND_ANNOUNCE => {
+                KIND_ANNOUNCE | KIND_INTRO => {
                     let _ = self.announces.try_send((body.to_vec(), seq));
                 }
                 _ => {}
@@ -174,12 +334,15 @@ impl ProtocolHandler for Handler {
 pub enum Out {
     Frame(Vec<u8>),
     Announce(Vec<u8>),
+    /// This member's own announce: sent as the first stream of every new connection (self-introduction).
+    Intro(Vec<u8>),
 }
 
 pub struct DirectNode {
     pub endpoint: Endpoint,
     router: Router,
     pub members: Members,
+    pub intro: Arc<Intro>,
 }
 
 /// The endpoint builder: n0's preset (its relays and pkarr/DNS address lookup), or -- with `relays = ["none"]` --
@@ -212,11 +375,13 @@ impl DirectNode {
         let secret = crate::transport::iroh::load_or_create_secret(secret_key_file)?;
         let mode = relay_mode(relays, fallback)?;
         let members = Members::default();
+        let intro = Arc::new(Intro::default());
         let endpoint = builder(relays)
             .secret_key(secret)
             .relay_mode(mode.clone())
             .hooks(Gate {
                 members: members.clone(),
+                intro: intro.clone(),
             })
             .bind()
             .await
@@ -225,6 +390,7 @@ impl DirectNode {
         let (atx, arx) = tokio::sync::mpsc::channel(256);
         let handler = Handler {
             members: members.clone(),
+            intro: intro.clone(),
             frames: ftx,
             announces: atx,
             quotas: Arc::new(Mutex::new(BTreeMap::new())),
@@ -239,6 +405,7 @@ impl DirectNode {
                 endpoint,
                 router,
                 members,
+                intro,
             },
             frx,
             arx,
@@ -263,10 +430,17 @@ impl DirectNode {
         let members = self.members.clone();
         tokio::spawn(async move {
             let conns: Arc<tokio::sync::Mutex<HashMap<EndpointId, Connection>>> = Default::default();
+            let mut intro: Option<Vec<u8>> = None;
             while let Some(item) = rx.recv().await {
                 let (kind, body) = match &item {
                     Out::Frame(b) => (KIND_FRAME, b.clone()),
                     Out::Announce(b) => (KIND_ANNOUNCE, b.clone()),
+                    Out::Intro(b) => {
+                        let mut m = vec![KIND_INTRO];
+                        m.extend_from_slice(b);
+                        intro = Some(m);
+                        continue;
+                    }
                 };
                 let mut msg = Vec::with_capacity(body.len() + 1);
                 msg.push(kind);
@@ -275,9 +449,9 @@ impl DirectNode {
                 let targets: Vec<(EndpointId, Peer)> =
                     members.snapshot().into_iter().filter(|(id, _)| *id != me).collect();
                 let sends = targets.into_iter().map(|(id, peer)| {
-                    let (endpoint, conns, msg) = (endpoint.clone(), conns.clone(), msg.clone());
+                    let (endpoint, conns, msg, intro) = (endpoint.clone(), conns.clone(), msg.clone(), intro.clone());
                     async move {
-                        if let Err(e) = send_one(&endpoint, &conns, id, &peer, &msg).await {
+                        if let Err(e) = send_one(&endpoint, &conns, id, &peer, &msg, intro.as_deref()).await {
                             tracing::debug!("cancel direct: to seq {} ({}): {e:#}", peer.seq, id.fmt_short());
                             conns.lock().await.remove(&id);
                         }
@@ -300,6 +474,7 @@ async fn send_one(
     id: EndpointId,
     peer: &Peer,
     msg: &[u8],
+    intro: Option<&[u8]>,
 ) -> anyhow::Result<()> {
     let cached = conns.lock().await.get(&id).cloned();
     let conn = match cached {
@@ -316,6 +491,13 @@ async fn send_one(
                 .await
                 .context("connect timed out")?
                 .context("connect")?;
+            // a new connection opens with this member's own announce, which admits it at a member that does not
+            // know its binding yet (self-introduction) and is an ordinary announce at one that does
+            if let Some(i) = intro {
+                let mut s = c.open_uni().await.context("open_uni (intro)")?;
+                s.write_all(i).await.context("write (intro)")?;
+                s.finish().context("finish (intro)")?;
+            }
             conns.lock().await.insert(id, c.clone());
             c
         }
@@ -761,5 +943,167 @@ mod tests {
             b.shutdown().await;
             m.shutdown().await;
         }
+    }
+
+    // ---- self-introduction (review N-A)
+
+    use crate::binding::testkit as bk;
+    use crate::cosig::testkit as ck;
+
+    fn intro_ctx() -> IntroCtx {
+        IntroCtx {
+            network: "regtest".into(),
+            set_hex: bk::set_hex(),
+            tip: 100,
+            ttl: 200,
+            members: [1u16, 2, 3]
+                .iter()
+                .map(|s| (*s, ck::pubkey(&ck::key(10 + *s as u8))))
+                .collect(),
+        }
+    }
+
+    /// Seq 2's announce for the endpoint `key` (its own key proves possession), member-signed by `member_key`.
+    fn intro_for(key: &iroh::SecretKey, endpoint: [u8; 32], member_key: u8) -> Vec<u8> {
+        bk::announce_with(2, member_key, endpoint, key, 100, 250, vec!["127.0.0.1:1".into()]).encode()
+    }
+
+    /// Dial `a` from a plain endpoint, send `first` as the first stream and then a frame; true when `a` closed the
+    /// connection with the refusal within 6 s.
+    async fn intro_and_frame(a: &DirectNode, from: &Endpoint, first: Option<Vec<u8>>) -> bool {
+        let c = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            from.connect(endpoint_addr(a.id(), &local(a), None), ALPN),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for msg in first.into_iter().chain([[vec![KIND_FRAME], vec![0x42; 115]].concat()]) {
+            if let Ok(mut s) = c.open_uni().await {
+                let _ = s.write_all(&msg).await;
+                let _ = s.finish();
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(6), c.closed()).await {
+            Ok(e) => format!("{e:?}").contains(&REFUSED.to_string()) || format!("{e:?}").contains("not a bound member"),
+            Err(_) => false,
+        }
+    }
+
+    /// A member whose binding the receiver has not seen yet is admitted on its first connection by a valid
+    /// self-introduction: the receiver learns the binding and takes its frames, attributed to its seat.
+    #[tokio::test]
+    async fn a_valid_self_introduction_is_admitted() {
+        let (a, mut a_frames, mut a_ann) = DirectNode::open(None, &["none".to_string()], &[]).await.unwrap();
+        let (b, _) = node().await;
+        a.intro.set_ctx(intro_ctx()); // a knows nobody's endpoint, but the members' keys
+        let mut bm = HashMap::new();
+        bm.insert(
+            a.id(),
+            Peer {
+                seq: 1,
+                addrs: local(&a),
+                relay: None,
+            },
+        );
+        b.members.set(bm);
+        let blob = intro_for(b.endpoint.secret_key(), *b.id().as_bytes(), 12);
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        b.spawn_sender(rx);
+        tx.send(Out::Intro(blob.clone())).await.unwrap();
+        tx.send(Out::Frame(vec![0x42; 115])).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(20), a_frames.recv())
+            .await
+            .expect("the introduced member's frame within 20 s")
+            .unwrap();
+        assert_eq!(got, (vec![0x42; 115], 2));
+        assert_eq!(
+            a_ann.try_recv().unwrap(),
+            (blob, 2),
+            "the binding reaches the agent's table"
+        );
+        assert_eq!(a.intro.verified_seq(&b.id(), Instant::now()), Some(2));
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
+    /// Refused: a forged member signature, a valid binding of another endpoint, a frame instead of an introduction,
+    /// and no stream at all (the deadline).
+    #[tokio::test]
+    async fn invalid_or_missing_self_introductions_are_refused() {
+        let (a, mut a_frames, mut a_ann) = DirectNode::open(None, &["none".to_string()], &[]).await.unwrap();
+        a.intro.set_ctx(intro_ctx());
+        // forged: seq 2's statement signed by a key that is not seq 2's
+        let e = plain().await;
+        assert!(
+            intro_and_frame(
+                &a,
+                &e,
+                Some([vec![KIND_INTRO], intro_for(e.secret_key(), *e.id().as_bytes(), 13)].concat())
+            )
+            .await
+        );
+        e.close().await;
+        // a genuine binding of another endpoint (replayed from the topic): not this connection's id
+        let e = plain().await;
+        let other = bk::endpoint_key(9);
+        assert!(
+            intro_and_frame(
+                &a,
+                &e,
+                Some([vec![KIND_INTRO], intro_for(&other, bk::endpoint_id(9), 12)].concat())
+            )
+            .await
+        );
+        e.close().await;
+        // a valid introduction sent as an ordinary announce, or a frame first: not an introduction
+        let e = plain().await;
+        assert!(
+            intro_and_frame(
+                &a,
+                &e,
+                Some([vec![KIND_ANNOUNCE], intro_for(e.secret_key(), *e.id().as_bytes(), 12)].concat())
+            )
+            .await
+        );
+        e.close().await;
+        let e = plain().await;
+        assert!(intro_and_frame(&a, &e, None).await);
+        e.close().await;
+        // nothing at all: closed at the deadline
+        assert!(probe(endpoint_addr(a.id(), &local(&a), None), &["none".to_string()])
+            .await
+            .unwrap());
+        assert!(a_frames.try_recv().is_err(), "no refused connection delivered a frame");
+        assert!(a_ann.try_recv().is_err(), "no refused connection delivered a binding");
+        a.shutdown().await;
+    }
+
+    /// The limiter: no view, no admission; a burst per source address, then one per INTRO_SOURCE_SECONDS; other
+    /// sources unaffected; at most INTRO_PENDING_MAX unverified at once.
+    #[test]
+    fn self_introductions_are_rate_limited_per_source() {
+        let intro = Intro::default();
+        let t0 = Instant::now();
+        let id = |i: u8| bk::endpoint_key(i).public();
+        assert!(!intro.admit(id(1), "10.0.0.1", t0), "no view yet");
+        intro.set_ctx(intro_ctx());
+        for i in 0..INTRO_SOURCE_BURST as u8 {
+            assert!(intro.admit(id(10 + i), "10.0.0.1", t0));
+        }
+        assert!(!intro.admit(id(20), "10.0.0.1", t0), "over the source's burst");
+        assert!(intro.admit(id(21), "10.0.0.2", t0), "another source is unaffected");
+        let later = t0 + Duration::from_secs_f64(INTRO_SOURCE_SECONDS);
+        assert!(intro.admit(id(22), "10.0.0.1", later), "one more after the refill");
+        // pending cap: the t0 entries are past twice the deadline, so one is pending; fill to the cap from fresh sources
+        let mut n = 1;
+        for i in 0..40u8 {
+            if intro.admit(id(30 + i), &format!("10.1.0.{i}"), later) {
+                n += 1;
+            }
+        }
+        assert_eq!(n, INTRO_PENDING_MAX);
+        // an expired pending entry frees its slot
+        assert!(intro.admit(id(99), "10.2.0.1", later + INTRO_DEADLINE * 2));
     }
 }

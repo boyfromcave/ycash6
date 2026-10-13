@@ -54,6 +54,8 @@ pub const BUILD_ATTEMPTS: usize = 8;
 pub const BINDING_PER_SEQ: usize = 4;
 /// Binding signature checks a poll, all sources together (a secp256k1 recovery and an ed25519 verification each).
 pub const BINDING_RECOVERIES: usize = 64;
+/// A newly signed binding is announced every poll for this many blocks (review N-A).
+pub const FRESH_ANNOUNCE_BLOCKS: u32 = 20;
 /// Announces one member's own connection may queue a poll (it can only be checked for its own seat).
 pub const BINDING_PER_MEMBER: usize = 4;
 /// `alert_command` children at once, and how long one may run before it is killed.
@@ -580,6 +582,13 @@ pub struct MemberView {
 
 // ------------------------------------------------------------------------------------------------------- agent
 
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// A bound member's endpoint: (endpoint id, seq, address hints, relay).
 pub type BoundPeer = ([u8; 32], u16, Vec<String>, Option<String>);
 
@@ -690,6 +699,8 @@ pub struct CancelAgent {
     bindings_member: Vec<(Vec<u8>, u16)>,
     /// The direct endpoint's key: it proves possession of the endpoint in this member's binding (review B-1).
     pub direct_key: Option<iroh::SecretKey>,
+    /// Until this height the own binding is announced every poll (review N-A: a fresh binding spreads fast).
+    own_fresh_until: Option<u32>,
     /// Announces to publish (the binding topic and every bound member).
     announces_out: Vec<Vec<u8>>,
     last_announce: Option<u32>,
@@ -746,6 +757,7 @@ impl CancelAgent {
             bindings_in: BTreeMap::new(),
             bindings_member: Vec::new(),
             direct_key: None,
+            own_fresh_until: None,
             announces_out: Vec::new(),
             last_announce: None,
             recoveries_last_poll: 0,
@@ -1623,6 +1635,25 @@ impl CancelAgent {
         std::mem::take(&mut self.announces_out)
     }
 
+    /// What a self-introduction at height `tip` is verified against (review N-A): this agent's network, set, TTL and
+    /// current members.
+    pub fn intro_ctx(&self, tip: u32) -> crate::direct::IntroCtx {
+        crate::direct::IntroCtx {
+            network: self.network.clone(),
+            set_hex: cosig::display_of_internal(&self.view.set_id),
+            tip,
+            ttl: self.cfg.binding_ttl_blocks,
+            members: self.view.members.clone(),
+        }
+    }
+
+    /// This member's own announce, if it holds one: sent first on every new direct connection (self-introduction).
+    pub fn own_announce(&self) -> Option<Vec<u8>> {
+        self.member()
+            .then(|| self.state.own_binding.as_ref().map(|a| a.encode()))
+            .flatten()
+    }
+
     /// The bound members' endpoints: (endpoint id, seq, address hints, relay).
     pub fn bound_peers(&self) -> Vec<BoundPeer> {
         self.state
@@ -1652,15 +1683,19 @@ impl CancelAgent {
                 self.sign_binding(height, ep, &key, addrs.clone(), relay.clone(), &set_hex)
                     .await;
             }
-            if let Some(own) = self.state.own_binding.as_mut() {
+            if let Some(own) = self.state.own_binding.clone() {
+                // new addresses: re-sign the proof locally (review N-B; no node call), a higher hint_seq
                 if own.addrs != addrs || own.relay != relay {
-                    own.addrs = addrs;
-                    own.relay = relay;
+                    let next = own.hint_seq.saturating_add(1).max(unix_seconds());
+                    self.state.own_binding = Some(own.with_hints(&key, addrs, relay, next));
                     self.last_announce = None;
+                    self.dirty = true;
                 }
-                let due = self.last_announce.is_none_or(|h| height >= h.saturating_add(10));
+                // every poll while the binding is fresh (review N-A), then every 10 blocks
+                let fresh = self.own_fresh_until.is_some_and(|h| height < h);
+                let due = fresh || self.last_announce.is_none_or(|h| height >= h.saturating_add(10));
                 if due {
-                    let blob = own.encode();
+                    let blob = self.state.own_binding.as_ref().expect("set").encode();
                     self.announces_out.push(blob.clone());
                     self.last_announce = Some(height);
                     self.bindings_member.push((blob, self.seq)); // our own entry, verified like any other
@@ -1670,11 +1705,11 @@ impl CancelAgent {
         let members = self.view.members.clone();
         // candidates: member connections first (their own seat only), then per seat a uniform sample of the
         // topic's announces, the seats in urgency order (no binding, or one expiring within a quarter of the TTL),
-        // round robin across seats; deduplicated by (seq, endpoint, issued) before any signature check
-        let mut member_c: Vec<(crate::binding::Announce, crate::binding::Source)> = Vec::new();
+        // round robin across seats; deduplicated by the announce's digest (review N-C) before any signature check
+        let mut cands: Vec<crate::binding::Announce> = Vec::new();
         for (blob, _) in std::mem::take(&mut self.bindings_member) {
             if let Some(a) = crate::binding::Announce::decode(&blob) {
-                member_c.push((a, crate::binding::Source::Member));
+                cands.push(a);
             }
         }
         let soon = height.saturating_add(ttl / 4);
@@ -1688,45 +1723,44 @@ impl CancelAgent {
             Some(_) => 1,
         };
         seats.sort_by_key(|(seq, _)| urgency(seq));
-        let mut topic_c = Vec::new();
         let rounds = seats.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
         for k in 0..rounds {
             for (_, blobs) in &seats {
                 if let Some(a) = blobs.get(k).and_then(|b| crate::binding::Announce::decode(b)) {
-                    topic_c.push((a, crate::binding::Source::Topic));
+                    cands.push(a);
                 }
             }
         }
-        let mut seen: std::collections::HashSet<(u16, [u8; 32], u32, bool)> = std::collections::HashSet::new();
-        let mut staged: Vec<(
-            crate::binding::Statement,
-            crate::binding::Announce,
-            crate::binding::Source,
-        )> = Vec::new();
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut staged: Vec<(crate::binding::Statement, crate::binding::Announce)> = Vec::new();
         let mut checked = 0;
-        for (a, source) in member_c.into_iter().chain(topic_c) {
+        for a in cands {
             let Ok(st) = a.binding.precheck(&self.network, &set_hex, height, ttl, &members) else {
                 continue;
             };
             if !self.state.bindings.newer_or_same(&st) {
                 continue;
             }
-            if self.state.bindings.holds(&a, st.seq) {
-                // the very binding held: only its hints may change, under the source rules (review B-3)
-                if self.state.bindings.refresh_hints(st.seq, &a, source) {
-                    self.dirty = true;
-                }
-                continue;
+            let same = self.state.bindings.holds(&a, st.seq);
+            if same && !self.state.bindings.newer_hints(st.seq, &a) {
+                continue; // the very binding and hints held
             }
-            if !seen.insert((st.seq, st.endpoint, st.issued, source == crate::binding::Source::Member)) {
+            if !seen.insert(a.digest()) {
                 continue;
             }
             if checked >= BINDING_RECOVERIES {
                 continue;
             }
             checked += 1;
+            if same {
+                // the binding held, newer hints: only the endpoint's proof needs checking
+                if a.possession_ok(&st) && self.state.bindings.refresh_hints(st.seq, &a) {
+                    self.dirty = true;
+                }
+                continue;
+            }
             match a.binding.verify(&self.network, &set_hex, height, ttl, &members) {
-                Ok(st) if a.possession_ok(&st) => staged.push((st, a, source)),
+                Ok(st) if a.possession_ok(&st) => staged.push((st, a)),
                 Ok(_) => tracing::debug!(
                     "cancel direct: binding of seq {} refused: {:?}",
                     st.seq,
@@ -1736,25 +1770,19 @@ impl CancelAgent {
             }
         }
         self.recoveries_last_poll = checked;
-        // per seat keep the latest; an endpoint id claimed by two seats in this poll is dropped for both (review B-1)
-        let mut best: BTreeMap<
-            u16,
-            (
-                crate::binding::Statement,
-                crate::binding::Announce,
-                crate::binding::Source,
-            ),
-        > = BTreeMap::new();
-        for (st, a, src) in staged {
-            let replace = best.get(&st.seq).is_none_or(|(b, _, bsrc)| {
-                st.issued > b.issued || (st.issued == b.issued && *bsrc == crate::binding::Source::Topic)
-            });
+        // per seat keep the latest (then the newest hints); an endpoint id claimed by two seats in this poll is
+        // dropped for both (review B-1)
+        let mut best: BTreeMap<u16, (crate::binding::Statement, crate::binding::Announce)> = BTreeMap::new();
+        for (st, a) in staged {
+            let replace = best
+                .get(&st.seq)
+                .is_none_or(|(b, ba)| st.issued > b.issued || (st.issued == b.issued && a.hint_seq > ba.hint_seq));
             if replace {
-                best.insert(st.seq, (st, a, src));
+                best.insert(st.seq, (st, a));
             }
         }
         let mut by_endpoint: BTreeMap<[u8; 32], Vec<u16>> = BTreeMap::new();
-        for (seq, (st, _, _)) in &best {
+        for (seq, (st, _)) in &best {
             by_endpoint.entry(st.endpoint).or_default().push(*seq);
         }
         for (ep, seqs) in by_endpoint.iter().filter(|(_, v)| v.len() > 1) {
@@ -1770,10 +1798,18 @@ impl CancelAgent {
                 ),
             );
         }
-        for (_, (st, a, src)) in best {
+        for (_, (st, a)) in best {
             let (seq, ep) = (st.seq, st.endpoint);
-            match self.state.bindings.commit(st, a, src) {
-                Ok(true) => self.dirty = true,
+            let was = self.state.bindings.by_seq.get(&seq).map(|h| h.statement.endpoint);
+            match self.state.bindings.commit(st, a) {
+                Ok(true) => {
+                    self.dirty = true;
+                    // a member at a new endpoint: announce ours at the next poll, which also dials it directly
+                    // with our self-introduction -- it learns our binding at once, whatever the topic carries
+                    if seq != self.seq && was != Some(ep) {
+                        self.last_announce = None;
+                    }
+                }
                 Ok(false) => {}
                 Err(crate::binding::Refusal::EndpointConflict(other)) => self.alert_global(
                     "binding-conflict",
@@ -1836,7 +1872,8 @@ impl CancelAgent {
                         hex::encode(ep),
                         self.seq
                     );
-                    self.state.own_binding = Some(crate::binding::Announce::new(b, key, addrs, relay));
+                    self.state.own_binding = Some(crate::binding::Announce::new(b, key, addrs, relay, unix_seconds()));
+                    self.own_fresh_until = Some(height.saturating_add(FRESH_ANNOUNCE_BLOCKS));
                     self.last_announce = None;
                     self.dirty = true;
                 }
@@ -2928,9 +2965,9 @@ mod tests {
                     "upgrade": {"attestorSetId": cosig::display_of_internal(&set), "claimDelay": 10},
                     "params": {"claimThresholdBps": THETA, "claimDelay": 10}})),
                 "yed_listattestors" => Ok(json!([
-                    {"seq": 0, "attestorPubKey": k(10), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
-                    {"seq": 1, "attestorPubKey": k(11), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
-                    {"seq": 2, "attestorPubKey": k(12), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false}
+                    {"seq": 0, "attestorPubKey": k(10), "bondKeyAddress": "addr0", "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
+                    {"seq": 1, "attestorPubKey": k(11), "bondKeyAddress": "addr1", "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
+                    {"seq": 2, "attestorPubKey": k(12), "bondKeyAddress": "addr2", "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false}
                 ])),
                 "yed_listvaults" => Ok(if ch.claiming {
                     json!([{"txid": "bb".repeat(32), "vout": 0, "status": "CLAIMING", "collateralZat": COLL, "mintedCents": DEBT,
@@ -2939,6 +2976,21 @@ mod tests {
                 } else {
                     json!([])
                 }),
+                "validateaddress" => {
+                    let a = params[0].as_str().unwrap_or("");
+                    let n: u8 = a.trim_start_matches("addr").parse().unwrap_or(99);
+                    Ok(json!({"isvalid": true, "pubkey": k(10 + n)}))
+                }
+                "signmessage" => {
+                    let a = params[0].as_str().unwrap_or("");
+                    let n: u8 = a.trim_start_matches("addr").parse().unwrap_or(99);
+                    let msg = params[1].as_str().unwrap_or("");
+                    let sig = testkit::sign(&testkit::key(10 + n), &crate::binding::message_hash(msg));
+                    Ok(json!(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        sig
+                    )))
+                }
                 "getrawtransaction" => Ok(json!("00")),
                 "yed_decodepayload" => {
                     Ok(json!({"valid": true, "type": "redeem", "refHeight": 99, "bundle": ch.bundle}))
@@ -3644,8 +3696,10 @@ mod tests {
     }
 
     /// Review B-2: the topic flooded at 100x across every seat, the fresh member's own seat included. Its honest
-    /// announce (repeated every poll here; every 10 blocks in production) competes with 150 forgeries of its seat a
-    /// poll, drawn 4 at a time uniformly: seeded, it lands within 200 polls (1 - (147/151)^200 > 0.99).
+    /// announce (repeated every poll here, as in production for the first FRESH_ANNOUNCE_BLOCKS -- about 100 polls on
+    /// mainnet -- then every 10 blocks) competes with 150 forgeries of its seat a poll, drawn 4 at a time uniformly:
+    /// seeded, it lands within 200 polls (1 - (147/151)^200 > 0.99). The production timing is in
+    /// `a_fresh_binding_is_announced_every_poll_then_every_ten_blocks`; self-introduction bypasses the topic.
     #[tokio::test]
     async fn a_fresh_binding_lands_through_a_100x_flood_across_seats() {
         let (mut a, _m, _d) = binding_agent(4).await;
@@ -3692,7 +3746,6 @@ mod tests {
         a.take_member_binding(valid(1, 7, 101), 1);
         a.tick(101).await;
         assert!(a.state.bindings.by_seq.contains_key(&1));
-        assert_eq!(a.state.bindings.by_seq[&1].hints_from, crate::binding::Source::Member);
         assert!(a.recoveries_last_poll <= BINDING_RECOVERIES);
     }
 
@@ -3732,30 +3785,124 @@ mod tests {
             .any(|k| k.starts_with("binding-conflict|2-")));
     }
 
-    /// Review B-3: hints learned from the member's own connection are never replaced by a topic copy.
+    /// Review N-B: a topic replay of a binding with fake hints is refused (the endpoint signed the real ones); newer
+    /// signed hints from any copy replace older ones.
     #[tokio::test]
-    async fn topic_copies_cannot_overwrite_authenticated_hints() {
+    async fn a_replay_with_fake_hints_is_refused() {
         let (mut a, _m, _d) = binding_agent(7).await;
-        let mut own = bk::announce(1, 11, 7, 101, 1_001);
-        own.addrs = vec!["192.168.1.5:4433".into()];
-        a.take_member_binding(own.encode(), 1);
+        let own = bk::announce(1, 11, 7, 101, 1_001).with_hints(
+            &bk::endpoint_key(7),
+            vec!["192.168.1.5:4433".into()],
+            None,
+            10,
+        );
+        a.take_binding(own.encode());
         a.tick(101).await;
+        assert_eq!(
+            a.state.bindings.by_seq[&1].announce.addrs,
+            vec!["192.168.1.5:4433".to_string()]
+        );
         let mut evil = own.clone();
         evil.addrs = vec!["6.6.6.6:6".into()];
+        evil.hint_seq = 11;
         a.take_binding(evil.encode());
         a.tick(102).await;
         assert_eq!(
             a.state.bindings.by_seq[&1].announce.addrs,
             vec!["192.168.1.5:4433".to_string()]
         );
-        // the member itself may move
-        let mut moved = own.clone();
-        moved.addrs = vec!["192.168.1.9:4433".into()];
-        a.take_member_binding(moved.encode(), 1);
+        // the endpoint moved and re-signed: any copy carries it in
+        let moved = own.with_hints(&bk::endpoint_key(7), vec!["192.168.1.9:4433".into()], None, 12);
+        a.take_binding(moved.encode());
         a.tick(103).await;
         assert_eq!(
             a.state.bindings.by_seq[&1].announce.addrs,
             vec!["192.168.1.9:4433".to_string()]
         );
+        // an old copy replayed does not roll it back
+        a.take_binding(own.encode());
+        a.tick(104).await;
+        assert_eq!(a.state.bindings.by_seq[&1].announce.hint_seq, 12);
+    }
+
+    /// Review N-C: forged look-alikes of the genuine announce -- the same seat, endpoint and issued height, a bad
+    /// member signature -- arriving first in the same poll do not displace it: dedup is by digest.
+    #[tokio::test]
+    async fn a_forged_look_alike_does_not_block_the_genuine_copy() {
+        let (mut a, _m, _d) = binding_agent(8).await;
+        let genuine = bk::announce(1, 11, 7, 101, 1_001);
+        let look_alike = bk::announce(1, 99, 7, 101, 1_001); // same (seq, endpoint, issued), forged member signature
+        assert_ne!(genuine.digest(), look_alike.digest());
+        a.take_member_binding(look_alike.encode(), 1);
+        a.take_member_binding(look_alike.encode(), 1);
+        a.take_member_binding(genuine.encode(), 1);
+        a.take_binding(look_alike.encode());
+        a.tick(101).await;
+        assert!(a.state.bindings.by_seq.contains_key(&1), "the genuine copy was taken");
+        assert!(a.recoveries_last_poll >= 2);
+    }
+
+    /// Review N-A: a fresh binding is announced every poll for FRESH_ANNOUNCE_BLOCKS, then every 10 blocks, and at
+    /// the next poll after a member is newly bound. Timing through the topic alone under a 100x per-seat flood: each
+    /// announce lands with p = 4/151, so the 20 fresh blocks at 15-second polls (about 100 announces, 25 minutes on
+    /// mainnet) carry it with ~93 %; after that one announce per 10 blocks (12.5 minutes) adds 4/151 each, ~98 % by 12
+    /// hours. Self-introduction (direct::tests) admits a fresh member at every member it can dial on its first
+    /// connection, and each of those announces back at once.
+    #[tokio::test]
+    async fn a_fresh_binding_is_announced_every_poll_then_every_ten_blocks() {
+        let ch = chain(1);
+        ch.lock().unwrap().claiming = false;
+        let m = mock(ch);
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = new_agent(&m, 1, &dir.path().join("s.json"));
+        a.direct_key = Some(bk::endpoint_key(7));
+        a.direct = Some((bk::endpoint_id(7), vec!["127.0.0.1:1".into()], None));
+        let mut announced = Vec::new();
+        for h in 100..140u32 {
+            a.tick(h).await;
+            if !a.take_announces().is_empty() {
+                announced.push(h);
+            }
+        }
+        assert!(
+            a.state.own_binding.is_some(),
+            "the binding was signed (signmessage, validateaddress)"
+        );
+        let first = announced[0];
+        let fresh: Vec<u32> = announced
+            .iter()
+            .copied()
+            .filter(|h| *h < first + FRESH_ANNOUNCE_BLOCKS)
+            .collect();
+        assert_eq!(
+            fresh.len() as u32,
+            FRESH_ANNOUNCE_BLOCKS,
+            "every poll while fresh: {announced:?}"
+        );
+        let later: Vec<u32> = announced
+            .iter()
+            .copied()
+            .filter(|h| *h >= first + FRESH_ANNOUNCE_BLOCKS)
+            .collect();
+        assert!(
+            later.windows(2).all(|w| w[1] - w[0] == 10),
+            "then every 10 blocks: {later:?}"
+        );
+        // a member newly bound at a new endpoint: ours goes out at the next poll (and over the direct path, with our
+        // self-introduction), not at the next 10-block mark
+        let h = later.last().copied().unwrap_or(first) + 1;
+        a.take_binding(valid(2, 9, h));
+        a.tick(h).await;
+        assert!(a.state.bindings.by_seq.contains_key(&2));
+        let _ = a.take_announces();
+        a.tick(h + 1).await;
+        assert!(!a.take_announces().is_empty(), "announced at once to the new member");
+        a.tick(h + 2).await;
+        assert!(a.take_announces().is_empty(), "then back to every 10 blocks");
+        // the same member's binding again (renewed in place, same endpoint): no extra announce
+        a.take_binding(valid(2, 9, h + 2));
+        a.tick(h + 3).await;
+        a.tick(h + 4).await;
+        assert!(a.take_announces().is_empty());
     }
 }
