@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <sstream>
 #include <unordered_map>
 #include <variant>
@@ -1916,6 +1917,22 @@ bool IsVaultSetStateScriptError(const CScript& templateScriptSig, ScriptError er
     return false;
 }
 
+// The isolated template-input check's verdict (audit 07/F-1, review of the integration): `run(branchId)`
+// evaluates the template input alone under that consensus branch ID and returns its ScriptError
+// (SCRIPT_ERR_OK on success). True = refuse at DoS 0 (a set-state-dependent failure); false = take the stock
+// route through ContextualCheckInputs. A set-state error that disappears under the previous epoch's branch ID
+// (the signatures were made for it) takes the stock route too, which diagnoses old-consensus-branch-id (DoS 10)
+// exactly as for any other input. `run` is called at most twice.
+bool VaultTemplateFailsOnSetState(const CScript& templateScriptSig, uint32_t consensusBranchId,
+                                  uint32_t prevConsensusBranchId, const std::function<ScriptError(uint32_t)>& run)
+{
+    if (!IsVaultSetStateScriptError(templateScriptSig, run(consensusBranchId)))
+        return false;
+    if (prevConsensusBranchId != consensusBranchId && run(prevConsensusBranchId) == SCRIPT_ERR_OK)
+        return false;
+    return true;
+}
+
 bool AcceptToMemoryPool(
         const CChainParams& chainparams,
         CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
@@ -2192,12 +2209,23 @@ bool AcceptToMemoryPool(
         if (vaultFlags) {
             if (auto nTemplate = FindVaultTemplateInput(tx, view)) {
                 const CCoins* coins = view.AccessCoins(tx.vin[*nTemplate].prevout.hash);
-                CScriptCheck check(*coins, tx, *nTemplate, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, consensusBranchId, &txdata);
-                check.SetVault(vaultSnapshot ? vaultSnapshot : vault::TipSnapshot(), GetSpendHeight(view));
-                if (!check() && IsVaultSetStateScriptError(tx.vin[*nTemplate].scriptSig, check.GetScriptError()))
+                const auto snapshot = vaultSnapshot ? vaultSnapshot : vault::TipSnapshot();
+                const int nSpendHeight = GetSpendHeight(view);
+                ScriptError templateError = SCRIPT_ERR_OK;
+                auto run = [&](uint32_t branchId) {
+                    CScriptCheck check(*coins, tx, *nTemplate, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, branchId, &txdata);
+                    check.SetVault(snapshot, nSpendHeight);
+                    const ScriptError err = check() ? SCRIPT_ERR_OK : check.GetScriptError();
+                    if (branchId == consensusBranchId)
+                        templateError = err;
+                    return err;
+                };
+                // The previous epoch's branch ID, as ContextualCheckInputs computes it for its retry.
+                if (VaultTemplateFailsOnSetState(tx.vin[*nTemplate].scriptSig, consensusBranchId,
+                                                 PrevEpochBranchId(consensusBranchId, chainparams.GetConsensus()), run))
                     return state.DoS(0, error("AcceptToMemoryPool: vault: %s input %u: %s", hash.ToString(), *nTemplate,
-                                              ScriptErrorString(check.GetScriptError())), REJECT_INVALID,
-                                     strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(check.GetScriptError())));
+                                              ScriptErrorString(templateError)), REJECT_INVALID,
+                                     strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(templateError)));
             }
         }
         if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
