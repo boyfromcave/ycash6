@@ -394,6 +394,13 @@ public:
      *  needs a block hash finds anything to eject. */
     void SetBlockHashes(const BlockHashFn& fn) { blockHashes = fn; }
 
+    /** S-0 (audit 01/V-1): UPGRADE_VAULT's activation height. A template input whose coin was
+     *  created below it is invalid, so a coin the rules never indexed is never their input and
+     *  replay (which derives height 0 for such a coin) agrees with the live path. The node sets it
+     *  at every construction (ConnectBlock, the miner, replay, CheckTx); 0, the default, is no
+     *  floor (unit tests that build chains from height 0). */
+    void SetActivationHeight(int64_t h) { activationHeight = h; }
+
     /** The module ejection hook (U-25) for one module: what ApplyTx runs, after the
      *  transaction's own rules and act, for each registered module. Public so a unit test can
      *  drive the hook with a module that is not in the compile-time table. */
@@ -414,11 +421,13 @@ private:
     const KVReader& base;
     std::map<std::string, std::optional<std::string>> changes;
     BlockHashFn blockHashes;
+    int64_t activationHeight = 0;
 };
 
-/** Mempool check: would `tx` apply at `height` (tip+1) over the snapshot's base? */
+/** Mempool check: would `tx` apply at `height` (tip+1) over the snapshot's base?
+ *  `activationHeight` is S-0's floor (VaultState::SetActivationHeight). */
 std::optional<std::string> CheckTx(const CTransaction& tx, const CoinAccessor& coins, int64_t height, const SetSnapshot& snapshot,
-                                   const BlockHashFn& blockHashes = BlockHashFn());
+                                   const BlockHashFn& blockHashes = BlockHashFn(), int64_t activationHeight = 0);
 
 /** Eject a member and freeze its bond (SET_EQUIVOCATION's effect, §15.5; the module ejection
  *  hook's, U-25): only a member of `setId` whose bond is unspent (indexed) and not frozen.

@@ -1990,7 +1990,8 @@ bool AcceptToMemoryPool(
         if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
             vaultSnapshot = vault::TipSnapshot();
             vault::ViewCoinAccessor vaultCoins(view, nextBlockHeight);
-            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip())))
+            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip()),
+                                               chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight))
                 return state.DoS(0, error("AcceptToMemoryPool: vault: %s: %s", hash.ToString(), vaultBad->c_str()), REJECT_INVALID, *vaultBad);
         }
 
@@ -4254,6 +4255,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fVaultRules) {
         vaultState.reset(new vault::VaultState(*vault::g_vaultdb));
         vaultState->SetBlockHashes(vault::AncestorHashes(pindex->pprev));
+        vaultState->SetActivationHeight(chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight);
         if (auto vaultBad = vaultState->ApplyBlock(block, pindex->nHeight, vaultCoins, vaultUndo, pindex))
             return state.DoS(100, error("ConnectBlock(): vault: %s", vaultBad->c_str()), REJECT_INVALID, *vaultBad);
     }

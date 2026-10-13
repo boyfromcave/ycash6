@@ -87,9 +87,9 @@ bool CoinsFromUndo(const CBlock& block, const CBlockUndo& undo, int64_t height, 
                 } else if (auto rec = GetTemplateOut(base, prevout)) {
                     c.height = rec->height;
                 } else {
-                    IntentParams ip;
-                    if (MatchIntent(c.scriptPubKey, ip) != Shape::NONE) return false;
-                    c.height = 0; // not consensus input for anything but an intent
+                    // 0 = created before activation or not a template: S-0 (audit 01/V-1) rejects a
+                    // template spend of it exactly as the live path does with the real height.
+                    c.height = 0;
                 }
                 out.coins[prevout] = c;
             }
@@ -269,7 +269,7 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
             continue;
         }
         if (!IsVaultRelevant(tx, view)) continue;
-        std::optional<std::string> why = CheckTx(tx, coins, nextHeight, *snapshot, AncestorHashes(chainActive.Tip()));
+        std::optional<std::string> why = CheckTx(tx, coins, nextHeight, *snapshot, AncestorHashes(chainActive.Tip()), activation);
         if (!why) why = RecheckTemplateScripts(tx, view, nextHeight, snapshot, params);
         if (why) {
             LogPrint("vault", "vault: dropping %s from the mempool at height %d: %s\n", tx.GetHash().ToString(), nextHeight, *why);
@@ -289,6 +289,8 @@ TemplateRun::TemplateRun(const VaultDB& db, CCoinsView* tip, CTxMemPool& pool, i
     // The module ejection hook (U-25) reads the template's ancestors: the template's parent is
     // the active tip (the miner holds cs_main for this object's lifetime). A trial copies them.
     running.SetBlockHashes(AncestorHashes(chainActive.Tip()));
+    // S-0 (audit 01/V-1): the activation floor on template inputs; a trial copies it.
+    running.SetActivationHeight(params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight);
 }
 
 std::optional<std::string> TemplateRun::Try(const CTransaction& tx)
@@ -381,6 +383,7 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
         }
         VaultState state(*g_vaultdb);
         state.SetBlockHashes(AncestorHashes(pindex->pprev));
+        state.SetActivationHeight(activation);
         BlockUndo vundo;
         if (auto bad = state.ApplyBlock(block, h, coins, vundo, pindex)) {
             err = strprintf("vault: block %d on the active chain fails the vault rules on replay (%s)", h, *bad);
