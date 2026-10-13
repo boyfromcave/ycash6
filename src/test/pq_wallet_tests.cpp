@@ -19,6 +19,7 @@
 #include "script/ismine.h"
 #include "script/sign.h"
 #include "script/standard.h"
+#include "test/data/pq_wallet_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
 #include "vault/template.h"
@@ -30,6 +31,10 @@
 #include "zcash/address/zip32.h"
 
 #include <boost/test/unit_test.hpp>
+
+#include <stdexcept>
+
+#include "univalue.h"
 
 typedef std::vector<unsigned char> valtype;
 
@@ -51,12 +56,39 @@ CPQKey::Secret Sec(const std::string& hex)
 
 std::string Hex(const CPQKey::Secret& s) { return HexStr(s.begin(), s.end()); }
 
-// Independent vectors: the workspace Python (hmac/hashlib HKDF + test_framework/pq.py slh_keygen).
-const char* SEED_1_0 = "335a7ef8fa0ab4fc9faeff290ce40ea4fce101b983c70cc23ac4893354fbda10d5fcce4ade352f727cfa37db588a9e1f";
-const char* SEED_1_1 = "b4e9e97fedc3632dec77709ed522bab4fbc8d65f6ebf6359418d4d2f854b02c7d01ca11d6fdc81b91cddd1ada728fccf";
-const char* SEED_2_0 = "16f91ba800e9d23d547e5e45f588464fa5102f3caa75fcb0dd3fd8cad5aa608f8368b05457b73d98aff51f5725c998b3";
-const char* PK_1_0 = "d5fcce4ade352f727cfa37db588a9e1f3803cb0b132b60db35f26e8343f0500a";
-const char* KEYHASH_1_0 = "73efa99cd22fe553222b1db6a6a021b3cba29dafd4fb4dfb50be69abcfcf9364";
+// The A-12 golden vector, src/test/data/pq_wallet_vectors.json: written by the workspace-independent
+// Python (qa/rpc-tests/test_framework/gen_pq_wallet_vectors.py: hmac/hashlib HKDF and PBKDF2, pq.py
+// slh_keygen), byte-identical on both node lines and copied by clients (YEW core/tests/vectors/).
+UniValue ReadWalletVectors()
+{
+    UniValue doc;
+    const std::string text(json_tests::pq_wallet_vectors, json_tests::pq_wallet_vectors + sizeof(json_tests::pq_wallet_vectors));
+    if (!doc.read(text))
+        throw std::runtime_error("src/test/data/pq_wallet_vectors.json does not parse");
+    return doc;
+}
+
+const UniValue& WalletVectors()
+{
+    static const UniValue doc = ReadWalletVectors();
+    return doc;
+}
+
+/** The derived 48-byte seed of (scheme, index) in a section of the vector ("hdSeed" or "mnemonic"). */
+std::string VectorSeed(const std::string& section, uint8_t scheme, uint32_t index)
+{
+    for (const UniValue& d : WalletVectors()[section]["derive"].getValues())
+        if (d["scheme"].get_int() == scheme && d["index"].get_int() == (int)index)
+            return d["seed"].get_str();
+    throw std::runtime_error("pq_wallet_vectors.json: no derive entry");
+}
+
+/** The HD-seed vector (the seed 0x00..0x1f): derived seeds and the SLH-DSA key at index 0. */
+const std::string SEED_1_0 = VectorSeed("hdSeed", 1, 0);
+const std::string SEED_1_1 = VectorSeed("hdSeed", 1, 1);
+const std::string SEED_2_0 = VectorSeed("hdSeed", 2, 0);
+const std::string PK_1_0 = WalletVectors()["hdSeed"]["slh"]["pk"].get_str();
+const std::string KEYHASH_1_0 = WalletVectors()["hdSeed"]["slh"]["keyhash"].get_str();
 
 CPQKey DerivedFrom(const RawHDSeed& raw, uint8_t scheme, uint32_t index)
 {
@@ -133,6 +165,47 @@ BOOST_AUTO_TEST_CASE(hkdf_rfc5869)
     BOOST_CHECK_EQUAL(HexStr(out), "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
     HKDF_SHA256(nullptr, 0, ikm.data(), ikm.size(), nullptr, 0, out.data(), out.size());
     BOOST_CHECK_EQUAL(HexStr(out), "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8");
+}
+
+BOOST_AUTO_TEST_CASE(wallet_vectors_json)
+{
+    // Every section of pq_wallet_vectors.json: the IKM's derived seeds, and the SLH-DSA key at index 0
+    // (pk and key hash). "hdSeed" is this line's wallet IKM (the 32-byte HD seed); "mnemonic" is the
+    // 64-byte BIP39 seed the 6.20.0 line and YEW use, whose HKDF part this line reproduces from the IKM bytes.
+    const UniValue& doc = WalletVectors();
+    BOOST_CHECK_EQUAL(doc["format"].get_str(), "ycash-pq-wallet-vectors-1");
+    BOOST_CHECK_EQUAL(doc["info"].get_str(), std::string(PQ_SEED_INFO));
+    BOOST_CHECK_EQUAL(ParseHex(doc["hdSeed"]["ikm"].get_str()).size(), 32U);
+    const RawHDSeed raw = TestRawSeed();
+    BOOST_CHECK(ParseHex(doc["hdSeed"]["ikm"].get_str()) == valtype(raw.begin(), raw.end()));
+    BOOST_CHECK_EQUAL(ParseHex(doc["mnemonic"]["ikm"].get_str()).size(), 64U);
+    // 6.20.0: this line's wallet IKM is the mnemonic one. The test wallet's seed (entropy 0x00..0x1f) is
+    // the vector's phrase, and its raw seed the vector's IKM; so a 24-word English phrase without a
+    // passphrase derives the same PQ keys here as in YEW (which replays the same section).
+    BOOST_CHECK_EQUAL(doc["mnemonic"]["entropy"].get_str(), HexStr(raw.begin(), raw.end()));
+    const MnemonicSeed ms = TestMnemonicSeed();
+    BOOST_CHECK_EQUAL(std::string(ms.GetMnemonic().begin(), ms.GetMnemonic().end()), doc["mnemonic"]["phrase"].get_str());
+    const RawHDSeed msRaw = ms.RawSeed();
+    BOOST_CHECK_EQUAL(HexStr(msRaw.begin(), msRaw.end()), doc["mnemonic"]["ikm"].get_str());
+    BOOST_CHECK(WalletDerived(1, 0).GetID() == CPQKeyID(1, uint256(ParseHex(doc["mnemonic"]["slh"]["keyhash"].get_str()))));
+    int n = 0;
+    for (const std::string section : {"hdSeed", "mnemonic"}) {
+        const UniValue& s = doc[section];
+        const valtype ikm = ParseHex(s["ikm"].get_str());
+        for (const UniValue& d : s["derive"].getValues()) {
+            const uint8_t scheme = (uint8_t)d["scheme"].get_int();
+            const uint32_t index = (uint32_t)d["index"].get_int();
+            BOOST_CHECK_EQUAL(Hex(DerivePQSeed(ikm.data(), ikm.size(), scheme, index)), d["seed"].get_str());
+            CPQKey k;
+            BOOST_CHECK(k.Set(scheme, Sec(d["seed"].get_str()), index));
+            n++;
+        }
+        CPQKey slh;
+        BOOST_REQUIRE(slh.Set(1, DerivePQSeed(ikm.data(), ikm.size(), 1, s["slh"]["index"].get_int()), 0));
+        BOOST_CHECK_EQUAL(HexStr(slh.PubKey()), s["slh"]["pk"].get_str());
+        BOOST_CHECK(slh.GetID() == CPQKeyID(1, uint256(ParseHex(s["slh"]["keyhash"].get_str()))));
+    }
+    BOOST_CHECK_EQUAL(n, 8);   // a silently shrunk file fails
 }
 
 BOOST_AUTO_TEST_CASE(derivation_vector)

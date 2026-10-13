@@ -1080,7 +1080,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           if [ ! -f qa/rpc-tests/test_framework/test_pq.py ]; then echo "no PQ framework on this line"; exit 0; fi
-          python3 -m pyflakes qa/rpc-tests/test_framework/pq.py qa/rpc-tests/test_framework/test_pq.py
+          python3 -m pyflakes qa/rpc-tests/test_framework/pq.py qa/rpc-tests/test_framework/test_pq.py qa/rpc-tests/test_framework/gen_pq_wallet_vectors.py
+          # the A-12 derivation vector (pq_wallet_tests replays it; YEW copies it): a stale file fails here
+          python3 qa/rpc-tests/test_framework/gen_pq_wallet_vectors.py --check
           cd qa/rpc-tests && python3 -m unittest test_framework.test_pq -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
