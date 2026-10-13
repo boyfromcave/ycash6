@@ -71,6 +71,7 @@ BASE_SCRIPTS= [
     'yellowback_fees_reaccept.py',
     'yellowback_mempool_limits.py',
     'yellowback_interm.py',
+    'yellowback_cancel_limit.py',     # the cancel-limit design (CAN-3 round 2: the held residual, R-1c)
     'yellowback_pq.py',
     'yellowback_pq_dayone.py',
     'yellowback_pricefeed.py',
