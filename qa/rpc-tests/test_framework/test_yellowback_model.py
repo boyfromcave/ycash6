@@ -1847,9 +1847,11 @@ def golden_rejected(claim_height):
             (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
             (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
             (claim_height + 1, 'intent-cancel-cosign'), (claim_height + 9, 'intent-cancel-residual'), (claim_height + 11, 'intent-residual-held'),
+            (claim_height + 41, 'intent-residual-held'),
             (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
 GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow (joins at 225..228 lapse at ~377)
 GOLDEN_HEARTBEAT = 370
+GOLDEN_RELEASE_CHECK = 41      # CAN-3 round 2: the held residual's release attempt after CANCEL_QUIET (claim + 1 + 40)
 GOLDEN_FALCON = 400            # TOK-PQ binds from here (pqFalconHeight; not hashed): only the golden's TOK-PQ refusals come after it
 
 
@@ -1869,10 +1871,11 @@ def build_golden():
     attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 and one
     without the refund (claim + 1), a cancel of the owner's residual intent (claim + 9), and from the Falcon height
     (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ).  The per-vault cancel
-    limit (cancel-limit design, owner 2026-10-13; nineteen rejected blocks): the cancel carries two CANCEL_COSIGN
+    limit (cancel-limit design, owner 2026-10-13; twenty rejected blocks): the cancel carries two CANCEL_COSIGN
     statements (CAN-2 + C4b), a cancel whose statement says the vault was claimable is refused (claim + 1,
     intent-cancel-cosign), the residual's release after CLAIM_DELAY is held (claim + 11, intent-residual-held, CAN-3)
-    and lands at claim + 1 + CANCEL_QUIET, and at GOLDEN_BLOCKS - 1 EQV-1 ejects the attestor whose statement
+    and, round 2, still at claim + 1 + CANCEL_QUIET (the re-created position is claimable at the snapshot), so the
+    residual stays held to the end, and at GOLDEN_BLOCKS - 1 EQV-1 ejects the attestor whose statement
     contradicts its claim5 attestation (C4b)."""
     params = ym.Params.regtest(1, 0, 0, attestor_set_id(liveness_window=GOLDEN_LIVENESS))
     params.pq_falcon_height = GOLDEN_FALCON
@@ -2008,13 +2011,6 @@ def build_golden():
             txs_at['cancel5'] = c.cancel_tx(intent, vault, v.collateral_zat - v3['residual'], refund=True,   # CAN-1
                                             cosigns=[c.cosign(intent, v3['lazy'], 9_000), v3['statement']])
             txs.append(txs_at['cancel5'])
-        elif 'claim_height' in v3 and h == v3['claim_height'] + 1 + params.cancel_quiet:   # CAN-3: the residual is released once
-            # CANCEL_QUIET has passed since the cancel (the re-created position ACTIVE)
-            claim5 = txid_of(txs_at['claim5'])
-            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL]
-            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.pqpkh_script(G_OWNER))
-            txs.append(txs_at['release5r'])
-            v3['residual_vout'] = res[0][1]
         elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
             e = min(q for q in range(4) if q != v3['lazy'])
             v3['ejected'] = e
@@ -2118,6 +2114,12 @@ def build_golden():
             claim5 = txid_of(txs_at['claim5'])
             res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
             bad.append(c.rejected(lambda: c.release_tx(res, v3['residual'], ym.pqpkh_script(G_OWNER))))
+            v3['residual_vout'] = res[1]
+        elif 'claim_height' in v3 and h == v3['claim_height'] + 1 + params.cancel_quiet:   # CAN-3 round 2: CANCEL_QUIET has
+            # passed, but the re-created position (~100 % at the claim's pClaim) is claimable at the pools' ~$0.0038: still held
+            claim5 = txid_of(txs_at['claim5'])
+            res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL][0]
+            bad.append(c.rejected(lambda: c.release_tx(res, v3['residual'], ym.pqpkh_script(G_OWNER))))
         elif h == GOLDEN_FALCON + 2:                            # TOK-PQ: a TRANSFER of the CAN-1 refund to a P2PKH after the Falcon height
             refund = (txid_of(txs_at['cancel5']), 1)
             bad.append(c.rejected(lambda: c.transfer_tx([refund], [(0, 10_000)])))
@@ -2159,7 +2161,7 @@ def golden_document(c):
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, a second notice that does not hold (no BundleLog row, R12 hardened), an emergency '
                        'claim into a claimant and a residual intent, an attestor cancel of the claimant intent refunding the burn '
-                       '(CAN-1) co-signed by two members (CAN-2 + C4b), the residual release once CANCEL_QUIET has passed (CAN-3), S15 dormancy, an equivocation (EQV-1: ejected, bond '
+                       '(CAN-1) co-signed by two members (CAN-2 + C4b), the residual held past CANCEL_QUIET while the position stays claimable (CAN-3, round 2), S15 dormancy, an equivocation (EQV-1: ejected, bond '
                        'frozen), a revival by SET_HEARTBEAT, a heartbeat that keeps one attestor live while the other stays live by its attestation (seats review B2, '
                        'the set\'s member dormancy), a member\'s own exit (SET_REMOVE, burn 0), an EQV-1 ejection on a cancel statement (C4b) '
                        'and two bond spends (the leaver\'s at exit + BOND_MATURITY). '
@@ -2371,10 +2373,12 @@ class StateHashTests(unittest.TestCase):
         # R12 hardened (03/M-2): the notice at 293 did not hold (notice5 stands) and its verified bundle left no row
         self.assertNotIn(293, m.bundle_log)
         self.assertNotIn(txid_of(txs_at['notice5b']), m.txlog)
-        # CAN-3: the residual was held at claim + 11 and released once CANCEL_QUIET had passed since the cancel
-        self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].type, 'CLAIM_RELEASE')
-        self.assertEqual(m.txlog[txid_of(txs_at['release5r'])].height, v3['claim_height'] + 1 + c.params.cancel_quiet)
-        self.assertEqual(m.intents, {})
+        # CAN-3: the residual was held at claim + 11, and (round 2) still at claim + 1 + CANCEL_QUIET because the re-created
+        # position is claimable at the snapshot; it stays held to the end
+        res = (txid_of(txs_at['claim5']), v3['residual_vout'])
+        self.assertEqual((m.intents[res].role, m.intents[res].held_by), (ym.I_RESIDUAL, (txid_of(txs_at['cancel5']), 0)))
+        self.assertEqual(GOLDEN_RELEASE_CHECK, v3['claim_height'] + 1 + c.params.cancel_quiet - v3['claim_height'])
+        self.assertEqual(list(m.intents), [res])
         self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE
         lazy, e, w = v3['lazy'], v3['ejected'], v3['withdrawn']
         self.assertEqual(m.snapshots[v3['dormancy_height']].attest.status, ym.ARMED)
