@@ -810,10 +810,15 @@ struct SpentIntent
  * the claimant intent's release closes the vault (CLAIMED); its cancel re-creates the byte-identical
  * vault, which becomes the same position again (ACTIVE at the new outpoint, its collateral the re-lock's
  * value), and -- CAN-1, audit 03/H-1, U-24 revised -- re-issues the claim's burn as a YED token to the holder
- * the burn came from (the claimant intent's refundScript), at the lowest output index >= 1 paying that script,
- * crediting supplyCents: a cancel delays a liquidation and never charges the claimant for it. The refund is
- * exempt from TOK-PQ (the holder was allowed at the claim, at most `delay` blocks earlier). The owner's residual
- * intent may only be released. The re-created vault must be vout[0]. Returns the verdict; OK on success.
+ * the burn came from (the claimant intent's refundScript: the token spent at the claim's lowest-index YED input),
+ * at the lowest output index >= 1 paying that script, crediting supplyCents: the whole burn, any over-burn included,
+ * goes to that one holder. A cancel returns the claimant's YED; the claim's YEC fees (protocol fee, attestor share,
+ * network fee) are not returned. The refund is exempt from TOK-PQ: on mainnet and testnet the exemption is moot
+ * (pqFalconHeight 0, so the token the claim spent was already a Falcon holder); on a regtest chain whose Falcon height
+ * lies after a pre-Falcon P2PKH token's creation (the token may be much older than the claim), the cancel re-creates
+ * that P2PKH holding after the Falcon height -- accepted, since refusing it would make the cancel impossible and the
+ * burn forfeit again. The owner's residual intent may only be released. The re-created vault must be vout[0]. Returns
+ * the verdict; OK on success.
  */
 std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const SpentIntent& in,
                              const std::optional<FoundPayload>& fp, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
