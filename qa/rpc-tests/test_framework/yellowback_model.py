@@ -80,9 +80,11 @@ PAYLOAD_ATTESTOR_REGISTER = 0x05
 PAYLOAD_CLAIM_NOTICE = 0x06
 PAYLOAD_EQUIVOCATION = 0x07
 PAYLOAD_ATTESTOR_REVIVE = 0x08
+PAYLOAD_CANCEL_COSIGN = 0x09        # CAN-2 + C4b (cancel-limit design, owner 2026-10-13): the cancel's empty-bodied marker
 PAYLOAD_TYPE_NAMES = {PAYLOAD_MINT: 'MINT', PAYLOAD_TRANSFER: 'TRANSFER', PAYLOAD_REDEEM: 'REDEEM',
                       PAYLOAD_ATTESTOR_REGISTER: 'ATTESTOR_REGISTER', PAYLOAD_CLAIM_NOTICE: 'CLAIM_NOTICE',
-                      PAYLOAD_EQUIVOCATION: 'EQUIVOCATION', PAYLOAD_ATTESTOR_REVIVE: 'ATTESTOR_REVIVE'}
+                      PAYLOAD_EQUIVOCATION: 'EQUIVOCATION', PAYLOAD_ATTESTOR_REVIVE: 'ATTESTOR_REVIVE',
+                      PAYLOAD_CANCEL_COSIGN: 'CANCEL_COSIGN'}
 # BUNDLE_CARRIER (v3 plan section 3.1, W2), the params.h enum order
 CARRIER_SCRIPTSIG, CARRIER_OP_RETURN, CARRIER_EITHER = 0, 1, 2
 CARRIER_NAMES = {CARRIER_SCRIPTSIG: 'scriptsig', CARRIER_OP_RETURN: 'opreturn', CARRIER_EITHER: 'either'}
@@ -259,7 +261,8 @@ class Params(object):
                  bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                 attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=1_152)
+                 attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=1_152,
+                 cancel_signers_max=5, cancel_quiet=8_064)       # CAN-2/CAN-3 (owner 2026-10-13); not hashed
         a.update(attest or {})
         for k, v in a.items():
             setattr(self, k, v)
@@ -273,7 +276,8 @@ class Params(object):
                           bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
                           seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                          attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=16)
+                          attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=16,
+                          cancel_signers_max=3, cancel_quiet=40)
 
     def pq_falcon_active(self, height):
         """IsPQFalconActive(params, height): scheme 0x02 owners mint and TOK-PQ binds from this height."""
@@ -1340,7 +1344,7 @@ def decode_payload(data, n_vout=None, opret_index=None):
         p.vault_vout = body[32]
         p.ref_height = struct.unpack('<I', body[33:37])[0]
         return p
-    if t == PAYLOAD_EQUIVOCATION:
+    if t in (PAYLOAD_EQUIVOCATION, PAYLOAD_CANCEL_COSIGN):
         if len(body) != 0:
             return None
         return Payload(t)
@@ -1590,7 +1594,8 @@ class Judgement(object):
 class Vault(object):
     __slots__ = ('owner_pubkey', 'term_class', 'lock_height', 'claim_height', 'collateral_zat',
                  'minted_cents', 'mint_height', 'ref_height', 'status', 'void_reason',
-                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked', 'app_height', 'owner_height', 'p_mint')
+                 'close_height', 'closing_txid', 'burned_cents', 'fee_paid_zat', 'unbacked', 'app_height', 'owner_height', 'p_mint',
+                 'cancel_count', 'last_cancel_height')
 
     def __init__(self):
         self.owner_pubkey = b''
@@ -1611,6 +1616,8 @@ class Vault(object):
         self.app_height = 0           # the V's appHeight: ref_height + 1 (IT-1); lock_height + grace before the in-term plan
         self.owner_height = 0         # the V's ownerHeight: ref_height + 1 (IT-1 extended); lock_height before the in-term plan
         self.p_mint = 0               # FEE-1' (D-Q-23): MINT-5's price at the mint, micro-USD per YEC; every later fee converts at it
+        self.cancel_count = 0         # CAN-2: the position's cancels counted by the escalation schedule (min(q + 1, 255))
+        self.last_cancel_height = 0   # CAN-2: the height of its last cancel; 0 = none
 
     def as_dict(self, outpoint):
         return {'txid': outpoint[0], 'vout': outpoint[1], 'status': VAULT_STATUS_NAMES[self.status],
@@ -1620,18 +1627,21 @@ class Vault(object):
                 'mintHeight': self.mint_height, 'refHeight': self.ref_height,
                 'feePaidZat': self.fee_paid_zat, 'closeHeight': self.close_height,
                 'closingTxid': self.closing_txid, 'burnedCents': self.burned_cents,
-                'unbacked': self.unbacked, 'voidReason': self.void_reason, 'pMint': self.p_mint}
+                'unbacked': self.unbacked, 'voidReason': self.void_reason, 'pMint': self.p_mint,
+                'cancelCount': self.cancel_count, 'lastCancelHeight': self.last_cancel_height}
 
 
 class IntentRec(object):
     """Intents[intentOutpoint] (U-23): a claim intent and the vault it was claimed from."""
-    __slots__ = ('vault', 'role', 'height', 'refund_script')
+    __slots__ = ('vault', 'role', 'height', 'refund_script', 'claim_ref_height', 'held_by')
 
-    def __init__(self, vault, role, height, refund_script=b''):
+    def __init__(self, vault, role, height, refund_script=b'', claim_ref_height=0):
         self.vault = vault          # (txid, n)
         self.role = role            # I_CLAIMANT | I_RESIDUAL
         self.height = height
         self.refund_script = refund_script   # CAN-1 (03/H-1): the claimant intent's refund holder; b'' on the residual
+        self.claim_ref_height = claim_ref_height   # C4b: the claim's REDEEM refHeight (both intents): what a cancel's statements cite
+        self.held_by = None         # CAN-3: on a cancelled claim's residual, the re-created position (txid, n); None = null
 
 
 class Token(object):
@@ -1962,11 +1972,13 @@ def _ser_vault(v):
             + _i64(v.collateral_zat) + _i64(v.minted_cents) + _i32(v.mint_height) + _i32(v.ref_height)
             + _u8(v.status) + _str(v.void_reason) + _i32(v.close_height) + _hash(v.closing_txid)
             + _i64(v.burned_cents) + _i64(v.fee_paid_zat) + _bool(v.unbacked) + _i32(v.app_height) + _i32(v.owner_height)
-            + _i64(v.p_mint))
+            + _i64(v.p_mint) + _u8(v.cancel_count) + _i32(v.last_cancel_height))
 
 
 def _ser_intent(r):
-    return _hash(r.vault[0]) + _u32(r.vault[1]) + _u8(r.role) + _i32(r.height) + _bytes(r.refund_script)
+    held = r.held_by if r.held_by is not None else (None, 0xFFFFFFFF)     # a null COutPoint: zero hash, n = 0xffffffff
+    return (_hash(r.vault[0]) + _u32(r.vault[1]) + _u8(r.role) + _i32(r.height) + _bytes(r.refund_script)
+            + _i32(r.claim_ref_height) + _hash(held[0]) + _u32(held[1]))
 
 
 def _ser_token(t):
@@ -1988,7 +2000,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 13       # IntentRecord.refundScript (CAN-1, audit 03/H-1); 12 was liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 14       # VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3); 13 was IntentRecord.refundScript (CAN-1, audit 03/H-1); 12 was liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2681,12 +2693,17 @@ class YellowbackModel(object):
         sel = selector_of(tx.vin[vin].script_sig)
         if sel not in (SEL_UNLOCK, SEL_OWNER):
             return 'intent-spend-malformed'
-        if payload is not None:
-            return 'intent-spend-malformed'
         cancel = sel == SEL_OWNER
+        # a release carries no Yellowback payload; a cancel none but CAN-2's CANCEL_COSIGN marker
+        if payload is not None and not (cancel and payload.type == PAYLOAD_CANCEL_COSIGN):
+            return 'intent-spend-malformed'
         ir = self.intents[op]
         if cancel and ir.role == I_RESIDUAL:
             return 'intent-cancel-residual'
+        # CAN-3: the residual of a cancelled claim is held while the re-created position lives
+        if not cancel and ir.role == I_RESIDUAL and ir.held_by is not None \
+                and not self._residual_releasable(self.vaults.get(ir.held_by), height):
+            return 'intent-residual-held'
         del self.intents[op]
         rec.type = 'CLAIM_CANCEL' if cancel else 'CLAIM_RELEASE'
         if ir.role == I_RESIDUAL:
@@ -2710,6 +2727,11 @@ class YellowbackModel(object):
         to = [j for j, o in enumerate(tx.vout) if j >= 1 and o.script == ir.refund_script and o.value > 0]
         if not to:
             return 'intent-cancel-no-refund'
+        # CAN-2 + C4b: at least cancels_required distinct current members, each with its price statement at the claim's refHeight
+        cosigners = None if payload is None else self._cancel_cosigns(tx, op, ir, v, self.cancels_required(v, height), height)
+        if cosigners is None:
+            return 'intent-cancel-cosign'
+        rec.bundle_seqs = cosigners
         self.tokens[(tx.txid, to[0])] = Token(refund, tx.vout[to[0]].value, ir.refund_script, height)
         rec.assigned = [(to[0], refund)]
         rec.yed_out = refund
@@ -2721,7 +2743,13 @@ class YellowbackModel(object):
         v.close_height = 0
         v.closing_txid = None
         v.burned_cents = 0
+        v.cancel_count = min(self._cancel_q(v, height) + 1, 255)      # CAN-2
+        v.last_cancel_height = height
         self.vaults[(tx.txid, 0)] = v
+        # CAN-3: this claim's residual, and any residual an earlier cancel of the position holds, is held by the re-created one
+        for r in self.intents.values():
+            if r.role == I_RESIDUAL and (r.vault if r.held_by is None else r.held_by) == ir.vault:
+                r.held_by = (tx.txid, 0)
         self.notices.pop(ir.vault, None)
         self.totals.collateral_zat += v.collateral_zat - claiming_collateral    # IT-6: the CLAIMING collateral was still counted
         self.totals.active_vaults += 1
@@ -2729,6 +2757,76 @@ class YellowbackModel(object):
         rec.reopened_vaults.append((tx.txid, 0))
         yed_outputs.add(0)
         return None
+
+    def _cancel_q(self, v, height):
+        """CAN-2: q, the position's recent cancels (0 once CANCEL_QUIET has passed since its last one)."""
+        return v.cancel_count if height - v.last_cancel_height < self.params.cancel_quiet else 0
+
+    def cancels_required(self, v, height):
+        """CancelsRequired (state.h): min(q + 1, CANCEL_SIGNERS_MAX)."""
+        return min(self._cancel_q(v, height) + 1, max(1, self.params.cancel_signers_max))
+
+    def _residual_releasable(self, pos, height):
+        """CAN-3: the held residual's position is CLOSED or CLAIMED, or ACTIVE with CANCEL_QUIET passed since its last cancel."""
+        if pos is None:
+            return False
+        if pos.status in (V_CLOSED, V_CLAIMED):
+            return True
+        return pos.status == V_ACTIVE and height - pos.last_cancel_height >= self.params.cancel_quiet
+
+    def current_member_seq(self, key33, height):
+        """The seq of a current member of the attestor set on the mirror (the primitive's IsCurrent): its key's newest
+        record, not EJECTED or WITHDRAWN, bond unspent and unfrozen, height >= register_height + the set's maturity."""
+        z = self.attestor_set_rec
+        if z is None:
+            return None
+        seq, r = self._latest_record(key33)
+        if r is None or r.status in (A_EJECTED, A_WITHDRAWN) or r.bond_spent_height or r.bond_frozen:
+            return None
+        if height < r.register_height + z.maturity:
+            return None
+        return seq
+
+    def _cancel_cosigns(self, tx, intent_op, ir, v, required, height):
+        """CAN-2 + C4b: the co-signers' seqs (carrier order) when the cancel's carrier holds at least `required` "YC"
+        co-signatures, each recovering over cancel_cosign_message(the set, the intent, claim_ref_height, price,
+        blockHash(claim_ref_height)) to a distinct current member with a price in [PRICE_MIN, PRICE_MAX] at which the
+        CLAIMING vault is not claimable; else None."""
+        from . import yellowback_attest as ya
+        from . import vault as va
+        p = self.params
+        if p.bundle_carrier == CARRIER_OP_RETURN:        # the OP_RETURN tail is unshipped: no carrier
+            return None
+        found, _why = self._find_carrier(tx, False)
+        if found is None:
+            return None
+        _i, pushes = found
+        _pk, h = ya.parse_carrier_script(pushes[2])
+        if sha256(pushes[0]) != h:
+            return None
+        entries = ya.decode_cancel_cosigns(pushes[0])
+        if entries is None or len(entries) < required:
+            return None
+        R = ir.claim_ref_height
+        bh = self.block_hash_at(R)
+        if bh is None:
+            return None
+        seen, seqs = set(), []
+        for price, sig in entries:
+            if not (p.price_min <= price <= p.price_max):
+                return None
+            if is_underwater(v.collateral_zat, price, v.minted_cents, p.claim_threshold_bps):
+                return None
+            msg = ya.cancel_cosign_message(p.attestor_set_internal or bytes(32), intent_op[0], intent_op[1], R, price, bh)
+            key = va.recover_compact(sig, msg)
+            if key is None or key in seen:
+                return None
+            seen.add(key)
+            seq = self.current_member_seq(key, height)
+            if seq is None:
+                return None
+            seqs.append(seq)
+        return seqs
 
     def _attestation_valid(self, att, pubkey33, block_hash):
         from . import yellowback_attest as ya
@@ -2897,12 +2995,22 @@ class YellowbackModel(object):
         if sha256(pushes[0]) != h:
             return None
         atts = ya.decode_bundle(pushes[0])
-        if atts is None or len(atts) != 2:
+        if atts is not None:
+            if len(atts) != 2:
+                return None
+            a, b = ya.parse_attestation(atts[0]), ya.parse_attestation(atts[1])
+            if a[0] != b[0] or a[2] != b[2] or a[1] == b[1] or a[2] < p.start_height:
+                return None
+            return atts, a[2]
+        # C4b (cancel-limit design, owner 2026-10-13): a regular attestation and a cancel statement ("YX") at its citedHeight
+        ev = ya.decode_cancel_evidence(pushes[0])
+        if ev is None:
             return None
-        a, b = ya.parse_attestation(atts[0]), ya.parse_attestation(atts[1])
-        if a[0] != b[0] or a[2] != b[2] or a[1] == b[1] or a[2] < p.start_height:
+        att, statement = ev
+        a = ya.parse_attestation(att)
+        if a[1] == statement[2] or a[2] < p.start_height:
             return None
-        return atts, a[2]
+        return [att, statement], a[2]
 
     def _attestor_join_refused(self, tx, height):
         """AttestorJoinRefused: a SET_JOIN of the adopted attestor set once the u16 seq space is used up
@@ -2977,6 +3085,16 @@ class YellowbackModel(object):
                 return []
         return [(seq, cited) for seq, _price, cited, _r, _s in parsed if cited > self.attestors[seq].last_act]
 
+    def _second_side_valid(self, side, cited, pubkey33, bh):
+        """EQV-1's second side: an attestation, or (C4b) a cancel statement (intent txid, n, price, sig65) whose signature
+        recovers to the key over cancel_cosign_message(the set, the intent, cited, price, blockHash(cited))."""
+        from . import yellowback_attest as ya
+        from . import vault as va
+        if isinstance(side, (bytes, bytearray)):
+            return self._attestation_valid(side, pubkey33, bh)
+        txid, n, price, sig = side
+        return va.recover_compact(sig, ya.cancel_cosign_message(self.params.attestor_set_internal or bytes(32), txid, n, cited, price, bh)) == pubkey33
+
     def _apply_equivocation(self, tx, height, rec):
         """EQV-1 (P4-b): the first record in seq order that is its key's newest, with an unspent, unfrozen bond, under
         which both attestations verify over blockHash(citedHeight) is EJECTED and its bond frozen."""
@@ -2996,7 +3114,7 @@ class YellowbackModel(object):
             r = self.attestors[seq]
             if r.bond_spent_height or r.bond_frozen or newest[r.attestor_pubkey] != seq:
                 continue
-            if not (self._attestation_valid(atts[0], r.attestor_pubkey, bh) and self._attestation_valid(atts[1], r.attestor_pubkey, bh)):
+            if not (self._attestation_valid(atts[0], r.attestor_pubkey, bh) and self._second_side_valid(atts[1], cited, r.attestor_pubkey, bh)):
                 continue
             self._eject_record(height, r, True)
             rec.attestor_seq = seq
@@ -3275,7 +3393,8 @@ class YellowbackModel(object):
                 if j is None:
                     continue
                 # CAN-1: the claimant intent remembers the holder of the claim's lowest-index YED input
-                self.intents[(tx.txid, j)] = IntentRec(vault_op, role, height, self._spent_scripts[0] if role == I_CLAIMANT else b'')
+                self.intents[(tx.txid, j)] = IntentRec(vault_op, role, height, self._spent_scripts[0] if role == I_CLAIMANT else b'',
+                                                       pl.ref_height)     # C4b: the height a cancel's statements cite
                 yed_outputs.add(j)
         rec.closed_vaults.append(vault_op)
         return None

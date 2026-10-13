@@ -89,6 +89,13 @@ PAYLOAD_ATTESTOR_REGISTER = 0x05
 PAYLOAD_CLAIM_NOTICE = 0x06
 PAYLOAD_EQUIVOCATION = 0x07
 PAYLOAD_ATTESTOR_REVIVE = 0x08
+PAYLOAD_CANCEL_COSIGN = 0x09        # CAN-2 + C4b (cancel-limit design, owner 2026-10-13)
+CANCEL_COSIGN_PREFIX = b'YedCancelCosign'      # 15 ASCII bytes, no length prefix
+CANCEL_COSIGN_MAGIC = b'YC'
+CANCEL_EVIDENCE_MAGIC = b'YX'
+CANCEL_COSIGN_VERSION = 1
+CANCEL_COSIGN_ENTRY = 4 + 65            # price u32 | recoverable sig 65
+CANCEL_COSIGN_MAX = 7                   # 4 + 7 x 69 = 487 bytes, one carrier push
 
 OP_SWAP = 0x7c
 OP_SHA256 = 0xa8
@@ -398,6 +405,72 @@ def encode_revive(att74):
     """78 bytes: the header and one attestation."""
     assert_equal(len(att74), ATTESTATION_SIZE)
     return _v3(PAYLOAD_ATTESTOR_REVIVE, bytes(att74))
+
+
+def encode_cancel_cosign():
+    """4 bytes: the CANCEL_COSIGN marker (its co-signatures ride the carrier, "YC")."""
+    return _v3(PAYLOAD_CANCEL_COSIGN, b'')
+
+
+def cancel_cosign_message(set_internal32, intent_txid_hex, intent_n, cited_height, price_micro_usd, blockhash_hex):
+    """attest.h CancelCosignMessage: ``SHA256d("YedCancelCosign" || attestorSetId 32 || intent txid 32 || n LE32 ||
+    citedHeight LE32 || price LE32 || blockHash 32)``, every hash as its internal bytes (123 bytes)."""
+    pre = (CANCEL_COSIGN_PREFIX + bytes(set_internal32) + bytes.fromhex(intent_txid_hex)[::-1]
+           + struct.pack('<III', intent_n, cited_height, price_micro_usd) + blockhash_internal(blockhash_hex))
+    return hashlib.sha256(hashlib.sha256(pre).digest()).digest()
+
+
+def sign_cancel_cosign(secret32, set_internal32, intent_txid_hex, intent_n, cited_height, price_micro_usd, blockhash_hex):
+    """One "YC" entry ``(price, sig65)``: the member's co-signature of the cancel and its price statement at
+    ``cited_height`` (the claim's refHeight), a recoverable signature under the set-signature rule."""
+    from . import vault as va
+    msg = cancel_cosign_message(set_internal32, intent_txid_hex, intent_n, cited_height, price_micro_usd, blockhash_hex)
+    return (price_micro_usd, va.sign_recoverable(secret32, msg))
+
+
+def encode_cancel_cosigns(entries):
+    """``"YC" || 0x01 || count || count x (price LE32 || sig65)``, 1 <= count <= CANCEL_COSIGN_MAX."""
+    assert 1 <= len(entries) <= CANCEL_COSIGN_MAX
+    out = CANCEL_COSIGN_MAGIC + bytes([CANCEL_COSIGN_VERSION, len(entries)])
+    for price, sig in entries:
+        assert_equal(len(sig), 65)
+        out += struct.pack('<I', price) + bytes(sig)
+    return out
+
+
+def decode_cancel_cosigns(blob):
+    """The ``(price, sig65)`` entries of a well-formed "YC" list, or None."""
+    blob = bytes(blob)
+    if len(blob) < 4 or blob[:2] != CANCEL_COSIGN_MAGIC or blob[2] != CANCEL_COSIGN_VERSION:
+        return None
+    count = blob[3]
+    if not 1 <= count <= CANCEL_COSIGN_MAX or len(blob) != 4 + CANCEL_COSIGN_ENTRY * count:
+        return None
+    out = []
+    for i in range(count):
+        e = blob[4 + CANCEL_COSIGN_ENTRY * i:4 + CANCEL_COSIGN_ENTRY * (i + 1)]
+        out.append((struct.unpack('<I', e[:4])[0], e[4:]))
+    return out
+
+
+def encode_cancel_evidence(att74, intent_txid_hex, intent_n, price_micro_usd, sig65):
+    """EQV-1's second shape (C4b), 182 bytes: ``"YX" || 0x01 || attestation 74 || intent txid 32 || n LE32 || price LE32 ||
+    sig65``; the statement's citedHeight is the attestation's."""
+    assert_equal(len(att74), ATTESTATION_SIZE)
+    assert_equal(len(sig65), 65)
+    return (CANCEL_EVIDENCE_MAGIC + bytes([CANCEL_COSIGN_VERSION]) + bytes(att74) + bytes.fromhex(intent_txid_hex)[::-1]
+            + struct.pack('<II', intent_n, price_micro_usd) + bytes(sig65))
+
+
+def decode_cancel_evidence(blob):
+    """``(att74, (intent txid display hex, n, price, sig65))`` of a well-formed "YX" blob, or None."""
+    blob = bytes(blob)
+    if len(blob) != 3 + ATTESTATION_SIZE + 32 + 4 + 4 + 65 or blob[:2] != CANCEL_EVIDENCE_MAGIC or blob[2] != CANCEL_COSIGN_VERSION:
+        return None
+    att = blob[3:3 + ATTESTATION_SIZE]
+    rest = blob[3 + ATTESTATION_SIZE:]
+    n, price = struct.unpack('<II', rest[32:40])
+    return att, (rest[:32][::-1].hex(), n, price, rest[40:105])
 
 
 def encode_bundle(atts):

@@ -39,13 +39,13 @@ of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of re
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
-| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan), `i64 pMint` (FEE-1', quantum plan D-Q-23: MINT-5's price at the mint, micro-USD per YEC, the price every later fee of the vault converts at; schema 9, appended last so every earlier field keeps its offset) |
+| 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan), `i64 pMint` (FEE-1', quantum plan D-Q-23: MINT-5's price at the mint, micro-USD per YEC, the price every later fee of the vault converts at; schema 9, appended last so every earlier field keeps its offset), `u8 cancelCount`, `i32 lastCancelHeight` (**CAN-2**, the cancel-limit design, schema 14, appended last: the position's cancels counted by the escalation schedule and the height of its last cancel; 0/0 at the mint, carried by every re-creation) |
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
 | 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |
 | 9 | `Params` | `P` | `i32 startHeight` (the `UPGRADE_VAULT` activation height, U-22), `i32 sigmaRefBps`, `i32 supplyCapBps`, `uint256 attestorSetId` (32 internal bytes; it replaced v3's `i32 enforceUntil`, **U-22**); v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1: `u8 mintRequiresArmed` |
 | 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice`. `Attestors`: `bytes attestorPubKey`, `bytes bondPubKey`, `COutPoint bondOutpoint`, `i64 bondZat`, `u32 bondLocktime`, `u8 flags`, `i32 registerHeight`, `u8 status` (`PENDING, ELIGIBLE, DORMANT, EJECTED, WITHDRAWN`), `i32 statusHeight`, `i32 bondSpentHeight`, `i32 seatedSince`, then **(P4-b)** `i32 lastAct`, `bool bondFrozen` |
-| 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height`, `bytes refundScript` (**CAN-1**, audit 03/H-1, schema 13, appended last: on the claimant intent the scriptPubKey of the token the claim spent at its lowest-index YED input; empty on the residual) |
+| 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height`, `bytes refundScript` (**CAN-1**, audit 03/H-1, schema 13, appended last: on the claimant intent the scriptPubKey of the token the claim spent at its lowest-index YED input; empty on the residual), `i32 claimRefHeight` (**C4b**, schema 14: the claim's REDEEM `refHeight`, on both intents), `COutPoint heldBy` (**CAN-3**, schema 14: on a residual whose claimant intent was cancelled the re-created position, else null = 32 zero bytes and `n = 0xffffffff`) |
 | 16 | `AttestorSet` **(P4-b)**, once the set's `SET_CREATE` is seen | `Z` | `i32 createHeight`, `u8 seats`, `u32 maturity`, `u32 livenessWindow` |
 
 Each record is its key immediately followed by its value. `TxLog`, `Rejected`, `Undo` are
@@ -174,13 +174,16 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   paying `P2PKH(hash160(ownerPubKey))` (its `recipientHash`) at least the residual — the first such
   in output order is the owner's residual intent, the other the claimant's — else `red5-residual`;
   with no residual due there must be exactly one (the claimant's), else `vault-claim-intents`.
-  Each gets an `Intents` record `{vault, role, height, refundScript}` -- **(CAN-1)** the claimant's `refundScript` is
+  Each gets an `Intents` record `{vault, role, height, refundScript, claimRefHeight = the payload's refHeight, heldBy = null}` -- **(CAN-1)** the claimant's `refundScript` is
   the script of the token spent at the claim's lowest-index YED input (a held claim always spent one, RED-2; none is
   `vault-spend-malformed`), the residual's is empty. The claim's REDEEM burn happens there (IN-3).
 - **M. Intent spends (U-23, U-24).** A transaction spending an `Intents` outpoint (exactly one, and
   no ACTIVE vault, else `intent-spend-malformed`) must use selector 1 (release) or 2 (cancel) and
-  carry no Yellowback payload (`intent-spend-malformed`). The record is erased. The residual's
-  cancel is `intent-cancel-residual`; its release changes nothing else. The claimant's release
+  carry no Yellowback payload -- a cancel none but `CANCEL_COSIGN` (type `0x09`, empty body) --
+  (`intent-spend-malformed`). The residual's cancel is `intent-cancel-residual`. **(CAN-3)** The release
+  of a residual whose `heldBy` is set is `intent-residual-held` unless `Vaults[heldBy]` is `CLOSED` or
+  `CLAIMED`, or `ACTIVE` with `H - lastCancelHeight >= CANCEL_QUIET` (regtest 40, mainnet 8,064).
+  The record is erased (after those checks); the residual's release changes nothing else. The claimant's release
   makes the vault `CLAIMED`. The claimant's cancel must create exactly one output equal to the
   vault's V, at `vout[0]` (`intent-cancel-no-vault`): the vault record moves to `(cancelTxid, 0)`
   as `ACTIVE` with `collateralZat` = that output's value, `closeHeight = 0`, `closingTxid` zero,
@@ -191,6 +194,17 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   record's `burnedCents` (the whole burn), `TxLog.assigned = [(j, burnedCents)]`, `yedOut = burnedCents`,
   and `Totals.supplyCents += burnedCents`; IN-3 treats a `CLAIM_CANCEL` like a MINT (its `yedOut` is not
   carried from its inputs, so YED inputs of a cancel burn). TOK-PQ is not applied to the refund.
+  **(CAN-2 + C4b, checked after the refund)** `q = cancelCount` when `H - lastCancelHeight < CANCEL_QUIET`, else 0;
+  `required = min(q + 1, CANCEL_SIGNERS_MAX)` (regtest 3, mainnet 5). The cancel must carry `CANCEL_COSIGN` and its
+  scriptsig carrier (any input, `skipVin0` false) must hold `"YC" | 1 | count | count × (u32 price | sig65)`,
+  `1 ≤ count ≤ 7`, `count ≥ required`, where every entry has `PRICE_MIN ≤ price ≤ PRICE_MAX`, is not claimable
+  (`!underwater(collateralZat, price, mintedCents, CLAIM_THRESHOLD_BPS)` of the CLAIMING record), and its signature
+  recovers (header 31..34, low S) over `SHA256d("YedCancelCosign" ‖ attestorSetId ‖ intent txid ‖ u32 n ‖
+  u32 claimRefHeight ‖ u32 price ‖ Snapshots[claimRefHeight].blockHash)` to a distinct key that is a current member
+  (its newest record, not `EJECTED`/`WITHDRAWN`, bond unspent and unfrozen, `H ≥ registerHeight + AttestorSet.maturity`);
+  else `intent-cancel-cosign`. `TxLog.bundleSeqs` = the co-signers' seqs in carrier order. The re-created record gets
+  `cancelCount = min(q + 1, 255)`, `lastCancelHeight = H`. **(CAN-3)** Every residual intent whose position
+  (`heldBy`, or `vault` when `heldBy` is null) is the cancelled outpoint gets `heldBy = (cancelTxid, 0)`.
   `TxLog.closedVaults` names the old outpoint, `reopenedVaults` the new one. The model checks neither
   the delay nor the payment (the primitive does).
 - **N. YED template outputs (U-23).** After the payload rules, any output that is a YED V or I
@@ -229,9 +243,11 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   A notice (or other act) that fails its own rule and whose bundle credits nobody -- no live member's fresh,
   verifying attestation, or R older than `REF_WINDOW` -- stays a valid no-op, as before (final review A-1).
 - **P. EQV-1 (P4-b).** The evidence is EQV-1's (two attestations, one `seq`, one `citedHeight ≥
-  START_HEIGHT` and `< H`, two prices, the scriptsig carrier); the key is the **first record in seq
+  START_HEIGHT` and `< H`, two prices, the scriptsig carrier; **C4b**: or a `"YX" | 1 | attestation 74 | intent txid |
+  u32 n | u32 price | sig65` carrier -- one attestation and one cancel statement at its `citedHeight` with a
+  different price, the statement's signature recovering to the key over the co-sign message above); the key is the **first record in seq
   order** that is its key's newest, has `bondSpentHeight = 0` and `bondFrozen = false`, under which
-  both attestations verify over `Snapshots[citedHeight].blockHash` (the record named by the
+  both sides verify over `Snapshots[citedHeight].blockHash` (the record named by the
   attestations' `seq` is not consulted: a key cannot sign under another key). Effect: `EJECTED`
   (`statusHeight` on change) and `bondFrozen`; `TxLog.attestorSeq` that record's seq,
   `bundleSeqs = [seq of the attestations]`. The primitive freezes the same member's bond (the module
