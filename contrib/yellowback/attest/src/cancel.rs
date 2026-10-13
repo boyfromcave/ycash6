@@ -1298,7 +1298,8 @@ impl CancelAgent {
                 Err(RpcError::Node { message, .. })
                     if message.starts_with("cancel-cosign-not-member")
                         || message.starts_with("cancel-cosign-malformed")
-                        || message.starts_with("cancel-statement-claimable") =>
+                        || message.starts_with("cancel-statement-claimable")
+                        || message.starts_with("attest-range") =>
                 {
                     let Some(seq) = refused_index(&message).and_then(|i| usable.get(i)).map(|(s, _)| *s) else {
                         tracing::error!("cancel: yed_buildcancel {intent}: {message}");
@@ -1736,6 +1737,10 @@ mod tests {
         assert_eq!(
             refused_index("cancel-cosign-not-member: cosigs[2] is not from a current member"),
             Some(2)
+        );
+        assert_eq!(
+            refused_index("attest-range: cosigs[0] (seq 3) states 5 micro-USD, outside [100, 4294967295]"),
+            Some(0)
         );
         assert_eq!(refused_index("cancel-cosign-needed: this cancel needs 2"), None);
     }
