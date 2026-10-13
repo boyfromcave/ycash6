@@ -1215,11 +1215,12 @@ bool ContextualCheckTransaction(
 
         // UPGRADE_VAULT (quantum spec R-A3): the vault opcodes and templates are defined over the ZIP-243
         // sighash of v4 transactions only; under Vault a v5 (ZIP-225) transaction is invalid.
+        // Potentially relaxing: a later upgrade that defines the ZIP-244 vault message lifts it (U-26).
         if (consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) &&
             tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) {
             return state.DoS(
-                dosLevelConstricting,
-                error("ContextualCheckTransaction(): v5 transaction under the vault upgrade"),
+                dosLevelPotentiallyRelaxing,
+                error("ContextualCheckTransaction(): non-Sapling version group under the vault upgrade"),
                 REJECT_INVALID, "bad-vault-tx-version-group-id");
         }
 
