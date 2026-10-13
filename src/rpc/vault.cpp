@@ -1347,9 +1347,14 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     vp.delay = find_value(o, "delay").get_int64();
     vp.ownerHeight = find_value(o, "ownerheight").get_int64();
     vp.appHeight = find_value(o, "appheight").isNull() ? 0 : find_value(o, "appheight").get_int64();
-    // V-1 (audit 01/V-5): the APP branch has no signer; only a tag a module governs may carry one.
-    if (vp.appHeight != 0 && !vault::FindModule(vp.tag))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "appheight on a tag without a module: the APP branch has no signer and only a module may govern it (bad-txns-vault-app)");
+    // V-1 (audit 01/V-5): the APP branch has no signer; only a tag a module governs may carry one. Consensus admits
+    // any registered tag (V-1); the wallet also requires the module to govern a set on this node (YED\0 without its
+    // attestor set is registered but governs nothing: its rules are unconfigured and the branch would be open to all).
+    if (vp.appHeight != 0) {
+        const vault::Module* mod = vault::FindModule(vp.tag);
+        if (!mod || !mod->GovernedSet())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "appheight on a tag no module governs: the APP branch has no signer and only a module with its set may govern it (V-1, bad-txns-vault-app)");
+    }
     if (!find_value(o, "ownerkey").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "ownerkey-removed: use owner (pqkeyid)");
     // Every vault owner is a post-quantum key (quantum plan §4.3): the named one, or a new SLH-DSA
     // key of this wallet (quantum spec §6.2).

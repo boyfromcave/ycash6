@@ -280,7 +280,10 @@ Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "owner
 `delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch). A non-zero
 `appheight` is accepted only on a tag a registered module governs (`YED\0`): the APP branch has no
 signer, and consensus refuses a V with an APP branch on any other tag (V-1, `bad-txns-vault-app`;
-audit 01/V-5). `owner` is
+audit 01/V-5). Registered is not governed: on a node where the module has no set (`YED\0` without
+`-yellowbackattestorset`, so its rules are unconfigured) such a V is consensus-valid but its APP
+branch is open to anyone from `appheight`; `vault_lock` therefore also requires the module to
+govern a set here (`GovernedSet`). `owner` is
 a pqkeyid, a PQ address or `{"scheme": int, "keyhash": hex}` (any key: an external owner is
 allowed); without it the wallet draws a new SLH-DSA owner (as `vault_getnewowner`). The former
 `ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
@@ -399,7 +402,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
 | -8 | `vault parameters out of range` | `vault_lock` | `delay` 0 |
 | -8 | `ownerkey-removed` | `vault_lock` | the former `ownerkey` parameter |
-| -8 | `appheight on a tag without a module` | `vault_lock` | `appheight` on tag `TEST` |
+| -8 | `appheight on a tag no module governs` | `vault_lock` | `appheight` on tag `TEST` (or on `YED\0` where no attestor set is configured) |
 | -8 | `unknown post-quantum scheme` | `vault_getnewowner` | `scheme` 3 |
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
 | -8 | `a scheme-2 (FN-DSA-512) owner before Falcon is active` | `vault_lock` | an `owner` with scheme `02` while Falcon is inactive at the next block |
@@ -447,8 +450,16 @@ C: vault_buildcancel I' -> X ; C: set_signcancel X -> X1 ; C: vault_send X1   (a
   network set a height must re-download the chain without `-prune`. Undo records are kept for
   4,096 blocks (`UNDO_KEEP`, `src/vault/db.h`); a crash-time walk-back deeper than that is a wipe
   and replay from the activation height (minutes to hours), as a `VAULT_DB_VERSION` change is
-  (audit 07/F-7, 07/F-8). Live reorgs stop at 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock`
-  more than 4,096 blocks deep stops the node, which then needs `-reindex`. A smaller `-dbcache` flushes the chainstate more often and
+  (audit 07/F-7, 07/F-8); a node killed during a long initial sync with a large `-dbcache` can take
+  it too (time, not soundness). After connecting block H the undo of H − 4,095 … H is kept. Live
+  reorgs stop at 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` that would disconnect a block
+  below H − 4,095 stops the node, a plain restart stops again, and `-reindex` (which forgets the
+  invalidation) recovers.
+- Rules S-0 and V-1's APP clause (2026-10-12) apply to every block from activation, so a regtest,
+  devnet or kind chain built by an earlier binary that holds a pre-activation template spend or a
+  module-less APP vault fails Reconcile's replay (the error names the cause) and splits from a fresh
+  node: restart such a chain from scratch. No public network has an activation height, so mainnet
+  and testnet are unaffected. A smaller `-dbcache` flushes the chainstate more often and
   keeps a crash within the walk-back.
 - A template input whose coin was created below the activation height is invalid (S-0,
   `bad-txns-vault-preactivation`, audit 01/V-1): a V or I a miner put in a block before the
