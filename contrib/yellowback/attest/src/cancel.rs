@@ -747,12 +747,18 @@ impl CancelAgent {
         }
     }
 
-    /// The claim's refHeight (its REDEEM payload) and blockHash(refHeight).
-    async fn claim_ref(&self, intent: &str) -> Result<(u32, String), String> {
+    /// The claim's refHeight (its REDEEM payload) and blockHash(refHeight). The claim is read from the block it
+    /// confirmed in (`getrawtransaction txid 0 blockhash`), which needs no -txindex on either node line.
+    async fn claim_ref(&self, intent: &str, confirm_height: u32) -> Result<(u32, String), String> {
         let txid = intent.split(':').next().unwrap_or("");
+        let in_block = self
+            .node
+            .call("getblockhash", vec![json!(confirm_height)])
+            .await
+            .map_err(|e| format!("getblockhash {confirm_height}: {e}"))?;
         let raw = self
             .node
-            .call("getrawtransaction", vec![json!(txid), json!(0)])
+            .call("getrawtransaction", vec![json!(txid), json!(0), in_block])
             .await
             .map_err(|e| format!("getrawtransaction {txid}: {e}"))?;
         let hex_str = raw.as_str().ok_or("getrawtransaction returned no hex")?;
@@ -931,7 +937,7 @@ impl CancelAgent {
             return;
         }
         if c.ref_height.is_none() {
-            match self.claim_ref(intent).await {
+            match self.claim_ref(intent, c.confirm_height).await {
                 Ok((r, bh)) => {
                     let c = self.state.claims.get_mut(intent).expect("present");
                     c.ref_height = Some(r);
