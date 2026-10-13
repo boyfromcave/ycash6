@@ -50,6 +50,13 @@ name: yellowback tests
 #     to harden/yellowback for the duration of the hardening plan).
 #   workflow_dispatch, input `tier`: all (push + nightly; the default, as a dispatch ran before),
 #     push, nightly (variants, the long suites, the cross-repo runs), weekly (fuzzing). Any ref.
+#   pull_request also runs lockorder-pr (a DEBUG_LOCKORDER build over LOCKORDER_PR_SCRIPTS and the
+#     lockorder check) and sanitizers-pr (ASan/UBSan test_bitcoin over the overlay unit suites); each
+#     builds only when the PR touches OVERLAY_PATHS and is part of the `gate` check (audit 07/F-11).
+#     The full lockorder/sanitizers variants stay nightly.
+# Fail, never skip (audit 04/F-1, 04/N-4): every rpc-tests.py run passes --fail-on-skip, so a script
+# that prints a line starting with SKIP fails the run; the sidecar/agent `test -x` guards and the
+# Falcon signer probe are the early, named message. qa/yellowback-audit.sh fails a run without the flag.
 # Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
 on:
   push:
@@ -114,6 +121,11 @@ env:
   # yellowback_attest_live joined on 2026-10-11 (attestations as liveness only from BUNDLE-1-verified bundles; ported from ycash-dd 8a1624527).
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_interm yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy wallet_pq_address
   SANITIZER_SCRIPTS: yellowback_index
+  # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
+  # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
+  # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
+  OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
@@ -374,6 +386,13 @@ jobs:
       - uses: ./.github/actions/yellowback-prereqs
         with:
           apt: 'false'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py; audit 04/F-1)
+        # vault_pq_reorg's Falcon spends come from the framework's signer, compiled with $CC on the fly;
+        # without a compiler the script would SKIP. Two packages, not the prereqs action's full apt list.
+        if: matrix.suite == 'yellowback'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -422,10 +441,18 @@ jobs:
             case "$n" in
               yellowback_stratum)  test -x "${YOLO_BIN:-}"     || { echo "yolo was not built (sidecars job); $n would SKIP"; exit 1; } ;;
               yellowback_chainviz) test -x "${CHAINVIZ_BIN:-}" || { echo "chain-viz was not built (sidecars job); $n would SKIP"; exit 1; } ;;
+              vault_pq_reorg)
+                # Audit 04/F-1: the early, named failure for the script that needs the Falcon signer.
+                python3 - <<'PY' || { echo "the Falcon signer does not build (test_framework/pq.py _falcon_load); $n would SKIP"; exit 1; }
+          import sys; sys.path.insert(0, 'qa/rpc-tests')
+          from test_framework import pq
+          sys.exit(0 if pq.falcon_signer_available() else 1)
+          PY
+                ;;
             esac
           done
           echo "shard $SHARD/$OF of $SUITE: ${sel[*]}"
-          qa/pull-tester/rpc-tests.py -j4 "${flags[@]}" --nocleanup "${sel[@]}"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j4 "${flags[@]}" --nocleanup "${sel[@]}"
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -481,16 +508,19 @@ jobs:
   # One required check for branch protection: green only when every push-tier job is.
   gate:
     name: push tier
-    needs: [build, unit, sidecars, functional, audit, agent, python, lint]
+    needs: [build, unit, sidecars, functional, audit, agent, python, lint, lockorder-pr, sanitizers-pr]
     if: ${{ always() && github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Every push-tier job succeeded
+        # lockorder-pr and sanitizers-pr run on pull_request only (audit 07/F-11): skipped is green for
+        # them on a push or a dispatch, and nowhere else.
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
         run: |
-          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"')
+          bad=$(echo "$NEEDS" | jq -r --arg ev "$EVENT" 'to_entries[] | select(.value.result != "success") | select(($ev != "pull_request") and (.key == "lockorder-pr" or .key == "sanitizers-pr") and (.value.result == "skipped") | not) | "\(.key)=\(.value.result)"')
           test -z "$bad" || { echo "not green: $bad"; exit 1; }
 
   audit:
@@ -1036,6 +1066,12 @@ jobs:
       - uses: ./.github/actions/yellowback-prereqs
         with:
           apt: 'false'
+      - name: Install a C compiler (the Falcon signer test_pq.py exercises; audit 04/F-1)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev
+      - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
+        run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)
@@ -1048,7 +1084,7 @@ jobs:
         # that is there is checked.
         if: ${{ !cancelled() }}
         run: |
-          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py"
+          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py qa/pull-tester/test_rpc_tests_classify.py qa/yellowback-lockorder-check.py"
           for f in qa/rpc-tests/test_framework/yellowback_attest.py qa/rpc-tests/test_framework/test_yellowback_attest.py; do
             test -f "$f" && files="$files $f"
           done
@@ -1088,6 +1124,9 @@ jobs:
         run: |
           if [ ! -f qa/rpc-tests/test_framework/test_pq.py ]; then echo "no PQ framework on this line"; exit 0; fi
           python3 -m pyflakes qa/rpc-tests/test_framework/pq.py qa/rpc-tests/test_framework/test_pq.py
+          # test_pq's Falcon signer cases are skipUnless(falcon_signer_available()): refuse the skip.
+          (cd qa/rpc-tests && python3 -c 'import sys; from test_framework import pq; sys.exit(0 if pq.falcon_signer_available() else 1)') \
+            || { echo "the Falcon signer does not build (test_framework/pq.py _falcon_load); test_pq's signer cases would skip"; exit 1; }
           cd qa/rpc-tests && python3 -m unittest test_framework.test_pq -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
@@ -1213,7 +1252,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$REF_YCASHD" || { echo "the ycash6-stock binary was not built; the scripts would fall back to fork-vs-fork"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_stockparity yellowback_stock_node
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup yellowback_stockparity yellowback_stock_node
       - name: Cache the Sprout Groth16 parameters (ycash-gtest)
         # ycashd 6.20.0 bundles the Sapling parameters and needs no download, but ycash-gtest does:
         # Joinsplit.FullApiTest proves and verifies a Sprout JoinSplit and loads sprout-groth16.params
@@ -1257,7 +1296,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nocleanup $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j4 --nocleanup $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
       # ycash6 port: yellowback_reorg_stress.py is retired (plan P-7). History: it was still the v1
       # federation script (rosters, anchors, cosigned price transactions) and dies at its first
       # yed_getinfo field. Its v2 adaptation is the unchecked item of the v2 plan's Phase 6
@@ -1291,7 +1330,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_attest_agent
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_attest_agent
       - name: Devnet role presets end to end (extended)
         # The role-based regtest plan's regression suite (R7): brings up each preset through the
         # devnet script itself -- heartbeat, price walk, six personas, a shock, a liquidation --
@@ -1302,7 +1341,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_roles
       - name: Devnet on the vault upgrade end to end (extended)
         # upgrade-walk's core through the devnet script (upgrade plan §4, §5, §15.10): attestor set
         # membership and S15 dormancy, mint on the V template, transfer, redeem and renew, a claim
@@ -1314,7 +1353,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from
@@ -1328,7 +1367,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$REF_YCASHD" || { echo "the ycash6-stock binary was not built; node 1 would be the fork binary"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_demo_v6
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_demo_v6
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet,
         # lightwalletd-dd (its feature branch) and the lightwalletd-legacy baseline both served
@@ -1434,6 +1473,131 @@ jobs:
           gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
+  # ── pull_request legs on overlay paths (audit 07/F-11) ──────────────────────────────────────────
+  # The nightly lockorder and sanitizers variants never block a merge (GitHub cannot gate a merge on
+  # a dispatched or scheduled run). These two run on every pull_request, build only when the PR
+  # touches OVERLAY_PATHS (vault/, yellowback/, their RPCs and the hook files), and then fail the PR on
+  # a lock-order report naming the overlay or on an ASan/UBSan error in the overlay unit suites. Both
+  # are in the `gate` check ("push tier").
+  lockorder-pr:
+    name: lockorder (PR, overlay paths)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # The PR's merge commit and its first parent (the base tip): HEAD^1..HEAD is the PR's change.
+          fetch-depth: 2
+      - name: Does the PR touch an overlay or hook path?
+        id: paths
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE "$OVERLAY_PATHS"; then run=true; else run=false; echo "no overlay path changed: nothing to check"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/yellowback-prereqs
+        if: steps.paths.outputs.run == 'true'
+      - uses: ./.github/actions/yellowback-depends
+        if: steps.paths.outputs.run == 'true'
+      - name: Cache ccache (this variant's own entries; its flags differ from the push build's)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-lockorder-${{ github.head_ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-lockorder-${{ github.head_ref }}-
+            ccache-${{ runner.os }}-lockorder-
+      - name: Build with --enable-debug, the log-only detector patched in (as the nightly lockorder job)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          qa/yellowback-lockorder-logonly.sh .
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug --disable-werror
+          qa/yellowback-cxxbridge-headers.sh . -j"$(nproc)"
+          make -C src -j"$(nproc)" ycashd ycash-cli
+      - name: The lockorder check's self-test (a vault inversion must fail it)
+        if: steps.paths.outputs.run == 'true'
+        run: python3 qa/yellowback-lockorder-check.py --selftest
+      - name: LOCKORDER_PR_SCRIPTS under DEBUG_LOCKORDER
+        if: steps.paths.outputs.run == 'true'
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $LOCKORDER_PR_SCRIPTS
+      - name: No potential deadlock naming the overlay in any debug.log
+        if: always() && steps.paths.outputs.run == 'true'
+        run: python3 qa/yellowback-lockorder-check.py "$RUNNER_TEMP/yellowback-tests"
+      - name: Upload node logs on failure
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yellowback-lockorder-pr-logs
+          path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+          if-no-files-found: ignore
+
+  sanitizers-pr:
+    name: sanitizers (PR, overlay unit suites)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Does the PR touch an overlay or hook path?
+        id: paths
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE "$OVERLAY_PATHS"; then run=true; else run=false; echo "no overlay path changed: nothing to check"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/yellowback-prereqs
+        if: steps.paths.outputs.run == 'true'
+        with:
+          apt-extra: clang
+          python: 'false'
+      - uses: ./.github/actions/yellowback-depends
+        if: steps.paths.outputs.run == 'true'
+      - name: Cache ccache (this variant's own entries)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-sanitizers-${{ github.head_ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-sanitizers-${{ github.head_ref }}-
+            ccache-${{ runner.os }}-sanitizers-
+      - name: Sanitizer-friendly ASLR
+        if: steps.paths.outputs.run == 'true'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: address + undefined test_bitcoin, the overlay unit suites
+        # The nightly sanitizers job's configure (its comments say why each flag is there); only
+        # test_bitcoin is built and only the overlay suites run, so this stays near the push tier's
+        # wall clock. The functional and thread-sanitizer runs stay nightly.
+        if: steps.paths.outputs.run == 'true'
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          ./autogen.sh
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --disable-werror \
+            CXXFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+            LDFLAGS='-fsanitize=address,undefined' \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize' config.log | tail -160; exit 1; }
+          qa/yellowback-cxxbridge-headers.sh . -j"$(nproc)"
+          make -C src -j"$(nproc)" test/test_bitcoin
+          src/test/test_bitcoin --run_test='vault_*,pq_*,yellowback_*'
+
   # The three variant builds of §6.0 item 6 (P6): a DEBUG_LOCKORDER build over the functional
   # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
   # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
@@ -1486,7 +1650,7 @@ jobs:
               *) variant="$variant $n" ;;
             esac
           done
-          qa/pull-tester/rpc-tests.py -j2 --nocleanup $variant $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nocleanup $variant $STOCK_BASELINE "$STOCK_BASELINE_MINEBLOCK"
       - name: No potential deadlock involving Yellowback in any debug.log
         if: always()
         # qa/yellowback-lockorder-check.py groups every report; the inherited net.cpp TRY_LOCK pairs
@@ -1568,7 +1732,7 @@ jobs:
           nm "$bin" | grep -c . >/dev/null
           ! nm "$bin" | grep -q 'ycash_je_' || exit 1
           src/test/test_bitcoin --run_test='yellowback_*,vault_*'
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
           make -C src clean
@@ -1641,7 +1805,7 @@ jobs:
               *) variant="$variant $n" ;;
             esac
           done
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $variant
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $variant
       - name: lcov over src/yellowback and src/rpc/yellowback*, the floors of qa/yellowback-coverage-floor.sh
         run: |
           set -e

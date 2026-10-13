@@ -296,6 +296,8 @@ def main():
     parser.add_argument('--machines', '-m', type=int, default=-1, help='how many machines to shard the tests over. must also provide individual shard index. Default=-1 (no sharding).')
     parser.add_argument('--rpcgroup', '-r', type=int, default=-1, help='individual shard index. must also provide how many machines to shard the tests over. Default=-1 (no sharding).')
     parser.add_argument('--nozmq', action='store_true', help='do not run the zmq tests')
+    # Yellowback (audit 04/F-1, 04/N-4): CI refuses a script that passes by printing SKIP.
+    parser.add_argument('--fail-on-skip', action='store_true', help='treat a script that prints a SKIP line as failed')
     args, unknown_args = parser.parse_known_args()
 
     # Create a set to store arguments and create the passon string
@@ -398,10 +400,23 @@ def main():
         args.jobs,
         args.coverage,
         args.deterministic,
-        passon_args)
+        passon_args,
+        args.fail_on_skip)
     sys.exit(not all_passed)
 
-def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=False, deterministic=False, args=[]):
+# Yellowback (audit 04/F-1, 04/N-4): a script that cannot run its assertions (an optional helper
+# binary or compiler is missing) prints a line starting with "SKIP" and exits 0. Such a line at
+# column 0 marks the run as skipped; "interm: SKIP: ..." mid-line (yellowback_devnet_upgrade.py)
+# is a deliberate value and does not. Under --fail-on-skip a skipped script fails the run.
+SKIP_LINE = re.compile(r'^SKIP\b')
+
+def classify(stdout, stderr, returncode):
+    """Return (passed, skipped) for a finished test script."""
+    passed = stderr == "" and returncode == 0
+    skipped = passed and any(SKIP_LINE.match(line) for line in stdout.splitlines())
+    return passed, skipped
+
+def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=False, deterministic=False, args=[], fail_on_skip=False):
     BOLD = ("","")
     if os.name == 'posix':
         # primitive formatting on supported
@@ -440,25 +455,29 @@ def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enabl
     max_len_name = len(max(test_list, key=len))
     total_count = 0
     passed_count = 0
+    skipped_count = 0
     results = []
     try:
         for _ in range(len(test_list)):
-            (name, stdout, stderr, passed, duration) = job_queue.get_next(deterministic)
+            (name, stdout, stderr, passed, skipped, duration) = job_queue.get_next(deterministic)
             time_sum += duration
 
             print('\n' + BOLD[1] + name + BOLD[0] + ":")
-            print('' if passed else stdout + '\n', end='')
+            print('' if passed and not skipped else stdout + '\n', end='')
             print('' if stderr == '' else 'stderr:\n' + stderr + '\n', end='')
+            if skipped:
+                skipped_count += 1
+                print("%sSkipped: %s%s%s" % (BOLD[1], name, " (fails under --fail-on-skip)" if fail_on_skip else "", BOLD[0]))
             print("Pass: %s%s%s" % (BOLD[1], passed, BOLD[0]), end='')
             if deterministic:
                 print("\n", end='')
             else:
                 print(", Duration: %s s" % (duration,))
             total_count += 1
-            if passed:
+            if passed and not (skipped and fail_on_skip):
                 passed_count += 1
 
-            new_result = "%s | %s" % (name.ljust(max_len_name), str(passed).ljust(6))
+            new_result = "%s | %s | %s" % (name.ljust(max_len_name), str(passed).ljust(6), str(skipped).ljust(7))
             if not deterministic:
                 new_result += (" | %s s" % (duration,))
             results.append(new_result)
@@ -469,7 +488,7 @@ def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enabl
             (name, time0, _proc, _log_out, _log_err) = j
             print("•", name)
             total_count += 1
-            new_result = "%s | %s" % (name.ljust(max_len_name), "INTR".ljust(6))
+            new_result = "%s | %s | %s" % (name.ljust(max_len_name), "INTR".ljust(6), "".ljust(7))
             if not deterministic:
                 new_result += (" | %s s" % (int(now - time0),))
             results.append(new_result)
@@ -481,8 +500,8 @@ def run_tests(test_handler, test_list, src_dir, build_dir, exeext, jobs=1, enabl
         success_rate = "True"
     else:
         success_rate = "%d/%d" % (passed_count, total_count)
-    header = "%s | PASSED" % ("TEST".ljust(max_len_name),)
-    footer = "%s | %s" % ("ALL".ljust(max_len_name), str(success_rate).ljust(6))
+    header = "%s | PASSED | SKIPPED" % ("TEST".ljust(max_len_name),)
+    footer = "%s | %s | %s" % ("ALL".ljust(max_len_name), str(success_rate).ljust(6), str(skipped_count).ljust(7))
     if not deterministic:
         header += " | DURATION"
         footer += " | %s s (accumulated)\nRuntime: %s s" % (time_sum, int(time.time() - time0))
@@ -556,10 +575,10 @@ class RPCTestHandler:
                     log_out.seek(0), log_err.seek(0)
                     [stdout, stderr] = [l.read().decode('utf-8') for l in (log_out, log_err)]
                     log_out.close(), log_err.close()
-                    passed = stderr == "" and proc.returncode == 0
+                    (passed, skipped) = classify(stdout, stderr, proc.returncode)
                     self.num_running -= 1
                     self.jobs.remove(j)
-                    return name, stdout, stderr, passed, int(time.time() - time0)
+                    return name, stdout, stderr, passed, skipped, int(time.time() - time0)
             if not deterministic:
                 print('.', end='', flush=True)
 

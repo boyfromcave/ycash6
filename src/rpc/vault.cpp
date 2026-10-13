@@ -1055,7 +1055,7 @@ UniValue set_create(const UniValue& params, bool fHelp)
             "   {\"seats\":n, \"unlockthreshold\":n, \"cancelthreshold\":n (default 1), \"slashthreshold\":n (default unlockthreshold),\n"
             "    \"open\":bool (default false), \"ratelimitbps\":n (default 0 = none), \"ratewindow\":n (default 144),\n"
             "    \"livenesswindow\":n (default 1000), \"bondmin\":amount (default 1), \"bondlockmin\":n (default 0),\n"
-            "    \"maturity\":n (default 0), \"admitkey\":\"hex\" (default: a new wallet key)}\n"
+            "    \"maturity\":n (default and minimum: the network's exit window, D-Q-31), \"admitkey\":\"hex\" (default: a new wallet key)}\n"
             "\nResult: {\"txid\", \"setid\", \"admitkey\"}\n"
             + HelpExampleCli("set_create", "'{\"seats\":3,\"unlockthreshold\":2,\"cancelthreshold\":1,\"slashthreshold\":2}'")
             + HelpExampleRpc("set_create", "{\"seats\":3,\"unlockthreshold\":2}"));

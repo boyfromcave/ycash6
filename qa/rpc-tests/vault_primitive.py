@@ -153,6 +153,12 @@ class VaultPrimitiveTest(VaultTestBase):
         bad = dict(create, flags=2)
         self.reject(self.raw_act_hex(v.encode_act(bad, check=False)), 'bad-vault-act-params',
                     'bad-vault-act-flags', 'SET_CREATE unknown flag bit')
+        # D-Q-31 (audit 07/F-9): a maturity below the network floor -- regtest's nVaultMinSetMaturity is 2, a
+        # scaling value; mainnet's 16,128 is pinned by vault_state_tests/min_set_maturity -- in the mempool
+        # and in a block.
+        bad = dict(create, maturity=v.MIN_SET_MATURITY_REGTEST - 1)
+        self.reject_both(self.raw_act_hex(v.encode_act(bad, check=False)), 'bad-vault-act-params',
+                         'bad-vault-act-params', 'SET_CREATE maturity below MinSetMaturity (D-Q-31)')
         self.reject(self.raw_act_hex(p, sigs_for=[admit]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
                     'SET_CREATE carrying a signature')
         self.reject(self.raw_act_hex(p, extra_sigs=[b'\x1f' * 64]), 'bad-vault-act-malformed',

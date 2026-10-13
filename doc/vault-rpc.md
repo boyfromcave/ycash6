@@ -175,7 +175,10 @@ exists from the block after the one it confirms in.
 the joiners' wait) must be at least `MIN_SET_MATURITY` = 16,128 blocks on mainnet and testnet (2 on regtest);
 a smaller value is refused here (`RPC_INVALID_PARAMETER`) and a `SET_CREATE` carrying one is
 `bad-vault-act-params`. A bridge set's members therefore wait at least 14 days for their bonds after leaving,
-and stay slashable for those 14 days.
+and stay slashable for those 14 days. Regtest's 2 is a scaling value so the functional suites fit (the
+floor itself is exercised there: `vault_primitive.py` sends a maturity-1 `SET_CREATE` to the mempool and in a
+block, `vault_rpc_contract.py` calls `set_create` with 1 and without `maturity`); the 14-day mainnet floor is
+pinned by the unit test `vault_state_tests/min_set_maturity`.
 
 ### `set_join "setid" bondamount bondlocktime ( "memberkey" )`
 Params: `["setid": hash, "bondamount": yec, "bondlocktime": height, "memberkey"?: key]`
