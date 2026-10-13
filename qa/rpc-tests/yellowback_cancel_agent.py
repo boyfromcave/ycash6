@@ -16,7 +16,14 @@ the refHeight itself, where the agents' own record would rightly forbid them a c
 so a class-A vault minted at $4.00 (300 %) reads 120 %, under theta, and the claim is consensus-valid at a false
 price. The agents wait one block for spares (spares 4), which opens a window for a reorg.
 
+Co-signatures travel over the members-only direct path (owner decision 1, 2026-10-13: dedicated iroh endpoints on
+loopback, a members-only ALPN, each member's endpoint bound to its seat by a `signmessage` binding exchanged on the
+dir bus's binding topic); the old cancel gossip topic is off (delivery = "direct").
+
 What it asserts, in order:
+
+  0. Every agent holds every member's binding, and an unbound endpoint (`yellowback-attest direct-probe`) is refused
+     at the handshake on the members-only ALPN.
 
   1. A wrong-price claim on vault V1 is cancelled with no RPC from this script but mining: the agents judge it,
      co-sign it (``yed_signcancelcosign``), gossip the co-signatures, one of them drives (``yed_buildcancel``,
@@ -28,6 +35,9 @@ What it asserts, in order:
      again, the TxLog row counting at least 2 distinct co-signers; ``cancelCount`` 2, ``cancelsRequired`` 3. The
      rota's leader for this claim is stopped before the claim confirms: the next member takes over after
      ``takeover_blocks`` and drives; one cancel is sent per round. The stopped agent restarts on its persisted state.
+  2b. Direct delivery blocked (every agent restarted with delivery = "onchain"): a third claim of the position needs
+     three co-signatures; two blocks after it confirmed each agent publishes its co-signature in a standard OP_RETURN
+     (owner decision 2), the driver reads them from the chain and the claim is cancelled before CLAIM_DELAY.
   3. The price really falls (every agent's mock to $1.60) and an honest claim on vault V2 is left alone: no agent
      co-signs it, nothing spends its intent for CLAIM_DELAY blocks, ``vault_release`` makes it CLAIMED, and every
      agent's persisted state records the verdict ``Honest``.
@@ -92,6 +102,11 @@ takeover_blocks = 2
 refee_after_blocks = 3
 price_tolerance_blocks = 8
 state_file = "%(state)s"
+delivery = "%(delivery)s"
+direct_relays = ["none"]
+direct_secret_key_file = "%(direct_key)s"
+onchain_fallback = true
+fallback_after_blocks = 2
 """
 
 
@@ -103,6 +118,7 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
         self.agent = None
         self.workdir = None
         self.procs = {}
+        self.delivery = {}
 
     @property
     def armed(self):
@@ -130,12 +146,15 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
             f.write('%s\n' % usd)
         os.replace(tmp, self.mock_path(seq))
 
-    def start_agent(self, seq):
+    def start_agent(self, seq, delivery='direct'):
         user, password = rpc_auth_pair(ATTESTOR_A)
         conf = os.path.join(self.workdir, 'agent-%d.toml' % seq)
         write_private(conf, AGENT_CONF % {'port': rpc_port(ATTESTOR_A), 'user': user, 'password': password,
                                           'seq': seq, 'ref_lag': REF_LAG, 'poll': POLL_SECONDS,
-                                          'bus': os.path.join(self.workdir, 'bus'), 'state': self.state_path(seq)})
+                                          'bus': os.path.join(self.workdir, 'bus'), 'state': self.state_path(seq),
+                                          'delivery': delivery,
+                                          'direct_key': os.path.join(self.workdir, 'direct-%d.key' % seq)})
+        self.delivery[seq] = delivery
         log = open(os.path.join(self.workdir, 'agent-%d.log' % seq), 'a')
         self.procs[seq] = subprocess.Popen([self.agent, '--conf', conf, '--log-level', 'info', 'attest',
                                             '--mock-price', self.mock_path(seq)],
@@ -230,6 +249,37 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
                 self.mine(POOLS[tip % len(POOLS)])
                 last = time.time()
             time.sleep(0.5)
+
+    def wait_bindings(self, seqs, timeout=90):
+        """Every agent holds a valid binding of every member's direct endpoint (signmessage, the binding topic)."""
+        deadline = time.time() + timeout
+        while True:
+            states = self.agent_states()
+            have = {s: sorted(int(k) for k in ((states[s] or {}).get('bindings') or {}).get('by_seq', {}))
+                    for s in seqs}
+            if all(have[s] == sorted(seqs) for s in seqs):
+                print('   every agent holds the %d member bindings' % len(seqs))
+                return
+            if time.time() > deadline:
+                self.agent_logs()
+                raise AssertionError('bindings not exchanged: %r' % have)
+            self.assert_agents_alive('bindings')
+            time.sleep(1)
+
+    def probe_outsider(self, seq):
+        """`direct-probe` with a fresh (unbound) endpoint against member `seq`'s direct endpoint: refused (exit 3)."""
+        state = self.agent_states()[seq]
+        own = state['own_binding']
+        endpoint = own['binding']['message'].split('|')[4]
+        addrs = [a for a in own['addrs'] if a.startswith('127.') or a.startswith('0.')] or own['addrs']
+        argv = [self.agent, '--conf', os.path.join(self.workdir, 'agent-%d.toml' % seq), 'direct-probe', endpoint]
+        for a in addrs:
+            argv += ['--addr', a]
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=60)
+        out = r.stdout.decode(errors='replace')
+        assert r.returncode == 3 and 'refused' in out, 'the outsider was not refused (exit %d): %s' % (r.returncode, out[-800:])
+        print('   direct-probe from an unbound endpoint: refused')
 
     def captured_claim(self, claimant, position):
         """The claim, its bundle signed at the captured price by the members' keys, citing refHeight - 1."""
@@ -336,12 +386,16 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[2])
         assert_equal(claimant.yed_getbalance()['confirmedCents'], 20000)
 
-        print('%d agents at an honest $%s, the cancel automation on (dir bus %s)' % (MEMBERS, HONEST, self.workdir))
+        print('%d agents at an honest $%s, co-signatures over the members-only direct path alone (dir bus %s)'
+              % (MEMBERS, HONEST, self.workdir))
         for seq in seqs:
             self.write_mock(seq, HONEST)
-            self.start_agent(seq)
-        time.sleep(3)
+            self.start_agent(seq, 'direct')
+        self.wait_bindings(seqs)
         self.assert_agents_alive('start')
+
+        print('a non-member is refused at the handshake on the members-only ALPN')
+        self.probe_outsider(seqs[0])
 
         print('the pools are captured: they quote $%s, so V1 reads 120 %% and is claimable on chain' % CAPTURED)
         self.price(CAPTURED)
@@ -396,8 +450,32 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(self.log_count('SENT '), 2)        # one driver per round
         assert stopped[0] not in info['bundleSeqs']
         print('   restarting seq %d on its persisted state' % stopped[0])
-        self.start_agent(stopped[0])
+        self.start_agent(stopped[0], 'direct')
         self.checkpoint('round 2')
+
+        # ---------------------------------------------------------------- on-chain fallback
+        print('2b. direct delivery blocked (every agent on delivery = "onchain"): a third claim, three co-signatures')
+        print('    required, reaches them only through the on-chain fallback, and is still cancelled in time')
+        self.stop_agents()
+        for seq in seqs:
+            self.start_agent(seq, 'onchain')
+        time.sleep(3)
+        claimed, at = self.claim_and_confirm(claimant, cancel2)
+        assert_equal(nodes[2].yed_getvault(cancel2)['cancelsRequired'], min(3, CANCEL_SIGNERS_MAX))
+        cancel3 = self.wait_cancel(claimed['txid'], at, 'round 3 (on-chain fallback)')
+        self.sync_all()
+        info = nodes[2].yed_gettxinfo(cancel3)
+        assert_equal(info['type'], 'claim_cancel')
+        assert len(set(info['bundleSeqs'])) >= min(3, CANCEL_SIGNERS_MAX), info
+        intent = '%s:0' % claimed['txid']
+        posted = [s for s in seqs if ((self.claim_state(s, intent) or {}).get('onchain_posted'))]
+        assert len(posted) >= 2, 'the fallback posted for %r only' % posted
+        assert self.log_count('read from the chain') >= 2
+        for s in posted:
+            assert 'onchain-fallback' in self.claim_state(s, intent)['alerted']
+        print('   cancelled by %s at height %d, co-signers %r; on-chain records from seqs %r'
+              % (cancel3[:16], info['height'], info['bundleSeqs'], posted))
+        self.checkpoint('round 3')
 
         # ---------------------------------------------------------------- honest
         print('3. the price really falls to $%s: an honest claim on V2 is left alone and released' % CAPTURED)
@@ -429,7 +507,7 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
             c = states[seq]['claims'][intent]
             assert_equal(c['verdict'], 'Honest')
             assert c['own_cosig'] is None, (seq, c)
-        assert_equal(self.log_count('SENT '), 2)        # nothing sent for the honest claim
+        assert_equal(self.log_count('SENT '), 3)        # nothing sent for the honest claim
         print('   V2 CLAIMED; every agent judged the claim honest and co-signed nothing')
         self.assert_agents_alive('end')
         self.checkpoint('end')

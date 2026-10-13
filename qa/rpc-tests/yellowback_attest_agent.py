@@ -79,6 +79,7 @@ listattestors_seconds = 5
 
 [cancel]
 state_file = "%(state)s"
+direct_relays = ["none"]
 """
 
 SUBSCRIBE_CONF = """[node]

@@ -188,6 +188,7 @@ listattestors_seconds = 5
 # the cancel automation (cancel-limit design, CAN-2 + C4b) runs as on mainnet; its state stays in the devnet directory
 [cancel]
 state_file = "%(state)s"
+direct_relays = ["none"]
 """
 SUBSCRIBE_CONF = """# written by yellowback-devnet: the subscriber beside node %(node)d
 [node]
