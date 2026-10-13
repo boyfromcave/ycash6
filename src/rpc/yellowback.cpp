@@ -264,6 +264,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
     o.pushKV("scriptPubKey", HexStr(spk.begin(), spk.end()));
     if (v.Status() == VaultStatus::CLAIMING) {
         UniValue intents(UniValue::VARR);
+        std::string refundHolder;
         State st(index.View());
         index.View().Iterate(std::string(1, 'I'), [&](const std::string& k, const std::string& raw) {
             IntentRecord ir;
@@ -275,10 +276,13 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, YellowbackIndex
                 e.pushKV("height", ir.height);
                 e.pushKV("releaseHeight", (int64_t)ir.height + p.claimDelay);
                 intents.push_back(e);
+                if (ir.Role() == IntentRole::CLAIMANT && !ir.refundScript.empty()) refundHolder = HexStr(ir.refundScript.begin(), ir.refundScript.end());
             }
             return true;
         });
         o.pushKV("intents", intents);
+        // CAN-1 (03/H-1): the script a cancel of the claimant intent must refund the claim's burn to (yed_buildcancel)
+        if (!refundHolder.empty()) o.pushKV("refundHolder", refundHolder);
     }
     yellowback::rpc::PushNoticeFields(o, State(index.View()), p, out, v);
     return o;

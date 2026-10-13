@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "8bd150f5e5358d6cdea0c884feb628e4786f0e524d3264d0c6bbe337f105715e"
+    "sha256": "a31b4856cbced7399c8fc6b33abd4ebe19c91665a8b7d22797676dba032a1c89"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2263,6 +2263,14 @@
         "vault_buildcancel"
       ],
       "provokedBy": "an intent past its delay"
+    },
+    {
+      "code": -8,
+      "message": "is cancelled with yed_buildcancel",
+      "raisedBy": [
+        "vault_buildcancel"
+      ],
+      "provokedBy": "a YED claim intent (its cancel refunds the burn, CAN-1)"
     },
     {
       "code": -1,

@@ -318,7 +318,9 @@ confirming in the next block, so I-2 holds), and both may confirm in one block; 
 before the intent confirms stays valid after it. So a watcher can build and sign a cancel the
 moment an intent appears. Called again for the same intent it returns the same transaction
 (mempool or confirmed) while its fee inputs are unspent (remembered in memory until restart), so
-every member signs one sighash.
+every member signs one sighash. An intent of the YED module (tag `YED\0`) is refused: the module's
+CAN-1 rule (audit 03/H-1) also requires the cancel to refund the claim's burn, so it is built with
+`yed_buildcancel` (doc/yellowback-rpc.md), and a member never signs a cancel the module rejects.
 
 ### `set_signcancel "hex"`
 Params: `["hex": hex]`
@@ -407,6 +409,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -4 | `set-sign-once` | `set_signunlock`, `set_signcancel` | a second, different unlock of a vault this wallet already signed |
 | -8 | `not an unspent intent output` | `vault_buildcancel`, `vault_release` | a released intent |
 | -1 | `can no longer be cancelled` | `vault_buildcancel` | an intent past its delay |
+| -8 | `is cancelled with yed_buildcancel` | `vault_buildcancel` | a YED claim intent (its cancel refunds the burn, CAN-1) |
 | -1 | `matures at height` | `vault_release` | an intent before its delay |
 | -1 | `owner branch opens at height` | `vault_ownerspend` | a vault before `ownerheight` |
 | -8 | `has no APP branch` | `vault_app` | a vault with `appheight` 0 |

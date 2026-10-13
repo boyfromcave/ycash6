@@ -1582,27 +1582,22 @@ UniValue set_signunlock(const UniValue& params, bool fHelp)
     return SignSetInPlace(mtx, idx, coin, vp.setId, ROLE_UNLOCK);
 }
 
-UniValue vault_buildcancel(const UniValue& params, bool fHelp)
+/**
+ * The I-2 cancel of `op` (vault_buildcancel, and yed_buildcancel through BuildYedIntentCancel): vout[0] re-creates the
+ * originating V with the intent's value, then `extra` (CAN-1's refund for a YED claim intent), then the wallet's fee
+ * inputs and change. `yedAllowed` false refuses a YED-tagged intent (its cancel needs the refund output). Rebuilt
+ * byte-identical while the remembered build's fee inputs are unspent and its outputs are the same (sign once).
+ */
+UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra, bool yedAllowed)
 {
-    if (fHelp || params.size() != 1)
-        throw std::runtime_error(
-            "vault_buildcancel \"intentoutpoint\"\n"
-            "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
-            "(I-2), fee from this wallet (unsigned). Collect the cancel set's signatures with set_signcancel, then vault_send.\n"
-            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
-            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once: a second,\n"
-            "different cancel signature is an equivocation).\n"
-            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
-            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\"}\n"
-            + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
-    EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureVaultActive();
-    const COutPoint op = ParseOutPoint(params[0], "intentoutpoint");
     CTxOut coin;
     int h;
     IntentParams ip;
     if (!GetCoin(op, coin, h) || !ParseIntent(coin.scriptPubKey, ip)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not an unspent intent output");
+    if (!yedAllowed && ip.tag == yellowback::YED_TAG)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "a YED claim intent is cancelled with yed_buildcancel (its cancel refunds the claim's burn, CAN-1)");
     // The originating V script (the vaultHash preimage the cancel re-creates): from the vault
     // database for a confirmed intent, else from the vault coin its mempool transaction spends
     // (finding (50): a watcher pre-builds and signs the cancel as soon as the intent appears).
@@ -1637,7 +1632,8 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     CMutableTransaction mtx;
     bool reused = false;
     auto cached = g_cancelBuilds.find(op);
-    if (cached != g_cancelBuilds.end() && cached->second.vout.size() > 0 && cached->second.vout[0].scriptPubKey == origin) {
+    if (cached != g_cancelBuilds.end() && cached->second.vout.size() > extra.size() && cached->second.vout[0].scriptPubKey == origin &&
+        std::equal(extra.begin(), extra.end(), cached->second.vout.begin() + 1)) {
         reused = true;
         const CMutableTransaction& c = cached->second;
         for (size_t i = 1; i < c.vin.size() && reused; i++) {
@@ -1654,6 +1650,7 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
         mtx = NewTx();
         mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
         mtx.vout.push_back(CTxOut(coin.nValue, origin));
+        for (const CTxOut& o : extra) mtx.vout.push_back(o);
         Fund(mtx, coin.nValue);
         g_cancelBuilds[op] = mtx;
     }
@@ -1665,6 +1662,24 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     o.pushKV("deadline", coinHeight + ip.delay - 1);
     o.pushKV("intentconfirmed", confirmed);
     return o;
+}
+
+UniValue vault_buildcancel(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "vault_buildcancel \"intentoutpoint\"\n"
+            "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
+            "(I-2), fee from this wallet (unsigned). Collect the cancel set's signatures with set_signcancel, then vault_send.\n"
+            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
+            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once: a second,\n"
+            "different cancel signature is an equivocation). A YED claim intent (tag YED) is refused: its cancel must also\n"
+            "refund the claim's burn (CAN-1), which yed_buildcancel builds.\n"
+            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
+            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\"}\n"
+            + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
+    EnsureWallet(fHelp);
+    return BuildIntentCancel(ParseOutPoint(params[0], "intentoutpoint"), {}, false);
 }
 
 UniValue set_signcancel(const UniValue& params, bool fHelp)
@@ -1885,6 +1900,14 @@ UniValue vault_app(const UniValue& params, bool fHelp)
 #endif // ENABLE_WALLET
 
 } // namespace
+
+#ifdef ENABLE_WALLET
+/** yed_buildcancel (rpc/yellowbackwallet.cpp, CAN-1): the I-2 cancel of a YED claimant intent with its refund output. */
+UniValue BuildYedIntentCancel(const COutPoint& intent, const CTxOut& refund)
+{
+    return BuildIntentCancel(intent, { refund }, true);
+}
+#endif
 
 static const CRPCCommand commands[] =
 { //  category   name                   actor (function)       okSafeMode
