@@ -815,14 +815,34 @@ int64_t CancelQ(const VaultRecord& v, const Params& P, int64_t h)
     return h - (int64_t)v.lastCancelHeight < (int64_t)P.cancelQuiet ? (int64_t)v.cancelCount : 0;
 }
 
+/**
+ * CAN-3 round 2 (owner 2026-10-13): whether the position `v` at `out` is claimable by either RED-4 path at the latest
+ * stored snapshot, Snapshots[H - 1], at that snapshot's prices: (a) underwater at its pClaim (xClaim) under
+ * CLAIM_THRESHOLD; (b) a standing notice that has persisted (H - 1 - notice.refHeight in [EMERGENCY_PERSIST,
+ * EMERGENCY_NOTICE_TTL]) and the position underwater at the notice's pEmerg under EMERGENCY_RATIO. An undefined price
+ * never makes it claimable (M1). Reads only the position's own records.
+ */
+bool ClaimableAtSnapshot(EvalContext& ctx, const VaultRecord& v, const COutPoint& out)
+{
+    const Params& P = ctx.params;
+    const int64_t S = ctx.height - 1;
+    const std::optional<Snapshot>& snap = ctx.Snap(S);
+    if (snap.has_value() && IsUnderwater(v.collateralZat, snap->PClaim(), v.mintedCents, P.claimThresholdBps)) return true;
+    std::optional<NoticeRecord> n = ctx.st.GetNotice(out);
+    return n.has_value() && S - (int64_t)n->refHeight >= P.emergencyPersist && S - (int64_t)n->refHeight <= P.emergencyNoticeTtl &&
+           IsUnderwater(v.collateralZat, (MicroUsd)n->pEmerg, v.mintedCents, P.emergencyRatioBps);
+}
+
 /** CAN-3: a held residual is released once its position is closed (CLOSED by the owner, CLAIMED by a later release),
- *  or once it is ACTIVE with CANCEL_QUIET passed since its last cancel; never while it is CLAIMING. */
-bool ResidualReleasable(const std::optional<VaultRecord>& pos, const Params& P, int64_t h)
+ *  or -- owner, round 2 -- once it is ACTIVE with CANCEL_QUIET passed since its last cancel AND not claimable at the
+ *  latest snapshot (ClaimableAtSnapshot); never while it is CLAIMING. */
+bool ResidualReleasable(EvalContext& ctx, const std::optional<VaultRecord>& pos, const COutPoint& out)
 {
     if (!pos.has_value()) return false;     // cannot happen: every cancel moves heldBy to the position it re-creates
     const VaultStatus s = pos->Status();
     if (s == VaultStatus::CLOSED || s == VaultStatus::CLAIMED) return true;
-    return s == VaultStatus::ACTIVE && h - (int64_t)pos->lastCancelHeight >= (int64_t)P.cancelQuiet;
+    if (s != VaultStatus::ACTIVE || ctx.height - (int64_t)pos->lastCancelHeight < (int64_t)ctx.params.cancelQuiet) return false;
+    return !ClaimableAtSnapshot(ctx, pos.value(), out);
 }
 
 /**
@@ -904,7 +924,7 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     if (cancel && in.record.Role() == IntentRole::RESIDUAL) return verdict::INTENT_CANCEL_RESIDUAL;
     // CAN-3: the residual of a cancelled claim is held while the re-created position lives
     if (!cancel && in.record.Role() == IntentRole::RESIDUAL && !in.record.heldBy.IsNull() &&
-        !ResidualReleasable(ctx.st.GetVault(in.record.heldBy), P, ctx.height)) return verdict::INTENT_RESIDUAL_HELD;
+        !ResidualReleasable(ctx, ctx.st.GetVault(in.record.heldBy), in.record.heldBy)) return verdict::INTENT_RESIDUAL_HELD;
     std::optional<VaultRecord> vault = ctx.st.GetVault(in.record.vault);
     ctx.st.EraseKey(keys::Intent(in.outpoint));
     log.type = (uint8_t)(cancel ? TxLogType::CLAIM_CANCEL : TxLogType::CLAIM_RELEASE);
