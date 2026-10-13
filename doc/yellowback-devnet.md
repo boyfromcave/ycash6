@@ -223,6 +223,14 @@ see `contrib/yellowback/attest/attest.toml.sample`, which documents every field.
 
 ## 4. Gotchas that will cost you an hour
 
+- **A devnet from an earlier build may not survive this one** (2026-10-12, audit 01/V-1, 01/V-5). The
+  vault rules S-0 (no template spend of a coin created before activation) and V-1's APP clause (an
+  APP branch only on a tag a module governs) apply from the activation block. A `~/yb-devnet` (or
+  regtest/kind) chain that already holds such a spend or vault fails the vault database's replay on
+  restart (`vault: block N ... fails the vault rules on replay (bad-txns-vault-preactivation | bad-txns-vault-app);
+  this chain was built before ...`) and a fresh node splits from it: `yellowback-devnet down --wipe` and start
+  over. Never relevant to mainnet or testnet (no activation height).
+
 - **Let the wallet settle between commands.** Two `yed_registerattestor` calls back to back, even
   with a `generate 1` between them, can fail with `transaction commit failed: the transaction was
   rejected by the mempool` — the wallet built on a view the block had already invalidated. A

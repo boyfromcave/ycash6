@@ -54,11 +54,15 @@ static const uint32_t VAULT_DB_VERSION = 3;   //!< 3: SetRecord.joinCount and Me
 
 /**
  * Undo records older than this many blocks are pruned on connect (audit 07/F-7), as the Yellowback index
- * prunes its own (yellowback/index.h UNDO_KEEP): connecting block h erases the undo of block h - UNDO_KEEP
- * in the same batch, so a database holds at most UNDO_KEEP of them. A crash-time walk-back in Reconcile deeper
- * than that finds no undo and takes the wipe + replay from the activation height (07/F-8). A live reorg is
- * bounded far below it (MAX_REORG_LENGTH, 99 blocks); a deeper manual invalidateblock finds no undo in
- * DisconnectBlock and stops the node (AbortNode, as the Yellowback index does): restart with -reindex.
+ * prunes its own (yellowback/index.h UNDO_KEEP): connecting block H erases the undo of block H - UNDO_KEEP in
+ * the same batch, so after connecting H the undo of H - 4095 .. H is kept (UNDO_KEEP records) and a disconnect
+ * of any of those blocks works. A crash-time walk-back in Reconcile that needs an older one finds no undo and
+ * takes the wipe + replay from the activation height (07/F-8): time, not soundness — a SIGKILL during a long
+ * IBD with a large -dbcache can also take it. A live reorg is bounded far below (MAX_REORG_LENGTH, 99 blocks);
+ * an invalidateblock that would disconnect a block below H - 4095 stops the node in DisconnectBlock (AbortNode,
+ * as the Yellowback index does) and a plain restart does not recover (it stops again in
+ * PruneBlockIndexCandidates, regtest-verified): restart with -reindex, which rebuilds the block index and
+ * every database from the block files and forgets the invalidation.
  * No VAULT_DB_VERSION bump: the record set only shrinks; a database written before this keeps its
  * older undo records (never pruned retroactively), which is harmless. Do not bump the version to clean them:
  * a bump replays every node from activation.

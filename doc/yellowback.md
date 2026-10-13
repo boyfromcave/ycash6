@@ -278,8 +278,11 @@ back their own undo records for at most 4,096 blocks (`UNDO_KEEP` in `src/yellow
 blocks older than either at the crash (the chainstate flushes hourly, or when `-dbcache` fills
 during a long sync) is a full rebuild from the activation height instead: the correct outcome, but
 minutes to hours of downtime. On a node where downtime matters, flush more often (a smaller
-`-dbcache`). A live reorg is refused beyond 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` more
-than 4,096 blocks deep finds no undo record and stops the node: restart it with `-reindex`.
+`-dbcache`); a node killed during a long initial sync with a large `-dbcache` can take the same rebuild.
+After connecting block H the vault database keeps the undo records of H − 4,095 … H. A live reorg is
+refused beyond 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` that would disconnect a block below
+H − 4,095 finds no undo record and stops the node, and a plain restart stops again: restart with
+`-reindex`, which rebuilds everything from the block files (and forgets the invalidation).
 
 ## How your YED is protected from being spent as plain YEC
 

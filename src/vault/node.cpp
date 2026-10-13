@@ -399,7 +399,13 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
         state.SetActivationHeight(activation);
         BlockUndo vundo;
         if (auto bad = state.ApplyBlock(block, h, coins, vundo, pindex)) {
-            err = strprintf("vault: block %d on the active chain fails the vault rules on replay (%s)", h, *bad);
+            // S-0 and V-1's APP clause (audit 01/V-1, 01/V-5) tightened rules retroactively: a regtest/devnet chain built by
+            // an earlier binary may hold a pre-activation template spend or a module-less APP vault that now fails here.
+            err = strprintf("vault: block %d on the active chain fails the vault rules on replay (%s)%s", h, *bad,
+                            (*bad == "bad-txns-vault-preactivation" || *bad == "bad-txns-vault-app")
+                                ? std::string("; this chain was built before rules S-0 / V-1 (APP) existed: a regtest or devnet "
+                                              "chain from an earlier build must be restarted from scratch")
+                                : std::string());
             return false;
         }
         if (!g_vaultdb->ConnectBlock(pindex->GetBlockHash(), h, pindex->pprev->GetBlockHash(), state, vundo, UndoToPrune(pindex, params))) {

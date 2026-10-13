@@ -148,6 +148,16 @@ When setting them in a release:
 | main | unset | unset | not yet: the release that passes the launch gates |
 | test | unset | unset | not yet |
 
+Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
+- **S-0 and V-1's APP clause are retroactive on private chains.** They apply from the activation
+  block, so a regtest, devnet or kind chain built by an earlier build that holds a template spend of
+  a pre-activation coin, or a V with an APP branch on a tag no module governs, fails the vault
+  database's replay on restart (the error names the cause) and a fresh node splits from it: restart
+  such a chain from scratch. Mainnet and testnet have no activation height, so nothing there changes.
+- **`-prune` is refused** wherever `UPGRADE_VAULT` has an activation height: a node that pruned
+  before its network set one must re-download the chain without `-prune` (there is no `-reindex` on a
+  pruned node).
+
 ## Parameter changes
 
 A YED parameter set is consensus from the activation height and has no end height: there is no
