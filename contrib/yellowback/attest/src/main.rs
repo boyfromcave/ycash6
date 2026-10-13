@@ -9,7 +9,9 @@
 //! Exit codes: 2 for a bad configuration; otherwise the loops run until a signal.
 
 mod attest;
+mod cancel;
 mod config;
+mod cosig;
 mod fixtures;
 mod framing;
 mod http;

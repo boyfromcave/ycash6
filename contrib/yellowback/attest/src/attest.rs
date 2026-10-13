@@ -136,6 +136,8 @@ pub struct Attestor {
     pub published: u64,
     /// P4-b: the height of the last SET_HEARTBEAT sent (or attempted: a failure retries a block later).
     pub last_heartbeat: Option<u32>,
+    /// The aggregate of the last poll (µUSD), whether or not it was due: the cancel watcher's price history.
+    pub last_aggregate: Option<i64>,
 }
 
 impl Attestor {
@@ -166,6 +168,7 @@ impl Attestor {
             seq,
             published: 0,
             last_heartbeat: None,
+            last_aggregate: None,
         })
     }
 
@@ -207,6 +210,7 @@ impl Attestor {
     /// aggregate at a due tick does not consume the tick — the next poll tries again.
     pub async fn tick(&mut self, height: u32, transport: &mut dyn Transport) -> Tick {
         let agg = poll_and_aggregate(&mut self.feed, &self.fetcher, self.mock.as_deref()).await;
+        self.last_aggregate = agg.as_ref().map(|a| a.micro_usd);
         if !self.cadence.due(height) {
             return Tick::NotDue;
         }
@@ -422,7 +426,22 @@ impl Attestor {
             );
             return Ok(crate::EXIT_BAD_CONFIG);
         }
-        let mut transport = transport::open(&self.cfg.transport, &network).await?;
+        // The cancel-limit design's automation (CAN-2 + C4b): its topic shares the transport (one iroh endpoint, or the
+        // dir bus's cancel/ subdirectory) and runs on its own task; the watcher and the collector run once per poll.
+        let (mut transport, mut cancel) = if self.cfg.cancel.enabled {
+            let (a, c) = transport::open_with_cancel(&self.cfg.transport, &network).await?;
+            let (tx, rx) = transport::spawn_pump(c);
+            let path = self
+                .cfg
+                .cancel
+                .state_file
+                .clone()
+                .unwrap_or_else(|| crate::cancel::CancelAgent::default_path(&network, self.seq));
+            let agent = crate::cancel::CancelAgent::new(self.cfg.cancel.clone(), &self.cfg.node, self.seq, path)?;
+            (a, Some((agent, tx, rx)))
+        } else {
+            (transport::open(&self.cfg.transport, &network).await?, None)
+        };
         tracing::info!(
             "yellowback-attest attest: seq {}, network {network}, every {} blocks, ref_lag {}, poll {} s, transport {}{}",
             self.seq,
@@ -436,8 +455,26 @@ impl Attestor {
         loop {
             match self.getinfo().await {
                 Ok((_, h)) if h >= 0 => {
-                    self.tick(h as u32, transport.as_mut()).await;
+                    let tick = self.tick(h as u32, transport.as_mut()).await;
                     self.heartbeat(h as u32).await;
+                    if let Some((agent, tx, rx)) = cancel.as_mut() {
+                        if let Some(p) = self.last_aggregate {
+                            agent.state.record_price(h as u32, p);
+                        }
+                        if let Tick::Published(att) = &tick {
+                            agent.state.record_signed(att.cited_height, att.price_micro_usd as i64);
+                        }
+                        let mut inbox = Vec::new();
+                        while let Ok(m) = rx.try_recv() {
+                            inbox.push(m);
+                        }
+                        agent.tick(h as u32, self.last_aggregate, inbox).await;
+                        for frame in agent.take_outbox() {
+                            if tx.send(frame).await.is_err() {
+                                tracing::error!("cancel topic: the transport task is gone");
+                            }
+                        }
+                    }
                 }
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
                 Err(e) => tracing::error!("yed_getinfo failed: {e}; retrying"),

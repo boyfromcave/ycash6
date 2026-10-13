@@ -98,6 +98,18 @@ impl IrohTransport {
         secret_key_file: Option<&Path>,
         topic: &str,
     ) -> anyhow::Result<Self> {
+        let mut v = Self::open_topics(relays, peers, secret_key_file, &[topic]).await?;
+        Ok(v.remove(0))
+    }
+
+    /// One endpoint, one gossip instance, one subscription per topic (the attestation topic and, beside it, the
+    /// cancel-limit design's co-signature topic): the peers an operator configures carry both.
+    pub async fn open_topics(
+        relays: &[String],
+        peers: &[String],
+        secret_key_file: Option<&Path>,
+        topics: &[&str],
+    ) -> anyhow::Result<Vec<Self>> {
         let secret = load_or_create_secret(secret_key_file)?;
         let bootstrap = peers
             .iter()
@@ -123,27 +135,32 @@ impl IrohTransport {
             endpoint.online().await;
         }
         tracing::info!(
-            "iroh: endpoint id {} (give this to peers as [transport] peers); topic {topic}",
-            endpoint.id()
+            "iroh: endpoint id {} (give this to peers as [transport] peers); topic(s) {}",
+            endpoint.id(),
+            topics.join(", ")
         );
         if bootstrap.is_empty() {
             tracing::warn!("iroh: no [transport] peers configured; waiting for peers to dial us");
         }
-        // `subscribe` (not `subscribe_and_join`): the topic is usable before a neighbour appears,
-        // and publications queue until one does.
-        let sub = gossip
-            .subscribe(topic_id(topic), bootstrap)
-            .await
-            .context("iroh-gossip subscribe")?;
-        let (sender, receiver) = sub.split();
-        Ok(IrohTransport {
-            endpoint,
-            lookup,
-            router,
-            _gossip: gossip,
-            sender,
-            receiver,
-        })
+        let mut out = Vec::with_capacity(topics.len());
+        for topic in topics {
+            // `subscribe` (not `subscribe_and_join`): the topic is usable before a neighbour appears,
+            // and publications queue until one does.
+            let sub = gossip
+                .subscribe(topic_id(topic), bootstrap.clone())
+                .await
+                .context("iroh-gossip subscribe")?;
+            let (sender, receiver) = sub.split();
+            out.push(IrohTransport {
+                endpoint: endpoint.clone(),
+                lookup: lookup.clone(),
+                router: router.clone(),
+                _gossip: gossip.clone(),
+                sender,
+                receiver,
+            });
+        }
+        Ok(out)
     }
 
     /// Used by the tests and kept public for a future `peers`-less bootstrap path.

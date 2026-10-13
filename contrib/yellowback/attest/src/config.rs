@@ -77,6 +77,30 @@ pub struct SubscribeToml {
     pub seq_refill_seconds: Option<u64>,
 }
 
+/// `[cancel]`: the cancel-limit design's automation (CAN-2 + C4b, owner 2026-10-13): the watcher, the co-signature
+/// gossip and the collector, all inside `attest`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelToml {
+    pub enabled: Option<bool>,
+    pub auto_cosign: Option<bool>,
+    pub margin_bps: Option<u32>,
+    pub drive: Option<bool>,
+    pub spares: Option<u32>,
+    pub spare_wait_blocks: Option<u32>,
+    pub takeover_blocks: Option<u32>,
+    pub min_confirmations: Option<u32>,
+    pub refee_after_blocks: Option<u32>,
+    pub republish_blocks: Option<u32>,
+    pub price_tolerance_blocks: Option<u32>,
+    pub state_file: Option<String>,
+    pub broadcast_rpc: Option<Vec<String>>,
+    pub allow_insecure_broadcast: Option<bool>,
+    pub alert_command: Option<String>,
+    pub gossip_burst: Option<u32>,
+    pub gossip_refill_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -86,6 +110,7 @@ struct RawConfig {
     btc_usd_sources: Option<Vec<SourceToml>>,
     transport: Option<TransportToml>,
     subscribe: Option<SubscribeToml>,
+    cancel: Option<CancelToml>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +158,52 @@ pub struct SubscribeConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct CancelConfig {
+    /// Run the watcher, the gossip and the collector inside `attest`.
+    pub enabled: bool,
+    /// Co-sign (yed_signcancelcosign) and publish every confirmed claim judged wrong-price, with no operator.
+    pub auto_cosign: bool,
+    /// Co-sign only when the vault is above theta at this agent's price with this many basis points to spare.
+    pub margin_bps: u32,
+    /// Take part in the leader rota: build, sign and send the cancel when this member's turn comes.
+    pub drive: bool,
+    /// Co-signatures beyond `cancelsRequired` to wait for (the rule counts valid entries; spares absorb a co-signer
+    /// that leaves or a reorg that raises the count, design A-6).
+    pub spares: u32,
+    /// Once `cancelsRequired` are in hand, how many blocks to wait for the spares before sending without them.
+    pub spare_wait_blocks: u32,
+    /// The member of rank r in the rota drives after r × this many blocks since the claim confirmed.
+    pub takeover_blocks: u32,
+    pub min_confirmations: u32,
+    /// A cancel unconfirmed this long after it was sent is re-pushed, and re-funded (vault_refee) if it left the mempool.
+    pub refee_after_blocks: u32,
+    /// Republish this agent's own co-signature every this many blocks while the claim stands (late joiners, restarts).
+    pub republish_blocks: u32,
+    /// How far the height of the aggregate the watcher judges with may lie from the claim's refHeight.
+    pub price_tolerance_blocks: u32,
+    /// Persisted state (JSON); None: `~/.ycash/yellowback-cancel-<network>-<seq>.json`.
+    pub state_file: Option<PathBuf>,
+    /// Other nodes' JSON-RPC URLs (`http://user:pass@host:port`) the cancel and its carrier are pushed to with
+    /// `sendrawtransaction` as soon as they are sent (pinning, review S1: broadcast early to well-connected peers).
+    pub broadcast_rpc: Vec<String>,
+    /// A program run on every alert: `<program> <kind> <intent> <message>`.
+    pub alert_command: Option<String>,
+    /// Per-seq token bucket on the cancel topic.
+    pub gossip_burst: u32,
+    pub gossip_refill_seconds: u64,
+}
+
+pub const DEFAULT_CANCEL_MARGIN_BPS: u32 = 500;
+pub const DEFAULT_CANCEL_SPARES: u32 = 2;
+pub const DEFAULT_SPARE_WAIT_BLOCKS: u32 = 1;
+pub const DEFAULT_TAKEOVER_BLOCKS: u32 = 6;
+pub const DEFAULT_REFEE_AFTER_BLOCKS: u32 = 6;
+pub const DEFAULT_REPUBLISH_BLOCKS: u32 = 4;
+pub const DEFAULT_PRICE_TOLERANCE_BLOCKS: u32 = 24;
+pub const DEFAULT_GOSSIP_BURST: u32 = 16;
+pub const DEFAULT_GOSSIP_REFILL_SECONDS: u64 = 10;
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub node: NodeConfig,
     pub attest: AttestConfig,
@@ -140,6 +211,7 @@ pub struct Config {
     pub btc_usd_sources: Vec<Source>,
     pub transport: TransportConfig,
     pub subscribe: SubscribeConfig,
+    pub cancel: CancelConfig,
 }
 
 pub const DEFAULT_EVERY_BLOCKS: u32 = 10;
@@ -326,6 +398,42 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         return Err(format!("[subscribe] endpoints: {e:?} is not an http(s) URL").into());
     }
 
+    let c = raw.cancel.unwrap_or_default();
+    let cancel = CancelConfig {
+        enabled: c.enabled.unwrap_or(true),
+        auto_cosign: c.auto_cosign.unwrap_or(true),
+        margin_bps: c.margin_bps.unwrap_or(DEFAULT_CANCEL_MARGIN_BPS),
+        drive: c.drive.unwrap_or(true),
+        spares: c.spares.unwrap_or(DEFAULT_CANCEL_SPARES),
+        spare_wait_blocks: c.spare_wait_blocks.unwrap_or(DEFAULT_SPARE_WAIT_BLOCKS),
+        takeover_blocks: c.takeover_blocks.unwrap_or(DEFAULT_TAKEOVER_BLOCKS).max(1),
+        min_confirmations: c.min_confirmations.unwrap_or(1).max(1),
+        refee_after_blocks: c.refee_after_blocks.unwrap_or(DEFAULT_REFEE_AFTER_BLOCKS).max(1),
+        republish_blocks: c.republish_blocks.unwrap_or(DEFAULT_REPUBLISH_BLOCKS).max(1),
+        price_tolerance_blocks: c.price_tolerance_blocks.unwrap_or(DEFAULT_PRICE_TOLERANCE_BLOCKS),
+        state_file: c.state_file.as_deref().filter(|p| !p.is_empty()).map(expand_user),
+        broadcast_rpc: c.broadcast_rpc.unwrap_or_default(),
+        alert_command: c.alert_command.filter(|s| !s.is_empty()),
+        gossip_burst: c.gossip_burst.unwrap_or(DEFAULT_GOSSIP_BURST).max(1),
+        gossip_refill_seconds: c.gossip_refill_seconds.unwrap_or(DEFAULT_GOSSIP_REFILL_SECONDS).max(1),
+    };
+    if cancel.margin_bps > 100_000 {
+        return Err("[cancel]: margin_bps must be at most 100000".to_string().into());
+    }
+    let allow_insecure_broadcast = c.allow_insecure_broadcast.unwrap_or(false);
+    for u in &cancel.broadcast_rpc {
+        if !(u.starts_with("http://") || u.starts_with("https://")) {
+            return Err(format!("[cancel] broadcast_rpc: {u:?} is not an http(s) URL").into());
+        }
+        if u.starts_with("http://") && u.contains('@') && !is_loopback_url(u) && !allow_insecure_broadcast {
+            return Err(format!(
+                "[cancel] broadcast_rpc: {u:?} would send credentials as cleartext to a host that is not loopback \
+                 (use https://, a tunnel, or allow_insecure_broadcast = true)"
+            )
+            .into());
+        }
+    }
+
     Ok(Config {
         node,
         attest,
@@ -333,6 +441,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         btc_usd_sources,
         transport,
         subscribe,
+        cancel,
     })
 }
 
@@ -468,6 +577,43 @@ endpoints = ["https://attestor.example/att"]
         std::fs::write(&p, "[node]\nrpc_url = \"http://127.0.0.1:1\"\nrpc_cookie = \"/x\"\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load(&p, false).is_ok());
+    }
+
+    #[test]
+    fn cancel_defaults_and_overrides() {
+        let c = parse("[node]\nrpc_url = \"http://h:1\"\n").unwrap();
+        assert!(c.cancel.enabled && c.cancel.auto_cosign && c.cancel.drive);
+        assert_eq!(
+            (
+                c.cancel.margin_bps,
+                c.cancel.spares,
+                c.cancel.takeover_blocks,
+                c.cancel.min_confirmations
+            ),
+            (
+                DEFAULT_CANCEL_MARGIN_BPS,
+                DEFAULT_CANCEL_SPARES,
+                DEFAULT_TAKEOVER_BLOCKS,
+                1
+            )
+        );
+        assert!(c.cancel.state_file.is_none() && c.cancel.broadcast_rpc.is_empty());
+        let c = parse(
+            "[node]\nrpc_url = \"http://h:1\"\n[cancel]\nauto_cosign = false\nmargin_bps = 0\ntakeover_blocks = 0\n\
+             state_file = \"/tmp/s.json\"\nbroadcast_rpc = [\"http://u:p@127.0.0.1:9\", \"https://u:p@miner.example\"]\n",
+        )
+        .unwrap();
+        assert!(!c.cancel.auto_cosign);
+        assert_eq!((c.cancel.margin_bps, c.cancel.takeover_blocks), (0, 1));
+        assert_eq!(c.cancel.state_file, Some(PathBuf::from("/tmp/s.json")));
+        assert_eq!(c.cancel.broadcast_rpc.len(), 2);
+        assert!(
+            parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:p@peer.example:9\"]\n")
+                .is_err()
+        );
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:p@peer.example:9\"]\nallow_insecure_broadcast = true\n").is_ok());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"ftp://x\"]\n").is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbogus = 1\n").is_err());
     }
 
     #[test]
