@@ -1870,6 +1870,41 @@ std::string FormatStateMessage(const CValidationState &state)
         state.GetRejectCode());
 }
 
+// AcceptToMemoryPool policy (audit 07/F-1 and its review): the one template input (V or I) of a transaction,
+// if any (a second is bad-txns-vault-multi, refused before the script checks). It is selected exactly as
+// vault::CheckTx counts template inputs (ParseVault / ParseIntent, a MATCH): a MALFORMED V-shaped coin is
+// no template there, so it is none here either and cannot stand in for the real one.
+std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
+        if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n))
+            continue;
+        const CScript& spk = coins->vout[tx.vin[i].prevout.n].scriptPubKey;
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        if (vault::ParseVault(spk, vp) || vault::ParseIntent(spk, ip))
+            return i;
+    }
+    return std::nullopt;
+}
+
+// Does the template input's own script error depend on the set state at this node's tip, which the
+// relaying peer's tip need not share? SCRIPT_ERR_SETSIG (OP_CHECKSETSIG: set membership, threshold and
+// dormancy move with the tip), and SCRIPT_ERR_VERIFY with selector 3 (OWNER-RELEASED: the templates'
+// only OP_VERIFY follows OP_CHECKSETDORMANT, which pushes false while the set is not released). Not
+// SCRIPT_ERR_SETSIG_COUNT: a template runs exactly one OP_CHECKSETSIG, so it never depends on state.
+bool IsVaultSetStateScriptError(const CScript& templateScriptSig, ScriptError err)
+{
+    if (err == SCRIPT_ERR_SETSIG)
+        return true;
+    if (err == SCRIPT_ERR_VERIFY) {
+        auto selector = vault::ParseSelector(templateScriptSig);
+        return selector && *selector == vault::SEL_RELEASED;
+    }
+    return false;
+}
+
 bool AcceptToMemoryPool(
         const CChainParams& chainparams,
         CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
@@ -2133,15 +2168,28 @@ bool AcceptToMemoryPool(
         PrecomputedTransactionData txdata(tx, allPrevOutputs);
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
-        // A template input's script reads the set state at this node's tip, which the relaying
-        // peer's tip need not share: its failure is no proof of misbehaviour (DoS 0).
-        const bool fVaultTemplateInput = vaultFlags && vault::HasTemplateInput(tx, view);
-        CValidationState vaultScriptState;
-        CValidationState& scriptState = fVaultTemplateInput ? vaultScriptState : state;
-        if (!ContextualCheckInputs(tx, scriptState, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        // A transaction spending a V or I has that template input's script checked alone first, with the
+        // same flags and set state. This exit runs before Consensus::CheckTxInputs (inside
+        // ContextualCheckInputs): a transaction that is also value-invalid but fails OP_CHECKSETSIG on its
+        // template input scores 0, at a cost of at most one set-signature recovery (CheckSetSigs returns
+        // at the first bad signature). A failure of it that depends on the set state at this node's tip, which
+        // the relaying peer's tip need not share, is no proof of misbehaviour (DoS 0). Every other outcome
+        // goes on to the stock checks below, which score every other failure as stock: the error of the
+        // first failing input of the whole transaction would not say which input failed (audit 07/F-1 and
+        // its review).
+        if (vaultFlags) {
+            if (auto nTemplate = FindVaultTemplateInput(tx, view)) {
+                const CCoins* coins = view.AccessCoins(tx.vin[*nTemplate].prevout.hash);
+                CScriptCheck check(*coins, tx, *nTemplate, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, consensusBranchId, &txdata);
+                check.SetVault(vaultSnapshot ? vaultSnapshot : vault::TipSnapshot(), GetSpendHeight(view));
+                if (!check() && IsVaultSetStateScriptError(tx.vin[*nTemplate].scriptSig, check.GetScriptError()))
+                    return state.DoS(0, error("AcceptToMemoryPool: vault: %s input %u: %s", hash.ToString(), *nTemplate,
+                                              ScriptErrorString(check.GetScriptError())), REJECT_INVALID,
+                                     strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(check.GetScriptError())));
+            }
+        }
+        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
-            if (fVaultTemplateInput)
-                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
             return false;
         }
 
@@ -2154,10 +2202,8 @@ bool AcceptToMemoryPool(
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!ContextualCheckInputs(tx, scriptState, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
-            if (fVaultTemplateInput)
-                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }

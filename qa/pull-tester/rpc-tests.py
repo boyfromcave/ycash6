@@ -100,6 +100,10 @@ BASE_SCRIPTS= [
     'vault_undo_prune.py',
     # Template-spend relay policy with standardness enforced (-acceptnonstdtxn=0; audit 01/V-4).
     'vault_policy.py',
+    # The mempool DoS score of a transaction spending a V or I: 0 only for set-state failures (audit 07/F-1).
+    'vault_dos.py',
+    # An SLH-DSA spend that arrives before its parent is parked as an orphan (audit 07/F-6).
+    'vault_pq_relay.py',
     # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',

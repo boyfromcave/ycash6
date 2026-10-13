@@ -17,6 +17,7 @@
 #include "key.h"
 #include "main.h"
 #include "policy/policy.h"
+#include "script/script_error.h"
 #include "script/standard.h"
 #include "streams.h"
 #include "test/test_bitcoin.h"
@@ -25,6 +26,10 @@
 #include "vault/template.h"
 
 #include <boost/test/unit_test.hpp>
+
+// AcceptToMemoryPool's DoS classification of a failed template-input script check (main.cpp, audit 07/F-1).
+extern std::optional<unsigned int> FindVaultTemplateInput(const CTransaction& tx, const CCoinsViewCache& view);
+extern bool IsVaultSetStateScriptError(const CScript& templateScriptSig, ScriptError err);
 
 using namespace vault;
 
@@ -485,6 +490,62 @@ BOOST_AUTO_TEST_CASE(pqpkh_dust_uses_the_real_spend_size)
     m.vout[0].nValue = t;
     reason.clear();
     BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(m), reason, Params(), 10), reason);
+}
+
+// Audit 07/F-1 and its review: AcceptToMemoryPool checks the one template input of a transaction alone first
+// and scores DoS 0 only for its own set-state-dependent errors; every other input and error keeps the stock score.
+BOOST_AUTO_TEST_CASE(mempool_set_state_failure_classification)
+{
+    VaultParams vp = Params1();
+    const CScript vspk = BuildVault(vp);
+    const CScript ispk = BuildIntent(IntentFor(vp, vspk, GetScriptForDestination(Key(3).GetID())));
+    const CScript p2pkh = GetScriptForDestination(Key(4).GetID());
+    CCoinsViewDummy base; // 6.20.0: CCoinsView is abstract
+    CCoinsViewCache view(&base);
+    AddCoin(view, uint256S("0x51"), vspk);
+    AddCoin(view, uint256S("0x52"), ispk);
+    AddCoin(view, uint256S("0x53"), p2pkh);
+    AddCoin(view, uint256S("0x54"), p2pkh);
+    auto spend = [](std::vector<uint256> ins) {
+        CMutableTransaction m;
+        for (const auto& in : ins)
+            m.vin.push_back(CTxIn(COutPoint(in, 0), CScript() << OP_1));
+        m.vout.push_back(CTxOut(1000, CScript() << OP_TRUE));
+        return CTransaction(m);
+    };
+    // the template input is found wherever it sits (the stock loop may never reach it)
+    BOOST_CHECK(!FindVaultTemplateInput(spend({uint256S("0x53"), uint256S("0x54")}), view));
+    BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x53"), uint256S("0x51")}), view), 1U);
+    BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x52"), uint256S("0x53")}), view), 0U);
+    BOOST_CHECK(!FindVaultTemplateInput(spend({uint256S("0x99")}), view));   // missing coin
+    // a MALFORMED V-shaped coin (delay 0, out of range) is no template, as in vault::CheckTx's count
+    CScript malformed = vspk;
+    BOOST_REQUIRE_EQUAL(malformed[38], (unsigned char)OP_5);                  // <tag:4> <cancelSetId:32> <delay>
+    malformed[38] = OP_0;
+    VaultParams mp;
+    BOOST_REQUIRE(MatchVault(malformed, mp) == Shape::MALFORMED);
+    AddCoin(view, uint256S("0x55"), malformed);
+    BOOST_CHECK(!FindVaultTemplateInput(spend({uint256S("0x55"), uint256S("0x53")}), view));
+    BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x55"), uint256S("0x51")}), view), 1U);
+
+    const CScript ownerSig = CScript() << valtype(64, 7) << OP_1 << valtype(32, 8) << OP_1;   // shape only
+    const CScript sel1 = CScript() << valtype(65, 9) << OP_1, sel2 = CScript(ownerSig) << OP_2,
+                  sel3 = CScript(ownerSig) << OP_3, sel3data = CScript(ownerSig) << valtype(1, 3);
+    // OP_CHECKSETSIG's error: state-dependent whatever the selector
+    for (const CScript* ss : {&sel1, &sel2, &sel3})
+        BOOST_CHECK(IsVaultSetStateScriptError(*ss, SCRIPT_ERR_SETSIG));
+    // OP_VERIFY: only the OWNER-RELEASED branch, whose one OP_VERIFY follows OP_CHECKSETDORMANT
+    BOOST_CHECK(IsVaultSetStateScriptError(sel3, SCRIPT_ERR_VERIFY));
+    BOOST_CHECK(!IsVaultSetStateScriptError(sel1, SCRIPT_ERR_VERIFY));
+    BOOST_CHECK(!IsVaultSetStateScriptError(sel2, SCRIPT_ERR_VERIFY));
+    BOOST_CHECK(!IsVaultSetStateScriptError(sel3data, SCRIPT_ERR_VERIFY));   // not a canonical selector
+    // never state-dependent: a template runs one OP_CHECKSETSIG; signatures, sizes, locktimes, stack shape
+    for (ScriptError e : {SCRIPT_ERR_SETSIG_COUNT, SCRIPT_ERR_EVAL_FALSE, SCRIPT_ERR_PQ_SIZE, SCRIPT_ERR_CHECKSIGVERIFY,
+                          SCRIPT_ERR_EQUALVERIFY, SCRIPT_ERR_UNSATISFIED_LOCKTIME, SCRIPT_ERR_SIG_DER,
+                          SCRIPT_ERR_INVALID_STACK_OPERATION, SCRIPT_ERR_OK}) {
+        for (const CScript* ss : {&sel1, &sel2, &sel3})
+            BOOST_CHECK_MESSAGE(!IsVaultSetStateScriptError(*ss, e), ScriptErrorString(e));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
