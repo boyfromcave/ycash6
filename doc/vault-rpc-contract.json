@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "8bd150f5e5358d6cdea0c884feb628e4786f0e524d3264d0c6bbe337f105715e"
+    "sha256": "acddefbccf06fd9f383ed1feacdb1d7270843c8b0e27077a32635b3ca732b2d9"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2170,6 +2170,14 @@
         "vault_lock"
       ],
       "provokedBy": "the former `ownerkey` parameter"
+    },
+    {
+      "code": -8,
+      "message": "appheight on a tag without a module",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`appheight` on tag `TEST`"
     },
     {
       "code": -8,

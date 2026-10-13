@@ -80,7 +80,8 @@ class VaultPQTest(VaultTestBase):
         self.mine()
         owner_id = OWNER_KEY.hex()
         self.vp1 = self.vparams(self.sid, owner_height=self.tip() + 8)
-        self.vp2 = self.vparams(self.sid, owner_height=self.tip() + 400, app_height=self.tip() + 4)
+        # an APP branch only on a tag a module governs (V-1, audit 01/V-5): YED\0, whose rules are not configured here
+        self.vp2 = self.vparams(self.sid, owner_height=self.tip() + 400, app_height=self.tip() + 4, tag=b'YED\x00')
         self.vp3 = self.vparams(self.sid, delay=100, owner_height=self.tip() + 400)
         self.v1 = self.lock(self.vp1, 2 * COIN, 'lock V1 (owner branch at tip + 8)')
         self.v2 = self.lock(self.vp2, 2 * COIN, 'lock V2 (APP branch at tip + 4)')

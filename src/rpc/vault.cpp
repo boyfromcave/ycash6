@@ -29,6 +29,7 @@
 #include "util/strencodings.h"
 #include "vault/act.h"
 #include "vault/checker.h"
+#include "vault/module.h"
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
@@ -1328,7 +1329,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
             "\nLock amount in a vault V (plan §15.3) funded by this wallet, and broadcast it. Both sets must be confirmed.\n"
             "\nArguments:\n"
             "1. params (object, required) {\"tag\": \"4 chars or 8 hex\", \"setid\", \"cancelsetid\" (default setid),\n"
-            "        \"delay\": 1..65535, \"ownerheight\": n, \"appheight\": n (default 0 = no APP branch), \"amount\",\n"
+            "        \"delay\": 1..65535, \"ownerheight\": n, \"appheight\": n (default 0 = no APP branch; only on a tag a module governs), \"amount\",\n"
             "        \"owner\": pqkeyid (66 hex, scheme || keyhash), a PQ address or {\"scheme\": n, \"keyhash\": \"64 hex\"}\n"
             "        (default: a new SLH-DSA key of this wallet, as vault_getnewowner)}\n"
             "\nResult: {\"txid\", \"vout\", \"outpoint\", \"script\", \"owner\"}\n"
@@ -1346,6 +1347,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     vp.delay = find_value(o, "delay").get_int64();
     vp.ownerHeight = find_value(o, "ownerheight").get_int64();
     vp.appHeight = find_value(o, "appheight").isNull() ? 0 : find_value(o, "appheight").get_int64();
+    // V-1 (audit 01/V-5): the APP branch has no signer; only a tag a module governs may carry one.
+    if (vp.appHeight != 0 && !vault::FindModule(vp.tag))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "appheight on a tag without a module: the APP branch has no signer and only a module may govern it (bad-txns-vault-app)");
     if (!find_value(o, "ownerkey").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "ownerkey-removed: use owner (pqkeyid)");
     // Every vault owner is a post-quantum key (quantum plan §4.3): the named one, or a new SLH-DSA
     // key of this wallet (quantum spec §6.2).

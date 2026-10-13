@@ -2009,7 +2009,7 @@ bool AcceptToMemoryPool(
 
         // Check for non-standard pay-to-script-hash in inputs
         try {
-            if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId))
+            if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId, vaultSnapshot.get()))
                 return state.DoS(0, false, REJECT_NONSTANDARD, "bad-txns-nonstandard-inputs", BodyCorruption::Possible);
         } catch (const std::runtime_error& e) {
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-input-value-out-of-range");

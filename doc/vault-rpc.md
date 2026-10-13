@@ -277,7 +277,10 @@ Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": i
 
 Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "owner": pqkeyid}`
 
-`delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch). `owner` is
+`delay` 1–65535; `cancelsetid` defaults to `setid`, `appheight` to 0 (no APP branch). A non-zero
+`appheight` is accepted only on a tag a registered module governs (`YED\0`): the APP branch has no
+signer, and consensus refuses a V with an APP branch on any other tag (V-1, `bad-txns-vault-app`;
+audit 01/V-5). `owner` is
 a pqkeyid, a PQ address or `{"scheme": int, "keyhash": hex}` (any key: an external owner is
 allowed); without it the wallet draws a new SLH-DSA owner (as `vault_getnewowner`). The former
 `ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
@@ -396,6 +399,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `kind must be vault or intent` | `vault_list` | `{"kind": "coin"}` |
 | -8 | `vault parameters out of range` | `vault_lock` | `delay` 0 |
 | -8 | `ownerkey-removed` | `vault_lock` | the former `ownerkey` parameter |
+| -8 | `appheight on a tag without a module` | `vault_lock` | `appheight` on tag `TEST` |
 | -8 | `unknown post-quantum scheme` | `vault_getnewowner` | `scheme` 3 |
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
 | -8 | `a scheme-2 (FN-DSA-512) owner before Falcon is active` | `vault_lock` | an `owner` with scheme `02` while Falcon is inactive at the next block |
@@ -437,8 +441,14 @@ C: vault_buildcancel I' -> X ; C: set_signcancel X -> X1 ; C: vault_send X1   (a
 
 - `<datadir>/vaults/` commits each connected block (state, undo, tip marker) after the block's
   script checks; `-reindex` wipes it; on start it is reconciled with the active chain
-  (disconnected with its own undo, replayed from the block files). A pruned node that lacks the
-  undo data of a block after activation cannot replay and asks for `-reindex`.
+  (disconnected with its own undo, replayed from the block files). Replay needs every block and
+  undo file from the activation height, so `-prune` is refused wherever the upgrade has an
+  activation height, with or without Yellowback (audit 01/N-1): a node that pruned before its
+  network set a height must re-download the chain without `-prune`.
+- A template input whose coin was created below the activation height is invalid (S-0,
+  `bad-txns-vault-preactivation`, audit 01/V-1): a V or I a miner put in a block before the
+  rules existed is never a template input, in the mempool, in a block or on replay (which reads
+  height 0 for a coin the template-output index does not hold).
 - The mempool applies the vault rules for the next block and re-checks vault transactions on
   every tip change; the miner applies acts and the rate limit to a running copy and skips a
   transaction that fails.

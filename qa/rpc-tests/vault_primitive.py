@@ -314,6 +314,8 @@ class VaultPrimitiveTest(VaultTestBase):
         app = v.build_app_tx(out, vp, val, recips, fee_vin, change, COIN)
         self.reject(v.node_sign(self.node, app, app.vin[0].scriptSig), ('bad-txns-vault-app', SCRIPT_FALSE),
                     'bad-vault-app-disabled', 'APP selector with appHeight 0 (S-4)')
+        self.reject_both(self.lock_hex(self.vparams(sid, app_height=self.tip() + 10), COIN), 'bad-txns-vault-app',
+                         'bad-txns-vault-app', 'a V with an APP branch on a tag no module governs (V-1, audit 01/V-5)')
 
         self.u1 = self.accept(unl(m[:2]), 'UNLOCK V1 into 3 intents (3 + 1 + 1 YEC) + re-lock 1 YEC')
         self.mine()

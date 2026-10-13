@@ -18,8 +18,10 @@
 #include "main.h"
 #include "policy/policy.h"
 #include "script/standard.h"
+#include "streams.h"
 #include "test/test_bitcoin.h"
 #include "vault/act.h"
+#include "vault/state.h"
 #include "vault/template.h"
 
 #include <boost/test/unit_test.hpp>
@@ -371,6 +373,78 @@ BOOST_AUTO_TEST_CASE(pq_scriptsig_limits)
     CScript shSig = fal;
     shSig << ToByteVector(redeem);
     BOOST_CHECK(!AreInputsStandard(spend(pSh, shSig, 12), view, branch));
+}
+
+BOOST_AUTO_TEST_CASE(template_scriptsig_shapes)
+{
+    // Audit 01/V-4: a template input's scriptSig carries no more than its selector's branch consumes. The extra
+    // pushes are outside every signature (OP_CHECKSETSIG pops exactly k; CLEANSTACK is policy, not consensus):
+    // consensus-valid in a block, non-standard for relay.
+    RegtestVault rv;
+    CCoinsViewDummy base; // 6.20.0: CCoinsView is abstract
+    CCoinsViewCache view(&base);
+    const VaultParams vp = Params1();                       // unlock set 0x11, cancel set 0x22, SLH-DSA owner
+    const CScript vspk = BuildVault(vp);
+    const CScript ispk = BuildIntent(IntentFor(vp, vspk, GetScriptForDestination(Key(3).GetID())));
+    const uint256 pV = uint256S("0x71"), pI = uint256S("0x72");
+    for (const auto& c : {std::make_pair(pV, vspk), std::make_pair(pI, ispk)}) {
+        CCoinsModifier m = view.ModifyCoins(c.first);
+        m->vout.resize(1);
+        m->vout[0] = CTxOut(100000, c.second);
+        m->nHeight = 11;
+    }
+    // The set state: unlock threshold 2 on 0x11, cancel threshold 1 on 0x22.
+    MemoryKV kv;
+    {
+        SetRecord a;
+        a.params.seats = 3;
+        a.params.unlockThreshold = 2;
+        a.params.cancelThreshold = 1;
+        CDataStream ss(SER_DISK, PROTOCOL_VERSION);   // the record encoding (state.cpp SerializeRecord)
+        ss << a;
+        kv.data[KeySet(vp.setId)] = kv.data[KeySet(vp.cancelSetId)] = std::string(ss.begin(), ss.end());
+    }
+    const SetSnapshot snap(kv);
+    BOOST_REQUIRE(snap.Threshold(vp.setId, ROLE_UNLOCK) == std::optional<int>(2));
+    const uint32_t branch = CurrentEpochBranchId(12, Params().GetConsensus());
+    auto spend = [&](const uint256& prev, const CScript& ss) {
+        CMutableTransaction m = Tx(12);
+        m.vin[0].prevout = COutPoint(prev, 0);
+        m.vin[0].scriptSig = ss;
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(Key(4).GetID())));
+        return CTransaction(m);
+    };
+    const valtype sig(65, 0x20);
+    // V UNLOCK: k = 2 signatures and OP_1.
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript() << sig << sig << OP_1), view, branch, &snap));
+    // <junk> <sig> <sig> OP_1: one push more than k (the extra-push malleation) — refused.
+    BOOST_CHECK(!AreInputsStandard(spend(pV, CScript() << valtype(1, 0x07) << sig << sig << OP_1), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pV, CScript() << sig << sig << sig << OP_1), view, branch, &snap));
+    // a non-65-byte push in a set-signed branch, with or without the set state
+    BOOST_CHECK(!AreInputsStandard(spend(pV, CScript() << valtype(1, 0x07) << sig << OP_1), view, branch, nullptr));
+    // without the set state only the signature size is checked (k unknown)
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript() << sig << sig << sig << OP_1), view, branch, nullptr));
+    // fewer than k fails OP_CHECKSETSIG: left to the script (its reason is the client's)
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript() << sig << OP_1), view, branch, &snap));
+    // V OWNER / OWNER-RELEASED: the SLH-DSA stack (s + p + 2 pushes) and the selector; both selectors standard
+    // (2 vs 3 is the owner's choice, not canonicalised); one extra push refused.
+    const CScript owner = PQArgs(pq::SCHEME_SLH_DSA_SHA2_128S);
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript(owner) << OP_2), view, branch, &snap));
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript(owner) << OP_3), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pV, PQArgs(pq::SCHEME_SLH_DSA_SHA2_128S, -1, 1) << OP_2), view, branch, &snap));
+    // V APP: the selector alone.
+    BOOST_CHECK(AreInputsStandard(spend(pV, CScript() << OP_4), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pV, CScript() << valtype(1, 0x07) << OP_4), view, branch, &snap));
+    // I RELEASE: the selector alone; I CANCEL: k = 1; I OWNER-RELEASED: the owner stack.
+    BOOST_CHECK(AreInputsStandard(spend(pI, CScript() << OP_1), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pI, CScript() << valtype(1, 0x07) << OP_1), view, branch, &snap));
+    BOOST_CHECK(AreInputsStandard(spend(pI, CScript() << sig << OP_2), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pI, CScript() << sig << sig << OP_2), view, branch, &snap));
+    BOOST_CHECK(AreInputsStandard(spend(pI, CScript(owner) << OP_3), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pI, PQArgs(pq::SCHEME_SLH_DSA_SHA2_128S, -1, 1) << OP_3), view, branch, &snap));
+    // OP_4 is not an I selector; no selector at all on a V
+    BOOST_CHECK(!AreInputsStandard(spend(pI, CScript() << OP_4), view, branch, &snap));
+    BOOST_CHECK(!AreInputsStandard(spend(pV, CScript() << sig << sig), view, branch, &snap));
 }
 
 BOOST_AUTO_TEST_CASE(pqpkh_dust_uses_the_real_spend_size)

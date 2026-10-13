@@ -685,7 +685,10 @@ class ModelTests(unittest.TestCase):
     def test_owner_branch_and_app(self):
         c = Chain()
         sid = c.setup()
-        vp = vparams(set_id=sid, cancel_set_id=sid, owner_height=c.h + 5, app_height=c.h + 3)
+        # V-1 (audit 01/V-5): an APP branch only on a tag a module governs (YED\0)
+        ungoverned = vparams(set_id=sid, cancel_set_id=sid, owner_height=c.h + 5, app_height=c.h + 3)
+        self.assertEqual(c.reject(v.build_lock_tx(c.coin(11 * v.COIN), ungoverned, 10 * v.COIN)), 'bad-txns-vault-app')
+        vp = vparams(tag=b'YED\x00', set_id=sid, cancel_set_id=sid, owner_height=c.h + 5, app_height=c.h + 3)
         out, val = c.lock(vp)
         early = v.build_owner_spend_tx(out, v.vault_script(vp), val, OWNER, c.dest, v.SEL_OWNER,
                                        lock_time=vp.owner_height)

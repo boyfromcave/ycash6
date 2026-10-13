@@ -1094,14 +1094,29 @@ BOOST_AUTO_TEST_CASE(app_branch)
     Chain c;
     CKey owner = MakeKey(50);
     SetId s = SetWithMembers(c, {MakeKey(1)});
+    // V-1 (audit 01/V-5): an APP branch only on a tag a module governs. TEST has none: refused.
+    VaultParams bad = VaultFor(s, owner, /*appHeight=*/500);
+    CMutableTransaction lockBad;
+    lockBad.vin.push_back(CTxIn(c.Fund(9000), CScript(), 0xffffffff));
+    lockBad.vout.push_back(CTxOut(8000, BuildVault(bad)));
+    BOOST_CHECK_EQUAL(*c.Try(lockBad), "bad-txns-vault-app");
+    // ... also when a template spend creates it (any V output: here an owner spend paying into it).
+    bad.appHeight = 0;
+    COutPoint plain = Lock(c, bad, 8000);
+    VaultParams badOut = bad;
+    badOut.appHeight = 500;
+    BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, plain, 2, {CTxOut(8000, BuildVault(badOut))})), "bad-txns-vault-app");
+    // YED\0 has a registered module (its rules are not configured in this suite, so it governs nothing else here).
     VaultParams vp = VaultFor(s, owner, /*appHeight=*/500);
+    vp.tag = yellowback::YED_TAG;
+    BOOST_REQUIRE(FindModule(vp.tag));
     CScript vspk = BuildVault(vp);
     COutPoint vout = Lock(c, vp, 8000);
     CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
     // Selector 4 obeys S-2 like an unlock.
     BOOST_CHECK_EQUAL(*c.Try(SpendTx(c, vout, 4, {CTxOut(8000, Recipient(60))})), "bad-txns-vault-value");
     BOOST_REQUIRE(!c.Block1(SpendTx(c, vout, 4, {CTxOut(8000, ispk)})));
-    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 0);
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 8000);   // only the plain V remains
 }
 
 BOOST_AUTO_TEST_CASE(rate_limit_epochs)

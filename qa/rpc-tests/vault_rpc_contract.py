@@ -120,7 +120,10 @@ class VaultRpcContractTest(BitcoinTestFramework):
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,
                                       'owner': OWNER_ID})
         app_height = h + 12
-        lk_app = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200,
+        c.error('appheight on a tag without a module', n, 'vault_lock',
+                {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'appheight': app_height, 'amount': 2})
+        # an APP branch only on a tag a module governs (V-1, audit 01/V-5): YED\0, whose rules are not configured here
+        lk_app = c.call(n, 'vault_lock', {'tag': '59454400', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200,
                                           'appheight': app_height, 'amount': 2})      # a new wallet owner
         mine(1)
         vaults = c.call(n, 'vault_list', {'kind': 'vault'})

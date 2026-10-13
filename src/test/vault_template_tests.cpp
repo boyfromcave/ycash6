@@ -7,6 +7,8 @@
 // post-quantum key ids (docs/plans/yellowback-quantum-spec.md §1): the slot <ownerHash:32>
 // OP_1|OP_2 OP_CHECKPQSIG is the only owner shape.
 
+#include "vault/checker.h"
+#include "vault/state.h"
 #include "vault/template.h"
 
 #include "consensus/upgrades.h"
@@ -576,6 +578,19 @@ BOOST_AUTO_TEST_CASE(owner_branch_real_signatures)
             BOOST_CHECK_EQUAL(tx.vin[0].scriptSig.size(), 7939U);           // quantum spec §1.5
             BOOST_CHECK(VerifyScript(tx.vin[0].scriptSig, spk, vaultFlags, checker, branch, &err));
             BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+            // Audit 01/V-4: both owner branches end in the same OP_CHECKPQSIG over the whole script, so the
+            // selector-2 signature also verifies under selector 3 once the set is released (here: unknown to an
+            // empty snapshot). The selector is outside the signature: a template spend's txid is malleable until
+            // it confirms (relay policy does not canonicalise 2 vs 3; upgrade plan §15.3).
+            CMutableTransaction swapped = mtx;
+            swapped.vin[0].scriptSig = OwnerScriptSig(sig, pk, SEL_RELEASED);
+            const CTransaction stx(swapped);
+            PrecomputedTransactionData stxdata(stx, {CTxOut(amount, spk)});
+            MemoryKV none;
+            SetSigChecker schecker(&stx, 0, amount, false, stxdata, std::make_shared<const SetSnapshot>(none), vp.ownerHeight);
+            BOOST_CHECK(VerifyScript(stx.vin[0].scriptSig, spk, vaultFlags, schecker, branch, &err));
+            BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+            BOOST_CHECK(stx.GetHash() != tx.GetHash());
         } else {
             BOOST_CHECK_EQUAL(tx.vin[0].scriptSig.size(), 1578U);
             // Falcon is SCRIPT_ERR_PQ_SCHEME without SCRIPT_VERIFY_PQ_FALCON, valid with it (A-1)
