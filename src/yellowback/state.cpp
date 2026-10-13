@@ -64,6 +64,7 @@ const char* const VAULT_CLAIM_INTENTS = "vault-claim-intents";
 const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
+const char* const INTENT_CANCEL_NO_REFUND = "intent-cancel-no-refund";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
 const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
@@ -194,7 +195,8 @@ struct EvalContext
         return S.has_value() && params.IsArmed(S->attest.IsArmed());
     }
 
-    /** BUNDLE-1 for the transaction under evaluation, recorded into the BundleLog accumulator when it holds (R12). */
+    /** BUNDLE-1 for the transaction under evaluation. Nothing is recorded: the calling rule commits the facts with
+     *  CommitBundle once it holds (R12 as hardened, audit 03/M-2). */
     BundleFacts Bundle(const CTransaction& tx, int64_t refHeight, const std::vector<unsigned char>& selector, bool skipVin0)
     {
         BundleFacts f;
@@ -210,12 +212,19 @@ struct EvalContext
             f.seqs.push_back(a.seq);
             f.pairs.push_back(std::make_tuple(a.seq, (int64_t)a.priceMicroUsd, a.citedHeight));
         }
+        return f;
+    }
+
+    /** R12 (hardened, audit 03/M-2): a verified bundle enters the BundleLog[H] accumulator only once the MINT, REDEEM or
+     *  CLAIM_NOTICE carrying it holds, so a transaction whose rule fails contributes no row to PIN-1/PIN-2 or S15. */
+    void CommitBundle(const BundleFacts& f)
+    {
+        if (!f.verified) return;
         anyBundle = true;
         if (f.aMint.has_value()) aMints.push_back(f.aMint.value());
         if (f.aClaim.has_value()) aClaims.push_back(f.aClaim.value());
         selectedUnion.insert(f.selected.begin(), f.selected.end());
         pairUnion.insert(f.pairs.begin(), f.pairs.end());
-        return f;
     }
 
     /** BundleLog[H] from the accumulator; nullopt when no bundle was verified in this block. */
@@ -472,6 +481,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
     SetVault(vault, p, P, tx, ctx.height);
     const COutPoint vaultOut(txid, 0);
     if (v == verdict::OK) {
+        ctx.CommitBundle(facts.bundle);   // R12 (03/M-2): the mint held
         vault.status = (uint8_t)VaultStatus::ACTIVE;
         vault.pMint = facts.pMint;      // FEE-1' (D-Q-23): the mint price, read by RED-3'/IT-9' instead of a live one
         if (!ctx.Eligible((int)p.refHeight).empty()) {
@@ -718,6 +728,14 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
         return true;
     }
     const bool ownerPath = IsOwnerSelector(selector.value());
+    // CAN-1 (03/H-1): a claim records the holder its burn came from; RED-2 (yedIn >= mintedCents > 0) means a held claim
+    // spent at least one YED token, so this refusal is for totality only
+    if (!ownerPath && log.spentTokens.empty()) {
+        log.verdict = verdict::VAULT_SPEND_MALFORMED;
+        log.yedOut = 0;
+        return true;
+    }
+    ctx.CommitBundle(facts.bundle);   // R12 (03/M-2): RED-1..5 held
     const Payload& p = fp->payload;
     VaultRecord& vault = active[0].record;
     for (const Assignment& a : p.assignments) {
@@ -768,6 +786,8 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
             ir.vault = active[0].outpoint;
             ir.role = (uint8_t)(j == facts.claimantVout ? IntentRole::CLAIMANT : IntentRole::RESIDUAL);
             ir.height = ctx.height;
+            // CAN-1: the refund holder is the token spent at the claim's lowest-index YED input (spentTokens is in vin order)
+            if (ir.Role() == IntentRole::CLAIMANT) ir.refundScript.assign(log.spentTokens[0].scriptPubKey.begin(), log.spentTokens[0].scriptPubKey.end());
             ctx.st.Put(keys::Intent(COutPoint(txid, (uint32_t)j)), ir);
             yedOutputs.insert((unsigned int)j);
         }
@@ -785,12 +805,20 @@ struct SpentIntent
 };
 
 /**
- * U-23, U-24: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
+ * U-23, U-24, CAN-1: the release (selector 1) or attestor cancel (selector 2) of a claim intent. The primitive has
  * already checked the delay (BIP68 / I-2) and the payment (I-1 / I-2); the module moves its records:
  * the claimant intent's release closes the vault (CLAIMED); its cancel re-creates the byte-identical
  * vault, which becomes the same position again (ACTIVE at the new outpoint, its collateral the re-lock's
- * value), and the claim's burn is not refunded (U-24). The owner's residual intent may only be released.
- * The re-created vault must be vout[0]. Returns the verdict; OK on success.
+ * value), and -- CAN-1, audit 03/H-1, U-24 revised -- re-issues the claim's burn as a YED token to the holder
+ * the burn came from (the claimant intent's refundScript: the token spent at the claim's lowest-index YED input),
+ * at the lowest output index >= 1 paying that script, crediting supplyCents: the whole burn, any over-burn included,
+ * goes to that one holder. A cancel returns the claimant's YED; the claim's YEC fees (protocol fee, attestor share,
+ * network fee) are not returned. The refund is exempt from TOK-PQ: on mainnet and testnet the exemption is moot
+ * (pqFalconHeight 0, so the token the claim spent was already a Falcon holder); on a regtest chain whose Falcon height
+ * lies after a pre-Falcon P2PKH token's creation (the token may be much older than the claim), the cancel re-creates
+ * that P2PKH holding after the Falcon height -- accepted, since refusing it would make the cancel impossible and the
+ * burn forfeit again. The owner's residual intent may only be released. The re-created vault must be vout[0]. Returns
+ * the verdict; OK on success.
  */
 std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const SpentIntent& in,
                              const std::optional<FoundPayload>& fp, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
@@ -824,6 +852,29 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
     // The re-created vault is vout[0] (vault_buildcancel's shape), so the position stays "txid:0" as every
     // Yellowback position is (the wallet addresses vaults by txid).
     if (relock != 0) return verdict::INTENT_CANCEL_NO_VAULT;
+    // CAN-1: the refund output -- the lowest index >= 1 paying the recorded holder a non-zero carrier
+    const Cents refund = vault->burnedCents;
+    if (refund <= 0 || in.record.refundScript.empty()) return verdict::INTENT_CANCEL_NO_REFUND;
+    const CScript holder(in.record.refundScript.begin(), in.record.refundScript.end());
+    int refundVout = -1;
+    for (unsigned int j = 1; j < tx.vout.size(); j++) {
+        if (tx.vout[j].scriptPubKey == holder && tx.vout[j].nValue > 0) { refundVout = (int)j; break; }
+    }
+    if (refundVout < 0) return verdict::INTENT_CANCEL_NO_REFUND;
+    const COutPoint refundOut(txid, (uint32_t)refundVout);
+    TokenRecord tok;
+    tok.cents = refund;
+    tok.nValue = tx.vout[refundVout].nValue;
+    tok.scriptPubKey = holder;
+    tok.height = ctx.height;
+    ctx.st.Put(keys::Token(refundOut), tok);
+    AssignedOutput ao;
+    ao.outpoint = refundOut;
+    ao.cents = refund;
+    ao.scriptPubKey = holder;
+    log.assigned.push_back(ao);
+    log.yedOut = refund;
+    totals.supplyCents += refund;                                       // 03/M-1: the debt is back in supply with its vault
     const COutPoint reopened(txid, (uint32_t)relock);
     VaultRecord v = vault.value();
     v.status = (uint8_t)VaultStatus::ACTIVE;
@@ -886,6 +937,7 @@ bool ApplyNotice(EvalContext& ctx, const CTransaction& tx, const Payload& p, TxL
     n.refHeight = (int32_t)ref;
     n.pEmerg = c.pEmerg.value();
     ctx.st.Put(keys::Notice(vaultOut), n);
+    ctx.CommitBundle(f);              // R12 (03/M-2): NOT-1 held
     LogBundle(log, f);
     log.notice = true;
     return true;
@@ -984,6 +1036,8 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
         if (txid != P.attestorSetId || ctx.st.GetAttestorSet().has_value()) return false;
         // owner, 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted (else YED has no attestor set)
         if (!act.create.IsOpen() || (int)act.create.seats != P.attestorSeats) return false;
+        // 03/I-3: ... whose cancel and unlock thresholds are the pinned constants (a cancel is value-neutral, CAN-1)
+        if ((int)act.create.cancelThreshold != P.attestorCancelThreshold || (int)act.create.unlockThreshold != P.attestorUnlockThreshold) return false;
         if ((int64_t)act.create.maturity != (int64_t)P.bondMaturity) return false;   // the bond exit delay is BOND_MATURITY
         if ((int64_t)act.create.livenessWindow < (int64_t)P.attestorLivenessMin) return false;   // seats review B3: >= one day
         AttestorSetRecord z;
@@ -1286,8 +1340,9 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         log.closedVaults.push_back(s.outpoint);
     }
 
-    // ---- IN-3 (for a MINT the burn formula's yedOut is 0, N19: every YED input of a mint is burned)
-    const Cents burnOut = log.Type() == TxLogType::MINT ? 0 : log.yedOut;
+    // ---- IN-3 (for a MINT the burn formula's yedOut is 0, N19: every YED input of a mint is burned; for a CLAIM_CANCEL too:
+    // its yedOut is CAN-1's re-issued refund, credited by ApplyIntentSpend, not carried from its inputs)
+    const Cents burnOut = (log.Type() == TxLogType::MINT || log.Type() == TxLogType::CLAIM_CANCEL) ? 0 : log.yedOut;
     const Cents burned = yedIn - burnOut;
     log.burned = burned;
     totals.supplyCents -= burned;

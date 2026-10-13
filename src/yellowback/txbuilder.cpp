@@ -903,6 +903,17 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         int64_t change = 0;
         int64_t extraBurn = 0;   // H4: a sub-dollar remainder burned on top of the debt (RED-2 allows over-burning)
         std::vector<YedCoin> sel = SelectYed(ctx, vault.mintedCents, change, true, extraBurn);
+        if (!ownerPath) {
+            // CAN-1 (audit 03/H-1): an attestor cancel refunds the claim's whole burn (any sub-dollar remainder too) to the
+            // holder of the claim's lowest-index YED input, so that input is one of this wallet's plain holder scripts
+            // (P2PKH or TX_PQPKH) whenever the selection has one: never a channel (or other contract) script, whose
+            // spending conditions the refund would inherit.
+            auto plain = [](const YedCoin& c) {
+                const CScript& s = c.token.scriptPubKey;
+                return HolderKey(s).has_value() && (s.size() == 25 || s.size() == 35);
+            };
+            std::stable_partition(sel.begin(), sel.end(), plain);
+        }
         out.extraBurnCents = extraBurn;
         shape.yedInputs = sel;
         shape.changeCents = change;

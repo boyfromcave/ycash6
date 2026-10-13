@@ -493,6 +493,21 @@
       ]
     }
   },
+  "yed_buildcancel": {
+    "args": "<intentOutpoint>",
+    "returns": {
+      "cancelsetid": "755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e",
+      "deadline": 980,
+      "hex": "0400008085202f89...",
+      "intentconfirmed": true,
+      "refund": {
+        "cents": 100000,
+        "script": "76a914a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d488ac",
+        "vout": 1
+      },
+      "required": 1
+    }
+  },
   "yed_claim": {
     "args": "<vaultTxid> [to] [bundleHex] [wait] [minOutZat] [maxBurnCents]",
     "returns": {

@@ -26,7 +26,8 @@ explainer's example (yb-calibration docs/reports/2026-10-zec/in-term-claims.html
         yellowback_attest_wallet's V2 and the unit test in_term_emergency_claim_pays_the_residual_to_the_owner;
   - the owner's redeem is open in term (IT-1 extended: ownerHeight = refHeight + 1): Y is redeemed in term above
     theta, Y2 in term while under theta before anyone claims it, both for the full debt;
-  - --armed only: an attestor cancels a wrong-price in-term claim (vault_cancel by the set's member key):
+  - --armed only: an attestor cancels a wrong-price in-term claim (vault_cancel by the set's member key, with
+    CAN-1's refund of the claim's burn to the claimant, audit 03/H-1):
     the vault comes back byte-identical as the same position, ACTIVE; the claimant's burn is not refunded
     (U-24);
   - assert_model_matches(node, full=True) at the end.
@@ -362,14 +363,15 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         assert_best_hash(self.enforcing_nodes(), 'end')
         assert_same_statehash(self.enforcing_nodes(), 'end')
 
-# Rule: RED-4 I-2 U-24 IT-2
+# Rule: RED-4 I-2 U-24 IT-2 CAN-1
     def cancel_case(self, mint):
         """--armed: the claimant claims the class-A vault in term with a bundle at a wrong (low) price; an
         attestor cancels the claimant intent (selector 2, one member signature: the set's cancel threshold is
-        1): the vault is back as the same position, ACTIVE, at the cancel's vout 0; the burn is not refunded."""
+        1): the vault is back as the same position, ACTIVE, at the cancel's vout 0, and (CAN-1, audit 03/H-1) the
+        claim's burn is refunded at vout 1 to the claimant's YED, which claims the vault again."""
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
-        print("--armed: an attestor cancels the claimant's in-term claim of the class-A vault; the vault is back, the burn kept")
+        print("--armed: an attestor cancels the claimant's in-term claim of the class-A vault; the vault is back, the burn refunded")
         vault = user.yed_getvault(mint['txid'])
         supply_before = nodes[2].yed_getstats()['supplyCents']
         claimed = self.claim(claimant, mint['txid'])
@@ -377,15 +379,22 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[1])
         assert_equal(nodes[2].yed_getvault(mint['txid'])['status'], 'CLAIMING')
         assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before - 10000)
+        holder = nodes[2].yed_getvault(mint['txid'])['refundHolder']           # CAN-1: the script the burned YED came from
+        balance_before = claimant.yed_getbalance()['confirmedCents']
         raw = claimant.getrawtransaction(claimed['txid'], 1)
         ispk = hex_str_to_bytes(raw['vout'][0]['scriptPubKey']['hex'])
         ip = v.IntentParams(*ym.yed_intent_fields(ispk))
-        owner = vault_owner(vault)
+        # the claimed V, as the node shows it (IT-1 extended: ownerHeight = appHeight = refHeight + 1, not lockHeight)
+        vp = v.parse_vault(hex_str_to_bytes(vault['scriptPubKey']))
         s = yed_params().attestor_set_internal
-        vp = v.VaultParams(ym.YED_TAG, s, s, CLAIM_DELAY, vault['lockHeight'], vault['refHeight'] + 1, owner)
+        assert_equal((vp.tag, vp.set_id, vp.cancel_set_id, vp.delay, vp.owner_height, vp.app_height, vp.owner),
+                     (ym.YED_TAG, s, s, CLAIM_DELAY, vault['refHeight'] + 1, vault['refHeight'] + 1, vault_owner(vault)))
         assert_equal(v.sha256(v.vault_script(vp)), ip.vault_hash)
         secret = hot_secret_for(user, 0)
-        cancel_hex = v.node_cancel(user, (claimed['txid'], 0), ip, raw['vout'][0]['valueZat'], vp, [secret])
+        refund = (yed_params().token_value, hex_str_to_bytes(holder))
+        no_refund = v.node_cancel(user, (claimed['txid'], 0), ip, raw['vout'][0]['valueZat'], vp, [secret])
+        assert_rpc_error('intent-cancel-no-refund', user.sendrawtransaction, no_refund)
+        cancel_hex = v.node_cancel(user, (claimed['txid'], 0), ip, raw['vout'][0]['valueZat'], vp, [secret], extra=[refund])
         cancel_txid = user.sendrawtransaction(cancel_hex)
         self.sync_all()
         self.mine(POOLS[2])
@@ -394,8 +403,12 @@ class YellowbackInTermTest(ArmedModeMixin, YellowbackTestFramework):
             assert_equal((back['status'], back['collateralZat'], back['mintedCents'], back['lockHeight']),
                          ('ACTIVE', raw['vout'][0]['valueZat'], 10000, vault['lockHeight']))
             assert_rpc_error('vault-not-found', nodes[i].yed_getvault, mint['txid'])
-        assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before - 10000)      # U-24: the burn is not refunded
-        assert_equal(nodes[2].yed_gettxinfo(cancel_txid)['type'], 'claim_cancel')
+        assert_equal(nodes[2].yed_getstats()['supplyCents'], supply_before)              # CAN-1: the burn is refunded
+        info = nodes[2].yed_gettxinfo(cancel_txid)
+        assert_equal((info['type'], info['assigned'], info['yedOut']), ('claim_cancel', [{'vout': 1, 'cents': 10000}], 10000))
+        refunded = [u for u in claimant.yed_listunspent() if u['txid'] == cancel_txid and u['vout'] == 1]
+        assert_equal([u['cents'] for u in refunded], [10000])                         # the claimant holds the burned YED again
+        assert_equal(claimant.yed_getbalance()['confirmedCents'], balance_before + 10000)
         self.checkpoint('cancel')
 
 

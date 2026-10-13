@@ -1032,7 +1032,7 @@ class Walk:
 
     # ------------------------------------------------------------------ cancel
     def s_cancel(self):
-        self.step("cancel", "a wrong-price claim cancelled by one attestor: the burn is lost, the vault ACTIVE again")
+        self.step("cancel", "a wrong-price claim cancelled by one attestor: the vault ACTIVE again, the burn refunded (CAN-1)")
         stats0 = self.node(USER).yed_getstats()
         spk = self.node(USER).yed_getvault(self.vaults["D"])["scriptPubKey"]
         res, claim = self.two_step(CLAIMANT, "yed_claim", self.vaults["D"], "", "")
@@ -1045,7 +1045,12 @@ class Walk:
         base = [c for c in self.yed_params()["classes"] if c["class"] == "A"][0]["baseRatioBps"] // 100
         self.note("the attestors' reference is back at $%s: at their price vault D is %d %% collateralised, so the claim is wrong "
                   "and one attestor (node %d) cancels it; consensus never learns why (§3.4)" % (int(PRICE), base, CANCELLER))
-        built = self.call(CANCELLER, "vault_buildcancel", claim + ":0", keys=["required", "cancelsetid", "deadline"])
+        self.fails(CANCELLER, "vault_buildcancel", claim + ":0", expect="is cancelled with yed_buildcancel")
+        claimant_before = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])["confirmedCents"]
+        holder = self.node(USER).yed_getvault(self.vaults["D"])["refundHolder"]
+        built = self.call(CANCELLER, "yed_buildcancel", claim + ":0", keys=["required", "cancelsetid", "deadline", "refund"])
+        self.ok(built["refund"]["cents"] == MINT_CENTS and built["refund"]["script"] == holder and built["refund"]["vout"] == 1,
+                "yed_buildcancel adds CAN-1's refund of %d cents to the claim's YED holder at output 1" % MINT_CENTS)
         signed = self.call(CANCELLER, "set_signcancel", built["hex"], keys=["complete", "signatures", "required", "sighash"])
         self.ok(signed["complete"] and signed["signatures"] == 1, "one attestor signature completes the cancel (cancelThreshold 1)")
         cancel = self.call(CANCELLER, "vault_send", signed["hex"])
@@ -1054,9 +1059,11 @@ class Walk:
         vd = self.call(USER, "yed_getvault", cancel, keys=["status", "mintedCents", "scriptPubKey"])
         self.ok(vd["status"] == "ACTIVE" and vd["scriptPubKey"] == spk, "the position is ACTIVE at the cancel's output 0, byte-identical V")
         after = self.call(USER, "yed_getstats", keys=["supplyCents", "activeVaults"])
-        self.ok(after["supplyCents"] == mid["supplyCents"], "the burn is not refunded (U-24): supply stays %d" % after["supplyCents"])
-        log = self.call(USER, "yed_gettxinfo", cancel, keys=["type", "reopenedVaults"])
-        self.ok(log["type"] == "claim_cancel", "yed_gettxinfo calls it claim_cancel")
+        self.ok(after["supplyCents"] == stats0["supplyCents"], "the burn is refunded (CAN-1): supply back at %d" % after["supplyCents"])
+        log = self.call(USER, "yed_gettxinfo", cancel, keys=["type", "reopenedVaults", "assigned"])
+        self.ok(log["type"] == "claim_cancel" and log["assigned"] == [{"vout": 1, "cents": MINT_CENTS}], "yed_gettxinfo calls it claim_cancel, the refund at output 1")
+        got = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])["confirmedCents"]
+        self.ok(got == claimant_before + MINT_CENTS, "the claimant holds its %d cents again (%d -> %d)" % (MINT_CENTS, claimant_before, got))
         self.fails(CLAIMANT, "vault_release", claim + ":0", expect="")
         self.vaults["D2"] = cancel
         self.evidence("cancel", {"claim": claim, "cancel": cancel})
@@ -1084,7 +1091,7 @@ class Walk:
         res, g = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
         res, h = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
         self.mine(1)
-        # the claimant burned its 200 YED on C and D (a cancelled claim's burn is not refunded, U-24): fund it for the claim of F
+        # the claimant burned 100 YED on C (D's burn came back with the cancel, CAN-1): fund it for the claim of F if short
         bal = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])
         if bal["confirmedCents"] < MINT_CENTS + 100:
             fund = self.call(USER, "yed_send", self.node(CLAIMANT).yed_getnewaddress(), 2 * MINT_CENTS, keys=["txid"])

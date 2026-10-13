@@ -259,7 +259,7 @@ class Params(object):
                  bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                 attestor_liveness_min=1_152)
+                 attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=1_152)
         a.update(attest or {})
         for k, v in a.items():
             setattr(self, k, v)
@@ -273,7 +273,7 @@ class Params(object):
                           bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
                           seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                          attestor_liveness_min=16)
+                          attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=16)
 
     def pq_falcon_active(self, height):
         """IsPQFalconActive(params, height): scheme 0x02 owners mint and TOK-PQ binds from this height."""
@@ -1625,12 +1625,13 @@ class Vault(object):
 
 class IntentRec(object):
     """Intents[intentOutpoint] (U-23): a claim intent and the vault it was claimed from."""
-    __slots__ = ('vault', 'role', 'height')
+    __slots__ = ('vault', 'role', 'height', 'refund_script')
 
-    def __init__(self, vault, role, height):
+    def __init__(self, vault, role, height, refund_script=b''):
         self.vault = vault          # (txid, n)
         self.role = role            # I_CLAIMANT | I_RESIDUAL
         self.height = height
+        self.refund_script = refund_script   # CAN-1 (03/H-1): the claimant intent's refund holder; b'' on the residual
 
 
 class Token(object):
@@ -1965,7 +1966,7 @@ def _ser_vault(v):
 
 
 def _ser_intent(r):
-    return _hash(r.vault[0]) + _u32(r.vault[1]) + _u8(r.role) + _i32(r.height)
+    return _hash(r.vault[0]) + _u32(r.vault[1]) + _u8(r.role) + _i32(r.height) + _bytes(r.refund_script)
 
 
 def _ser_token(t):
@@ -1987,7 +1988,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 12       # liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 13       # IntentRecord.refundScript (CAN-1, audit 03/H-1); 12 was liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2228,9 +2229,13 @@ class YellowbackModel(object):
         return out
 
     def _bundle(self, tx, ref_height, selector, skip_vin0):
-        """verify_bundle, recorded into the BundleLog[H] accumulator when BUNDLE-1 held (R12)."""
-        b = self.verify_bundle(tx, ref_height, selector, skip_vin0)
-        if b['ok'] and self._bundle_acc is not None:
+        """verify_bundle; nothing is recorded until the carrying rule holds (_commit_bundle, R12 hardened, 03/M-2)."""
+        return self.verify_bundle(tx, ref_height, selector, skip_vin0)
+
+    def _commit_bundle(self, b):
+        """R12 (hardened, audit 03/M-2): a verified bundle enters the BundleLog[H] accumulator only once the MINT, REDEEM
+        or CLAIM_NOTICE carrying it holds."""
+        if b is not None and b['ok'] and self._bundle_acc is not None:
             acc = self._bundle_acc
             if b['a_mint'] is not None:
                 acc['a_mints'].append(b['a_mint'])
@@ -2239,7 +2244,6 @@ class YellowbackModel(object):
             acc['selected'].update(b['selected'])
             acc['pairs'].update((seq, price, cited) for seq, price, cited in b['atts'])
             acc['any'] = True
-        return b
 
     def _attest_fee_ok(self, tx, attest_fee_vout, A, excluded, attest_fee_zat):
         """AFEE-1: the seq whose P2PKH(bondPubKey) vout[attestFeeVout] pays, or None."""
@@ -2512,11 +2516,13 @@ class YellowbackModel(object):
         outpoints = [(i.prev_txid, i.prev_n) for i in tx.vin]
         # IN-1
         yed_in = 0
+        self._spent_scripts = []    # CAN-1: the spent tokens' scripts, vin order (the C++ TxLog's spentTokens)
         for op in outpoints:
             t = self.tokens.pop(op, None)
             if t is not None:
                 yed_in += t.cents
                 rec.spent_tokens.append(op)
+                self._spent_scripts.append(t.script_pub_key)
         rec.yed_in = yed_in
         # IN-2 (amended): a bond spend withdraws the attestor unless EJECTED; the record stays
         bond_spent = False
@@ -2634,8 +2640,9 @@ class YellowbackModel(object):
             self.totals.closed_vaults += 1
             rec.closed_vaults.append(op)
 
-        # IN-3 (for a MINT the burn formula's yedOut is 0, N19; _apply_mint set rec.yed_out = cents separately)
-        burn_out = 0 if rec.type == 'MINT' else rec.yed_out
+        # IN-3 (for a MINT the burn formula's yedOut is 0, N19; _apply_mint set rec.yed_out = cents separately; for a
+        # CLAIM_CANCEL too: its yed_out is CAN-1's re-issued refund, credited by _apply_intent_spend)
+        burn_out = 0 if rec.type in ('MINT', 'CLAIM_CANCEL') else rec.yed_out
         burned = yed_in - burn_out
         rec.burned = burned
         self.totals.supply_cents -= burned
@@ -2663,10 +2670,12 @@ class YellowbackModel(object):
         return verdict
 
     def _apply_intent_spend(self, tx, height, rec, spent, payload, yed_outputs):
-        """U-23, U-24: a claim intent's release (selector 1) or attestor cancel (selector 2).  The primitive has
+        """U-23, U-24, CAN-1: a claim intent's release (selector 1) or attestor cancel (selector 2).  The primitive has
         checked the delay and the payment; the claimant intent's release closes the vault (CLAIMED), its cancel
         re-creates the byte-identical vault at vout[0], which is the same position again (ACTIVE, its collateral
-        the re-lock's value; the claim's burn is not refunded).  The owner's residual intent is only released."""
+        the re-lock's value), and re-issues the claim's burn as a YED token to the intent's refund_script at the
+        lowest output index >= 1 paying it a non-zero carrier, crediting supply (CAN-1, audit 03/H-1; no TOK-PQ).
+        The owner's residual intent is only released."""
         p = self.params
         op, vin = spent
         sel = selector_of(tx.vin[vin].script_sig)
@@ -2695,6 +2704,16 @@ class YellowbackModel(object):
         relock = [j for j, o in enumerate(tx.vout) if o.script == spk]
         if relock != [0]:
             return 'intent-cancel-no-vault'
+        refund = v.burned_cents
+        if refund <= 0 or not ir.refund_script:
+            return 'intent-cancel-no-refund'
+        to = [j for j, o in enumerate(tx.vout) if j >= 1 and o.script == ir.refund_script and o.value > 0]
+        if not to:
+            return 'intent-cancel-no-refund'
+        self.tokens[(tx.txid, to[0])] = Token(refund, tx.vout[to[0]].value, ir.refund_script, height)
+        rec.assigned = [(to[0], refund)]
+        rec.yed_out = refund
+        self.totals.supply_cents += refund               # 03/M-1: the debt is back in supply with its vault
         del self.vaults[ir.vault]
         v.status = V_ACTIVE
         claiming_collateral = v.collateral_zat
@@ -2754,6 +2773,8 @@ class YellowbackModel(object):
                 return False
             if not (act['flags'] & va.SET_FLAG_OPEN) or act['seats'] != p.attestor_seats:
                 return False              # owner 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted
+            if act['cancelThreshold'] != p.attestor_cancel_threshold or act['unlockThreshold'] != p.attestor_unlock_threshold:
+                return False              # 03/I-3: ... whose cancel and unlock thresholds are the pinned constants
             if act['maturity'] != p.bond_maturity:
                 return False              # ... whose maturity (the bond exit delay) is BOND_MATURITY
             if act['livenessWindow'] < p.attestor_liveness_min:
@@ -2855,6 +2876,7 @@ class YellowbackModel(object):
         if standing is not None and height - standing.height <= p.emergency_notice_ttl:
             return False
         self.notices[op] = NoticeRecord(height, r, p_emerg)
+        self._commit_bundle(b)                 # R12 (03/M-2): NOT-1 held
         rec.a_mint, rec.a_claim = b['a_mint'], b['a_claim']
         rec.bundle_seqs = [seq for seq, _p, _c in b['atts']]
         rec.notice = True
@@ -2993,6 +3015,7 @@ class YellowbackModel(object):
             rec.bundle_seqs = [seq for seq, _p, _c in b['atts']]
         vout0 = tx.vout[0] if tx.vout else None
         if verdict == VERDICT_OK:
+            self._commit_bundle(b)             # R12 (03/M-2): the mint held
             v = Vault()
             v.owner_pubkey = pl.owner_pubkey
             v.term_class = pl.term_class
@@ -3216,6 +3239,9 @@ class YellowbackModel(object):
         rec.claim_path = facts.get('claim_path', '')
         if verdict != VERDICT_OK:
             return verdict
+        if path == 'claim' and not self._spent_scripts:
+            return 'vault-spend-malformed'           # CAN-1: a held claim spent a YED token (RED-2); totality only
+        self._commit_bundle(facts.get('bundle'))     # R12 (03/M-2): RED-1..5 held
         vault_op = outpoints[0]
         v = self.vaults[vault_op]
         total = sum(c for _, c in pl.assignments)
@@ -3248,7 +3274,8 @@ class YellowbackModel(object):
             for j, role in ((facts['claimant_vout'], I_CLAIMANT), (facts.get('residual_vout'), I_RESIDUAL)):
                 if j is None:
                     continue
-                self.intents[(tx.txid, j)] = IntentRec(vault_op, role, height)
+                # CAN-1: the claimant intent remembers the holder of the claim's lowest-index YED input
+                self.intents[(tx.txid, j)] = IntentRec(vault_op, role, height, self._spent_scripts[0] if role == I_CLAIMANT else b'')
                 yed_outputs.add(j)
         rec.closed_vaults.append(vault_op)
         return None
@@ -3736,6 +3763,8 @@ def replay_golden(doc):
     params = Params.regtest(int(p['startHeight']), int(p['sigmaRefBps']), int(p['supplyCapBps']), p['attestorSetId'],
                             int(p.get('attestArmMin', 3)), int(p.get('bundleCarrier', CARRIER_SCRIPTSIG)),
                             bool(p.get('mintRequiresArmed', False)))
+    if p.get('pqFalconHeight') is not None:
+        params.pq_falcon_height = int(p['pqFalconHeight'])     # TOK-PQ from this height (not hashed, quantum spec section 3.4)
     model = YellowbackModel(params)
     for b in doc['blocks']:
         txs = [tx_from_hex(h) for h in b['txs']]
