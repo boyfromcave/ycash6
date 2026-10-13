@@ -10,7 +10,8 @@ mempool refuses it with bad-yellowback-<verdict> (DoS 0) and a block carrying it
 the same reason, so no vault, no TxLog row and no state change exist for it. The script keeps one
 case per MINT rule and per halt (the wallet refusing the same mint with the matching mintpol-*
 identifier, MINTPOL-1), the supply-cap race across a reorg (the loser becomes invalid on the joined
-chain, mint6_cap_race_after_reorg), and the soft cap (W20: above the cap only a class whose minimum
+chain, mint6_cap_race_after_reorg), the template's two checks in order (a mint the vault primitive
+skips leaves no supply in the template, tpl_primitive_skip_leaves_no_yed_effect), and the soft cap (W20: above the cap only a class whose minimum
 ratio reaches RECAP_RATIO_BPS mints, class A, mint6_cap_is_soft). The VOID release (L14), the mint
 before activation and the participation halt left with VOID vaults and ACT-1..7 (upgrade plan §6).
 
@@ -46,6 +47,7 @@ from test_framework.yellowback_util import (
     term_class_of,
     yed_params,
 )
+from test_framework import vault as v
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint
 
@@ -146,6 +148,98 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
     def ref(self):
         return self.nodes[0].yed_getinfo()['height'] - REF_LAG
+
+    def mint_outputs(self, node, cents, lock_blocks):
+        """The section 3.5 MINT outputs (vault, token, payload, fee) at the current reference height,
+        and the YEC they need (with the standard fee)."""
+        est = self.estimate(node, cents, lock_blocks)
+        ref, col = int(est['refHeight']), int(est['requiredZat'])
+        owner = new_pq_owner()
+        payee = node.yed_getfeepayee(ref)['default']['payoutAddress']
+        payload = ym.encode_mint('ABC'.index(term_class_of(lock_blocks)), cents, ref + lock_blocks, ref, owner, 3)
+        vout = [(col, ym.yed_vault_script(yed_params(), owner, ref)),
+                (TOKEN_VALUE, ym.p2pkh_script(ym.address_key_hash(node.getnewaddress()))),
+                (0, bytes([ym.OP_RETURN]) + ym.push(payload)),
+                (protocol_fee_zat(cents, int(est['pMint'])), ym.p2pkh_script(ym.address_key_hash(payee)))]
+        return vout, ref, sum(value for value, _ in vout) + YELLOWBACK_FEE
+
+    def tpl_primitive_skip_leaves_no_yed_effect(self):
+        # Rule: TPL-1 MINT-6
+        # CreateNewBlock asks the vault primitive and the YED module about each candidate; the module's
+        # check commits a kept candidate's effect to the template overlay, so it must come after the
+        # primitive's (which can still skip the candidate: a set-state change by an earlier candidate of
+        # the same block). Before 2026-10-06 it came first on v4.5.0: a mint B the primitive skipped (it
+        # spends a bond that an equivocation proof A earlier in the block froze) still counted in the
+        # template's supply, so a mint C that fits the cap only without B was skipped too.
+        print('tpl_primitive_skip_leaves_no_yed_effect: a mint the vault primitive skips adds no supply to the template')
+        user, pool = self.nodes[0], self.nodes[POOLS[1]]
+        if user.getbalance() < 60:
+            funder = max([n for n in self.nodes if n is not user], key=lambda n: n.getbalance())
+            funder.sendtoaddress(user.getnewaddress(), 60)
+            self.sync_all()
+            self.mine(POOLS[2])
+        # a set of one seat, its member x with a bond that is spendable at once
+        admit, x = v.fixed_secret('tpl-order-admit'), v.fixed_secret('tpl-order-member')
+        create, sid = v.node_set_create(user, v.act_set_create(1, 1, 1, 1, v.pubkey_of(admit), bond_lock_min=1, maturity=2))
+        v.node_send(user, create)
+        self.sync_all()
+        self.mine(POOLS[0])
+        locktime = user.getblockcount() + 3
+        join = v.node_set_join(user, sid, x, COIN, locktime, [admit])
+        bond = (v.node_send(user, join), 0)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert bond[0] in user.getblock(user.getbestblockhash())['tx']
+        # the bond exit delay (owner 2026-10-11): an ACTIVE member's bond is never spendable, so x leaves first (its own
+        # SET_REMOVE); its bond is spendable from exit + maturity (2) and still slashable until spent
+        self.mine(POOLS[0], 2)                               # x is current (maturity 2)
+        v.node_send(user, v.node_act_tx(user, v.act_set_remove(sid, v.pubkey_of(x), 0), [x]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        exit_h = user.getblockcount()
+        # the cap's headroom: B alone fits, C alone fits, B and C together do not; C leaves room for the
+        # soft-cap case after this one (the cap grows with issuance, so mine until it is wide enough)
+        for _ in range(60):
+            stats = user.yed_getstats()
+            headroom = stats['supplyCapCents'] - stats['supplyCents']
+            if headroom >= 21000 and user.getblockcount() + 1 > locktime and user.getblockcount() + 1 >= exit_h + 2:
+                break
+            self.mine_round_robin(POOLS, 4)
+        assert headroom >= 21000, headroom
+        m_c = 10000
+        m_b = (headroom - m_c + 1000) // 100 * 100          # B + C = headroom + ~1000 > the cap at tip + 1
+        assert_greater_than(headroom + 1, m_b)
+        vout_b, _ref_b, need_b = self.mint_outputs(user, m_b, 48)           # class A (300 %): the cap is hard for it (W20, IT-5)
+        vout_c, _ref_c, need_c = self.mint_outputs(user, m_c, 48)
+        spk_b, spk_c = v.node_spk(user), v.node_spk(user)
+        # A: SET_EQUIVOCATION of x (anyone submits); vout 0 funds C, vout 1 funds B, so both follow A
+        proof = v.equivocation_proof(sid, x, bond[0], bond[1], 1, b'\x01' * 32, 1, b'\x02' * 32)
+        a_txid = v.node_send(user, v.node_act_tx(user, proof, (), [(need_c, spk_c), (need_b, spk_b)]))
+        # B: mint m_b from A's vout 1 and x's bond (valid at the tip, where the bond is not frozen yet)
+        tx_b = v.make_tx([(a_txid, 1, 0xFFFFFFFE), (bond[0], bond[1], 0xFFFFFFFE)],
+                         vout_b + [(COIN - YELLOWBACK_FEE, v.node_spk(user))], locktime, _ref_b + REF_WINDOW)
+        tx_b = v.tx_from_hex(user.signrawtransaction(v.tx_hex(tx_b))['hex'])
+        redeem = v.bond_script(v.pubkey_of(x), locktime)
+        tx_b.vin[1].scriptSig = v.push(v.owner_sig(tx_b, 1, redeem, COIN, x)) + v.push(redeem)
+        b_txid = user.sendrawtransaction(v.tx_hex(tx_b))
+        # C: mint m_c from A's vout 0
+        tx_c = v.make_tx([(a_txid, 0, 0xFFFFFFFF)], vout_c, 0, _ref_c + REF_WINDOW)
+        c_hex = user.signrawtransaction(v.tx_hex(tx_c))
+        assert_equal(c_hex['complete'], True)
+        c_txid = user.sendrawtransaction(c_hex['hex'])
+        sync_mempools([self.nodes[i] for i in (0, 2, 3, 4)])
+        assert_equal(user.yed_validaterawtransaction(c_hex['hex'])['verdict'], 'ok')
+        # the template: A, then B (more priority: the bond's age) refused by the primitive, then C kept
+        in_tpl = [t['hash'] for t in pool.getblocktemplate()['transactions']]
+        assert a_txid in in_tpl, 'the equivocation proof is not in the template'
+        assert b_txid not in in_tpl, 'the mint spending the bond A freezes is in the template'
+        assert c_txid in in_tpl, 'the template skipped C: B (which it does not carry) still counted in its supply'
+        self.mine(POOLS[1])
+        mined = user.getblock(user.getbestblockhash())['tx']
+        assert a_txid in mined and c_txid in mined and b_txid not in mined
+        assert b_txid not in user.getrawmempool(), 'the mint spending a frozen bond stayed in the mempool'
+        assert_equal(user.yed_getvault(c_txid)['status'], 'ACTIVE')
+        self.checkpoint('primitive skip')
 
     def collateral(self, cents=10000, lock=48):
         return self.estimate(self.nodes[0], cents, lock)['requiredZat']
@@ -273,6 +367,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
             assert mint_x['txid'] not in nodes[i].getrawmempool()
         self.expect_invalid(user, x_hex, 'mint-supply-cap', POOLS[1])
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000 + m)
+        self.tpl_primitive_skip_leaves_no_yed_effect()
         stats = user.yed_getstats()      # v3: the carrier blocks added issuance, so the cap moved; provoke it from the current numbers
         over = stats['supplyCapCents'] - stats['supplyCents'] + 2000   # the carrier's and the mint's blocks add issuance (~190 cents of cap each here): stay over the moving cap
         self.checkpoint('cap race')

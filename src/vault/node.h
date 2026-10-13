@@ -81,9 +81,21 @@ bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
  *  `view`): OP_CHECKSETSIG (current members) and OP_CHECKSETDORMANT (dormancy, wind-down) read set
  *  state, which a tip change moves. nullopt when every template input verifies. Used by
  *  RecheckMempool and, on 6.20.0, by the miner, whose template check (CheckAs::BlockTemplate)
- *  skips scripts. */
+ *  skips scripts. A non-v4 transaction with a template input is refused ("non-v4 transaction
+ *  (R-A3)", quantum spec R-A3). */
 std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
                                                   const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params);
+
+/** Re-run every input script of `tx` at `height`'s flags and branch against `snapshot` (inputs from
+ *  `view`) when `tx` carries an OP_CHECKPQSIG; nullopt when it carries none or every input verifies.
+ *  A non-v4 transaction with an OP_CHECKPQSIG is refused ("non-v4 transaction (R-A3)", quantum spec
+ *  R-A3). Flags are STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(height). Used by RecheckMempool
+ *  (a reorg below pqFalconHeight) and, with `forTemplate`, by TemplateRun::Try (parity with v4.5.0's
+ *  per-candidate ContextualCheckInputs, audit 04/F-4): then the template (V/I) inputs, which Try has
+ *  just verified, are skipped, and successes are stored in the signature cache. */
+std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
+                                            const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params,
+                                            bool forTemplate = false);
 
 /** After a tip change (ConnectTip, DisconnectTip): re-run CheckTx for `nextHeight` on every
  *  mempool transaction that touches the primitive, and the scripts of its template inputs
@@ -105,7 +117,9 @@ std::optional<uint256> UndoToPrune(const CBlockIndex* pindex, const Consensus::P
  * the mempool (a mempool coin is an in-block parent there, read at the template's height). Try()
  * applies a candidate's acts and template rules on a child overlay of the running state and
  * re-runs its template inputs' scripts against the tip snapshot (the template check,
- * CheckAs::BlockTemplate, skips scripts; v4.5.0's miner re-ran them per transaction); Commit()
+ * CheckAs::BlockTemplate, skips scripts; v4.5.0's miner re-ran them per transaction), then, for
+ * parity with v4.5.0's miner (audit 04/F-4), its PQ input scripts (RecheckPQScripts) and its BIP68
+ * sequence locks at the template height; Commit()
  * merges the last successful trial once nothing else can refuse the candidate. Requires cs_main
  * and pool.cs for its lifetime.
  */

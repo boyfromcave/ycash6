@@ -19,9 +19,12 @@ and Vault (branch ID 0x6d5b7a31) at ACT.  Checked on both sides of the activatio
 - OP_CHECKSEQUENCEVERIFY (0xb2): OP_NOP3 before (non-standard, valid in a block), BIP112 after;
 - BIP68: not enforced before; height-based relative locks from ACT in the mempool (tip+1) and in
   blocks, mempool parents counted at tip+1, the time flag (bit 22) invalid, eviction on reorg;
-- OP_CHECKSETSIG (0xc0) / OP_CHECKSETDORMANT (0xc1): bad opcodes before, evaluated after.
+- OP_CHECKSETSIG (0xc0) / OP_CHECKSETDORMANT (0xc1): bad opcodes before, evaluated after;
+- quantum spec R-A3: a regtest node refuses -nuparams scheduling NU5..NU6.2 together with Vault,
+  or Vault below Sapling.
 """
 
+import os
 from io import BytesIO
 from decimal import Decimal
 
@@ -50,11 +53,15 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
+    assert_start_raises_init_error,
     bytes_to_hex_str,
     connect_nodes_bi,
     hex_str_to_bytes,
     nuparams,
+    start_node,
+    zcashd_binary,
     start_nodes,
+    stop_node,
     sync_blocks,
     wait_and_assert_operationid_status,
 )
@@ -66,6 +73,17 @@ FEE = 10000
 NULL_FIELD = '00' * 32
 SEQ_TYPE_FLAG = 1 << 22
 
+
+
+def assert_vault_alone_refused(binary, datadir, extra=()):
+    """Quantum spec R-A3: the plain -nuparams=6d5b7a31:<h> with no Sapling at all (start_node always adds
+    Overwinter and Sapling, so ycashd is run directly here) must not start."""
+    import subprocess
+    p = subprocess.run([binary, '-datadir=' + datadir, '-discover=0', '-listen=0'] + list(extra)
+                       + ['-nuparams=6d5b7a31:10'], capture_output=True, timeout=120)
+    out = (p.stdout + p.stderr).decode('utf-8', 'replace')
+    assert p.returncode != 0, out
+    assert 'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3' in out, out
 
 class VaultUpgradeTest(BitcoinTestFramework):
 
@@ -359,6 +377,20 @@ class VaultUpgradeTest(BitcoinTestFramework):
         assert locked in n0.getrawmempool()
         self.mine()
         assert_equal(n0.getrawtransaction(locked, 1)['confirmations'], 1)
+        sync_blocks(self.nodes)
+
+        print('quantum spec R-A3: a regtest node refuses NU5..NU6.2 scheduled with Vault')
+        stop_node(self.nodes[1], 1)
+        r_a3 = 'NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3'
+        for nu in ('f919a198:5', '5437f330:12'):          # Ycash NU5 below Vault; NU6.2 above it
+            assert_start_raises_init_error(1, self.options.tmpdir,
+                                           YCASH_UPGRADE_ARGS + ['-nuparams=' + nu, nuparams(VAULT_BRANCH_ID, 10)], r_a3)
+        print('quantum spec R-A3: a node refuses Vault scheduled below Sapling, or with no Sapling at all')
+        assert_vault_alone_refused(zcashd_binary(), os.path.join(self.options.tmpdir, 'node1'), ['-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025'])
+        assert_start_raises_init_error(1, self.options.tmpdir, ['-nuparams=76b809bb:20', nuparams(VAULT_BRANCH_ID, 10)],
+                                       'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3')
+        self.nodes[1] = start_node(1, self.options.tmpdir, YCASH_UPGRADE_ARGS + [nuparams(VAULT_BRANCH_ID, ACT), '-txindex'])
+        connect_nodes_bi(self.nodes, 0, 1)
         sync_blocks(self.nodes)
 
 

@@ -193,10 +193,13 @@ bool GetCoin(const COutPoint& out, CTxOut& txout, int& height)
     return true;
 }
 
-/** 6.20.0: the precomputed sighash data takes every input's coin (a v4 sighash ignores them; built
- *  from the chain tip and the mempool, an unknown coin as an empty output). */
+/** 6.20.0: the precomputed sighash data takes every input's coin (built from the chain tip and the
+ *  mempool, an unknown coin as an empty output). The placeholders are inert because only a v4
+ *  (ZIP-243) sighash ignores them: a non-v4 transaction is refused (quantum spec R-A3). */
 PrecomputedTransactionData TxData(const CTransaction& tx)
 {
+    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "non-v4 transaction (R-A3): the vault opcodes are defined over the ZIP-243 sighash of v4 transactions only");
     std::vector<CTxOut> allPrevOutputs;
     for (const CTxIn& in : tx.vin) {
         CTxOut prev;

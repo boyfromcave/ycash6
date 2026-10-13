@@ -34,8 +34,17 @@ else
       regtest)
         echo "regtest=1"
         echo "rpcport=${YCASHD_RPC_PORT:-18832}"
-        # The vault network upgrade (branch id 6d5b7a31) on regtest: active from this height.
-        [ -n "${YCASHD_VAULT_HEIGHT:-}" ] && echo "nuparams=6d5b7a31:${YCASHD_VAULT_HEIGHT}"
+        # The vault network upgrade (branch id 6d5b7a31) on regtest: active from this height. Regtest
+        # schedules no upgrade by itself, and Vault needs Sapling active at or below its height (quantum
+        # spec R-A3: ycashd refuses to start otherwise), so the upgrades before it are written too, at
+        # min(1, h), as the functional harness and ycash-infra's values-kind.yaml do: Overwinter,
+        # Sapling, Ycash, Blossom, Heartwood, Canopy (never NU5..NU6.2, which cannot go with Vault).
+        if [ -n "${YCASHD_VAULT_HEIGHT:-}" ]; then
+          PRE=1
+          [ "${YCASHD_VAULT_HEIGHT}" -lt 1 ] && PRE="${YCASHD_VAULT_HEIGHT}"
+          for b in 5ba81b19 76b809bb 374d694f 8e471bd6 66314da3 19bd2d2f; do echo "nuparams=$b:$PRE"; done
+          echo "nuparams=6d5b7a31:${YCASHD_VAULT_HEIGHT}"
+        fi
         # YED is live once the network's attestor set exists (a vault primitive set id) and the
         # node is restarted with it; see doc/yellowback-devnet.md.
         [ -n "${YCASHD_YELLOWBACK_ATTESTOR_SET:-}" ] && echo "yellowbackattestorset=${YCASHD_YELLOWBACK_ATTESTOR_SET}"
