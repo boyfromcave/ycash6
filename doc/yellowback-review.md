@@ -998,6 +998,38 @@ The plan §4 checkboxes that the script covers by pointer rather than in its own
 
 ---
 
+## 8a. CI tiers and what gates a merge (audits 04/F-1, 04/N-4, 07/F-11; 2026-10-12)
+
+`.github/workflows/yellowback-tests.yml` runs three tiers; its header comment is the authoritative list.
+
+- **Push / pull request (gating):** one build, the unit suites, the merge-gate functional list
+  (`YELLOWBACK_SCRIPTS` + the inherited baseline) sharded over that build, the audit, the Python checks.
+  **Fail, never skip:** every `rpc-tests.py` run passes `--fail-on-skip`, so a script that prints a line
+  starting with `SKIP` (a sidecar binary, the attest agent or the Falcon signer's C compiler missing) fails
+  the run instead of passing vacuously; `qa/pull-tester/test_rpc_tests_classify.py` pins the detector
+  (`SKIP` at column 0 only) and `qa/yellowback-audit.sh` fails a workflow run without the flag. The
+  functional and Python jobs install `gcc libc6-dev` explicitly and probe `pq.falcon_signer_available()`
+  before `vault_pq_reorg` (the only functional proof that a reorg below Falcon's height evicts Falcon spends)
+  and `test_pq`'s signer cases.
+- **Pull request on overlay paths (gating):** `lockorder-pr` builds `--enable-debug` (DEBUG_LOCKORDER,
+  log-only) and runs `LOCKORDER_PR_SCRIPTS` (vault_primitive, vault_rpc_contract, vault_slashing,
+  vault_upgrade, yellowback_index, yellowback_void_mint, yellowback_attest_live), then
+  `qa/yellowback-lockorder-check.py`; `sanitizers-pr` builds an ASan/UBSan `test_bitcoin` and runs
+  `vault_*,pq_*,yellowback_*`. Each first diffs the PR against its base and builds only when a file matches
+  `OVERLAY_PATHS` (`src/vault/`, `src/yellowback/`, `src/rpc/vault.cpp`, `src/rpc/yellowback*.cpp`,
+  `main.cpp`, `miner.cpp`, `txmempool.cpp`, `sync.*`, the lockorder check); otherwise it passes in seconds.
+  Both are needs of the `gate` job (the one "push tier" required check), which counts them as green when skipped on a push or a dispatch and nowhere else.
+- **Nightly and weekly (never block; open an issue):** the full lockorder, sanitizer and coverage variants,
+  `make check`, the stock-parity and devnet suites, fuzzing. An open `lockorder failed` / `sanitizers failed`
+  issue is triaged before the next release tag.
+
+The lockorder check judges a report as naming the overlay when it matches `YELLOWBACK_TOKENS`
+(`yellowback`, `yed_`, a `vault/` source, `vault*.cpp`, `VaultDB`, `VaultState`, `cs_vault`); before 07/F-11
+it matched only `yellowback`/`yed_`, so an inversion at a vault lock site (`vault/node.cpp`, `rpc/vault.cpp`)
+counted as inherited. Its `--selftest` (run by the audit and by `lockorder-pr`) feeds synthetic reports: a
+vault inversion fails, the F-37 pair is allowed, the stock pair is inherited. `VaultDB::cs` and
+`VaultState::cs` are `std::mutex` under `std::lock_guard`, which DEBUG_LOCKORDER does not track at all.
+
 ## 9. Reproducing
 
 From a worktree of `boyfromcave/ycash6` on `feature/yellowback` with the tag `ycash6-baseline`

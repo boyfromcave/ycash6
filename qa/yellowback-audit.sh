@@ -37,6 +37,16 @@ for f in src/main.cpp:40 src/miner.cpp:35 src/miner.h:10 src/rpc/mining.cpp:35 s
     if [ "$report" = 1 ]; then echo "  over budget (report only)"; else rc=1; fi
   fi
 done
+# Fail, never skip (audit 04/F-1, 04/N-4): every rpc-tests.py run in the workflow passes --fail-on-skip,
+# so a script that prints a line starting with SKIP fails CI instead of passing vacuously.
+wf=.github/workflows/yellowback-tests.yml
+runs=$(grep -nE '^[[:space:]]*(\./)?qa/pull-tester/rpc-tests\.py' "$wf" || true)
+[ -n "$runs" ] || { echo "no rpc-tests.py run found in $wf"; rc=1; }
+if printf '%s\n' "$runs" | grep -v -- '--fail-on-skip' | grep -q .; then
+  echo "rpc-tests.py runs without --fail-on-skip in $wf:"; printf '%s\n' "$runs" | grep -v -- '--fail-on-skip'; rc=1
+fi
+# The lockorder check names the vault primitive's lock sites (audit 07/F-11): its self-test must pass.
+../.venv/bin/python qa/yellowback-lockorder-check.py --selftest 2>/dev/null || python3 qa/yellowback-lockorder-check.py --selftest || rc=1
 # S1: every registered yed_* RPC has an exact-arity rpcCvtTable row (the server rejects it otherwise)
 ../.venv/bin/python qa/yellowback-rpc-cvt.py --check 2>/dev/null || python3 qa/yellowback-rpc-cvt.py --check || rc=1
 exit $rc

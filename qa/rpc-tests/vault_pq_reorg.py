@@ -22,7 +22,8 @@ drops the next block below Falcon's height, and evicts failures with their desce
 Falcon signatures come from the framework's optional Falcon signer (``pq.falcon_keygen`` /
 ``pq.falcon_sign``: the tree's own vendored PQClean code, the wallet's signer, compiled once with
 ``$CC`` into the tmpdir and called through ctypes); the framework's independent Python verifier
-checks every signature. Without a C compiler the test prints SKIP and passes.
+checks every signature. Without a C compiler the test prints SKIP and passes locally; CI refuses a
+SKIP (`rpc-tests.py --fail-on-skip`) and probes the signer before the shard (audit 04/F-1).
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_reorg.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
