@@ -196,9 +196,10 @@ class YellowbackCancelAgentTest(ArmedModeMixin, YellowbackTestFramework):
         """The claim_cancel transaction in the blocks at `heights` that spends the claimant intent, or None."""
         node = self.nodes[2]
         for h in heights:
-            block = node.getblock(node.getblockhash(h))
+            bh = node.getblockhash(h)
+            block = node.getblock(bh)
             for txid in block['tx']:
-                raw = node.getrawtransaction(txid, 1)
+                raw = node.getrawtransaction(txid, 1, bh)     # with the block: no -txindex needed (6.20.0)
                 if any(i.get('txid') == intent_txid and i.get('vout') == 0 for i in raw['vin']):
                     return txid
         return None
