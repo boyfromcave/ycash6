@@ -864,11 +864,14 @@ std::optional<uint16_t> CurrentMemberSeq(const State& st, const CPubKey& key, in
 }
 
 /**
- * CAN-2 + C4b (cancel-limit design §2 C2, C4b; owner 2026-10-13): the cancel's carrier holds "YC" co-signatures
- * (bundle.h), at least `required` of them, and every one recovers (vault::RecoverSig) over CancelCosignMessage(the
- * attestor set, the claimant intent, the claim's refHeight, its price, blockHash(refHeight)) to a distinct current
- * member, with a price in [PRICE_MIN, PRICE_MAX] at which the CLAIMING vault is not claimable (collateral x price >=
- * debt x CLAIM_THRESHOLD: !IsUnderwater). `seqs` receives the co-signers' seqs in carrier order.
+ * CAN-2 + C4b (cancel-limit design §2 C2, C4b; owner 2026-10-13): the cancel's carrier holds a well-formed "YC" list
+ * (bundle.h; a malformed one fails) in which at least `required` DISTINCT VALID entries are found (round 2, coordinator
+ * decision on review M-2): an entry is valid when its price is in [PRICE_MIN, PRICE_MAX], the CLAIMING vault is not
+ * claimable at it (collateral x price >= debt x CLAIM_THRESHOLD: !IsUnderwater), and it recovers (vault::RecoverSig)
+ * over CancelCosignMessage(the attestor set, the claimant intent, the claim's refHeight, its price,
+ * blockHash(refHeight)) to a current member; it counts once per key. Invalid, non-current and repeated entries are
+ * ignored, so a co-signer that leaves (or is ejected) before the cancel confirms does not void it when spares were
+ * carried. `seqs` receives the counted co-signers' seqs in carrier order.
  */
 bool CancelCosignsHold(EvalContext& ctx, const CTransaction& tx, const SpentIntent& in, const VaultRecord& vault, int required,
                        std::vector<uint16_t>& seqs)
@@ -877,23 +880,24 @@ bool CancelCosignsHold(EvalContext& ctx, const CTransaction& tx, const SpentInte
     auto extracted = ExtractBundle(tx, P.bundleCarrier, false, std::vector<unsigned char>());
     if (!extracted) return false;
     std::optional<std::vector<CancelCosignEntry>> entries = DecodeCancelCosigns(extracted->first);
-    if (!entries.has_value() || entries->size() < (size_t)required) return false;
+    if (!entries.has_value()) return false;
     const int64_t R = in.record.claimRefHeight;
     std::optional<uint256> blockHash = BlockHashAt(ctx.st.View(), P, R);
     if (!blockHash.has_value()) return false;
-    std::set<CPubKey> seen;
+    std::set<CPubKey> counted;
     for (const CancelCosignEntry& e : entries.value()) {
-        if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX) return false;
-        if (IsUnderwater(vault.collateralZat, (MicroUsd)e.priceMicroUsd, vault.mintedCents, P.claimThresholdBps)) return false;
+        if ((MicroUsd)e.priceMicroUsd < PRICE_MIN || (MicroUsd)e.priceMicroUsd > PRICE_MAX) continue;
+        if (IsUnderwater(vault.collateralZat, (MicroUsd)e.priceMicroUsd, vault.mintedCents, P.claimThresholdBps)) continue;
         CPubKey key;
         const uint256 msg = CancelCosignMessage(P.attestorSetId, in.outpoint.hash, in.outpoint.n, (uint32_t)R, e.priceMicroUsd, blockHash.value());
-        if (!vault::RecoverSig(msg, e.sig, key)) return false;
-        if (!seen.insert(key).second) return false;
+        if (!vault::RecoverSig(msg, e.sig, key)) continue;
+        if (counted.count(key)) continue;
         std::optional<uint16_t> seq = CurrentMemberSeq(ctx.st, key, ctx.height);
-        if (!seq.has_value()) return false;
+        if (!seq.has_value()) continue;
+        counted.insert(key);
         seqs.push_back(seq.value());
     }
-    return true;
+    return seqs.size() >= (size_t)required;
 }
 
 /**
