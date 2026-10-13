@@ -2790,7 +2790,8 @@ BOOST_AUTO_TEST_CASE(seat_eviction_victim_rule)
     m[3].lastAct = H - LW - 1;
     BOOST_CHECK(EvictionVictim(m, H, P.bondMinFloorZat, LW, P) == std::optional<CPubKey>(key(4)));
     std::vector<SeatCandidate> tie = { cand(5, 8 * COIN, H - 50, H), cand(6, 8 * COIN, H - 50, H) };
-    const CPubKey lo = std::lexicographical_compare(key(5).begin(), key(5).end(), key(6).begin(), key(6).end()) ? key(5) : key(6);
+    const CPubKey k5 = key(5), k6 = key(6);
+    const CPubKey lo = std::lexicographical_compare(k5.begin(), k5.end(), k6.begin(), k6.end()) ? k5 : k6;
     BOOST_CHECK(EvictionVictim(tie, H, 100 * COIN, LW, P) == std::optional<CPubKey>(lo));
     BOOST_CHECK(!EvictionVictim({}, H, 100 * COIN, LW, P).has_value());
 }
