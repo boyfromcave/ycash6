@@ -180,8 +180,28 @@ pub fn insert_output(tx: &[u8], value: i64, script: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Whether a `listunspent` row can fund the fallback: confirmed, spendable, P2PKH, and above `min_zat` (YED tokens
-/// carry 10,000 zat and are never chosen; neither are bonds, which are P2SH).
+/// `TOKEN_VALUE`: the zat every YED token output carries. A fallback coin is always worth more (review L-1).
+pub const TOKEN_VALUE: i64 = 10_000;
+
+/// Whether a `listunspent` row can fund the fallback: confirmed, spendable, P2PKH, not a coinbase output (review
+/// L-2: ycash6 lists mature coinbase), worth more than both `min_zat` and TOKEN_VALUE, and not an outpoint in
+/// `tokens` (the YED index's own token outpoints of this wallet, review L-1). Bonds are P2SH and never chosen.
+pub fn fundable_coin(
+    row: &serde_json::Value,
+    min_zat: i64,
+    tokens: &std::collections::HashSet<(String, u64)>,
+) -> Option<(String, u64, String, i64)> {
+    if row.get("generated").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    let c = fundable(row, min_zat.max(TOKEN_VALUE + 1))?;
+    if tokens.contains(&(c.0.clone(), c.1)) {
+        return None;
+    }
+    Some(c)
+}
+
+/// The shape checks of [`fundable_coin`] without the token and coinbase filters.
 pub fn fundable(row: &serde_json::Value, min_zat: i64) -> Option<(String, u64, String, i64)> {
     let spk = row.get("scriptPubKey")?.as_str()?;
     if !(spk.len() == 50 && spk.starts_with("76a914") && spk.ends_with("88ac")) {
@@ -308,5 +328,14 @@ mod tests {
         assert!(fundable(&row(&p2pkh, 100_000, 0), 30_000).is_none());
         assert!(fundable(&row(&format!("a914{}87", "00".repeat(20)), 100_000, 5), 30_000).is_none());
         // a bond (P2SH)
+        // review L-1/L-2: never at or under TOKEN_VALUE whatever the fee, never a known token, never a coinbase
+        let none = std::collections::HashSet::new();
+        assert!(fundable_coin(&row(&p2pkh, 10_000, 1), 1_000, &none).is_none());
+        assert!(fundable_coin(&row(&p2pkh, 10_001, 1), 1_000, &none).is_some());
+        let tokens: std::collections::HashSet<(String, u64)> = [("aa".to_string(), 1u64)].into_iter().collect();
+        assert!(fundable_coin(&row(&p2pkh, 100_000, 1), 1_000, &tokens).is_none());
+        let mut cb = row(&p2pkh, 100_000, 200);
+        cb["generated"] = serde_json::json!(true);
+        assert!(fundable_coin(&cb, 1_000, &none).is_none());
     }
 }

@@ -50,6 +50,12 @@ pub const PRICE_HISTORY: u32 = 4096;
 pub const CLOSED_KEEP: u32 = 1152;
 /// `yed_buildcancel` retries in one tick when the node refuses an entry.
 pub const BUILD_ATTEMPTS: usize = 8;
+/// Public-topic binding announces kept between polls per claimed seq: a uniform sample of that seq's arrivals.
+pub const BINDING_PER_SEQ: usize = 4;
+/// Binding signature checks a poll, all sources together (a secp256k1 recovery and an ed25519 verification each).
+pub const BINDING_RECOVERIES: usize = 64;
+/// Announces one member's own connection may queue a poll (it can only be checked for its own seat).
+pub const BINDING_PER_MEMBER: usize = 4;
 /// `alert_command` children at once, and how long one may run before it is killed.
 pub const ALERTS_INFLIGHT_MAX: usize = 4;
 pub const ALERT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -271,6 +277,9 @@ pub struct State {
     /// This member's own announced binding.
     #[serde(default)]
     pub own_binding: Option<crate::binding::Announce>,
+    /// Alerts that are not about one claim, already raised ("kind|key").
+    #[serde(default)]
+    pub alerted_global: BTreeSet<String>,
     /// Heights of the on-chain fallback transactions this agent sent (the daily cap).
     #[serde(default)]
     pub fallback_posts: Vec<u32>,
@@ -673,10 +682,19 @@ pub struct CancelAgent {
     /// The direct endpoint (id, address hints), set by attest; None while direct delivery is off.
     pub direct: Option<([u8; 32], Vec<String>, Option<String>)>,
     /// Binding announces received (the binding topic, the direct table exchange), checked at the next poll.
-    bindings_in: Vec<Vec<u8>>,
+    /// Public-topic announces, by the seq they claim: a uniform reservoir of at most BINDING_PER_SEQ each (review
+    /// B-2: an honest announce competes only with forgeries of its own seat).
+    bindings_in: BTreeMap<u16, crate::gossip::Reservoir<Vec<u8>>>,
+    /// Announces delivered over a member's own authenticated direct connection (only its own seat's binding is taken
+    /// from it, review B-2), with that member's seq: checked first.
+    bindings_member: Vec<(Vec<u8>, u16)>,
+    /// The direct endpoint's key: it proves possession of the endpoint in this member's binding (review B-1).
+    pub direct_key: Option<iroh::SecretKey>,
     /// Announces to publish (the binding topic and every bound member).
     announces_out: Vec<Vec<u8>>,
     last_announce: Option<u32>,
+    /// Binding candidates that reached signature recovery in the last poll (at most BINDING_RECOVERIES).
+    pub recoveries_last_poll: usize,
     rng: crate::gossip::Rng,
     /// The node's CLAIM_DELAY (yed_getinfo), for the takeover bound.
     pub claim_delay: Option<u32>,
@@ -725,9 +743,12 @@ impl CancelAgent {
             my_address: None,
             network: String::new(),
             direct: None,
-            bindings_in: Vec::new(),
+            bindings_in: BTreeMap::new(),
+            bindings_member: Vec::new(),
+            direct_key: None,
             announces_out: Vec::new(),
             last_announce: None,
+            recoveries_last_poll: 0,
             rng: crate::gossip::Rng::from_clock(),
             claim_delay: None,
             peers,
@@ -1533,15 +1554,67 @@ impl CancelAgent {
         }
     }
 
-    /// A binding announce from the binding topic or a member's table exchange; checked at the next poll. The queue
-    /// is bounded with random replacement, so a flood of announces cannot keep a real one out for long.
+    /// A binding announce from the public binding topic, checked at a later poll. It goes to the reservoir of the
+    /// seq it claims (a current member's seq only; parsing costs no signature), so a flood of forgeries for one seat
+    /// dilutes only that seat's candidates, and a flood spread over every seat leaves each its own BINDING_PER_SEQ
+    /// uniform sample (review B-2; never the head of a queue, M5-1).
     pub fn take_binding(&mut self, blob: Vec<u8>) {
-        const QUEUE: usize = 512;
-        if self.bindings_in.len() < QUEUE {
-            self.bindings_in.push(blob);
+        let Some(seq) = crate::binding::Announce::decode(&blob)
+            .and_then(|a| crate::binding::Statement::parse(&a.binding.message))
+            .map(|st| st.seq)
+        else {
+            return;
+        };
+        if !self.view.members.is_empty() && !self.view.members.contains_key(&seq) {
+            return;
+        }
+        if !self.bindings_in.contains_key(&seq) && self.bindings_in.len() >= 64 {
+            return; // before the view is known: at most 64 seats queue
+        }
+        self.bindings_in
+            .entry(seq)
+            .or_insert_with(|| crate::gossip::Reservoir::new(BINDING_PER_SEQ))
+            .offer(blob, &mut self.rng);
+    }
+
+    /// A binding announce delivered by member `from` over its own authenticated direct connection. Only an announce
+    /// of `from`'s own seat is taken (a member cannot relay -- or forge -- other seats' bindings this way, review
+    /// B-2); it is checked first, and its hints are authenticated (review B-3).
+    pub fn take_member_binding(&mut self, blob: Vec<u8>, from: u16) {
+        let own_seat = crate::binding::Announce::decode(&blob)
+            .and_then(|a| crate::binding::Statement::parse(&a.binding.message))
+            .is_some_and(|st| st.seq == from);
+        if !own_seat {
+            tracing::debug!("cancel direct: member {from} sent a binding announce for another seat; dropped");
+            return;
+        }
+        let mine = self.bindings_member.iter().filter(|(_, f)| *f == from).count();
+        if mine < BINDING_PER_MEMBER {
+            self.bindings_member.push((blob, from));
         } else {
-            let j = self.rng.below(QUEUE as u64) as usize;
-            self.bindings_in[j] = blob;
+            let j = self.rng.below(BINDING_PER_MEMBER as u64) as usize;
+            if let Some(k) = self
+                .bindings_member
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, f))| *f == from)
+                .nth(j)
+                .map(|(k, _)| k)
+            {
+                self.bindings_member[k] = (blob, from);
+            }
+        }
+    }
+
+    /// An alert that is not about one claim (kind and key deduplicated).
+    fn alert_global(&mut self, kind: &str, key: &str, message: String) {
+        if !self.state.alerted_global.insert(format!("{kind}|{key}")) {
+            return;
+        }
+        self.dirty = true;
+        tracing::error!("ALERT {kind} {key}: {message}");
+        if let Some(cmd) = self.cfg.alert_command.clone() {
+            run_alert_command(cmd, kind.to_string(), key.to_string(), message);
         }
     }
 
@@ -1561,51 +1634,23 @@ impl CancelAgent {
     }
 
     /// Sign this member's binding when it has none for its current direct endpoint or it is past half its life,
-    /// announce it every 10 blocks (or when its hints change), take the queued announces (at most 64 signature
-    /// recoveries a poll), and drop the bindings of seqs that left.
+    /// announce it every 10 blocks (or when its hints change), check queued announces (member connections first, then
+    /// the public topic's per-seat samples, at most BINDING_RECOVERIES signature checks a poll), resolve endpoint
+    /// conflicts (review B-1), and drop the bindings of seqs that left.
     async fn bindings_step(&mut self, height: u32) {
         let set_hex = cosig::display_of_internal(&self.view.set_id);
-        if let (Some((ep, addrs, relay)), true) = (self.direct.clone(), self.member()) {
+        let ttl = self.cfg.binding_ttl_blocks;
+        if let (Some((ep, addrs, relay)), Some(key), true) =
+            (self.direct.clone(), self.direct_key.clone(), self.member())
+        {
             let current = self.state.own_binding.as_ref().and_then(|a| {
                 crate::binding::Statement::parse(&a.binding.message)
                     .filter(|st| st.endpoint == ep && st.seq == self.seq && st.set_id_hex == set_hex)
-                    .filter(|st| height < st.issued.saturating_add(self.cfg.binding_ttl_blocks / 2))
+                    .filter(|st| height < st.issued.saturating_add(ttl / 2))
             });
             if current.is_none() {
-                if let Some(addr) = self.my_address.clone() {
-                    let st = crate::binding::Statement {
-                        network: self.network.clone(),
-                        set_id_hex: set_hex.clone(),
-                        seq: self.seq,
-                        endpoint: ep,
-                        issued: height,
-                        expiry: height.saturating_add(self.cfg.binding_ttl_blocks),
-                    };
-                    let msg = st.message();
-                    match self.node.call("signmessage", vec![json!(addr), json!(msg)]).await {
-                        Ok(v) => match v
-                            .as_str()
-                            .and_then(|b| crate::binding::Binding::from_signmessage(msg, b))
-                        {
-                            Some(b) => {
-                                tracing::info!(
-                                    "cancel direct: signed the binding of endpoint {} to seq {}",
-                                    hex::encode(ep),
-                                    self.seq
-                                );
-                                self.state.own_binding = Some(crate::binding::Announce {
-                                    binding: b,
-                                    addrs: addrs.clone(),
-                                    relay: relay.clone(),
-                                });
-                                self.last_announce = None;
-                                self.dirty = true;
-                            }
-                            None => tracing::error!("cancel direct: signmessage returned no 65-byte signature"),
-                        },
-                        Err(e) => tracing::warn!("cancel direct: signmessage for the binding: {e}; retried next poll"),
-                    }
-                }
+                self.sign_binding(height, ep, &key, addrs.clone(), relay.clone(), &set_hex)
+                    .await;
             }
             if let Some(own) = self.state.own_binding.as_mut() {
                 if own.addrs != addrs || own.relay != relay {
@@ -1618,28 +1663,187 @@ impl CancelAgent {
                     let blob = own.encode();
                     self.announces_out.push(blob.clone());
                     self.last_announce = Some(height);
-                    self.bindings_in.push(blob); // our own entry in the table, verified like any other
+                    self.bindings_member.push((blob, self.seq)); // our own entry, verified like any other
                 }
             }
         }
-        let queued = std::mem::take(&mut self.bindings_in);
         let members = self.view.members.clone();
+        // candidates: member connections first (their own seat only), then per seat a uniform sample of the
+        // topic's announces, the seats in urgency order (no binding, or one expiring within a quarter of the TTL),
+        // round robin across seats; deduplicated by (seq, endpoint, issued) before any signature check
+        let mut member_c: Vec<(crate::binding::Announce, crate::binding::Source)> = Vec::new();
+        for (blob, _) in std::mem::take(&mut self.bindings_member) {
+            if let Some(a) = crate::binding::Announce::decode(&blob) {
+                member_c.push((a, crate::binding::Source::Member));
+            }
+        }
+        let soon = height.saturating_add(ttl / 4);
+        let mut seats: Vec<(u16, Vec<Vec<u8>>)> = std::mem::take(&mut self.bindings_in)
+            .into_iter()
+            .map(|(seq, mut r)| (seq, r.take().0))
+            .collect();
+        let urgency = |seq: &u16| match self.state.bindings.by_seq.get(seq) {
+            None => 0,
+            Some(h) if h.statement.expiry <= soon => 0,
+            Some(_) => 1,
+        };
+        seats.sort_by_key(|(seq, _)| urgency(seq));
+        let mut topic_c = Vec::new();
+        let rounds = seats.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+        for k in 0..rounds {
+            for (_, blobs) in &seats {
+                if let Some(a) = blobs.get(k).and_then(|b| crate::binding::Announce::decode(b)) {
+                    topic_c.push((a, crate::binding::Source::Topic));
+                }
+            }
+        }
+        let mut seen: std::collections::HashSet<(u16, [u8; 32], u32, bool)> = std::collections::HashSet::new();
+        let mut staged: Vec<(
+            crate::binding::Statement,
+            crate::binding::Announce,
+            crate::binding::Source,
+        )> = Vec::new();
         let mut checked = 0;
-        for blob in queued {
-            let Some(a) = crate::binding::Announce::decode(&blob) else {
+        for (a, source) in member_c.into_iter().chain(topic_c) {
+            let Ok(st) = a.binding.precheck(&self.network, &set_hex, height, ttl, &members) else {
                 continue;
             };
-            if checked >= 64 {
-                break;
+            if !self.state.bindings.newer_or_same(&st) {
+                continue;
+            }
+            if self.state.bindings.holds(&a, st.seq) {
+                // the very binding held: only its hints may change, under the source rules (review B-3)
+                if self.state.bindings.refresh_hints(st.seq, &a, source) {
+                    self.dirty = true;
+                }
+                continue;
+            }
+            if !seen.insert((st.seq, st.endpoint, st.issued, source == crate::binding::Source::Member)) {
+                continue;
+            }
+            if checked >= BINDING_RECOVERIES {
+                continue;
             }
             checked += 1;
-            match self.state.bindings.offer(a, &self.network, &set_hex, height, &members) {
-                Ok(true) => self.dirty = true,
-                Ok(false) => {}
+            match a.binding.verify(&self.network, &set_hex, height, ttl, &members) {
+                Ok(st) if a.possession_ok(&st) => staged.push((st, a, source)),
+                Ok(_) => tracing::debug!(
+                    "cancel direct: binding of seq {} refused: {:?}",
+                    st.seq,
+                    crate::binding::Refusal::BadPossession
+                ),
                 Err(r) => tracing::debug!("cancel direct: binding refused: {r:?}"),
             }
         }
+        self.recoveries_last_poll = checked;
+        // per seat keep the latest; an endpoint id claimed by two seats in this poll is dropped for both (review B-1)
+        let mut best: BTreeMap<
+            u16,
+            (
+                crate::binding::Statement,
+                crate::binding::Announce,
+                crate::binding::Source,
+            ),
+        > = BTreeMap::new();
+        for (st, a, src) in staged {
+            let replace = best.get(&st.seq).is_none_or(|(b, _, bsrc)| {
+                st.issued > b.issued || (st.issued == b.issued && *bsrc == crate::binding::Source::Topic)
+            });
+            if replace {
+                best.insert(st.seq, (st, a, src));
+            }
+        }
+        let mut by_endpoint: BTreeMap<[u8; 32], Vec<u16>> = BTreeMap::new();
+        for (seq, (st, _, _)) in &best {
+            by_endpoint.entry(st.endpoint).or_default().push(*seq);
+        }
+        for (ep, seqs) in by_endpoint.iter().filter(|(_, v)| v.len() > 1) {
+            for s in seqs {
+                best.remove(s);
+            }
+            self.alert_global(
+                "binding-conflict",
+                &hex::encode(ep),
+                format!(
+                    "seats {seqs:?} bound the same endpoint id {} in one poll: both refused",
+                    hex::encode(ep)
+                ),
+            );
+        }
+        for (_, (st, a, src)) in best {
+            let (seq, ep) = (st.seq, st.endpoint);
+            match self.state.bindings.commit(st, a, src) {
+                Ok(true) => self.dirty = true,
+                Ok(false) => {}
+                Err(crate::binding::Refusal::EndpointConflict(other)) => self.alert_global(
+                    "binding-conflict",
+                    &format!("{seq}-{}", hex::encode(ep)),
+                    format!(
+                        "seat {seq} bound endpoint id {}, already bound to seat {other}: refused, seat {other}'s kept",
+                        hex::encode(ep)
+                    ),
+                ),
+                Err(r) => tracing::debug!("cancel direct: binding of seq {seq} refused: {r:?}"),
+            }
+        }
         self.state.bindings.prune(height, &members);
+    }
+
+    /// `signmessage` with this seq's member key (its P2PKH address, checked to be the member key's own with
+    /// `validateaddress`), then the endpoint key's proof of possession.
+    async fn sign_binding(
+        &mut self,
+        height: u32,
+        ep: [u8; 32],
+        key: &iroh::SecretKey,
+        addrs: Vec<String>,
+        relay: Option<String>,
+        set_hex: &str,
+    ) {
+        let (Some(addr), Some(member_key)) = (self.my_address.clone(), self.my_key) else {
+            return;
+        };
+        match self.node.call("validateaddress", vec![json!(addr)]).await {
+            Ok(v) if v.get("pubkey").and_then(Value::as_str) == Some(hex::encode(member_key).as_str()) => {}
+            Ok(_) => {
+                tracing::error!(
+                    "cancel direct: {addr} is not the member key's own address in this wallet; no binding signed"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("cancel direct: validateaddress: {e}; retried next poll");
+                return;
+            }
+        }
+        let st = crate::binding::Statement {
+            network: self.network.clone(),
+            set_id_hex: set_hex.to_string(),
+            seq: self.seq,
+            endpoint: ep,
+            issued: height,
+            expiry: height.saturating_add(self.cfg.binding_ttl_blocks),
+        };
+        let msg = st.message();
+        match self.node.call("signmessage", vec![json!(addr), json!(msg)]).await {
+            Ok(v) => match v
+                .as_str()
+                .and_then(|b| crate::binding::Binding::from_signmessage(msg, b))
+            {
+                Some(b) => {
+                    tracing::info!(
+                        "cancel direct: signed the binding of endpoint {} to seq {}",
+                        hex::encode(ep),
+                        self.seq
+                    );
+                    self.state.own_binding = Some(crate::binding::Announce::new(b, key, addrs, relay));
+                    self.last_announce = None;
+                    self.dirty = true;
+                }
+                None => tracing::error!("cancel direct: signmessage returned no 65-byte signature"),
+            },
+            Err(e) => tracing::warn!("cancel direct: signmessage for the binding: {e}; retried next poll"),
+        }
     }
 
     /// The on-chain fallback for one claim: post this member's co-signature when the claim is still short
@@ -1749,13 +1953,22 @@ impl CancelAgent {
     /// output inserted, signed, sent. The fee is exactly `fallback_fee_zat`.
     async fn post_onchain(&mut self, txid: &[u8; 32], n: u32, e: &Entry) -> anyhow::Result<String> {
         let fee = self.cfg.fallback_fee_zat;
+        // the YED index's token outpoints of this wallet are never spent here (review L-1); without the list, no post
+        let toks = self.node.call("yed_listunspent", vec![]).await?;
+        let tokens: std::collections::HashSet<(String, u64)> = toks
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|t| Some((t.get("txid")?.as_str()?.to_string(), t.get("vout")?.as_u64()?)))
+            .collect();
         let rows = self.node.call("listunspent", vec![json!(1)]).await?;
         let coins: Vec<_> = rows
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or(&[])
             .iter()
-            .filter_map(|r| crate::onchain::fundable(r, fee + 2_000))
+            .filter_map(|r| crate::onchain::fundable_coin(r, fee + 2_000, &tokens))
             .collect();
         anyhow::ensure!(
             !coins.is_empty(),
@@ -3351,115 +3564,198 @@ mod tests {
         assert_eq!(decide(&c, &x), Decision::Idle("short of co-signatures"));
     }
 
-    // ---- M5: the binding topic under a flood (docs/plans/yellowback-attest-gossip-evaluation.md §7 M5)
+    // ---- M5 and review B-1/B-2/B-3: bindings under a flood (docs/plans/yellowback-attest-gossip-evaluation.md §7)
 
-    fn announce(seq: u16, key: u8, endpoint: u8, issued: u32, expiry: u32) -> Vec<u8> {
-        let st = crate::binding::Statement {
-            network: "regtest".into(),
-            set_id_hex: cosig::display_of_internal(&[0x75; 32]),
-            seq,
-            endpoint: [endpoint; 32],
-            issued,
-            expiry,
-        };
-        let msg = st.message();
-        crate::binding::Announce {
-            binding: crate::binding::Binding {
-                sig: testkit::sign(&testkit::key(key), &crate::binding::message_hash(&msg)),
-                message: msg,
-            },
-            addrs: vec!["127.0.0.1:1".into()],
-            relay: None,
-        }
-        .encode()
+    use crate::binding::testkit as bk;
+
+    /// A valid announce of seat `seq` (member key 10 + seq in the mock), on its own endpoint `ep`.
+    fn valid(seq: u16, ep: u8, issued: u32) -> Vec<u8> {
+        bk::announce(seq, 10 + seq as u8, ep, issued, issued + 1_000).encode()
     }
 
-    /// Forged announces that pass every cheap check: a member's seq, our network and set, a future expiry, an issued
-    /// height newer than anything held (so the store cannot skip them unverified), signed by a key that is no member's.
-    fn forged_announces(n: usize, base: u32) -> Vec<Vec<u8>> {
+    /// Forgeries that pass every cheap check for seat `seq`: our network and set, a sane window, a current member's
+    /// seq, an issued height newer than anything held; signed by a member key that is not the seat's (99), with a
+    /// valid proof of possession of a fresh endpoint.
+    fn forged(seq: u16, n: usize, base: u32) -> Vec<Vec<u8>> {
         (0..n)
-            .map(|i| announce(2, 99, (i % 250) as u8, base + (i as u32 % 2), base + 1_000))
+            .map(|i| bk::announce(seq, 99, (i % 200) as u8 + 30, base + (i as u32 % 2), base + 900).encode())
             .collect()
     }
 
-    /// M5: the per-poll recovery cap holds under a flood: a poll takes at most 64 announces, whatever arrived, and
-    /// drops the rest (the queue holds 512 at most, with random replacement).
-    #[tokio::test]
-    async fn a_binding_flood_is_capped_per_poll() {
+    async fn binding_agent(seed: u64) -> (CancelAgent, MockNode, tempfile::TempDir) {
         let ch = chain(1);
         ch.lock().unwrap().claiming = false;
-        let m = mock(ch.clone());
+        let m = mock(ch);
         let dir = tempfile::tempdir().unwrap();
         let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
-        a.tick(100).await; // the view (members, set, network)
-        for f in forged_announces(5_000, 100) {
+        a.rng = crate::gossip::Rng::new(seed);
+        a.tick(100).await; // the view: members 0, 1, 2; the set; the network
+        (a, m, dir)
+    }
+
+    /// M5: the per-poll check cap holds whatever arrives: 5,000 forgeries of one seat leave that seat 4 candidates
+    /// (BINDING_PER_SEQ), a poll drains the queue, no forgery is taken; stale announces change nothing.
+    #[tokio::test]
+    async fn a_binding_flood_is_capped_per_poll() {
+        let (mut a, _m, _d) = binding_agent(1).await;
+        for f in forged(2, 5_000, 100) {
             a.take_binding(f);
         }
-        assert!(a.bindings_in.len() <= 512, "the queue is bounded");
         let t0 = Instant::now();
         a.tick(101).await;
-        let took = t0.elapsed();
+        assert!(a.recoveries_last_poll <= BINDING_PER_SEQ, "{}", a.recoveries_last_poll);
         assert!(a.bindings_in.is_empty(), "a poll drains the queue");
-        assert!(a.state.bindings.by_seq.is_empty(), "no forged binding is taken");
-        // 64 recoveries are a few ms even in a debug build; 5,000 would not be
-        assert!(took < Duration::from_secs(2), "{took:?}");
-        // stale ones (expired, another network) cost nothing and change nothing either
+        assert!(a.state.bindings.by_seq.is_empty());
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        // stale: expired, or valid far longer than the TTL allows -- refused before any signature check
         for i in 0..1_000u32 {
-            a.take_binding(announce(1, 11, 1, 10 + i % 50, 60));
+            a.take_binding(bk::announce(1, 11, 7, 10 + i % 50, 60).encode());
+            a.take_binding(bk::announce(1, 11, 7, 101, 101 + 100_000).encode());
         }
         a.tick(102).await;
+        assert_eq!(a.recoveries_last_poll, 0);
         assert!(a.state.bindings.by_seq.is_empty());
     }
 
-    /// M5: a valid binding still propagates through a flood of 10x normal traffic (normal: 15 members announcing every
-    /// 10 blocks, 1.5 a poll; 10x = 15 a poll, under the 64-a-poll cap) even when it arrives last in every poll.
+    /// M5 at 10x normal (15 forgeries a poll), the honest announce last: taken.
     #[tokio::test]
     async fn a_valid_binding_propagates_through_a_10x_flood() {
-        let ch = chain(1);
-        ch.lock().unwrap().claiming = false;
-        let m = mock(ch.clone());
-        let dir = tempfile::tempdir().unwrap();
-        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
-        a.tick(100).await;
-        for f in forged_announces(15, 100) {
+        let (mut a, _m, _d) = binding_agent(2).await;
+        for f in forged(2, 15, 100) {
             a.take_binding(f);
         }
-        a.take_binding(announce(1, 11, 7, 100, 1_100)); // the honest announce, last
+        a.take_binding(valid(1, 7, 100));
         a.tick(101).await;
-        assert!(a.state.bindings.by_seq.contains_key(&1), "the valid binding was taken");
+        assert!(a.state.bindings.by_seq.contains_key(&1));
     }
 
-    /// M5: the same at 100x (150 forged a poll), the honest member re-announcing every 10 polls and its announce
-    /// arriving after the attacker's. EXPOSES DEFECT M5-1 (reported, not fixed): a poll takes the FIRST 64 queued
-    /// announces in arrival order and drops the rest, so an honest announce queued behind 64 or more forged ones in
-    /// the same poll is never checked, however often it is repeated. Taking a uniform sample of the poll's queue (as
-    /// gossip.rs does for co-signatures) instead of its head would give it a 64/151 chance per announce here.
+    /// M5-1, fixed (review B-2): at 100x (150 forgeries a poll) for another seat, the honest announce arriving last is
+    /// taken in the first poll -- it competes only with forgeries of its own seat.
     #[tokio::test]
-    #[ignore = "exposes defect M5-1 (reported to the coordinator): bindings_step takes the head of the queue, not a sample"]
     async fn a_valid_binding_propagates_through_a_100x_flood() {
-        let ch = chain(1);
-        ch.lock().unwrap().claiming = false;
-        let m = mock(ch.clone());
-        let dir = tempfile::tempdir().unwrap();
-        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
-        a.tick(100).await;
-        let mut taken_at = None;
-        for round in 0..10u32 {
-            let h = 101 + round * 10;
-            // the honest announce arrives after the attacker's (its worst case, which a sustained flood produces)
-            for f in forged_announces(150, h) {
-                a.take_binding(f);
+        let (mut a, _m, _d) = binding_agent(3).await;
+        for f in forged(2, 150, 101) {
+            a.take_binding(f);
+        }
+        a.take_binding(valid(1, 7, 101));
+        a.tick(101).await;
+        assert!(a.state.bindings.by_seq.contains_key(&1), "taken in the first poll");
+        assert!(a.recoveries_last_poll <= BINDING_RECOVERIES);
+    }
+
+    /// Review B-2: the topic flooded at 100x across every seat, the fresh member's own seat included. Its honest
+    /// announce (repeated every poll here; every 10 blocks in production) competes with 150 forgeries of its seat a
+    /// poll, drawn 4 at a time uniformly: seeded, it lands within 200 polls (1 - (147/151)^200 > 0.99).
+    #[tokio::test]
+    async fn a_fresh_binding_lands_through_a_100x_flood_across_seats() {
+        let (mut a, _m, _d) = binding_agent(4).await;
+        // 150 distinct forgeries a seat, signed once and replayed every poll (valid through height 1,001)
+        let pools: Vec<Vec<Vec<u8>>> = [0u16, 1, 2].iter().map(|seq| forged(*seq, 150, 101)).collect();
+        let honest = valid(1, 7, 101);
+        let mut landed = None;
+        for poll in 0..200u32 {
+            let h = 101 + poll;
+            for pool in &pools {
+                for f in pool {
+                    a.take_binding(f.clone());
+                }
             }
-            a.take_binding(announce(1, 11, 7, h, h + 1_000));
+            a.take_binding(honest.clone());
             a.tick(h).await;
+            assert!(a.recoveries_last_poll <= 3 * BINDING_PER_SEQ);
             if a.state.bindings.by_seq.contains_key(&1) {
-                taken_at = Some(round);
+                landed = Some(poll);
                 break;
             }
         }
-        assert!(
-            taken_at.is_some(),
-            "the valid binding never got through 10 re-announcements under a 100x flood"
+        assert!(landed.is_some(), "the fresh member's binding never landed in 200 polls");
+        assert!(!a.state.bindings.by_seq.contains_key(&0) && !a.state.bindings.by_seq.contains_key(&2));
+    }
+
+    /// Review B-2: over its own authenticated connection a member's own binding is taken first and at once, however
+    /// the public topic is flooded -- and a member sending forged bindings for OTHER seats over its connection gets
+    /// nothing in: only its own seat's announce is accepted from it.
+    #[tokio::test]
+    async fn member_connections_carry_their_own_binding_only() {
+        let (mut a, _m, _d) = binding_agent(5).await;
+        for seq in [0u16, 1, 2] {
+            for f in forged(seq, 1_500, 101) {
+                a.take_binding(f);
+            }
+        }
+        // member 2 floods forged bindings of seat 1 over its own connection: all dropped at intake
+        for f in forged(1, 1_000, 101) {
+            a.take_member_binding(f, 2);
+        }
+        assert!(a.bindings_member.is_empty());
+        // member 1's own binding over its own connection: taken in this poll
+        a.take_member_binding(valid(1, 7, 101), 1);
+        a.tick(101).await;
+        assert!(a.state.bindings.by_seq.contains_key(&1));
+        assert_eq!(a.state.bindings.by_seq[&1].hints_from, crate::binding::Source::Member);
+        assert!(a.recoveries_last_poll <= BINDING_RECOVERIES);
+    }
+
+    /// Review B-1: one endpoint id claimed by two seats in the same poll is refused for both, with an alert; a seat
+    /// claiming an endpoint another seat holds is refused, the holder kept, with an alert. (The proofs of possession
+    /// are made with the endpoint's key here, as if it had been stolen: without it the binding is refused anyway,
+    /// binding::tests.)
+    #[tokio::test]
+    async fn an_endpoint_bound_to_two_seats_is_refused_with_an_alert() {
+        let (mut a, _m, _d) = binding_agent(6).await;
+        let ep = bk::endpoint_id(7);
+        let key = bk::endpoint_key(7);
+        let both = |seq: u16, issued: u32| {
+            bk::announce_with(seq, 10 + seq as u8, ep, &key, issued, issued + 900, vec![]).encode()
+        };
+        a.take_binding(both(1, 101));
+        a.take_binding(both(2, 101));
+        a.tick(101).await;
+        assert!(a.state.bindings.by_seq.is_empty(), "both refused");
+        assert!(a
+            .state
+            .alerted_global
+            .iter()
+            .any(|k| k.starts_with("binding-conflict|")));
+        // seat 1 binds it alone; then seat 2 claims it: refused, seat 1 kept
+        a.take_binding(both(1, 102));
+        a.tick(102).await;
+        assert!(a.state.bindings.by_seq.contains_key(&1));
+        a.take_binding(both(2, 103));
+        a.tick(103).await;
+        assert!(!a.state.bindings.by_seq.contains_key(&2));
+        assert_eq!(a.state.bindings.by_seq[&1].statement.endpoint, ep);
+        assert!(a
+            .state
+            .alerted_global
+            .iter()
+            .any(|k| k.starts_with("binding-conflict|2-")));
+    }
+
+    /// Review B-3: hints learned from the member's own connection are never replaced by a topic copy.
+    #[tokio::test]
+    async fn topic_copies_cannot_overwrite_authenticated_hints() {
+        let (mut a, _m, _d) = binding_agent(7).await;
+        let mut own = bk::announce(1, 11, 7, 101, 1_001);
+        own.addrs = vec!["192.168.1.5:4433".into()];
+        a.take_member_binding(own.encode(), 1);
+        a.tick(101).await;
+        let mut evil = own.clone();
+        evil.addrs = vec!["6.6.6.6:6".into()];
+        a.take_binding(evil.encode());
+        a.tick(102).await;
+        assert_eq!(
+            a.state.bindings.by_seq[&1].announce.addrs,
+            vec!["192.168.1.5:4433".to_string()]
+        );
+        // the member itself may move
+        let mut moved = own.clone();
+        moved.addrs = vec!["192.168.1.9:4433".into()];
+        a.take_member_binding(moved.encode(), 1);
+        a.tick(103).await;
+        assert_eq!(
+            a.state.bindings.by_seq[&1].announce.addrs,
+            vec!["192.168.1.9:4433".to_string()]
         );
     }
 }

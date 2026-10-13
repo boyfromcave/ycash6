@@ -497,7 +497,7 @@ pub struct CancelRuntime {
     bindings_rx: tokio::sync::mpsc::Receiver<transport::Delivered>,
     direct: Option<crate::direct::DirectNode>,
     direct_tx: Option<tokio::sync::mpsc::Sender<crate::direct::Out>>,
-    direct_announces: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    direct_announces: Option<tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>>,
     ctx_tx: tokio::sync::watch::Sender<std::sync::Arc<crate::gossip::Ctx>>,
     pub verified: tokio::sync::mpsc::Receiver<crate::gossip::Verified>,
     /// Senders kept alive for a channel whose path is off, so the verifier task does not see it close.
@@ -588,13 +588,16 @@ impl CancelRuntime {
             }
         }
         if let Some(rx) = self.direct_announces.as_mut() {
-            while let Ok(bytes) = rx.try_recv() {
-                self.agent.take_binding(bytes);
+            while let Ok((bytes, from)) = rx.try_recv() {
+                self.agent.take_member_binding(bytes, from);
             }
         }
         if let Some(node) = &self.direct {
             let (addrs, relay) = node.hints();
             self.agent.direct = Some((*node.id().as_bytes(), addrs, relay));
+            if self.agent.direct_key.is_none() {
+                self.agent.direct_key = Some(node.endpoint.secret_key().clone());
+            }
         }
         self.agent.tick(height).await;
         let _ = self.ctx_tx.send(std::sync::Arc::new(self.agent.gossip_ctx()));

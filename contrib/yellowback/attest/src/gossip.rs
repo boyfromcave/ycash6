@@ -165,6 +165,8 @@ pub struct Verifier {
     rng: Rng,
     reservoir: Reservoir<Frame>,
     pending: Vec<(Frame, Instant)>,
+    /// Direct frames for a claim not known yet: their own half of the pending budget (review L-3).
+    pending_direct: Vec<(Frame, Instant, u16)>,
     seen: HashSet<[u8; 32]>,
     order: VecDeque<[u8; 32]>,
     /// (intent, seq, refHeight, blockHash) verified since the context was taken (N-3a between updates).
@@ -185,6 +187,7 @@ impl Verifier {
             rng,
             reservoir: Reservoir::new(budget),
             pending: Vec::new(),
+            pending_direct: Vec::new(),
             seen: HashSet::new(),
             order: VecDeque::new(),
             accepted: HashSet::new(),
@@ -209,6 +212,20 @@ impl Verifier {
         }
     }
 
+    /// Direct frames that waited for their claim, verified now that the view changed (the caller sends them on).
+    pub fn replay_direct(&mut self, now: Instant) -> Vec<Verified> {
+        let parked = std::mem::take(&mut self.pending_direct);
+        let mut out = Vec::new();
+        for (f, at, author) in parked {
+            if now.saturating_duration_since(at) < PENDING_TTL {
+                if let Ok(v) = self.intake_direct(&f.encode(), author, at) {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
     fn remember(&mut self, d: [u8; 32]) {
         if self.seen.insert(d) {
             self.order.push_back(d);
@@ -228,11 +245,13 @@ impl Verifier {
             return Err(Drop::NotMember(seq));
         }
         let Some(c) = self.ctx.claims.get(&intent) else {
-            // random replacement when full: a flood of frames for invented claims cannot hold the set
-            if self.pending.len() < PENDING_MAX {
+            // random replacement when full: a flood of frames for invented claims cannot hold the set; topic frames
+            // have half of it, direct frames the other half (review L-3)
+            let half = PENDING_MAX / 2;
+            if self.pending.len() < half {
                 self.pending.push((f, at));
             } else {
-                let j = self.rng.below(PENDING_MAX as u64) as usize;
+                let j = self.rng.below(half as u64) as usize;
                 self.pending[j] = (f, at);
             }
             return Err(Drop::UnknownClaim);
@@ -285,11 +304,12 @@ impl Verifier {
         let c = self.ctx.claims.get(&intent).cloned();
         let Some(c) = c else {
             if self.ctx.view.members.contains_key(&seq) {
-                if self.pending.len() < PENDING_MAX {
-                    self.pending.push((f, now));
+                let half = PENDING_MAX / 2;
+                if self.pending_direct.len() < half {
+                    self.pending_direct.push((f, now, author));
                 } else {
-                    let j = self.rng.below(PENDING_MAX as u64) as usize;
-                    self.pending[j] = (f, now);
+                    let j = self.rng.below(half as u64) as usize;
+                    self.pending_direct[j] = (f, now, author);
                 }
             }
             return Err(Drop::UnknownClaim);
@@ -421,6 +441,11 @@ pub fn spawn(
                     }
                     let c = ctx.borrow_and_update().clone();
                     v.set_ctx(c, Instant::now());
+                    for item in v.replay_direct(Instant::now()) {
+                        if out.send(item).await.is_err() {
+                            return;
+                        }
+                    }
                 }
                 _ = tick.tick() => {
                     for item in v.run_slice(Instant::now()) {
@@ -551,6 +576,28 @@ mod tests {
         let ok = v.intake_direct(&frame(2, 2, 4_000_000), 2, now).unwrap();
         assert_eq!((ok.seq, ok.ref_height), (2, 99));
         assert_eq!(v.intake_direct(&frame(2, 2, 4_000_000), 2, now), Err(Drop::Duplicate));
+    }
+
+    /// Review L-3: a flood of topic frames for unknown claims cannot evict a direct frame waiting for its claim.
+    #[test]
+    fn direct_frames_keep_their_half_of_the_pending_set() {
+        let now = Instant::now();
+        let mut v = Verifier::new(4, 60, 100, Rng::new(6));
+        let mut empty = (*ctx(&[(1, 1), (2, 2)])).clone();
+        empty.claims.clear();
+        v.set_ctx(Arc::new(empty), now);
+        assert_eq!(
+            v.intake_direct(&frame(2, 2, 4_000_000), 2, now),
+            Err(Drop::UnknownClaim)
+        );
+        for i in 0..20_000u32 {
+            let _ = v.intake(&forged(1, i), now);
+        }
+        assert!(v.pending.len() <= PENDING_MAX / 2);
+        v.set_ctx(ctx(&[(1, 1), (2, 2)]), now);
+        let replayed = v.replay_direct(now);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].seq, 2);
     }
 
     #[test]

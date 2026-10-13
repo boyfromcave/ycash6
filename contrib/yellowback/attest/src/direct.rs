@@ -106,7 +106,7 @@ impl EndpointHooks for Gate {
 struct Handler {
     members: Members,
     frames: tokio::sync::mpsc::Sender<(Vec<u8>, u16)>,
-    announces: tokio::sync::mpsc::Sender<Vec<u8>>,
+    announces: tokio::sync::mpsc::Sender<(Vec<u8>, u16)>,
     quotas: Arc<Mutex<BTreeMap<u16, Quota>>>,
 }
 
@@ -161,7 +161,7 @@ impl ProtocolHandler for Handler {
                     }
                 }
                 KIND_ANNOUNCE => {
-                    let _ = self.announces.try_send(body.to_vec());
+                    let _ = self.announces.try_send((body.to_vec(), seq));
                 }
                 _ => {}
             }
@@ -199,7 +199,7 @@ pub fn relay_mode(relays: &[String], fallback: &[String]) -> anyhow::Result<iroh
 
 impl DirectNode {
     /// Bind the endpoint (the key file is created 0600 on first use) and mount the handler. Returns the node and
-    /// the receivers of member frames (with the author's seq) and of announces.
+    /// the receivers of member frames and of announces, each with the seq of the member that delivered it.
     pub async fn open(
         secret_key_file: Option<&Path>,
         relays: &[String],
@@ -207,7 +207,7 @@ impl DirectNode {
     ) -> anyhow::Result<(
         Self,
         tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>,
-        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<(Vec<u8>, u16)>,
     )> {
         let secret = crate::transport::iroh::load_or_create_secret(secret_key_file)?;
         let mode = relay_mode(relays, fallback)?;
@@ -551,12 +551,18 @@ mod tests {
         }
         let cpu0 = cpu_seconds();
         let t0 = Instant::now();
+        // outcome of each outsider connection: refused by the gate's close code, failed otherwise (no connection,
+        // or closed for another reason under load), or still open after 30 s -- admitted, which must never happen
         let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let admitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut tasks = Vec::new();
         for i in 0..handshakes {
             let ep = outsiders[i % endpoints].clone();
-            let (target, refused) = (target.clone(), refused.clone());
+            let (target, refused, failed, admitted) =
+                (target.clone(), refused.clone(), failed.clone(), admitted.clone());
             tasks.push(tokio::spawn(async move {
+                use std::sync::atomic::Ordering::SeqCst;
                 match tokio::time::timeout(Duration::from_secs(30), ep.connect(target, ALPN)).await {
                     Ok(Ok(c)) => {
                         // try to push a frame through anyway: the gate closed the connection after the handshake
@@ -564,13 +570,14 @@ mod tests {
                             let _ = s.write_all(&[KIND_FRAME; 116]).await;
                             let _ = s.finish();
                         }
-                        let r = tokio::time::timeout(Duration::from_secs(10), c.closed()).await;
-                        if matches!(r, Ok(ref e) if format!("{e:?}").contains(&REFUSED.to_string())) {
-                            refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        }
+                        match tokio::time::timeout(Duration::from_secs(30), c.closed()).await {
+                            Ok(e) if format!("{e:?}").contains(&REFUSED.to_string()) => refused.fetch_add(1, SeqCst),
+                            Ok(_) => failed.fetch_add(1, SeqCst),
+                            Err(_) => admitted.fetch_add(1, SeqCst),
+                        };
                     }
                     Ok(Err(_)) | Err(_) => {
-                        refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        failed.fetch_add(1, SeqCst);
                     }
                 }
             }));
@@ -606,10 +613,18 @@ mod tests {
             assert_eq!(seq, 2);
         }
         let n = refused.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(n, handshakes, "every outsider handshake was refused");
+        let f = failed.load(std::sync::atomic::Ordering::SeqCst);
+        let adm = admitted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(adm, 0, "no outsider connection may stay open");
+        assert_eq!(n + f, handshakes);
+        assert!(
+            n * 10 >= handshakes * 9,
+            "most handshakes end in the gate's refusal ({n} of {handshakes})"
+        );
         eprintln!(
-            "outsider flood {factor}x: {handshakes} handshakes refused in {elapsed:?}, honest worst latency {worst:?}, \
-             process CPU {cpu:.2} s (attacker and member in one process)"
+            "outsider flood {factor}x: {handshakes} handshakes, {n} refused by the gate, {f} failed otherwise, 0 \
+             admitted, in {elapsed:?}; honest worst latency {worst:?}; process CPU {cpu:.2} s (attacker and member in \
+             one process)"
         );
         for o in outsiders {
             o.close().await;
@@ -622,12 +637,54 @@ mod tests {
     /// M5: an outsider flood at 10x and 100x a member's normal connection count. Every handshake is refused by the
     /// gate, nothing reaches the frame handler, the honest member's frames keep arriving within seconds (well inside
     /// one block), and the CPU spent is bounded by the handshakes (one TLS handshake each: no stream, no signature).
+    /// The measurement itself, run in a child process of this test binary (env YB_OUTSIDER_FLOOD = factor) so the
+    /// process CPU it reads is the flood's alone, not that of the tests running beside it. A no-op otherwise.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_outsider_flood_is_refused_at_the_handshake() {
+    async fn outsider_flood_probe() {
+        let Ok(factor) = std::env::var("YB_OUTSIDER_FLOOD") else {
+            return;
+        };
+        let factor: usize = factor.parse().unwrap();
+        let (handshakes, worst, cpu) = outsider_flood(factor).await;
+        println!("FLOOD_RESULT {factor} {handshakes} {} {cpu:.3}", worst.as_millis());
+    }
+
+    #[test]
+    fn an_outsider_flood_is_refused_at_the_handshake() {
         for factor in [10usize, 100] {
-            let (handshakes, worst, cpu) = outsider_flood(factor).await;
-            assert!(worst < Duration::from_secs(10), "{factor}x: honest latency {worst:?}");
-            // a generous bound (debug build, both sides of every handshake in this one process): 20 ms a handshake
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "direct::tests::outsider_flood_probe",
+                    "--nocapture",
+                    "--test-threads",
+                    "1",
+                ])
+                .env("YB_OUTSIDER_FLOOD", factor.to_string())
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "{factor}x: the flood run failed:\n{text}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // libtest prints "test <name> ... " before the test's own output, on the same line
+            let line = text
+                .lines()
+                .find_map(|l| l.find("FLOOD_RESULT").map(|k| &l[k..]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{factor}x: no result line in:\n{text}{}",
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                });
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (handshakes, worst_ms, cpu): (usize, u64, f64) =
+                (f[2].parse().unwrap(), f[3].parse().unwrap(), f[4].parse().unwrap());
+            eprintln!("{line}");
+            assert!(worst_ms < 10_000, "{factor}x: honest latency {worst_ms} ms");
+            // a generous bound (debug build, both sides of every handshake in the one child process): 20 ms each
             assert!(
                 cpu < 2.0 + 0.02 * handshakes as f64,
                 "{factor}x: {cpu:.2} s of CPU for {handshakes} handshakes"

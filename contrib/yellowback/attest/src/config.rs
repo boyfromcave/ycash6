@@ -530,6 +530,23 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         gossip_burst: c.gossip_burst.unwrap_or(DEFAULT_GOSSIP_BURST).max(1),
         gossip_refill_seconds: c.gossip_refill_seconds.unwrap_or(DEFAULT_GOSSIP_REFILL_SECONDS).max(1),
     };
+    if let (
+        Some(d),
+        TransportConfig::Iroh {
+            secret_key_file: Some(t),
+            ..
+        },
+    ) = (&cancel.direct_secret_key_file, &transport)
+    {
+        if d == t {
+            return Err(
+                "[cancel] direct_secret_key_file must not be [transport] secret_key_file: the direct endpoint is bound to \
+                 the seat and must have its own key"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
     if cancel.takeover_blocks > MAX_TAKEOVER_BLOCKS {
         return Err(format!(
             "[cancel]: takeover_blocks must be at most {MAX_TAKEOVER_BLOCKS} (the last of 15 ranks must still drive inside CLAIM_DELAY)"
@@ -731,6 +748,10 @@ endpoints = ["https://attestor.example/att"]
         assert_eq!(c.fallback_relays.len(), 1);
         assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ndelivery = \"carrier pigeon\"\n").is_err());
         assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nfallback_fee_zat = 5\n").is_err());
+        assert!(parse(
+            "[node]\nrpc_url = \"http://h:1\"\n[transport]\nsecret_key_file = \"/k\"\n[cancel]\ndirect_secret_key_file = \"/k\"\n"
+        )
+        .is_err());
         assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 36\n").is_ok());
     }
 
