@@ -80,6 +80,28 @@ std::vector<unsigned char> EncodeCancelCosigns(const std::vector<CancelCosignEnt
 /** nullopt unless magic "YC", version 1, 1 <= count <= CANCEL_COSIGN_MAX and the length is exactly 4 + 69 * count. */
 std::optional<std::vector<CancelCosignEntry>> DecodeCancelCosigns(const std::vector<unsigned char>& data);
 
+/**
+ * C4b: EQV-1's second evidence shape -- one regular attestation and one cancel statement by the same key at the same
+ * citedHeight with different prices -- carried as an EQUIVOCATION's carrier bytes:
+ *
+ *   "YX" | version u8 (= 1) | attestation 74 | intent txid 32 | intent n u32 LE | priceMicroUsd u32 LE | sig 65
+ *
+ * (182 bytes); the statement's citedHeight is the attestation's.
+ */
+static const size_t CANCEL_EVIDENCE_SIZE = 3 + 74 + 32 + 4 + 4 + 65;
+
+struct CancelStatement
+{
+    COutPoint intent;                   //!< the claimant intent the statement co-signed the cancel of
+    uint32_t priceMicroUsd;
+    std::vector<unsigned char> sig;     //!< 65 bytes, recoverable
+
+    CancelStatement() : priceMicroUsd(0) {}
+};
+
+std::vector<unsigned char> EncodeCancelEvidence(const Attestation& a, const CancelStatement& s);
+std::optional<std::pair<Attestation, CancelStatement>> DecodeCancelEvidence(const std::vector<unsigned char>& data);
+
 /** Where a bundle rides: params.h BundleCarrier (BUNDLE_CARRIER, W2). */
 enum class BundleSource { SCRIPTSIG, OP_RETURN };
 

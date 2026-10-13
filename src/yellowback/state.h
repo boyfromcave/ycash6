@@ -291,13 +291,28 @@ std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, 
  */
 
 /**
- * EQV-1's evidence (structure only): the two attestations of an EQUIVOCATION transaction's carrier bundle when
- * they share a seq and a citedHeight with different prices; nullopt otherwise. No key, hash or state is read.
+ * EQV-1's evidence: two signed prices at one citedHeight. `a` is a regular attestation; the other side is either a
+ * second attestation `b` (same seq, the "YA" bundle of two) or, since C4b (cancel-limit design, owner 2026-10-13), a
+ * cancel statement `s` (bundle.h "YX": the co-signature a member gave a YED cancel, which is its signed price at the
+ * claim's refHeight).
  */
-std::optional<std::pair<Attestation, Attestation>> EquivocationEvidence(const CTransaction& tx, const Params& params);
+struct Equivocation
+{
+    Attestation a;
+    std::optional<Attestation> b;
+    std::optional<CancelStatement> s;
+};
 
-/** Both attestations of the evidence verify under `key` over `blockHash` (EQV-1's signature check). */
-bool EquivocatedBy(const std::pair<Attestation, Attestation>& evidence, const CPubKey& key, const uint256& blockHash);
+/**
+ * EQV-1's evidence (structure only): an EQUIVOCATION transaction whose carrier holds two attestations sharing a seq
+ * and a citedHeight with different prices, or (C4b) one attestation and one cancel statement whose price differs;
+ * citedHeight >= START_HEIGHT; nullopt otherwise. No key, hash or state is read.
+ */
+std::optional<Equivocation> EquivocationEvidence(const CTransaction& tx, const Params& params);
+
+/** Both sides of the evidence verify under `key` over `blockHash` (EQV-1's signature check); a cancel statement's
+ *  message names `attestorSetId` (attest.h CancelCosignMessage) and its signature must recover to `key`. */
+bool EquivocatedBy(const Equivocation& evidence, const CPubKey& key, const uint256& blockHash, const uint256& attestorSetId);
 
 /**
  * CAN-2 (cancel-limit design §2 C2): the number of distinct current members whose CANCEL_COSIGN statements a cancel

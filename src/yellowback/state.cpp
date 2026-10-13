@@ -1043,10 +1043,9 @@ void EjectRecord(EvalContext& ctx, uint16_t seq, AttestorRecord rec, bool freeze
 bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& log)
 {
     const Params& P = ctx.params;
-    std::optional<std::pair<Attestation, Attestation>> e = EquivocationEvidence(tx, P);
+    std::optional<Equivocation> e = EquivocationEvidence(tx, P);
     if (!e) return false;
-    const Attestation& a = e->first;
-    const Attestation& b = e->second;
+    const Attestation& a = e->a;
     if ((int64_t)a.citedHeight >= ctx.height) return false;
     std::optional<uint256> blockHash = BlockHashAt(ctx.st.View(), P, a.citedHeight);
     if (!blockHash.has_value()) return false;
@@ -1058,7 +1057,7 @@ bool ApplyEquivocation(EvalContext& ctx, const CTransaction& tx, TxLogRecord& lo
         for (size_t j = i + 1; j < all.size(); j++) newest = newest && all[j].second.attestorPubKey != rec.attestorPubKey;
         if (!newest) continue;
         const CPubKey pk = rec.AttestorKey();
-        if (!EquivocatedBy(e.value(), pk, blockHash.value())) continue;   // never the W8 cache: it is keyed by seq, not by key
+        if (!EquivocatedBy(e.value(), pk, blockHash.value(), P.attestorSetId)) continue;   // never the W8 cache: it is keyed by seq, not by key
         EjectRecord(ctx, all[i].first, rec, true);
         log.attestorSeq = all[i].first;
         log.bundleSeqs.push_back(a.seq);
@@ -1905,28 +1904,46 @@ void UndoBlock(StateView& view, const UndoRecord& undo)
 // ---------------------------------------------------------------------------
 // v3: attestors, arming, selection (v3 plan §3.7, W9)
 
-std::optional<std::pair<Attestation, Attestation>> EquivocationEvidence(const CTransaction& tx, const Params& P)
+std::optional<Equivocation> EquivocationEvidence(const CTransaction& tx, const Params& P)
 {
     std::optional<FoundPayload> fp = FindPayload(tx);
     if (!fp.has_value() || fp->payload.type != PayloadType::EQUIVOCATION) return std::nullopt;
     std::string reason;
     auto extracted = ExtractBundle(tx, P.bundleCarrier, false, std::vector<unsigned char>(), &reason);
     if (!extracted) return std::nullopt;
-    std::optional<Bundle> bundle = DecodeBundle(extracted->first, 255);
-    if (!bundle || bundle->atts.size() != 2) return std::nullopt;
-    const Attestation& a = bundle->atts[0];
-    const Attestation& b = bundle->atts[1];
-    if (a.seq != b.seq || a.citedHeight != b.citedHeight || a.priceMicroUsd == b.priceMicroUsd) return std::nullopt;
-    if ((int64_t)a.citedHeight < (int64_t)P.startHeight) return std::nullopt;
-    return std::make_pair(a, b);
+    Equivocation e;
+    if (std::optional<Bundle> bundle = DecodeBundle(extracted->first, 255)) {
+        if (bundle->atts.size() != 2) return std::nullopt;
+        const Attestation& a = bundle->atts[0];
+        const Attestation& b = bundle->atts[1];
+        if (a.seq != b.seq || a.citedHeight != b.citedHeight || a.priceMicroUsd == b.priceMicroUsd) return std::nullopt;
+        e.a = a;
+        e.b = b;
+    } else if (auto c = DecodeCancelEvidence(extracted->first)) {
+        // C4b (cancel-limit design, owner 2026-10-13): a regular attestation and a cancel statement at its citedHeight
+        if (c->first.priceMicroUsd == c->second.priceMicroUsd) return std::nullopt;
+        e.a = c->first;
+        e.s = c->second;
+    } else {
+        return std::nullopt;
+    }
+    if ((int64_t)e.a.citedHeight < (int64_t)P.startHeight) return std::nullopt;
+    return e;
 }
 
-bool EquivocatedBy(const std::pair<Attestation, Attestation>& e, const CPubKey& key, const uint256& blockHash)
+bool EquivocatedBy(const Equivocation& e, const CPubKey& key, const uint256& blockHash, const uint256& attestorSetId)
 {
-    const Attestation& a = e.first;
-    const Attestation& b = e.second;
-    return VerifyCompactSig(key, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig) &&
-           VerifyCompactSig(key, AttestMessage(b.seq, b.priceMicroUsd, b.citedHeight, blockHash), b.sig);
+    const Attestation& a = e.a;
+    if (!VerifyCompactSig(key, AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash), a.sig)) return false;
+    if (e.b.has_value()) {
+        const Attestation& b = e.b.value();
+        return VerifyCompactSig(key, AttestMessage(b.seq, b.priceMicroUsd, b.citedHeight, blockHash), b.sig);
+    }
+    if (!e.s.has_value()) return false;
+    const CancelStatement& s = e.s.value();
+    CPubKey signer;
+    return vault::RecoverSig(CancelCosignMessage(attestorSetId, s.intent.hash, s.intent.n, a.citedHeight, s.priceMicroUsd, blockHash), s.sig, signer) &&
+           signer == key;
 }
 
 int CancelsRequired(const VaultRecord& vault, const Params& P, int64_t height)

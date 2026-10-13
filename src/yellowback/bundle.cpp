@@ -70,6 +70,7 @@ std::optional<Bundle> DecodeBundle(const std::vector<unsigned char>& data, size_
 
 namespace {
 const unsigned char COSIGN_MAGIC[2] = { 'Y', 'C' };
+const unsigned char EVIDENCE_MAGIC[2] = { 'Y', 'X' };
 
 void PutLE32(std::vector<unsigned char>& out, uint32_t v) { for (int i = 0; i < 4; i++) out.push_back((v >> (8 * i)) & 0xff); }
 uint32_t GetLE32(const unsigned char* p) { uint32_t v = 0; for (int i = 3; i >= 0; i--) v = (v << 8) | p[i]; return v; }
@@ -101,6 +102,33 @@ std::optional<std::vector<CancelCosignEntry>> DecodeCancelCosigns(const std::vec
         out.push_back(e);
     }
     return out;
+}
+
+std::vector<unsigned char> EncodeCancelEvidence(const Attestation& a, const CancelStatement& s)
+{
+    if (s.sig.size() != 65) return {};
+    std::vector<unsigned char> out{ EVIDENCE_MAGIC[0], EVIDENCE_MAGIC[1], CANCEL_COSIGN_VERSION };
+    std::vector<unsigned char> att = EncodeAttestation(a);
+    out.insert(out.end(), att.begin(), att.end());
+    out.insert(out.end(), s.intent.hash.begin(), s.intent.hash.end());
+    PutLE32(out, s.intent.n);
+    PutLE32(out, s.priceMicroUsd);
+    out.insert(out.end(), s.sig.begin(), s.sig.end());
+    return out;
+}
+
+std::optional<std::pair<Attestation, CancelStatement>> DecodeCancelEvidence(const std::vector<unsigned char>& data)
+{
+    if (data.size() != CANCEL_EVIDENCE_SIZE || data[0] != EVIDENCE_MAGIC[0] || data[1] != EVIDENCE_MAGIC[1] || data[2] != CANCEL_COSIGN_VERSION) return std::nullopt;
+    std::optional<Attestation> a = DecodeAttestation(data.data() + 3, ATTESTATION_SIZE);
+    if (!a) return std::nullopt;
+    const unsigned char* p = data.data() + 3 + ATTESTATION_SIZE;
+    CancelStatement s;
+    s.intent.hash = uint256(std::vector<unsigned char>(p, p + 32));
+    s.intent.n = GetLE32(p + 32);
+    s.priceMicroUsd = GetLE32(p + 36);
+    s.sig.assign(p + 40, p + 105);
+    return std::make_pair(a.value(), s);
 }
 
 std::optional<std::pair<std::vector<unsigned char>, BundleSource>>
