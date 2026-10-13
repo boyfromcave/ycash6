@@ -38,6 +38,11 @@ pub trait Transport: Send {
     fn publish<'a>(&'a mut self, message: &'a [u8]) -> BoxFuture<'a, anyhow::Result<()>>;
     /// The next message from the topic, whatever its size; `Err` means the transport is gone.
     fn recv(&mut self) -> BoxFuture<'_, anyhow::Result<Vec<u8>>>;
+    /// The next message and the peer that delivered it (iroh: the neighbour's endpoint id, which is not the author;
+    /// a transport that cannot tell names every message "local"). The cancel topic rate-limits by it.
+    fn recv_from(&mut self) -> BoxFuture<'_, anyhow::Result<(Vec<u8>, String)>> {
+        Box::pin(async move { Ok((self.recv().await?, "local".to_string())) })
+    }
 }
 
 /// Open the configured transport on `topic` (`network` names the chain the node reports).
@@ -86,13 +91,20 @@ pub async fn open_with_cancel(
     })
 }
 
-/// Run `transport` on its own task: what arrives goes to the returned receiver, what is sent on the returned sender
-/// is published. The loop ends when the sender is dropped or the transport fails (logged).
+/// A frame from the cancel topic and the peer that delivered it.
+pub type Delivered = (Vec<u8>, String);
+
+/// Run `transport` on its own task: what arrives goes to the returned receiver with its delivering peer, what is
+/// sent on the returned sender is published. The task ends when the sender is dropped or the transport fails
+/// (logged); the caller sees the receiver close and must not carry on without its topic.
 pub fn spawn_pump(
     mut transport: Box<dyn Transport>,
-) -> (tokio::sync::mpsc::Sender<Vec<u8>>, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+) -> (
+    tokio::sync::mpsc::Sender<Vec<u8>>,
+    tokio::sync::mpsc::Receiver<Delivered>,
+) {
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-    let (in_tx, in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+    let (in_tx, in_rx) = tokio::sync::mpsc::channel::<Delivered>(PUMP_INBOX);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -104,9 +116,10 @@ pub fn spawn_pump(
                     }
                     None => return,
                 },
-                got = transport.recv() => match got {
+                got = transport.recv_from() => match got {
                     Ok(m) => {
-                        // a full inbox drops (the receiver's rate limit would drop it anyway)
+                        // the receiver drains continuously (attest's poll loop); a full inbox means it is far
+                        // behind, and the frame is dropped rather than queued without bound
                         if in_tx.try_send(m).is_err() {
                             tracing::debug!("cancel topic: inbox full, frame dropped");
                         }
@@ -121,6 +134,8 @@ pub fn spawn_pump(
     });
     (out_tx, in_rx)
 }
+
+pub const PUMP_INBOX: usize = 4096;
 
 #[cfg(test)]
 mod tests {

@@ -91,6 +91,7 @@ pub struct CancelToml {
     pub takeover_blocks: Option<u32>,
     pub min_confirmations: Option<u32>,
     pub refee_after_blocks: Option<u32>,
+    pub max_sends: Option<u32>,
     pub republish_blocks: Option<u32>,
     pub price_tolerance_blocks: Option<u32>,
     pub state_file: Option<String>,
@@ -177,6 +178,9 @@ pub struct CancelConfig {
     pub min_confirmations: u32,
     /// A cancel unconfirmed this long after it was sent is re-pushed, and re-funded (vault_refee) if it left the mempool.
     pub refee_after_blocks: u32,
+    /// At most this many sends (the first and every rebuild) per claim, rebuilds spaced
+    /// `refee_after_blocks × 2^(sends − 1)` apart; reaching the cap raises an alert.
+    pub max_sends: u32,
     /// Republish this agent's own co-signature every this many blocks while the claim stands (late joiners, restarts).
     pub republish_blocks: u32,
     /// How far the height of the aggregate the watcher judges with may lie from the claim's refHeight.
@@ -199,6 +203,11 @@ pub const DEFAULT_CANCEL_SPARES: u32 = 2;
 pub const DEFAULT_SPARE_WAIT_BLOCKS: u32 = 1;
 pub const DEFAULT_TAKEOVER_BLOCKS: u32 = 6;
 pub const DEFAULT_REFEE_AFTER_BLOCKS: u32 = 6;
+pub const DEFAULT_MAX_SENDS: u32 = 5;
+/// The largest `takeover_blocks`: with the 15-seat attestor set the last rank drives 14 × this after the claim
+/// confirmed, which must leave time inside CLAIM_DELAY (576): 14 × 36 = 504. The agent also shrinks it at run time
+/// to fit the node's claimDelay and the set's current size.
+pub const MAX_TAKEOVER_BLOCKS: u32 = 36;
 pub const DEFAULT_REPUBLISH_BLOCKS: u32 = 4;
 pub const DEFAULT_PRICE_TOLERANCE_BLOCKS: u32 = 24;
 pub const DEFAULT_GOSSIP_BURST: u32 = 16;
@@ -235,6 +244,22 @@ fn expand_user(p: &str) -> PathBuf {
         }
     }
     PathBuf::from(p)
+}
+
+/// `scheme://user:password@host` with the password replaced by `***`, for error messages.
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((creds, host)) => {
+            let user = creds.split_once(':').map_or(creds, |(u, _)| u);
+            format!("{scheme}://{user}:***@{host}{path}")
+        }
+        None => url.to_string(),
+    }
 }
 
 /// The host of an http(s) URL is loopback (`localhost`, `127.0.0.0/8`, `::1`).
@@ -304,7 +329,11 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         .filter(|u| !u.is_empty())
         .ok_or_else(|| "[node] rpc_url is required".to_string())?;
     if !(rpc_url.starts_with("http://") || rpc_url.starts_with("https://")) {
-        return Err(format!("[node] rpc_url must start with http:// or https:// (got {rpc_url:?})").into());
+        return Err(format!(
+            "[node] rpc_url must start with http:// or https:// (got {:?})",
+            redact_url(&rpc_url)
+        )
+        .into());
     }
     let has_credentials = n.rpc_user.is_some() || n.rpc_cookie.is_some() || rpc_url.contains('@');
     if rpc_url.starts_with("http://")
@@ -313,8 +342,9 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         && !n.allow_insecure_rpc.unwrap_or(false)
     {
         return Err(format!(
-            "[node] rpc_url {rpc_url:?} would send the node's credentials as cleartext Basic auth to a host that is not \
-             loopback: use https://, an SSH tunnel to 127.0.0.1, or set allow_insecure_rpc = true"
+            "[node] rpc_url {:?} would send the node's credentials as cleartext Basic auth to a host that is not \
+             loopback: use https://, an SSH tunnel to 127.0.0.1, or set allow_insecure_rpc = true",
+            redact_url(&rpc_url)
         )
         .into());
     }
@@ -410,6 +440,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         takeover_blocks: c.takeover_blocks.unwrap_or(DEFAULT_TAKEOVER_BLOCKS).max(1),
         min_confirmations: c.min_confirmations.unwrap_or(1).max(1),
         refee_after_blocks: c.refee_after_blocks.unwrap_or(DEFAULT_REFEE_AFTER_BLOCKS).max(1),
+        max_sends: c.max_sends.unwrap_or(DEFAULT_MAX_SENDS).max(1),
         republish_blocks: c.republish_blocks.unwrap_or(DEFAULT_REPUBLISH_BLOCKS).max(1),
         price_tolerance_blocks: c.price_tolerance_blocks.unwrap_or(DEFAULT_PRICE_TOLERANCE_BLOCKS),
         state_file: c.state_file.as_deref().filter(|p| !p.is_empty()).map(expand_user),
@@ -418,18 +449,25 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         gossip_burst: c.gossip_burst.unwrap_or(DEFAULT_GOSSIP_BURST).max(1),
         gossip_refill_seconds: c.gossip_refill_seconds.unwrap_or(DEFAULT_GOSSIP_REFILL_SECONDS).max(1),
     };
+    if cancel.takeover_blocks > MAX_TAKEOVER_BLOCKS {
+        return Err(format!(
+            "[cancel]: takeover_blocks must be at most {MAX_TAKEOVER_BLOCKS} (the last of 15 ranks must still drive inside CLAIM_DELAY)"
+        )
+        .into());
+    }
     if cancel.margin_bps > 100_000 {
         return Err("[cancel]: margin_bps must be at most 100000".to_string().into());
     }
     let allow_insecure_broadcast = c.allow_insecure_broadcast.unwrap_or(false);
     for u in &cancel.broadcast_rpc {
         if !(u.starts_with("http://") || u.starts_with("https://")) {
-            return Err(format!("[cancel] broadcast_rpc: {u:?} is not an http(s) URL").into());
+            return Err(format!("[cancel] broadcast_rpc: {:?} is not an http(s) URL", redact_url(u)).into());
         }
         if u.starts_with("http://") && u.contains('@') && !is_loopback_url(u) && !allow_insecure_broadcast {
             return Err(format!(
-                "[cancel] broadcast_rpc: {u:?} would send credentials as cleartext to a host that is not loopback \
-                 (use https://, a tunnel, or allow_insecure_broadcast = true)"
+                "[cancel] broadcast_rpc: {:?} would send credentials as cleartext to a host that is not loopback \
+                 (use https://, a tunnel, or allow_insecure_broadcast = true)",
+                redact_url(u)
             )
             .into());
         }
@@ -578,6 +616,26 @@ endpoints = ["https://attestor.example/att"]
         std::fs::write(&p, "[node]\nrpc_url = \"http://127.0.0.1:1\"\nrpc_cookie = \"/x\"\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load(&p, false).is_ok());
+    }
+
+    #[test]
+    fn errors_never_print_a_password() {
+        assert_eq!(
+            redact_url("http://u:s3cret@node.example:8832/x"),
+            "http://u:***@node.example:8832/x"
+        );
+        assert_eq!(redact_url("https://h:1"), "https://h:1");
+        let e = parse("[node]\nrpc_url = \"http://u:s3cret@node.example:8832\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!e.contains("s3cret"), "{e}");
+        let e =
+            parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\nbroadcast_rpc = [\"http://u:s3cret@peer.example:9\"]\n")
+                .unwrap_err()
+                .to_string();
+        assert!(!e.contains("s3cret"), "{e}");
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 37\n").is_err());
+        assert!(parse("[node]\nrpc_url = \"http://h:1\"\n[cancel]\ntakeover_blocks = 36\n").is_ok());
     }
 
     #[test]

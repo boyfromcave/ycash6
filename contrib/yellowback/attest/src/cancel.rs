@@ -3,32 +3,35 @@
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 //! The cancel-limit design's safety brake, automated (CAN-2 + C4b; owner 2026-10-13: automated before release).
-//! Three parts, run inside `attest` once per poll:
+//! Three parts, run inside `attest`:
 //!
-//! 1. **Watcher.** Every confirmed YED claim (`yed_listvaults CLAIMING`: the index holds confirmed state only) is
-//!    judged at the claim's refHeight with this agent's own price: the price this seq signed for that height, else
-//!    the last aggregate it computed at or before that height, else its aggregate now while the refHeight is recent. A claim is
-//!    **wrong-price** when the vault was not claimable at that price with `margin_bps` to spare
-//!    ([`cosig::is_wrong_price`]). A wrong-price claim raises an alert and, with `auto_cosign`, is co-signed
-//!    (`yed_signcancelcosign`: the node's equivocation guard locks the statement to the price this key signed for
-//!    that height) and the co-signature is published on the cancel topic.
-//! 2. **Gossip.** Frames on the cancel topic ([`cosig::Frame`], 115 bytes, nothing else) pass a digest dedup and a
-//!    global token bucket, wait (bounded) until this node knows the claim, are verified locally -- the key the entry
-//!    recovers to over the message rebuilt from this node's view must be `seq`'s current member key, the refHeight
-//!    the claim's, the stated price one at which the vault was not claimable -- and then pass a per-seq bucket.
-//! 3. **Collector.** For a wrong-price claim one member drives: the rota is the current members in seq order,
-//!    rotated by the intent's hash; the member of rank r takes over r x `takeover_blocks` blocks after the claim
-//!    confirmed. The driver waits for `cancelsRequired` (`yed_getvault`) valid co-signatures plus `spares` (at most
-//!    `spare_wait_blocks` for the spares), calls `yed_buildcancel` (an entry the node refuses is dropped and the call
-//!    retried), `set_signcancel`, `vault_send`, pushes the carrier and the cancel to `broadcast_rpc`, re-pushes a
-//!    cancel that lingers, and rebuilds one that left the mempool (`vault_refee`, then `yed_buildcancel` re-attaches
-//!    the carrier with the co-signatures valid now). Everything is persisted (`state_file`), so a restart resumes.
+//! 1. **Watcher** (once per poll). Every confirmed YED claim (`yed_listvaults CLAIMING`: the index holds confirmed
+//!    state only) is judged at the claim's refHeight with this agent's own price there: a price this key is on
+//!    record for at that height (the state's signed prices, the claim's own bundle, the node's pool, the node's
+//!    equivocation guard), else the last aggregate it computed at or before that height. A claim is **wrong-price**
+//!    when the vault was not claimable at that price with `margin_bps` to spare ([`cosig::is_wrong_price`]). A
+//!    wrong-price claim raises an alert and, with `auto_cosign`, is co-signed (`yed_signcancelcosign`) and the
+//!    co-signature published on the cancel topic. A price is stated anew for a height only when this agent's record
+//!    covers that height (review M-2); with no price at all the claim is Unjudged and alerted, never guessed from a
+//!    later aggregate (review L-6). Reorgs: a claim whose block leaves the chain is held (never closed), a claim back
+//!    in CLAIMING is reopened, and a reorg across the refHeight resets the claim and re-signs (review H-1, H-2).
+//! 2. **Gossip** (continuously, between polls). A frame ([`cosig::Frame`], 115 bytes) passes a digest dedup, then
+//!    the cheap checks (current member seq, a claim this node knows, its refHeight, a price at which the vault was
+//!    not claimable), then a token bucket of the peer that delivered it, then signature recovery against that seq's
+//!    member key, then a per-seq bucket. A flood from one peer spends only that peer's bucket (review H-3).
+//! 3. **Collector** (once per poll). One member drives each claim: the rota is the current members in seq order,
+//!    rotated by the intent's hash; rank r takes over r x `takeover_blocks` after the claim confirmed (shrunk to fit
+//!    CLAIM_DELAY). The driver waits for `cancelsRequired` valid co-signatures plus `spares`, calls
+//!    `yed_buildcancel`, `set_signcancel`, `vault_send`, pushes the carrier and the cancel to `broadcast_rpc`,
+//!    re-pushes a lingering cancel, and rebuilds one that left the mempool with exponential backoff, at most
+//!    `max_sends` times (review M-3). Everything is persisted (`state_file`), so a restart resumes.
 //!
 //! The decisions are pure functions ([`honest_price`], [`judge`], [`rank`], [`decide`], [`GossipFilter`]) for the
 //! unit tests; [`CancelAgent`] performs the RPCs.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -40,16 +43,30 @@ use crate::cosig::{self, Entry, Frame};
 use crate::rpc::{Node, RpcError};
 
 pub const STATE_VERSION: u32 = 1;
-/// Frames waiting for a claim this node does not know yet (gossip can outrun a block by a few seconds).
+/// Frames waiting for a claim this node does not know yet (gossip can outrun a block by a few seconds) ...
 pub const PENDING_MAX: usize = 256;
+/// ... of which one delivering peer may hold this many.
+pub const PENDING_PER_PEER: usize = 32;
 pub const PENDING_TTL: Duration = Duration::from_secs(600);
 pub const DEDUP_CAPACITY: usize = 4096;
+/// The per-peer bucket in front of signature recovery (~100 µs each): a burst and a steady rate per second. A peer
+/// beyond it is dropped; the other peers are not affected.
+pub const PEER_BURST: f64 = 512.0;
+pub const PEER_RATE: f64 = 200.0;
+/// Peers remembered for their buckets (the least recently seen are forgotten beyond this).
+pub const PEERS_MAX: usize = 4096;
 /// Price history kept (blocks): far more than CLAIM_DELAY.
 pub const PRICE_HISTORY: u32 = 4096;
-/// A closed claim is forgotten this many blocks after its release height.
+/// A closed claim is forgotten this many blocks after its release height; a claim whose block left the chain and
+/// never came back is closed as "orphaned" this long after its release height.
 pub const CLOSED_KEEP: u32 = 1152;
 /// `yed_buildcancel` retries in one tick when the node refuses an entry.
 pub const BUILD_ATTEMPTS: usize = 8;
+/// `alert_command` children at once, and how long one may run before it is killed.
+pub const ALERTS_INFLIGHT_MAX: usize = 4;
+pub const ALERT_TIMEOUT: Duration = Duration::from_secs(30);
+
+static ALERTS_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------------------------------------- state
 
@@ -61,7 +78,7 @@ pub enum Verdict {
     Wrong,
     /// Claimable at this agent's honest price: leave it.
     Honest,
-    /// No price of this agent's near the refHeight: no co-signature; driven only on others' co-signatures.
+    /// No price of this agent's at the refHeight: no co-signature; driven only on others' co-signatures.
     Unjudged,
 }
 
@@ -77,7 +94,8 @@ pub enum Phase {
         cosigners: Vec<u16>,
         last_push: u32,
     },
-    /// The claim is gone from CLAIMING: "cancelled" or "released", or "expired" (past its release height).
+    /// The claim's intent was spent in a confirmed block: "cancelled" or "released"; or "orphaned" (its block left
+    /// the chain and it never came back).
     Closed {
         outcome: String,
         height: u32,
@@ -89,10 +107,16 @@ pub struct Claim {
     /// The CLAIMING vault's outpoint ("txid:n"), the record `yed_getvault` reads.
     pub vault: String,
     pub confirm_height: u32,
+    /// The hash of the block the claim confirmed in (display hex): a reorg is seen when it changes.
+    #[serde(default)]
+    pub confirm_hash: Option<String>,
     pub release_height: u32,
     pub ref_height: Option<u32>,
     /// blockHash(refHeight), display hex.
     pub block_hash: Option<String>,
+    /// The price this seq attested at the refHeight inside the claim's own bundle, if it did (review M-2).
+    #[serde(default)]
+    pub bundle_price: Option<i64>,
     pub collateral_zat: i64,
     pub minted_cents: i64,
     /// `cancelsRequired` as last read (a cancel confirming in the next block).
@@ -100,17 +124,41 @@ pub struct Claim {
     pub verdict: Verdict,
     pub judged_price: Option<i64>,
     pub own_cosig: Option<String>,
+    /// Why this agent will not co-sign this claim (a sticky refusal: the statement is claimable, an equivocation
+    /// guard, a price out of range, inside the margin, no record at the height). None: it may still co-sign.
+    #[serde(default)]
+    pub cosign_blocked: Option<String>,
     pub last_publish: Option<u32>,
     /// Verified co-signatures by seq (69-byte hex), this agent's own included.
     pub cosigs: BTreeMap<u16, String>,
-    /// Seqs whose entry the node refused (yed_buildcancel), or that stopped being current.
+    /// Seqs whose entry the node refused or dropped for a reason that does not change (malformed, claimable,
+    /// out of range). Membership is not recorded here: it is checked against the current view every time.
     pub rejected: BTreeSet<u16>,
     /// The first height at which `required` valid co-signatures were in hand (spares wait from here).
     pub enough_since: Option<u32>,
     pub phase: Phase,
     pub sends: u32,
+    /// No rebuild before this height (exponential backoff, review M-3).
+    #[serde(default)]
+    pub next_rebuild: u32,
+    /// The claim's block left the chain: it is held open but not driven until it is back in CLAIMING.
+    #[serde(default)]
+    pub orphaned: bool,
+    /// Since when a transaction that is not this agent's spends the intent in the mempool.
+    #[serde(default)]
+    pub foreign_spend_since: Option<u32>,
     /// Alert kinds already raised for this claim.
     pub alerted: BTreeSet<String>,
+}
+
+/// What a reset keeps aside: co-signatures stay valid when the claim comes back with the same refHeight and
+/// blockHash(refHeight) (the message they sign is unchanged), and are restored then.
+#[derive(Clone, Debug)]
+pub struct Prior {
+    pub ref_height: Option<u32>,
+    pub block_hash: Option<String>,
+    pub cosigs: BTreeMap<u16, String>,
+    pub own_cosig: Option<String>,
 }
 
 impl Claim {
@@ -118,34 +166,81 @@ impl Claim {
         Claim {
             vault,
             confirm_height,
+            confirm_hash: None,
             release_height,
             ref_height: None,
             block_hash: None,
+            bundle_price: None,
             collateral_zat: 0,
             minted_cents: 0,
             required: 1,
             verdict: Verdict::Pending,
             judged_price: None,
             own_cosig: None,
+            cosign_blocked: None,
             last_publish: None,
             cosigs: BTreeMap::new(),
             rejected: BTreeSet::new(),
             enough_since: None,
             phase: Phase::Watching,
             sends: 0,
+            next_rebuild: 0,
+            orphaned: false,
+            foreign_spend_since: None,
             alerted: BTreeSet::new(),
         }
     }
 
-    /// The co-signatures a cancel would carry: valid (not refused) ones, this agent's first, then by seq; at most
-    /// `CANCEL_COSIGN_MAX`.
-    pub fn usable(&self, me: u16) -> Vec<(u16, String)> {
+    /// A reorg (review H-1, H-2): forget everything derived from the chain -- the confirmation, the refHeight and
+    /// its hash, the verdict, the co-signatures, the sent cancel -- and judge the claim again. Returns what was set
+    /// aside (see [`Prior`]).
+    pub fn reset(&mut self, confirm_height: u32, release_height: u32) -> Prior {
+        let prior = Prior {
+            ref_height: self.ref_height,
+            block_hash: self.block_hash.clone(),
+            cosigs: std::mem::take(&mut self.cosigs),
+            own_cosig: self.own_cosig.take(),
+        };
+        self.confirm_height = confirm_height;
+        self.confirm_hash = None;
+        self.release_height = release_height;
+        self.ref_height = None;
+        self.block_hash = None;
+        self.bundle_price = None;
+        self.verdict = Verdict::Pending;
+        self.judged_price = None;
+        self.cosign_blocked = None;
+        self.last_publish = None;
+        self.rejected.clear();
+        self.enough_since = None;
+        self.phase = Phase::Watching;
+        self.sends = 0;
+        self.next_rebuild = 0;
+        self.orphaned = false;
+        self.foreign_spend_since = None;
+        for k in [
+            "honest",
+            "wrong-price",
+            "unjudged",
+            "cosign-refused",
+            "cosign-within-margin",
+            "no-record",
+        ] {
+            self.alerted.remove(k);
+        }
+        prior
+    }
+
+    /// The co-signatures a cancel would carry: those of current `members` the node did not refuse, this agent's
+    /// first, then by seq; at most `CANCEL_COSIGN_MAX`.
+    pub fn usable(&self, me: u16, members: &BTreeMap<u16, [u8; 33]>) -> Vec<(u16, String)> {
+        let ok = |s: &u16| members.contains_key(s) && !self.rejected.contains(s);
         let mut out: Vec<(u16, String)> = Vec::new();
-        if let Some(own) = self.cosigs.get(&me).filter(|_| !self.rejected.contains(&me)) {
+        if let Some(own) = self.cosigs.get(&me).filter(|_| ok(&me)) {
             out.push((me, own.clone()));
         }
         for (s, h) in &self.cosigs {
-            if *s != me && !self.rejected.contains(s) {
+            if *s != me && ok(s) {
                 out.push((*s, h.clone()));
             }
         }
@@ -167,6 +262,10 @@ pub struct State {
     pub prices: BTreeMap<u32, i64>,
     /// citedHeight -> the price this seq signed (its published attestations).
     pub signed: BTreeMap<u32, i64>,
+    /// The tip when this state file began recording `signed`: for a height above it, a missing `signed` entry means
+    /// this agent did not attest there (review M-2); at or below it the state cannot say.
+    #[serde(default)]
+    pub recording_since: Option<u32>,
 }
 
 impl State {
@@ -184,8 +283,9 @@ impl State {
                     State::fresh()
                 }
                 Err(e) => {
-                    // Starting afresh is safe: co-signing again is idempotent (the node's guard), and so is building
-                    // the cancel again (yed_buildcancel's sign-once build memo).
+                    // Starting afresh is safe: co-signing again goes through the node's guard (the price this key
+                    // signed there), a price is stated only for heights the new record covers, and building again
+                    // returns the same cancel (the sign-once build memo).
                     tracing::error!(
                         "cancel state {} is unreadable ({e}); starting afresh (kept as .corrupt)",
                         path.display()
@@ -209,24 +309,35 @@ impl State {
         }
     }
 
-    /// Written through a temporary file and one rename (mode 0600), so a crash leaves the old or the new file.
+    /// Written through a new temporary file (O_EXCL, mode 0600) and one rename, so a crash leaves the old or the
+    /// new file and the temporary name is never one somebody else created.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        {
+        let open = || {
             let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
             }
-            let mut f = opts.open(&tmp)?;
-            std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(self)?)?;
-            f.sync_all()?;
-        }
+            opts.open(&tmp)
+        };
+        let mut f = match open() {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // a leftover of this process (a failed write): remove it and create it afresh
+                std::fs::remove_file(&tmp)?;
+                open()?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(self)?)?;
+        f.sync_all()?;
+        drop(f);
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -252,29 +363,16 @@ impl State {
 
 // ---------------------------------------------------------------------------------------------- pure decisions
 
-/// This agent's honest price at `ref_height`: what it signed for that height (the node's guard holds the same), else
-/// the last aggregate it computed while the tip was at or below the refHeight (within `tolerance`): what it knew at
-/// that height, never a later move (blocks can arrive in bursts between polls, and the price can change right after
-/// a claim). Only when it recorded none there, the first aggregate after the refHeight within `tolerance`, else
-/// `current` when the refHeight is within `tolerance` of the tip. None: this agent cannot judge the claim.
-pub fn honest_price(state: &State, ref_height: u32, tip: u32, tolerance: u32, current: Option<i64>) -> Option<i64> {
+/// This agent's aggregate at `ref_height`: what it signed for that height, else the last aggregate it recorded
+/// while the tip was at or below that height (within `tolerance`) -- what it knew there, never a later move. None:
+/// it has no price of its own there (it was not running, or its feed was down), and the claim is not judged on a
+/// guess (review L-6).
+pub fn honest_price(state: &State, ref_height: u32, tolerance: u32) -> Option<i64> {
     if let Some(p) = state.signed.get(&ref_height) {
         return Some(*p);
     }
     let lo = ref_height.saturating_sub(tolerance);
-    let hi = ref_height.saturating_add(tolerance);
-    if let Some((_, p)) = state.prices.range(lo..=ref_height).next_back() {
-        return Some(*p);
-    }
-    if hi > ref_height {
-        if let Some((_, p)) = state.prices.range(ref_height + 1..=hi).next() {
-            return Some(*p);
-        }
-    }
-    if tip.abs_diff(ref_height) <= tolerance {
-        return current;
-    }
-    None
+    state.prices.range(lo..=ref_height).next_back().map(|(_, p)| *p)
 }
 
 /// The watcher's verdict on a claim at `price` (None: unjudged).
@@ -301,6 +399,17 @@ pub fn rank(members: &[u16], me: u16, txid: &[u8; 32], n: u32) -> Option<u32> {
     Some(((idx + m.len() - offset) % m.len()) as u32)
 }
 
+/// `takeover_blocks` shrunk so the last of `members` ranks still drives inside CLAIM_DELAY with the spare wait and
+/// a block of slack: `(claimDelay − spare_wait − 2) / (members − 1)`, at least 1 (review L-4).
+pub fn effective_takeover(configured: u32, claim_delay: Option<u32>, spare_wait: u32, members: usize) -> u32 {
+    let Some(delay) = claim_delay else {
+        return configured.max(1);
+    };
+    let ranks = (members.max(2) - 1) as u32;
+    let room = delay.saturating_sub(spare_wait).saturating_sub(2) / ranks;
+    configured.min(room).max(1)
+}
+
 /// What the collector should do with one claim this tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -311,9 +420,11 @@ pub enum Decision {
     Rebroadcast,
     /// Our cancel left the mempool unconfirmed: re-fund it and rebuild it with the co-signatures valid now.
     Rebuild,
+    /// Our cancel left the mempool and `max_sends` are spent: alert, do nothing more.
+    SendCap,
 }
 
-pub struct DecideCtx {
+pub struct DecideCtx<'a> {
     pub height: u32,
     pub me: u16,
     pub rank: Option<u32>,
@@ -322,6 +433,8 @@ pub struct DecideCtx {
     pub spares: u32,
     pub spare_wait_blocks: u32,
     pub refee_after_blocks: u32,
+    pub max_sends: u32,
+    pub members: &'a BTreeMap<u16, [u8; 33]>,
     /// The claimant intent is spent in the mempool (a cancel or a release is pending).
     pub intent_spent_in_mempool: bool,
     /// Our sent cancel is in the node's mempool.
@@ -331,6 +444,9 @@ pub struct DecideCtx {
 pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
     if c.is_closed() {
         return Decision::Idle("closed");
+    }
+    if c.orphaned {
+        return Decision::Idle("the claim's block left the chain");
     }
     if x.height >= c.release_height {
         return Decision::Idle("past the release height");
@@ -346,8 +462,9 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
     let Some(rank) = x.rank else {
         return Decision::Idle("not a current member");
     };
-    let usable = c.usable(x.me).len() as u32;
-    if c.verdict == Verdict::Unjudged && usable < c.required {
+    let usable = c.usable(x.me, x.members);
+    let n = usable.len() as u32;
+    if c.verdict == Verdict::Unjudged && n < c.required {
         return Decision::Idle("unjudged and short of co-signatures");
     }
     match &c.phase {
@@ -361,7 +478,11 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
                 }
             } else if x.intent_spent_in_mempool {
                 Decision::Idle("another cancel is in the mempool")
-            } else if usable >= c.required {
+            } else if c.sends >= x.max_sends {
+                Decision::SendCap
+            } else if x.height < c.next_rebuild {
+                Decision::Idle("rebuild backoff")
+            } else if n >= c.required {
                 Decision::Rebuild
             } else {
                 Decision::Idle("sent cancel gone; short of co-signatures to rebuild")
@@ -375,19 +496,48 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
             if x.intent_spent_in_mempool {
                 return Decision::Idle("another cancel is in the mempool");
             }
-            if usable < c.required {
+            if n < c.required {
                 return Decision::Idle("short of co-signatures");
             }
-            let full = usable >= c.required.saturating_add(x.spares) || usable as usize >= cosig::CANCEL_COSIGN_MAX;
+            let full = n >= c.required.saturating_add(x.spares) || n as usize >= cosig::CANCEL_COSIGN_MAX;
             let waited = c
                 .enough_since
                 .is_some_and(|h| x.height >= h.saturating_add(x.spare_wait_blocks));
             if full || waited {
-                Decision::Build(c.usable(x.me).into_iter().map(|(s, _)| s).collect())
+                Decision::Build(usable.into_iter().map(|(s, _)| s).collect())
             } else {
                 Decision::Idle("waiting for spare co-signatures")
             }
         }
+    }
+}
+
+/// How a `yed_signcancelcosign` refusal is treated (review M-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignErr {
+    /// The key signed no price for the height: one must be stated.
+    PriceRequired,
+    /// The key's price for the height says the vault was claimable: the claim is honest by this key's own record.
+    Claimable(String),
+    /// Will not change by retrying: a second price for one height (equivocation guard), a price out of range.
+    Sticky(String),
+    /// Anything else (a timeout, a locked wallet, the index behind the chain, a height not indexed, a claim not yet
+    /// confirmed, a member not yet mature): retried at the next poll.
+    Transient(String),
+}
+
+pub fn classify_sign_error(e: &RpcError) -> SignErr {
+    match e {
+        RpcError::Node { message, .. } if message.starts_with("price-required") => SignErr::PriceRequired,
+        RpcError::Node { message, .. } if message.starts_with("cancel-statement-claimable") => {
+            SignErr::Claimable(message.clone())
+        }
+        RpcError::Node { message, .. }
+            if message.starts_with("equivocation-guard") || message.starts_with("attest-range") =>
+        {
+            SignErr::Sticky(message.clone())
+        }
+        other => SignErr::Transient(other.to_string()),
     }
 }
 
@@ -398,7 +548,8 @@ pub fn decide(c: &Claim, x: &DecideCtx) -> Decision {
 pub enum Drop {
     Malformed(String),
     Duplicate,
-    GlobalRate,
+    /// The delivering peer is over its bucket.
+    PeerRate,
     /// The claim is unknown to this node (yet): the frame waits in the pending queue.
     UnknownClaim,
     NotMember(u16),
@@ -415,9 +566,9 @@ struct Bucket {
     last: Instant,
 }
 
-fn take(b: &mut Bucket, burst: f64, refill: f64, now: Instant) -> bool {
+fn take(b: &mut Bucket, burst: f64, per_second: f64, now: Instant) -> bool {
     let elapsed = now.saturating_duration_since(b.last).as_secs_f64();
-    b.tokens = (b.tokens + elapsed / refill).min(burst);
+    b.tokens = (b.tokens + elapsed * per_second).min(burst);
     b.last = now;
     if b.tokens >= 1.0 {
         b.tokens -= 1.0;
@@ -432,34 +583,30 @@ fn take(b: &mut Bucket, burst: f64, refill: f64, now: Instant) -> bool {
 pub struct MemberView {
     pub set_id: [u8; 32],
     pub theta_bps: u32,
-    /// Current members: seq -> compressed key (the newest record of each key).
+    /// Current members: seq -> compressed key (the newest record of each key, current in the primitive's sense).
     pub members: BTreeMap<u16, [u8; 33]>,
 }
 
-/// The cancel topic's receive filter: dedup, a global bucket before any work, local verification, then a per-seq
-/// bucket that only authenticated frames can drain (a forged `seq` never starves the real member).
+/// The cancel topic's receive filter. Order: size, magic and dedup ([`GossipFilter::screen`]); the cheap checks
+/// ([`GossipFilter::cheap`]); the delivering peer's bucket ([`GossipFilter::peer_ok`]); signature recovery and the
+/// authenticated per-seq bucket ([`GossipFilter::verify`]).
 pub struct GossipFilter {
-    burst: f64,
-    refill: f64,
-    global: Bucket,
+    seq_burst: f64,
+    seq_per_second: f64,
+    peers: HashMap<String, Bucket>,
     seqs: HashMap<u16, Bucket>,
-    seen: HashSet<[u8; 32]>,
+    seen: std::collections::HashSet<[u8; 32]>,
     order: VecDeque<[u8; 32]>,
 }
 
 impl GossipFilter {
-    pub fn new(burst: u32, refill_seconds: u64, now: Instant) -> Self {
-        let burst = burst.max(1) as f64;
+    pub fn new(seq_burst: u32, seq_refill_seconds: u64) -> Self {
         GossipFilter {
-            burst,
-            refill: refill_seconds.max(1) as f64,
-            // the global bucket admits 16 seqs' worth of burst, refilled 16 times as fast
-            global: Bucket {
-                tokens: burst * 16.0,
-                last: now,
-            },
+            seq_burst: seq_burst.max(1) as f64,
+            seq_per_second: 1.0 / seq_refill_seconds.max(1) as f64,
+            peers: HashMap::new(),
             seqs: HashMap::new(),
-            seen: HashSet::new(),
+            seen: Default::default(),
             order: VecDeque::new(),
         }
     }
@@ -475,34 +622,35 @@ impl GossipFilter {
         }
     }
 
-    /// Stateless checks and the global bucket: size, magic, dedup.
-    pub fn screen(&mut self, bytes: &[u8], now: Instant) -> Result<Frame, Drop> {
+    /// Forget every frame seen (a reorg reset a claim: its republished co-signatures must be taken again).
+    pub fn forget_seen(&mut self) {
+        self.seen.clear();
+        self.order.clear();
+    }
+
+    /// Size, magic, dedup. No shared limit is spent here.
+    pub fn screen(&mut self, bytes: &[u8]) -> Result<Frame, Drop> {
         let frame = Frame::decode(bytes).map_err(|e| Drop::Malformed(e.to_string()))?;
         let d: [u8; 32] = Sha256::digest(bytes).into();
         if self.seen.contains(&d) {
             return Err(Drop::Duplicate);
         }
-        let (burst, refill) = (self.burst * 16.0, self.refill / 16.0);
-        if !take(&mut self.global, burst, refill, now) {
-            return Err(Drop::GlobalRate);
-        }
         Ok(frame)
     }
 
-    /// Verify `frame` against `claim` and the member view; on success the frame is remembered and the per-seq
-    /// bucket charged.
-    pub fn verify(&mut self, frame: &Frame, claim: &Claim, view: &MemberView, now: Instant) -> Result<(), Drop> {
+    /// The checks that cost no signature: a current member's seq, the claim's refHeight, a price at which the vault
+    /// was not claimable.
+    pub fn cheap(frame: &Frame, claim: &Claim, view: &MemberView) -> Result<(), Drop> {
         let seq = frame.seq;
-        let Some(key) = view.members.get(&seq) else {
+        if !view.members.contains_key(&seq) {
             return Err(Drop::NotMember(seq));
-        };
-        let (Some(r), Some(bh)) = (claim.ref_height, claim.block_hash.as_deref()) else {
+        }
+        let (Some(r), Some(_)) = (claim.ref_height, claim.block_hash.as_deref()) else {
             return Err(Drop::UnknownClaim);
         };
         if frame.ref_height != r {
             return Err(Drop::WrongRefHeight(seq));
         }
-        let bh = cosig::internal_from_display(bh).ok_or(Drop::UnknownClaim)?;
         if (frame.entry.price as i64) < 100
             || cosig::is_underwater(
                 claim.collateral_zat,
@@ -513,22 +661,49 @@ impl GossipFilter {
         {
             return Err(Drop::Claimable(seq));
         }
+        Ok(())
+    }
+
+    /// The delivering peer's bucket (PEER_BURST, PEER_RATE per second): spent only by frames that passed the cheap
+    /// checks, so it bounds the signature work one peer can cause and nothing else.
+    pub fn peer_ok(&mut self, peer: &str, now: Instant) -> bool {
+        if !self.peers.contains_key(peer) && self.peers.len() >= PEERS_MAX {
+            if let Some(oldest) = self.peers.iter().min_by_key(|(_, b)| b.last).map(|(k, _)| k.clone()) {
+                self.peers.remove(&oldest);
+            }
+        }
+        let b = self.peers.entry(peer.to_string()).or_insert(Bucket {
+            tokens: PEER_BURST,
+            last: now,
+        });
+        take(b, PEER_BURST, PEER_RATE, now)
+    }
+
+    /// Signature recovery against the seq's member key, then the authenticated per-seq bucket. The frame is
+    /// remembered (dedup) once its signature was checked, whatever the outcome.
+    pub fn verify(&mut self, frame: &Frame, claim: &Claim, view: &MemberView, now: Instant) -> Result<(), Drop> {
+        let seq = frame.seq;
+        let key = view.members.get(&seq).ok_or(Drop::NotMember(seq))?;
+        let (Some(r), Some(bh)) = (claim.ref_height, claim.block_hash.as_deref()) else {
+            return Err(Drop::UnknownClaim);
+        };
+        let bh = cosig::internal_from_display(bh).ok_or(Drop::UnknownClaim)?;
         let msg = cosig::message(&view.set_id, &frame.txid, frame.n, r, frame.entry.price, &bh);
+        let digest: [u8; 32] = Sha256::digest(frame.encode()).into();
+        self.remember(digest);
         if cosig::recover(&msg, &frame.entry.sig).as_ref() != Some(key) {
             return Err(Drop::BadSignature(seq));
         }
         if claim.cosigs.get(&seq) == Some(&frame.entry.to_hex()) {
-            self.remember(Sha256::digest(frame.encode()).into());
             return Err(Drop::AlreadyHeld(seq));
         }
         let b = self.seqs.entry(seq).or_insert(Bucket {
-            tokens: self.burst,
+            tokens: self.seq_burst,
             last: now,
         });
-        if !take(b, self.burst, self.refill, now) {
+        if !take(b, self.seq_burst, self.seq_per_second, now) {
             return Err(Drop::SeqRate(seq));
         }
-        self.remember(Sha256::digest(frame.encode()).into());
         Ok(())
     }
 }
@@ -536,8 +711,9 @@ impl GossipFilter {
 // ------------------------------------------------------------------------------------------------------- agent
 
 /// The `yed_listattestors` rows → the current members (status ELIGIBLE or DORMANT, bond unspent and unfrozen; the
-/// newest record of each key).
-pub fn current_members(rows: &Value) -> BTreeMap<u16, [u8; 33]> {
+/// newest record of each key). `current_keys`, when the node gave it (`set_getinfo`'s memberlist), is the primitive's
+/// own IsCurrent (maturity included, review L-1); a key not in it is not current.
+pub fn current_members(rows: &Value, current_keys: Option<&BTreeSet<[u8; 33]>>) -> BTreeMap<u16, [u8; 33]> {
     let mut newest: HashMap<[u8; 33], u16> = HashMap::new();
     let mut current: BTreeMap<u16, [u8; 33]> = BTreeMap::new();
     for r in rows.as_array().map(Vec::as_slice).unwrap_or(&[]) {
@@ -557,12 +733,26 @@ pub fn current_members(rows: &Value) -> BTreeMap<u16, [u8; 33]> {
         let status = r.get("status").and_then(Value::as_str).unwrap_or("");
         let spent = r.get("bondSpentHeight").is_some_and(|v| !v.is_null());
         let frozen = r.get("bondFrozen").and_then(Value::as_bool).unwrap_or(false);
-        if (status == "ELIGIBLE" || status == "DORMANT") && !spent && !frozen {
+        let mature = current_keys.is_none_or(|k| k.contains(&key));
+        if (status == "ELIGIBLE" || status == "DORMANT") && !spent && !frozen && mature {
             current.insert(seq, key);
         }
     }
     current.retain(|seq, key| newest.get(key) == Some(seq));
     current
+}
+
+/// `set_getinfo`'s memberlist → the keys the primitive calls current at the next block.
+pub fn current_keys(set: &Value) -> Option<BTreeSet<[u8; 33]>> {
+    let list = set.get("memberlist")?.as_array()?;
+    Some(
+        list.iter()
+            .filter(|m| m.get("current").and_then(Value::as_bool) == Some(true))
+            .filter_map(|m| m.get("key").and_then(Value::as_str))
+            .filter_map(|h| hex::decode(h).ok())
+            .filter_map(|b| <[u8; 33]>::try_from(b.as_slice()).ok())
+            .collect(),
+    )
 }
 
 /// `cosigs[i]` in a `yed_buildcancel` refusal.
@@ -572,22 +762,35 @@ pub fn refused_index(message: &str) -> Option<usize> {
     message[start..end].parse().ok()
 }
 
-/// Every `cosigs[i] dropped` a `yed_buildcancel` names (its `warnings`, or the reasons appended to
-/// `cancel-cosign-needed`): the indexes of the entries it would not count.
-pub fn dropped_indexes(text: &str) -> Vec<usize> {
-    let mut out = Vec::new();
+/// Every `cosigs[i] dropped: <identifier>` a `yed_buildcancel` names (its `warnings`, or the reasons appended to
+/// `cancel-cosign-needed`), with the identifier.
+pub fn dropped_entries(text: &str) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
     let mut rest = text;
     while let Some(i) = rest.find("cosigs[") {
         let tail = &rest[i..];
         if let Some(idx) = refused_index(tail) {
-            let after = &tail[tail.find(']').map_or(0, |e| e + 1)..];
-            if after.trim_start().starts_with("dropped") && !out.contains(&idx) {
-                out.push(idx);
+            let after = tail[tail.find(']').map_or(0, |e| e + 1)..].trim_start();
+            if let Some(reason) = after.strip_prefix("dropped") {
+                let reason = reason.trim_start_matches([':', ' ']);
+                let id: String = reason
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                if !out.iter().any(|(j, _)| *j == idx) {
+                    out.push((idx, id));
+                }
             }
         }
         rest = &rest[i + 7..];
     }
     out
+}
+
+/// A dropped or refused entry that will never count for this claim (as opposed to one whose signer is not current
+/// now and may be later: membership is checked against the live view instead).
+pub fn permanent_refusal(identifier: &str) -> bool {
+    !identifier.starts_with("cancel-cosign-not-member")
 }
 
 pub struct CancelAgent {
@@ -597,10 +800,15 @@ pub struct CancelAgent {
     pub state: State,
     pub path: PathBuf,
     pub filter: GossipFilter,
-    pending: VecDeque<(Frame, Instant)>,
+    /// Frames for claims this node does not know yet, with their delivering peer.
+    pending: VecDeque<(Frame, Instant, String)>,
     pub view: MemberView,
+    /// The node's CLAIM_DELAY (yed_getinfo), for the takeover bound.
+    pub claim_delay: Option<u32>,
     peers: Vec<Node>,
     outbox: Vec<Vec<u8>>,
+    /// Co-signatures set aside by a reorg reset, restored when the refHeight and its hash come back unchanged.
+    priors: HashMap<String, Prior>,
     pub dirty: bool,
 }
 
@@ -632,7 +840,7 @@ impl CancelAgent {
             state.claims.len()
         );
         Ok(CancelAgent {
-            filter: GossipFilter::new(cfg.gossip_burst, cfg.gossip_refill_seconds, Instant::now()),
+            filter: GossipFilter::new(cfg.gossip_burst, cfg.gossip_refill_seconds),
             cfg,
             node,
             seq,
@@ -640,8 +848,10 @@ impl CancelAgent {
             path,
             pending: VecDeque::new(),
             view: MemberView::default(),
+            claim_delay: None,
             peers,
             outbox: Vec::new(),
+            priors: HashMap::new(),
             dirty: false,
         })
     }
@@ -687,16 +897,15 @@ impl CancelAgent {
         self.dirty = true;
         tracing::error!("ALERT {kind} {intent}: {message}");
         if let Some(cmd) = self.cfg.alert_command.clone() {
-            let (k, i) = (kind.to_string(), intent.to_string());
-            std::thread::spawn(move || {
-                if let Err(e) = std::process::Command::new(&cmd).arg(&k).arg(&i).arg(&message).status() {
-                    tracing::error!("alert_command {cmd}: {e}");
-                }
-            });
+            run_alert_command(cmd, kind.to_string(), intent.to_string(), message);
         }
     }
 
-    /// Refresh the set id, theta and the current members. False when the node cannot say.
+    fn member(&self) -> bool {
+        self.view.members.contains_key(&self.seq)
+    }
+
+    /// Refresh the set id, theta, CLAIM_DELAY and the current members. False when the node cannot say.
     pub async fn refresh_view(&mut self) -> bool {
         if self.view.theta_bps == 0 {
             match self.node.call("yed_getinfo", vec![]).await {
@@ -709,6 +918,12 @@ impl CancelAgent {
                     let theta = v
                         .get("params")
                         .and_then(|p| p.get("claimThresholdBps"))
+                        .and_then(Value::as_u64)
+                        .and_then(|t| u32::try_from(t).ok());
+                    self.claim_delay = v
+                        .get("params")
+                        .and_then(|p| p.get("claimDelay"))
+                        .or_else(|| v.get("upgrade").and_then(|u| u.get("claimDelay")))
                         .and_then(Value::as_u64)
                         .and_then(|t| u32::try_from(t).ok());
                     match (set, theta) {
@@ -728,16 +943,24 @@ impl CancelAgent {
                 }
             }
         }
-        match self.node.call("yed_listattestors", vec![]).await {
-            Ok(rows) => {
-                self.view.members = current_members(&rows);
-                true
-            }
+        let rows = match self.node.call("yed_listattestors", vec![]).await {
+            Ok(rows) => rows,
             Err(e) => {
                 tracing::error!("cancel: yed_listattestors failed: {e}");
-                false
+                return false;
             }
-        }
+        };
+        // the primitive's IsCurrent (maturity included) from the set's memberlist; without it, the records alone
+        let set_hex = cosig::display_of_internal(&self.view.set_id);
+        let keys = match self.node.call("set_getinfo", vec![json!(set_hex)]).await {
+            Ok(v) => current_keys(&v),
+            Err(e) => {
+                tracing::debug!("cancel: set_getinfo: {e}; membership from yed_listattestors alone");
+                None
+            }
+        };
+        self.view.members = current_members(&rows, keys.as_ref());
+        true
     }
 
     /// `yed_listvaults CLAIMING`, every page: the claimant intents with their vault rows.
@@ -776,18 +999,28 @@ impl CancelAgent {
         }
     }
 
-    /// The claim's refHeight (its REDEEM payload) and blockHash(refHeight). The claim is read from the block it
-    /// confirmed in (`getrawtransaction txid 0 blockhash`), which needs no -txindex on either node line.
-    async fn claim_ref(&self, intent: &str, confirm_height: u32) -> Result<(u32, String), String> {
+    async fn block_hash_at(&self, height: u32) -> Result<String, RpcError> {
+        Ok(self
+            .node
+            .call("getblockhash", vec![json!(height)])
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// The claim's refHeight (its REDEEM payload), blockHash(refHeight), and this seq's attestation at the
+    /// refHeight inside the claim's own bundle, if any. The claim is read from the block it confirmed in
+    /// (`getrawtransaction txid 0 blockhash`), which needs no -txindex on either node line.
+    async fn claim_ref(&self, intent: &str, confirm_height: u32) -> Result<(u32, String, Option<i64>), String> {
         let txid = intent.split(':').next().unwrap_or("");
         let in_block = self
-            .node
-            .call("getblockhash", vec![json!(confirm_height)])
+            .block_hash_at(confirm_height)
             .await
             .map_err(|e| format!("getblockhash {confirm_height}: {e}"))?;
         let raw = self
             .node
-            .call("getrawtransaction", vec![json!(txid), json!(0), in_block])
+            .call("getrawtransaction", vec![json!(txid), json!(0), json!(in_block)])
             .await
             .map_err(|e| format!("getrawtransaction {txid}: {e}"))?;
         let hex_str = raw.as_str().ok_or("getrawtransaction returned no hex")?;
@@ -801,22 +1034,69 @@ impl CancelAgent {
             .and_then(Value::as_u64)
             .and_then(|r| u32::try_from(r).ok())
             .ok_or("the claim carries no refHeight")?;
+        let own = dec
+            .get("bundle")
+            .and_then(|b| b.get("attestations"))
+            .and_then(Value::as_array)
+            .and_then(|a| {
+                a.iter().find(|x| {
+                    x.get("seq").and_then(Value::as_u64) == Some(self.seq as u64)
+                        && x.get("citedHeight").and_then(Value::as_u64) == Some(r as u64)
+                })
+            })
+            .and_then(|x| x.get("priceMicroUsd").and_then(Value::as_i64));
         let bh = self
-            .node
-            .call("getblockhash", vec![json!(r)])
+            .block_hash_at(r)
             .await
             .map_err(|e| format!("getblockhash {r}: {e}"))?;
-        Ok((r, bh.as_str().unwrap_or("").to_string()))
+        Ok((r, bh, own))
     }
 
-    /// One poll at tip `height`. `current` is the aggregate this poll computed (already recorded by the caller);
-    /// `inbox` the frames received since the last poll.
-    pub async fn tick(&mut self, height: u32, current: Option<i64>, inbox: Vec<Vec<u8>>) {
+    /// This seq's attestation citing `r` in the node's pool (`yed_getattestations`), if it holds one.
+    async fn pool_price(&self, r: u32) -> Option<i64> {
+        let rows = self.node.call("yed_getattestations", vec![]).await.ok()?;
+        rows.as_array()?
+            .iter()
+            .find(|x| {
+                x.get("seq").and_then(Value::as_u64) == Some(self.seq as u64)
+                    && x.get("citedHeight").and_then(Value::as_u64) == Some(r as u64)
+            })
+            .and_then(|x| x.get("priceMicroUsd").and_then(Value::as_i64))
+    }
+
+    /// `yed_signcancelcosign intent [price] seq` → (the stated price, the 69-byte co-signature hex).
+    async fn sign(&self, intent: &str, price: Option<i64>) -> Result<(i64, String), SignErr> {
+        let p = price.map(|p| json!(p)).unwrap_or(Value::Null);
+        match self
+            .node
+            .call("yed_signcancelcosign", vec![json!(intent), p, json!(self.seq)])
+            .await
+        {
+            Ok(v) => {
+                let cosig = v.get("cosig").and_then(Value::as_str).unwrap_or("").to_string();
+                let stated = v.get("priceMicroUsd").and_then(Value::as_i64).unwrap_or(0);
+                if Entry::decode_hex(&cosig).is_none() {
+                    return Err(SignErr::Transient(
+                        "yed_signcancelcosign returned no 69-byte cosig".into(),
+                    ));
+                }
+                Ok((stated, cosig))
+            }
+            Err(e) => Err(classify_sign_error(&e)),
+        }
+    }
+
+    /// One poll at tip `height` (the caller has recorded this poll's aggregate and any attestation it signed;
+    /// frames arrive through [`CancelAgent::on_frame`] between polls).
+    pub async fn tick(&mut self, height: u32) {
+        if self.state.recording_since.is_none() {
+            self.state.recording_since = Some(height);
+            self.dirty = true;
+        }
         if !self.refresh_view().await {
             return;
         }
-        let now = Instant::now();
-        // 1. the claims the index holds
+        // 1. the claims the index holds (reorgs included)
         match self.claiming().await {
             Ok(rows) => self.follow(height, rows).await,
             Err(e) => {
@@ -827,18 +1107,13 @@ impl CancelAgent {
         // 2. judge, co-sign, publish
         let intents: Vec<String> = self.state.claims.keys().cloned().collect();
         for intent in &intents {
-            self.watch(intent, height, current).await;
+            self.watch(intent, height).await;
         }
-        // 3. the gossip: pending first (their claim may be known now), then the new frames
-        let mut frames: Vec<(Frame, Instant)> = self.pending.drain(..).collect();
-        for bytes in inbox {
-            match self.filter.screen(&bytes, now) {
-                Ok(f) => frames.push((f, now)),
-                Err(d) => tracing::debug!("cancel topic: dropped {d:?}"),
-            }
-        }
-        for (f, at) in frames {
-            self.admit(f, at, now);
+        // 3. frames that waited for their claim
+        let now = Instant::now();
+        let parked: Vec<(Frame, Instant, String)> = self.pending.drain(..).collect();
+        for (f, at, peer) in parked {
+            self.admit(f, &peer, at, now);
         }
         // 4. drive
         for intent in &intents {
@@ -849,9 +1124,23 @@ impl CancelAgent {
         self.save();
     }
 
-    /// Track new CLAIMING rows, refresh the open ones, close the ones that left CLAIMING.
+    /// Reset a claim after a reorg and keep its co-signatures aside for [`CancelAgent::watch`] to restore when the
+    /// refHeight and its hash come back unchanged.
+    fn reorg_reset(&mut self, intent: &str, confirm: u32, release: u32, why: &str) {
+        let Some(c) = self.state.claims.get_mut(intent) else {
+            return;
+        };
+        let prior = c.reset(confirm, release);
+        tracing::warn!("cancel: claim {intent}: {why}; judged again from the chain");
+        self.priors.insert(intent.to_string(), prior);
+        self.filter.forget_seen();
+        self.dirty = true;
+    }
+
+    /// Track new CLAIMING rows, refresh the open ones (a different confirmation is a reorg), reopen a closed one that
+    /// is back (review H-1), and decide on the ones that left CLAIMING only from a confirmed spend of the intent.
     async fn follow(&mut self, height: u32, rows: Vec<(String, Value)>) {
-        let mut live: HashSet<String> = HashSet::new();
+        let mut live: BTreeSet<String> = BTreeSet::new();
         for (intent, row) in rows {
             live.insert(intent.clone());
             let vault = format!(
@@ -875,13 +1164,44 @@ impl CancelAgent {
                 .unwrap_or(Value::Null);
             let confirm = it.get("height").and_then(Value::as_u64).unwrap_or(height as u64) as u32;
             let release = it.get("releaseHeight").and_then(Value::as_u64).unwrap_or(0) as u32;
-            let c = self.state.claims.entry(intent.clone()).or_insert_with(|| {
-                tracing::info!("cancel: following claim {intent} of vault {vault} (confirmed at {confirm}, releasable at {release})");
-                Claim::new(vault.clone(), confirm, release)
-            });
-            if c.is_closed() {
-                // the same intent CLAIMING again cannot happen (a cancel re-creates the vault at a new outpoint)
-                continue;
+            let Ok(hash) = self.block_hash_at(confirm).await else {
+                continue; // the index is ahead of the chain RPC for a moment: next poll
+            };
+            match self.state.claims.get(&intent) {
+                None => {
+                    tracing::info!(
+                        "cancel: following claim {intent} of vault {vault} (confirmed at {confirm}, releasable at {release})"
+                    );
+                    self.state
+                        .claims
+                        .insert(intent.clone(), Claim::new(vault.clone(), confirm, release));
+                }
+                Some(c) if c.is_closed() => {
+                    self.reorg_reset(
+                        &intent,
+                        confirm,
+                        release,
+                        "back in CLAIMING after it was closed (a reorg)",
+                    );
+                    self.alert(
+                        &intent,
+                        "claim-reorged",
+                        format!("the claim on vault {vault} is CLAIMING again at height {confirm}: reopened"),
+                    );
+                }
+                Some(c) if c.confirm_height != confirm || c.confirm_hash.as_deref().is_some_and(|h| h != hash) => {
+                    self.reorg_reset(&intent, confirm, release, "its confirming block changed (a reorg)");
+                }
+                Some(c) if c.orphaned => {
+                    let c = self.state.claims.get_mut(&intent).expect("present");
+                    c.orphaned = false;
+                    tracing::warn!("cancel: claim {intent} is back in its block");
+                }
+                Some(_) => {}
+            }
+            let c = self.state.claims.get_mut(&intent).expect("present");
+            if c.confirm_hash.is_none() {
+                c.confirm_hash = Some(hash);
             }
             let required = row.get("cancelsRequired").and_then(Value::as_u64).unwrap_or(1) as u32;
             let first_read = c.collateral_zat == 0;
@@ -907,14 +1227,64 @@ impl CancelAgent {
             .map(|(k, _)| k.clone())
             .collect();
         for intent in gone {
-            let (vault, verdict) = {
+            let (vault, verdict, confirm, confirm_hash, release) = {
                 let c = &self.state.claims[&intent];
-                (c.vault.clone(), c.verdict)
+                (
+                    c.vault.clone(),
+                    c.verdict,
+                    c.confirm_height,
+                    c.confirm_hash.clone(),
+                    c.release_height,
+                )
             };
+            // is the claim still in the chain? a reorg that took its block away is not a cancel
+            let in_chain = match (self.block_hash_at(confirm).await, &confirm_hash) {
+                (Ok(h), Some(want)) => h == *want,
+                (Err(RpcError::Node { .. }), Some(_)) => false, // the chain is now shorter than the claim's height
+                _ => continue,
+            };
+            if !in_chain {
+                let first = !self.state.claims[&intent].orphaned;
+                if first {
+                    let c = self.state.claims.get_mut(&intent).expect("present");
+                    c.orphaned = true;
+                    c.phase = Phase::Watching;
+                    self.dirty = true;
+                    self.alert(
+                        &intent,
+                        "claim-reorged",
+                        format!(
+                            "the block that confirmed the claim on vault {vault} (height {confirm}) left the chain: held, \
+                             not closed; it is followed again if it is re-mined"
+                        ),
+                    );
+                }
+                if height >= release.saturating_add(CLOSED_KEEP) {
+                    let c = self.state.claims.get_mut(&intent).expect("present");
+                    c.phase = Phase::Closed {
+                        outcome: "orphaned".into(),
+                        height,
+                    };
+                }
+                continue;
+            }
+            // in the chain and not CLAIMING: decide only from a spend of the intent in a confirmed block
+            let Some((t, n)) = intent.split_once(':') else {
+                continue;
+            };
+            let n: u64 = n.parse().unwrap_or(0);
+            match self.node.call("gettxout", vec![json!(t), json!(n), json!(false)]).await {
+                Ok(Value::Null) => {}
+                Ok(_) => continue, // unspent in the chain: the index lags; next poll
+                Err(e) => {
+                    tracing::warn!("cancel: gettxout {intent}: {e}; retried next poll");
+                    continue;
+                }
+            }
             let vtxid = vault.split(':').next().unwrap_or("").to_string();
             let outcome = match self.node.call("yed_getvault", vec![json!(vtxid)]).await {
                 Ok(v) if v.get("status").and_then(Value::as_str) == Some("CLAIMED") => "released",
-                Ok(v) if v.get("status").and_then(Value::as_str) == Some("CLAIMING") => continue, // index racing; next poll
+                Ok(v) if v.get("status").and_then(Value::as_str) == Some("CLAIMING") => continue,
                 Ok(_) => "cancelled",
                 Err(RpcError::Node { message, .. }) if message.contains("vault-not-found") => "cancelled",
                 Err(e) => {
@@ -944,11 +1314,11 @@ impl CancelAgent {
     }
 
     /// Judge one claim and co-sign it when it is wrong-price.
-    async fn watch(&mut self, intent: &str, height: u32, current: Option<i64>) {
+    async fn watch(&mut self, intent: &str, height: u32) {
         let Some(c) = self.state.claims.get(intent) else {
             return;
         };
-        if c.is_closed() {
+        if c.is_closed() || c.orphaned {
             return;
         }
         if height >= c.release_height && c.release_height > 0 {
@@ -965,12 +1335,40 @@ impl CancelAgent {
         if height + 1 < c.confirm_height.saturating_add(self.cfg.min_confirmations) {
             return;
         }
+        // review H-2: a reorg across the refHeight changes blockHash(R), which every co-signature signs
+        if let (Some(r), Some(bh)) = (c.ref_height, c.block_hash.clone()) {
+            match self.block_hash_at(r).await {
+                Ok(h) if h == bh => {}
+                Ok(_) => {
+                    let (confirm, release) = (c.confirm_height, c.release_height);
+                    self.reorg_reset(
+                        intent,
+                        confirm,
+                        release,
+                        "blockHash(refHeight) changed (a reorg across it)",
+                    );
+                    self.priors.remove(intent); // the old co-signatures sign the old hash: never restored
+                }
+                Err(e) => {
+                    tracing::warn!("cancel: getblockhash {r}: {e}; retried next poll");
+                    return;
+                }
+            }
+        }
+        let c = &self.state.claims[intent];
         if c.ref_height.is_none() {
             match self.claim_ref(intent, c.confirm_height).await {
-                Ok((r, bh)) => {
+                Ok((r, bh, own)) => {
+                    let prior = self.priors.remove(intent);
                     let c = self.state.claims.get_mut(intent).expect("present");
                     c.ref_height = Some(r);
-                    c.block_hash = Some(bh);
+                    c.block_hash = Some(bh.clone());
+                    c.bundle_price = own;
+                    // the same refHeight and hash: the co-signatures sign the same message and are still valid
+                    if let Some(p) = prior.filter(|p| p.ref_height == Some(r) && p.block_hash.as_deref() == Some(&bh)) {
+                        c.cosigs = p.cosigs;
+                        c.own_cosig = p.own_cosig;
+                    }
                     self.dirty = true;
                 }
                 Err(e) => {
@@ -979,168 +1377,235 @@ impl CancelAgent {
                 }
             }
         }
-        let c = &self.state.claims[intent];
-        let r = c.ref_height.expect("set above");
-        if matches!(c.verdict, Verdict::Pending | Verdict::Unjudged) {
-            let price = honest_price(&self.state, r, height, self.cfg.price_tolerance_blocks, current);
-            let verdict = judge(
-                c.collateral_zat,
-                c.minted_cents,
-                self.view.theta_bps,
-                self.cfg.margin_bps,
-                price,
-            );
-            let (vault, coll, debt) = (c.vault.clone(), c.collateral_zat, c.minted_cents);
-            {
-                let c = self.state.claims.get_mut(intent).expect("present");
-                if c.verdict != verdict {
-                    self.dirty = true;
-                }
-                c.verdict = verdict;
-                c.judged_price = price;
-            }
-            match verdict {
-                Verdict::Wrong => self.alert(
-                    intent,
-                    "wrong-price",
-                    format!(
-                        "claim on vault {vault} at refHeight {r} is NOT claimable at this agent's price {} µUSD \
-                         (collateral {coll} zat, debt {debt} cents, theta {} bps, margin {} bps)",
-                        price.unwrap_or(0),
-                        self.view.theta_bps,
-                        self.cfg.margin_bps
-                    ),
-                ),
-                Verdict::Unjudged => self.alert(
-                    intent,
-                    "unjudged",
-                    format!(
-                        "no price of this agent's within {} blocks of refHeight {r}: not co-signed",
-                        self.cfg.price_tolerance_blocks
-                    ),
-                ),
-                Verdict::Honest => {
-                    let first = self
-                        .state
-                        .claims
-                        .get_mut(intent)
-                        .is_some_and(|c| c.alerted.insert("honest".into()));
-                    if first {
-                        tracing::info!(
-                            "cancel: claim {intent} on vault {vault} is claimable at this agent's price {} µUSD: honest, left alone",
-                            price.unwrap_or(0)
-                        );
-                    }
-                }
-                Verdict::Pending => {}
-            }
-        }
-        let c = &self.state.claims[intent];
-        if c.verdict != Verdict::Wrong || !self.cfg.auto_cosign || !self.view.members.contains_key(&self.seq) {
+        if matches!(self.state.claims[intent].verdict, Verdict::Pending | Verdict::Unjudged)
+            && !self.judge_claim(intent).await
+        {
             return;
         }
-        if c.own_cosig.is_none() && !c.alerted.contains("cosign-refused") {
+        let c = &self.state.claims[intent];
+        if c.verdict != Verdict::Wrong || !self.cfg.auto_cosign || !self.member() {
+            return;
+        }
+        if c.own_cosig.is_none() && c.cosign_blocked.is_none() {
             self.cosign(intent).await;
         }
         let c = &self.state.claims[intent];
+        let r = c.ref_height.expect("set above");
         if let Some(own) = c.own_cosig.clone() {
             let due = c
                 .last_publish
                 .is_none_or(|h| height >= h.saturating_add(self.cfg.republish_blocks));
             if due {
-                if let Some(entry) = Entry::decode_hex(&own) {
-                    if let Some((txid, n)) = cosig::parse_intent(intent) {
-                        let f = Frame {
-                            txid,
-                            n,
-                            seq: self.seq,
-                            ref_height: r,
-                            entry,
-                        };
-                        self.outbox.push(f.encode().to_vec());
-                        let c = self.state.claims.get_mut(intent).expect("present");
-                        c.last_publish = Some(height);
-                        self.dirty = true;
-                    }
+                if let (Some(entry), Some((txid, n))) = (Entry::decode_hex(&own), cosig::parse_intent(intent)) {
+                    let f = Frame {
+                        txid,
+                        n,
+                        seq: self.seq,
+                        ref_height: r,
+                        entry,
+                    };
+                    self.outbox.push(f.encode().to_vec());
+                    let c = self.state.claims.get_mut(intent).expect("present");
+                    c.last_publish = Some(height);
+                    self.dirty = true;
                 }
             }
         }
     }
 
-    /// `yed_signcancelcosign`: the node's guard first (the price this key signed for refHeight), then the judged
-    /// price when the key signed none there. A reply whose price is inside the margin is kept but not published.
+    /// The price this key is on record for at `r`: what the state says it signed, the claim's own bundle, the
+    /// node's pool. A record is what a statement must repeat (EQV-1 slashes two prices at one height).
+    async fn recorded_price(&self, intent: &str, r: u32) -> Option<i64> {
+        if let Some(p) = self.state.signed.get(&r) {
+            return Some(*p);
+        }
+        if let Some(p) = self.state.claims.get(intent).and_then(|c| c.bundle_price) {
+            return Some(p);
+        }
+        self.pool_price(r).await
+    }
+
+    /// The verdict. Returns false when it cannot be reached this poll (a transient node error).
+    async fn judge_claim(&mut self, intent: &str) -> bool {
+        let c = &self.state.claims[intent];
+        let r = c.ref_height.expect("set");
+        let (vault, coll, debt) = (c.vault.clone(), c.collateral_zat, c.minted_cents);
+        let mut price = match self.recorded_price(intent, r).await {
+            Some(p) => Some(p),
+            None => honest_price(&self.state, r, self.cfg.price_tolerance_blocks),
+        };
+        let mut honest_by_record = false;
+        // review L-2: with no price of its own, ask the node's guard (the price this key signed there) first
+        if price.is_none() && self.member() {
+            match self.sign(intent, None).await {
+                Ok((p, cosig)) => {
+                    price = Some(p);
+                    if cosig::is_wrong_price(coll, p, debt, self.view.theta_bps, self.cfg.margin_bps) {
+                        let c = self.state.claims.get_mut(intent).expect("present");
+                        c.own_cosig = Some(cosig.clone());
+                        c.cosigs.insert(self.seq, cosig);
+                    }
+                }
+                Err(SignErr::Claimable(_)) => honest_by_record = true,
+                Err(SignErr::PriceRequired) => {}
+                Err(SignErr::Sticky(m)) => {
+                    self.state.claims.get_mut(intent).expect("present").cosign_blocked = Some(m);
+                }
+                Err(SignErr::Transient(m)) => {
+                    tracing::warn!("cancel: {intent}: yed_signcancelcosign: {m}; judged next poll");
+                    return false;
+                }
+            }
+        }
+        let verdict = if honest_by_record {
+            Verdict::Honest
+        } else {
+            judge(coll, debt, self.view.theta_bps, self.cfg.margin_bps, price)
+        };
+        {
+            let c = self.state.claims.get_mut(intent).expect("present");
+            c.verdict = verdict;
+            c.judged_price = price;
+        }
+        self.dirty = true;
+        match verdict {
+            Verdict::Wrong => self.alert(
+                intent,
+                "wrong-price",
+                format!(
+                    "claim on vault {vault} at refHeight {r} is NOT claimable at this agent's price {} µUSD \
+                     (collateral {coll} zat, debt {debt} cents, theta {} bps, margin {} bps)",
+                    price.unwrap_or(0),
+                    self.view.theta_bps,
+                    self.cfg.margin_bps
+                ),
+            ),
+            Verdict::Unjudged => self.alert(
+                intent,
+                "unjudged",
+                format!(
+                    "no price of this agent's at refHeight {r} (none signed, none in the bundle, pool or guard, no \
+                     aggregate within {} blocks before it): not co-signed",
+                    self.cfg.price_tolerance_blocks
+                ),
+            ),
+            Verdict::Honest => {
+                let first = self
+                    .state
+                    .claims
+                    .get_mut(intent)
+                    .is_some_and(|c| c.alerted.insert("honest".into()));
+                if first {
+                    tracing::info!(
+                        "cancel: claim {intent} on vault {vault} is claimable at this agent's price {}: honest, left alone",
+                        price.map_or("(its own signed statement)".to_string(), |p| format!("{p} µUSD"))
+                    );
+                }
+            }
+            Verdict::Pending => {}
+        }
+        true
+    }
+
+    fn block_cosign(&mut self, intent: &str, kind: &str, why: String) {
+        if let Some(c) = self.state.claims.get_mut(intent) {
+            c.cosign_blocked = Some(why.clone());
+        }
+        self.dirty = true;
+        self.alert(intent, kind, why);
+    }
+
+    /// `yed_signcancelcosign`: the node's guard first (the price this key signed for refHeight). When it signed none
+    /// there, the price on record (state, bundle, pool), else the aggregate -- but a new price is stated only for a
+    /// refHeight above `recording_since`, where the state proves this agent did not attest (review M-2). Sticky
+    /// refusals block the claim; transient ones are retried (review M-1).
     async fn cosign(&mut self, intent: &str) {
         let c = &self.state.claims[intent];
-        let judged = c.judged_price;
-        let (coll, debt) = (c.collateral_zat, c.minted_cents);
-        let first = self
-            .node
-            .call(
-                "yed_signcancelcosign",
-                vec![json!(intent), Value::Null, json!(self.seq)],
-            )
-            .await;
-        let reply = match first {
-            Ok(v) => v,
-            Err(RpcError::Node { message, .. }) if message.starts_with("price-required") => {
-                let Some(p) = judged else {
+        let r = c.ref_height.expect("set");
+        let (coll, debt, judged) = (c.collateral_zat, c.minted_cents, c.judged_price);
+        let first = match self.sign(intent, None).await {
+            Ok(v) => Ok(v),
+            Err(SignErr::PriceRequired) => {
+                let recorded = self.recorded_price(intent, r).await;
+                let covered = self.state.recording_since.is_some_and(|s| r > s);
+                let statement = match recorded {
+                    Some(p) => Some(p),
+                    None if covered => judged,
+                    None => None,
+                };
+                let Some(p) = statement else {
+                    self.block_cosign(
+                        intent,
+                        "no-record",
+                        format!(
+                            "the node's guard holds no price of this key at refHeight {r}, and this agent's record starts \
+                             at {:?}: stating one could contradict an attestation it cannot see (EQV-1); not co-signed",
+                            self.state.recording_since
+                        ),
+                    );
                     return;
                 };
-                match self
-                    .node
-                    .call("yed_signcancelcosign", vec![json!(intent), json!(p), json!(self.seq)])
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.alert(
-                            intent,
-                            "cosign-refused",
-                            format!("yed_signcancelcosign at {p} µUSD: {e}"),
-                        );
-                        return;
-                    }
-                }
+                self.sign(intent, Some(p)).await
             }
-            Err(RpcError::Node { message, .. }) if message.starts_with("cancel-statement-claimable") => {
-                // this key already signed, for the claim's refHeight, a price at which the vault was claimable
-                self.alert(
+            Err(e) => Err(e),
+        };
+        match first {
+            Ok((price, cosig)) => {
+                if !cosig::is_wrong_price(coll, price, debt, self.view.theta_bps, self.cfg.margin_bps) {
+                    self.block_cosign(
+                        intent,
+                        "cosign-within-margin",
+                        format!(
+                            "this key's statement at the claim's refHeight is {price} µUSD, inside the {} bps margin: not published",
+                            self.cfg.margin_bps
+                        ),
+                    );
+                    return;
+                }
+                tracing::info!("cancel: co-signed {intent} as seq {} at {price} µUSD", self.seq);
+                let c = self.state.claims.get_mut(intent).expect("present");
+                c.own_cosig = Some(cosig.clone());
+                c.cosigs.insert(self.seq, cosig);
+                c.last_publish = None;
+                self.dirty = true;
+            }
+            Err(SignErr::Claimable(m)) => {
+                // this key's own record at the height says the vault was claimable: honest by its own statement
+                if let Some(c) = self.state.claims.get_mut(intent) {
+                    c.verdict = Verdict::Honest;
+                }
+                self.block_cosign(
                     intent,
                     "cosign-refused",
-                    format!(
-                        "the price this seq signed at the claim's refHeight says the vault was claimable: {message}"
-                    ),
+                    format!("this key's price at the claim's refHeight says the vault was claimable: {m}"),
                 );
-                return;
             }
-            Err(e) => {
-                tracing::error!("cancel: yed_signcancelcosign {intent}: {e}; retried next poll");
-                return;
+            Err(SignErr::Sticky(m)) => self.block_cosign(intent, "cosign-refused", m),
+            Err(SignErr::PriceRequired) => {
+                tracing::warn!("cancel: {intent}: the node still asks for a price; retried next poll")
             }
-        };
-        let Some(hex_str) = reply.get("cosig").and_then(Value::as_str) else {
-            tracing::error!("cancel: yed_signcancelcosign returned no cosig");
-            return;
-        };
-        let price = reply.get("priceMicroUsd").and_then(Value::as_i64).unwrap_or(0);
-        if !cosig::is_wrong_price(coll, price, debt, self.view.theta_bps, self.cfg.margin_bps) {
-            self.alert(
-                intent,
-                "cosign-within-margin",
-                format!("the node's guard states {price} µUSD at the claim's refHeight, inside the {} bps margin: not published", self.cfg.margin_bps),
-            );
-            return;
+            Err(SignErr::Transient(m)) => {
+                tracing::warn!("cancel: yed_signcancelcosign {intent}: {m}; retried next poll")
+            }
         }
-        tracing::info!("cancel: co-signed {intent} as seq {} at {price} µUSD", self.seq);
-        let c = self.state.claims.get_mut(intent).expect("present");
-        c.own_cosig = Some(hex_str.to_string());
-        c.cosigs.insert(self.seq, hex_str.to_string());
-        c.rejected.remove(&self.seq);
-        self.dirty = true;
     }
 
-    /// Take a screened frame: verify it against the claim it names, or park it until this node knows that claim.
-    fn admit(&mut self, f: Frame, at: Instant, now: Instant) {
+    /// A frame from the cancel topic, as it arrives (the caller drains the topic continuously): screened, checked,
+    /// rate-limited by the peer that delivered it, verified.
+    pub fn on_frame(&mut self, bytes: &[u8], peer: &str) {
+        self.on_frame_at(bytes, peer, Instant::now());
+    }
+
+    pub fn on_frame_at(&mut self, bytes: &[u8], peer: &str, now: Instant) {
+        match self.filter.screen(bytes) {
+            Ok(f) => self.admit(f, peer, now, now),
+            Err(d) => tracing::debug!("cancel topic: from {peer}: dropped {d:?}"),
+        }
+    }
+
+    /// Take a screened frame: the cheap checks, the peer's bucket, the signature; or park it (bounded per peer) until
+    /// this node knows its claim.
+    fn admit(&mut self, f: Frame, peer: &str, at: Instant, now: Instant) {
         let intent = f.intent();
         let known = self
             .state
@@ -1148,14 +1613,26 @@ impl CancelAgent {
             .get(&intent)
             .filter(|c| !c.is_closed() && c.ref_height.is_some());
         let Some(claim) = known else {
-            if self.state.claims.get(&intent).is_some_and(Claim::is_closed) {
+            if self.state.claims.get(&intent).is_some_and(Claim::is_closed) || !self.view.members.contains_key(&f.seq) {
                 return;
             }
-            if now.saturating_duration_since(at) < PENDING_TTL && self.pending.len() < PENDING_MAX {
-                self.pending.push_back((f, at));
+            let mine = self.pending.iter().filter(|(_, _, p)| p == peer).count();
+            if now.saturating_duration_since(at) < PENDING_TTL
+                && self.pending.len() < PENDING_MAX
+                && mine < PENDING_PER_PEER
+            {
+                self.pending.push_back((f, at, peer.to_string()));
             }
             return;
         };
+        if let Err(d) = GossipFilter::cheap(&f, claim, &self.view) {
+            tracing::debug!("cancel topic: frame {f:?} from {peer} dropped: {d:?}");
+            return;
+        }
+        if !self.filter.peer_ok(peer, now) {
+            tracing::debug!("cancel topic: frame {f:?} from {peer} dropped: {:?}", Drop::PeerRate);
+            return;
+        }
         match self.filter.verify(&f, claim, &self.view, now) {
             Ok(()) => {
                 let c = self.state.claims.get_mut(&intent).expect("present");
@@ -1178,7 +1655,7 @@ impl CancelAgent {
                 self.dirty = true;
             }
             Err(Drop::AlreadyHeld(_)) => {}
-            Err(d) => tracing::info!("cancel topic: frame {f:?} dropped: {d:?}"),
+            Err(d) => tracing::info!("cancel topic: frame {f:?} from {peer} dropped: {d:?}"),
         }
     }
 
@@ -1202,41 +1679,26 @@ impl CancelAgent {
         )
     }
 
-    /// Drop the co-signatures of seqs that stopped being current (the rule ignores them; spares replace them).
-    fn prune_members(&mut self, intent: &str) {
-        let members = self.view.members.clone();
-        if let Some(c) = self.state.claims.get_mut(intent) {
-            for s in c.cosigs.keys() {
-                if !members.contains_key(s) && c.rejected.insert(*s) {
-                    tracing::warn!(
-                        "cancel: seq {s} is no longer a current member; its co-signature for {intent} is set aside"
-                    );
-                    self.dirty = true;
-                }
-            }
-            let usable = c.usable(self.seq).len() as u32;
-            if usable < c.required {
-                c.enough_since = None;
-            }
-        }
-    }
-
     async fn collect(&mut self, intent: &str, height: u32) {
-        self.prune_members(intent);
         let Some(c) = self.state.claims.get(intent) else {
             return;
         };
-        if c.is_closed() || matches!(c.verdict, Verdict::Pending | Verdict::Honest) {
+        if c.is_closed() || c.orphaned || matches!(c.verdict, Verdict::Pending | Verdict::Honest) {
             return;
         }
-        if c.enough_since.is_none() && c.usable(self.seq).len() as u32 >= c.required {
-            let c = self.state.claims.get_mut(intent).expect("present");
-            c.enough_since = Some(height);
+        let members = self.view.members.clone();
+        let n = c.usable(self.seq, &members).len() as u32;
+        if n < c.required {
+            if c.enough_since.is_some() {
+                self.state.claims.get_mut(intent).expect("present").enough_since = None;
+            }
+        } else if c.enough_since.is_none() {
+            self.state.claims.get_mut(intent).expect("present").enough_since = Some(height);
             self.dirty = true;
         }
         let c = &self.state.claims[intent];
-        let members: Vec<u16> = self.view.members.keys().copied().collect();
-        let r = cosig::parse_intent(intent).and_then(|(t, n)| rank(&members, self.seq, &t, n));
+        let seqs: Vec<u16> = members.keys().copied().collect();
+        let r = cosig::parse_intent(intent).and_then(|(t, n)| rank(&seqs, self.seq, &t, n));
         let our_tx = match &c.phase {
             Phase::Sent { txid, .. } => Some(txid.clone()),
             _ => None,
@@ -1250,16 +1712,49 @@ impl CancelAgent {
         } else {
             self.intent_spent_in_mempool(intent).await
         };
+        // review L-3: a spend that is not ours and does not confirm is pinning the intent
+        let foreign = spent && !our_tx_in_mempool;
+        {
+            let c = self.state.claims.get_mut(intent).expect("present");
+            c.foreign_spend_since = if foreign {
+                Some(c.foreign_spend_since.unwrap_or(height))
+            } else {
+                None
+            };
+        }
         let c = &self.state.claims[intent];
+        if let Some(since) = c.foreign_spend_since {
+            if height >= since.saturating_add(self.cfg.refee_after_blocks) {
+                let v = c.vault.clone();
+                self.alert(
+                    intent,
+                    "foreign-spend",
+                    format!(
+                        "a transaction that is not this agent's has spent the claim on vault {v} in the mempool since \
+                         height {since} without confirming (a pinned cancel variant, or a release): send a cancel \
+                         directly to miners"
+                    ),
+                );
+            }
+        }
+        let c = &self.state.claims[intent];
+        let takeover = effective_takeover(
+            self.cfg.takeover_blocks,
+            self.claim_delay,
+            self.cfg.spare_wait_blocks,
+            members.len(),
+        );
         let x = DecideCtx {
             height,
             me: self.seq,
             rank: r,
             drive: self.cfg.drive,
-            takeover_blocks: self.cfg.takeover_blocks,
+            takeover_blocks: takeover,
             spares: self.cfg.spares,
             spare_wait_blocks: self.cfg.spare_wait_blocks,
             refee_after_blocks: self.cfg.refee_after_blocks,
+            max_sends: self.cfg.max_sends,
+            members: &members,
             intent_spent_in_mempool: spent,
             our_tx_in_mempool,
         };
@@ -1269,7 +1764,7 @@ impl CancelAgent {
                 tracing::info!(
                     "cancel: driving the cancel of {intent} (rank {}, {} co-signature(s), {} required)",
                     r.unwrap_or(0),
-                    c.usable(self.seq).len(),
+                    c.usable(self.seq, &members).len(),
                     c.required
                 );
                 self.build_and_send(intent, height, None).await;
@@ -1291,24 +1786,41 @@ impl CancelAgent {
             Decision::Rebuild => {
                 if let Phase::Sent { txid, hex, .. } = c.phase.clone() {
                     tracing::warn!(
-                        "cancel: {txid} for {intent} left the mempool unconfirmed; re-funding and rebuilding"
+                        "cancel: {txid} for {intent} left the mempool unconfirmed; re-funding and rebuilding (send {} of {})",
+                        c.sends + 1,
+                        self.cfg.max_sends
                     );
-                    // vault_refee replaces the fee inputs (and drops the carrier); yed_buildcancel then re-attaches a
-                    // carrier with the co-signatures valid now (the build memo follows the re-funded transaction)
+                    // vault_refee replaces the fee inputs of the cancel this agent sent last (and drops its carrier);
+                    // yed_buildcancel then re-attaches a carrier with the co-signatures valid now (the build memo
+                    // follows the re-funded transaction)
                     if let Err(e) = self.node.call("vault_refee", vec![json!(hex)]).await {
                         tracing::warn!("cancel: vault_refee: {e}; rebuilding without it");
                     }
                     self.build_and_send(intent, height, Some(txid)).await;
                 }
             }
+            Decision::SendCap => {
+                let v = c.vault.clone();
+                let sends = c.sends;
+                self.alert(
+                    intent,
+                    "cancel-send-cap",
+                    format!(
+                        "the cancel of the claim on vault {v} left the mempool unconfirmed {sends} time(s); no more \
+                         rebuilds (max_sends): act by hand"
+                    ),
+                );
+            }
         }
     }
 
-    /// `yed_buildcancel` (dropping refused entries and retrying), `set_signcancel`, `vault_send`, then the peers.
+    /// `yed_buildcancel` (entries the node drops or refuses are set aside), `set_signcancel`, `vault_send`, then
+    /// the peers.
     async fn build_and_send(&mut self, intent: &str, height: u32, previous: Option<String>) {
+        let members = self.view.members.clone();
         for _ in 0..BUILD_ATTEMPTS {
             let c = &self.state.claims[intent];
-            let usable = c.usable(self.seq);
+            let usable = c.usable(self.seq, &members);
             if (usable.len() as u32) < c.required {
                 tracing::warn!(
                     "cancel: {intent}: {} usable co-signature(s), {} required; waiting",
@@ -1336,21 +1848,22 @@ impl CancelAgent {
                     };
                     tracing::warn!("cancel: the node refused seq {seq}'s co-signature for {intent} ({message}); retrying without it");
                     let c = self.state.claims.get_mut(intent).expect("present");
-                    c.rejected.insert(seq);
+                    if permanent_refusal(&message) {
+                        c.rejected.insert(seq);
+                    } else {
+                        // the node does not count it as a member now: leave it out of this build only
+                        c.cosigs.remove(&seq);
+                    }
                     c.enough_since = None;
                     self.dirty = true;
                     continue;
                 }
                 Err(RpcError::Node { message, .. }) if message.starts_with("cancel-cosign-needed") => {
                     tracing::warn!("cancel: {intent}: {message}");
-                    let dropped: Vec<u16> = dropped_indexes(&message)
-                        .into_iter()
-                        .filter_map(|i| usable.get(i).map(|(s, _)| *s))
-                        .collect();
-                    let c = self.state.claims.get_mut(intent).expect("present");
-                    c.rejected.extend(dropped);
-                    c.enough_since = None;
-                    self.dirty = true;
+                    self.set_aside(intent, &usable, &message);
+                    if let Some(c) = self.state.claims.get_mut(intent) {
+                        c.enough_since = None;
+                    }
                     return;
                 }
                 Err(e) => {
@@ -1365,17 +1878,8 @@ impl CancelAgent {
                 .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                 .unwrap_or_default();
             if !warnings.is_empty() {
-                let dropped: Vec<u16> = dropped_indexes(&warnings.join("\n"))
-                    .into_iter()
-                    .filter_map(|i| usable.get(i).map(|(s, _)| *s))
-                    .collect();
-                tracing::warn!(
-                    "cancel: yed_buildcancel for {intent} dropped seqs {dropped:?}: {}",
-                    warnings.join("; ")
-                );
-                let c = self.state.claims.get_mut(intent).expect("present");
-                c.rejected.extend(dropped);
-                self.dirty = true;
+                tracing::warn!("cancel: yed_buildcancel for {intent}: {}", warnings.join("; "));
+                self.set_aside(intent, &usable, &warnings.join("\n"));
             }
             let hex_str = built.get("hex").and_then(Value::as_str).unwrap_or("").to_string();
             let carrier = built
@@ -1408,7 +1912,6 @@ impl CancelAgent {
                 Ok(v) => v.as_str().unwrap_or("").to_string(),
                 Err(e) => {
                     tracing::error!("cancel: vault_send for {intent}: {e}; re-checked next poll");
-                    // a co-signer that stopped being current shows up in the next refresh and is set aside then
                     return;
                 }
             };
@@ -1429,11 +1932,35 @@ impl CancelAgent {
                 last_push: height,
             };
             c.sends += 1;
+            // the next rebuild waits refee_after_blocks × 2^(sends − 1) (review M-3)
+            let backoff = self
+                .cfg
+                .refee_after_blocks
+                .saturating_mul(1u32 << (c.sends - 1).min(10));
+            c.next_rebuild = height.saturating_add(backoff);
             self.dirty = true;
             self.save();
             self.push_to_peers(&carrier, &shex).await;
             return;
         }
+    }
+
+    /// The entries a `yed_buildcancel` named as dropped: a permanent reason sets the seq aside for this claim; a
+    /// membership reason drops the entry from this build only (the seq may be current again later).
+    fn set_aside(&mut self, intent: &str, usable: &[(u16, String)], text: &str) {
+        let Some(c) = self.state.claims.get_mut(intent) else {
+            return;
+        };
+        for (i, id) in dropped_entries(text) {
+            if let Some((s, _)) = usable.get(i) {
+                if permanent_refusal(&id) {
+                    c.rejected.insert(*s);
+                } else {
+                    c.cosigs.remove(s);
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     /// The carrier, then the cancel, to every `broadcast_rpc` node (review S1: send directly to well-connected peers).
@@ -1473,6 +2000,47 @@ impl CancelAgent {
     }
 }
 
+/// `alert_command <kind> <intent> <message>`: at most ALERTS_INFLIGHT_MAX at once (more are logged and skipped),
+/// each killed after ALERT_TIMEOUT.
+fn run_alert_command(cmd: String, kind: String, intent: String, message: String) {
+    if ALERTS_INFLIGHT.fetch_add(1, Ordering::SeqCst) >= ALERTS_INFLIGHT_MAX {
+        ALERTS_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        tracing::warn!("alert_command: {ALERTS_INFLIGHT_MAX} already running; this alert is in the log only");
+        return;
+    }
+    std::thread::spawn(move || {
+        match std::process::Command::new(&cmd)
+            .arg(&kind)
+            .arg(&intent)
+            .arg(&message)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let deadline = Instant::now() + ALERT_TIMEOUT;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+                        Ok(None) => {
+                            tracing::error!("alert_command {cmd}: still running after {ALERT_TIMEOUT:?}; killed");
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("alert_command {cmd}: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::error!("alert_command {cmd}: {e}"),
+        }
+        ALERTS_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
 // ------------------------------------------------------------------------------------------------------- tests
 
 #[cfg(test)]
@@ -1480,11 +2048,16 @@ mod tests {
     use super::*;
     use crate::cosig::testkit;
     use crate::rpc::mock::MockNode;
+    use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
     const THETA: u32 = 12_500;
     const COLL: i64 = 75 * 100_000_000; // 75 YEC against $100: claimable below $1.6667
     const DEBT: i64 = 10_000;
+
+    fn members(seqs: &[u16]) -> BTreeMap<u16, [u8; 33]> {
+        seqs.iter().map(|s| (*s, [*s as u8; 33])).collect()
+    }
 
     fn claim(required: u32) -> Claim {
         let mut c = Claim::new("aa:0".into(), 100, 110);
@@ -1497,7 +2070,7 @@ mod tests {
         c
     }
 
-    fn ctx(height: u32, rank: u32) -> DecideCtx {
+    fn ctx(height: u32, rank: u32, m: &BTreeMap<u16, [u8; 33]>) -> DecideCtx<'_> {
         DecideCtx {
             height,
             me: 1,
@@ -1507,6 +2080,8 @@ mod tests {
             spares: 1,
             spare_wait_blocks: 1,
             refee_after_blocks: 3,
+            max_sends: 3,
+            members: m,
             intent_spent_in_mempool: false,
             our_tx_in_mempool: false,
         }
@@ -1515,23 +2090,22 @@ mod tests {
     // ---- watcher
 
     #[test]
-    fn honest_price_prefers_the_signed_then_the_last_known_at_r() {
+    fn honest_price_is_what_it_knew_at_r_and_never_later() {
         let mut s = State::fresh();
-        assert_eq!(honest_price(&s, 100, 101, 5, Some(7)), Some(7)); // recent: the aggregate now
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), None); // too old to judge with today's price
+        assert_eq!(honest_price(&s, 100, 5), None);
         s.record_price(104, 4);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(4)); // nothing at or before R: the first after it
+        assert_eq!(honest_price(&s, 100, 5), None); // only a later aggregate: unjudged, not guessed (L-6)
+        s.record_price(94, 2);
+        assert_eq!(honest_price(&s, 100, 5), None); // older than the tolerance
         s.record_price(96, 3);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(3)); // what it knew at R wins over a later move
+        assert_eq!(honest_price(&s, 100, 5), Some(3));
         s.record_price(99, 5);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(5)); // the last one at or before R
         s.record_price(101, 8);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(5)); // even when a later one is as near
+        assert_eq!(honest_price(&s, 100, 5), Some(5)); // the last one at or before R
         s.record_price(100, 6);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(6));
+        assert_eq!(honest_price(&s, 100, 5), Some(6));
         s.record_signed(100, 9);
-        assert_eq!(honest_price(&s, 100, 120, 5, Some(7)), Some(9)); // what this seq signed for R wins
-        assert_eq!(honest_price(&s, 300, 301, 0, None), None);
+        assert_eq!(honest_price(&s, 100, 5), Some(9)); // what this seq signed for R wins
     }
 
     #[test]
@@ -1541,6 +2115,40 @@ mod tests {
         assert_eq!(judge(COLL, DEBT, THETA, 500, Some(1_700_000)), Verdict::Honest); // 127.5 %: inside the margin
         assert_eq!(judge(COLL, DEBT, THETA, 0, Some(1_700_000)), Verdict::Wrong);
         assert_eq!(judge(COLL, DEBT, THETA, 500, None), Verdict::Unjudged);
+    }
+
+    #[test]
+    fn sign_errors_are_sticky_only_when_they_cannot_change() {
+        let e = |m: &str| RpcError::Node {
+            code: -8,
+            message: m.into(),
+        };
+        assert_eq!(classify_sign_error(&e("price-required: x")), SignErr::PriceRequired);
+        assert!(matches!(
+            classify_sign_error(&e("cancel-statement-claimable: x")),
+            SignErr::Claimable(_)
+        ));
+        assert!(matches!(
+            classify_sign_error(&e("equivocation-guard: x")),
+            SignErr::Sticky(_)
+        ));
+        assert!(matches!(classify_sign_error(&e("attest-range: x")), SignErr::Sticky(_)));
+        for transient in [
+            "the Yellowback index and the active chain disagree at the claim's refHeight; retry",
+            "the claim's refHeight 99 is not indexed",
+            "Error: Please enter the wallet passphrase with walletpassphrase first.",
+            "claim-unconfirmed: co-sign the cancel once the claim has confirmed",
+            "attest-not-eligible: seq 3 is not a current member",
+        ] {
+            assert!(
+                matches!(classify_sign_error(&e(transient)), SignErr::Transient(_)),
+                "{transient}"
+            );
+        }
+        assert!(matches!(
+            classify_sign_error(&RpcError::Transport("timed out".into())),
+            SignErr::Transient(_)
+        ));
     }
 
     #[test]
@@ -1555,78 +2163,95 @@ mod tests {
 
     #[test]
     fn rank_is_a_rotation_by_the_intent() {
-        let members = [5u16, 1, 3, 9];
-        let ranks: Vec<u32> = members
-            .iter()
-            .map(|m| rank(&members, *m, &[7; 32], 0).unwrap())
-            .collect();
+        let m = [5u16, 1, 3, 9];
+        let ranks: Vec<u32> = m.iter().map(|s| rank(&m, *s, &[7; 32], 0).unwrap()).collect();
         let mut sorted = ranks.clone();
         sorted.sort();
         assert_eq!(sorted, vec![0, 1, 2, 3]); // a permutation: exactly one leader
-        assert_eq!(rank(&members, 4, &[7; 32], 0), None);
-        // deterministic, independent of the list order, and it differs between claims
-        assert_eq!(rank(&[9, 5, 3, 1], 3, &[7; 32], 0), rank(&members, 3, &[7; 32], 0));
+        assert_eq!(rank(&m, 4, &[7; 32], 0), None);
+        assert_eq!(rank(&[9, 5, 3, 1], 3, &[7; 32], 0), rank(&m, 3, &[7; 32], 0));
         let leaders: HashSet<u16> = (0u8..32)
-            .map(|i| {
-                *members
-                    .iter()
-                    .find(|m| rank(&members, **m, &[i; 32], 0) == Some(0))
-                    .unwrap()
-            })
+            .map(|i| *m.iter().find(|s| rank(&m, **s, &[i; 32], 0) == Some(0)).unwrap())
             .collect();
         assert!(leaders.len() > 1, "the first driver should vary across claims");
+    }
+
+    #[test]
+    fn takeover_fits_claim_delay() {
+        // mainnet: 576 blocks, 15 seats: (576 - 1 - 2) / 14 = 40, so 6 stands and 36 stands
+        assert_eq!(effective_takeover(6, Some(576), 1, 15), 6);
+        assert_eq!(effective_takeover(36, Some(576), 1, 15), 36);
+        // regtest: 10 blocks, 4 members: (10 - 1 - 2) / 3 = 2
+        assert_eq!(effective_takeover(6, Some(10), 1, 4), 2);
+        assert_eq!(effective_takeover(6, Some(3), 1, 15), 1);
+        assert_eq!(effective_takeover(6, None, 1, 4), 6);
+        for members in 2..16usize {
+            let t = effective_takeover(36, Some(576), 1, members);
+            assert!((members as u32 - 1) * t + 1 + 2 <= 576, "{members} {t}");
+        }
     }
 
     // ---- the collector state machine
 
     #[test]
     fn decide_waits_for_its_turn_then_for_spares() {
+        let m = members(&[0, 1, 2]);
         let mut c = claim(1);
-        assert_eq!(decide(&c, &ctx(100, 0)), Decision::Idle("short of co-signatures"));
+        assert_eq!(decide(&c, &ctx(100, 0, &m)), Decision::Idle("short of co-signatures"));
         c.cosigs.insert(1, "11".into());
-        // rank 1 waits takeover_blocks (2) after the confirmation
-        assert_eq!(decide(&c, &ctx(101, 1)), Decision::Idle("not this member's turn yet"));
-        // rank 0, one valid (= required), the spare not yet in: waits a block from enough_since
+        assert_eq!(
+            decide(&c, &ctx(101, 1, &m)),
+            Decision::Idle("not this member's turn yet")
+        );
         c.enough_since = Some(100);
         assert_eq!(
-            decide(&c, &ctx(100, 0)),
+            decide(&c, &ctx(100, 0, &m)),
             Decision::Idle("waiting for spare co-signatures")
         );
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Build(vec![1]));
-        // a spare in hand: at once, own first
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Build(vec![1]));
         c.cosigs.insert(0, "00".into());
-        assert_eq!(decide(&c, &ctx(100, 0)), Decision::Build(vec![1, 0]));
-        // the takeover member drives at its turn
-        assert_eq!(decide(&c, &ctx(102, 1)), Decision::Build(vec![1, 0]));
-        // somebody's cancel already in the mempool: wait
-        let mut x = ctx(102, 1);
+        assert_eq!(decide(&c, &ctx(100, 0, &m)), Decision::Build(vec![1, 0]));
+        assert_eq!(decide(&c, &ctx(102, 1, &m)), Decision::Build(vec![1, 0]));
+        let mut x = ctx(102, 1, &m);
         x.intent_spent_in_mempool = true;
         assert_eq!(decide(&c, &x), Decision::Idle("another cancel is in the mempool"));
+        // an orphaned claim (its block left the chain) is never driven
+        c.orphaned = true;
+        assert_eq!(
+            decide(&c, &ctx(102, 0, &m)),
+            Decision::Idle("the claim's block left the chain")
+        );
     }
 
     #[test]
-    fn decide_escalates_and_drops_refused_entries() {
+    fn decide_counts_only_current_members_and_unrefused_entries() {
+        let mut m = members(&[1, 4, 6]);
         let mut c = claim(2);
         c.cosigs.insert(1, "11".into());
         c.cosigs.insert(4, "44".into());
         c.enough_since = Some(100);
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Build(vec![1, 4]));
-        c.rejected.insert(4); // the node refused seq 4's entry (it left the set): one short again
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Idle("short of co-signatures"));
-        c.cosigs.insert(6, "66".into()); // a spare arrives
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Build(vec![1, 6]));
-        // more than CANCEL_COSIGN_MAX: the carrier holds seven
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Build(vec![1, 4]));
+        c.rejected.insert(4); // the node refused seq 4's entry for good: one short again
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Idle("short of co-signatures"));
+        c.rejected.clear();
+        m.remove(&4); // seq 4 is not current now (left, or not yet mature): not counted ...
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Idle("short of co-signatures"));
+        m.insert(4, [4; 33]); // ... and counted again once it is (review L-1: reinstated)
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Build(vec![1, 4]));
+        let mut big = m.clone();
         for s in 10..20 {
             c.cosigs.insert(s, "ff".into());
+            big.insert(s, [s as u8; 33]);
         }
-        match decide(&c, &ctx(101, 0)) {
+        match decide(&c, &ctx(101, 0, &big)) {
             Decision::Build(v) => assert_eq!(v.len(), cosig::CANCEL_COSIGN_MAX),
             d => panic!("{d:?}"),
         }
     }
 
     #[test]
-    fn decide_after_sending() {
+    fn decide_after_sending_backs_off_and_caps() {
+        let m = members(&[0, 1]);
         let mut c = claim(1);
         c.cosigs.insert(1, "11".into());
         c.phase = Phase::Sent {
@@ -1637,13 +2262,21 @@ mod tests {
             cosigners: vec![1],
             last_push: 101,
         };
-        let mut x = ctx(102, 0);
+        c.sends = 1;
+        c.next_rebuild = 104;
+        let mut x = ctx(102, 0, &m);
         x.our_tx_in_mempool = true;
         assert_eq!(decide(&c, &x), Decision::Idle("sent"));
         x.height = 104;
-        assert_eq!(decide(&c, &x), Decision::Rebroadcast); // lingering: push again
+        assert_eq!(decide(&c, &x), Decision::Rebroadcast);
         x.our_tx_in_mempool = false;
-        assert_eq!(decide(&c, &x), Decision::Rebuild); // gone and nothing else spends the intent: rebuild
+        x.height = 103;
+        assert_eq!(decide(&c, &x), Decision::Idle("rebuild backoff")); // review M-3
+        x.height = 104;
+        assert_eq!(decide(&c, &x), Decision::Rebuild);
+        c.sends = 3; // max_sends
+        assert_eq!(decide(&c, &x), Decision::SendCap);
+        c.sends = 1;
         c.rejected.insert(1);
         assert_eq!(
             decide(&c, &x),
@@ -1653,27 +2286,56 @@ mod tests {
 
     #[test]
     fn decide_never_touches_honest_closed_late_or_passive() {
+        let m = members(&[0, 1, 2]);
         let mut c = claim(1);
         c.cosigs.insert(1, "11".into());
         c.cosigs.insert(2, "22".into());
         c.verdict = Verdict::Honest;
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Idle("honest claim"));
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Idle("honest claim"));
         c.verdict = Verdict::Wrong;
-        assert_eq!(decide(&c, &ctx(110, 0)), Decision::Idle("past the release height"));
-        let mut x = ctx(101, 0);
+        assert_eq!(decide(&c, &ctx(110, 0, &m)), Decision::Idle("past the release height"));
+        let mut x = ctx(101, 0, &m);
         x.drive = false;
         assert_eq!(decide(&c, &x), Decision::Idle("drive = false"));
         x.drive = true;
         x.rank = None;
         assert_eq!(decide(&c, &x), Decision::Idle("not a current member"));
-        // unjudged here, but others' co-signatures are enough: it still drives
         c.verdict = Verdict::Unjudged;
-        assert_eq!(decide(&c, &ctx(101, 0)), Decision::Build(vec![1, 2]));
+        assert_eq!(decide(&c, &ctx(101, 0, &m)), Decision::Build(vec![1, 2]));
         c.phase = Phase::Closed {
             outcome: "cancelled".into(),
             height: 105,
         };
-        assert_eq!(decide(&c, &ctx(106, 0)), Decision::Idle("closed"));
+        assert_eq!(decide(&c, &ctx(106, 0, &m)), Decision::Idle("closed"));
+    }
+
+    #[test]
+    fn a_reset_forgets_the_chain_and_sets_the_cosignatures_aside() {
+        let mut c = claim(2);
+        c.cosigs.insert(1, "11".into());
+        c.own_cosig = Some("11".into());
+        c.rejected.insert(3);
+        c.sends = 2;
+        c.alerted.insert("wrong-price".into());
+        c.phase = Phase::Sent {
+            txid: "t".into(),
+            hex: "h".into(),
+            carrier: "c".into(),
+            height: 101,
+            cosigners: vec![1],
+            last_push: 101,
+        };
+        let prior = c.reset(105, 115);
+        assert_eq!((c.confirm_height, c.release_height), (105, 115));
+        assert!(c.ref_height.is_none() && c.block_hash.is_none() && c.own_cosig.is_none());
+        assert!(c.cosigs.is_empty() && c.rejected.is_empty());
+        assert_eq!(
+            (c.verdict, c.phase.clone(), c.sends),
+            (Verdict::Pending, Phase::Watching, 0)
+        );
+        assert!(!c.alerted.contains("wrong-price")); // a new verdict is alerted afresh
+        assert_eq!(prior.ref_height, Some(99));
+        assert_eq!(prior.cosigs.len(), 1);
     }
 
     // ---- gossip validation
@@ -1710,32 +2372,26 @@ mod tests {
         let now = Instant::now();
         let c = claim(1);
         let v = view(&[(1, 1), (2, 2), (3, 3)]);
-        let mut g = GossipFilter::new(4, 60, now);
+        let mut g = GossipFilter::new(4, 60);
         let good = frame_for(&c, 2, 2, 4_000_000, v.set_id);
-        let f = g.screen(&good.encode(), now).unwrap();
+        let f = g.screen(&good.encode()).unwrap();
+        assert_eq!(GossipFilter::cheap(&f, &c, &v), Ok(()));
         assert_eq!(g.verify(&f, &c, &v, now), Ok(()));
-        // the same bytes again: a duplicate, before any work
-        assert_eq!(g.screen(&good.encode(), now), Err(Drop::Duplicate));
-        // size cap and magic
-        assert!(matches!(g.screen(&[0u8; 116], now), Err(Drop::Malformed(_))));
-        assert!(matches!(g.screen(b"YCG1", now), Err(Drop::Malformed(_))));
-        // a non-member key, claiming a member's seq: the signature does not recover to seq 3's key
+        assert_eq!(g.screen(&good.encode()), Err(Drop::Duplicate));
+        assert!(matches!(g.screen(&[0u8; 116]), Err(Drop::Malformed(_))));
+        assert!(matches!(g.screen(b"YCG1"), Err(Drop::Malformed(_))));
         let forged = frame_for(&c, 3, 9, 4_000_000, v.set_id);
-        assert_eq!(g.verify(&forged, &c, &v, now), Err(Drop::BadSignature(3)));
-        // an unknown seq
+        assert_eq!(GossipFilter::cheap(&forged, &c, &v), Ok(())); // the cheap checks cannot tell ...
+        assert_eq!(g.verify(&forged, &c, &v, now), Err(Drop::BadSignature(3))); // ... the signature can
         let stranger = frame_for(&c, 7, 7, 4_000_000, v.set_id);
-        assert_eq!(g.verify(&stranger, &c, &v, now), Err(Drop::NotMember(7)));
-        // a member's signature over another set (another network) does not verify here
+        assert_eq!(GossipFilter::cheap(&stranger, &c, &v), Err(Drop::NotMember(7)));
         let other_set = frame_for(&c, 1, 1, 4_000_000, [0x01; 32]);
         assert_eq!(g.verify(&other_set, &c, &v, now), Err(Drop::BadSignature(1)));
-        // a statement saying the vault WAS claimable is worthless to the rule: dropped
         let claimable = frame_for(&c, 1, 1, 1_600_000, v.set_id);
-        assert_eq!(g.verify(&claimable, &c, &v, now), Err(Drop::Claimable(1)));
-        // the wrong refHeight
+        assert_eq!(GossipFilter::cheap(&claimable, &c, &v), Err(Drop::Claimable(1)));
         let mut wrong_r = frame_for(&c, 1, 1, 4_000_000, v.set_id);
         wrong_r.ref_height += 1;
-        assert_eq!(g.verify(&wrong_r, &c, &v, now), Err(Drop::WrongRefHeight(1)));
-        // an entry already held is not counted again
+        assert_eq!(GossipFilter::cheap(&wrong_r, &c, &v), Err(Drop::WrongRefHeight(1)));
         let mut held = c.clone();
         held.cosigs.insert(2, good.entry.to_hex());
         let again = frame_for(&c, 2, 2, 4_000_000, v.set_id);
@@ -1743,37 +2399,24 @@ mod tests {
     }
 
     #[test]
-    fn gossip_rate_limits_per_authenticated_seq_and_globally() {
+    fn gossip_rate_limits_per_authenticated_seq() {
         let now = Instant::now();
         let c = claim(1);
         let v = view(&[(1, 1)]);
-        let mut g = GossipFilter::new(2, 60, now);
-        // distinct valid statements of seq 1 (different prices): two pass, the third is over its bucket
+        let mut g = GossipFilter::new(2, 60);
         let mut outcomes = Vec::new();
         for p in [4_000_000u32, 4_000_001, 4_000_002] {
             let f = frame_for(&c, 1, 1, p, v.set_id);
             outcomes.push(g.verify(&f, &c, &v, now));
         }
         assert_eq!(outcomes, vec![Ok(()), Ok(()), Err(Drop::SeqRate(1))]);
-        // forged frames naming seq 1 do not drain its bucket (they fail before it), but the global bucket bounds
-        // the work: 2 x 16 = 32 frames, then GlobalRate
-        let mut g = GossipFilter::new(2, 60, now);
-        let mut global = 0;
-        for i in 0..40u32 {
-            let mut junk = frame_for(&c, 1, 9, 4_000_000 + i, v.set_id).encode();
-            junk[100] ^= 1;
-            if g.screen(&junk, now) == Err(Drop::GlobalRate) {
-                global += 1;
-            }
-        }
-        assert_eq!(global, 8);
         let later = now + Duration::from_secs(120);
         let f = frame_for(&c, 1, 1, 4_000_100, v.set_id);
         assert_eq!(g.verify(&f, &c, &v, later), Ok(()));
     }
 
     #[test]
-    fn members_are_current_and_newest() {
+    fn members_are_current_mature_and_newest() {
         let k = |i: u8| hex::encode(testkit::pubkey(&testkit::key(i)));
         let rows = json!([
             {"seq": 0, "attestorPubKey": k(1), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
@@ -1782,10 +2425,17 @@ mod tests {
             {"seq": 3, "attestorPubKey": k(4), "status": "PENDING", "bondSpentHeight": null, "bondFrozen": false},
             {"seq": 4, "attestorPubKey": k(5), "status": "WITHDRAWN", "bondSpentHeight": 50, "bondFrozen": false},
             {"seq": 5, "attestorPubKey": k(5), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
-            {"seq": 6, "attestorPubKey": k(1), "status": "PENDING", "bondSpentHeight": null, "bondFrozen": false}
+            {"seq": 6, "attestorPubKey": k(1), "status": "PENDING", "bondSpentHeight": null, "bondFrozen": false},
+            {"seq": 7, "attestorPubKey": k(8), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false}
         ]);
-        let m = current_members(&rows);
-        // seq 0's key re-joined as seq 6 (pending): the newest record is not current, so neither is seq 0
+        let m = current_members(&rows, None);
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![1, 5, 7]);
+        // the primitive says seq 7's key is not current yet (its join has not matured): left out (review L-1)
+        let set = json!({"memberlist": [
+            {"key": k(2), "current": true}, {"key": k(5), "current": true}, {"key": k(8), "current": false}
+        ]});
+        let keys = current_keys(&set).unwrap();
+        let m = current_members(&rows, Some(&keys));
         assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![1, 5]);
     }
 
@@ -1805,72 +2455,129 @@ mod tests {
     }
 
     #[test]
-    fn refused_index_parses_the_node_message() {
+    fn refused_and_dropped_entries_parse_the_node_message() {
         assert_eq!(
             refused_index("cancel-cosign-not-member: cosigs[2] is not from a current member"),
             Some(2)
         );
-        assert_eq!(
-            refused_index("attest-range: cosigs[0] (seq 3) states 5 micro-USD, outside [100, 4294967295]"),
-            Some(0)
-        );
         assert_eq!(refused_index("cancel-cosign-needed: this cancel needs 2"), None);
         assert_eq!(
-            dropped_indexes(
+            dropped_entries(
                 "cosigs[1] dropped: cancel-cosign-not-member: key 02ab; cosigs[3] dropped: attest-range: x"
             ),
-            vec![1, 3]
+            vec![
+                (1, "cancel-cosign-not-member".to_string()),
+                (3, "attest-range".to_string())
+            ]
         );
         assert_eq!(
-            dropped_indexes("cancel-cosign-needed: this cancel needs 2 co-signature(s), 1 given; cosigs[0] dropped: cancel-statement-claimable"),
-            vec![0]
+            dropped_entries("cancel-cosign-needed: needs 2, 1 given; cosigs[0] dropped: cancel-statement-claimable"),
+            vec![(0, "cancel-statement-claimable".to_string())]
         );
-        assert!(dropped_indexes("cosigs[2] is not from a current member").is_empty());
+        assert!(dropped_entries("cosigs[2] is not from a current member").is_empty());
+        assert!(!permanent_refusal("cancel-cosign-not-member"));
+        assert!(permanent_refusal("cancel-statement-claimable"));
+        assert!(permanent_refusal("cancel-cosign-malformed"));
     }
 
     #[test]
-    fn state_round_trips_and_survives_corruption() {
+    fn state_round_trips_survives_corruption_and_reads_older_files() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("s/cancel.json");
         let mut s = State::fresh();
         s.claims.insert("aa:0".into(), claim(2));
         s.record_price(10, 4_000_000);
+        s.recording_since = Some(5);
         s.save(&p).unwrap();
+        s.save(&p).unwrap(); // the O_EXCL temporary name is free again after a save
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        // a leftover temporary file of this process is replaced, not written through
+        std::fs::write(p.with_extension(format!("tmp.{}", std::process::id())), "junk").unwrap();
+        s.save(&p).unwrap();
         let back = State::load(&p);
         assert_eq!(back.claims["aa:0"].required, 2);
-        assert_eq!(back.prices[&10], 4_000_000);
+        assert_eq!((back.prices[&10], back.recording_since), (4_000_000, Some(5)));
+        // a file written before the review's fields still loads (serde defaults)
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("recording_since");
+        for k in [
+            "confirm_hash",
+            "bundle_price",
+            "cosign_blocked",
+            "next_rebuild",
+            "orphaned",
+            "foreign_spend_since",
+        ] {
+            v["claims"]["aa:0"].as_object_mut().unwrap().remove(k);
+        }
+        std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+        let old = State::load(&p);
+        assert_eq!(old.claims["aa:0"].required, 2);
+        assert!(old.recording_since.is_none());
         std::fs::write(&p, "{not json").unwrap();
         let fresh = State::load(&p);
         assert!(fresh.claims.is_empty());
         assert!(p.with_extension("corrupt").exists());
     }
 
-    // ---- the agent end to end against a mock node: watch, co-sign, gossip in, collect, send, close, restart
+    // ---- the agent end to end against a mock node
 
     struct Chain {
         height: u32,
         claiming: bool,
         cancelled: bool,
         cancels_required: u32,
+        /// blockHash(height) overrides (display hex); everything else is 0x33..
+        hashes: HashMap<u32, String>,
+        /// the claim's intent is spent in a confirmed block
+        spent_in_chain: bool,
+        /// the guard's price per (seq) for the refHeight; None: price-required
+        guard: HashMap<u16, u32>,
+        /// a transient failure for the next N yed_signcancelcosign calls
+        sign_failures: u32,
+        /// the equivocation guard refuses an explicit price
+        guard_refuses: bool,
         sent: Vec<Vec<String>>,
         mempool: Vec<String>,
+        sign_calls: u32,
+    }
+
+    fn chain(required: u32) -> Arc<Mutex<Chain>> {
+        Arc::new(Mutex::new(Chain {
+            height: 100,
+            claiming: true,
+            cancelled: false,
+            cancels_required: required,
+            hashes: HashMap::new(),
+            spent_in_chain: false,
+            guard: HashMap::new(),
+            sign_failures: 0,
+            guard_refuses: false,
+            sent: vec![],
+            mempool: vec![],
+            sign_calls: 0,
+        }))
+    }
+
+    fn default_hash() -> String {
+        cosig::display_of_internal(&[0x33u8; 32])
     }
 
     fn mock(chain: Arc<Mutex<Chain>>) -> MockNode {
         let set = [0x75u8; 32];
-        let bh = [0x33u8; 32];
         let intent_txid = "aa".repeat(32);
         MockNode::start(None, move |method, params| {
             let mut ch = chain.lock().unwrap();
             let k = |i: u8| hex::encode(testkit::pubkey(&testkit::key(i)));
+            let hash_at = |ch: &Chain, h: u32| ch.hashes.get(&h).cloned().unwrap_or_else(default_hash);
             match method {
                 "yed_getinfo" => Ok(json!({"network": "regtest", "height": ch.height,
-                    "upgrade": {"attestorSetId": cosig::display_of_internal(&set)}, "params": {"claimThresholdBps": THETA}})),
+                    "upgrade": {"attestorSetId": cosig::display_of_internal(&set), "claimDelay": 10},
+                    "params": {"claimThresholdBps": THETA, "claimDelay": 10}})),
                 "yed_listattestors" => Ok(json!([
                     {"seq": 0, "attestorPubKey": k(10), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
                     {"seq": 1, "attestorPubKey": k(11), "status": "ELIGIBLE", "bondSpentHeight": null, "bondFrozen": false},
@@ -1885,16 +2592,42 @@ mod tests {
                 }),
                 "getrawtransaction" => Ok(json!("00")),
                 "yed_decodepayload" => Ok(json!({"valid": true, "type": "redeem", "refHeight": 99})),
-                "getblockhash" => Ok(json!(cosig::display_of_internal(&bh))),
+                "yed_getattestations" => Ok(json!([])),
+                "getblockhash" => Ok(json!(hash_at(&ch, params[0].as_u64().unwrap() as u32))),
                 "yed_signcancelcosign" => {
-                    let seq = params[2].as_u64().unwrap() as u16;
-                    if params[1].is_null() {
+                    ch.sign_calls += 1;
+                    if ch.sign_failures > 0 {
+                        ch.sign_failures -= 1;
                         return Err((
-                            -8,
-                            format!("price-required: seq {seq} signed no price for the claim's refHeight 99"),
+                            -4,
+                            "Error: Please enter the wallet passphrase with walletpassphrase first.".into(),
                         ));
                     }
-                    let price = params[1].as_u64().unwrap() as u32;
+                    let seq = params[2].as_u64().unwrap() as u16;
+                    let price = match (ch.guard.get(&seq), &params[1]) {
+                        (Some(g), Value::Null) => *g,
+                        (None, Value::Null) => {
+                            return Err((
+                                -8,
+                                "price-required: this key signed no price for the claim's refHeight 99".into(),
+                            ))
+                        }
+                        (_, p) if ch.guard_refuses => {
+                            return Err((
+                                -8,
+                                format!("equivocation-guard: seq {seq} already signed 1 for height 99 ({p})"),
+                            ))
+                        }
+                        (_, p) => p.as_u64().unwrap() as u32,
+                    };
+                    if cosig::is_underwater(COLL, price as i64, DEBT, THETA) {
+                        return Err((
+                            -8,
+                            "cancel-statement-claimable: at that price the vault was claimable".into(),
+                        ));
+                    }
+                    ch.guard.insert(seq, price);
+                    let bh = cosig::internal_from_display(&hash_at(&ch, 99)).unwrap();
                     let msg = cosig::message(
                         &set,
                         &cosig::internal_from_display(&intent_txid).unwrap(),
@@ -1938,11 +2671,11 @@ mod tests {
                     Ok(json!("dd".repeat(32)))
                 }
                 "getrawmempool" => Ok(json!(ch.mempool)),
-                "gettxout" => Ok(if ch.mempool.is_empty() {
-                    json!({"value": 1})
-                } else {
-                    Value::Null
-                }),
+                "gettxout" => {
+                    let mempool = params[2].as_bool().unwrap_or(true);
+                    let spent = ch.spent_in_chain || (mempool && !ch.mempool.is_empty());
+                    Ok(if spent { Value::Null } else { json!({"value": 1}) })
+                }
                 "yed_getvault" => {
                     if ch.cancelled {
                         Err((-8, "vault-not-found".into()))
@@ -1956,35 +2689,59 @@ mod tests {
     }
 
     fn agent_cfg() -> CancelConfig {
-        crate::config::parse("[node]\nrpc_url = \"http://127.0.0.1:1\"\n[cancel]\nspares = 1\nspare_wait_blocks = 1\ntakeover_blocks = 50\n")
-            .unwrap()
-            .cancel
+        crate::config::parse(
+            "[node]\nrpc_url = \"http://127.0.0.1:1\"\n[cancel]\nspares = 1\nspare_wait_blocks = 1\ntakeover_blocks = 36\n",
+        )
+        .unwrap()
+        .cancel
+    }
+
+    fn intent() -> String {
+        format!("{}:0", "aa".repeat(32))
+    }
+
+    fn leader_and_other() -> (u16, u16) {
+        let txid = cosig::internal_from_display(&"aa".repeat(32)).unwrap();
+        let leader = (0u16..3).find(|s| rank(&[0, 1, 2], *s, &txid, 0) == Some(0)).unwrap();
+        (leader, (0u16..3).find(|s| *s != leader).unwrap())
+    }
+
+    fn signed_frame(seq: u16, key: u8, price: u32, block_hash: &str) -> Vec<u8> {
+        let txid = cosig::internal_from_display(&"aa".repeat(32)).unwrap();
+        let bh = cosig::internal_from_display(block_hash).unwrap();
+        let msg = cosig::message(&[0x75; 32], &txid, 0, 99, price, &bh);
+        Frame {
+            txid,
+            n: 0,
+            seq,
+            ref_height: 99,
+            entry: Entry {
+                price,
+                sig: testkit::sign(&testkit::key(key), &msg),
+            },
+        }
+        .encode()
+        .to_vec()
+    }
+
+    fn new_agent(m: &MockNode, seq: u16, path: &Path) -> CancelAgent {
+        let mut a = CancelAgent::new(agent_cfg(), &m.config(None, None, None), seq, path.to_path_buf()).unwrap();
+        a.state.recording_since.get_or_insert(50); // this agent's record covers the claim's refHeight (99)
+        a
     }
 
     #[tokio::test]
     async fn agent_cosigns_collects_sends_closes_and_resumes() {
-        let chain = Arc::new(Mutex::new(Chain {
-            height: 100,
-            claiming: true,
-            cancelled: false,
-            cancels_required: 2,
-            sent: vec![],
-            mempool: vec![],
-        }));
-        let m = mock(chain.clone());
+        let ch = chain(2);
+        let m = mock(ch.clone());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let node_cfg = m.config(None, None, None);
-        // find the rota's leader for this intent among seqs 0..2 and run as that member
-        let txid = cosig::internal_from_display(&"aa".repeat(32)).unwrap();
-        let leader = (0u16..3).find(|s| rank(&[0, 1, 2], *s, &txid, 0) == Some(0)).unwrap();
-        let other = (0u16..3).find(|s| *s != leader).unwrap();
-        let mut a = CancelAgent::new(agent_cfg(), &node_cfg, leader, path.clone()).unwrap();
-        a.state.record_price(99, 4_000_000); // this agent's honest price at R = 99: $4.00 (the vault at 300 %)
+        let (leader, other) = leader_and_other();
+        let mut a = new_agent(&m, leader, &path);
+        a.state.record_price(99, 4_000_000); // its honest price at R = 99: $4.00 (the vault at 300 %)
 
-        // tick 1: follows the claim, judges it wrong-price, co-signs (price-required -> its own price), publishes
-        a.tick(100, Some(4_000_000), vec![]).await;
-        let c = &a.state.claims[&format!("{}:0", "aa".repeat(32))];
+        a.tick(100).await;
+        let c = &a.state.claims[&intent()];
         assert_eq!(c.verdict, Verdict::Wrong);
         assert!(c.alerted.contains("wrong-price"));
         assert!(c.own_cosig.is_some());
@@ -1992,73 +2749,41 @@ mod tests {
         assert_eq!(out.len(), 1);
         let f = Frame::decode(&out[0]).unwrap();
         assert_eq!((f.seq, f.ref_height, f.entry.price), (leader, 99, 4_000_000));
-        assert!(chain.lock().unwrap().sent.is_empty()); // required 2: one in hand, nothing built
+        assert!(ch.lock().unwrap().sent.is_empty()); // required 2: one in hand
 
-        // a second member's co-signature arrives on the topic (and a forged one, dropped): the leader now holds 2 =
-        // required, waits a block for the spare, then builds
-        let set = [0x75u8; 32];
-        let bh = [0x33u8; 32];
-        let sign = |seq: u16, key: u8| {
-            let msg = cosig::message(&set, &txid, 0, 99, 4_000_000, &bh);
-            Frame {
-                txid,
-                n: 0,
-                seq,
-                ref_height: 99,
-                entry: Entry {
-                    price: 4_000_000,
-                    sig: testkit::sign(&testkit::key(key), &msg),
-                },
-            }
-            .encode()
-            .to_vec()
-        };
-        a.tick(
-            100,
-            Some(4_000_000),
-            vec![sign(other, 10 + other as u8), sign(other, 99)],
-        )
-        .await;
-        assert_eq!(a.state.claims.values().next().unwrap().cosigs.len(), 2);
-        assert!(chain.lock().unwrap().sent.is_empty());
-        a.tick(101, Some(4_000_000), vec![]).await;
-        {
-            let ch = chain.lock().unwrap();
-            assert_eq!(ch.sent.len(), 1);
-            assert_eq!(ch.sent[0].len(), 2);
-        }
-        assert!(matches!(
-            a.state.claims.values().next().unwrap().phase,
-            Phase::Sent { .. }
-        ));
+        // another member's co-signature arrives (and a forged one, dropped), between polls
+        a.on_frame(
+            &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
+            "peer-a",
+        );
+        a.on_frame(&signed_frame(other, 99, 4_000_001, &default_hash()), "peer-b");
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
+        a.tick(100).await;
+        assert!(ch.lock().unwrap().sent.is_empty()); // waits a block for the spare
+        a.tick(101).await;
+        assert_eq!(ch.lock().unwrap().sent.len(), 1);
+        assert_eq!(ch.lock().unwrap().sent[0].len(), 2);
+        assert!(matches!(a.state.claims[&intent()].phase, Phase::Sent { .. }));
 
-        // restart: a new agent on the same state file neither re-co-signs nor rebuilds (the cancel is in the mempool)
+        // restart: neither re-co-signs nor rebuilds (the cancel is in the mempool)
         drop(a);
-        let signs = |m: &MockNode| {
-            m.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(c, _)| c == "yed_signcancelcosign")
-                .count()
-        };
-        let before = signs(&m);
-        let mut b = CancelAgent::new(agent_cfg(), &node_cfg, leader, path.clone()).unwrap();
-        b.tick(102, Some(4_000_000), vec![]).await;
-        assert_eq!(chain.lock().unwrap().sent.len(), 1);
-        assert_eq!(signs(&m), before);
-        assert_eq!(b.state.claims.values().next().unwrap().cosigs.len(), 2);
+        let before = ch.lock().unwrap().sign_calls;
+        let mut b = new_agent(&m, leader, &path);
+        b.tick(102).await;
+        assert_eq!(ch.lock().unwrap().sent.len(), 1);
+        assert_eq!(ch.lock().unwrap().sign_calls, before);
 
-        // the cancel confirms: the claim leaves CLAIMING, the vault record is gone: closed as cancelled
+        // the cancel confirms: the intent is spent in the chain, the vault record gone: closed as cancelled
         {
-            let mut ch = chain.lock().unwrap();
-            ch.claiming = false;
-            ch.cancelled = true;
-            ch.mempool.clear();
+            let mut c = ch.lock().unwrap();
+            c.claiming = false;
+            c.cancelled = true;
+            c.spent_in_chain = true;
+            c.mempool.clear();
         }
-        b.tick(103, Some(4_000_000), vec![]).await;
+        b.tick(103).await;
         assert_eq!(
-            b.state.claims.values().next().unwrap().phase,
+            b.state.claims[&intent()].phase,
             Phase::Closed {
                 outcome: "cancelled".into(),
                 height: 103
@@ -2066,68 +2791,271 @@ mod tests {
         );
     }
 
+    /// Review H-1: the claim's block is reorganised away. The claim is held (never closed as cancelled), its
+    /// re-mining at another height reopens it with its co-signatures restored, and it is still cancelled; a claim
+    /// that was closed and comes back is reopened too.
+    #[tokio::test]
+    async fn a_reorg_of_the_claim_block_never_closes_the_claim() {
+        let ch = chain(1);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, _) = leader_and_other();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.record_price(99, 4_000_000);
+        a.tick(100).await;
+        assert!(a.state.claims[&intent()].own_cosig.is_some());
+        // the claim's block (100) is replaced: the claim is not CLAIMING, its intent is "spent" (gone) in the chain
+        {
+            let mut c = ch.lock().unwrap();
+            c.claiming = false;
+            c.spent_in_chain = true;
+            c.cancelled = true; // yed_getvault would say vault-not-found: the old code closed it as cancelled
+            c.hashes.insert(100, cosig::display_of_internal(&[0x44; 32]));
+        }
+        a.tick(100).await;
+        let c = &a.state.claims[&intent()];
+        assert!(!c.is_closed(), "a reorg is not a cancel");
+        assert!(c.orphaned && c.alerted.contains("claim-reorged"));
+        assert!(ch.lock().unwrap().sent.is_empty()); // an orphaned claim is not driven
+                                                     // re-mined in a new block at the same height: followed again, co-signatures restored (same R and hash)
+        {
+            let mut c = ch.lock().unwrap();
+            c.claiming = true;
+            c.spent_in_chain = false;
+            c.cancelled = false;
+        }
+        a.tick(101).await;
+        let c = &a.state.claims[&intent()];
+        assert!(!c.orphaned && !c.is_closed());
+        assert!(c.own_cosig.is_some() && c.cosigs.contains_key(&leader));
+        a.tick(102).await;
+        assert_eq!(
+            ch.lock().unwrap().sent.len(),
+            1,
+            "the re-mined claim is still cancelled"
+        );
+
+        // a claim closed earlier that is CLAIMING again is reopened
+        a.state.claims.get_mut(&intent()).unwrap().phase = Phase::Closed {
+            outcome: "cancelled".into(),
+            height: 102,
+        };
+        ch.lock().unwrap().mempool.clear();
+        a.tick(103).await;
+        let c = &a.state.claims[&intent()];
+        assert!(!c.is_closed());
+        assert_eq!(c.phase, Phase::Watching);
+    }
+
+    /// Review H-2: a reorg across the refHeight changes blockHash(R): the claim is reset and re-signed over the new
+    /// hash; frames over the old hash no longer verify.
+    #[tokio::test]
+    async fn a_reorg_across_the_ref_height_re_signs() {
+        let ch = chain(2);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, other) = leader_and_other();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.record_signed(99, 4_000_000);
+        a.tick(100).await;
+        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()), "p");
+        let old = a.state.claims[&intent()].own_cosig.clone().unwrap();
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
+        let new_hash = cosig::display_of_internal(&[0x55; 32]);
+        ch.lock().unwrap().hashes.insert(99, new_hash.clone());
+        a.take_outbox();
+        a.tick(101).await;
+        let c = &a.state.claims[&intent()];
+        assert_eq!(c.block_hash.as_deref(), Some(new_hash.as_str()));
+        let new = c.own_cosig.clone().unwrap();
+        assert_ne!(new, old, "re-signed over the new blockHash(R)");
+        assert_eq!(c.cosigs.len(), 1, "the other member's old co-signature is gone");
+        assert_eq!(a.take_outbox().len(), 1, "the new co-signature is published at once");
+        // the other member's old frame does not verify any more; its re-signed one does
+        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()), "p");
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 1);
+        a.on_frame(&signed_frame(other, 10 + other as u8, 4_000_000, &new_hash), "p");
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 2);
+    }
+
+    /// Review H-3: a flood from one peer -- frames that pass every cheap check, with bad signatures -- does not
+    /// starve another peer's valid frame.
+    #[tokio::test]
+    async fn a_flood_from_one_peer_cannot_starve_another() {
+        let ch = chain(2);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, other) = leader_and_other();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.record_price(99, 4_000_000);
+        a.tick(100).await;
+        let now = Instant::now();
+        let mut flood = 0;
+        for i in 0..5_000u32 {
+            // a member's seq, the right R, a non-claimable price, a signature by a key that is not the member's
+            a.on_frame_at(&signed_frame(other, 99, 4_000_000 + i, &default_hash()), "evil", now);
+            flood += 1;
+        }
+        assert_eq!(flood, 5_000);
+        assert_eq!(a.state.claims[&intent()].cosigs.len(), 1);
+        a.on_frame_at(
+            &signed_frame(other, 10 + other as u8, 4_000_000, &default_hash()),
+            "good",
+            now,
+        );
+        assert_eq!(
+            a.state.claims[&intent()].cosigs.len(),
+            2,
+            "the honest peer's frame got through"
+        );
+        // and the flooding peer itself is limited: its bucket is empty now
+        assert!(!a.filter.peer_ok("evil", now));
+        assert!(a.filter.peer_ok("good", now));
+    }
+
+    /// Review M-1: a transient refusal (a locked wallet) is retried; a sticky one blocks.
+    #[tokio::test]
+    async fn transient_signing_errors_are_retried_sticky_ones_block() {
+        let ch = chain(1);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, _) = leader_and_other();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.record_price(99, 4_000_000);
+        ch.lock().unwrap().sign_failures = 2;
+        a.tick(100).await;
+        assert!(a.state.claims[&intent()].own_cosig.is_none());
+        assert!(a.state.claims[&intent()].cosign_blocked.is_none());
+        a.tick(100).await;
+        a.tick(100).await;
+        assert!(
+            a.state.claims[&intent()].own_cosig.is_some(),
+            "co-signed once the wallet answered"
+        );
+
+        let ch2 = chain(1);
+        ch2.lock().unwrap().guard_refuses = true;
+        let m2 = mock(ch2.clone());
+        let mut b = new_agent(&m2, leader, &dir.path().join("s2.json"));
+        b.state.record_price(99, 4_000_000);
+        b.tick(100).await;
+        let calls = ch2.lock().unwrap().sign_calls;
+        assert!(b.state.claims[&intent()].cosign_blocked.is_some());
+        assert!(b.state.claims[&intent()].alerted.contains("cosign-refused"));
+        b.tick(101).await;
+        assert_eq!(ch2.lock().unwrap().sign_calls, calls, "a sticky refusal is not retried");
+    }
+
+    /// Review M-2 / L-2: with no record of its own at the refHeight and the height before its record began, the agent
+    /// asks the guard and, finding none, states nothing.
+    #[tokio::test]
+    async fn no_price_is_stated_for_a_height_the_record_does_not_cover() {
+        let ch = chain(1);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, _) = leader_and_other();
+        let mut a = new_agent(&m, leader, &dir.path().join("s.json"));
+        a.state.recording_since = Some(99); // the state began at R = 99 (it was lost and recreated)
+        a.state.record_price(99, 4_000_000); // even with an aggregate there ...
+        a.tick(106).await;
+        let c = &a.state.claims[&intent()];
+        assert_eq!(c.verdict, Verdict::Wrong);
+        assert!(
+            c.own_cosig.is_none(),
+            "... no new statement at a height it may have attested"
+        );
+        assert!(c.alerted.contains("no-record"));
+        // with the guard holding this key's price there, it co-signs at that price
+        let ch2 = chain(1);
+        ch2.lock().unwrap().guard.insert(leader, 4_100_000);
+        let m2 = mock(ch2.clone());
+        let mut b = new_agent(&m2, leader, &dir.path().join("s2.json"));
+        b.state.recording_since = Some(105); // no history at all: the guard decides (L-2)
+        b.tick(106).await;
+        let c = &b.state.claims[&intent()];
+        assert_eq!((c.verdict, c.judged_price), (Verdict::Wrong, Some(4_100_000)));
+        assert!(c.own_cosig.is_some());
+    }
+
     #[tokio::test]
     async fn agent_leaves_an_honest_claim_alone() {
-        let chain = Arc::new(Mutex::new(Chain {
-            height: 100,
-            claiming: true,
-            cancelled: false,
-            cancels_required: 1,
-            sent: vec![],
-            mempool: vec![],
-        }));
-        let m = mock(chain.clone());
+        let ch = chain(1);
+        let m = mock(ch.clone());
         let dir = tempfile::tempdir().unwrap();
-        let mut a = CancelAgent::new(agent_cfg(), &m.config(None, None, None), 0, dir.path().join("s.json")).unwrap();
+        let mut a = new_agent(&m, 0, &dir.path().join("s.json"));
         a.state.record_price(99, 1_600_000); // the vault really is at 120 % at this agent's price
         for h in 100..111 {
-            a.tick(h, Some(1_600_000), vec![]).await;
+            a.tick(h).await;
         }
-        let c = a.state.claims.values().next().unwrap();
+        let c = &a.state.claims[&intent()];
         assert_eq!(c.verdict, Verdict::Honest);
         assert!(c.own_cosig.is_none());
         assert!(a.take_outbox().is_empty());
-        assert!(chain.lock().unwrap().sent.is_empty());
-        assert!(!m.calls.lock().unwrap().iter().any(|(c, _)| c == "yed_signcancelcosign"));
-        // released after the delay: closed as released, no alert (it was honest)
-        chain.lock().unwrap().claiming = false;
-        a.tick(111, Some(1_600_000), vec![]).await;
-        let c = a.state.claims.values().next().unwrap();
+        assert!(ch.lock().unwrap().sent.is_empty());
+        assert_eq!(ch.lock().unwrap().sign_calls, 0);
+        {
+            let mut c = ch.lock().unwrap();
+            c.claiming = false;
+            c.spent_in_chain = true;
+        }
+        a.tick(111).await;
+        let c = &a.state.claims[&intent()];
         assert!(matches!(&c.phase, Phase::Closed { outcome, .. } if outcome == "released"));
         assert!(!c.alerted.contains("wrong-price-released"));
     }
 
     #[tokio::test]
     async fn agent_with_auto_cosign_off_only_alerts() {
-        let chain = Arc::new(Mutex::new(Chain {
-            height: 100,
-            claiming: true,
-            cancelled: false,
-            cancels_required: 1,
-            sent: vec![],
-            mempool: vec![],
-        }));
-        let m = mock(chain.clone());
+        let ch = chain(1);
+        let m = mock(ch.clone());
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = agent_cfg();
         cfg.auto_cosign = false;
         let mut a = CancelAgent::new(cfg, &m.config(None, None, None), 0, dir.path().join("s.json")).unwrap();
-        a.tick(100, Some(4_000_000), vec![]).await;
-        let c = a.state.claims.values().next().unwrap();
+        a.state.recording_since = Some(50);
+        a.state.record_price(99, 4_000_000);
+        a.tick(100).await;
+        let c = &a.state.claims[&intent()];
         assert_eq!(c.verdict, Verdict::Wrong);
         assert!(c.alerted.contains("wrong-price"));
         assert!(c.own_cosig.is_none());
         assert!(a.take_outbox().is_empty());
-        // the claim is released: the alert that matters
-        chain.lock().unwrap().claiming = false;
-        a.tick(111, None, vec![]).await;
-        assert!(a
-            .state
-            .claims
-            .values()
-            .next()
-            .unwrap()
-            .alerted
-            .contains("wrong-price-released"));
+        {
+            let mut c = ch.lock().unwrap();
+            c.claiming = false;
+            c.spent_in_chain = true;
+        }
+        a.tick(111).await;
+        assert!(a.state.claims[&intent()].alerted.contains("wrong-price-released"));
+    }
+
+    /// Review M-3: a cancel that keeps leaving the mempool is rebuilt with backoff, at most max_sends times.
+    #[tokio::test]
+    async fn rebuilds_back_off_and_stop_at_the_cap() {
+        let ch = chain(1);
+        let m = mock(ch.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let (leader, _) = leader_and_other();
+        let mut cfg = agent_cfg();
+        cfg.refee_after_blocks = 1;
+        cfg.max_sends = 3;
+        cfg.spares = 0;
+        let mut a = CancelAgent::new(cfg, &m.config(None, None, None), leader, dir.path().join("s.json")).unwrap();
+        a.state.recording_since = Some(50);
+        a.state.record_price(99, 4_000_000);
+        let mut h = 100;
+        for _ in 0..40 {
+            a.tick(h).await;
+            ch.lock().unwrap().mempool.clear(); // every cancel is evicted
+            h += 1;
+            if h >= 109 {
+                break;
+            }
+        }
+        let sends = ch.lock().unwrap().sent.len();
+        assert_eq!(sends, 3, "max_sends");
+        assert!(a.state.claims[&intent()].alerted.contains("cancel-send-cap"));
+        let c = &a.state.claims[&intent()];
+        assert!(c.next_rebuild > 0);
     }
 }

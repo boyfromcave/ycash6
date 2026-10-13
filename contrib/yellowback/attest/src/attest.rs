@@ -456,21 +456,20 @@ impl Attestor {
                 Ok((_, h)) if h >= 0 => {
                     let tick = self.tick(h as u32, transport.as_mut()).await;
                     self.heartbeat(h as u32).await;
-                    if let Some((agent, tx, rx)) = cancel.as_mut() {
+                    if let Some((agent, tx, _)) = cancel.as_mut() {
                         if let Some(p) = self.last_aggregate {
                             agent.state.record_price(h as u32, p);
                         }
                         if let Tick::Published(att) = &tick {
                             agent.state.record_signed(att.cited_height, att.price_micro_usd as i64);
                         }
-                        let mut inbox = Vec::new();
-                        while let Ok(m) = rx.try_recv() {
-                            inbox.push(m);
-                        }
-                        agent.tick(h as u32, self.last_aggregate, inbox).await;
+                        agent.tick(h as u32).await;
                         for frame in agent.take_outbox() {
                             if tx.send(frame).await.is_err() {
-                                tracing::error!("cancel topic: the transport task is gone");
+                                // review L-5: never run on without the topic; the service manager restarts us
+                                anyhow::bail!(
+                                    "cancel topic: the transport task is gone; exiting so the agent is restarted"
+                                );
                             }
                         }
                     }
@@ -478,9 +477,23 @@ impl Attestor {
                 Ok(_) => tracing::warn!("node index is empty (height -1); waiting"),
                 Err(e) => tracing::error!("yed_getinfo failed: {e}; retrying"),
             }
-            tokio::select! {
-                _ = tokio::time::sleep(poll) => {}
-                _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+            // between polls the cancel topic is drained continuously (review H-3): a frame is checked as it arrives
+            let deadline = tokio::time::Instant::now() + poll;
+            loop {
+                match cancel.as_mut() {
+                    Some((agent, _, rx)) => tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        got = rx.recv() => match got {
+                            Some((bytes, peer)) => agent.on_frame(&bytes, &peer),
+                            None => anyhow::bail!("cancel topic: the transport task is gone; exiting so the agent is restarted"),
+                        },
+                        _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+                    },
+                    None => tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(0); }
+                    },
+                }
             }
         }
     }

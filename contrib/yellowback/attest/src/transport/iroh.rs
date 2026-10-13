@@ -205,10 +205,16 @@ impl Transport for IrohTransport {
     }
 
     fn recv(&mut self) -> BoxFuture<'_, anyhow::Result<Vec<u8>>> {
+        Box::pin(async move { Ok(self.recv_from().await?.0) })
+    }
+
+    fn recv_from(&mut self) -> BoxFuture<'_, anyhow::Result<(Vec<u8>, String)>> {
         Box::pin(async move {
             loop {
                 match self.receiver.next().await {
-                    Some(Ok(Event::Received(msg))) => return Ok(msg.content.to_vec()),
+                    Some(Ok(Event::Received(msg))) => {
+                        return Ok((msg.content.to_vec(), msg.delivered_from.to_string()))
+                    }
                     Some(Ok(Event::NeighborUp(id))) => tracing::info!("iroh: neighbour up {}", id.fmt_short()),
                     Some(Ok(Event::NeighborDown(id))) => tracing::info!("iroh: neighbour down {}", id.fmt_short()),
                     Some(Ok(Event::Lagged)) => tracing::warn!("iroh: receiver lagged; some messages were dropped"),
