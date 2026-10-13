@@ -816,26 +816,39 @@ int64_t CancelQ(const VaultRecord& v, const Params& P, int64_t h)
 }
 
 /**
- * CAN-3 round 2 (owner 2026-10-13): whether the position `v` at `out` is claimable by either RED-4 path at the latest
- * stored snapshot, Snapshots[H - 1], at that snapshot's prices: (a) underwater at its pClaim (xClaim) under
- * CLAIM_THRESHOLD; (b) a standing notice that has persisted (H - 1 - notice.refHeight in [EMERGENCY_PERSIST,
- * EMERGENCY_NOTICE_TTL]) and the position underwater at the notice's pEmerg under EMERGENCY_RATIO. An undefined price
- * never makes it claimable (M1). Reads only the position's own records.
+ * CAN-3 round 2, as fixed after the review (coordinator 2026-10-13): whether a claim of the position `v` at `out` in this
+ * block could pass RED-4 at ANY reference height it may cite, R in [max(H - REF_WINDOW, START_HEIGHT), H - 1], judged
+ * fail-closed from chain state alone (no bundle is at hand at a release):
+ *  - an undefined xClaim at R (no snapshot, no price) counts as claimable;
+ *  - path (a): a claim uses pClaim = max(xClaim, aClaim) when R is ARMED and xClaim otherwise; since pClaim >= xClaim
+ *    either way, the position is treated as claimable when it is underwater at xClaim under CLAIM_THRESHOLD (an
+ *    unarmed R: exactly the claim's test; an armed R: a claim could pass with a bundle whose aClaim is as low);
+ *  - path (b): when R is ARMED and a standing notice of the position persists for R (EMERGENCY_PERSIST <=
+ *    R - notice.refHeight <= EMERGENCY_NOTICE_TTL), the claim's pEmerg = min(xClaim, aClaim) can be as low as a bundle
+ *    makes it, so the position is treated as claimable.
+ * Reads at most REF_WINDOW (40) snapshots (cached per block) and one notice per held residual's release; only the
+ * owner's own records. Over-approximating claimability can only hold a residual a real claim could not take, never
+ * release one it could; the owner can always redeem.
  */
 bool ClaimableAtSnapshot(EvalContext& ctx, const VaultRecord& v, const COutPoint& out)
 {
     const Params& P = ctx.params;
-    const int64_t S = ctx.height - 1;
-    const std::optional<Snapshot>& snap = ctx.Snap(S);
-    if (snap.has_value() && IsUnderwater(v.collateralZat, snap->PClaim(), v.mintedCents, P.claimThresholdBps)) return true;
+    const int64_t H = ctx.height;
+    const int64_t lo = std::max<int64_t>(H - P.refWindow, P.startHeight);
     std::optional<NoticeRecord> n = ctx.st.GetNotice(out);
-    return n.has_value() && S - (int64_t)n->refHeight >= P.emergencyPersist && S - (int64_t)n->refHeight <= P.emergencyNoticeTtl &&
-           IsUnderwater(v.collateralZat, (MicroUsd)n->pEmerg, v.mintedCents, P.emergencyRatioBps);
+    for (int64_t R = lo; R <= H - 1; R++) {
+        const std::optional<Snapshot>& snap = ctx.Snap(R);
+        if (!snap.has_value() || !snap->PClaim().has_value()) return true;                       // fail closed
+        if (IsUnderwater(v.collateralZat, snap->PClaim(), v.mintedCents, P.claimThresholdBps)) return true;   // (a)
+        if (n.has_value() && P.IsArmed(snap->attest.IsArmed()) && R - (int64_t)n->refHeight >= P.emergencyPersist &&
+            R - (int64_t)n->refHeight <= P.emergencyNoticeTtl) return true;                      // (b)
+    }
+    return false;
 }
 
 /** CAN-3: a held residual is released once its position is closed (CLOSED by the owner, CLAIMED by a later release),
- *  or -- owner, round 2 -- once it is ACTIVE with CANCEL_QUIET passed since its last cancel AND not claimable at the
- *  latest snapshot (ClaimableAtSnapshot); never while it is CLAIMING. */
+ *  or -- owner, round 2 -- once it is ACTIVE with CANCEL_QUIET passed since its last cancel AND no claim of it could pass
+ *  at any reference height a claim in this block may cite (ClaimableAtSnapshot); never while it is CLAIMING. */
 bool ResidualReleasable(EvalContext& ctx, const std::optional<VaultRecord>& pos, const COutPoint& out)
 {
     if (!pos.has_value()) return false;     // cannot happen: every cancel moves heldBy to the position it re-creates
