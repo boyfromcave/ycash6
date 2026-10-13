@@ -262,7 +262,7 @@ class Params(object):
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
                  attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=1_152,
-                 cancel_signers_max=5, cancel_quiet=8_064)       # CAN-2/CAN-3 (owner 2026-10-13); not hashed
+                 cancel_signers_max=4, cancel_quiet=8_064)       # CAN-2/CAN-3 (owner 2026-10-13; round 2: max 4, was 5); not hashed
         a.update(attest or {})
         for k, v in a.items():
             setattr(self, k, v)
@@ -2702,7 +2702,7 @@ class YellowbackModel(object):
             return 'intent-cancel-residual'
         # CAN-3: the residual of a cancelled claim is held while the re-created position lives
         if not cancel and ir.role == I_RESIDUAL and ir.held_by is not None \
-                and not self._residual_releasable(self.vaults.get(ir.held_by), height):
+                and not self._residual_releasable(self.vaults.get(ir.held_by), ir.held_by, height):
             return 'intent-residual-held'
         del self.intents[op]
         rec.type = 'CLAIM_CANCEL' if cancel else 'CLAIM_RELEASE'
@@ -2766,13 +2766,28 @@ class YellowbackModel(object):
         """CancelsRequired (state.h): min(q + 1, CANCEL_SIGNERS_MAX)."""
         return min(self._cancel_q(v, height) + 1, max(1, self.params.cancel_signers_max))
 
-    def _residual_releasable(self, pos, height):
-        """CAN-3: the held residual's position is CLOSED or CLAIMED, or ACTIVE with CANCEL_QUIET passed since its last cancel."""
+    def claimable_at_snapshot(self, v, op, height):
+        """ClaimableAtSnapshot (CAN-3 round 2): at Snapshots[H - 1], (a) underwater at its pClaim under CLAIM_THRESHOLD, or
+        (b) a standing notice of ``op`` persisted at H - 1 with the position underwater at its pEmerg under EMERGENCY_RATIO."""
+        p = self.params
+        S = height - 1
+        snap = self.snapshot(S)
+        if snap is not None and snap.p_claim and is_underwater(v.collateral_zat, snap.p_claim, v.minted_cents, p.claim_threshold_bps):
+            return True
+        n = self.notices.get(op)
+        return (n is not None and p.emergency_persist <= S - n.ref_height <= p.emergency_notice_ttl
+                and is_underwater(v.collateral_zat, n.p_emerg, v.minted_cents, p.emergency_ratio_bps))
+
+    def _residual_releasable(self, pos, op, height):
+        """CAN-3: the held residual's position is CLOSED or CLAIMED, or ACTIVE with CANCEL_QUIET passed since its last cancel
+        and (round 2) not claimable at the latest snapshot."""
         if pos is None:
             return False
         if pos.status in (V_CLOSED, V_CLAIMED):
             return True
-        return pos.status == V_ACTIVE and height - pos.last_cancel_height >= self.params.cancel_quiet
+        if pos.status != V_ACTIVE or height - pos.last_cancel_height < self.params.cancel_quiet:
+            return False
+        return not self.claimable_at_snapshot(pos, op, height)
 
     def current_member_seq(self, key33, height):
         """The seq of a current member of the attestor set on the mirror (the primitive's IsCurrent): its key's newest
@@ -2805,28 +2820,28 @@ class YellowbackModel(object):
         if sha256(pushes[0]) != h:
             return None
         entries = ya.decode_cancel_cosigns(pushes[0])
-        if entries is None or len(entries) < required:
+        if entries is None:
             return None
         R = ir.claim_ref_height
         bh = self.block_hash_at(R)
         if bh is None:
             return None
-        seen, seqs = set(), []
-        for price, sig in entries:
+        counted, seqs = set(), []
+        for price, sig in entries:          # round 2 (review M-2): invalid, non-current and repeated entries are ignored
             if not (p.price_min <= price <= p.price_max):
-                return None
+                continue
             if is_underwater(v.collateral_zat, price, v.minted_cents, p.claim_threshold_bps):
-                return None
+                continue
             msg = ya.cancel_cosign_message(p.attestor_set_internal or bytes(32), intent_op[0], intent_op[1], R, price, bh)
             key = va.recover_compact(sig, msg)
-            if key is None or key in seen:
-                return None
-            seen.add(key)
+            if key is None or key in counted:
+                continue
             seq = self.current_member_seq(key, height)
             if seq is None:
-                return None
+                continue
+            counted.add(key)
             seqs.append(seq)
-        return seqs
+        return seqs if len(seqs) >= required else None
 
     def _attestation_valid(self, att, pubkey33, block_hash):
         from . import yellowback_attest as ya

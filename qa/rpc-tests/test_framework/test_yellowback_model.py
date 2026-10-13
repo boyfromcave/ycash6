@@ -1700,7 +1700,6 @@ class CancelLimitTests(CancelTests):
         no_marker = c.cancel_tx(self.intent, self.vault, self.coll, refund=True, cosigns=None,
                                 vouts=None)
         self.assertEqual(self.mine(no_marker), bad)
-        self.assertEqual(self.mine(self.cancel(seqs=(0, 0))), bad)                           # a repeated key
         other = c.cosign(self.intent, 4, self.HONEST)                                          # ATTESTORS[4] never joined
         self.assertEqual(self.mine(self.cancel(cosigns=[other])), bad)
         self.assertEqual(self.mine(self.cancel(cosigns=[c.cosign((self.claim, 1), 0, self.HONEST, ref=m.intents[self.intent].claim_ref_height)])), bad)
@@ -1711,11 +1710,44 @@ class CancelLimitTests(CancelTests):
         self.assertEqual(self.mine(self.cancel(price=9_000)), bad)                            # a claimable statement
         self.assertEqual(self.mine(self.cancel(price=edge - 1)), bad)
         self.assertEqual(self.mine(self.cancel(price=99)), bad)                               # under PRICE_MIN
-        self.assertEqual(self.mine(self.cancel(cosigns=[c.cosign(self.intent, 0, self.HONEST), other])), bad)
+        self.assertEqual(self.mine(self.cancel(cosigns=[other, c.cosign(self.intent, 0, 9_000)])), bad)   # nothing valid
         self.assertEqual(m.vaults[self.vault].status, ym.V_CLAIMING)
         raw = self.cancel(seqs=(0, 2, 3), price=edge)                                        # extras valid; the boundary holds
         self.assertEqual(self.mine(raw), '')
         self.assertEqual(m.txlog[txid_of(raw)].bundle_seqs, [0, 2, 3])
+
+    # Rule: CAN-3
+    # Rule: NOT-1
+    def test_residual_held_while_claimable_by_path_b(self):
+        """Round 2: healthy at the snapshot price, but a persisted notice on the position under EMERGENCY_RATIO holds it."""
+        c, m = self.c, self.c.model
+        res = self.fake_residual()
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        c.mine_n(64, price_fn=lambda h: 50_000)
+        m.notices[pos] = ym.NoticeRecord(c.height - 4, c.height - c.params.emergency_persist, 1_000)
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        m.notices[pos] = ym.NoticeRecord(c.height, c.height, 1_000)       # not yet persisted at H - 1
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
+
+    # Rule: CAN-2
+    def test_counts_distinct_valid_entries(self):
+        """Round 2 (review M-2): invalid, non-current and repeated entries are ignored; enough distinct valid ones hold."""
+        c, m = self.c, self.c.model
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        pos = (txid_of(raw), 0)
+        intent = self.reclaim(pos)                               # two needed now
+        cs = lambda seq, price=None: c.cosign(intent, seq, price or self.HONEST)  # noqa: E731
+        other = c.cosign(intent, 0, self.HONEST, member=ATTESTORS[4])            # never joined
+        vouts = [c.relock(pos, self.coll), c.refund_out(intent)]
+        self.assertEqual(self.mine(c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), cs(0)])), 'intent-cancel-cosign')
+        self.assertEqual(self.mine(c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), other])), 'intent-cancel-cosign')
+        raw = c.cancel_tx(intent, pos, self.coll, vouts=vouts, cosigns=[cs(0), other, cs(2, 9_000), cs(0), cs(1)])
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual(m.txlog[txid_of(raw)].bundle_seqs, [0, 1])
+        self.assertEqual(m.vaults[(txid_of(raw), 0)].cancel_count, 2)
 
     def fake_residual(self):
         """A residual intent of this fixture's claim (the claim had none due: injected into the model for the unit,
@@ -1738,6 +1770,11 @@ class CancelLimitTests(CancelTests):
         while c.height + 2 < cancelled + c.params.cancel_quiet:
             c.mine_n(1, price_fn=lambda h: 9_000)
         self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        # round 2: past CANCEL_QUIET the position (300 % at $0.05) is claimable at $0.009: still held
+        self.assertTrue(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
+        self.assertEqual(self.mine(c.release_tx(res, 1000)), 'intent-residual-held')
+        c.mine_n(64, price_fn=lambda h: 50_000)                 # the price recovers for a slow window
+        self.assertFalse(m.claimable_at_snapshot(m.vaults[pos], pos, c.height + 1))
         self.assertEqual(self.mine(c.release_tx(res, 1000)), '')
         self.assertNotIn(res, m.intents)
 

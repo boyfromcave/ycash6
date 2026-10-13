@@ -182,7 +182,10 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   carry no Yellowback payload -- a cancel none but `CANCEL_COSIGN` (type `0x09`, empty body) --
   (`intent-spend-malformed`). The residual's cancel is `intent-cancel-residual`. **(CAN-3)** The release
   of a residual whose `heldBy` is set is `intent-residual-held` unless `Vaults[heldBy]` is `CLOSED` or
-  `CLAIMED`, or `ACTIVE` with `H - lastCancelHeight >= CANCEL_QUIET` (regtest 40, mainnet 8,064).
+  `CLAIMED`, or `ACTIVE` with `H - lastCancelHeight >= CANCEL_QUIET` (regtest 40, mainnet 8,064) **and** (round 2) not
+  claimable at `Snapshots[H - 1]`: not underwater at its `pClaim` under `CLAIM_THRESHOLD_BPS`, and no standing notice of
+  the position with `EMERGENCY_PERSIST ≤ H - 1 - notice.refHeight ≤ EMERGENCY_NOTICE_TTL` and the position underwater at
+  `notice.pEmerg` under `EMERGENCY_RATIO_BPS` (an undefined price never makes it claimable).
   The record is erased (after those checks); the residual's release changes nothing else. The claimant's release
   makes the vault `CLAIMED`. The claimant's cancel must create exactly one output equal to the
   vault's V, at `vout[0]` (`intent-cancel-no-vault`): the vault record moves to `(cancelTxid, 0)`
@@ -197,12 +200,14 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   **(CAN-2 + C4b, checked after the refund)** `q = cancelCount` when `H - lastCancelHeight < CANCEL_QUIET`, else 0;
   `required = min(q + 1, CANCEL_SIGNERS_MAX)` (regtest 3, mainnet 5). The cancel must carry `CANCEL_COSIGN` and its
   scriptsig carrier (any input, `skipVin0` false) must hold `"YC" | 1 | count | count × (u32 price | sig65)`,
-  `1 ≤ count ≤ 7`, `count ≥ required`, where every entry has `PRICE_MIN ≤ price ≤ PRICE_MAX`, is not claimable
+  `1 ≤ count ≤ 7` (else `intent-cancel-cosign`), and at least `required` **distinct valid** entries (round 2: an entry that
+  fails any test below, or repeats a counted key, is ignored), an entry being valid when it has `PRICE_MIN ≤ price ≤ PRICE_MAX`, is not claimable
   (`!underwater(collateralZat, price, mintedCents, CLAIM_THRESHOLD_BPS)` of the CLAIMING record), and its signature
   recovers (header 31..34, low S) over `SHA256d("YedCancelCosign" ‖ attestorSetId ‖ intent txid ‖ u32 n ‖
   u32 claimRefHeight ‖ u32 price ‖ Snapshots[claimRefHeight].blockHash)` to a distinct key that is a current member
   (its newest record, not `EJECTED`/`WITHDRAWN`, bond unspent and unfrozen, `H ≥ registerHeight + AttestorSet.maturity`);
-  else `intent-cancel-cosign`. `TxLog.bundleSeqs` = the co-signers' seqs in carrier order. The re-created record gets
+  else `intent-cancel-cosign`. `TxLog.bundleSeqs` = the counted co-signers' seqs in carrier order. `CANCEL_SIGNERS_MAX`
+  is 4 on mainnet (round 2). The re-created record gets
   `cancelCount = min(q + 1, 255)`, `lastCancelHeight = H`. **(CAN-3)** Every residual intent whose position
   (`heldBy`, or `vault` when `heldBy` is null) is the cancelled outpoint gets `heldBy = (cancelTxid, 0)`.
   `TxLog.closedVaults` names the old outpoint, `reopenedVaults` the new one. The model checks neither
