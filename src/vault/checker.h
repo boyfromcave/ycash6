@@ -32,7 +32,8 @@ public:
 
     /** The set's threshold for `role` (1 unlock, 2 cancel); nullopt for an unknown set/role. */
     std::optional<int> SetThreshold(const uint256& setId, uint8_t role) const override;
-    /** §15.2 steps 3–5 over sighash = SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL, amount, branch). */
+    /** §15.2 steps 3–5 over sighash = SignatureHash(scriptCode, tx, nIn, SIGHASH_ALL|SIGHASH_ANYONECANPAY, amount,
+     *  branch): the fee inputs are not signed (01/V-2); the fee never comes from the vault's value (S-2, I-1, I-2). */
     bool CheckSetSigs(const uint256& setId, uint8_t role, const std::vector<valtype>& sigs,
                       const CScript& scriptCode, uint32_t consensusBranchId) const override;
     /** Dormant, wound down past its liveness window, or unknown (§15.4). */
