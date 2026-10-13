@@ -150,15 +150,15 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         assert_raises_rpc('Method not found', n0.yed_getinfo)
         self.mine(ACTIVATION - n0.getblockcount())
         assert_equal(n0.vault_getinfo()['active'], True)
+        n0.sendtoaddress(n1.getnewaddress(), 30)    # n1's bond at the module's floor (D-Q-30), below
+        self.mine()
         created = n0.set_create({'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
                                  'open': True, 'maturity': 8})   # the module adopts a set whose maturity is BOND_MATURITY (8 on regtest)
-        self.mine()
         self.set_id = created['setid']
-        joined = n1.set_join(self.set_id, 1, n0.getblockcount() + 300)
-        assert 'txid' in joined, joined
-        self.mine(9)                        # past the set maturity (8): the member is current
-        info = n0.set_getinfo(self.set_id)
-        assert_equal((info['members'], info['current']), (1, 1))
+        # the cancel-limit design (CAN-2): a YED cancel needs a co-signature of a current member on the module's mirror,
+        # which learns the set from its SET_CREATE and its members from their SET_JOINs; so the nodes learn the set id
+        # before the SET_CREATE is mined (it is re-sent after the restart) and n1 joins with a bond at the module's floor
+        set_hex = n0.getrawtransaction(self.set_id)
 
         # 01/V-7: before P8 the attestor set is a node parameter; vault_getinfo says which one a node validates with
         for n in self.nodes:
@@ -177,6 +177,15 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
             line = ('Yellowback: attestor set %s (regtest -yellowbackattestorset)' % self.set_id if i < 3
                     else 'Yellowback: no attestor set; the YED module validates inertly')
             assert line in log, 'node%d debug.log lacks "%s"' % (i, line)
+        if self.set_id not in n0.getrawmempool():               # the wallet may already have re-accepted it
+            n0.sendrawtransaction(set_hex)
+        self.mine()
+        joined = n1.set_join(self.set_id, 10, n0.getblockcount() + 300)
+        assert 'txid' in joined, joined
+        self.mine(9)                        # past the set maturity (8): the member is current
+        info = n0.set_getinfo(self.set_id)
+        assert_equal((info['members'], info['current']), (1, 1))
+        assert_equal([(r['seq'], r['status']) for r in n0.yed_listattestors()], [(0, 'ELIGIBLE')])     # the module's mirror
         for n in self.yb():
             act = n.yed_getactivation()
             assert_equal(act['status'], 'active')
@@ -318,6 +327,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         self.assert_one_state('release B')
 
         print('a wrong-price claim cancelled by the attestor set: the same position ACTIVE, the burn refunded (CAN-1)')
+        for _ in range(2):                  # the canceller funds the cancel's fee and its CAN-2 carrier from two confirmed coins
+            n0.sendtoaddress(n2.getnewaddress(), 2)
+        self.mine()
         _res, claim_c = self.two_step(n2, 'yed_claim', mint_c, '')
         # yed_buildcancel on the claim still in the mempool (review of 03/H-1): it reads the holder and the burn from the
         # claim's inputs, so it builds only when every input is confirmed (the index sees confirmed tokens only) and
@@ -326,35 +338,49 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         pool = set(n2.getrawmempool())
         unconfirmed = [i for i in claim_raw['vin'] if i['txid'] in pool]
         early = None
+        # CAN-2 + C4b (the cancel-limit design): the first cancel needs one member's co-signature -- n1's, its price
+        # statement at the claim's refHeight: the mint price, at which the vault is at 300 % (not claimable)
+        honest = n0.yed_getvault(mint_c)['pMint']
+        sync_mempools([n1, n2])
+        cosig = n1.yed_signcancelcosign('%s:0' % claim_c, honest)['cosig']
         if unconfirmed:
-            assert_raises_rpc('spends an unconfirmed output', n2.yed_buildcancel, '%s:0' % claim_c)
+            assert_raises_rpc('spends an unconfirmed output', n2.yed_buildcancel, '%s:0' % claim_c, [cosig])
         else:
-            early = n2.yed_buildcancel('%s:0' % claim_c)
+            assert_raises_rpc('cancel-cosign-needed', n2.yed_buildcancel, '%s:0' % claim_c)
+            early = n2.yed_buildcancel('%s:0' % claim_c, [cosig])
             assert_equal(early['intentconfirmed'], False)
         self.mine()
         claiming = n0.yed_getvault(mint_c)
         if early is not None:
             assert_equal((early['refund']['script'], early['refund']['cents']), (claiming['refundHolder'], claiming['burnedCents']))
-            assert_equal(n2.yed_buildcancel('%s:0' % claim_c)['hex'], early['hex'])     # sign once across the confirmation
+            assert_equal(n2.yed_buildcancel('%s:0' % claim_c, [cosig])['hex'], early['hex'])     # sign once across the confirmation
         assert_equal(claiming['status'], 'CLAIMING')
+        assert_equal((claiming['cancelCount'], claiming['cancelsRequired']), (0, 1))
         before = n0.yed_getstats()
         # CAN-1 (audit 03/H-1): the primitive's builder refuses a YED intent; yed_buildcancel adds the refund to the
         # holder the claim's YED came from (refundHolder), so no member signs a cancel the module rejects
         assert_raises_rpc('is cancelled with yed_buildcancel', n2.vault_buildcancel, '%s:0' % claim_c)
-        built = n2.yed_buildcancel('%s:0' % claim_c)
+        built = n2.yed_buildcancel('%s:0' % claim_c, [cosig])
         assert_equal((built['refund']['vout'], built['refund']['cents'], built['refund']['script']), (1, 10_000, claiming['refundHolder']))
+        assert_equal((built['cancelsRequired'], len(built['cosigners'])), (1, 1))
         assert n2.validateaddress(n2.decoderawtransaction(built['hex'])['vout'][1]['scriptPubKey']['addresses'][0])['ismine']
         signed = n1.set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
         # 01/V-2: the attestor's signature (SIGHASH_ALL|ANYONECANPAY) does not bind the fee inputs: the builder's node
         # re-funds the signed cancel (vault_refee) under the same sighash, re-signing it is idempotent for the member,
-        # and yed_buildcancel returns the re-funded transaction from then on (the build memo follows it, 07/N-2)
+        # and yed_buildcancel returns the re-funded transaction from then on (the build memo follows it, 07/N-2).
+        # vault_refee replaces every non-template input, the CAN-2 carrier too: yed_buildcancel with the same cosigs
+        # re-attaches it (the same carrier, re-signed over the new inputs)
         rf = n2.vault_refee(signed['hex'])
         assert_equal(rf['sighash'], signed['sighash'])
         assert_equal(n1.set_signcancel(rf['hex'])['sighash'], signed['sighash'])
-        again = n2.yed_buildcancel('%s:0' % claim_c)['hex']             # the re-funded build, without the signature
-        assert_equal(n1.set_signcancel(again)['hex'], rf['hex'])
-        signed = dict(signed, hex=rf['hex'])
+        again = n2.yed_buildcancel('%s:0' % claim_c, [cosig])            # the re-funded build with the carrier, without the signature
+        assert_equal(again['carrierTxid'], built['carrierTxid'])
+        resigned = n1.set_signcancel(again['hex'])
+        assert_equal(resigned['sighash'], signed['sighash'])
+        assert_equal([i['txid'] for i in n2.decoderawtransaction(resigned['hex'])['vin'][:-1]],
+                     [i['txid'] for i in n2.decoderawtransaction(rf['hex'])['vin']])
+        signed = dict(signed, hex=resigned['hex'])
         # the OP_CHECKSETSIG input is complete; the fee inputs are not signed yet: invalid, naming one of them
         v = n2.yed_validaterawtransaction(signed['hex'])
         assert_equal((v['valid'], v['type']), (False, 'claim_cancel'))

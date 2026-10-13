@@ -793,10 +793,39 @@ def equivocation_raw(node, carrier, carrier_wif=None, expiry=0):
     """EQUIVOCATION: ``carrier`` (from ``build_carrier_tx(node, encode_bundle([a, b]))``,
     confirmed) plus funding; outputs the empty-bodied payload ``0x07`` and change."""
     atts = decode_bundle(carrier['bundle'])
-    assert atts is not None and len(atts) == 2, 'an equivocation carrier holds exactly two attestations'
+    assert (atts is not None and len(atts) == 2) or decode_cancel_evidence(carrier['bundle']) is not None, \
+        'an equivocation carrier holds exactly two attestations, or an attestation and a cancel statement (C4b, "YX")'
     vout = [(0, bytes([ym.OP_RETURN]) + ym.push(encode_equivocation()))]
     hex_, n_funding = _fund(node, vout, 0, [_carrier_vin(carrier)], expiry=expiry, extra_in_value=CARRIER_VALUE)
     return spend_carrier(node, hex_, n_funding, carrier, carrier_wif)
+
+
+def yed_cancel_raw(node, intent_outpoint, ip, intent_value, vp, member_secrets, refund, cosigns, carrier=None):
+    """A YED claimant intent's CANCEL built by hand (CAN-1 + CAN-2 + C4b): vout[0] the re-created V, vout[1] the
+    ``refund`` (value, spk), the CANCEL_COSIGN marker, change; vin[0] the intent with the set signatures of
+    ``member_secrets``, the node's fee inputs, and last a carrier holding ``cosigns`` ("YC" entries (price, sig65); built
+    and broadcast here unless ``carrier`` is given), signed.  Returns the hex."""
+    from . import vault as va
+    if carrier is None:
+        carrier = build_carrier_tx(node, encode_cancel_cosigns(cosigns))
+        node.lockunspent(False, [{'txid': i['txid'], 'vout': int(i['vout'])} for i in node.decoderawtransaction(carrier['hex'])['vin']])
+    marker = (0, bytes([ym.OP_RETURN]) + ym.push(encode_cancel_cosign()))
+    fee_vin, change = va.node_fee_inputs(node, va.VAULT_FEE + refund[0])
+    vin = list(fee_vin) + [(carrier['txid'], int(carrier['vout']), va.SEQUENCE_FINAL)]
+    tx = va.build_cancel_tx(intent_outpoint, ip, intent_value, vp, vin, change, member_secrets, extra=[refund, marker])
+    hex_ = va.node_sign(node, tx, tx.vin[0].scriptSig)
+    return spend_carrier(node, hex_, len(tx.vin) - 1, carrier)
+
+
+def cosign_entry_hex(entry):
+    """A "YC" entry (price, sig65) as yed_signcancelcosign returns it: 69 bytes, price LE32 || sig65."""
+    return bytes_to_hex_str(struct.pack('<I', entry[0]) + bytes(entry[1]))
+
+
+def cosign_entry_of_hex(hex_):
+    b = hex_str_to_bytes(hex_)
+    assert_equal(len(b), CANCEL_COSIGN_ENTRY)
+    return (struct.unpack('<I', b[:4])[0], b[4:])
 
 
 def legacy_revive_raw(node, att74, expiry=0):

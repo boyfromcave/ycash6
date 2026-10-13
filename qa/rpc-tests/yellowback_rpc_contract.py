@@ -77,14 +77,14 @@ CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 
 
 # Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
-    'yed_getvault': {'intents', 'refundHolder'},          # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1)
-    'yed_listpositions': {'intents'},
-    'yed_listvaults': {'intents', 'refundHolder'},
+    'yed_getvault': {'intents', 'refundHolder', 'heldResiduals'},   # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1); CAN-3's held residuals
+    'yed_listpositions': {'intents', 'heldResiduals'},
+    'yed_listvaults': {'intents', 'refundHolder', 'heldResiduals'},
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
     'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerScheme', 'ownerHash', 'feeVout', 'attestFeeVout', 'assignments',
-                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle'},
+                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign'},
     'yed_getnotice': {'vault', 'txid', 'height', 'refHeight', 'pEmerg', 'emergencyOpenAt', 'expiresAt'},
     'yed_gettxinfo': {'seq'},
     'yed_validaterawtransaction': {'invalidReason'},   # only when valid is false
@@ -448,15 +448,13 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         claiming = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
         assert_equal((claiming['status'], [x['role'] for x in claiming['intents']]), ('CLAIMING', ['claimant']))
-        # CAN-1 (03/H-1): the refund holder a cancel must pay; yed_buildcancel builds that cancel (not sent here), and
-        # vault_buildcancel refuses a YED intent
-        cancel = c.check('yed_buildcancel', claimant.yed_buildcancel('%s:0' % claimed['txid']))
-        assert_equal((cancel['refund']['vout'], cancel['refund']['cents'], cancel['refund']['script']), (1, 10000, claiming['refundHolder']))
-        assert_equal(claimant.decoderawtransaction(cancel['hex'])['vout'][1]['scriptPubKey']['hex'], claiming['refundHolder'])
-        assert_equal(claimant.yed_buildcancel('%s:0' % claimed['txid'])['hex'], cancel['hex'])          # sign once: the same transaction
+        # CAN-1 (03/H-1): the refund holder a cancel must pay; vault_buildcancel refuses a YED intent; CAN-2 (the
+        # cancel-limit design): the first cancel needs one member's co-signature, and the set has no member yet here
+        # (yed_buildcancel's result is checked in the v3 wallet context, where it does)
+        assert_equal((claiming['cancelCount'], claiming['cancelsRequired'], claiming['cancelQuietUntil']), (0, 1, None))
+        msg = assert_rpc_error('cancel-cosign-needed', claimant.yed_buildcancel, '%s:0' % claimed['txid'])
+        assert 'needs 1 co-signature(s)' in msg, msg
         assert_rpc_error('is cancelled with yed_buildcancel', claimant.vault_buildcancel, '%s:0' % claimed['txid'])
-        fee_inputs = [{'txid': i['txid'], 'vout': i['vout']} for i in claimant.decoderawtransaction(cancel['hex'])['vin'][1:]]
-        claimant.lockunspent(True, fee_inputs)                     # the cancel is not sent: free its fee inputs for the release
         assert_equal([v['status'] for v in c.check('yed_listvaults', user.yed_listvaults('CLAIMING'))], ['CLAIMING'])
         c.check('yed_listtransactions', claimant.yed_listtransactions())
         self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())
@@ -716,6 +714,25 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine(POOLS[1])
         claiming = user.yed_getvault(victim)
         assert_equal((claiming['status'], sorted(x['role'] for x in claiming['intents'])), ('CLAIMING', ['claimant', 'residual']))
+# Rule: CAN-2 C4b
+        # the cancel-limit design: the user wallet holds member wseq's key, so it co-signs a cancel of the claim (its price
+        # statement at the claim's refHeight: $22, not claimable); the claimant builds that cancel (not sent here)
+        row = [x for x in claiming['intents'] if x['role'] == 'claimant'][0]
+        intent = '%s:%d' % (row['txid'], row['vout'])
+        assert_rpc_error('price-required', user.yed_signcancelcosign, intent, None, wseq)
+        assert_rpc_error('cancel-statement-claimable', user.yed_signcancelcosign, intent, claiming['underwaterAt'] - 1, wseq)
+        cos = c.check('yed_signcancelcosign', user.yed_signcancelcosign(intent, usd_to_micro(22), wseq))
+        assert_equal((cos['seq'], cos['priceMicroUsd'], cos['reused']), (wseq, usd_to_micro(22), False))
+        assert_equal(user.yed_signcancelcosign(intent, None, wseq)['cosig'], cos['cosig'])        # the guard's price, the same signature
+        assert_rpc_error('cancel-cosign-malformed', claimant.yed_buildcancel, intent, [cos['cosig'][:-2]])
+        cancel = c.check('yed_buildcancel', claimant.yed_buildcancel(intent, [cos['cosig']]))
+        assert_equal((cancel['cancelsRequired'], cancel['cosigners'], cancel['refund']['cents'], cancel['refund']['script']),
+                     (1, [wseq], 10000, claiming['refundHolder']))
+        assert_equal(claimant.yed_buildcancel(intent, [cos['cosig']])['hex'], cancel['hex'])          # sign once: the same transaction
+        built = claimant.decoderawtransaction(cancel['hex'])
+        assert_equal(built['vin'][-1]['txid'], cancel['carrierTxid'])
+        fee_inputs = [{'txid': i['txid'], 'vout': i['vout']} for i in built['vin'][1:-1]]
+        claimant.lockunspent(True, fee_inputs)                     # the cancel is not sent: free its fee inputs for the release
         self.mine_round_robin(POOLS, claiming['intents'][0]['releaseHeight'] - 1 - user.getblockcount())
         claimant.vault_release('%s:0' % claimed['txid'])
         self.sync_all()
