@@ -1072,7 +1072,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -m pyflakes qa/rpc-tests/test_framework/vault.py qa/rpc-tests/test_framework/test_vault.py qa/rpc-tests/test_framework/gen_vault_vectors.py qa/rpc-tests/test_framework/vault_harness.py qa/rpc-tests/vault_primitive.py qa/rpc-tests/vault_slashing.py qa/rpc-tests/vault_bridge.py qa/rpc-tests/vault_pq_reorg.py
+          python3 -m pyflakes qa/rpc-tests/test_framework/vault.py qa/rpc-tests/test_framework/test_vault.py qa/rpc-tests/test_framework/gen_vault_vectors.py qa/rpc-tests/test_framework/vault_harness.py qa/rpc-tests/vault_primitive.py qa/rpc-tests/vault_slashing.py qa/rpc-tests/vault_bridge.py qa/rpc-tests/vault_pq_reorg.py qa/rpc-tests/vault_dos.py qa/rpc-tests/vault_pq_relay.py
           python3 qa/rpc-tests/test_framework/gen_vault_vectors.py --check
           cd qa/rpc-tests && python3 -m unittest test_framework.test_vault -v
       - name: PQ framework unit tests (quantum plan §4.7; NIST ACVP SLH-DSA + PQClean falcon-padded-512 subset)

@@ -19,6 +19,14 @@ d. an OWNER-RELEASED spend (selector 3) of a V whose set is not released        
    OP_CHECKSETDORMANT)
 e. an UNLOCK signed by a member whose JOIN is on the peer's tip but not on this node's (the
    original justification: the set state differs by tip)                        -> 0 (SCRIPT_ERR_SETSIG)
+f. a garbage SLH-DSA signature on a TX_PQCHANNEL input (fails with SCRIPT_ERR_VERIFY) beside a V input
+   with selector 3 and nothing else (review of 07/F-1). The template input is checked alone first:
+   - while the set is not released it fails its own dormancy OP_VERIFY -> 0, and the node logs that
+     verdict for input 1, so the channel's PQ signature was never verified;
+   - once the set is released it fails for a reason of its own (no owner signature), the stock checks
+     run, and the channel's garbage signature scores                              -> 100, disconnected
+g. an honest OWNER-RELEASED spend relayed from a tip where the set is released, one block ahead of
+   this node                                                                      -> 0, then accepted
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_dos.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -32,6 +40,7 @@ from test_framework.mininode import CTransaction, NetworkThread, NodeConn, msg_t
 from test_framework.util import assert_equal, p2p_port
 from test_framework import pq
 from test_framework import vault as v
+from test_framework import yellowback_model as ym
 from test_framework.vault_harness import (
     ACTIVATION,
     COIN,
@@ -75,6 +84,7 @@ class VaultDoSTest(VaultTestBase):
         vp_falcon = self.vparams(sid, owner_height=oh, owner=falcon_owner)
         vo = self.lock(vp, COIN, 'lock V (SLH-DSA owner, ownerHeight tip + 2)')
         vf = self.lock(vp_falcon, COIN, 'lock V (Falcon owner)')
+        vo2 = self.lock(vp, COIN, 'lock a second V (SLH-DSA owner)')
         self.mine(2)
         assert self.tip() >= oh
 
@@ -133,8 +143,54 @@ class VaultDoSTest(VaultTestBase):
         self.sync_all()
         self.sync_model()
 
-        # the V coins were never spent
-        for out in (vo, vf):
+        print('f. a garbage SLH-DSA signature on a TX_PQCHANNEL input beside an OP_3 V input (review of 07/F-1)')
+        # The channel's cooperative branch is <client slot> OP_CHECKPQSIG OP_VERIFY: a garbage signature
+        # fails with SCRIPT_ERR_VERIFY after a full verification. The V input (selector 3, nothing else)
+        # comes second, where the stock loop never reaches it; it must not lend that failure a DoS 0.
+        server = v.fixed_secret('vault_dos channel server')
+        chan_spk = ym.pqchannel_script(v.pq_owner_of(OWNER), v.pubkey_of(server), self.tip() + 500)
+        chan_txid = self.accept(self.wallet_tx_hex([(COIN, chan_spk)]), 'fund a TX_PQCHANNEL output')
+        self.mine()
+        chan_n = [i for i, o in enumerate(v.tx_from_hex(node.getrawtransaction(chan_txid)).vout)
+                  if o.scriptPubKey == chan_spk][0]
+        tx = v.make_tx([(chan_txid, chan_n, v.SEQUENCE_FINAL), (vo2[0], vo2[1], v.SEQUENCE_FINAL)],
+                       [(2 * COIN - FEE, self.change_spk())])
+        garbage = os.urandom(pq.sig_size(pq.SCHEME_SLH_DSA_SHA2_128S)) + bytes([pq.SIGHASH_ALL])
+        tx.vin[0].scriptSig = (v.push(v.ecdsa_sign_der(server, os.urandom(32)) + bytes([v.SIGHASH_ALL]))
+                               + pq.pq_scriptsig(slh_pk, garbage, extra=bytes([OP_1])))
+        tx.vin[1].scriptSig = bytes([OP_3])
+        f = v.tx_hex(tx)
+        assert not self.released(sid)
+        self.rpc_reject(f, SCRIPT_VERIFY)
+        off = os.path.getsize(os.path.join(self.datadir(0), 'debug.log'))
+        self.relay(f, 'the same, set not released: the V input alone fails its dormancy check', banned=False)
+        verdict = 'vault: %s input 1: %s' % (v.tx_txid(v.tx_from_hex(f)), SCRIPT_VERIFY)
+        assert any(verdict in ln for ln in self.log_since(off)), 'no %r verdict in the log' % verdict
+        print('    ok   the verdict is the template input\'s own (input 1): the channel signature was not verified')
+
+        print('g. an honest OWNER-RELEASED spend relayed from a tip where the set is released')
+        deadline = self.tip() + 200
+        while not self.released(sid):
+            assert self.tip() < deadline, 'the set never became released'
+            self.mine()
+        last = node.getbestblockhash()
+        g = self.owner_hex(vo, v.vault_script(vp), COIN, v.SEL_OWNER_RELEASED)
+        assert self.model.check_tx(v.tx_from_hex(g)) is None, 'the OWNER-RELEASED spend must be valid on the released tip'
+        node.invalidateblock(last)                 # node 0 stands one block short of the release
+        self.sync_model()
+        assert not self.released(sid)
+        self.rpc_reject(g, SCRIPT_VERIFY)
+        self.relay(g, 'OWNER-RELEASED valid on the peer\'s tip, not yet on ours', banned=False)
+        node.reconsiderblock(last)
+        self.sync_all()
+        self.sync_model()
+        assert self.released(sid)
+        self.relay(f, 'garbage PQ-channel signature beside an OP_3 V input, set released', banned=True)
+        self.accept(g, 'the same OWNER-RELEASED spend once this node has the block')
+        self.mine()
+
+        # the other V coins were never spent
+        for out in (vf, vo2):
             assert node.gettxout(out[0], out[1]) is not None
         print('vault_dos OK')
 
