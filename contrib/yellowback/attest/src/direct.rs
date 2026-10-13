@@ -802,8 +802,17 @@ mod tests {
             .unwrap()
     }
 
-    /// This process's CPU time (user + system) in seconds, from `ps` (macOS and Linux).
+    /// This process's CPU time (user + system) in seconds: from /proc/self/stat in clock ticks on Linux, where
+    /// `ps` reports whole seconds only; from `ps` (hundredths) on macOS.
     fn cpu_seconds() -> Option<f64> {
+        if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+            // "pid (comm) state ppid ..."; utime and stime are fields 14 and 15, i.e. 11 and 12 after the comm
+            let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            let ticks = fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+            let out = std::process::Command::new("getconf").arg("CLK_TCK").output().ok()?;
+            let hz = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok()?;
+            return Some(ticks / hz);
+        }
         let out = std::process::Command::new("ps")
             .args(["-o", "time=", "-p", &std::process::id().to_string()])
             .output()
@@ -987,6 +996,8 @@ mod tests {
 
     #[test]
     fn an_outsider_flood_is_refused_at_the_handshake() {
+        // CPU seconds per handshake of the 10x run: the 100x run is held to it (the cost must stay linear)
+        let mut per_handshake_10x = None;
         for factor in [10usize, 100] {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1020,11 +1031,30 @@ mod tests {
                 (f[2].parse().unwrap(), f[3].parse().unwrap(), f[4].parse().unwrap());
             eprintln!("{line}");
             assert!(worst_ms < 10_000, "{factor}x: honest latency {worst_ms} ms");
-            // a generous bound (debug build, both sides of every handshake in the one child process): 20 ms each
+            // The CPU bound is per handshake, absolute and relative, so that it holds on a slow runner and still
+            // catches a regression. (A gate that let an outsider in -- a stream accepted, a frame read or verified --
+            // fails the strict refusal assertions in outsider_flood whatever it costs.) Absolute: a debug build doing
+            // both sides of every handshake in the one child process costs ~5 ms each on the dev Mac and 29-36 ms on
+            // a GitHub ubuntu-22.04 runner (2026-10-13); 100 ms each (+ 5 s of fixed setup) is about 3x the slow
+            // runner, a ceiling only an expensive regression reaches. Relative: the 100x run may cost at most 3x the
+            // 10x run's CPU per handshake (+ 10 ms) on the same machine, so a cost that grows with the flood (a
+            // per-connection scan, a table that is never pruned) fails anywhere, however fast or slow the runner.
+            let per = cpu / handshakes as f64;
             assert!(
-                cpu < 2.0 + 0.02 * handshakes as f64,
-                "{factor}x: {cpu:.2} s of CPU for {handshakes} handshakes"
+                cpu < 5.0 + 0.1 * handshakes as f64,
+                "{factor}x: {cpu:.2} s of CPU for {handshakes} handshakes ({:.1} ms each, bound 100 ms)",
+                per * 1e3
             );
+            if let Some(base) = per_handshake_10x {
+                assert!(
+                    per < 3.0 * base + 0.010,
+                    "{factor}x: {:.1} ms of CPU per handshake against {:.1} ms at 10x: the cost grows with the flood",
+                    per * 1e3,
+                    base * 1e3
+                );
+            } else {
+                per_handshake_10x = Some(per);
+            }
         }
     }
 
