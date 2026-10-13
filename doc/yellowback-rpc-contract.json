@@ -1268,6 +1268,9 @@
     "returns": [
       {
         "attestFeeZat": 251889169,
+        "cancelCount": 0,
+        "cancelQuietUntil": null,
+        "cancelsRequired": 1,
         "claimHeight": 401,
         "claimPath": "a",
         "claimable": true,

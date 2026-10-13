@@ -1432,6 +1432,12 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         o.pushKV("underwaterAt", UnderwaterAt(v, p));
         o.pushKV("pClaim", PriceOrNull(est.pClaim));
         o.pushKV("claimPath", claimable ? est.claimPath : "");
+        // CAN-2 (the cancel-limit design): what a claim of this vault faces, as yed_getvault reports it -- its counted
+        // cancels, the co-signers a cancel needs if it confirms in the next block, and the quiet period's end (null
+        // when never cancelled). Additive; rpcversion unchanged.
+        o.pushKV("cancelCount", (int)v.cancelCount);
+        o.pushKV("cancelsRequired", CancelsRequired(v, p, (int64_t)tip + 1));
+        o.pushKV("cancelQuietUntil", v.lastCancelHeight > 0 ? UniValue((int64_t)v.lastCancelHeight + p.cancelQuiet) : NullUniValue);
         yellowback::rpc::PushNoticeFields(o, st, p, out, v);
         o.pushKV("residualZat", est.residualZat);
         o.pushKV("attestFeeZat", est.attestFeeZat);
