@@ -1112,10 +1112,16 @@ BOOST_AUTO_TEST_CASE(pq_p2sh_wrapped_real_signature)
     BOOST_CHECK_EQUAL(VerifyPQ(ss, p2sh, tx, amount + 1, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS), SCRIPT_ERR_EVAL_FALSE);
 }
 
+namespace {
+bool InIBD(const Consensus::Params&) { return true; }
+bool NotInIBD(const Consensus::Params&) { return false; }
+} // namespace
+
 BOOST_AUTO_TEST_CASE(pq_v5_invalid_under_vault)
 {
     // Quantum spec R-A3: under UPGRADE_VAULT a transaction whose nVersionGroupId is not the Sapling
-    // group is invalid (bad-vault-tx-version-group-id), mempool and block alike. NU5 at 5 and Vault at
+    // group is invalid (bad-vault-tx-version-group-id), mempool and block alike; its DoS level is
+    // "potentially relaxing" like the neighbouring version-group rules (block 100, mempool 10, 0 in IBD). NU5 at 5 and Vault at
     // 10 are set directly here (a regtest node refuses -nuparams scheduling both, init.cpp).
     SelectParams(CBaseChainParams::REGTEST);
     for (auto idx : {Consensus::UPGRADE_OVERWINTER, Consensus::UPGRADE_SAPLING, Consensus::UPGRADE_YCASH,
@@ -1142,24 +1148,33 @@ BOOST_AUTO_TEST_CASE(pq_v5_invalid_under_vault)
     const CTransaction tx5vault = v5(VAULT_BRANCH_ID);
 
     for (bool isMined : {false, true}) {
+        // NotInIBD: the default IsInitialBlockDownload would depend on the fixture's chain state.
+        auto check = [&](const CTransaction& t, CValidationState& st, int h) {
+            return ContextualCheckTransaction(t, st, chainparams, h, isMined, NotInIBD);
+        };
         // NU5 epoch (height 8): v5 passes the version-group rules, v4 passes.
         CValidationState s8;
-        BOOST_CHECK(ContextualCheckTransaction(tx5nu5, s8, chainparams, 8, isMined));
+        BOOST_CHECK(check(tx5nu5, s8, 8));
         BOOST_CHECK(s8.GetRejectReason() != "bad-vault-tx-version-group-id");
         CValidationState s8v4;
-        BOOST_CHECK(ContextualCheckTransaction(tx4, s8v4, chainparams, 8, isMined));
+        BOOST_CHECK(check(tx4, s8v4, 8));
         // Vault epoch (height 10, 11): v5 is invalid whatever branch id it carries; v4 passes.
         for (int h : {10, 11}) {
             for (const CTransaction* t : {&tx5nu5, &tx5vault}) {
                 CValidationState s;
-                BOOST_CHECK(!ContextualCheckTransaction(*t, s, chainparams, h, isMined));
+                BOOST_CHECK(!check(*t, s, h));
                 BOOST_CHECK_EQUAL(s.GetRejectReason(), "bad-vault-tx-version-group-id");
                 int dos = 0;
                 BOOST_CHECK(s.IsInvalid(dos));
                 BOOST_CHECK_EQUAL(dos, isMined ? 100 : 10);
+                // Potentially relaxing (U-26): no ban score for a mempool transaction during IBD.
+                CValidationState sIbd;
+                BOOST_CHECK(!ContextualCheckTransaction(*t, sIbd, chainparams, h, isMined, InIBD));
+                BOOST_CHECK(sIbd.IsInvalid(dos));
+                BOOST_CHECK_EQUAL(dos, isMined ? 100 : 0);
             }
             CValidationState sv4;
-            BOOST_CHECK(ContextualCheckTransaction(tx4, sv4, chainparams, h, isMined));
+            BOOST_CHECK(check(tx4, sv4, h));
         }
     }
 
