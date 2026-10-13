@@ -444,6 +444,15 @@ BOOST_AUTO_TEST_CASE(mempool_set_state_failure_classification)
     BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x53"), uint256S("0x51")}), view), 1U);
     BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x52"), uint256S("0x53")}), view), 0U);
     BOOST_CHECK(!FindVaultTemplateInput(spend({uint256S("0x99")}), view));   // missing coin
+    // a MALFORMED V-shaped coin (delay 0, out of range) is no template, as in vault::CheckTx's count
+    CScript malformed = vspk;
+    BOOST_REQUIRE_EQUAL(malformed[38], (unsigned char)OP_5);                  // <tag:4> <cancelSetId:32> <delay>
+    malformed[38] = OP_0;
+    VaultParams mp;
+    BOOST_REQUIRE(MatchVault(malformed, mp) == Shape::MALFORMED);
+    AddCoin(view, uint256S("0x55"), malformed);
+    BOOST_CHECK(!FindVaultTemplateInput(spend({uint256S("0x55"), uint256S("0x53")}), view));
+    BOOST_CHECK_EQUAL(*FindVaultTemplateInput(spend({uint256S("0x55"), uint256S("0x51")}), view), 1U);
 
     const CScript ownerSig = CScript() << valtype(64, 7) << OP_1 << valtype(32, 8) << OP_1;   // shape only
     const CScript sel1 = CScript() << valtype(65, 9) << OP_1, sel2 = CScript(ownerSig) << OP_2,
