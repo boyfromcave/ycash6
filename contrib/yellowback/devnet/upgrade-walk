@@ -17,7 +17,8 @@ The devnet it expects (deterministic: nothing mines but this script):
     yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 480
 
 Eleven nodes: 0 the minter, 1 stock (no attestor set: the YED module is inert there, the
-primitive is not), 2-4 pools (real quote agents), 5-7 attestors, 8 the empty attestor seat this
+primitive is not; it follows the tip, but its set state lacks the module's liveness writes, so its
+vault state hash is not compared), 2-4 pools (real quote agents), 5-7 attestors, 8 the empty attestor seat this
 walk fills (join, mature, agent, heartbeat), 9 a holder, 10 the claimant.
 
 Steps (each can be skipped with --skip NAME[,NAME]):
@@ -42,8 +43,8 @@ Steps (each can be skipped with --skip NAME[,NAME]):
   interm     an in-term claim (in-term claims plan IT-1/IT-2/IT-7): the price falls until a class-A
              vault crosses theta in term; a claim above theta is refused everywhere, the claim at
              theta accepted, released after the delay, the residual to the owner, one state hash;
-             owner redeems in term (D-IT-15) paying the early-redeem fee (IT-9: 5 % of the collateral
-             for class A), above theta (G) and under it, pre-empting a claim (H). SKIPs unless
+             owner redeems in term (D-IT-15) paying the early-redeem fee (IT-9': 5 % of the debt at
+             pMint for class A), above theta (G) and under it, pre-empting a claim (H). SKIPs unless
              yed_getinfo.params.inTermClaims is true
   invalid    an invalid mint refused by every Yellowback mempool, the block carrying it rejected by
              every Yellowback node
@@ -330,11 +331,18 @@ class Walk:
     def statehashes(self, label):
         sync_blocks(self.all_nodes())
         yed = {i: self.node(i).yed_getstatehash()["statehash"] for i in self.yed_nodes}
-        vault = {i: self.node(i).vault_getinfo()["statehash"] for i in range(self.n)}
-        self.out("  $ yed_getstatehash on nodes %s; vault_getinfo.statehash on every node" % ",".join(str(i) for i in self.yed_nodes))
-        self.out("    = yed %s ; vault %s" % (sorted(set(yed.values())), sorted(set(vault.values()))))
+        # The vault state hash is compared on the module nodes only: on regtest the attestor set is a per-node
+        # consensus parameter (-yellowbackattestorset; on mainnet a network constant), and the YED module's liveness
+        # hook (seats review B2, vault/state.cpp ApplyEjectionsOf) writes the set's member lastAct, which is hashed
+        # and feeds IsDormant. The stock node, without the set, does not run that hook: it follows the same tip
+        # but its set state is not the network's, so it is checked for the tip, not the hash.
+        vault = {i: self.node(i).vault_getinfo()["statehash"] for i in self.yed_nodes}
+        tips = {i: self.node(i).getbestblockhash() for i in range(self.n)}
+        self.out("  $ yed_getstatehash and vault_getinfo.statehash on nodes %s; getbestblockhash on every node" % ",".join(str(i) for i in self.yed_nodes))
+        self.out("    = yed %s ; vault %s ; stock vault %s" % (sorted(set(yed.values())), sorted(set(vault.values())), self.node(STOCK).vault_getinfo()["statehash"]))
         self.ok(len(set(yed.values())) == 1, "%s: one YED state hash on all %d Yellowback nodes" % (label, len(yed)))
-        self.ok(len(set(vault.values())) == 1, "%s: one vault state hash on all %d nodes, the stock node included" % (label, len(vault)))
+        self.ok(len(set(vault.values())) == 1, "%s: one vault state hash on all %d module nodes" % (label, len(vault)))
+        self.ok(len(set(tips.values())) == 1, "%s: one tip on all %d nodes, the stock node included" % (label, len(tips)))
         return yed[USER], vault[USER]
 
     def yed_params(self):
@@ -892,8 +900,8 @@ class Walk:
         if in_term:
             # D-IT-15: the owner path is open in term; IT-9: a redeem before lockHeight pays the early-redeem fee
             q = self.call(USER, "yed_estimateredeem", self.vaults["A"], keys=["early", "earlyRedeemFeeBps", "earlyRedeemFeeZat", "feeZat", "canRedeem", "lockHeight"])
-            self.ok(q["early"] is True and q["canRedeem"] is True and q["earlyRedeemFeeZat"] == va["collateralZat"] * q["earlyRedeemFeeBps"] // 10_000,
-                    "in term the redeem is open and quoted with the early-redeem fee (%d bps of the collateral = %d zat); the walk waits for lockHeight here"
+            self.ok(q["early"] is True and q["canRedeem"] is True and q["earlyRedeemFeeZat"] == ym.early_redeem_fee_zat(va["mintedCents"], q["earlyRedeemFeeBps"], va["pMint"]),
+                    "in term the redeem is open and quoted with the early-redeem fee (IT-9', D-Q-23: %d bps of the debt at pMint = %d zat); the walk waits for lockHeight here"
                     % (q["earlyRedeemFeeBps"], q["earlyRedeemFeeZat"]))
         else:
             self.fails(USER, "yed_redeem", self.vaults["A"], expect="vault-locked")
@@ -1117,18 +1125,18 @@ class Walk:
 
     def redeem_in_term(self, vault, label, why):
         """D-IT-15 + IT-9: the owner redeems `vault` before lockHeight; the fee output carries FEE-1 plus
-        earlyRedeemFeeBps[class] of the collateral (5 % for class A), quoted first by yed_estimateredeem."""
+        earlyRedeemFeeBps[class] of the debt at pMint (IT-9', D-Q-23; 5 % for class A), quoted first by yed_estimateredeem."""
         v = self.node(USER).yed_getvault(vault)
         cls = [c for c in self.node(USER).yed_getinfo()["params"]["classes"] if c["class"] == v["termClass"]][0]
-        want = v["collateralZat"] * cls["earlyRedeemFeeBps"] // 10_000
+        want = ym.early_redeem_fee_zat(v["mintedCents"], cls["earlyRedeemFeeBps"], v["pMint"])
         self.ok(self.tip() + 1 < v["lockHeight"], "%s is in term: the redeem confirms at %d < lockHeight %d" % (label, self.tip() + 1, v["lockHeight"]))
         q = self.call(USER, "yed_estimateredeem", vault, keys=["early", "earlyRedeemFeeBps", "earlyRedeemFeeZat", "feeZat", "payee", "canRedeem", "error"])
         self.ok(q["early"] is True and q["canRedeem"] is True and q["earlyRedeemFeeZat"] == want,
-                "yed_estimateredeem quotes the early-redeem fee before the owner confirms: %d bps (class %s) of %d zat = %d zat"
-                % (cls["earlyRedeemFeeBps"], v["termClass"], v["collateralZat"], want))
+                "yed_estimateredeem quotes the early-redeem fee before the owner confirms: %d bps (class %s) of the debt %d cents at pMint %d = %d zat"
+                % (cls["earlyRedeemFeeBps"], v["termClass"], v["mintedCents"], v["pMint"], want))
         red = self.call(USER, "yed_redeem", vault, keys=["txid", "burnedCents", "feeZat", "earlyRedeemFeeZat", "payee", "collateralOut"])
         self.ok(red["earlyRedeemFeeZat"] == want and red["feeZat"] == q["feeZat"] and red["burnedCents"] == v["mintedCents"],
-                "the owner redeems %s in term (%s): burns the full debt, pays the early-redeem fee %d zat (%s %% of the collateral) on top of FEE-1 (feeZat %d)"
+                "the owner redeems %s in term (%s): burns the full debt, pays the early-redeem fee %d zat (%s %% of the debt at pMint) on top of FEE-1 (feeZat %d)"
                 % (label, why, want, Decimal(cls["earlyRedeemFeeBps"]) / 100, red["feeZat"]))
         self.wait_mempool(red["txid"]); self.mine(1)
         tx = self.node(USER).getrawtransaction(red["txid"], 1)

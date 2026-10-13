@@ -32,7 +32,7 @@ summary that every step passed:
   invalid   an invalid mint refused by every Yellowback mempool, its block rejected by every node
   bridge    the WYEC bridge persona (bridge-sim), both shapes: lock -> mock burn -> intent ->
             release; a rogue intent cancelled by the watcher; owner recovery on a dormant set
-  final     one YED state hash on the ten Yellowback nodes, one vault state hash on all eleven
+  final     one YED and one vault state hash on the ten module nodes, one tip on all eleven
 
 The clients (chain-viz, lightwalletd, yolo) are left to the manual walk (its transcript is
 ``contrib/yellowback/devnet/upgrade-walk-transcript.txt``). SKIPs without the Rust attestor
