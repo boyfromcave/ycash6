@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2014-2016 The Bitcoin Core developers
 # Copyright (c) 2016-2022 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -77,22 +78,22 @@ class WalletBackupTest(BitcoinTestFramework):
         self.is_network_split=False
         self.sync_all()
 
-    def one_send(self, from_node, to_address):
-        if (randint(1,2) == 1):
+    def one_send(self, from_node, to_address, always=False):
+        if always or (randint(1,2) == 1):
             amount = Decimal(randint(1,10)) / Decimal(10)
             self.nodes[from_node].sendtoaddress(to_address, amount)
 
-    def do_one_round(self):
+    def do_one_round(self, always=False):
         a0 = self.nodes[0].getnewaddress()
         a1 = self.nodes[1].getnewaddress()
         a2 = self.nodes[2].getnewaddress()
 
-        self.one_send(0, a1)
-        self.one_send(0, a2)
-        self.one_send(1, a0)
-        self.one_send(1, a2)
-        self.one_send(2, a0)
-        self.one_send(2, a1)
+        self.one_send(0, a1, always)
+        self.one_send(0, a2, always)
+        self.one_send(1, a0, always)
+        self.one_send(1, a2, always)
+        self.one_send(2, a0, always)
+        self.one_send(2, a1, always)
 
         # Have the miner (node3) mine a block.
         # Must sync mempools before mining.
@@ -160,8 +161,11 @@ class WalletBackupTest(BitcoinTestFramework):
             assert("Cannot overwrite existing file" in errorString)
 
         logging.info("More transactions")
+        # The last round makes every send, so that each spender receives at an address generated after the backup:
+        # with every send left to chance, a spender that received nothing in these five rounds (probability 1/1024
+        # each, ~0.3% a run) restores to the same balance and the balanceNbackup != balanceN check below fails.
         for i in range(5):
-            self.do_one_round()
+            self.do_one_round(always=(i == 4))
 
         # Generate 101 more blocks, so any fees paid mature
         self.nodes[3].generate(101)
