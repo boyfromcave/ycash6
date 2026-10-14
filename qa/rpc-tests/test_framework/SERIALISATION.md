@@ -17,11 +17,11 @@ primitive's set `attestorSetId`) is marked **(P4-b)**. In-term claims
 and the vault record remembers it; RED-4 decides a claim at every height; CLAIMING collateral stays in the
 system ratio until release) are marked **(IT-n)**.
 
-The golden vector `yellowback_golden.json` (440 synthetic heights, 460 block entries, regtest
+The golden vector `yellowback_golden.json` (440 synthetic heights, 462 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false, pqFalconHeight 400 (not hashed)}`) pins the result of all of these choices: state hash
-`02f3ce11e0394e1bb4fea21ba6e177ddf761d537960447821fda520b1bb06a17`. Twenty entries are flagged
+`7a38e41dac6ddeb54cd02f5862a4abf1918309a5323d48b4318742f311c0dc34`. Twenty-two entries are flagged
 `"invalid"`, one per consensus verdict the vector covers (audit 03/T-1; `golden_rejected` in
 `test_yellowback_model.py` lists them): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
@@ -170,10 +170,13 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
 - **L. The claim's outputs (U-23).** The claim (selector 4) must have one or two YED intents whose
   `vaultHash` is `SHA256` of the spent V and no output equal to the V (re-lock), else
   `vault-claim-intents` (checked right after RED-1's payload checks, before BUNDLE-1). At RED-5:
-  when a residual `≥ RESIDUAL_MIN_ZAT` is due there must be exactly two intents, one of them
-  paying `P2PKH(hash160(ownerPubKey))` (its `recipientHash`) at least the residual — the first such
-  in output order is the owner's residual intent, the other the claimant's — else `red5-residual`;
-  with no residual due there must be exactly one (the claimant's), else `vault-claim-intents`.
+  when a residual `≥ RESIDUAL_MIN_ZAT` is due there must be exactly two intents. **(RED-5a)** The
+  lower-index intent is the claimant's and its `nValue` is at least `collateralZat − residualZat`
+  (else `red5-claimant-short`; it may still pay the owner). The higher-index intent is the owner's
+  residual: it pays `PQPKH(owner)` (its `recipientHash`) at least the residual, else `red5-residual`.
+  **(RED-5b)** The cap price is `pClaim` on path (a) and `pEmerg` on path (b) (W3-Y-5, audit
+  recommendation A1, 2026-10-14, pending owner confirmation; this reverses v3 R1). With no residual
+  due there must be exactly one intent (the claimant's), else `vault-claim-intents`.
   Each gets an `Intents` record `{vault, role, height, refundScript, claimRefHeight = the payload's refHeight, heldBy = null}` -- **(CAN-1)** the claimant's `refundScript` is
   the script of the token spent at the claim's lowest-index YED input (a held claim always spent one, RED-2; none is
   `vault-spend-malformed`), the residual's is empty. The claim's REDEEM burn happens there (IN-3).
