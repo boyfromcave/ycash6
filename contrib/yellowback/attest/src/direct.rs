@@ -804,6 +804,16 @@ mod tests {
     /// within 75 s and none stayed open.
     const OUTSIDER_CLOSE_BOUND: Duration = Duration::from_secs(90);
 
+    /// M5's delivery criterion is that the honest members' co-signatures reach the driver within one block
+    /// (POST_BLOSSOM_POW_TARGET_SPACING, 75 s); the flood test holds every honest frame to half of that. Under the flood
+    /// the honest frame waits for CPU behind the handshakes (both sides of each, in one process), so its latency is
+    /// proportional to the runner's speed: ~1.4 s at 100x on the dev Mac, 11.9 s on a GitHub ubuntu-22.04 runner
+    /// (2026-10-14), 2.6-3.1 s / 6.7-8.1 s / 21.5 s under a 1 / 0.6 / 0.4-CPU docker quota. The fixed 10 s bound it
+    /// replaces was a dev-Mac calibration. The strict assertions are unchanged: no outsider admitted, none open after
+    /// OUTSIDER_CLOSE_BOUND, >= 90 % refused by the gate, nothing an outsider sent reaching the handler, and every honest
+    /// frame delivered.
+    const HONEST_LATENCY_CEILING: Duration = Duration::from_millis(37_500);
+
     /// A plain iroh endpoint on loopback with no gate: what an outsider runs.
     async fn plain() -> Endpoint {
         Endpoint::builder(presets::Minimal)
@@ -957,9 +967,9 @@ mod tests {
             let sent = Instant::now();
             tx.send(Out::Frame(vec![k; 115])).await.unwrap();
             loop {
-                let (body, seq) = tokio::time::timeout(Duration::from_secs(20), a_frames.recv())
+                let (body, seq) = tokio::time::timeout(HONEST_LATENCY_CEILING, a_frames.recv())
                     .await
-                    .expect("the honest member's frame within 20 s under the flood")
+                    .expect("the honest member's frame within half a block under the flood")
                     .unwrap();
                 assert_eq!(seq, 2, "only bound members reach the handler");
                 if body[0] == k {
@@ -1060,7 +1070,14 @@ mod tests {
             let (handshakes, worst_ms, cpu): (usize, u64, f64) =
                 (f[2].parse().unwrap(), f[3].parse().unwrap(), f[4].parse().unwrap());
             eprintln!("{line}");
-            assert!(worst_ms < 10_000, "{factor}x: honest latency {worst_ms} ms");
+            // Inside half a block, M5's criterion with a 2x margin, on any runner. (A latency relative to the 10x
+            // run was tried and rejected: the 10x latency is too noisy under a CPU quota -- 146-965 ms -- for a fixed
+            // ratio to hold. The flood's cost growth is held by the relative CPU bound below.)
+            assert!(
+                (worst_ms as u128) < HONEST_LATENCY_CEILING.as_millis(),
+                "{factor}x: honest latency {worst_ms} ms, bound {} ms",
+                HONEST_LATENCY_CEILING.as_millis()
+            );
             // The CPU bound is per handshake, absolute and relative, so that it holds on a slow runner and still
             // catches a regression. (A gate that let an outsider in -- a stream accepted, a frame read or verified --
             // fails the strict refusal assertions in outsider_flood whatever it costs.) Absolute: a debug build doing
