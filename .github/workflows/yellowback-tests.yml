@@ -700,7 +700,7 @@ jobs:
           [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
           exit $rc
 
-      - name: Cross-line vectors (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
+      - name: Cross-line vectors and Vault chain parameters (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
         # PR's head when that branch exists there, else the PR's base; upgrade/vault when ycash-dd
@@ -747,6 +747,11 @@ jobs:
             if [ "$mine" = "$theirs" ]; then echo "identical: src/crypto/pq (tree $mine)"
             else echo "::error::src/crypto/pq differs from $OTHER_LINE_REPO $other (tree here $mine, there $theirs)"; rc=1; fi
           fi
+          # Every Vault chain parameter (all three networks, PROTOCOL_VERSION, the yellowback params bodies)
+          # must agree with the other line (audit W3-P-1); read from the other line's git objects.
+          python3 qa/yellowback-vault-params.py extract --root . > "$RUNNER_TEMP/vault-params-mine.json" || rc=1
+          python3 qa/yellowback-vault-params.py extract --git-ref other-line/head > "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
+          python3 qa/yellowback-vault-params.py compare "$RUNNER_TEMP/vault-params-mine.json" "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
           exit $rc
 
       - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees) through the workspace generator (findings (39), (44))
@@ -1097,6 +1102,8 @@ jobs:
           sudo apt-get install -y -q gcc libc6-dev
       - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
+      - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
+        run: python3 qa/test_yellowback_vault_params.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)
