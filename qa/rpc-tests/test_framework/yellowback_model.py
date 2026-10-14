@@ -3518,25 +3518,27 @@ class YellowbackModel(object):
                 if not persisted or not is_underwater(vault.collateral_zat, p_emerg, vault.minted_cents, p.emergency_ratio_bps):
                     return 'vault-claim-not-underwater'
                 facts['claim_path'] = 'b'
-            # RED-5 (U-23: the owner's residual intent pays the owner's PQPKH (F-3) at least the residual; the other is the claimant's)
-            if p_claim is None:
+            # RED-5b (W3-Y-5, audit recommendation A1, 2026-10-14, pending owner confirmation): path (a) caps at
+            # pClaim, path (b) at pEmerg. Reverses v3 R1. RED-5a: the lower-index intent is the claimant and must
+            # carry at least collateral - residual; the higher-index intent is the owner's residual.
+            cap_price = p_claim if facts['claim_path'] == 'a' else p_emerg
+            if cap_price is None:
                 return 'red5-residual'
             margin = p.claim_threshold_bps if facts['claim_path'] == 'a' else BPS
-            residual = residual_zat(vault.collateral_zat, claimant_max_zat(vault.minted_cents, margin, p_claim))
+            residual = residual_zat(vault.collateral_zat, claimant_max_zat(vault.minted_cents, margin, cap_price))
             facts['residual_zat'] = residual
             if residual >= residual_min_zat(vault.p_mint, p):      # RED-5': $0.48 at the vault's p_mint, at least RESIDUAL_MIN_ZAT
                 if not is_pq_owner(vault.owner_pubkey) or len(intents) != 2:
                     return 'red5-residual'
                 owner_hash = sha256(pqpkh_script(vault.owner_pubkey))      # the owner's PQPKH (quantum spec F-3)
-                res = None
-                for j in intents:
-                    if yed_intent_fields(tx.vout[j].script)[1] == owner_hash and tx.vout[j].value >= residual:
-                        res = j
-                        break
-                if res is None:
+                claimant, res = intents[0], intents[1]
+                fields = yed_intent_fields(tx.vout[res].script)
+                if fields is None or fields[1] != owner_hash or tx.vout[res].value < residual:
                     return 'red5-residual'
+                if tx.vout[claimant].value < vault.collateral_zat - residual:
+                    return 'red5-claimant-short'
                 facts['residual_vout'] = res
-                facts['claimant_vout'] = intents[1] if intents[0] == res else intents[0]
+                facts['claimant_vout'] = claimant
             else:
                 if len(intents) != 1:
                     return 'vault-claim-intents'

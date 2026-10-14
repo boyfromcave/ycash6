@@ -249,7 +249,8 @@ class Chain(object):
 
     def spend_tx(self, vault_op, vault_script, path, yed_inputs, ref_height, fee_key, fee_value,
                  assignments=(), payload=None, collateral_out=10 ** 9, selector=None, script_sig=None,
-                 extra_vaults=(), fee_vout=1, first_input=None, carrier=None, attest_fee=None, residual=None):
+                 extra_vaults=(), fee_vout=1, first_input=None, carrier=None, attest_fee=None, residual=None,
+                 claimant_value=None, swap_intents=False):
         """A vault spend (U-23): vin[0] = vault (owner: <sig> OP_2; claim: OP_4; ``selector`` = the
         selector byte(s) to use instead), vin[1..] = YED inputs, then (claim) a fee input, then the carrier
         input when ``carrier`` (a bundle) is given; vout[0] = collateral (owner) or the claimant's intent
@@ -274,7 +275,8 @@ class Chain(object):
             vin.append(self.carrier_input(carrier))
         if claim and v is not None:
             res = residual[1] if residual is not None else 0
-            vouts = [(v.collateral_zat - res, ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, ym.p2pkh_script(OWNER_KEYHASH)))]
+            claimant_zat = claimant_value if claimant_value is not None else v.collateral_zat - res
+            vouts = [(claimant_zat, ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, ym.p2pkh_script(OWNER_KEYHASH)))]
         else:
             vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
         vouts.append((fee_value, ym.p2pkh_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
@@ -292,6 +294,8 @@ class Chain(object):
             if claim and v is not None:
                 spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, spk)
             vouts.append((residual[1], spk))
+        if swap_intents and residual is not None:
+            vouts[0], vouts[-1] = vouts[-1], vouts[0]   # RED-5a: residual at the lower index is red5-residual
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
 
     def release_tx(self, intent_op, value, recipient_spk=None):
@@ -1158,6 +1162,18 @@ class MintTests(unittest.TestCase):
         self.assertEqual(ym.residual_min_zat(None, p), 100_000)
         self.assertEqual(ym.residual_min_zat(100, p), 480_000_000_000)
 
+    # Rule: RED-5b
+    def test_red5b_path_b_sized_at_p_emerg(self):
+        """W3-Y-5 A1: D = $100,000, 300,000 YEC, pEmerg = $0.349 → 13,467.04871060 YEC. A sub-1.19 spread is path (a)
+        and the residual is 0."""
+        debt, collateral = 10_000_000, 300_000 * ym.COIN
+        p_emerg, close = 349_000, 380_000
+        residual = ym.residual_zat(collateral, ym.claimant_max_zat(debt, ym.BPS, p_emerg))
+        self.assertEqual(residual, 1_346_704_871_060)
+        self.assertTrue(ym.is_underwater(collateral, p_emerg, debt, 10_500))
+        self.assertTrue(ym.is_underwater(collateral, close, debt, 12_500))
+        self.assertEqual(ym.residual_zat(collateral, ym.claimant_max_zat(debt, 12_500, close)), 0)
+
     # Rule: MINT-7
     def test_mint7_token_output_is_opreturn(self):
         self.assertVoid(self.mint(opret_at=1, fee_vout=3), 'bad-mint-token-output')
@@ -1868,6 +1884,10 @@ class AttestorSetThresholdTests(unittest.TestCase):
 # section 3.6  State hash and the golden vector
 
 GOLDEN_BLOCKS = 440
+# Path-(b) attestor price on the golden claim. Pools quote ~$0.0038, so 3,100 µUSD is a spread of ~1.23: above
+# 1.25/1.05 (path (b) is reachable) and below 1.25 (the vault re-created at D/pEmerg stays claimable at the pools'
+# price, so the CAN-3 round-2 hold at claim + CANCEL_QUIET still refuses the release).
+GOLDEN_ATT_CLAIM = 3_100
 
 
 def golden_rejected(claim_height):
@@ -1876,7 +1896,8 @@ def golden_rejected(claim_height):
     return [(137, 'bad-mint-amount'), (141, 'bad-mint-collateral'), (146, 'yed-template-output'), (150, 'bad-redeem-early-fee'),
             (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
             (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
-            (claim_height, 'red5-residual'), (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
+            (claim_height, 'red5-residual'), (claim_height, 'red5-residual'), (claim_height, 'red5-claimant-short'),
+            (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
             (claim_height + 1, 'intent-cancel-cosign'), (claim_height + 9, 'intent-cancel-residual'), (claim_height + 11, 'intent-residual-held'),
             (claim_height + 41, 'intent-residual-held'),
             (GOLDEN_FALCON + 2, 'bad-yed-holder'), (GOLDEN_FALCON + 3, 'bad-yed-holder')]
@@ -1899,10 +1920,12 @@ def build_golden():
     Chain.rejected() so the accepted chain is unchanged, an over-mint at required - 1 (141), a YED V output no rule
     created (146), an early owner redeem without the early fee (150), a short burn (185), a bundle with a bad
     signature (252), a bundle drawn for another selector replayed on a mint (253), a non-held notice carrying a fresh
-    attestation (292), a claim short of its residual (the claim height), a cancel that re-locks at vout 1 and one
+    attestation (292), a claim short of its residual, the same claim with the residual intent first, and a 1-zat
+    claimant beside a residual of the whole collateral (the claim height; red5-residual, red5-residual,
+    red5-claimant-short), a cancel that re-locks at vout 1 and one
     without the refund (claim + 1), a cancel of the owner's residual intent (claim + 9), and from the Falcon height
     (GOLDEN_FALCON) a TRANSFER and a REDEEM-type change of the refunded YED to a P2PKH (TOK-PQ).  The per-vault cancel
-    limit (cancel-limit design, owner 2026-10-13; twenty rejected blocks): the cancel carries two CANCEL_COSIGN
+    limit (cancel-limit design, owner 2026-10-13; twenty-two rejected blocks): the cancel carries two CANCEL_COSIGN
     statements (CAN-2 + C4b), a cancel whose statement says the vault was claimable is refused (claim + 1,
     intent-cancel-cosign), the residual's release after CLAIM_DELAY is held (claim + 11, intent-residual-held, CAN-3)
     and, round 2, still at claim + 1 + CANCEL_QUIET (the re-created position is claimable at the snapshot), so the
@@ -1912,7 +1935,9 @@ def build_golden():
     params.pq_falcon_height = GOLDEN_FALCON
     c = Chain(params)
     # IT-2 keeps the v3 tail on RED-4's path (b): at 300 % collateral minted at $0.009 the vault sits at ~127 %
-    # when the pools quote $0.0038 (not under theta 125 %) and at 100 % at the attestors' $0.003 (under 105 %).
+    # when the pools quote $0.0038 (not under theta 125 %) and at ~103 % at the attestors' $0.0031 (under 105 %).
+    # RED-5b sizes the residual at pEmerg; $0.0031 (not $0.003) keeps that residual above RED-5' and leaves the
+    # re-created vault claimable at the pools' price, so the CAN-3 round-2 hold still applies.
     price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (3_800 + (h % 3) * 5)  # noqa: E731
     key = lambda h: MINERS[h % 3]  # noqa: E731
     txs_at = {}
@@ -2016,10 +2041,11 @@ def build_golden():
             if v3['lazy'] in sel:
                 v = c.model.vaults[vault]
                 script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
-                bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
+                bundle, _ = c.bundle_for(ref, selector, {'*': GOLDEN_ATT_CLAIM}, skip=(v3['lazy'],))
                 fee = c.vault_fee(vault, owner=False)                        # RED-3': the claimant pays the redeem fee at the vault's pMint
-                p_claim = max(c.model.snapshot(ref).p_claim, 3_000)
-                residual = ym.residual_zat(v.collateral_zat, ym.claimant_max_zat(v.minted_cents, ym.BPS, p_claim))
+                p_pool = c.model.snapshot(ref).p_claim
+                p_emerg = min(p_pool, GOLDEN_ATT_CLAIM)                        # RED-5b: path (b) caps at pEmerg
+                residual = ym.residual_zat(v.collateral_zat, ym.claimant_max_zat(v.minted_cents, ym.BPS, p_emerg))
                 payee = [q for q in sel if q != v3['lazy']][0]
                 txs_at['claim5'] = c.spend_tx(vault, script, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
                                               carrier=bundle, collateral_out=v.collateral_zat - residual - fee - 10 ** 8,
@@ -2068,7 +2094,7 @@ def build_golden():
         elif h == GOLDEN_BLOCKS - 1:                            # C4b: the liar's cancel statement ($0.009) against its claim5 attestation ($0.003)
             R = v3['claim_ref']
             liar = v3['liar']
-            att = ya.sign_attestation(ATTESTORS[liar][0], liar, 3_000, R, c.block_hash(R))
+            att = ya.sign_attestation(ATTESTORS[liar][0], liar, GOLDEN_ATT_CLAIM, R, c.block_hash(R))
             txs_at['eqv_statement'] = c.cancel_evidence_tx(att, (txid_of(txs_at['claim5']), 0), v3['statement'])
             txs.append(txs_at['eqv_statement'])
         elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (w's at exit + BOND_MATURITY; the EJECTED one stays EJECTED)
@@ -2121,13 +2147,23 @@ def build_golden():
             ref = h - 2
             selector = ya.outpoint_selector(*vault)
             sel = c.model.selected(ref, selector)
-            bundle, _ = c.bundle_for(ref, selector, {'*': 3_000}, skip=(v3['lazy'],))
+            bundle, _ = c.bundle_for(ref, selector, {'*': GOLDEN_ATT_CLAIM}, skip=(v3['lazy'],))
             fee = c.vault_fee(vault, owner=False)
             payee = [q for q in sel if q != v3['lazy']][0]
-            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
-                                                     carrier=bundle, collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
-                                                     attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
-                                                     residual=(ym.pqpkh_script(G_OWNER), v3['residual'] - 1))))
+            attest = (ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps))
+            yed = [(txid_of(txs_at['mint5']), 1)]
+            owner = ym.pqpkh_script(G_OWNER)
+            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', yed, ref, KEY3, fee, carrier=bundle,
+                                                     collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
+                                                     attest_fee=attest, residual=(owner, v3['residual'] - 1))))
+            # RED-5a: the residual intent at the lower index (honest values, swapped) is red5-residual
+            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', yed, ref, KEY3, fee, carrier=bundle,
+                                                     collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
+                                                     attest_fee=attest, residual=(owner, v3['residual']), swap_intents=True)))
+            # RED-5a: a 1-zat claimant and a residual of the whole collateral is red5-claimant-short
+            bad.append(c.rejected(lambda: c.spend_tx(vault, None, 'claim', yed, ref, KEY3, fee, carrier=bundle,
+                                                     collateral_out=v.collateral_zat - v3['residual'] - fee - 10 ** 8,
+                                                     attest_fee=attest, residual=(owner, v.collateral_zat), claimant_value=1)))
         elif 'claim_height' in v3 and h == v3['claim_height'] + 1:     # I-2 / U-23: the cancel's re-lock at vout 1; CAN-1: no refund
             vault = (txid_of(txs_at['mint5']), 0)
             value = c.model.vaults[vault].collateral_zat - v3['residual']
@@ -2352,7 +2388,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 3_225_730_455_562, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 3_823_416_013_613, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held; RED-5b leaves more of it in the reopened vault
                                               'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
                                               'unbackedCents': 0})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
