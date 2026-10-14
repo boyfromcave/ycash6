@@ -36,7 +36,7 @@ from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MATURITY, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
     TOKEN_VALUE, YellowbackTestFramework, wallet_network_fee, assert_same_statehash, pubkey_to_address, set_quote,
-    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW, ym,
+    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW, P_MID_WINDOW, ym,
 )
 from test_framework.yellowback_attest import (
     REGISTRY, arming_state, decode_bundle, note_attestor_status, offline_bundle, offline_bundle_hex, offline_selection,
@@ -481,7 +481,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         # attested prices within one BundleLog window stay within PIN_DELTA_BPS of each other ($20 here, $20.80 for V2):
         # a wider spread arms PIN-1 and pins every pool key quoting one constant price, leaving no xClaim. At 300 %
         # (6.12 YEC) the vault is under theta 125 % up to $20.41, so V1's attestors say $20 (122 %, clause (a)) and
-        # V2's $20.80 (127 %: not (a); pEmerg = the pools' $10.20, 62 %, opens clause (b) after a notice).
+        # V2's $20.80 (127 %: not (a); the notice's pEmerg is the pools' $10.20). The claim below raises the pools
+        # into the 100–105 % band: RED-5b sizes the residual at pEmerg with no extra margin, and at 62 % that residual is 0.
         print('  V1: the normal claim (clause a) with attestors at $20: attestor fee, no residual, carrier never vin[0]')
         c1 = wallet_claim(self, claimant, v1['txid'], prices='20')
         assert_equal((c1['pending'], c1['claimPath'], c1['residualZat'], c1['burnedCents']), (False, 'a', 0, 10000))
@@ -530,11 +531,16 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
                      (True, notice_height, notice['refHeight'] + EMERGENCY_PERSIST, False))
         assert_rpc_error('notice-standing', claimant.yed_claimnotice, v2['txid'],
                          offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
-        print('  before EMERGENCY_PERSIST the claim is refused; after it clause (b) opens with the residual to the owner')
+        print('  before EMERGENCY_PERSIST the claim is refused; after it the pools rise to $16.90 so clause (b) pays a residual')
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, v2['txid'], '',
                          offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), '20.80'))
         self.mine_round_robin(POOLS, notice['refHeight'] + EMERGENCY_PERSIST - user.getblockcount())
         assert_equal([p['canClaim'] for p in claimant.yed_listpositions()], [])   # not the claimant's vault
+        # RED-5b: the claimant cap is the debt at pEmerg. pEmerg cannot rise above xClaim, and $10.20 covers
+        # this vault about 62 %, so the cap exceeds the collateral. Fill pMid at $16.90 (~102 % at the $49 mint)
+        # while the attestors stay at $20.80, so pClaim stays above theta and the path stays (b).
+        self.price('16.90')
+        self.mine_round_robin(POOLS, P_MID_WINDOW + REF_LAG)
         vrow = user.yed_getvault(v2['txid'])
         owner_t = '20' + vrow['ownerHash'] + '%02x' % (0x50 + vrow['ownerScheme']) + 'c2'   # the residual pays PQPKH(owner) (F-3)
         yec_owner_before = user.getbalance()
@@ -550,10 +556,11 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         claimant.getbalance()
         claimant.yed_listunspent()
         assert 'blockhash' not in claimant.getrawtransaction(c2['txid'], 1)     # still unconfirmed: the walk above was the real one
-        assert_equal(c2['pEmerg'], usd_to_micro('10.20'))
+        assert_equal(c2['pEmerg'], usd_to_micro('16.90'))
         assert_equal(c2['pClaim'], c2['aClaim'])
         vault2 = user.yed_getvault(v2['txid'])
-        expected_residual = vault2['collateralZat'] - (10000 * 10000 * COIN + c2['pClaim'] - 1) // c2['pClaim']
+        # path (b): ceil(debt at pEmerg), margin 10_000. Path (a) would have used pClaim and theta.
+        expected_residual = vault2['collateralZat'] - (10000 * 10000 * COIN + c2['pEmerg'] - 1) // c2['pEmerg']
         assert_equal(c2['residualZat'], expected_residual)
         assert_greater_than(c2['residualZat'], 100000)
         rawc2 = claimant.getrawtransaction(c2['txid'], 1)
