@@ -793,6 +793,17 @@ mod tests {
 
     // ---- M5 adversarial tests (docs/plans/yellowback-attest-gossip-evaluation.md §7 M5)
 
+    /// How long an outsider's connection may stay open, from its handshake, before the flood test calls it admitted.
+    /// The gate closes it at once, or at INTRO_DEADLINE (3 s) for one admitted to introduce itself. When that
+    /// CONNECTION_CLOSE datagram is lost (a flooded loopback socket drops them) the outsider learns of the close only
+    /// later: from a stateless reset, when its next keep-alive (iroh's HEARTBEAT_INTERVAL, 5 s) reaches a gate that no
+    /// longer knows the connection, or at the QUIC idle timeout (noq's default, 30 s). A connection the gate still held
+    /// would answer every keep-alive and never close at all, so any bound past the idle timeout tells the two apart.
+    /// 90 s is 3x the idle timeout: on a starved 2-CPU runner the late closes arrived past 30 s and a 30 s wait
+    /// called them admitted (CI, 2026-10-13); under a 0.3-CPU docker quota every one closed (reset or timed out)
+    /// within 75 s and none stayed open.
+    const OUTSIDER_CLOSE_BOUND: Duration = Duration::from_secs(90);
+
     /// A plain iroh endpoint on loopback with no gate: what an outsider runs.
     async fn plain() -> Endpoint {
         Endpoint::builder(presets::Minimal)
@@ -896,16 +907,26 @@ mod tests {
         }
         let cpu0 = cpu_seconds();
         let t0 = Instant::now();
-        // outcome of each outsider connection: refused by the gate's close code, failed otherwise (no connection,
-        // or closed for another reason under load), or still open after 30 s -- admitted, which must never happen
+        // outcome of each outsider connection: refused by the gate's close code; lost (the gate closed it but its
+        // CONNECTION_CLOSE datagram was dropped under load, so this side learns of it late: a stateless reset from the
+        // gate, which no longer knows the connection, or the idle timeout); failed otherwise (no connection, or closed
+        // for another reason under load); or still open after OUTSIDER_CLOSE_BOUND -- admitted, which must never
+        // happen. Both sides send keep-alives (iroh's HEARTBEAT_INTERVAL, 5 s), so a connection the gate still held
+        // would never idle out: one still open past the idle timeout is one the gate holds.
         let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lost = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let admitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut tasks = Vec::new();
         for i in 0..handshakes {
             let ep = outsiders[i % endpoints].clone();
-            let (target, refused, failed, admitted) =
-                (target.clone(), refused.clone(), failed.clone(), admitted.clone());
+            let (target, refused, lost, failed, admitted) = (
+                target.clone(),
+                refused.clone(),
+                lost.clone(),
+                failed.clone(),
+                admitted.clone(),
+            );
             tasks.push(tokio::spawn(async move {
                 use std::sync::atomic::Ordering::SeqCst;
                 match tokio::time::timeout(Duration::from_secs(30), ep.connect(target, ALPN)).await {
@@ -915,8 +936,11 @@ mod tests {
                             let _ = s.write_all(&[KIND_FRAME; 116]).await;
                             let _ = s.finish();
                         }
-                        match tokio::time::timeout(Duration::from_secs(30), c.closed()).await {
+                        match tokio::time::timeout(OUTSIDER_CLOSE_BOUND, c.closed()).await {
                             Ok(e) if format!("{e:?}").contains(&REFUSED.to_string()) => refused.fetch_add(1, SeqCst),
+                            Ok(iroh::endpoint::ConnectionError::TimedOut | iroh::endpoint::ConnectionError::Reset) => {
+                                lost.fetch_add(1, SeqCst)
+                            }
                             Ok(_) => failed.fetch_add(1, SeqCst),
                             Err(_) => admitted.fetch_add(1, SeqCst),
                         };
@@ -958,18 +982,24 @@ mod tests {
             assert_eq!(seq, 2);
         }
         let n = refused.load(std::sync::atomic::Ordering::SeqCst);
+        let t = lost.load(std::sync::atomic::Ordering::SeqCst);
         let f = failed.load(std::sync::atomic::Ordering::SeqCst);
         let adm = admitted.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(adm, 0, "no outsider connection may stay open");
-        assert_eq!(n + f, handshakes);
+        assert_eq!(
+            adm, 0,
+            "no outsider connection may stay open ({n} refused, {t} closed with the refusal lost, {f} failed)"
+        );
+        assert_eq!(n + t + f, handshakes);
+        // a refusal whose close datagram was lost is still the gate's: the reset or idle timeout that ends it means the
+        // gate no longer holds the connection
         assert!(
-            n * 10 >= handshakes * 9,
-            "most handshakes end in the gate's refusal ({n} of {handshakes})"
+            (n + t) * 10 >= handshakes * 9,
+            "most handshakes end in the gate's refusal ({n} of {handshakes}, {t} more with the refusal lost)"
         );
         eprintln!(
-            "outsider flood {factor}x: {handshakes} handshakes, {n} refused by the gate, {f} failed otherwise, 0 \
-             admitted, in {elapsed:?}; honest worst latency {worst:?}; process CPU {cpu:.2} s (attacker and member in \
-             one process)"
+            "outsider flood {factor}x: {handshakes} handshakes, {n} refused by the gate, {t} closed with the refusal \
+             lost, {f} failed otherwise, 0 admitted, in {elapsed:?}; honest worst latency {worst:?}; process CPU \
+             {cpu:.2} s (attacker and member in one process)"
         );
         for o in outsiders {
             o.close().await;
