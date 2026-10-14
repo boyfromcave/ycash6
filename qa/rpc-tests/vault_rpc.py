@@ -265,6 +265,9 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_raises_rpc('set-sign-once', n1.set_signunlock, bu_other['hex'])
         assert_equal(n1.set_signunlock(n0.set_signunlock(bu['hex'])['hex'])['hex'], signed['hex'])
         assert_raises_rpc('', n1.vault_send, signed['hex'])   # node 1 cannot sign node 0's fee inputs
+        plain_in = n0.listunspent()[0]
+        plain = n0.createrawtransaction([{'txid': plain_in['txid'], 'vout': plain_in['vout']}], {n1.getnewaddress(): 0.0001})
+        assert_raises_rpc('no unspent vault or intent input', n0.vault_send, plain)
         txid = n0.vault_send(signed['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         # Finding (50): a watcher pre-builds and signs the cancel while the intent is in the mempool.

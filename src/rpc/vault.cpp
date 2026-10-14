@@ -2136,6 +2136,14 @@ UniValue vault_send(const UniValue& params, bool fHelp)
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     CMutableTransaction mtx = DecodeMutable(params[0]);
+    {
+        CTxOut coin;
+        int h;
+        VaultParams vp;
+        IntentParams ip;
+        TemplateKind kind;
+        FindTemplateInput(mtx, coin, h, vp, ip, kind);
+    }
     SignWalletInputs(mtx);
     return Broadcast(CTransaction(mtx)).GetHex();
 }
