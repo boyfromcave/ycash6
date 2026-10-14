@@ -107,6 +107,7 @@ extern const char* const MINT9_BUNDLE_PREFIX;    //!< "mint9-bundle-"
 extern const char* const MINT10_DIVERGED;
 extern const char* const RED1_BUNDLE_PREFIX;     //!< "red1-bundle-"
 extern const char* const RED5_RESIDUAL;
+extern const char* const RED5_CLAIMANT_SHORT;   //!< RED-5a: the lower-index intent is under collateral − residualZat
 extern const char* const AFEE1_FEE;
 // The vault upgrade (U-23)
 extern const char* const VAULT_CLAIM_INTENTS;    //!< a claim's outputs are not one claimant intent (+ at most one owner residual intent), or re-lock

@@ -1114,7 +1114,7 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
 BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause)
 {
     // Pools at $2.60 (50 YEC back $100 at 130 %: not underwater at theta 125 %), attestors at $2.00 (100 %): pClaim =
-    // 2.60 (clause (a) false), pEmerg = 2.00 and a persisted notice open clause (b) (R1: margin 100 %, a residual is due).
+    // 2.60 (clause (a) false), pEmerg = 2.00 and a persisted notice open clause (b) (RED-5b: the cap is pEmerg, margin 100 %).
     Armed a(3, 2600000);
     CBasicKeyStore ks;
     a.AddKeys(ks);
@@ -1154,8 +1154,8 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     BOOST_REQUIRE_MESSAGE(v.ok, v.reason);
     BOOST_CHECK(!IsUnderwater(vault.collateralZat, std::max(a.x, aPrice), vault.mintedCents, a.P.claimThresholdBps));   // (a) false
     BOOST_CHECK(IsUnderwater(vault.collateralZat, std::min(a.x, aPrice), vault.mintedCents, a.P.emergencyRatioBps));    // (b) true
-    const MicroUsd pClaim = std::max(a.x, aPrice);
-    const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, 10000, pClaim));
+    const MicroUsd pEmerg = std::min(a.x, aPrice);   // RED-5b: path (b) sizes the residual at pEmerg
+    const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, 10000, pEmerg));
     BOOST_REQUIRE(residual >= a.P.residualMinZat);
 
     std::vector<uint16_t> A;

@@ -59,6 +59,7 @@ const char* const MINT9_BUNDLE_PREFIX = "mint9-bundle-";
 const char* const MINT10_DIVERGED = "mint10-diverged";
 const char* const RED1_BUNDLE_PREFIX = "red1-bundle-";
 const char* const RED5_RESIDUAL = "red5-residual";
+const char* const RED5_CLAIMANT_SHORT = "red5-claimant-short";
 const char* const AFEE1_FEE = "afee1-fee";
 const char* const VAULT_CLAIM_INTENTS = "vault-claim-intents";
 const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
@@ -686,23 +687,28 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
             if (!persisted || !IsUnderwater(vault.collateralZat, pEmerg, vault.mintedCents, P.emergencyRatioBps)) return verdict::VAULT_CLAIM_NOT_UNDERWATER;
             facts.claimPath = "b";
         }
-        // RED-5: the residual above the claimant's cap goes back to the owner (R1: no margin under (b) alone).
-        // U-23: it is the owner's residual intent, paying the owner's PQPKH at least the residual; the other
-        // intent is the claimant's. With no residual due the claim has exactly one intent.
-        if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
+        // RED-5: the residual above the claimant's cap goes back to the owner.
+        // RED-5b (W3-Y-5, audit recommendation A1, 2026-10-14, pending owner confirmation): path (a) caps at
+        // pClaim with the claim threshold; path (b) caps at pEmerg, the price that judged the vault underwater,
+        // with no extra margin. This reverses v3 R1, which sized path (b) at pClaim so a captured set would
+        // collect nothing — and so path (b) never liquidated in the case it was built for.
+        // U-23 / RED-5a: when a residual is due the lower-index intent is the claimant's and the higher-index
+        // one is the owner's (PQPKH, at least the residual). The claimant carries at least collateral − residual
+        // out of the vault; it may still pay the owner. With no residual due the claim has exactly one intent.
+        const std::optional<MicroUsd> capPrice = facts.claimPath == "a" ? pClaim : pEmerg;
+        if (!capPrice.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
-        facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
+        facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, capPrice.value()));
         if (facts.residualZat >= ResidualMinZat(vault.pMint, P)) {     // RED-5': $0.48 at the vault's pMint, at least RESIDUAL_MIN_ZAT
             const CPQKeyID owner = vault.Owner();
             if (!vault::IsOwnerValid(owner) || intents.size() != 2) return verdict::RED5_RESIDUAL;
             const uint256 ownerHash = vault::ScriptHash256(GetScriptForDestination(owner));   // the owner's PQPKH (quantum spec F-3)
-            for (unsigned int j : intents) {
-                vault::IntentParams ip;
-                IsYedIntentOutput(tx.vout[j].scriptPubKey, &ip);
-                if (ip.recipientHash == ownerHash && tx.vout[j].nValue >= facts.residualZat) { facts.residualVout = (int)j; break; }
-            }
-            if (facts.residualVout < 0) return verdict::RED5_RESIDUAL;
-            facts.claimantVout = (int)(intents[0] == (unsigned int)facts.residualVout ? intents[1] : intents[0]);
+            facts.claimantVout = (int)intents[0];
+            facts.residualVout = (int)intents[1];
+            vault::IntentParams residualIp;
+            IsYedIntentOutput(tx.vout[facts.residualVout].scriptPubKey, &residualIp);
+            if (residualIp.recipientHash != ownerHash || tx.vout[facts.residualVout].nValue < facts.residualZat) return verdict::RED5_RESIDUAL;
+            if (tx.vout[facts.claimantVout].nValue < vault.collateralZat - facts.residualZat) return verdict::RED5_CLAIMANT_SHORT;
         } else {
             if (intents.size() != 1) return verdict::VAULT_CLAIM_INTENTS;
             facts.claimantVout = (int)intents[0];

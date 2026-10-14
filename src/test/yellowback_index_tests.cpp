@@ -1547,8 +1547,8 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
     const int R3 = live.Tip() - 1;
     const valtype claimBundle = b.BundleFor(R3, selector, 10000);
     const VaultRecord v = b.Vault(vault).value();
-    const MicroUsd pClaim = std::max<MicroUsd>(b.Snap(R3).PClaim().value(), 10000);      // max(xClaim, aClaim) under clause (b): the margin is 10^4 (R1)
-    const CAmount residual = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, (int)BPS, pClaim));
+    const MicroUsd pEmerg = std::min<MicroUsd>(b.Snap(R3).PClaim().value(), 10000);      // RED-5b: path (b) caps at pEmerg = min(xClaim, aClaim)
+    const CAmount residual = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, (int)BPS, pEmerg));
     BOOST_REQUIRE(residual >= live.P.residualMinZat);
     CMutableTransaction noResidual = b.ClaimTx(vault, R3, claimBundle, std::nullopt);
     CMutableTransaction shortResidual = b.ClaimTx(vault, R3, claimBundle, residual - 1);

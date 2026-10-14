@@ -338,7 +338,9 @@ inline std::optional<MicroUsd> WeightedQuantile(std::vector<WeightedPrice> entri
 /**
  * claimantMaxZat = ceil(mintedCents * marginBps * COIN / pClaim) (R5; §3.7
  * check: $100 at 110 % and 18,333 uUSD => 600,010,909,290 zat ~ 6,000 YEC).
- * marginBps is CLAIM_THRESHOLD_BPS under RED-4(a), 10^4 under (b) only (R1).
+ * marginBps is CLAIM_THRESHOLD_BPS under RED-4(a), 10^4 under (b). The price is pClaim
+ * under (a) and pEmerg under (b) (RED-5b: W3-Y-5, audit recommendation A1, 2026-10-14,
+ * pending owner confirmation — reverses v3 R1, which sized path (b) at pClaim).
  * nullopt = undefined (non-positive input) or > MAX_MONEY, which RED-5 reads
  * as residual 0.
  */
