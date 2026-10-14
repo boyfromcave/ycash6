@@ -1543,11 +1543,17 @@ BOOST_AUTO_TEST_CASE(tpl2_skips_mint9_red5_not1)
         BOOST_CHECK(!policy::FilterTemplate(view, CTransaction(b.NoticeTx(vault, R2, b.BundleFor(R2, selector, 10000))), live.Tip() + 1));
     }
     // EMERGENCY_PERSIST blocks later a claim opens by clause (b) and owes the residual.
+    // The notice above stays at a fifth of the pools (NOT-1). The claim bundle is priced so coverage at
+    // pEmerg sits between 100 % and EMERGENCY_RATIO (105 %): at 17_000 against pools of 50_000 a class-A
+    // 300 % vault is covered at 102 %, path (a) is still false at pClaim, and RED-5b's residual (sized at
+    // pEmerg, no extra margin) stays above residualMinZat. A bundle still at a fifth covers ~60 % and the
+    // claimant cap exceeds the collateral, so the residual is zero.
     while (live.Tip() - 1 - R1 < live.P.emergencyPersist) live.MineQuote();
     const int R3 = live.Tip() - 1;
-    const valtype claimBundle = b.BundleFor(R3, selector, 10000);
+    const MicroUsd claimPrice = 17000;
+    const valtype claimBundle = b.BundleFor(R3, selector, claimPrice);
     const VaultRecord v = b.Vault(vault).value();
-    const MicroUsd pEmerg = std::min<MicroUsd>(b.Snap(R3).PClaim().value(), 10000);      // RED-5b: path (b) caps at pEmerg = min(xClaim, aClaim)
+    const MicroUsd pEmerg = std::min<MicroUsd>(b.Snap(R3).PClaim().value(), claimPrice);      // RED-5b: path (b) caps at pEmerg = min(xClaim, aClaim)
     const CAmount residual = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, (int)BPS, pEmerg));
     BOOST_REQUIRE(residual >= live.P.residualMinZat);
     CMutableTransaction noResidual = b.ClaimTx(vault, R3, claimBundle, std::nullopt);

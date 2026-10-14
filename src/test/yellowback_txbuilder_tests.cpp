@@ -1113,8 +1113,9 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
 // Rule: RED-1 RED-3 RED-4 RED-5 AFEE-1 MP-1
 BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause)
 {
-    // Pools at $2.60 (50 YEC back $100 at 130 %: not underwater at theta 125 %), attestors at $2.00 (100 %): pClaim =
-    // 2.60 (clause (a) false), pEmerg = 2.00 and a persisted notice open clause (b) (RED-5b: the cap is pEmerg, margin 100 %).
+    // Pools at $2.60 (50 YEC back $100 at 130 %: not underwater at theta 125 %), attestors at $2.05 (102.5 %): pClaim =
+    // 2.60 (clause (a) false), pEmerg = 2.05 and a persisted notice open clause (b) (RED-5b: the cap is pEmerg, margin 100 %).
+    // At $2.00 the claimant cap equals the collateral, so the residual is zero and the floor assert cannot pass.
     Armed a(3, 2600000);
     CBasicKeyStore ks;
     a.AddKeys(ks);
@@ -1144,10 +1145,10 @@ BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause
     NoticeRecord notice;
     notice.height = a.R - 3;
     notice.refHeight = a.R - a.P.emergencyPersist;
-    notice.pEmerg = 2000000;
+    notice.pEmerg = 2050000;
     st.Put(keys::Notice(vaultOut), notice);
 
-    const MicroUsd aPrice = 2000000;
+    const MicroUsd aPrice = 2050000;
     const std::vector<unsigned char> bundle = a.BundleFor(selector, aPrice);
     std::vector<uint16_t> sel;
     BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, selector, &sel);
