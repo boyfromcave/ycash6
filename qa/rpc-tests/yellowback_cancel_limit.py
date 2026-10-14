@@ -120,7 +120,7 @@ class YellowbackCancelLimitTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, yed_params().emergency_persist + 1)
 
 # Rule: RED-4 RED-5
-        print('pools to $16.90 for the claim (pEmerg inside 100-105 %); attestors stay at $%s' % ATTESTED)
+        print('pools to $16.90 for the claim (pEmerg inside 100-105 %%); attestors stay at $%s' % ATTESTED)
         self.price(Decimal('16.90'))
         self.mine_round_robin(POOLS, P_MID_WINDOW + REF_LAG)
         print('the owner claims its own vault by path (b): a claimant intent and its residual intent')
