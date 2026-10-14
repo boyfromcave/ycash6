@@ -700,7 +700,7 @@ jobs:
           [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
           exit $rc
 
-      - name: Cross-line vectors (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
+      - name: Cross-line vectors (all nine vector files, model and shared sources byte-identical to ycash-dd)
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
         # PR's head when that branch exists there, else the PR's base; upgrade/vault when ycash-dd
@@ -734,7 +734,19 @@ jobs:
           rc=0
           for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json src/test/data/yellowback_math_cases.json \
                    qa/rpc-tests/test_framework/yellowback_golden.json qa/rpc-tests/test_framework/yellowback_model.py \
-                   qa/rpc-tests/test_framework/SERIALISATION.md; do
+                   qa/rpc-tests/test_framework/SERIALISATION.md \
+                   src/test/data/pq_vectors.json \
+                   src/test/data/pq_wallet_vectors.json \
+                   src/test/data/yellowback_attest_vectors.json \
+                   src/test/data/yellowback_pq_vectors.json \
+                   src/test/data/pq_acvp_slhdsa.json \
+                   src/test/data/pq_falcon_kat.json \
+                   qa/rpc-tests/test_framework/yellowback_pq_vectors.json \
+                   qa/rpc-tests/test_framework/pq.py \
+                   qa/rpc-tests/test_framework/vault.py \
+                   qa/rpc-tests/test_framework/yellowback_attest.py \
+                   src/pqkey.h \
+                   src/pqkey.cpp; do
             mine=$(sha256sum < "$f" | cut -c1-64)
             theirs=$(git show "other-line/head:$f" | sha256sum | cut -c1-64)
             if [ "$mine" = "$theirs" ]; then echo "identical: $f ($mine)"
