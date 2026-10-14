@@ -344,6 +344,7 @@ never sign on a restored wallet before importing the record and confirming it is
 `set_listsigned` on the old wallet (or its `dumpwallet` / `z_exportwallet` dump, whose
 `vaultsetsig=` lines carry it) and `set_importsigned` (or `importwallet` / `z_importwallet` of the
 dump) on the new one, check with `set_listsigned`, then `set_acknowledgerestore`.
+`-salvagewallet`, or a startup that reports "data salvaged", also sets the restore marker (a salvage can lose records), and keeps the surviving `vault*` and `pqissued` rows: the same procedure applies, using a dump or `set_listsigned` taken before the damage (the original file is kept as `wallet.<timestamp>.bak`).
 A bridge attestor backs `wallet.dat` up together with its sidecar's own ledger and never runs two copies
 (`hawkeye/docs/operations.md`).
 
