@@ -2218,9 +2218,11 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     const bool underB = persisted && IsUnderwater(v.collateralZat, e.pEmerg, v.mintedCents, p.emergencyRatioBps);
     e.claimable = mature && (underA || underB);
     if (e.bundleOk) e.claimPath = underA ? "a" : underB ? "b" : "";
-    if (e.claimable && e.pClaim.has_value()) {
+    // RED-5b: path (a) caps at pClaim; path (b) caps at pEmerg (W3-Y-5, A1).
+    const std::optional<MicroUsd> capPrice = underA ? e.pClaim : e.pEmerg;
+    if (e.claimable && capPrice.has_value()) {
         const int marginBps = underA ? p.claimThresholdBps : (int)BPS;
-        e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, e.pClaim.value()));
+        e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, capPrice.value()));
         if (e.residualZat < ResidualMinZat(v.pMint, p)) e.residualZat = 0;   // RED-5''s threshold ($0.48 at pMint, floor RESIDUAL_MIN_ZAT), as the builder's ClaimAt applies it
     }
     const bool standing = notice.has_value() && (int64_t)tip - notice->height <= p.emergencyNoticeTtl;

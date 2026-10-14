@@ -10,6 +10,9 @@ on regtest, as the R-1c attack would play it: an owner who also holds an attesto
   - arm three attestors; node 0 (the user) mints a class-A vault (300 % at $50) and holds the member keys;
   - the pools fall to $10.20 while the attestors attest $22: pClaim = max = $22 keeps the vault above theta (132 %),
     pEmerg = min = $10.20 puts it under EMERGENCY_RATIO (61 %);
+  - after the notice persists the pools rise to $16.90 for the claim only (~101 % on a vault minted at $50).
+    RED-5b sizes the residual at pEmerg, and at 61 % that residual is 0. Attestors stay at $22 so the path stays (b).
+    The pools then return to $10.20 before the quiet period;
   - the owner posts a CLAIM_NOTICE, waits EMERGENCY_PERSIST and claims its OWN vault by path (b): a claimant intent
     (to itself) and the owner's residual intent (RED-5);
   - with its seat it co-signs and cancels the claimant intent (yed_signcancelcosign at $22, yed_buildcancel,
@@ -29,6 +32,7 @@ from test_framework.util import assert_equal, assert_greater_than, sync_blocks, 
 from test_framework.yellowback_util import (
     CANCEL_QUIET,
     CLAIM_DELAY,
+    P_MID_WINDOW,
     POOLS,
     REF_LAG,
     STOCK,
@@ -116,12 +120,16 @@ class YellowbackCancelLimitTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, yed_params().emergency_persist + 1)
 
 # Rule: RED-4 RED-5
+        print('pools to $16.90 for the claim (pEmerg inside 100-105 %%); attestors stay at $%s' % ATTESTED)
+        self.price(Decimal('16.90'))
+        self.mine_round_robin(POOLS, P_MID_WINDOW + REF_LAG)
         print('the owner claims its own vault by path (b): a claimant intent and its residual intent')
         claimed = wallet_claim(self, user, vault, prices=ATTESTED)
         assert_equal(claimed['claimPath'], 'b')
         assert_greater_than(claimed['residualZat'], 0)
         self.sync_all()
         self.mine(POOLS[1])
+        self.price(POOL_LOW)                                 # the reopened position is judged at $10.20 (round 2)
         claim_height = user.getblockcount()
         claiming = user.yed_getvault(vault)
         rows = dict((x['role'], x) for x in claiming['intents'])

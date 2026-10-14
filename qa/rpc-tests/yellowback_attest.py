@@ -107,7 +107,7 @@ from test_framework.yellowback_util import (
 
 PRICE = Decimal('20.00')      # a high YEC price keeps the class-A collateral of a $100 mint at 15 YEC (300 %, D-IT-4)
 EMERG_X = Decimal('12.00')    # pools at 60 % of the mint price: a 300 %-covered vault becomes 180 %-covered (above theta 125 %)
-EMERG_A = Decimal('4.00')     # attestors at a fifth: pEmerg under EMERGENCY_RATIO_BPS, pClaim = xClaim above CLAIM_THRESHOLD
+EMERG_A = Decimal('6.80')     # 102% of this vault: pEmerg = min(x, a) sits inside (100%, 105%), so RED-5b's residual at pEmerg clears the floor; pClaim stays the pools' $12 (180%, above theta)
 CRASH = Decimal('1.00')       # the clause-(a) claim
 CENTS = 10_000                # $100, the class-A minimum mint
 LOCK = 48                     # class A minimum lock

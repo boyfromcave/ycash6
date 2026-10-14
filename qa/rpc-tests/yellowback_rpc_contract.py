@@ -50,6 +50,7 @@ from test_framework.yellowback_util import (
     EMERGENCY_PERSIST,
     MAX_MINT,
     POOLS,
+    P_MID_WINDOW,
     REF_LAG,
     YellowbackTestFramework,
     build_mint_tx,
@@ -702,14 +703,20 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal((pos[victim]['noticed'], pos[victim]['noticeHeight'], pos[victim]['canNotice']), (True, user.getblockcount(), False))
         assert_rpc_error('notice-standing', claimant.yed_claimnotice, victim)
         self.mine_round_robin(POOLS, notice['emergencyOpenAt'] - user.getblockcount())
+        # RED-5b sizes the residual at pEmerg with no extra margin. pEmerg cannot exceed xClaim, and $10.20
+        # covers a 300 % vault minted at $50 about 61 %, so the claimant cap exceeds the collateral and the
+        # residual is 0. Fill pMid at $16.90 (~101 %); attestors stay at $22 so pClaim stays above theta.
+        for i in POOLS:
+            set_quote(nodes[i], '16.90')
+        self.mine_round_robin(POOLS, P_MID_WINDOW + REF_LAG)
         for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
-            feed_all(node, {seq: 22 for seq in live})   # IT-2: pClaim = max(x, a) $22 keeps a 300 % vault above theta; pEmerg $10.20 under EMERGENCY_RATIO
+            feed_all(node, {seq: 22 for seq in live})   # fresh citations: the $22 rows from the notice have aged out
         claimable = {x['vault']: x for x in c.check('yed_listclaimable', user.yed_listclaimable())}
         assert_equal((claimable[victim + ':0']['claimPath'], claimable[victim + ':0']['noticed'], claimable[victim + ':0']['claimable']), ('b', True, True))
         pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
         assert_equal((pos[victim]['canClaim'], pos[victim]['canNotice']), (True, False))    # the owner holds >= mintedCents
         claimed = c.check('yed_claim', wallet_claim(self, claimant, victim, bundle_hex=''))
-        assert_equal((claimed['claimPath'], claimed['burnedCents'], claimed['pEmerg']), ('b', 10000, usd_to_micro('10.20')))
+        assert_equal((claimed['claimPath'], claimed['burnedCents'], claimed['pEmerg']), ('b', 10000, usd_to_micro('16.90')))
         assert_equal(claimed['residualZat'], claimable[victim + ':0']['residualZat'])
         assert_greater_than(claimed['residualZat'], 0)
         self.mine(POOLS[1])

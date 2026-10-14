@@ -195,7 +195,8 @@ env:
   # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
   # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md). Since the fee merge: 26ae6b7, which adds the
   # generator's fees mode (--check-fees, rpcversion 8) and docs/plans/yellowback-quantum-fees-rpc-delta.md.
-  YB_WORKSPACE_COMMIT: 308eefee386b1c16df3d769dc87efc8ce8cecbc7
+  # 6ac627a records RED-5a/RED-5b in the plans the fees-line spec copy is generated from.
+  YB_WORKSPACE_COMMIT: 6ac627a6b730504e095236e8e78da4d66af29642
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -702,12 +703,14 @@ jobs:
       - name: Cross-line vectors (vault_vectors.json, yellowback_golden.json byte-identical to ycash-dd)
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
-        # PR's base for a pull request; upgrade/vault when ycash-dd has no such branch). A tree on the
+        # PR's head when that branch exists there, else the PR's base; upgrade/vault when ycash-dd
+        # has no such branch). A tree on the
         # in-term line (interm=1) compares with ycash-dd's upgrade/vault-in-term and nothing else: the
         # upgrade line's vectors are not this line's, so a missing in-term branch there is an error.
         if: steps.line.outputs.line == 'upgrade' && !cancelled()
         env:
           REF: ${{ github.base_ref || github.ref_name }}
+          HEAD_REF: ${{ github.head_ref }}
           INTERM: ${{ steps.line.outputs.interm }}
           QUANTUM: ${{ steps.line.outputs.quantum }}
         run: |
@@ -719,6 +722,12 @@ jobs:
           if [ "$REF" != upgrade/vault ]; then
             if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
             if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
+          fi
+          # A pull request into upgrade/vault carries a rule change the other line's upgrade/vault does not
+          # have yet. When that same branch exists on the other line, compare with it (both lines land the
+          # change together). A missing branch keeps the upgrade/vault comparison above.
+          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads "$url" "$HEAD_REF" >/dev/null; then
+            other=$HEAD_REF
           fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"

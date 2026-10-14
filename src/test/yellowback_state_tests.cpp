@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "02f3ce11e0394e1bb4fea21ba6e177ddf761d537960447821fda520b1bb06a17";   // SCHEMA_VERSION 14: the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "7a38e41dac6ddeb54cd02f5862a4abf1918309a5323d48b4318742f311c0dc34";   // SCHEMA_VERSION 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -746,7 +746,8 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
                 { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
-                { 300, "red5-residual" }, { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" }, { 301, "intent-cancel-cosign" },
+                { 300, "red5-residual" }, { 300, "red5-residual" }, { 300, "red5-claimant-short" },
+                { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" }, { 301, "intent-cancel-cosign" },
                 { 309, "intent-cancel-residual" }, { 311, "intent-residual-held" },
                 { 341, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
@@ -763,7 +764,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 20);
+    BOOST_CHECK_EQUAL(invalidBlocks, 22);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -2553,8 +2554,9 @@ struct EmergencyFixture
     }
     CAmount Residual(int R) const
     {
-        const MicroUsd pClaim = std::max(f.Snap(R).PClaim().value(), attPrice);
-        return ResidualZat(COLLATERAL, ClaimantMaxZat(10000, (int)BPS, pClaim));
+        // RED-5b: path (b) caps at pEmerg = min(xClaim, aClaim), not at pClaim.
+        const MicroUsd pEmerg = std::min(f.Snap(R).PClaim().value(), attPrice);
+        return ResidualZat(COLLATERAL, ClaimantMaxZat(10000, (int)BPS, pEmerg));
     }
     RedResult Mine(const CMutableTransaction& tx)
     {
@@ -3475,7 +3477,7 @@ BOOST_AUTO_TEST_CASE(red5_residual_paid)
     for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
     const CAmount residual = g.Residual(g.f.tip - 1);
     BOOST_CHECK(residual >= g.f.P.residualMinZat);
-    BOOST_CHECK_EQUAL(residual, EmergencyFixture::COLLATERAL - ClaimantMaxZat(10000, (int)BPS, g.poolPrice).value());
+    BOOST_CHECK_EQUAL(residual, EmergencyFixture::COLLATERAL - ClaimantMaxZat(10000, (int)BPS, g.attPrice).value());
     // Missing residual output: invalid. One zat short: invalid. Exact: ok.
     {
         CBlock block;
@@ -3537,6 +3539,83 @@ BOOST_AUTO_TEST_CASE(red5_residual_to_wrong_key_invalid)
     BOOST_CHECK_EQUAL(r.verdict, verdict::RED5_RESIDUAL);
     BOOST_CHECK(r.invalid);
     BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::ACTIVE);
+}
+
+// Rule: RED-5
+// Rule: RED-5a
+BOOST_AUTO_TEST_CASE(red5a_roles_are_positional_and_the_claimant_is_floored)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    const CAmount residual = g.Residual(g.f.tip - 1);
+    const CAmount collateral = EmergencyFixture::COLLATERAL;
+    const CAmount floor = collateral - residual;
+    auto verdictOf = [&](const CMutableTransaction& tx) {
+        CBlock block;
+        block.vtx.push_back(CTransaction(Fixture::Coinbase(g.f.tip + 1, Fixture::Quote(g.poolPrice, 0))));
+        block.vtx.push_back(CTransaction(tx));
+        OverlayStateView overlay(g.f.view);
+        BlockEvaluation ev = EvaluateBlock(overlay, g.f.P, block, g.f.tip + 1, Fixture::FakeHash(g.f.tip + 1), SUBSIDY);
+        BOOST_REQUIRE(!ev.txlogs.empty());
+        return ev.txlogs[0].second.verdict;
+    };
+    SpendOpts o;
+    o.residualValue = residual;
+    const CMutableTransaction honest = g.Claim(o);
+    BOOST_CHECK_EQUAL(verdictOf(honest), verdict::OK);                 // wallet shape: claimant first, residual second
+    {
+        CMutableTransaction selfPay = honest;                          // the claimant may still pay the owner
+        selfPay.vout[0].scriptPubKey = selfPay.vout.back().scriptPubKey;
+        BOOST_CHECK_EQUAL(verdictOf(selfPay), verdict::OK);
+    }
+    {
+        CMutableTransaction tiny = honest;                             // residual = the whole collateral, 1-zat claimant
+        tiny.vout[0].nValue = 1;
+        tiny.vout.back().nValue = collateral;
+        BOOST_CHECK_EQUAL(verdictOf(tiny), verdict::RED5_CLAIMANT_SHORT);
+    }
+    {
+        CMutableTransaction shortClaimant = honest;                    // one zat under collateral − residual
+        shortClaimant.vout[0].nValue = floor - 1;
+        BOOST_CHECK_EQUAL(verdictOf(shortClaimant), verdict::RED5_CLAIMANT_SHORT);
+    }
+    {
+        CMutableTransaction swapped = honest;                          // residual first: vout 1 of the intents is not the owner's
+        std::swap(swapped.vout[0], swapped.vout.back());
+        BOOST_CHECK_EQUAL(verdictOf(swapped), verdict::RED5_RESIDUAL);
+    }
+    {
+        CMutableTransaction bigFirst = honest;                         // big owner intent first, 1-zat intent second
+        bigFirst.vout[0].scriptPubKey = bigFirst.vout.back().scriptPubKey;
+        bigFirst.vout[0].nValue = collateral - 1;
+        bigFirst.vout.back().nValue = 1;
+        BOOST_CHECK_EQUAL(verdictOf(bigFirst), verdict::RED5_RESIDUAL);
+    }
+}
+
+// Rule: RED-5
+// Rule: RED-5b
+BOOST_AUTO_TEST_CASE(red5b_path_b_caps_at_p_emerg)
+{
+    // Worked example (W3-Y-5, A1): D = $100,000, 300,000 YEC, pEmerg = $0.349, pClaim = $0.42.
+    const Cents debt = 10000000;
+    const CAmount collateral = 300000 * COIN;
+    const MicroUsd pEmerg = 349000;
+    const CAmount residual = ResidualZat(collateral, ClaimantMaxZat(debt, (int)BPS, pEmerg));
+    BOOST_CHECK_EQUAL(residual, 1346704871060LL);                      // 13,467.04871060 YEC
+    // A spread under 1.25/1.05 is path (a): underwater at pClaim against theta, so the residual is 0.
+    const MicroUsd close = 380000;                                     // 380000/349000 ≈ 1.089
+    BOOST_CHECK(IsUnderwater(collateral, pEmerg, debt, 10500));
+    BOOST_CHECK(IsUnderwater(collateral, close, debt, 12500));
+    BOOST_CHECK_EQUAL(ResidualZat(collateral, ClaimantMaxZat(debt, 12500, close)), 0);
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    const CAmount atEmerg = ResidualZat(EmergencyFixture::COLLATERAL, ClaimantMaxZat(10000, (int)BPS, g.attPrice));
+    const CAmount atClaim = ResidualZat(EmergencyFixture::COLLATERAL, ClaimantMaxZat(10000, (int)BPS, g.poolPrice));
+    BOOST_CHECK(atEmerg < atClaim);
+    BOOST_CHECK_EQUAL(g.Residual(g.f.tip - 1), atEmerg);
 }
 
 // Rule: RED-5

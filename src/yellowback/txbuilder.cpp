@@ -1285,9 +1285,12 @@ ClaimFacts ClaimAt(const Context& ctx, const COutPoint& vaultOut, const VaultRec
         }
         c.claimPath = "b";
     }
-    if (!c.pClaim.has_value()) throw std::runtime_error("claim-not-underwater: pClaim is undefined at the reference height");
-    const int marginBps = c.claimPath == "a" ? p.claimThresholdBps : (int)BPS;   // R1: no margin under (b) alone
-    const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, c.pClaim.value()));
+    // RED-5b (W3-Y-5, audit recommendation A1, 2026-10-14, pending owner confirmation): path (a) at pClaim,
+    // path (b) at pEmerg. Reverses v3 R1, which sized path (b) at pClaim.
+    const std::optional<MicroUsd> capPrice = c.claimPath == "a" ? c.pClaim : c.pEmerg;
+    if (!capPrice.has_value()) throw std::runtime_error("claim-not-underwater: the cap price is undefined at the reference height");
+    const int marginBps = c.claimPath == "a" ? p.claimThresholdBps : (int)BPS;   // no extra margin under (b); the cap price is pEmerg
+    const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, capPrice.value()));
     c.residualZat = residual >= ResidualMinZat(vault.pMint, p) ? residual : 0;   // RED-5'
     return c;
 }
