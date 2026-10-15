@@ -1659,11 +1659,12 @@ size_t FindTemplateInput(const CMutableTransaction& mtx, CTxOut& coin, int& heig
 
 /** Refuse (before anything is recorded or signed) a build the vault rules would not accept at the next block.
  *  The fee inputs are not under the set signature, so a spent one only downgrades the check to the template input. */
-void ValidateSetSpend(const CMutableTransaction& mtx, size_t idx)
+void ValidateSetSpend(const CMutableTransaction& mtx, size_t idx, uint8_t role)
 {
     if (!ActiveAtNext() || !vault::g_vaultdb) return;
     CMutableTransaction probe(mtx);
-    if (probe.vin[idx].scriptSig.empty()) probe.vin[idx].scriptSig = CScript() << OP_1;
+    // An unsigned input still has to carry this role's selector, or a cancel is judged as an intent's RELEASE.
+    if (probe.vin[idx].scriptSig.empty()) probe.vin[idx].scriptSig = CScript() << (role == ROLE_UNLOCK ? OP_1 : OP_2);
     const int64_t next = NextHeight();
     const auto snapshot = vault::TipSnapshot();
     const int64_t activation = Params().GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
@@ -1707,7 +1708,7 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
             throw JSONRPCError(RPC_INVALID_PARAMETER, "set-sign-invalid: an existing signature is not by a distinct current member of " + setId.GetHex());
         have.push_back(key);
     }
-    ValidateSetSpend(mtx, idx);
+    ValidateSetSpend(mtx, idx, role);
     // Sign once (SET_EQUIVOCATION, plan §15.3): two signatures by one member over the same (setId, prevout)
     // with a different role or sighash eject it and freeze its bond. The wallet records what its members
     // signed before handing any signature out, and refuses a different one; the identical sighash is idempotent.
