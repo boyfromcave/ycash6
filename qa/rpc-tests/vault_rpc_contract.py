@@ -60,7 +60,12 @@ class VaultRpcContractTest(BitcoinTestFramework):
     def run_test(self):
         n = self.nodes[0]
         c = Contract()
-        mine = n.generate
+        def mine(k):
+            # both nodes' wallets must have seen the blocks before the next funded call (6.20.0 notifies wallets
+            # asynchronously; sync_blocks waits for fullyNotified)
+            hashes = n.generate(k)
+            sync_blocks(self.nodes)
+            return hashes
 
         # ---- before activation ----
         info = c.call(n, 'vault_getinfo')
