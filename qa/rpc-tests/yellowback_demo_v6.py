@@ -36,7 +36,7 @@ _stock_node, _stockparity); this script strings them together on one chain.
      bundle is an invalid transaction: refused by every mempool, its block rejected
   6  the module is consensus (U-21): node 1 mines an unburned vault spend; every Yellowback node
      rejects the block at DoS 100 and disconnects it; the chain continues and node 1 is brought
-     back; a wrong-price claim is cancelled by one attestor, the burn kept (I-2, U-24)
+     back; a wrong-price claim is cancelled by one attestor with one co-signature, the burn refunded (I-2, CAN-1, CAN-2)
   7  a 2-block and a 10-block reorg with equal state hashes; restart and -reindex
   8  (pointer) the 30-minute persona economy and the devnet upgrade walk
   9  parity spot check, node 1 vs node 5 as the fork without the overlay (the full 300 blocks is
@@ -821,11 +821,13 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
                  'banscore 0 on every connection, statehash %s' % (self.tip(), short(h1)))
 
         # a wrong-price claim cancelled by one attestor (I-2): the claim is valid at the chain's price, the attestor
-        # disagrees; the collateral returns to a byte-identical vault and the claimant's burn is not refunded (U-24)
+        # disagrees; the collateral returns to a byte-identical vault and the claimant's burn is refunded (CAN-1, audit 03/H-1)
         c_txid = self.mints['C']['txid']
         spk_c = user.getrawtransaction(c_txid, 1)['vout'][0]['scriptPubKey']['hex']
         self.crash_until_claimable(c_txid, item)
         user.yed_send(observer.yed_getnewaddress(), CENTS)
+        for _ in range(2):              # the observer funds the cancel's fee and its CAN-2 carrier from two confirmed coins
+            user.sendtoaddress(observer.getnewaddress(), 2)
         self.sync_all()
         self.mine(POOLS[1])
         before = nodes[2].yed_getstats()
@@ -837,7 +839,18 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(after_claim['supplyCents'], before['supplyCents'] - CENTS)
         self.say(item, 'yed_claim C by the observer at pClaim %s: %s burned %d, CLAIMING (intent %s:0, release at +%d)'
                  % (user.yed_getprice()['pClaim'], claimed['txid'], claimed['burnedCents'], short(claimed['txid']), CLAIM_DELAY))
-        built = observer.vault_buildcancel('%s:0' % claimed['txid'])
+        intent = '%s:0' % claimed['txid']
+        refund_holder = nodes[2].yed_getvault(c_txid)['refundHolder']
+        yed_before = observer.yed_getbalance()['confirmedCents']
+        # CAN-1: the primitive's builder refuses a YED intent; yed_buildcancel adds the burn's refund at vout 1.
+        # CAN-2 + C4b: a vault's first cancel needs one current member's co-signature, its price statement at the
+        # claim's refHeight saying the vault was not claimable: node 6 states the mint price ($PRICE, 300 %)
+        rpc_error('is cancelled with yed_buildcancel', observer.vault_buildcancel, intent)
+        rpc_error('cancel-cosign-needed', observer.yed_buildcancel, intent)
+        cos = nodes[ATTESTOR_A].yed_signcancelcosign(intent, usd_to_micro(PRICE))
+        built = observer.yed_buildcancel(intent, [cos['cosig']])
+        assert_equal((built['cancelsRequired'], built['cosigners']), (1, [cos['seq']]))
+        assert_equal((built['refund']['vout'], built['refund']['cents'], built['refund']['script']), (1, CENTS, refund_holder))
         signed = nodes[ATTESTOR_A].set_signcancel(built['hex'])
         assert_equal(signed['complete'], True)
         full = observer.signrawtransaction(signed['hex'])
@@ -853,15 +866,18 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
             assert_equal((vc['status'], vc['mintedCents'], vc['scriptPubKey']), ('ACTIVE', CENTS, spk_c))
         assert_equal(nodes[2].getrawtransaction(cancel, 1)['vout'][0]['scriptPubKey']['hex'], spk_c)
         after = nodes[2].yed_getstats()
-        assert_equal((after['supplyCents'], after['activeVaults']), (after_claim['supplyCents'], after_claim['activeVaults'] + 1))
-        assert_equal(nodes[2].yed_gettxinfo(cancel)['type'], 'claim_cancel')
-        self.say(item, 'attestor cancel (vault_buildcancel on the claimant, set_signcancel on node 6 = one current member, cancel threshold 1): %s; '
-                 'the collateral is back in a byte-identical V at %s:0, ACTIVE as the same position on every node; supply stays %d: '
-                 'the claimant\'s %d-cent burn is not refunded (U-24)' % (cancel, short(cancel), after['supplyCents'], CENTS))
+        assert_equal((after['supplyCents'], after['activeVaults']), (before['supplyCents'], after_claim['activeVaults'] + 1))   # CAN-1
+        info = nodes[2].yed_gettxinfo(cancel)
+        assert_equal((info['type'], info['assigned']), ('claim_cancel', [{'vout': 1, 'cents': CENTS}]))
+        assert_equal(observer.yed_getbalance()['confirmedCents'], yed_before + CENTS)
+        self.say(item, 'attestor cancel (yed_signcancelcosign on node 6 at $%d, yed_buildcancel on the claimant, set_signcancel on node 6 = '
+                 'one current member, cancel threshold 1): %s; the collateral is back in a byte-identical V at %s:0, ACTIVE as the same '
+                 'position on every node; the claimant\'s %d-cent burn is refunded at vout 1 (CAN-1): supply back at %d'
+                 % (PRICE, cancel, short(cancel), CENTS, after['supplyCents']))
         self.recover_price(item)
         self.model_check(nodes[2])
         h = self.hashes('item 6')
-        self.passed(item, 'the module is consensus: an unburned vault spend mined by node 1 is rejected at DoS 100 by every Yellowback node, which disconnect it and carry on; a wrong-price claim is cancelled by one attestor, the burn kept',
+        self.passed(item, 'the module is consensus: an unburned vault spend mined by node 1 is rejected at DoS 100 by every Yellowback node, which disconnect it and carry on; a wrong-price claim is cancelled by one attestor, the burn refunded',
                     'block %s rejected (%s) by 7 nodes, node 1 back at %s; claim %s cancelled by %s, vault ACTIVE at %s; statehash %s'
                     % (short(blockhash), check['verdict'], short(h1), short(claimed['txid']), short(cancel), short(cancel), short(h)))
 
