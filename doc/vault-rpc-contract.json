@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "4d81931a8a7514489c538eb62a3a2ff3a61ec0c480e2c6548e5c01dfaf4d20d3"
+    "sha256": "ffe24be3b3c3a01b67de75c3fa102cb0a4f6a421735bec95a51a5c63bd3881d2"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2482,6 +2482,15 @@
         "set_signcancel"
       ],
       "provokedBy": "signing on a wallet that imported a member key, before `set_importsigned`"
+    },
+    {
+      "code": -8,
+      "message": "set-sign-invalid",
+      "raisedBy": [
+        "set_signunlock",
+        "set_signcancel"
+      ],
+      "provokedBy": "`set_signcancel` of an intent's cancel after the intent matured"
     },
     {
       "code": -8,
