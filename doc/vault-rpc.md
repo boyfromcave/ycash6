@@ -473,7 +473,8 @@ Params: `["hex": hex]`
 Result: `hash`
 
 Signs this wallet's inputs of a built vault spend (the template input's scriptSig is kept) and
-broadcasts. Result: the txid. The node that funded the spend must send it.
+broadcasts. Result: the txid. The node that funded the spend must send it. A transaction with no unspent
+vault or intent input is refused: `vault_send` is not a general signer.
 
 ### `vault_release "intentoutpoint" ( "address"|"script" )`
 Params: `["intentoutpoint": outpoint, "recipient"?: str]`
@@ -544,6 +545,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
 | -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
+| -8 | `no unspent vault or intent input` | `set_signunlock`, `set_signcancel`, `vault_refee`, `vault_send` | `vault_send` of a transaction with no template input |
 | -4 | `set-sign-once` | `set_signunlock`, `set_signcancel`, `set_importsigned` | a second, different unlock of a vault this wallet already signed |
 | -4 | `set-sign-restored` | `set_signunlock`, `set_signcancel` | signing on a wallet that imported a member key, before `set_importsigned` |
 | -8 | `set-sign-invalid` | `set_signunlock`, `set_signcancel` | `set_signcancel` of an intent's cancel after the intent matured |

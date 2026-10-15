@@ -175,6 +175,9 @@ class VaultRpcContractTest(BitcoinTestFramework):
         rf = c.call(n, 'vault_refee', su['hex'])                     # 01/V-2: new fee input, same signatures
         assert_equal(rf['sighash'], su['sighash'])
         assert_equal(len(rf['replaced']), 1)
+        plain_in = n.listunspent()[0]
+        plain = n.createrawtransaction([{'txid': plain_in['txid'], 'vout': plain_in['vout']}], {addr: 0.0001})
+        c.error('no unspent vault or intent input', n, 'vault_send', plain)
         txid = c.call(n, 'vault_send', rf['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         mine(1)
