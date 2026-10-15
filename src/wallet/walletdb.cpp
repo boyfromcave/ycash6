@@ -1163,6 +1163,15 @@ static bool IsKeyType(string strType)
             strType == "pqkey" || strType == "cpqkey");
 }
 
+// 07/NEW-1: records whose loss is unsafe are kept by a keys-only salvage, but their read errors stay non-critical on load.
+static bool IsSalvagedType(const std::string& strType)
+{
+    return IsKeyType(strType) ||
+           strType == "pqissued" || strType == "vaultsetsig" ||
+           strType == "vaultsignrestored" || strType == "vaultbuild" ||
+           strType == "vaultpendingkey" || strType == "vaultrecipient";
+}
+
 DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
 {
     pwallet->vchDefaultKey = CPubKey();
@@ -1540,7 +1549,7 @@ bool CWalletDB::Recover(CDBEnv& dbenv, const std::string& filename, bool fOnlyKe
                 fReadOK = ReadKeyValue(&dummyWallet, ssKey, ssValue,
                                         wss, strType, strErr);
             }
-            if (!IsKeyType(strType))
+            if (!IsSalvagedType(strType))
                 continue;
             if (!fReadOK)
             {

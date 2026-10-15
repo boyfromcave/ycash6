@@ -25,6 +25,7 @@ a wallet re-created from the phrase holds before it rescans.
   (quantum review F-1: the keys are stored with PQ_INDEX_NONE).
 - the set sign-once record follows wallet.dat, not the seed (07/F-5): node 1, a member, signs an unlock;
   (a) its backup on node 2 re-signs the identical hex and refuses a different build (set-sign-once);
+  (a2) the same backup started with -salvagewallet keeps the record and carries the restore marker (07/NEW-1);
   (b) a wallet restored from node 1's seed (-mnemonicfile) carries the restore marker: after importing the member key it
   refuses (set-sign-restored), acknowledgerestore overrides it for a vault the key never signed, and after
   set_importsigned of node 1's set_listsigned the refusal is set-sign-once and the identical hex signs; neither
@@ -243,6 +244,12 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         assert_equal(n2.set_listsigned(), listed)
         assert_equal(n2.set_signunlock(bu['hex'])['sighash'], bu['sighash'])   # identical: idempotent
         assert_raises_rpc('set-sign-once', n2.set_signunlock, bu2['hex'])
+
+        print('(a2) -salvagewallet keeps the record and sets the restore marker (07/NEW-1)')
+        n2 = self.restart_node2(extra=['-salvagewallet'], wallet=os.path.join(export_dir, 'signonce'))
+        assert_equal(n2.set_listsigned(), {'restored': True, 'records': [record]})
+        assert_raises_rpc('set-sign-once', n2.set_signunlock, bu2['hex'])
+        assert_equal(n2.set_signunlock(bu['hex'])['sighash'], bu['sighash'])
 
         print('(b) a seed-only restore carries no record: the restore marker refuses until it is imported')
         export = n1.z_exportwallet('n1signonce')
