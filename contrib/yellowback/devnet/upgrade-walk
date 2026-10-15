@@ -1054,12 +1054,25 @@ class Walk:
         # A canceller whose own attestation at that height said "claimable" cannot co-sign (cancel-statement-claimable):
         # under C4b that cancel is the slashable kind, so the scenario needs an attestor that did not attest the crash there.
         self.fails(CANCELLER, "yed_buildcancel", claim + ":0", expect="cancel-cosign-needed")
-        try:
-            cos = self.node(CANCELLER).yed_signcancelcosign(claim + ":0")
-        except Exception as error:
-            if "price-required" not in str(getattr(error, "error", error)):
-                raise
-            cos = self.call(CANCELLER, "yed_signcancelcosign", claim + ":0", int(PRICE) * 1_000_000, keys=["cosig", "seq", "citedHeight"])
+        # The agents sign every ATTEST_INTERVAL blocks on their own phase, so whether node 5 attested at the claim's refHeight
+        # depends on the run's heights. If it did (cancel-statement-claimable), another member whose agent did not co-signs:
+        # yed_buildcancel takes any distinct current member's co-signature, and node 5 still builds and signs the cancel.
+        cos, refused = None, []
+        for i in (CANCELLER,) + tuple(a for a in ATTESTORS + (SEAT,) if a != CANCELLER):
+            try:
+                cos = self.node(i).yed_signcancelcosign(claim + ":0")
+            except Exception as error:
+                message = str(getattr(error, "error", {}).get("message", error))
+                if "price-required" in message:
+                    cos = self.call(i, "yed_signcancelcosign", claim + ":0", int(PRICE) * 1_000_000, keys=["cosig", "seq", "citedHeight"])
+                elif "cancel-statement-claimable" in message:
+                    refused.append(i)
+                    self.note("node %d attested the crash at the claim's refHeight and cannot co-sign its cancel (C4b): %s" % (i, message[:120]))
+                    continue
+                else:
+                    raise
+            break
+        self.ok(cos is not None, "a member co-signs the cancel (nodes refused: %s)" % (refused or "none"))
         built = self.call(CANCELLER, "yed_buildcancel", claim + ":0", [cos["cosig"]],
                           keys=["required", "cancelsetid", "deadline", "refund", "cancelsRequired", "cosigners"])
         self.ok(built["cancelsRequired"] == 1 and built["cosigners"] == [cos["seq"]],
