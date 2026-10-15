@@ -188,6 +188,7 @@ class VaultRpcContractTest(BitcoinTestFramework):
         c.error('matures at height', n, 'vault_release', intent_op)
         mine(DELAY)
         c.error('can no longer be cancelled', n, 'vault_buildcancel', intent_op)
+        c.error('set-sign-invalid', n, 'set_signcancel', bc['hex'])        # signed in time; refused once matured
         c.call(n, 'vault_release', intent_op)
         mine(1)
         c.error('not an unspent intent output', n, 'vault_buildcancel', intent_op)

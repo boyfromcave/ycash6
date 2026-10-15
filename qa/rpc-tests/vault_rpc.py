@@ -241,7 +241,10 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(relock[0]['value'], Decimal('6'))
         assert_equal(relock[0]['script'], lk['script'])
         assert_raises_rpc('matures at height', n2.vault_release, intent_op)
+        stale = n2.vault_buildcancel(intent_op)
         self.mine(DELAY - 1)
+        # a cancel built in time but signed after the intent matured is refused before anything is recorded or signed
+        assert_raises_rpc('set-sign-invalid: bad-txns-vault-cancel', n2.set_signcancel, stale['hex'])
         bal = n2.getreceivedbyaddress(addr2)
         n2.vault_release(intent_op)
         self.mine(1)
