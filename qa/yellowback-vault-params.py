@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """Extract and compare the Vault chain parameters of the two Yellowback node lines.
 
   yellowback-vault-params.py extract [--root DIR | --git-ref REF [--git-dir DIR]]
