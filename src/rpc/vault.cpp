@@ -1657,6 +1657,33 @@ size_t FindTemplateInput(const CMutableTransaction& mtx, CTxOut& coin, int& heig
     return *found;
 }
 
+/** Refuse (before anything is recorded or signed) a build the vault rules would not accept at the next block.
+ *  The fee inputs are not under the set signature, so a spent one only downgrades the check to the template input. */
+void ValidateSetSpend(const CMutableTransaction& mtx, size_t idx, uint8_t role)
+{
+    if (!ActiveAtNext() || !vault::g_vaultdb) return;
+    CMutableTransaction probe(mtx);
+    // An unsigned input still has to carry this role's selector, or a cancel is judged as an intent's RELEASE.
+    if (probe.vin[idx].scriptSig.empty()) probe.vin[idx].scriptSig = CScript() << (role == ROLE_UNLOCK ? OP_1 : OP_2);
+    const int64_t next = NextHeight();
+    const auto snapshot = vault::TipSnapshot();
+    const int64_t activation = Params().GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    vault::ViewCoinAccessor coins(view, next);
+    const auto blockHashes = vault::AncestorHashes(chainActive.Tip());
+    auto bad = vault::CheckTx(CTransaction(probe), coins, next, *snapshot, blockHashes, activation);
+    if (bad && *bad == "bad-txns-vault-inputs-missing" && probe.vin.size() > 1) {
+        CMutableTransaction only(probe);
+        only.vin = {probe.vin[idx]};
+        bad = vault::CheckTx(CTransaction(only), coins, next, *snapshot, blockHashes, activation);
+    }
+    // bad-txns-vault-rate is epoch-dependent and clears on its own; every other reason is permanent for this build.
+    if (bad && *bad != "bad-txns-vault-rate")
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("set-sign-invalid: %s; nothing was recorded or signed", *bad));
+}
+
 /** Add this wallet's set signatures (role 1 unlock / 2 cancel of setId) to the template input. */
 UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin, const SetId& setId, uint8_t role, bool ackRestore)
 {
@@ -1677,8 +1704,11 @@ UniValue SignSetInPlace(CMutableTransaction& mtx, size_t idx, const CTxOut& coin
     for (const auto& sig : sigs) {
         CPubKey key;
         if (!RecoverSig(msg, sig, key)) throw JSONRPCError(RPC_INVALID_PARAMETER, "an existing set signature does not verify (the transaction changed?)");
+        if (!snap->IsCurrentMember(setId, key, h) || std::find(have.begin(), have.end(), key) != have.end())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "set-sign-invalid: an existing signature is not by a distinct current member of " + setId.GetHex());
         have.push_back(key);
     }
+    ValidateSetSpend(mtx, idx, role);
     // Sign once (SET_EQUIVOCATION, plan §15.3): two signatures by one member over the same (setId, prevout)
     // with a different role or sighash eject it and freeze its bond. The wallet records what its members
     // signed before handing any signature out, and refuses a different one; the identical sighash is idempotent.
