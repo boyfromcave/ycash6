@@ -13,12 +13,15 @@
 # Triggers:
 #   push of a tag v*            build, smoke-test, and create a draft release (a prerelease when
 #                               the version has -rc/-beta); the tag must equal configure.ac's version
-#                               and the mainnet Yellowback heights must be set
-#                               (qa/yellowback-release-heights.sh, hardening F-5), and the
-#                               version must be the line's (6.21.x harden, 6.22.x upgrade; O-7).
-#                               Nothing here creates a tag: a tag is pushed by hand per
-#                               doc/yellowback-release.md, and this workflow refuses it while
-#                               the line's mainnet heights are unset.
+#                               and the mainnet Vault activation height, pqFalconHeight,
+#                               nVaultMinSetMaturity and attestor set must be set
+#                               (qa/yellowback-release-heights.sh, hardening F-5, audit W3-P-1),
+#                               and the version must be the line's (6.21.x harden, 6.22.x upgrade; O-7).
+#                               A tag also needs the ycash-dd pairing tag vault-params/v<version>,
+#                               with the same activation height, pqFalconHeight and
+#                               nVaultMinSetMaturity on every network. Nothing here creates a tag:
+#                               a tag is pushed by hand per doc/yellowback-release.md, and this
+#                               workflow refuses it while those parameters are unset or divergent.
 #   workflow_dispatch           the same builds and smoke tests, artifacts only, no release
 #                               (a proving run before tagging)
 #
@@ -92,12 +95,40 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
           echo "version $version (prerelease: $pre)"
-      - name: Mainnet Yellowback heights are set (hardening F-5)
-        # A tag never releases a build whose mainnet START_HEIGHT is unset; a workflow_dispatch
-        # proving run only warns.
+      - name: Vault release parameters are set and match the ycash-dd pairing tag
+        # A tag never releases while the mainnet activation height, pqFalconHeight,
+        # nVaultMinSetMaturity or attestor set is unset, or while those three parameters
+        # differ from ycash-dd at vault-params/v<version>. A workflow_dispatch proving run
+        # only warns, and compares with ycash-dd upgrade/vault.
         run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then qa/yellowback-release-heights.sh
-          else qa/yellowback-release-heights.sh --warn; fi
+          set -euo pipefail
+          url="https://github.com/boyfromcave/ycash-dd.git"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            ref="refs/tags/vault-params/v${{ steps.v.outputs.version }}"
+            set +e
+            git ls-remote --exit-code --tags "$url" "$ref"
+            lrc=$?
+            set -e
+            if [ "$lrc" -eq 2 ]; then
+              echo "refusing to release: pairing tag vault-params/v${{ steps.v.outputs.version }} is missing on ycash-dd (tag ycash-dd first; doc/yellowback-release.md)"
+              exit 1
+            fi
+            if [ "$lrc" -ne 0 ]; then
+              echo "refusing to release: could not look up the ycash-dd pairing tag (ls-remote exit $lrc)"
+              exit 1
+            fi
+            git fetch --depth 1 "$url" "+${ref}:refs/remotes/ycash-dd/pairing"
+            python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/pairing > "$RUNNER_TEMP/vault-params-other.json"
+            qa/yellowback-release-heights.sh --other-json "$RUNNER_TEMP/vault-params-other.json"
+          else
+            if git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash-dd/upgrade-vault"; then
+              python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/upgrade-vault > "$RUNNER_TEMP/vault-params-other.json"
+              qa/yellowback-release-heights.sh --warn --other-json "$RUNNER_TEMP/vault-params-other.json"
+            else
+              echo "::warning::could not fetch ycash-dd upgrade/vault; skipping the divergence check"
+              qa/yellowback-release-heights.sh --warn
+            fi
+          fi
 
   build:
     name: Build ${{ matrix.platform }}

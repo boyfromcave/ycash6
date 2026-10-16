@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "e9147268ed07e72023233131d66801e863a724edc21b5d993774a51ea962280f"
+    "sha256": "55c44fb4a0a2e142802a76a379f0bfe7ba57c25065342aa61c7308b4c3c71892"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2474,6 +2474,15 @@
         "vault_send"
       ],
       "provokedBy": "`vault_send` of a transaction with no template input"
+    },
+    {
+      "code": -4,
+      "message": "vault-send-foreign-input",
+      "raisedBy": [
+        "vault_send",
+        "set_sendact"
+      ],
+      "provokedBy": "a spend that names a wallet coin this wallet did not fund for these outputs"
     },
     {
       "code": -4,

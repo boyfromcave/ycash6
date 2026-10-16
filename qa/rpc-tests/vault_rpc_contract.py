@@ -183,6 +183,13 @@ class VaultRpcContractTest(BitcoinTestFramework):
         plain_in = n.listunspent()[0]
         plain = n.createrawtransaction([{'txid': plain_in['txid'], 'vout': plain_in['vout']}], {addr: 0.0001})
         c.error('no unspent vault or intent input', n, 'vault_send', plain)
+        dec = n.decoderawtransaction(rf['hex'])
+        templ = dec['vin'][0]
+        stolen = n.createrawtransaction(
+            [{'txid': templ['txid'], 'vout': templ['vout']},
+             {'txid': plain_in['txid'], 'vout': plain_in['vout']}],
+            {addr: Decimal('0.0001')})
+        c.error('vault-send-foreign-input', n, 'vault_send', stolen)
         txid = c.call(n, 'vault_send', rf['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         mine(1)

@@ -138,10 +138,20 @@ When setting them in a release:
   <https://explorer.ycash.xyz/api/v1/network/info>, and leave slack for the time between the
   commit and the tag.
 - The attestor set must exist on chain before the release can name it.
-- Make the same change on the other node line (`ycash-dd`): both lines must agree.
-- The release workflow refuses a tag while the mainnet `UPGRADE_VAULT` height or the mainnet
-  `attestorSetId` is unset (`qa/yellowback-release-heights.sh`; a `workflow_dispatch` run only
-  warns).
+- Set the same mainnet, testnet and regtest `UPGRADE_VAULT` activation height, `pqFalconHeight`
+  and `nVaultMinSetMaturity` on `ycash-dd`. Tag `ycash-dd` `vault-params/v6.22.N` first. Its guard
+  (`.github/workflows/yellowback-release-guard.yml`) runs `qa/yellowback-release-heights.sh` and
+  refuses the tag unless the version is 6.22.x, the mainnet activation height is a positive
+  integer, mainnet `pqFalconHeight` and `nVaultMinSetMaturity` are set, the mainnet attestor set
+  is set, and those three parameters agree with ycash6 (`v6.22.N` when that tag already exists,
+  otherwise `upgrade/vault`) on mainnet, testnet and regtest.
+- Then tag ycash6 `v6.22.N`. This release workflow refuses the tag when
+  `vault-params/v6.22.N` is missing on ycash-dd, or when the activation height, `pqFalconHeight`
+  or `nVaultMinSetMaturity` differs on any network (`qa/yellowback-release-heights.sh`). A
+  `workflow_dispatch` run only warns, and compares with ycash-dd `upgrade/vault`.
+- Protocol version stays deferred (audit W3-P-1 part D). When it is taken, raise
+  `UPGRADE_VAULT.nProtocolVersion` and `PROTOCOL_VERSION` to the same value on both lines
+  together. Do not raise `MIN_PEER_PROTO_VERSION` to the Vault version.
 
 | Network | `UPGRADE_VAULT` height | `attestorSetId` | Set in |
 |---|---|---|---|

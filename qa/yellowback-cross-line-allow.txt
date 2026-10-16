@@ -33,7 +33,7 @@ src/yellowback/index.h 010c3798e5f17ac78d4d044dfc941abccacfc0017f34146fab0b8d20b
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee).
-src/yellowback/params.h 760690539a349f00387ca0fcb7b34dbff529bc9143a6f6ad8d700b5596a2dd97 70312172ac5e9d1c4aa8e8b8e065ac471cd3ef5ad44a61eb0097057c738d0ccb
+src/yellowback/params.h 981dc4d1e12aa83788ba68074ccbd24817e57af7a9ef297506cfc7398a5244db 1bbb739ec036ade352181ad15be32210cb02c9f62ecd5af94aff074d41ff3a71
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).

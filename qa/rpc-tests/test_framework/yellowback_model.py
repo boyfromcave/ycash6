@@ -261,7 +261,7 @@ class Params(object):
                  bond_min_lock=0, bond_maturity=16_128, age_cap=207_360,
                  founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48,
                  seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                 attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=1_152,
+                 attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_rate_limit_bps=0, attestor_liveness_min=1_152,
                  cancel_signers_max=4, cancel_quiet=8_064)       # CAN-2/CAN-3 (owner 2026-10-13; round 2: max 4, was 5); not hashed
         a.update(attest or {})
         for k, v in a.items():
@@ -276,7 +276,7 @@ class Params(object):
                           bond_min_lock=0, bond_maturity=8, age_cap=64, founding_window=16,
                           dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4,
                           seat_age_unit=1_152, seat_age_cap=420_480, seat_margin_bps=500, evict_margin_bps=500, attestor_seats=15,
-                          attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_liveness_min=16,
+                          attestor_cancel_threshold=1, attestor_unlock_threshold=1, attestor_rate_limit_bps=0, attestor_liveness_min=16,
                           cancel_signers_max=3, cancel_quiet=40)
 
     def pq_falcon_active(self, height):
@@ -2891,8 +2891,9 @@ class YellowbackModel(object):
                 return False
             if not (act['flags'] & va.SET_FLAG_OPEN) or act['seats'] != p.attestor_seats:
                 return False              # owner 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted
-            if act['cancelThreshold'] != p.attestor_cancel_threshold or act['unlockThreshold'] != p.attestor_unlock_threshold:
-                return False              # 03/I-3: ... whose cancel and unlock thresholds are the pinned constants
+            if (act['cancelThreshold'] != p.attestor_cancel_threshold or act['unlockThreshold'] != p.attestor_unlock_threshold
+                    or act['rateLimitBps'] != p.attestor_rate_limit_bps):
+                return False              # 03/I-3 thresholds; W3-Y-3 (R-1d): a cancelled claim spends S-3's budget; the YED set has none
             if act['maturity'] != p.bond_maturity:
                 return False              # ... whose maturity (the bond exit delay) is BOND_MATURITY
             if act['livenessWindow'] < p.attestor_liveness_min:

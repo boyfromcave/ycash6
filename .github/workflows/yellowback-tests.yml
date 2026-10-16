@@ -1119,6 +1119,8 @@ jobs:
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
         run: python3 qa/test_yellowback_vault_params.py -v
+      - name: Vault release-guard unit tests (audit W3-P-1 part C)
+        run: python3 qa/test_yellowback_release_heights.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)
