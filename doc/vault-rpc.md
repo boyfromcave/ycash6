@@ -195,7 +195,8 @@ Builds the `SET_JOIN` with the bond `P2SH(<bondlocktime> CLTV DROP <memberkey> C
 `vout 0`, adds the member's signature and whatever admission signatures this wallet holds (the
 admit key while the set has fewer than `slashthreshold` current members, current members'
 keys after that; none for an open set). Complete → signed and broadcast (`txid` present);
-otherwise the partially signed `hex` is returned.
+otherwise the partially signed `hex` is returned. That build is remembered in the wallet;
+`set_sendact` on this node signs only the coins it chose for those outputs.
 
 A join into a set that already has `seats` ACTIVE members is refused (`bad-vault-act-seats`) —
 unless a registered module governs the set (the module displacement hook, owner 2026-10-11) and
@@ -242,7 +243,8 @@ An unsigned, funded act transaction. Types and params: `create` (as `set_create`
 (`setid`, `bondamount`, `bondlocktime`, `memberkey` — any key), `heartbeat` (`setid`,
 `memberkey`), `remove` (`setid`, `memberkey` = the member removed, `burn` bool: freeze its bond),
 `equivocation` (as `set_equivocation`), `winddown` (`setid`). `complete` is false (unless no
-signature is needed) and `signatures` 0.
+signature is needed) and `signatures` 0. The build is remembered; `set_sendact` on this node
+signs only its coins, for these outputs.
 
 ### `set_signact "hex" ( "setid" )`
 Params: `["hex": hex, "setid"?: hash]`
@@ -258,7 +260,11 @@ Params: `["hex": hex]`
 
 Result: `hash`
 
-Signs this wallet's inputs and broadcasts. Result: the txid.
+Signs this wallet's inputs of an act transaction this wallet built (`set_buildact`, or `set_join`
+when it returned a hex) and broadcasts. Result: the txid. Only the coins that build chose are
+signed, and only while the outputs are the ones it chose (act signatures added later do not make
+a different output). Any other spendable coin of this wallet is refused
+(`vault-send-foreign-input`) and nothing is signed.
 
 ### `set_equivocation {proof}`
 Params: `["proof": Proof]`
@@ -473,8 +479,11 @@ Params: `["hex": hex]`
 Result: `hash`
 
 Signs this wallet's inputs of a built vault spend (the template input's scriptSig is kept) and
-broadcasts. Result: the txid. The node that funded the spend must send it. A transaction with no unspent
-vault or intent input is refused: `vault_send` is not a general signer.
+broadcasts. Result: the txid. The node that funded the spend must send it: only coins this wallet's
+builders (`vault_buildunlock`, `vault_buildcancel`, `yed_buildcancel`, `vault_app`, `vault_refee`)
+chose for these exact outputs are signed. Any other spendable coin of this wallet is refused
+(`vault-send-foreign-input`) and nothing is signed. A transaction with no unspent vault or intent
+input is refused: `vault_send` is not a general signer.
 
 ### `vault_release "intentoutpoint" ( "address"|"script" )`
 Params: `["intentoutpoint": outpoint, "recipient"?: str]`
@@ -517,7 +526,8 @@ Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`
 Result: `{"hex": hex, "intents": [IntentOut]}`
 
 The APP spend skeleton (selector 4, `nLockTime = appheight`) with intents and re-lock as
-`vault_buildunlock`, fee inputs unsigned, for a module to complete; send with `vault_send`.
+`vault_buildunlock`, fee inputs unsigned, for a module to complete; the build is remembered, and
+`vault_send` on this node signs only the coins it chose for these outputs.
 
 ## Error reasons
 
@@ -546,6 +556,7 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
 | -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
 | -8 | `no unspent vault or intent input` | `set_signunlock`, `set_signcancel`, `vault_refee`, `vault_send` | `vault_send` of a transaction with no template input |
+| -4 | `vault-send-foreign-input` | `vault_send`, `set_sendact` | a spend that names a wallet coin this wallet did not fund for these outputs |
 | -4 | `set-sign-once` | `set_signunlock`, `set_signcancel`, `set_importsigned` | a second, different unlock of a vault this wallet already signed |
 | -4 | `set-sign-restored` | `set_signunlock`, `set_signcancel` | signing on a wallet that imported a member key, before `set_importsigned` |
 | -8 | `set-sign-invalid` | `set_signunlock`, `set_signcancel` | `set_signcancel` of an intent's cancel after the intent matured |

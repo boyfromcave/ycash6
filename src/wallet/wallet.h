@@ -1808,9 +1808,11 @@ public:
     std::map<std::string, CAtomicSwapInfo> mapAtomicSwaps;
 
     /**
-     * Vault spends this wallet built for set signatures (vault_buildunlock / vault_buildcancel / vault_refee), keyed
-     * by the template outpoint, and the recipient scripts of the intents it built (01/V-2, 07/N-2). Persisted as
-     * "vaultbuild" / "vaultrecipient" records; a build's fee inputs are re-locked at load (LoadVaultBuild).
+     * Vault spends this wallet built (vault_buildunlock / vault_buildcancel / vault_refee / vault_app, and an
+     * unbroadcast set_join / set_buildact), keyed by the template outpoint or, for an act, by vin[0]. Hand-off
+     * senders sign a wallet coin only when it is in that build and the outputs match (01/V-2, 07/N-2, W3-N-1).
+     * Persisted as "vaultbuild" / "vaultrecipient" records. Load re-locks every input but the key
+     * (LoadVaultBuild); an act's vin[0] is that key, so a restart leaves it unlocked until it is spent.
      */
     std::map<COutPoint, CMutableTransaction> mapVaultBuilds;
     std::map<uint256, CScript> mapVaultRecipients;

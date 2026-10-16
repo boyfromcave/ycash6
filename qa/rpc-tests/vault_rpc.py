@@ -46,6 +46,7 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
 )
+from test_framework.vault import tx_from_hex, tx_hex
 from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, conventional_fee
 
 ACTIVATION = 205
@@ -162,6 +163,11 @@ class VaultRpcTest(BitcoinTestFramework):
             signed = n0.set_signact(j['hex'], setid)
             assert_equal(signed['complete'], True)
             assert_equal(signed['signatures'], 2)
+            if node is n1:
+                # W3-N-1: the joiner's coins are signed only for the outputs set_join funded.
+                altered = tx_from_hex(signed['hex'])
+                altered.vout[0].nValue -= 1
+                assert_raises_rpc('vault-send-foreign-input', node.set_sendact, tx_hex(altered))
             node.set_sendact(signed['hex'])
             keys.append(j['memberkey'])
         self.mine(1)
@@ -271,6 +277,21 @@ class VaultRpcTest(BitcoinTestFramework):
         plain_in = n0.listunspent()[0]
         plain = n0.createrawtransaction([{'txid': plain_in['txid'], 'vout': plain_in['vout']}], {n1.getnewaddress(): 0.0001})
         assert_raises_rpc('no unspent vault or intent input', n0.vault_send, plain)
+        # W3-N-1: a real template plus one of this wallet's other coins, paying the counterparty.
+        dec = n0.decoderawtransaction(signed['hex'])
+        templ = dec['vin'][0]
+        stolen = n0.createrawtransaction(
+            [{'txid': templ['txid'], 'vout': templ['vout']},
+             {'txid': plain_in['txid'], 'vout': plain_in['vout']}],
+            {n1.getnewaddress(): Decimal('0.0001')})
+        assert_raises_rpc('vault-send-foreign-input', n0.vault_send, stolen)
+        assert n0.gettxout(plain_in['txid'], plain_in['vout']) is not None
+        fee = next(vin for vin in dec['vin'] if vin['txid'] != templ['txid'] or vin['vout'] != templ['vout'])
+        redirected = n0.createrawtransaction(
+            [{'txid': templ['txid'], 'vout': templ['vout']},
+             {'txid': fee['txid'], 'vout': fee['vout']}],
+            {n1.getnewaddress(): Decimal('0.0001')})
+        assert_raises_rpc('vault-send-foreign-input', n0.vault_send, redirected)
         txid = n0.vault_send(signed['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         # Finding (50): a watcher pre-builds and signs the cancel while the intent is in the mempool.
