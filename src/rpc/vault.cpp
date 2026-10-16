@@ -862,7 +862,9 @@ void PruneVaultBuilds()
     }
 }
 
-/** Remember the build of templ (without any set signatures: they are not part of the sighash). */
+/** Remember the build of `key` (without that input's scriptSig: set signatures are not part of the sighash;
+ *  an act's signatures live in its output and are kept). `key` is the template outpoint of a vault spend, or
+ *  vin[0] of an act transaction. */
 void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
 {
     for (CTxIn& in : mtx.vin)
@@ -960,7 +962,8 @@ std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut&
 }
 
 /** Sign every input whose coin the wallet can sign (P2PKH and the like); template inputs and
- *  foreign inputs are left as they are. */
+ *  foreign inputs are left as they are. One-shot builders (vault_lock, set_create, vault_release, ...)
+ *  use this: the hex never leaves the node. */
 void SignWalletInputs(CMutableTransaction& mtx)
 {
     const uint32_t branch = NextBranchId();
@@ -975,6 +978,61 @@ void SignWalletInputs(CMutableTransaction& mtx)
         if (!SignSignature(*pwalletMain, prev.scriptPubKey, mtx, TxData(CTransaction(mtx)), i, prev.nValue, SIGHASH_ALL, branch, SignFlags()))
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("cannot sign input %d", i));
     }
+}
+
+/** True when `memo` and `mtx` pay the same outputs. Act outputs compare with their signatures cleared:
+ *  set_signact rewrites the act output, and a hand-off must still match the build that funded it. */
+bool SameHandoffOutputs(const CMutableTransaction& memo, const CMutableTransaction& mtx)
+{
+    if (memo.vout.size() != mtx.vout.size()) return false;
+    for (size_t i = 0; i < memo.vout.size(); i++) {
+        const CTxOut& a = memo.vout[i];
+        const CTxOut& b = mtx.vout[i];
+        if (a.nValue != b.nValue) return false;
+        if (IsActOutput(a.scriptPubKey) || IsActOutput(b.scriptPubKey)) {
+            if (!IsActOutput(a.scriptPubKey) || !IsActOutput(b.scriptPubKey)) return false;
+            Act aa, bb;
+            if (DecodeAct(a.scriptPubKey, aa) || DecodeAct(b.scriptPubKey, bb)) return false;
+            aa.sigs.clear();
+            bb.sigs.clear();
+            if (EncodeAct(aa) != EncodeAct(bb)) return false;
+        } else if (a.scriptPubKey != b.scriptPubKey) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** vault_send / set_sendact: sign a wallet coin only when this wallet's remembered build for `buildKey`
+ *  names that coin and was built for these outputs. Anything else is refused before any input is signed. */
+void SignHandoffInputs(CMutableTransaction& mtx, const COutPoint& buildKey)
+{
+    auto it = pwalletMain->mapVaultBuilds.find(buildKey);
+    const bool same = it != pwalletMain->mapVaultBuilds.end() && SameHandoffOutputs(it->second, mtx);
+    std::set<COutPoint> funded;
+    if (same)
+        for (const CTxIn& in : it->second.vin) funded.insert(in.prevout);
+    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
+        CTxOut prev;
+        int h;
+        if (!GetCoin(mtx.vin[i].prevout, prev, h)) continue;
+        VaultParams vp;
+        IntentParams ip;
+        if (MatchVault(prev.scriptPubKey, vp) != Shape::NONE || MatchIntent(prev.scriptPubKey, ip) != Shape::NONE) continue;
+        if (IsMine(*pwalletMain, prev.scriptPubKey) != ISMINE_SPENDABLE) continue;
+        if (!same || !funded.count(mtx.vin[i].prevout))
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("vault-send-foreign-input: input %d (%s, %s) is this wallet's coin but was not chosen by this wallet for these outputs; nothing was signed",
+                                                           i, mtx.vin[i].prevout.ToString(), FormatMoney(prev.nValue)));
+    }
+    SignWalletInputs(mtx);
+}
+
+/** Remember an act build under vin[0], the input its signatures bind. */
+void RememberActBuild(const CMutableTransaction& mtx)
+{
+    if (mtx.vin.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "an act transaction needs a transparent input (vin[0] is bound by the signatures)");
+    RememberBuild(mtx.vin[0].prevout, mtx);
 }
 
 uint256 Broadcast(const CTransaction& tx)
@@ -1277,7 +1335,8 @@ UniValue set_join(const UniValue& params, bool fHelp)
             "\nJoin a set with a bond P2SH(<bondlocktime> CLTV DROP <memberkey> CHECKSIG) of bondamount. The member's\n"
             "signature is added by this wallet, and the admission signatures it can add (the admit key, or current\n"
             "members' keys once the set has slashthreshold of them). If that completes the act it is broadcast;\n"
-            "otherwise the hex is returned for set_signact on the other signers' nodes and set_sendact here.\n"
+            "otherwise the hex is returned for set_signact on the other signers' nodes and set_sendact here. The unbroadcast\n"
+            "build is remembered; set_sendact on this node signs only the coins it chose for those outputs.\n"
             "\nArguments:\n"
             "1. \"setid\"      (string, required)\n"
             "2. bondamount   (numeric, required) at least the set's bondmin\n"
@@ -1308,6 +1367,8 @@ UniValue set_join(const UniValue& params, bool fHelp)
     if (missing == 0) {
         SignWalletInputs(mtx);
         o.pushKV("txid", Broadcast(CTransaction(mtx)).GetHex());
+    } else {
+        RememberActBuild(mtx);
     }
     o.pushKVs(ActResult(mtx, decoded, missing, required));
     o.pushKV("memberkey", HexStr(act.join.memberKey.begin(), act.join.memberKey.end()));
@@ -1411,7 +1472,8 @@ UniValue set_buildact(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "set_buildact \"type\" {params}\n"
             "\nBuild an act transaction funded by this wallet (inputs unsigned; vin[0], which the act signatures bind, is\n"
-            "fixed) carrying no act signatures yet. Collect them with set_signact, then set_sendact on this node.\n"
+            "fixed) carrying no act signatures yet. The build is remembered. Collect signatures with set_signact, then\n"
+            "set_sendact on this node, which signs only the coins chosen for these outputs.\n"
             "\nArguments:\n"
             "1. \"type\"   (string, required) create | join | heartbeat | remove | equivocation | winddown\n"
             "2. params   (object, required)\n"
@@ -1445,6 +1507,7 @@ UniValue set_buildact(const UniValue& params, bool fHelp)
         }
         missing = required;
     }
+    RememberActBuild(mtx);
     return ActResult(mtx, act, missing, required);
 }
 
@@ -1480,7 +1543,10 @@ UniValue set_sendact(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "set_sendact \"hex\"\n"
-            "\nSign this wallet's inputs of an act transaction and broadcast it.\n"
+            "\nSign this wallet's inputs of an act transaction this wallet built (set_buildact, or set_join when it\n"
+            "returned a hex) and broadcast it. Only coins that build chose are signed, and only for its outputs (act\n"
+            "signatures added later still match). Any other spendable coin of this wallet is refused\n"
+            "(vault-send-foreign-input) and nothing is signed.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("set_sendact", "\"hex\"") + HelpExampleRpc("set_sendact", "\"hex\""));
     EnsureWallet(fHelp);
@@ -1488,7 +1554,9 @@ UniValue set_sendact(const UniValue& params, bool fHelp)
     CMutableTransaction mtx = DecodeMutable(params[0]);
     Act act;
     FindAct(mtx, act);
-    SignWalletInputs(mtx);
+    if (mtx.vin.empty())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "an act transaction needs a transparent input (vin[0] is bound by the signatures)");
+    SignHandoffInputs(mtx, mtx.vin[0].prevout);
     return Broadcast(CTransaction(mtx)).GetHex();
 }
 
@@ -2158,23 +2226,22 @@ UniValue vault_send(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "vault_send \"hex\"\n"
-            "\nSign this wallet's (fee) inputs of a vault spend built by vault_buildunlock / vault_buildcancel / vault_app /\n"
-            "vault_refee,\n"
-            "keeping the template input's scriptSig, and broadcast it.\n"
+            "\nSign this wallet's (fee) inputs of a vault spend built by vault_buildunlock / vault_buildcancel /\n"
+            "yed_buildcancel / vault_app / vault_refee, keeping the template input's scriptSig, and broadcast it.\n"
+            "Signs only coins this wallet's remembered build chose for these exact outputs. Any other spendable coin of\n"
+            "this wallet is refused (vault-send-foreign-input) and nothing is signed.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_send", "\"hex\"") + HelpExampleRpc("vault_send", "\"hex\""));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     CMutableTransaction mtx = DecodeMutable(params[0]);
-    {
-        CTxOut coin;
-        int h;
-        VaultParams vp;
-        IntentParams ip;
-        TemplateKind kind;
-        FindTemplateInput(mtx, coin, h, vp, ip, kind);
-    }
-    SignWalletInputs(mtx);
+    CTxOut coin;
+    int h;
+    VaultParams vp;
+    IntentParams ip;
+    TemplateKind kind;
+    const size_t idx = FindTemplateInput(mtx, coin, h, vp, ip, kind);
+    SignHandoffInputs(mtx, mtx.vin[idx].prevout);
     return Broadcast(CTransaction(mtx)).GetHex();
 }
 
@@ -2330,7 +2397,8 @@ UniValue vault_app(const UniValue& params, bool fHelp)
             "vault_app \"outpoint\" ( [{\"address\"|\"script\": .., \"amount\": x}, ...] )\n"
             "\nBuild the APP spend (selector 4, nLockTime = appheight) of a vault for a module: the intents and re-lock as\n"
             "vault_buildunlock, fee from this wallet, unsigned. A registered module adds its own outputs / rules; with no\n"
-            "module for the tag the primitive alone governs it (S-2, S-3). Send with vault_send.\n"
+            "module for the tag the primitive alone governs it (S-2, S-3). The build is remembered; vault_send on this\n"
+            "node signs only the coins it chose for these outputs.\n"
             "\nResult: {\"hex\", \"intents\"}\n"
             + HelpExampleCli("vault_app", "\"txid:0\" '[{\"address\":\"..\",\"amount\":1}]'")
             + HelpExampleRpc("vault_app", "\"txid:0\", []"));
@@ -2349,6 +2417,19 @@ UniValue vault_app(const UniValue& params, bool fHelp)
     mtx.vin.push_back(CTxIn(op, CScript() << OP_4, CTxIn::SEQUENCE_FINAL - 1));
     UniValue intents = AddIntents(mtx, vp, coin, params.size() > 1 && !params[1].isNull() ? params[1].get_array() : UniValue(UniValue::VARR));
     Fund(mtx, coin.nValue);
+    // The same vaultbuild record as an unlock, keyed by the vault. An unlock or cancel memo for this outpoint is left
+    // alone (sign once); a previous APP build is replaced.
+    auto existing = pwalletMain->mapVaultBuilds.find(op);
+    if (existing != pwalletMain->mapVaultBuilds.end()) {
+        const CMutableTransaction& prev = existing->second;
+        const bool app = !prev.vin.empty() && prev.vin[0].prevout == op && prev.vin[0].nSequence != CTxIn::SEQUENCE_FINAL;
+        if (!app) {
+            UnlockBuildInputs(op, mtx);
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "this wallet already built a different spend of this vault");
+        }
+        if (prev.vout != mtx.vout) UnlockBuildInputs(op, prev);
+    }
+    RememberBuild(op, mtx);
     UniValue o(UniValue::VOBJ);
     o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
     o.pushKV("intents", intents);
