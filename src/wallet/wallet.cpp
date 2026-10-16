@@ -4281,10 +4281,35 @@ void CWallet::LoadWalletTx(const CWalletTx& wtxIn) {
     AddToSpends(hash);
 }
 
-bool CWallet::AddToWallet(const CWalletTx& wtxIn, CWalletDB* pwalletdb)
+bool CWallet::AddToWallet(const CWalletTx& wtxIn, CWalletDB* pwalletdb, const int64_t* pblockTime)
 {
     { // additional scope left in place for backport whitespace compatibility
         uint256 hash = wtxIn.GetHash();
+
+        // mapBlockIndex is a boost::unordered_map. Its first insert (genesis, on the
+        // main thread) allocates a 112-byte bucket array — 13 buckets plus a sentinel,
+        // one pointer each. A later insert rehashes and frees that array. generate()
+        // does the insert on an HTTP worker while ThreadNotifyWallets is in here on
+        // the notifier thread with cs_wallet held and without cs_main, so a lookup of
+        // the block hash is a use-after-free of the bucket array (read at a bucket
+        // slot). The notifier already holds the block and passes its header time,
+        // which is what CBlockIndex::GetBlockTime() would return. Callers that do
+        // not pass it take cs_main before cs_wallet; CommitTransaction already holds
+        // cs_main.
+        std::optional<int64_t> blockTime;
+        bool blockUnknown = false;
+        if (!wtxIn.hashBlock.IsNull()) {
+            if (pblockTime) {
+                blockTime = *pblockTime;
+            } else {
+                LOCK(cs_main);
+                BlockMap::iterator mi = mapBlockIndex.find(wtxIn.hashBlock);
+                if (mi != mapBlockIndex.end() && mi->second)
+                    blockTime = mi->second->GetBlockTime();
+                else
+                    blockUnknown = true;
+            }
+        }
 
         LOCK(cs_wallet);
         // Inserts only if not already there, returns tx inserted or tx found
@@ -4300,43 +4325,40 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, CWalletDB* pwalletdb)
             wtxOrdered.insert(make_pair(wtx.nOrderPos, &wtx));
 
             wtx.nTimeSmart = wtx.nTimeReceived;
-            if (!wtxIn.hashBlock.IsNull())
+            if (blockTime)
             {
-                if (mapBlockIndex.count(wtxIn.hashBlock))
+                int64_t latestNow = wtx.nTimeReceived;
+                int64_t latestEntry = 0;
                 {
-                    int64_t latestNow = wtx.nTimeReceived;
-                    int64_t latestEntry = 0;
+                    // Tolerate times up to the last timestamp in the wallet not more than 5 minutes into the future
+                    int64_t latestTolerated = latestNow + 300;
+                    const TxItems & txOrdered = wtxOrdered;
+                    for (TxItems::const_reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
                     {
-                        // Tolerate times up to the last timestamp in the wallet not more than 5 minutes into the future
-                        int64_t latestTolerated = latestNow + 300;
-                        const TxItems & txOrdered = wtxOrdered;
-                        for (TxItems::const_reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+                        CWalletTx *const pwtx = (*it).second;
+                        if (pwtx == &wtx)
+                            continue;
+                        int64_t nSmartTime;
+                        nSmartTime = pwtx->nTimeSmart;
+                        if (!nSmartTime)
+                            nSmartTime = pwtx->nTimeReceived;
+                        if (nSmartTime <= latestTolerated)
                         {
-                            CWalletTx *const pwtx = (*it).second;
-                            if (pwtx == &wtx)
-                                continue;
-                            int64_t nSmartTime;
-                            nSmartTime = pwtx->nTimeSmart;
-                            if (!nSmartTime)
-                                nSmartTime = pwtx->nTimeReceived;
-                            if (nSmartTime <= latestTolerated)
-                            {
-                                latestEntry = nSmartTime;
-                                if (nSmartTime > latestNow)
-                                    latestNow = nSmartTime;
-                                break;
-                            }
+                            latestEntry = nSmartTime;
+                            if (nSmartTime > latestNow)
+                                latestNow = nSmartTime;
+                            break;
                         }
                     }
-
-                    int64_t blocktime = mapBlockIndex[wtxIn.hashBlock]->GetBlockTime();
-                    wtx.nTimeSmart = std::max(latestEntry, std::min(blocktime, latestNow));
                 }
-                else
-                    LogPrintf("AddToWallet(): found %s in block %s not in index\n",
-                             wtxIn.GetHash().ToString(),
-                             wtxIn.hashBlock.ToString());
+
+                int64_t blocktime = *blockTime;
+                wtx.nTimeSmart = std::max(latestEntry, std::min(blocktime, latestNow));
             }
+            else if (blockUnknown)
+                LogPrintf("AddToWallet(): found %s in block %s not in index\n",
+                         wtxIn.GetHash().ToString(),
+                         wtxIn.hashBlock.ToString());
             AddToSpends(hash);
         }
 
@@ -4541,7 +4563,15 @@ bool CWallet::AddToWalletIfInvolvingMe(
             // startup through our SetBestChain-mechanism
             CWalletDB walletdb(strWalletFile, "r+", false);
 
-            return AddToWallet(wtx, &walletdb);
+            // Header time of the block we already hold. AddToWallet must not
+            // look hashBlock up in mapBlockIndex from this thread (see there).
+            const int64_t* pblockTime = nullptr;
+            int64_t blockTime = 0;
+            if (pblock) {
+                blockTime = pblock->GetBlockTime();
+                pblockTime = &blockTime;
+            }
+            return AddToWallet(wtx, &walletdb, pblockTime);
         }
         return false;
     }

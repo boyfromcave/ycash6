@@ -2243,7 +2243,13 @@ public:
     void UpdateSaplingNullifierNoteMapWithTx(CWalletTx& wtx);
     void UpdateSaplingNullifierNoteMapForBlock(const CBlock* pblock);
     void LoadWalletTx(const CWalletTx& wtxIn);
-    bool AddToWallet(const CWalletTx& wtxIn, CWalletDB* pwalletdb);
+    /**
+     * `pblockTime`, when set, is the header time of the block `wtxIn.hashBlock` names.
+     * ThreadNotifyWallets passes it so nTimeSmart does not look the hash up in
+     * mapBlockIndex: that map's bucket array is freed by a rehash on the HTTP
+     * worker that is mining, while this runs on the notifier thread without cs_main.
+     */
+    bool AddToWallet(const CWalletTx& wtxIn, CWalletDB* pwalletdb, const int64_t* pblockTime = nullptr);
     BatchScanner* GetBatchScanner();
     bool AddToWalletIfInvolvingMe(
             const Consensus::Params& consensus,
