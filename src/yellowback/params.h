@@ -246,6 +246,8 @@ struct Params
                                          //!< can delay a liquidation, never charge for it); consensus constant, not hashed
     int attestorUnlockThreshold;         //!< ATTESTOR_UNLOCK_THRESHOLD 1 (03/I-3): ... and of this unlockThreshold (UNLOCK of a YED V is
                                          //!< refused by ValidateSpend anyway); consensus constant, not hashed
+    int attestorRateLimitBps;            //!< ATTESTOR_RATE_LIMIT_BPS 0 (W3-Y-3, R-1d): the adopted set has no S-3 rate limit
+                                         //!< (a cancelled claim still spends the epoch budget); consensus constant, not hashed
     int cancelSignersMax;                //!< CANCEL_SIGNERS_MAX 4 (round 2, was 5; regtest 3; CAN-2, cancel-limit design, owner 2026-10-13): a cancel
                                          //!< of a YED claimant intent needs min(q + 1, this) distinct current members' CANCEL_COSIGN
                                          //!< statements, q the vault's recent cancels; consensus constant, not hashed (03/I-3 precedent)
