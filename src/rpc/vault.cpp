@@ -862,6 +862,18 @@ void PruneVaultBuilds()
     }
 }
 
+/** True when this wallet has already added a set signature to a spend of `op` (set_signunlock / set_signcancel).
+ *  A later rebuild may still return a different hex, so a caller can show the equivocation refusal, but it must
+ *  not forget the fee inputs of the build that was signed: vault_send of that hex still has to sign them. */
+bool WalletSignedPrevout(const COutPoint& op)
+{
+    std::vector<VaultSetSigRecord> recs;
+    if (!CWalletDB(pwalletMain->strWalletFile).ListVaultSetSigs(recs)) return false;
+    for (const VaultSetSigRecord& r : recs)
+        if (r.prevout == op) return true;
+    return false;
+}
+
 /** Remember the build of `key` (without that input's scriptSig: set signatures are not part of the sighash;
  *  an act's signatures live in its output and are kept). `key` is the template outpoint of a vault spend, or
  *  vin[0] of an act transaction. */
@@ -1883,8 +1895,11 @@ UniValue vault_buildunlock(const UniValue& params, bool fHelp)
     // without changing the sighash (01/V-2).
     std::string build = "new";
     auto memo = pwalletMain->mapVaultBuilds.find(op);
+    // rebuild=true discards the remembered build only before this wallet has signed it. After that, the
+    // returned hex is a different spend (sign-once refuses it) and the signed build's fee inputs stay recorded.
+    const bool keepSigned = memo != pwalletMain->mapVaultBuilds.end() && rebuild && WalletSignedPrevout(op);
     if (memo != pwalletMain->mapVaultBuilds.end() && rebuild) {
-        UnlockBuildInputs(op, memo->second);
+        if (!keepSigned) UnlockBuildInputs(op, memo->second);
     } else if (memo != pwalletMain->mapVaultBuilds.end()) {
         const CMutableTransaction& c = memo->second;
         const bool same = c.vin.size() >= 1 && c.vin[0].prevout == op && c.vout.size() >= mtx.vout.size() && c.vout.size() <= mtx.vout.size() + 1 &&
@@ -1901,7 +1916,7 @@ UniValue vault_buildunlock(const UniValue& params, bool fHelp)
         }
     }
     if (build == "new") Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
-    RememberBuild(op, mtx);
+    if (!keepSigned) RememberBuild(op, mtx);
     auto k = Snapshot()->Threshold(vp.setId, ROLE_UNLOCK);
     const uint256 sighash = SetSighash(mtx, 0, coin);
     UniValue o(UniValue::VOBJ);
@@ -1994,11 +2009,13 @@ UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra
     CMutableTransaction mtx;
     std::string build = "new";
     auto cached = pwalletMain->mapVaultBuilds.find(op);
+    bool keepSigned = false;
     if (cached != pwalletMain->mapVaultBuilds.end()) {
         const CMutableTransaction& c = cached->second;
         if (rebuild || c.vin.empty() || c.vin[0].prevout != op || c.vout.size() <= extra.size() || c.vout[0].scriptPubKey != origin ||
             c.vout[0].nValue != coin.nValue || !std::equal(extra.begin(), extra.end(), c.vout.begin() + 1)) {
-            UnlockBuildInputs(op, c);
+            keepSigned = WalletSignedPrevout(op);
+            if (!keepSigned) UnlockBuildInputs(op, c);
         } else {
             mtx = c;
             build = "reused";
@@ -2015,7 +2032,7 @@ UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra
         for (const CTxOut& o : extra) mtx.vout.push_back(o);
         Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
     }
-    RememberBuild(op, mtx);
+    if (!keepSigned) RememberBuild(op, mtx);
     const uint256 sighash = SetSighash(mtx, 0, coin);
     auto k = Snapshot()->Threshold(ip.cancelSetId, ROLE_CANCEL);
     UniValue o(UniValue::VOBJ);
