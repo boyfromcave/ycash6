@@ -1173,7 +1173,9 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
         // owner, 2026-10-11: only an OPEN set of ATTESTOR_SEATS seats is adopted (else YED has no attestor set)
         if (!act.create.IsOpen() || (int)act.create.seats != P.attestorSeats) return false;
         // 03/I-3: ... whose cancel and unlock thresholds are the pinned constants (a cancel is value-neutral, CAN-1)
-        if ((int)act.create.cancelThreshold != P.attestorCancelThreshold || (int)act.create.unlockThreshold != P.attestorUnlockThreshold) return false;
+        // W3-Y-3 (R-1d): a cancelled claim spends S-3's budget; the YED set has none
+        if ((int)act.create.cancelThreshold != P.attestorCancelThreshold || (int)act.create.unlockThreshold != P.attestorUnlockThreshold ||
+            (int)act.create.rateLimitBps != P.attestorRateLimitBps) return false;
         if ((int64_t)act.create.maturity != (int64_t)P.bondMaturity) return false;   // the bond exit delay is BOND_MATURITY
         if ((int64_t)act.create.livenessWindow < (int64_t)P.attestorLivenessMin) return false;   // seats review B3: >= one day
         AttestorSetRecord z;

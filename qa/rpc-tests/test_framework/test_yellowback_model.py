@@ -80,10 +80,11 @@ ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
 BONDS = ATTESTORS
 
 
-def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15, unlock_threshold=1, cancel_threshold=1):
-    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds by default), from a fixed input; its txid is the set id."""
+def attestor_set_create(liveness_window=1_000_000, maturity=8, seats=15, unlock_threshold=1, cancel_threshold=1, rate_limit_bps=0):
+    """P4-b: the attestor set's SET_CREATE (open, 1/1/1 thresholds, rateLimitBps 0 by default), from a fixed input; its txid is the set id."""
     act = va.act_set_create(seats, unlock_threshold, cancel_threshold, 1, G2_PUBKEY, flags=va.SET_FLAG_OPEN, rate_window=1000,
-                            liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity)
+                            liveness_window=liveness_window, bond_min=1, bond_lock_min=0, maturity=maturity,
+                            rate_limit_bps=rate_limit_bps)
     vin = [(ym.sha256(b'yellowback-attestor-set')[::-1].hex(), 0, b'', 0xFFFFFFFF)]
     return ym.serialize_tx_v4(vin, [(0, va.act_script(va.encode_act(act)))]).hex()
 
@@ -1873,8 +1874,9 @@ class AttestorSetThresholdTests(unittest.TestCase):
     # Rule: P4-b
     # Rule: I-3
     def test_adopted_only_with_threshold_one(self):
-        """03/I-3: the mirror adopts the attestor set only with cancelThreshold = unlockThreshold = 1."""
-        for kw, adopted in (({}, True), ({'cancel_threshold': 2}, False), ({'unlock_threshold': 2}, False)):
+        """03/I-3 and W3-Y-3: the mirror adopts the attestor set only with cancelThreshold = unlockThreshold = 1 and rateLimitBps = 0."""
+        for kw, adopted in (({}, True), ({'cancel_threshold': 2}, False), ({'unlock_threshold': 2}, False),
+                            ({'rate_limit_bps': 1}, False), ({'rate_limit_bps': 0}, True)):
             c = Chain(ym.Params.regtest(1, 0, 0, attestor_set_id(**kw)))
             c.mine((1, 50_000, 0, KEY1), [attestor_set_create(**kw)])
             self.assertEqual(c.model.attestor_set_rec is not None, adopted, kw)
