@@ -2785,18 +2785,21 @@ BOOST_AUTO_TEST_CASE(p4b_attestor_set_adopted_only_open_15)
 BOOST_AUTO_TEST_CASE(attestor_set_adopted_only_with_threshold_one)
 {
     // 03/I-3: cancelThreshold and unlockThreshold are pinned at ATTESTOR_CANCEL/UNLOCK_THRESHOLD (1)
+    // W3-Y-3: rateLimitBps is pinned at ATTESTOR_RATE_LIMIT_BPS (0); a non-zero S-3 limit is not adopted
     BOOST_CHECK_EQUAL(MainParams().attestorCancelThreshold, 1);
     BOOST_CHECK_EQUAL(MainParams().attestorUnlockThreshold, 1);
-    for (int variant = 0; variant < 3; variant++) {
+    BOOST_CHECK_EQUAL(MainParams().attestorRateLimitBps, 0);
+    for (int variant = 0; variant < 4; variant++) {
         Fixture f;
         vault::Act a;
         BOOST_REQUIRE(!vault::DecodeAct(f.setCreate.vout[0].scriptPubKey, a));
         if (variant == 0) a.create.cancelThreshold = 2;
         if (variant == 1) a.create.unlockThreshold = 2;
+        if (variant == 2) a.create.rateLimitBps = 1;
         f.setCreate.vout[0].scriptPubKey = vault::EncodeAct(a);
         f.P.attestorSetId = CTransaction(f.setCreate).GetHash();
         f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { f.setCreate });
-        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 2);
+        BOOST_CHECK_EQUAL(State(f.view).GetAttestorSet().has_value(), variant == 3);
     }
 }
 
