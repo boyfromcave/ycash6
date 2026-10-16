@@ -1568,9 +1568,14 @@ bool CWalletDB::Recover(CDBEnv& dbenv, const std::string& filename, bool fOnlyKe
 
     // Try to load the wallet's caches, uncovering inconsistencies in wallet
     // records like missing viewing key records despite existing account
-    // records.
-    if (!dummyWallet.LoadCaches()) {
-        LogPrintf("WARNING: wallet caches could not be reconstructed; salvaged wallet file may have omissions");
+    // records. LoadCaches asserts cs_wallet (the per-record lock above has
+    // already been released). Hold it again so -salvagewallet can finish and
+    // InitLoadWallet can write the sign-once restore marker (07/NEW-1).
+    {
+        LOCK(dummyWallet.cs_wallet);
+        if (!dummyWallet.LoadCaches()) {
+            LogPrintf("WARNING: wallet caches could not be reconstructed; salvaged wallet file may have omissions");
+        }
     }
 
     return fSuccess;
