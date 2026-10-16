@@ -700,7 +700,7 @@ jobs:
           [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
           exit $rc
 
-      - name: Cross-line vectors and Vault chain parameters (all nine vector files, model and shared sources byte-identical to ycash-dd)
+      - name: Cross-line vectors, overlay trees and Vault chain parameters (vectors and shared sources byte-identical to ycash-dd; src/vault and src/yellowback pinned)
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
         # PR's head when that branch exists there, else the PR's base; upgrade/vault when ycash-dd
@@ -759,6 +759,9 @@ jobs:
             if [ "$mine" = "$theirs" ]; then echo "identical: src/crypto/pq (tree $mine)"
             else echo "::error::src/crypto/pq differs from $OTHER_LINE_REPO $other (tree here $mine, there $theirs)"; rc=1; fi
           fi
+          # src/vault and src/yellowback (MEDIUM-W3-P-2): byte-identical, except the 6.20.0 shims pinned by
+          # both sha256 hashes in qa/yellowback-cross-line-allow.txt. The same checker runs in ycash-dd's audit.
+          python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-ref other-line/head || rc=1
           # Every Vault chain parameter (all three networks, PROTOCOL_VERSION, the yellowback params bodies)
           # must agree with the other line (audit W3-P-1); read from the other line's git objects.
           python3 qa/yellowback-vault-params.py extract --root . > "$RUNNER_TEMP/vault-params-mine.json" || rc=1
@@ -1116,6 +1119,8 @@ jobs:
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
         run: python3 qa/test_yellowback_vault_params.py -v
+      - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
+        run: python3 qa/test_yellowback_cross_line_trees.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)

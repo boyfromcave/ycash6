@@ -1,0 +1,53 @@
+# MEDIUM-W3-P-2. Pinned 6.20.0 shims under src/vault and src/yellowback.
+#
+# Every other git-tracked file under those trees must be byte-identical on
+# ycash-dd and ycash6. A path listed here may differ, and only at this sha256
+# pair: column 2 is ycash-dd, column 3 is ycash6. Any other byte on either
+# line fails the cross-line check until both lines update this file together.
+# This file is itself byte-identical on both lines.
+#
+# Hashes are of origin/upgrade/vault at ycash-dd ca3b3adcb and ycash6 d1c308a17,
+# the trees the pins were taken from. Each note is the difference at those commits.
+
+# CachingTransactionSignatureChecker / SignatureHash argument order on 6.20.0
+# (tx, txdata, nIn, amount, store) and a PrecomputedTransactionData reference.
+# The ZIP-243 ANYONECANPAY sighash is the same.
+src/vault/checker.cpp 42ae5411a640da8ee43aa0cb6a14d040fc685dc5890af297bf5809068c4c68a4 fedce11fa3604966ca1f5b2fad3f03c84389437b02b6f8f0be26e28c3f24e526
+
+# 6.20.0 moved logging out of util.h.
+src/vault/db.cpp a3914a2e5d661bce428fdf786f9e24dc861487440d1a422cde7d9e9998e6fc1d 8af2bc7f0aa3ab4951060a467790f3c3df97df89dae585bfb97266353be3d6da
+
+# 6.20.0 miner glue. BlockAssembler does not re-run scripts per candidate, so
+# RecheckTemplateScripts, RecheckPQScripts (forTemplate, signature cache) and
+# TemplateRun live here, with ZIP-244 PrecomputedTransactionData prevouts and
+# an explicit non-v4 refusal (quantum spec R-A3). Includes logging.h and util/system.h.
+src/vault/node.cpp e5810d45cb85a118e92baa748282dbbcb18e46f1c95e141d82316bf94617f605 4bb3c28828da402709395932f10ba94b90f89c4210cdf328987b782ec3ba1dc9
+src/vault/node.h 6179944da69eb3628cf7680dc4d1ffed9f29c83f311c6e6b839aded640d98032 23adbbd357c7e7a8f7bab88aa0d741223ec14baf65e81619964ba0acac13156c
+
+# CCriticalBlock became UniqueLock; ChainTip frontiers are MerkleFrontiers;
+# GetBlockSubsidy is a consensus-params method; regtest crashHeight (SIGKILL
+# after FlushStateToDisk) reproduces a crash only 6.20.0's index flush can.
+# Header split: util/system.h, util/strencodings.h.
+src/yellowback/index.cpp bc9b3d6bedb9d39be39e285ad95578c445e7b22cdd0ed1df4016c6445c034c2f 74741bc41ac0ee310b0141d2ed9c73b38c55ac9feca16cdf05acd681d9f9f4cd
+src/yellowback/index.h 010c3798e5f17ac78d4d044dfc941abccacfc0017f34146fab0b8d20b39f150b a1301cb72e288a9481234a54530465c1028fcc2a7a407fbf04ed0f0e5280f1a7
+
+# Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
+# P-2 rule max(-yellowbackfee, ZIP-317 conventional fee).
+src/yellowback/params.h 760690539a349f00387ca0fcb7b34dbff529bc9143a6f6ad8d700b5596a2dd97 70312172ac5e9d1c4aa8e8b8e065ac471cd3ef5ad44a61eb0097057c738d0ccb
+
+# util/time.h, PrecomputedTransactionData(tx, prevouts), and
+# TransactionSignatureChecker(tx, txdata, nIn, amount).
+src/yellowback/policy.cpp 9860f4b74658f25f03d92b59cc43b3bc9050507a49447d2368e3aecfa1a65f89 e8903c770b03a67923fcac563f827ac0b925c0f992adf3376247c9b8ffccc61a
+
+# P-2 fee path. 6.20.0 prices with NetworkFee over a sized probe and reprices
+# until the ZIP-317 conventional fee covers the shape it selects. The builder
+# is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
+# place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
+# with YedConventionalFeeEstimate instead. zip317.h and the header split.
+src/yellowback/txbuilder.cpp 23796dc8421254595864f1f29b6e4061ff5ea673beb390a8065e1349e362e816 690f84bb0687f78f9979c2f1f661d188d0416faef418670d653f6e386b4dac96
+src/yellowback/txbuilder.h aa34fc1909efa95c2806eb1e2b8ea1cf27b01bf3afc9e3cbfe01b24aee5c312d 8cb4cf2d19c89525dca1462555f543f6953ed5252f533b84d06fcb681232166f
+
+# util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
+# take CValidationState. RemoveOrphan drops wtxOrdered before erasing mapWallet.
+# GetDepthInMainChain and IsSpent take an anchor (std::nullopt).
+src/yellowback/wallet.cpp d0afc072a2b014d67e0cd777f357e1a215e907d15a638dd4c21bf761c13cd9b0 55a83a0e6a352d985c50184c1e76dcad8eeda0cfe36e2ef42e275d0f8608ff49
