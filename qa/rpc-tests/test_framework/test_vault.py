@@ -280,6 +280,11 @@ class ActTests(unittest.TestCase):
             v.parse_act_script(v.act_script(p) + bytes([v.OP_1]))
         with self.assertRaises(v.VaultError):
             v.parse_act_script(v.act_script(p[:-1]))
+        sixteen = v.parse_act_script(v.act_script(p, [sig] * v.MAX_ACT_SIGS))
+        self.assertEqual(len(sixteen[2]), v.MAX_ACT_SIGS)
+        with self.assertRaises(v.VaultError) as too_many:
+            v.parse_act_script(v.act_script(p, [sig] * (v.MAX_ACT_SIGS + 1)))
+        self.assertEqual(too_many.exception.reason, 'bad-vault-act-sigs')
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +559,7 @@ class ModelTests(unittest.TestCase):
         m1_spend = v.build_bond_spend_tx(m1.bond_outpoint, MEMBERS[1], m1.bond_value, m1.bond_locktime, c.dest)
         self.assertEqual(c.reject(m1_spend), 'bad-vault-bond-locked')
         self_burn, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[1], [MEMBERS[1]], burn=1)
-        self.assertEqual(c.reject(self_burn), 'bad-vault-act-sig')
+        self.assertEqual(c.reject(self_burn), 'bad-vault-act-sigs')
         leave, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[1], [MEMBERS[1]], burn=0)
         c.block(leave)
         left = c.h - 1
@@ -585,7 +590,7 @@ class ModelTests(unittest.TestCase):
         nob, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1], MEMBERS[2]], burn=0)
         self.assertEqual(c.reject(nob), 'bad-vault-act-remove')
         few, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1]], burn=1)
-        self.assertEqual(c.reject(few), 'bad-vault-act-sig')
+        self.assertEqual(c.reject(few), 'bad-vault-act-sigs')
         burn, _p = v.build_set_remove_tx(c.coin(), sid, MKEYS[0], [MEMBERS[1], MEMBERS[2]], burn=1)
         c.block(burn)
         m0 = c.m.get_set(sid).members[MKEYS[0]]
@@ -646,7 +651,7 @@ class ModelTests(unittest.TestCase):
         c = Chain()
         sid = c.setup(members=(0, 1), seats=3)
         # two current members = slashThreshold: admission now needs them, not the admitKey
-        self.assertEqual(c.reject(c.join_tx(sid, 2)), 'bad-vault-act-sig')
+        self.assertEqual(c.reject(c.join_tx(sid, 2)), 'bad-vault-act-sigs')
         c.block(c.join_tx(sid, 2, admit=[MEMBERS[0], MEMBERS[1]]))
         self.assertEqual(c.reject(c.join_tx(sid, 3, admit=[MEMBERS[0], MEMBERS[1]])), 'bad-vault-act-join')  # seats
         self.assertEqual(c.reject(c.join_tx(sid, 0, admit=[MEMBERS[1], MEMBERS[2]])), 'bad-vault-act-join')
@@ -657,7 +662,7 @@ class ModelTests(unittest.TestCase):
         c = Chain()
         sid = c.create_set(flags=v.SET_FLAG_OPEN)
         c.block(c.join_tx(sid, 0, admit=[]))
-        self.assertEqual(c.reject(c.join_tx(sid, 1, admit=[ADMIT])), 'bad-vault-act-sig')
+        self.assertEqual(c.reject(c.join_tx(sid, 1, admit=[ADMIT])), 'bad-vault-act-sigs')
 
     def test_winddown(self):
         c = Chain()
@@ -665,7 +670,7 @@ class ModelTests(unittest.TestCase):
         hb = [v.build_set_heartbeat_tx(c.coin(), sid, MEMBERS[i])[0] for i in range(3)]
         c.block(*hb)
         one, _p = v.build_set_winddown_tx(c.coin(), sid, [MEMBERS[0]])
-        self.assertEqual(c.reject(one), 'bad-vault-act-sig')
+        self.assertEqual(c.reject(one), 'bad-vault-act-sigs')
         wd, _p = v.build_set_winddown_tx(c.coin(), sid, [MEMBERS[0], MEMBERS[1]])
         c.block(wd)
         wd_h = c.m.tip

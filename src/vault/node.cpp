@@ -462,4 +462,25 @@ uint256 StateHash(const KVReader& kv)
     return hw.GetHash();
 }
 
+bool IsByteLevelActFailure(const std::string& reason, const CTransaction& tx)
+{
+    bool byteLevel = reason == "bad-vault-act-malformed" || reason == "bad-vault-act-params" ||
+                     reason == "bad-vault-act-type" || reason == "bad-vault-act-multi" ||
+                     reason == "bad-vault-act-coinbase" || reason == "bad-vault-act-novin" ||
+                     reason == "bad-vault-act-sig" || reason == "bad-txns-vault-malformed";
+    if (reason == "bad-vault-act-sigs") {
+        for (const CTxOut& o : tx.vout) {
+            if (!IsActOutput(o.scriptPubKey)) continue;
+            Act act;
+            const std::optional<std::string> err = DecodeAct(o.scriptPubKey, act);
+            if (err && *err == "bad-vault-act-sigs") { byteLevel = true; break; }
+        }
+    }
+    if (!byteLevel) return false;
+    for (const CTxOut& o : tx.vout) {
+        if (IsActOutput(o.scriptPubKey) && o.scriptPubKey.size() > MAX_OP_RETURN_RELAY) return true;
+    }
+    return false;
+}
+
 } // namespace vault

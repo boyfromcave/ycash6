@@ -940,7 +940,10 @@ jobs:
           test -f doc/yellowback-attestor.md && test -f qa/yellowback-frozen-files.txt
           # U-21: the vault primitive's consensus checks (its block verdict, its timelock and the
           # final-transaction check it extends) and the YED module's block verdict are consensus
-          # rejections (DoS 100); every other inserted DoS stays DoS(0).
+          # rejections (DoS 100); every other inserted DoS stays DoS(0), except a byte-level act
+          # failure whose act output is longer than 83 bytes
+          # (DoS(vault::IsByteLevelActFailure(*vaultBad, tx) ? 10 : 0), W3-N-4). The plan text
+          # that states U-21 lives in the workspace upgrade plan; this gate is the node copy.
           # A call split over lines (`state.DoS(` alone) must take stock zcashd's consensus DoS level on its
           # next line (dosLevelPotentiallyRelaxing / dosLevelConstricting: 100 in a block, 10 in the mempool,
           # 0 in IBD), as the R-A3 version-group clause does (quantum spec R-A3, audit 04/F-2).
@@ -951,7 +954,8 @@ jobs:
             { print }
             END { exit bad }' | grep 'DoS(\|Misbehaving(' \
             | grep -v -e 'DoS(100, error("ConnectBlock(): vault: %s"' -e 'DoS(100, error("ConnectBlock(): %s", yb\.reason' \
-                      -e '"bad-txns-vault-timelock")' -e '"bad-txns-nonfinal")' | { ! grep -v 'DoS(0'; } || exit 1
+                      -e '"bad-txns-vault-timelock")' -e '"bad-txns-nonfinal")' \
+                      -e 'IsByteLevelActFailure(\*vaultBad, tx) ? 10 : 0' | { ! grep -v 'DoS(0'; } || exit 1
           # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
           echo "main.cpp residual (lines not mentioning g_yellowback):"
           git diff ycash6-baseline...HEAD -- src/main.cpp | grep '^+' | grep -v 'g_yellowback\|#include\|^+$\|^+++' || true

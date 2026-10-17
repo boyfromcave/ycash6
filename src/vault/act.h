@@ -48,6 +48,9 @@ size_t ActBodySize(uint8_t type);
 
 static const uint8_t SET_FLAG_OPEN = 0x01;
 static const unsigned int MAX_SET_SEATS = 15;
+/** A closed SET_JOIN: the joiner plus slashThreshold <= seats cosigners (§15.5). More is
+ *  bad-vault-act-sigs at decode, before any signature is recovered. */
+static const unsigned int MAX_ACT_SIGS = 1 + MAX_SET_SEATS;
 static const uint32_t MAX_SET_WINDOW = 1048576;
 static const uint16_t MAX_RATE_BPS = 10000;
 static const size_t RECOVERABLE_SIG_SIZE = 65;
@@ -143,7 +146,8 @@ CScript EncodeAct(const Act& act);
 bool ActFieldsValid(const Act& act);
 
 /** Decode a `YV` output. nullopt on success; otherwise a reject reason:
- *  bad-vault-act-malformed, bad-vault-act-version, bad-vault-act-type. */
+ *  bad-vault-act-malformed, bad-vault-act-version, bad-vault-act-type, or
+ *  bad-vault-act-sigs when more than MAX_ACT_SIGS signatures follow the payload. */
 std::optional<std::string> DecodeAct(const CScript& spk, Act& out);
 /** Decode only the payload P (no signatures). */
 std::optional<std::string> DecodePayload(const std::vector<unsigned char>& P, Act& out);

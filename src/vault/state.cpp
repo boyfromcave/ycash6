@@ -673,6 +673,70 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
     if (act.type == ACT_SET_CREATE && !act.sigs.empty()) return std::string("bad-vault-act-sigs");
     if (!ActFieldsValid(act)) return std::string("bad-vault-act-params");
 
+    // The count each type already demands, compared before any RecoverSig (W3-V-2). A mismatch is
+    // invalid today; this only changes the cost, and the reject reason when a bad signature and a
+    // wrong count both apply. State reasons that do not read the signatures stay first, in the
+    // order the cases below use. Those cases remain the check that a passing count is the right keys.
+    {
+        auto sigCount = [&]() -> std::optional<std::string> {
+            switch (act.type) {
+            case ACT_SET_CREATE:
+                return std::nullopt; // a non-empty list already returned above
+            case ACT_SET_EQUIVOCATION:
+                if (!GetSet(*this, act.equivocation.setId)) return std::string("bad-vault-act-noset");
+                if (!act.sigs.empty()) return std::string("bad-vault-act-sigs");
+                return std::nullopt;
+            case ACT_SET_HEARTBEAT:
+                if (!GetSet(*this, act.heartbeat.setId)) return std::string("bad-vault-act-noset");
+                if (act.sigs.size() != 1) return std::string("bad-vault-act-sigs");
+                return std::nullopt;
+            case ACT_SET_JOIN: {
+                const SetJoinBody& j = act.join;
+                auto s = GetSet(*this, j.setId);
+                if (!s || s->createHeight >= h) return std::string("bad-vault-act-noset");
+                if (s->windDownHeight != 0) return std::string("bad-vault-act-winddown");
+                const size_t expected = s->params.IsOpen() ? 1
+                    : CountCurrent(*s, GetMembers(*this, j.setId), h) >= (int)s->params.slashThreshold
+                        ? (size_t)1 + s->params.slashThreshold : (size_t)2;
+                if (act.sigs.size() != expected) return std::string("bad-vault-act-sigs");
+                return std::nullopt;
+            }
+            case ACT_SET_REMOVE: {
+                const SetRemoveBody& r = act.remove;
+                auto s = GetSet(*this, r.setId);
+                if (!s) return std::string("bad-vault-act-noset");
+                auto m = GetMember(*this, r.setId, r.memberKey);
+                if (!m) return std::string("bad-vault-act-remove");
+                if (m->status != MEMBER_ACTIVE) {
+                    auto b = GetBond(*this, m->bondOutpoint);
+                    // Not a slash of a bond still in its exit delay: the case returns remove
+                    // before it looks at the count.
+                    if (m->status != MEMBER_REMOVED || r.burn != 1 || !b || b->frozen || b->exitHeight == 0 ||
+                        b->setId != r.setId || b->memberKey != r.memberKey)
+                        return std::string("bad-vault-act-remove");
+                    if (act.sigs.size() != s->params.slashThreshold) return std::string("bad-vault-act-sigs");
+                    return std::nullopt;
+                }
+                // Voluntary exit is one signature and burn 0; its key is checked after recovery.
+                // Every other shape needs slashThreshold signatures.
+                const size_t expected = (act.sigs.size() == 1 && r.burn == 0) ? 1 : (size_t)s->params.slashThreshold;
+                if (act.sigs.size() != expected) return std::string("bad-vault-act-sigs");
+                return std::nullopt;
+            }
+            case ACT_SET_WINDDOWN: {
+                auto s = GetSet(*this, act.winddown.setId);
+                if (!s) return std::string("bad-vault-act-noset");
+                if (s->windDownHeight != 0) return std::string("bad-vault-act-winddown");
+                if (act.sigs.size() != s->params.slashThreshold) return std::string("bad-vault-act-sigs");
+                return std::nullopt;
+            }
+            default:
+                return std::string("bad-vault-act-type");
+            }
+        };
+        if (auto err = sigCount()) return err;
+    }
+
     const uint256 msg = ActMsg(EncodePayload(act), tx.vin[0].prevout);
     std::vector<CPubKey> keys;
     for (const auto& sig : act.sigs) {
