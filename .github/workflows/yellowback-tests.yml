@@ -624,7 +624,7 @@ jobs:
         # one of their rules is rejected with DoS 100, while a MEMPOOL refusal is state-dependent
         # (a peer on another tip sees a different set state; findings (25), (24)) and is DoS 0.
         # Encoded over main.cpp's inserted lines by enclosing function (the hunk header):
-        #   AcceptToMemoryPool   every inserted DoS is DoS(0
+        #   AcceptToMemoryPool   every inserted DoS is DoS(0, or the byte-level act ternary DoS(10)
         #   ConnectBlock / CheckBlock / ContextualCheckBlock(Header) / CheckBlockHeader
         #                        every inserted vault/yellowback verdict is DoS(100
         #   `DoS(fMempool ? 0 : 100` is the one both-ways form (the vault timelock in CheckFinalTx)
