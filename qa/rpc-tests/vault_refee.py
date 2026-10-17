@@ -46,6 +46,11 @@ DELAY = 10
 COIN = 100000000
 
 
+def is_p2pkh(spk):
+    return (len(spk) == 25 and spk[0] == 0x76 and spk[1] == 0xa9 and spk[2] == 0x14
+            and spk[23] == 0x88 and spk[24] == 0xac)
+
+
 def assert_raises_rpc(substr, fn, *args):
     try:
         fn(*args)
@@ -269,6 +274,27 @@ class VaultRefeeTest(BitcoinTestFramework):
             self.mine(1)
             assert n0.getrawtransaction(t3, 1)['confirmations'] >= 1
             v3_next = [x['outpoint'] for x in n0.vault_list({'kind': 'vault'}) if x['outpoint'].startswith(t3)][0]
+
+        # Hawkeye fund_exactly drops the builder's P2PKH change, then vault_refee, then signs and
+        # vault_send. The re-fund's fee coin is this wallet's, and the outputs are not the ones
+        # vault_buildcancel remembered. vault_send must still sign it.
+        lk = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 2})
+        self.mine(1)
+        vop = lk['outpoint']
+        built = n0.vault_buildunlock(vop, [{'address': addr, 'amount': 1}])
+        opened = n0.vault_send(n2.set_signunlock(n1.set_signunlock(built['hex'])['hex'])['hex'])
+        self.mine(1)
+        intent = '%s:%d' % (opened, built['intents'][0]['vout'])
+        cancel = n2.vault_buildcancel(intent)
+        raw = vault.tx_from_hex(cancel['hex'])
+        assert any(is_p2pkh(o.scriptPubKey) for o in raw.vout)
+        raw.vout = [o for o in raw.vout if not is_p2pkh(o.scriptPubKey)]
+        refunded = n2.vault_refee(vault.tx_hex(raw))
+        signed = n2.set_signcancel(refunded['hex'])
+        assert_equal(signed['complete'], True)
+        sent = n2.vault_send(signed['hex'])
+        self.mine(1)
+        assert n2.getrawtransaction(sent, 1)['confirmations'] >= 1
 
 
 if __name__ == '__main__':

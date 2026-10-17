@@ -2121,9 +2121,14 @@ UniValue vault_refee(const UniValue& params, bool fHelp)
     const COutPoint templ = mtx.vin[idx].prevout;
     PruneVaultBuilds();
     const std::vector<COutPoint> replaced = Refee(mtx, idx, coin);
-    // This wallet's remembered build of the outpoint follows the re-funded transaction (same outputs, same sighash).
+    // Remember this re-fund so vault_send will sign the new fee coin. Same outputs: only the fee
+    // inputs moved (01/V-2). Different outputs, and this wallet has not signed the prevout yet:
+    // the caller replaced an unsigned build (Hawkeye drops the change output, then re-funds).
+    // A signed build with different outputs keeps its fee inputs: vault_send of those bytes
+    // still has to sign them.
     auto memo = pwalletMain->mapVaultBuilds.find(templ);
-    if (memo == pwalletMain->mapVaultBuilds.end() || memo->second.vout == mtx.vout) RememberBuild(templ, mtx);
+    if (memo == pwalletMain->mapVaultBuilds.end() || memo->second.vout == mtx.vout || !WalletSignedPrevout(templ))
+        RememberBuild(templ, mtx);
     CAmount in = coin.nValue;
     for (size_t i = 1; i < mtx.vin.size(); i++) {
         CTxOut prev;
