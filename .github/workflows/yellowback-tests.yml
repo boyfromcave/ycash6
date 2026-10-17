@@ -642,8 +642,10 @@ jobs:
               lvl = line; sub(/.*DoS\(/, "", lvl); sub(/,.*/, "", lvl)
               verdict = (line ~ /[Vv]ault|[Yy]ellowback|yb\.|ybBad/)
               if (fn ~ /AcceptToMemoryPool/) {
-                # A byte-level act failure scores 10; every other mempool refusal stays 0 (W3-N-4).
-                if (lvl != "0" && lvl != "vault::IsByteLevelActFailure(*vaultBad, tx) ? 10 : 0") { print "FAIL (mempool refusals are state-dependent: DoS 0): " fn ": " line; bad = 1 } else print "ok   mempool  DoS 0   " fn ": " line
+                # lvl is cut at the first comma, which sits inside IsByteLevelActFailure(*vaultBad, tx).
+                # Match the byte-level act score on the whole line (W3-N-4); every other mempool refusal stays 0.
+                if (lvl == "0" || line ~ /IsByteLevelActFailure\(\*vaultBad, tx\) \? 10 : 0/) print "ok   mempool  DoS 0   " fn ": " line
+                else { print "FAIL (mempool refusals are state-dependent: DoS 0): " fn ": " line; bad = 1 }
               } else if (fn ~ /^(ConnectBlock|CheckBlock|ContextualCheckBlock|ContextualCheckBlockHeader|CheckBlockHeader)$/ && verdict) {
                 if (lvl != "100") { print "FAIL (a block breaking a consensus rule is DoS 100): " fn ": " line; bad = 1 } else print "ok   block    DoS 100 " fn ": " line
               } else if (lvl == "fMempool ? 0 : 100") {
