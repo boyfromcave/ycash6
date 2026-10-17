@@ -190,6 +190,8 @@ class VaultRpcContractTest(BitcoinTestFramework):
              {'txid': plain_in['txid'], 'vout': plain_in['vout']}],
             {addr: Decimal('0.0001')})
         c.error('vault-send-foreign-input', n, 'vault_send', stolen)
+        c.error('vault-send-outflow', n, 'vault_send', stolen,
+                {'allowinputs': ['%s:%d' % (plain_in['txid'], plain_in['vout'])]})
         txid = c.call(n, 'vault_send', rf['hex'])
         intent_op = '%s:%d' % (txid, bu['intents'][0]['vout'])
         mine(1)
