@@ -159,7 +159,7 @@ class VaultPrimitiveTest(VaultTestBase):
         bad = dict(create, maturity=v.MIN_SET_MATURITY_REGTEST - 1)
         self.reject_both(self.raw_act_hex(v.encode_act(bad, check=False)), 'bad-vault-act-params',
                          'bad-vault-act-params', 'SET_CREATE maturity below MinSetMaturity (D-Q-31)')
-        self.reject(self.raw_act_hex(p, sigs_for=[admit]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.raw_act_hex(p, sigs_for=[admit]), 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'SET_CREATE carrying a signature')
         self.reject(self.raw_act_hex(p, extra_sigs=[b'\x1f' * 64]), 'bad-vault-act-malformed',
                     'bad-vault-act-sig', 'an act signature of 64 bytes')
@@ -198,7 +198,7 @@ class VaultPrimitiveTest(VaultTestBase):
         print('  JOIN (admitKey admission while fewer than slashThreshold members are current)')
         sm = self.model.get_set(sid)
         lt = self.tip() + 1 + sm.p['bondLockMin'] + 30
-        self.reject(self.join_hex(sid, m[0], [])[0], 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.join_hex(sid, m[0], [])[0], 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'JOIN without the admitKey signature')
         mk = v.pubkey_of(m[0])
         wrong_s1 = self.act_hex(v.act_set_join(sid, mk, lt), [OUTSIDER, admit], [(COIN, v.bond_spk(mk, lt))])
@@ -229,9 +229,9 @@ class VaultPrimitiveTest(VaultTestBase):
                     'HEARTBEAT by a non-member')
         wrong_hb = self.act_hex(v.act_set_heartbeat(sid, v.pubkey_of(m[0])), [m[1]])
         self.reject(wrong_hb, 'bad-vault-act-sig', 'bad-vault-act-heartbeat', 'HEARTBEAT signed by another member')
-        self.reject(self.join_hex(sid, m[2], [admit])[0], 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.join_hex(sid, m[2], [admit])[0], 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'JOIN by admitKey once 2 members are current')
-        self.reject(self.join_hex(sid, m[2], [m[0]])[0], 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.join_hex(sid, m[2], [m[0]])[0], 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'JOIN with one member signature (slashThreshold 2)')
         self.join(sid, m[2], [m[0], m[1]], 'JOIN m2 (m0 + m1)')
         self.heartbeat(sid, [m[0]], 'HEARTBEAT S m0')
@@ -466,7 +466,7 @@ class VaultPrimitiveTest(VaultTestBase):
         spk = v.vault_script(vp)
         out = self.lock(vp, 2 * COIN, 'lock VW (2 YEC) under W')
         self.mine()
-        self.reject(self.act_hex(v.act_set_winddown(sid), [w[0]]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.act_hex(v.act_set_winddown(sid), [w[0]]), 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'WINDDOWN with 1 of 2 signatures')
         self.reject(self.act_hex(v.act_set_winddown(sid), [w[0], OUTSIDER]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
                     'WINDDOWN with an outsider')

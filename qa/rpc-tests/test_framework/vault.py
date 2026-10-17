@@ -125,6 +125,7 @@ SETSIG_DOMAIN = b'YcashSetSig'           # 11 ASCII bytes
 SET_SIG_SIZE = 65
 
 MAX_SEATS = 15
+MAX_ACT_SIGS = 1 + MAX_SEATS          # joiner + slashThreshold <= seats (§15.5)
 MAX_WINDOW = 1048576
 DELAY_MIN, DELAY_MAX = 1, 65535
 OWNER_HEIGHT_MIN, OWNER_HEIGHT_MAX = 1, 499999999
@@ -1146,10 +1147,17 @@ def parse_act_script(spk):
     if act_script(vals[0], vals[1:]) != spk:
         raise VaultError('bad-vault-act-script', 'non-canonical push')
     p, sigs = vals[0], vals[1:]
+    act = decode_act(p)
+    kept = []
     for s in sigs:
         if len(s) != SET_SIG_SIZE:
             raise VaultError('bad-vault-act-sig', 'signature size')
-    return p, decode_act(p), sigs
+        # The decoder stops at the 17th signature (MAX_ACT_SIGS). More is bad-vault-act-sigs
+        # and no further push is read.
+        if len(kept) >= MAX_ACT_SIGS:
+            raise VaultError('bad-vault-act-sigs')
+        kept.append(s)
+    return p, act, kept
 
 
 def act_outputs(tx):
@@ -1940,7 +1948,7 @@ class VaultModel(object):
         t = a['type']
         if t == ACT_SET_CREATE:
             if sigs:
-                raise VaultError('bad-vault-act-sig', 'SET_CREATE takes none')
+                raise VaultError('bad-vault-act-sigs', 'SET_CREATE takes none')
             if a['maturity'] < self.min_set_maturity:
                 raise VaultError('bad-vault-act-params', 'maturity below the exit window (D-Q-31)')
             sid = txid_internal(txid)
@@ -1949,7 +1957,7 @@ class VaultModel(object):
             return
         if t == ACT_SET_EQUIVOCATION:
             if sigs:
-                raise VaultError('bad-vault-act-sig', 'SET_EQUIVOCATION takes none')
+                raise VaultError('bad-vault-act-sigs', 'SET_EQUIVOCATION takes none')
             k = equivocation_key(a)
             s = self.sets.get(bytes.fromhex(a['setId']))
             m = None if s is None else s.members.get(k)
@@ -1963,6 +1971,43 @@ class VaultModel(object):
         s = self.sets.get(sid)
         if s is None:
             raise VaultError('bad-vault-act-set')
+        # Count before recover_compact (W3-V-2). A wrong count is bad-vault-act-sigs and _sig_keys
+        # is not called. State reasons that do not need the signatures stay first.
+        th = s.p['slashThreshold']
+        if t == ACT_SET_JOIN:
+            if s.create_height >= h or s.wind_down_height:
+                raise VaultError('bad-vault-act-join', 'set not joinable')
+            if s.p['flags'] & SET_FLAG_OPEN:
+                expected = 1
+            elif len(s.current(h)) >= th:
+                expected = 1 + th
+            else:
+                expected = 2
+            if len(sigs) != expected:
+                raise VaultError('bad-vault-act-sigs')
+        elif t == ACT_SET_HEARTBEAT:
+            if len(sigs) != 1:
+                raise VaultError('bad-vault-act-sigs')
+        elif t == ACT_SET_REMOVE:
+            mk0 = bytes.fromhex(a['memberKey'])
+            m0 = s.members.get(mk0)
+            if m0 is None:
+                raise VaultError('bad-vault-act-remove', 'target not a member')
+            if m0.status != MEMBER_ACTIVE:
+                b0 = self.bonds.get(m0.bond_outpoint)
+                if m0.status != MEMBER_REMOVED or a['burn'] != 1 or b0 is None or b0[2] or not b0[3]:
+                    raise VaultError('bad-vault-act-remove', 'target not active')
+                if len(sigs) != th:
+                    raise VaultError('bad-vault-act-sigs')
+            else:
+                expected = 1 if len(sigs) == 1 and not a['burn'] else th
+                if len(sigs) != expected:
+                    raise VaultError('bad-vault-act-sigs')
+        elif t == ACT_SET_WINDDOWN:
+            if s.wind_down_height:
+                raise VaultError('bad-vault-act-winddown', 'already wound down')
+            if len(sigs) != th:
+                raise VaultError('bad-vault-act-sigs')
         keys = self._sig_keys(p, sigs, po)
         th = s.p['slashThreshold']
         if t == ACT_SET_JOIN:

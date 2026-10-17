@@ -223,7 +223,9 @@ class VaultRefeeTest(BitcoinTestFramework):
         # anyone may re-fund: node 1 replaces node 2's fee input under node 2's cancel signature
         rfc = n1.vault_refee(sc['hex'])
         assert_equal(rfc['sighash'], bc['sighash'])
-        cancel_txid = n1.vault_send(rfc['hex'])
+        # Node 2's change output is bound into the sighash, so node 1's fee coin leaves
+        # this wallet. That is above the fee cap; the re-funder names it.
+        cancel_txid = n1.vault_send(rfc['hex'], {'allowoutflow': 50})
         self.mine(1)
         assert n0.getblockcount() - n0.getrawtransaction(unlock_txid, 1)['height'] < DELAY
         assert n1.getrawtransaction(cancel_txid, 1)['confirmations'] >= 1

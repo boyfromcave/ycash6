@@ -86,7 +86,7 @@ class VaultSlashingTest(VaultTestBase):
                     'proof: an outsider\'s two signatures')
         self.reject(self.raw_act_hex(v.encode_act(dict(proof, roleB=3), check=False)), 'bad-vault-act-params',
                     'bad-vault-act-role', 'proof: role 3')
-        self.reject(self.raw_act_hex(v.encode_act(proof), sigs_for=[x[1]]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.raw_act_hex(v.encode_act(proof), sigs_for=[x[1]]), 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'proof carrying an act signature')
         nosid = b'\x42' * 32
         self.reject(self.act_hex(v.equivocation_proof(nosid, x[0], vout[0], vout[1], 1, sh_a, 1, sh_b)),
@@ -104,7 +104,7 @@ class VaultSlashingTest(VaultTestBase):
                     'bad-vault-act-remove', 'REMOVE of the ejected x0')
 
         print('2. SET_REMOVE with burn')
-        self.reject(self.act_hex(v.act_set_remove(sid, k[1], 1), x[2:4]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.act_hex(v.act_set_remove(sid, k[1], 1), x[2:4]), 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'REMOVE x1 with 2 of 3 signatures')
         self.reject(self.act_hex(v.act_set_remove(sid, k[1], 1), [x[1], x[2], x[3]]), 'bad-vault-act-sigs',
                     'bad-vault-act-sig', 'REMOVE x1 signed by x1 itself')
@@ -121,7 +121,7 @@ class VaultSlashingTest(VaultTestBase):
         self.mine()
         assert_equal(self.info(sid)['current'], 3)
         self.reject(self.join_hex(sid, x[0], [admit])[0], 'bad-vault-act-sigs',
-                    'bad-vault-act-sig', 'rejoin of x0 by admitKey while 3 members are current')
+                    'bad-vault-act-sigs', 'rejoin of x0 by admitKey while 3 members are current')
         # seats review B1: one unspent bond per (set, key) -- x0's frozen bond is never spent, so x0 never rejoins
         self.reject(self.join_hex(sid, x[0], x[3:6])[0], 'bad-vault-act-join', 'bad-vault-act-join',
                     'rejoin of the ejected x0 (its frozen bond is unspent)')
@@ -149,7 +149,7 @@ class VaultSlashingTest(VaultTestBase):
         print('5. the bond exit delay: x5 leaves, then withdraws')
         self.reject(self.bond_spend_hex(bonds[5]), 'bad-vault-bond-locked', 'bad-vault-bond-locked',
                     'x5 spends its bond while ACTIVE')
-        self.reject(self.act_hex(v.act_set_remove(sid, k[5], 1), [x[5]]), 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.act_hex(v.act_set_remove(sid, k[5], 1), [x[5]]), 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'x5 burns itself alone')
         self.accept(self.act_hex(v.act_set_remove(sid, k[5], 0), [x[5]]), 'x5 leaves (its own SET_REMOVE)')
         self.mine()

@@ -2047,16 +2047,11 @@ bool AcceptToMemoryPool(
             !ContextualCheckSequenceLocks(tx, view, nextBlockHeight, state, true))
             return false;
 
-        // UPGRADE_VAULT (plan §15.6): acts and template rules for the next block, against the
-        // set state at the tip (mempool parents count as confirming in the next block).
+        // UPGRADE_VAULT (plan §15.6): the set snapshot for AreInputsStandard and, after the fee
+        // checks below, vault::CheckTx (W3-N-4). Mempool parents count as confirming in the next block.
         std::shared_ptr<const vault::SetSnapshot> vaultSnapshot;
-        if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
+        if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb)
             vaultSnapshot = vault::TipSnapshot();
-            vault::ViewCoinAccessor vaultCoins(view, nextBlockHeight);
-            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip()),
-                                               chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight))
-                return state.DoS(0, error("AcceptToMemoryPool: vault: %s: %s", hash.ToString(), vaultBad->c_str()), REJECT_INVALID, *vaultBad);
-        }
 
         // Bring the best block into scope
         view.GetBestBlock();
@@ -2196,6 +2191,16 @@ bool AcceptToMemoryPool(
         PrecomputedTransactionData txdata(tx, allPrevOutputs);
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
+        // Acts and template rules after AreInputsStandard, the sigop budget, the fee, the unpaid-action
+        // limit and the absurd-fee check (W3-N-4). The accessor reads prevouts GetValueIn cached before
+        // view.SetBackend(dummy). Tip-dependent failures stay DoS 0. A byte-level act failure whose
+        // act output is longer than MAX_OP_RETURN_RELAY scores 10.
+        if (vaultSnapshot) {
+            vault::ViewCoinAccessor vaultCoins(view, nextBlockHeight);
+            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip()),
+                                               chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight))
+                return state.DoS(vault::IsByteLevelActFailure(*vaultBad, tx) ? 10 : 0, error("AcceptToMemoryPool: vault: %s: %s", hash.ToString(), vaultBad->c_str()), REJECT_INVALID, *vaultBad);
+        }
         // A transaction spending a V or I has that template input's script checked alone first, with the
         // same flags and set state. This exit runs before Consensus::CheckTxInputs (inside
         // ContextualCheckInputs): a transaction that is also value-invalid but fails OP_CHECKSETSIG on its

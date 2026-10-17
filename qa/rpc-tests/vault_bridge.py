@@ -215,7 +215,7 @@ class VaultBridgeTest(VaultTestBase):
         self.accept(self.cancel_hex((ug, 0), ipg, rest, vp, [g[8]]), 'guardian 8 cancels a legitimate intent')
         self.mine()
         self.reject(self.act_hex(v.act_set_remove(G, v.pubkey_of(g[8]), 0), g[:6]), 'bad-vault-act-sigs',
-                    'bad-vault-act-sig', 'removal with 6 of 7 signatures')
+                    'bad-vault-act-sigs', 'removal with 6 of 7 signatures')
         self.accept(self.act_hex(v.act_set_remove(G, v.pubkey_of(g[8]), 0), g[:7]),
                     'SET_REMOVE guardian 8 by 7 (burn 0: bond returned, O-6)')
         self.mine()
@@ -273,7 +273,7 @@ class VaultBridgeTest(VaultTestBase):
                     'relayer bond below bondMin (20 YEC)')
         rl_bond = self.join(RL, rl, [rladmit], 'JOIN the relayer (20 YEC bond, admitKey)', bond=20 * COIN)
         self.join(RL2, rl2, [rl2admit], 'JOIN relayer 2', bond=5 * COIN)
-        self.reject(self.join_hex(CH, ch[0], [chadmit])[0], 'bad-vault-act-sigs', 'bad-vault-act-sig',
+        self.reject(self.join_hex(CH, ch[0], [chadmit])[0], 'bad-vault-act-sigs', 'bad-vault-act-sigs',
                     'OPEN set: a JOIN carrying an admission signature')
         chb = [self.join(CH, s, [], 'JOIN challenger %d (OPEN: S_1 only)' % i) for i, s in enumerate(ch)]
         self.mine(3)
@@ -323,7 +323,7 @@ class VaultBridgeTest(VaultTestBase):
         self.accept(self.act_hex(v.act_set_remove(CH, v.pubkey_of(ch[4]), 0), ch[:3]),
                     'SET_REMOVE challenger 4 by 3 challengers (burn 0)')
         self.reject(self.act_hex(v.act_set_remove(RL, v.pubkey_of(rl), 1), ch[:3]), 'bad-vault-act-sigs',
-                    'bad-vault-act-sig', 'challengers cannot remove the relayer (SET_REMOVE is per set)')
+                    'bad-vault-act-sigs', 'challengers cannot remove the relayer (SET_REMOVE is per set)')
         self.mine()
         self.mine_to(max(self.tip() + 1, chb[4]['locktime']))                 # and exit + maturity (the bond exit delay)
         self.accept(self.bond_spend_hex(chb[4]), 'the removed challenger\'s bond is returned')

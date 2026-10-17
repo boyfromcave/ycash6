@@ -150,6 +150,13 @@ bool Reconcile(const CChainParams& chainparams, std::string& err);
  *  their set state is equal (vault_getinfo "statehash"). */
 uint256 StateHash(const KVReader& kv);
 
+/** Mempool DoS class for a vault::CheckTx failure (W3-N-4). True only for a byte-level reason
+ *  no honest pre-upgrade relay produces, and only when an act output is longer than
+ *  MAX_OP_RETURN_RELAY (83). `bad-vault-act-sigs` counts only when DecodeAct itself rejected the
+ *  output for more than MAX_ACT_SIGS signatures; a count mismatch from ApplyAct depends on set
+ *  state and stays false. */
+bool IsByteLevelActFailure(const std::string& reason, const CTransaction& tx);
+
 } // namespace vault
 
 #endif // YCASH_VAULT_NODE_H

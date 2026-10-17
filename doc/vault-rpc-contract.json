@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "55c44fb4a0a2e142802a76a379f0bfe7ba57c25065342aa61c7308b4c3c71892"
+    "sha256": "526b488426da653fdeb5d7a86f59ed20f899ccd4bf96eb1405610d30c4987442"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -747,6 +747,141 @@
         "address",
         "script"
       ]
+    },
+    "HandoffCoin": {
+      "type": "object",
+      "fields": {
+        "vin": {
+          "type": "int"
+        },
+        "outpoint": {
+          "type": "outpoint"
+        },
+        "amount": {
+          "type": "yec"
+        }
+      },
+      "optional": []
+    },
+    "HandoffOutput": {
+      "type": "object",
+      "fields": {
+        "n": {
+          "type": "int"
+        },
+        "amount": {
+          "type": "yec"
+        },
+        "address": {
+          "type": "address"
+        },
+        "script": {
+          "type": "hex"
+        },
+        "mine": {
+          "type": "bool"
+        },
+        "kind": {
+          "type": "str"
+        }
+      },
+      "optional": [
+        "address",
+        "script"
+      ]
+    },
+    "HandoffPreview": {
+      "type": "object",
+      "fields": {
+        "template": {
+          "oneOf": [
+            {
+              "type": "object",
+              "fields": {
+                "outpoint": {
+                  "type": "outpoint"
+                },
+                "kind": {
+                  "oneOf": [
+                    {
+                      "const": "vault"
+                    },
+                    {
+                      "const": "intent"
+                    }
+                  ]
+                },
+                "selector": {
+                  "oneOf": [
+                    {
+                      "type": "int"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "optional": []
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "act": {
+          "oneOf": [
+            {
+              "type": "any"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sign": {
+          "type": "array",
+          "items": {
+            "ref": "HandoffCoin"
+          }
+        },
+        "foreign": {
+          "type": "array",
+          "items": {
+            "ref": "HandoffCoin"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "ref": "HandoffOutput"
+          }
+        },
+        "fee": {
+          "oneOf": [
+            {
+              "type": "yec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outflow": {
+          "type": "yec"
+        },
+        "wouldrefuse": {
+          "oneOf": [
+            {
+              "type": "str"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "optional": []
     }
   },
   "methods": {
@@ -1753,7 +1888,7 @@
     },
     "set_sendact": {
       "wallet": true,
-      "signature": "set_sendact \"hex\"",
+      "signature": "set_sendact \"hex\" ( {\"dryrun\", \"allowinputs\", \"allowoutflow\"} )",
       "params": [
         {
           "name": "hex",
@@ -1761,10 +1896,43 @@
           "type": {
             "type": "hex"
           }
+        },
+        {
+          "name": "options",
+          "required": false,
+          "type": {
+            "type": "object",
+            "fields": {
+              "dryrun": {
+                "type": "bool"
+              },
+              "allowinputs": {
+                "type": "array",
+                "items": {
+                  "type": "outpoint"
+                }
+              },
+              "allowoutflow": {
+                "type": "yec"
+              }
+            },
+            "optional": [
+              "allowinputs",
+              "allowoutflow",
+              "dryrun"
+            ]
+          }
         }
       ],
       "result": {
-        "type": "hash"
+        "oneOf": [
+          {
+            "type": "hash"
+          },
+          {
+            "ref": "HandoffPreview"
+          }
+        ]
       }
     },
     "set_equivocation": {
@@ -2193,7 +2361,7 @@
     },
     "vault_send": {
       "wallet": true,
-      "signature": "vault_send \"hex\"",
+      "signature": "vault_send \"hex\" ( {\"dryrun\", \"allowinputs\", \"allowoutflow\"} )",
       "params": [
         {
           "name": "hex",
@@ -2201,10 +2369,43 @@
           "type": {
             "type": "hex"
           }
+        },
+        {
+          "name": "options",
+          "required": false,
+          "type": {
+            "type": "object",
+            "fields": {
+              "dryrun": {
+                "type": "bool"
+              },
+              "allowinputs": {
+                "type": "array",
+                "items": {
+                  "type": "outpoint"
+                }
+              },
+              "allowoutflow": {
+                "type": "yec"
+              }
+            },
+            "optional": [
+              "allowinputs",
+              "allowoutflow",
+              "dryrun"
+            ]
+          }
         }
       ],
       "result": {
-        "type": "hash"
+        "oneOf": [
+          {
+            "type": "hash"
+          },
+          {
+            "ref": "HandoffPreview"
+          }
+        ]
       }
     },
     "vault_release": {
@@ -2482,7 +2683,16 @@
         "vault_send",
         "set_sendact"
       ],
-      "provokedBy": "a spend that names a wallet coin this wallet did not fund for these outputs"
+      "provokedBy": "a spend that names a wallet coin this wallet did not fund for these outputs, and `allowinputs` does not name it"
+    },
+    {
+      "code": -4,
+      "message": "vault-send-outflow",
+      "raisedBy": [
+        "vault_send",
+        "set_sendact"
+      ],
+      "provokedBy": "the wallet's net outflow exceeds the fee cap and `allowoutflow` does not cover it"
     },
     {
       "code": -4,

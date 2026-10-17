@@ -21,8 +21,9 @@ src/vault/db.cpp a3914a2e5d661bce428fdf786f9e24dc861487440d1a422cde7d9e9998e6fc1
 # RecheckTemplateScripts, RecheckPQScripts (forTemplate, signature cache) and
 # TemplateRun live here, with ZIP-244 PrecomputedTransactionData prevouts and
 # an explicit non-v4 refusal (quantum spec R-A3). Includes logging.h and util/system.h.
-src/vault/node.cpp e5810d45cb85a118e92baa748282dbbcb18e46f1c95e141d82316bf94617f605 4bb3c28828da402709395932f10ba94b90f89c4210cdf328987b782ec3ba1dc9
-src/vault/node.h 6179944da69eb3628cf7680dc4d1ffed9f29c83f311c6e6b839aded640d98032 23adbbd357c7e7a8f7bab88aa0d741223ec14baf65e81619964ba0acac13156c
+# IsByteLevelActFailure is the same function on both lines; these hashes include it.
+src/vault/node.cpp 58064ba0c1ef015bf229b2ccddee97aadde1807403ed6f416a036c13e9838dce 49f85d229f8f2067781212c1ca5857a556bec89dd8d0e1bc89efe3f503a01b04
+src/vault/node.h dfb3fb423b1b40a2b5d0bfb1a535b5ee35835908565c36f3c24260225a4702cc 717e27f71b38edca7d93295eec21ade608712f0185c8ed18ea990455706ca6dc
 
 # CCriticalBlock became UniqueLock; ChainTip frontiers are MerkleFrontiers;
 # GetBlockSubsidy is a consensus-params method; regtest crashHeight (SIGKILL

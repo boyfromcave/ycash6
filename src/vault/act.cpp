@@ -301,6 +301,10 @@ std::optional<std::string> DecodeAct(const CScript& spk, Act& out)
         valtype sig;
         if (!spk.GetOp(pc, op, sig)) return std::string("bad-vault-act-malformed");
         if (op > OP_PUSHDATA4 || sig.size() != RECOVERABLE_SIG_SIZE) return std::string("bad-vault-act-malformed");
+        // Before push_back, so at most MAX_ACT_SIGS signatures are stored and the rest of a
+        // huge output is not walked (W3-V-2). A longer list is already invalid: no act type
+        // accepts more than one signature per seat, plus the joiner.
+        if (a.sigs.size() >= MAX_ACT_SIGS) return std::string("bad-vault-act-sigs");
         a.sigs.push_back(std::move(sig));
     }
     // Minimal pushes only: the canonical encoding must reproduce the script byte for byte.
