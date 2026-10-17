@@ -876,7 +876,9 @@ bool WalletSignedPrevout(const COutPoint& op)
 
 /** Remember the build of `key` (without that input's scriptSig: set signatures are not part of the sighash;
  *  an act's signatures live in its output and are kept). `key` is the template outpoint of a vault spend, or
- *  vin[0] of an act transaction. */
+ *  vin[0] of an act transaction. The wallet record is the existing "vaultbuild" row: dumpwallet / importwallet
+ *  carry it and a keys-only salvage keeps it (MEDIUM-W3-07-NEW-1). That row is the hand-off registry, so there
+ *  is no second "vaultfeein" record. */
 void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
 {
     for (CTxIn& in : mtx.vin)
@@ -1015,15 +1017,68 @@ bool SameHandoffOutputs(const CMutableTransaction& memo, const CMutableTransacti
     return true;
 }
 
-/** vault_send / set_sendact: sign a wallet coin only when this wallet's remembered build for `buildKey`
- *  names that coin and was built for these outputs. Anything else is refused before any input is signed. */
-void SignHandoffInputs(CMutableTransaction& mtx, const COutPoint& buildKey)
+/** Optional second argument of vault_send / set_sendact. */
+struct HandoffOptions {
+    bool dryrun = false;
+    std::set<COutPoint> allowinputs;
+    bool hasAllowOutflow = false;
+    CAmount allowOutflow = 0;
+};
+
+HandoffOptions ParseHandoffOptions(const UniValue& params)
+{
+    HandoffOptions opt;
+    if (params.size() < 2 || params[1].isNull()) return opt;
+    if (!params[1].isObject()) throw JSONRPCError(RPC_INVALID_PARAMETER, "options must be an object");
+    const UniValue& o = params[1].get_obj();
+    const UniValue& dry = find_value(o, "dryrun");
+    if (!dry.isNull()) {
+        if (!dry.isBool()) throw JSONRPCError(RPC_INVALID_PARAMETER, "dryrun must be a boolean");
+        opt.dryrun = dry.get_bool();
+    }
+    const UniValue& allow = find_value(o, "allowinputs");
+    if (!allow.isNull()) {
+        if (!allow.isArray()) throw JSONRPCError(RPC_INVALID_PARAMETER, "allowinputs must be an array of outpoints");
+        for (size_t i = 0; i < allow.size(); i++)
+            opt.allowinputs.insert(ParseOutPoint(allow[i], "allowinputs"));
+    }
+    const UniValue& flow = find_value(o, "allowoutflow");
+    if (!flow.isNull()) {
+        opt.hasAllowOutflow = true;
+        opt.allowOutflow = AmountFromValue(flow);
+    }
+    return opt;
+}
+
+std::string OutputKind(const CScript& spk)
+{
+    if (IsActOutput(spk)) return "act";
+    VaultParams vp;
+    IntentParams ip;
+    if (MatchVault(spk, vp) != Shape::NONE) return "vault";
+    if (MatchIntent(spk, ip) != Shape::NONE) return "intent";
+    uint32_t locktime;
+    CPubKey key;
+    if (ParseBondRedeem(spk, locktime, key)) return "bond";
+    return "payment";
+}
+
+/** vault_send / set_sendact. A wallet coin is signed only when this wallet's remembered build for
+ *  `buildKey` names it for these outputs, unless `allowinputs` names that outpoint. The wallet's net
+ *  outflow (those inputs, minus outputs this wallet can spend and a SET_JOIN bond of a member key it
+ *  holds) above the fee cap is refused unless `allowoutflow` covers it. `dryrun` returns the preview
+ *  and signs nothing; otherwise a refusal throws and a pass signs. */
+UniValue HandoffSend(CMutableTransaction& mtx, const COutPoint& buildKey, const HandoffOptions& opt, const UniValue& templ)
 {
     auto it = pwalletMain->mapVaultBuilds.find(buildKey);
     const bool same = it != pwalletMain->mapVaultBuilds.end() && SameHandoffOutputs(it->second, mtx);
     std::set<COutPoint> funded;
     if (same)
         for (const CTxIn& in : it->second.vin) funded.insert(in.prevout);
+
+    UniValue sign(UniValue::VARR), foreign(UniValue::VARR);
+    CAmount signedIn = 0;
+    std::string refuse;
     for (unsigned int i = 0; i < mtx.vin.size(); i++) {
         CTxOut prev;
         int h;
@@ -1032,11 +1087,74 @@ void SignHandoffInputs(CMutableTransaction& mtx, const COutPoint& buildKey)
         IntentParams ip;
         if (MatchVault(prev.scriptPubKey, vp) != Shape::NONE || MatchIntent(prev.scriptPubKey, ip) != Shape::NONE) continue;
         if (IsMine(*pwalletMain, prev.scriptPubKey) != ISMINE_SPENDABLE) continue;
-        if (!same || !funded.count(mtx.vin[i].prevout))
-            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("vault-send-foreign-input: input %d (%s, %s) is this wallet's coin but was not chosen by this wallet for these outputs; nothing was signed",
-                                                           i, mtx.vin[i].prevout.ToString(), FormatMoney(prev.nValue)));
+        const bool chosen = same && funded.count(mtx.vin[i].prevout);
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("vin", (int)i);
+        row.pushKV("outpoint", mtx.vin[i].prevout.ToString());
+        row.pushKV("amount", ValueFromAmount(prev.nValue));
+        if (!chosen) {
+            foreign.push_back(row);
+            if (!opt.allowinputs.count(mtx.vin[i].prevout) && refuse.empty())
+                refuse = strprintf("vault-send-foreign-input: input %d (%s, %s) is this wallet's coin but was not chosen by this wallet for these outputs; nothing was signed",
+                                   i, mtx.vin[i].prevout.ToString(), FormatMoney(prev.nValue));
+        }
+        if (chosen || opt.allowinputs.count(mtx.vin[i].prevout)) {
+            sign.push_back(row);
+            signedIn += prev.nValue;
+        }
     }
+
+    std::set<unsigned int> own;
+    UniValue actField(UniValue::VNULL);
+    for (unsigned int i = 0; i < mtx.vout.size(); i++) {
+        if (IsMine(*pwalletMain, mtx.vout[i].scriptPubKey) == ISMINE_SPENDABLE) own.insert(i);
+        if (!actField.isNull() || !IsActOutput(mtx.vout[i].scriptPubKey)) continue;
+        Act act;
+        if (DecodeAct(mtx.vout[i].scriptPubKey, act)) continue;
+        actField = ActJSON(act, mtx.vin.empty() ? std::nullopt : std::optional<COutPoint>(mtx.vin[0].prevout));
+        if (act.type == ACT_SET_JOIN && pwalletMain->HaveKey(act.join.memberKey.GetID()) && act.join.bondVout < mtx.vout.size())
+            own.insert(act.join.bondVout);
+    }
+    CAmount ownOut = 0;
+    for (unsigned int i : own) ownOut += mtx.vout[i].nValue;
+    const CAmount outflow = signedIn - ownOut;
+    if (refuse.empty() && outflow > YedMaxTxFee() && !(opt.hasAllowOutflow && opt.allowOutflow >= outflow))
+        refuse = strprintf("vault-send-outflow: this wallet would pay %s beyond its own outputs (the fee cap is %s); nothing was signed",
+                           FormatMoney(outflow), FormatMoney(YedMaxTxFee()));
+
+    UniValue outputs(UniValue::VARR);
+    CAmount in = 0;
+    bool allIn = true;
+    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
+        CTxOut prev;
+        int h;
+        if (!GetCoin(mtx.vin[i].prevout, prev, h)) { allIn = false; continue; }
+        in += prev.nValue;
+    }
+    for (unsigned int i = 0; i < mtx.vout.size(); i++) {
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("n", (int)i);
+        row.pushKV("amount", ValueFromAmount(mtx.vout[i].nValue));
+        const std::string addr = ScriptAddress(mtx.vout[i].scriptPubKey);
+        if (!addr.empty()) row.pushKV("address", addr);
+        else row.pushKV("script", HexStr(mtx.vout[i].scriptPubKey.begin(), mtx.vout[i].scriptPubKey.end()));
+        row.pushKV("mine", own.count(i) != 0);
+        row.pushKV("kind", OutputKind(mtx.vout[i].scriptPubKey));
+        outputs.push_back(row);
+    }
+    UniValue preview(UniValue::VOBJ);
+    preview.pushKV("template", templ);
+    preview.pushKV("act", actField);
+    preview.pushKV("sign", sign);
+    preview.pushKV("foreign", foreign);
+    preview.pushKV("outputs", outputs);
+    preview.pushKV("fee", allIn ? UniValue(ValueFromAmount(in - CTransaction(mtx).GetValueOut())) : NullUniValue);
+    preview.pushKV("outflow", ValueFromAmount(outflow));
+    preview.pushKV("wouldrefuse", refuse.empty() ? NullUniValue : UniValue(refuse));
+    if (opt.dryrun) return preview;
+    if (!refuse.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refuse);
     SignWalletInputs(mtx);
+    return Broadcast(CTransaction(mtx)).GetHex();
 }
 
 /** Remember an act build under vin[0], the input its signatures bind. */
@@ -1552,24 +1670,28 @@ UniValue set_signact(const UniValue& params, bool fHelp)
 
 UniValue set_sendact(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "set_sendact \"hex\"\n"
+            "set_sendact \"hex\" ( {\"dryrun\":bool, \"allowinputs\":[\"txid:n\",...], \"allowoutflow\":n} )\n"
             "\nSign this wallet's inputs of an act transaction this wallet built (set_buildact, or set_join when it\n"
             "returned a hex) and broadcast it. Only coins that build chose are signed, and only for its outputs (act\n"
             "signatures added later still match). Any other spendable coin of this wallet is refused\n"
-            "(vault-send-foreign-input) and nothing is signed.\n"
-            "\nResult: \"txid\"\n"
+            "(vault-send-foreign-input) unless allowinputs names it, and nothing is signed. The wallet's net outflow\n"
+            "above the fee cap is refused (vault-send-outflow) unless allowoutflow is at least that outflow. A\n"
+            "SET_JOIN bond counts as this wallet's when it holds the member key. dryrun returns a preview and does\n"
+            "not sign or broadcast.\n"
+            "\nResult (dryrun false or omitted): \"txid\"\n"
+            "Result (dryrun true): {\"template\":null, \"act\", \"sign\", \"foreign\", \"outputs\", \"fee\", \"outflow\", \"wouldrefuse\"}\n"
             + HelpExampleCli("set_sendact", "\"hex\"") + HelpExampleRpc("set_sendact", "\"hex\""));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    PruneVaultBuilds();
     CMutableTransaction mtx = DecodeMutable(params[0]);
     Act act;
     FindAct(mtx, act);
     if (mtx.vin.empty())
         throw JSONRPCError(RPC_INVALID_PARAMETER, "an act transaction needs a transparent input (vin[0] is bound by the signatures)");
-    SignHandoffInputs(mtx, mtx.vin[0].prevout);
-    return Broadcast(CTransaction(mtx)).GetHex();
+    return HandoffSend(mtx, mtx.vin[0].prevout, ParseHandoffOptions(params), NullUniValue);
 }
 
 UniValue set_equivocation(const UniValue& params, bool fHelp)
@@ -2245,17 +2367,21 @@ UniValue set_acknowledgerestore(const UniValue& params, bool fHelp)
 
 UniValue vault_send(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "vault_send \"hex\"\n"
+            "vault_send \"hex\" ( {\"dryrun\":bool, \"allowinputs\":[\"txid:n\",...], \"allowoutflow\":n} )\n"
             "\nSign this wallet's (fee) inputs of a vault spend built by vault_buildunlock / vault_buildcancel /\n"
             "yed_buildcancel / vault_app / vault_refee, keeping the template input's scriptSig, and broadcast it.\n"
             "Signs only coins this wallet's remembered build chose for these exact outputs. Any other spendable coin of\n"
-            "this wallet is refused (vault-send-foreign-input) and nothing is signed.\n"
-            "\nResult: \"txid\"\n"
+            "this wallet is refused (vault-send-foreign-input) unless allowinputs names it, and nothing is signed. The\n"
+            "wallet's net outflow above the fee cap is refused (vault-send-outflow) unless allowoutflow is at least\n"
+            "that outflow. dryrun returns a preview and does not sign or broadcast.\n"
+            "\nResult (dryrun false or omitted): \"txid\"\n"
+            "Result (dryrun true): {\"template\", \"act\", \"sign\", \"foreign\", \"outputs\", \"fee\", \"outflow\", \"wouldrefuse\"}\n"
             + HelpExampleCli("vault_send", "\"hex\"") + HelpExampleRpc("vault_send", "\"hex\""));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    PruneVaultBuilds();
     CMutableTransaction mtx = DecodeMutable(params[0]);
     CTxOut coin;
     int h;
@@ -2263,8 +2389,12 @@ UniValue vault_send(const UniValue& params, bool fHelp)
     IntentParams ip;
     TemplateKind kind;
     const size_t idx = FindTemplateInput(mtx, coin, h, vp, ip, kind);
-    SignHandoffInputs(mtx, mtx.vin[idx].prevout);
-    return Broadcast(CTransaction(mtx)).GetHex();
+    UniValue templ(UniValue::VOBJ);
+    templ.pushKV("outpoint", mtx.vin[idx].prevout.ToString());
+    templ.pushKV("kind", kind == TemplateKind::VAULT ? "vault" : "intent");
+    const std::optional<uint8_t> sel = ParseSelector(mtx.vin[idx].scriptSig);
+    templ.pushKV("selector", sel ? UniValue((int)*sel) : NullUniValue);
+    return HandoffSend(mtx, mtx.vin[idx].prevout, ParseHandoffOptions(params), templ);
 }
 
 UniValue vault_release(const UniValue& params, bool fHelp)

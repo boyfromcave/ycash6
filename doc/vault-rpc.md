@@ -101,6 +101,9 @@ Undocumented result fields are a contract violation; so is a missing field not m
 - `SetSigResult` = `{"hex": hex, "complete": bool, "signatures": int, "required": int, "sighash": hash, "setsigs": [{"key": key, "sig": hex}]}`
 - `IntentOut` = `{"vout": int, "amount": yec, "recipient": hex, "recipienthash": hash}`
 - `Recipient` = `{"address"?: address, "script"?: hex, "amount": yec}`
+- `HandoffCoin` = `{"vin": int, "outpoint": outpoint, "amount": yec}`
+- `HandoffOutput` = `{"n": int, "amount": yec, "address"?: address, "script"?: hex, "mine": bool, "kind": str}`
+- `HandoffPreview` = `{"template": {"outpoint": outpoint, "kind": "vault"|"intent", "selector": int|null}|null, "act": any|null, "sign": [HandoffCoin], "foreign": [HandoffCoin], "outputs": [HandoffOutput], "fee": yec|null, "outflow": yec, "wouldrefuse": str|null}`
 
 ## Read RPCs (no wallet needed)
 
@@ -255,16 +258,21 @@ Adds this wallet's act signatures: the member's own first signature (join, heart
 admission / co-signer signatures up to what the act needs at the next block (a remove never by
 its target). The inputs must still be unsigned.
 
-### `set_sendact "hex"`
-Params: `["hex": hex]`
+### `set_sendact "hex" ( {"dryrun", "allowinputs", "allowoutflow"} )`
+Params: `["hex": hex, "options"?: {"dryrun"?: bool, "allowinputs"?: [outpoint], "allowoutflow"?: yec}]`
 
-Result: `hash`
+Result: `hash|HandoffPreview`
 
 Signs this wallet's inputs of an act transaction this wallet built (`set_buildact`, or `set_join`
-when it returned a hex) and broadcasts. Result: the txid. Only the coins that build chose are
-signed, and only while the outputs are the ones it chose (act signatures added later do not make
-a different output). Any other spendable coin of this wallet is refused
-(`vault-send-foreign-input`) and nothing is signed.
+when it returned a hex) and broadcasts. Without `dryrun`, the result is the txid. Only the coins
+that build chose are signed, and only while the outputs are the ones it chose (act signatures
+added later do not make a different output). Any other spendable coin of this wallet is refused
+(`vault-send-foreign-input`) unless `allowinputs` names that outpoint, and nothing is signed.
+The wallet's net outflow — the value of the inputs it would sign, minus outputs it can spend, and
+minus a `SET_JOIN` bond when this wallet holds that act's member key — above the fee cap is refused
+(`vault-send-outflow`) unless `allowoutflow` is at least that outflow. `dryrun: true` signs and
+broadcasts nothing and returns `HandoffPreview` (`sign` is the inputs it would sign, `foreign` the
+wallet coins the build did not choose, `outflow` the net, `wouldrefuse` the refusal or null).
 
 ### `set_equivocation {proof}`
 Params: `["proof": Proof]`
@@ -473,17 +481,21 @@ Clears the restore marker: the operator confirms that the wallet's sign-once his
 keys since that history was taken. `restored` is then false; `pendingkeys` counts imported keys
 still watched for a `SET_JOIN` (one connecting sets the marker again).
 
-### `vault_send "hex"`
-Params: `["hex": hex]`
+### `vault_send "hex" ( {"dryrun", "allowinputs", "allowoutflow"} )`
+Params: `["hex": hex, "options"?: {"dryrun"?: bool, "allowinputs"?: [outpoint], "allowoutflow"?: yec}]`
 
-Result: `hash`
+Result: `hash|HandoffPreview`
 
 Signs this wallet's inputs of a built vault spend (the template input's scriptSig is kept) and
-broadcasts. Result: the txid. The node that funded the spend must send it: only coins this wallet's
-builders (`vault_buildunlock`, `vault_buildcancel`, `yed_buildcancel`, `vault_app`, `vault_refee`)
-chose for these exact outputs are signed. Any other spendable coin of this wallet is refused
-(`vault-send-foreign-input`) and nothing is signed. A transaction with no unspent vault or intent
-input is refused: `vault_send` is not a general signer.
+broadcasts. Without `dryrun`, the result is the txid. The node that funded the spend must send it:
+only coins this wallet's builders (`vault_buildunlock`, `vault_buildcancel`, `yed_buildcancel`,
+`vault_app`, `set_buildact`, `vault_refee`) chose for these exact outputs are signed. Any other
+spendable coin of this wallet is refused (`vault-send-foreign-input`) unless `allowinputs` names
+that outpoint, and nothing is signed. The same net-outflow cap as `set_sendact` applies
+(`vault-send-outflow`, overridden by `allowoutflow`). `dryrun: true` returns `HandoffPreview` and
+signs nothing. A transaction with no unspent vault or intent input is refused: `vault_send` is not
+a general signer. The coins a build chose are the wallet's `vaultbuild` record (dumped, imported,
+and kept by salvage); there is no separate fee-input record.
 
 ### `vault_release "intentoutpoint" ( "address"|"script" )`
 Params: `["intentoutpoint": outpoint, "recipient"?: str]`
@@ -556,7 +568,8 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `the template input is not an intent` | `set_signcancel` | an unlock spend |
 | -8 | `the template input is not a vault` | `set_signunlock` | a cancel spend |
 | -8 | `no unspent vault or intent input` | `set_signunlock`, `set_signcancel`, `vault_refee`, `vault_send` | `vault_send` of a transaction with no template input |
-| -4 | `vault-send-foreign-input` | `vault_send`, `set_sendact` | a spend that names a wallet coin this wallet did not fund for these outputs |
+| -4 | `vault-send-foreign-input` | `vault_send`, `set_sendact` | a spend that names a wallet coin this wallet did not fund for these outputs, and `allowinputs` does not name it |
+| -4 | `vault-send-outflow` | `vault_send`, `set_sendact` | the wallet's net outflow exceeds the fee cap and `allowoutflow` does not cover it |
 | -4 | `set-sign-once` | `set_signunlock`, `set_signcancel`, `set_importsigned` | a second, different unlock of a vault this wallet already signed |
 | -4 | `set-sign-restored` | `set_signunlock`, `set_signcancel` | signing on a wallet that imported a member key, before `set_importsigned` |
 | -8 | `set-sign-invalid` | `set_signunlock`, `set_signcancel` | `set_signcancel` of an intent's cancel after the intent matured |
