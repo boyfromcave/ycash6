@@ -35,14 +35,14 @@ const Params& TestParams()
     return p;
 }
 """
-VERSION_H = "static const int PROTOCOL_VERSION = 270013;\nstatic const int MIN_PEER_PROTO_VERSION = 170002;\n"
+VERSION_H = "static const int PROTOCOL_VERSION = 270200;\nstatic const int MIN_PEER_PROTO_VERSION = 170002;\n"
 
 
-def klass(cls, height, extra=""):
+def klass(cls, height, extra="", proto=270200):
     return """class %s : public CChainParams {
 public:
     %s() {
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = %s;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             %s;
 %s    }
@@ -51,7 +51,7 @@ public:
     }
 };
 static %s %s;
-""" % (cls, cls, height, extra, cls, cls.lower())
+""" % (cls, cls, proto, height, extra, cls, cls.lower())
 
 
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
@@ -97,7 +97,7 @@ class ReleaseHeights(unittest.TestCase):
         write_tree(root, main_height=NO)
         code, out = run(["--root", root])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: the mainnet UPGRADE_VAULT activation height is unset", out)
+        self.assertIn("problem: R1: the mainnet UPGRADE_VAULT activation height is unset", out)
         self.assertIn("refusing to release", out)
         warn, warned = run(["--warn", "--root", root])
         self.assertEqual(warn, 0, warned)
@@ -108,7 +108,7 @@ class ReleaseHeights(unittest.TestCase):
         write_tree(root, main_extra="")
         code, out = run(["--root", root])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: the mainnet pqFalconHeight is unset", out)
+        self.assertIn("problem: R6: the mainnet pqFalconHeight is unset", out)
 
     def test_zero_maturity_is_refused(self):
         root = os.path.join(self.tmp, "zeromat")
@@ -129,7 +129,7 @@ class ReleaseHeights(unittest.TestCase):
         write_tree(root, att="0" * 64)
         code, out = run(["--root", root])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: the mainnet YED attestor set", out)
+        self.assertIn("problem: R2: the mainnet YED attestor set", out)
 
     def test_divergence_of_each_guarded_field(self):
         left = os.path.join(self.tmp, "left")
@@ -145,9 +145,9 @@ class ReleaseHeights(unittest.TestCase):
             fh.write(ext.stdout)
         code, out = run(["--root", left, "--other-json", other])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: divergent main UPGRADE_VAULT activation height: 3300000 != 3300001", out)
-        self.assertIn("problem: divergent main pqFalconHeight: 0 != 1", out)
-        self.assertIn("problem: divergent regtest nVaultMinSetMaturity: 2 != 3", out)
+        self.assertIn("problem: divergent main.vault_activation_height: 3300000 != 3300001", out)
+        self.assertIn("problem: divergent main.pq_falcon_height: 0 != 1", out)
+        self.assertIn("problem: divergent regtest.vault_min_set_maturity: 2 != 3", out)
 
     def test_matching_other_line_passes(self):
         root = os.path.join(self.tmp, "same")
@@ -172,7 +172,7 @@ class ReleaseHeights(unittest.TestCase):
         self.assertNotIn("problem: the mainnet pqFalconHeight is unset", warned)
         self.assertNotIn("problem: the mainnet nVaultMinSetMaturity is unset", warned)
         strict, refused = run([])
-        if "problem: the mainnet UPGRADE_VAULT activation height is unset" in warned:
+        if "R1: the mainnet UPGRADE_VAULT activation height is unset" in warned:
             self.assertEqual(strict, 1, refused)
             self.assertIn("refusing to release", refused)
         else:

@@ -6,11 +6,13 @@
 """Extract and compare the Vault chain parameters of the two Yellowback node lines.
 
   yellowback-vault-params.py extract [--root DIR | --git-ref REF [--git-dir DIR]]
-  yellowback-vault-params.py compare A.json B.json
+  yellowback-vault-params.py compare A.json B.json [--release main]
 
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
 W3-P-1). The extractor reads every parameter from the constructor body of each network class (never
-the first match in the file) and fails closed (exit 2) on any shape it does not expect. This file is
+the first match in the file) and fails closed (exit 2) on any shape it does not expect.
+`compare --release main` applies release rules R1-R7 to A (the tag guard). Part D, raising
+PROTOCOL_VERSION, is deferred; R3-R5 still refuse a tag until that bump. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
 """
 import argparse
@@ -25,6 +27,11 @@ NETWORKS = (("main", "CMainParams"), ("test", "CTestNetParams"), ("regtest", "CR
 VERSION_CONSTANTS = ("PROTOCOL_VERSION", "MIN_PEER_PROTO_VERSION", "MIN_TESTNET_PEER_PROTO_VERSION")
 # MIN_PEER_PROTO_VERSION differs between the lines today (audit W3-P-1, part D): reported, not compared.
 VERSION_COMPARED = ("PROTOCOL_VERSION",)
+# Live peer floor (version.h PROTOCOL_VERSION on both lines). R3 requires the Vault epoch above it.
+# Cited by audit W3-P-1. Do not bump PROTOCOL_VERSION here; P8 does, and the tag guard enforces it.
+LIVE_NETWORK_PROTOCOL_VERSION = 270013
+# R6. A release that deliberately names another height changes this constant in the same change.
+EXPECTED_PQ_FALCON_HEIGHT = 0
 
 
 class ParseError(Exception):
@@ -131,6 +138,47 @@ def flatten(d, prefix=""):
             yield prefix + k, v
 
 
+def _height_set(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _attestor_set(value):
+    return isinstance(value, str) and bool(value) and not set(value) <= set("0")
+
+
+def release_problems(doc):
+    """R1-R7 for a tag of this tree (audit W3-P-1 part C). A parse failure never reaches here."""
+    problems = []
+    main = doc.get("main", {})
+    version = doc.get("version", {})
+    yb = doc.get("yellowback_params", {})
+    if not _height_set(main.get("vault_activation_height")):
+        problems.append("R1: the mainnet UPGRADE_VAULT activation height is unset")
+    if not _attestor_set(yb.get("main_attestor_set_id")):
+        problems.append("R2: the mainnet YED attestor set (MainParams attestorSetId) is unset")
+    vault_v = main.get("vault_protocol_version")
+    if not isinstance(vault_v, int) or isinstance(vault_v, bool) or vault_v <= LIVE_NETWORK_PROTOCOL_VERSION:
+        problems.append("R3: main.vault_protocol_version must be greater than %d" % LIVE_NETWORK_PROTOCOL_VERSION)
+    proto = version.get("PROTOCOL_VERSION")
+    if not isinstance(proto, int) or isinstance(proto, bool) or not isinstance(vault_v, int) or proto < vault_v:
+        problems.append("R4: PROTOCOL_VERSION must be >= main.vault_protocol_version")
+    floor = version.get("MIN_PEER_PROTO_VERSION")
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor > LIVE_NETWORK_PROTOCOL_VERSION:
+        problems.append("R5: MIN_PEER_PROTO_VERSION must be <= %d" % LIVE_NETWORK_PROTOCOL_VERSION)
+    falcon = main.get("pq_falcon_height")
+    if falcon != EXPECTED_PQ_FALCON_HEIGHT:
+        if falcon in (None, "NO_ACTIVATION_HEIGHT"):
+            problems.append("R6: the mainnet pqFalconHeight is unset")
+        else:
+            problems.append("R6: main.pq_falcon_height must be %s (got %r)" % (EXPECTED_PQ_FALCON_HEIGHT, falcon))
+    test = doc.get("test", {})
+    test_height = _height_set(test.get("vault_activation_height"))
+    test_att = _attestor_set(yb.get("test_attestor_set_id"))
+    if test_height != test_att:
+        problems.append("R7: testnet activation height and test_attestor_set_id must both be set or both be unset")
+    return problems
+
+
 def compare(a, b):
     fa, fb = dict(flatten(a)), dict(flatten(b))
     bad = []
@@ -152,6 +200,7 @@ def main(argv):
     cp = sub.add_parser("compare")
     cp.add_argument("a")
     cp.add_argument("b")
+    cp.add_argument("--release", choices=("main",), default=None)
     args = ap.parse_args(argv)
 
     if args.cmd == "extract":
@@ -174,7 +223,10 @@ def main(argv):
         return 0
 
     with open(args.a, encoding="utf-8") as fa, open(args.b, encoding="utf-8") as fb:
-        bad = compare(json.load(fa), json.load(fb))
+        loaded_a, loaded_b = json.load(fa), json.load(fb)
+    bad = compare(loaded_a, loaded_b)
+    if args.release == "main":
+        bad.extend(release_problems(loaded_a))
     for line in bad:
         print("DIFFERENT %s" % line)
     if bad:

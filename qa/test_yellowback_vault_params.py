@@ -110,6 +110,40 @@ class VaultParams(unittest.TestCase):
         self.assertEqual(r["regtest"]["vault_min_set_maturity"], 2)
         self.assertEqual(r["main"]["vault_min_set_maturity"], 16128)
 
+    def test_release_rules_r1_through_r7(self):
+        att = "ab" * 32
+        doc = {
+            "version": {"PROTOCOL_VERSION": 270200, "MIN_PEER_PROTO_VERSION": 170002},
+            "main": {"vault_protocol_version": 270200, "vault_activation_height": 3300000,
+                     "pq_falcon_height": 0, "vault_min_set_maturity": 16128},
+            "test": {"vault_protocol_version": 270200, "vault_activation_height": "NO_ACTIVATION_HEIGHT",
+                     "pq_falcon_height": 0, "vault_min_set_maturity": 16128},
+            "yellowback_params": {"main_attestor_set_id": att, "test_attestor_set_id": None},
+        }
+        self.assertEqual(vp.release_problems(doc), [])
+        doc["main"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
+        self.assertTrue(any(p.startswith("R1:") for p in vp.release_problems(doc)))
+        doc["main"]["vault_activation_height"] = 3300000
+        doc["yellowback_params"]["main_attestor_set_id"] = "0" * 64
+        self.assertTrue(any(p.startswith("R2:") for p in vp.release_problems(doc)))
+        doc["yellowback_params"]["main_attestor_set_id"] = att
+        doc["main"]["vault_protocol_version"] = 270013
+        self.assertTrue(any(p.startswith("R3:") for p in vp.release_problems(doc)))
+        doc["main"]["vault_protocol_version"] = 270200
+        doc["version"]["PROTOCOL_VERSION"] = 270013
+        self.assertTrue(any(p.startswith("R4:") for p in vp.release_problems(doc)))
+        doc["version"]["PROTOCOL_VERSION"] = 270200
+        doc["version"]["MIN_PEER_PROTO_VERSION"] = 270200
+        self.assertTrue(any(p.startswith("R5:") for p in vp.release_problems(doc)))
+        doc["version"]["MIN_PEER_PROTO_VERSION"] = 270013
+        doc["main"]["pq_falcon_height"] = 1
+        self.assertTrue(any(p.startswith("R6:") for p in vp.release_problems(doc)))
+        doc["main"]["pq_falcon_height"] = 0
+        doc["test"]["vault_activation_height"] = 100
+        self.assertTrue(any(p.startswith("R7:") for p in vp.release_problems(doc)))
+        doc["yellowback_params"]["test_attestor_set_id"] = att
+        self.assertEqual(vp.release_problems(doc), [])
+
 
 if __name__ == "__main__":
     unittest.main()
