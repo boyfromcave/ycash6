@@ -851,8 +851,11 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         built = observer.yed_buildcancel(intent, [cos['cosig']])
         assert_equal((built['cancelsRequired'], built['cosigners']), (1, [cos['seq']]))
         assert_equal((built['refund']['vout'], built['refund']['cents'], built['refund']['script']), (1, CENTS, refund_holder))
-        signed = nodes[ATTESTOR_A].set_signcancel(built['hex'])
+        # 07/F-5: register_and_arm imported this member key, so the restore marker is set. The key
+        # has never signed this intent; acknowledge that. The marker stays (only set_acknowledgerestore clears it).
+        signed = nodes[ATTESTOR_A].set_signcancel(built['hex'], {'acknowledgerestore': True})
         assert_equal(signed['complete'], True)
+        assert_equal(nodes[ATTESTOR_A].set_listsigned()['restored'], True)
         full = observer.signrawtransaction(signed['hex'])
         assert_equal(full['complete'], True)
         v = observer.yed_validaterawtransaction(full['hex'])
