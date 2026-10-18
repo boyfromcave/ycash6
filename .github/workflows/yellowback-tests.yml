@@ -703,7 +703,7 @@ jobs:
           [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
           exit $rc
 
-      - name: Cross-line vectors, overlay trees and Vault chain parameters (vectors and shared sources byte-identical to ycash-dd; src/vault and src/yellowback pinned)
+      - name: Cross-line identity (qa/yellowback-cross-line.manifest) and Vault chain parameters
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
         # the Yellowback golden state must be the same bytes on ycash-dd at the same branch (the
         # PR's head when that branch exists there, else the PR's base; upgrade/vault when ycash-dd
@@ -735,35 +735,10 @@ jobs:
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
           rc=0
-          for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json src/test/data/yellowback_math_cases.json \
-                   qa/rpc-tests/test_framework/yellowback_golden.json qa/rpc-tests/test_framework/yellowback_model.py \
-                   qa/rpc-tests/test_framework/SERIALISATION.md \
-                   src/test/data/pq_vectors.json \
-                   src/test/data/pq_wallet_vectors.json \
-                   src/test/data/yellowback_attest_vectors.json \
-                   src/test/data/yellowback_pq_vectors.json \
-                   src/test/data/pq_acvp_slhdsa.json \
-                   src/test/data/pq_falcon_kat.json \
-                   qa/rpc-tests/test_framework/yellowback_pq_vectors.json \
-                   qa/rpc-tests/test_framework/pq.py \
-                   qa/rpc-tests/test_framework/vault.py \
-                   qa/rpc-tests/test_framework/yellowback_attest.py \
-                   src/pqkey.h \
-                   src/pqkey.cpp; do
-            mine=$(sha256sum < "$f" | cut -c1-64)
-            theirs=$(git show "other-line/head:$f" | sha256sum | cut -c1-64)
-            if [ "$mine" = "$theirs" ]; then echo "identical: $f ($mine)"
-            else echo "::error::$f differs from $OTHER_LINE_REPO $other (here $mine, there $theirs)"; rc=1; fi
-          done
-          # src/crypto/pq (the PQ schemes and their vendored C with local patches P1-P3) is byte-identical on both
-          # lines (src/crypto/pq/README.md; audit 02/PQ-1..PQ-3): the committed trees must have the same hash.
-          if [ -d src/crypto/pq ]; then
-            mine=$(git rev-parse HEAD:src/crypto/pq); theirs=$(git rev-parse other-line/head:src/crypto/pq 2>/dev/null || echo none)
-            if [ "$mine" = "$theirs" ]; then echo "identical: src/crypto/pq (tree $mine)"
-            else echo "::error::src/crypto/pq differs from $OTHER_LINE_REPO $other (tree here $mine, there $theirs)"; rc=1; fi
-          fi
-          # src/vault and src/yellowback (MEDIUM-W3-P-2): byte-identical, except the 6.20.0 shims pinned by
-          # both sha256 hashes in qa/yellowback-cross-line-allow.txt. The same checker runs in ycash-dd's audit.
+          # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback
+          # (audit W3-P-2). The manifest is the list; this step has no path list of its own.
+          python3 qa/yellowback-cross-line.py --this-line y6 --other-ref other-line/head || rc=1
+          # The overlay-tree checker still pins the same 11 shims in qa/yellowback-cross-line-allow.txt.
           python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-ref other-line/head || rc=1
           # Every Vault chain parameter (all three networks, PROTOCOL_VERSION, the yellowback params bodies)
           # must agree with the other line (audit W3-P-1); read from the other line's git objects.
@@ -1128,6 +1103,8 @@ jobs:
         run: python3 qa/test_yellowback_vault_params.py -v
       - name: Vault release-guard unit tests (audit W3-P-1 part C)
         run: python3 qa/test_yellowback_release_heights.py -v
+      - name: Cross-line identity checker unit tests (audit W3-P-2)
+        run: python3 qa/test_yellowback_cross_line.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)

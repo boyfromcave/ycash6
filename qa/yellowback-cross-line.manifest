@@ -1,0 +1,59 @@
+# Every path here is the same on both node lines (workspace rule: two node lines, one overlay;
+# audit W3-P-2). identical = byte-identical file; tree = every git-tracked file under the
+# directory, same path set, byte-identical unless listed as shim; shim = may differ, pinned by
+# both hashes. A shim edit updates this file on both lines. CI calls qa/yellowback-cross-line.py.
+# qa/yellowback-cross-line-trees.py still checks src/vault and src/yellowback against
+# qa/yellowback-cross-line-allow.txt with the same pins.
+identical src/test/data/vault_vectors.json
+identical src/test/data/pq_vectors.json
+identical src/test/data/pq_wallet_vectors.json
+identical src/test/data/yellowback_golden.json
+identical src/test/data/yellowback_attest_vectors.json
+identical src/test/data/yellowback_math_cases.json
+identical src/test/data/yellowback_pq_vectors.json
+identical src/test/data/pq_acvp_slhdsa.json
+identical src/test/data/pq_falcon_kat.json
+identical qa/rpc-tests/test_framework/yellowback_golden.json
+identical qa/rpc-tests/test_framework/yellowback_model.py
+identical qa/rpc-tests/test_framework/SERIALISATION.md
+identical qa/rpc-tests/test_framework/yellowback_pq_vectors.json
+identical qa/rpc-tests/test_framework/VAULT_VECTORS.md
+identical qa/rpc-tests/test_framework/pq.py
+identical qa/rpc-tests/test_framework/test_pq.py
+identical qa/rpc-tests/test_framework/gen_pq_wallet_vectors.py
+identical qa/rpc-tests/test_framework/vault.py
+identical qa/rpc-tests/test_framework/test_vault.py
+identical qa/rpc-tests/test_framework/gen_vault_vectors.py
+identical qa/rpc-tests/test_framework/vault_contract.py
+identical qa/rpc-tests/test_framework/vault_module_hook.py
+identical qa/rpc-tests/test_framework/yellowback_attest.py
+identical qa/rpc-tests/test_framework/test_yellowback_attest.py
+identical qa/rpc-tests/test_framework/test_yellowback_math_spec.py
+identical qa/rpc-tests/test_framework/test_yellowback_model.py
+identical src/pqkey.h
+identical src/pqkey.cpp
+identical doc/yellowback-spec.md
+identical src/test/vault_fuzz_harness.h
+identical src/test/vault_state_fuzz_harness.h
+identical src/test/yellowback_fuzz_harness.h
+identical src/test/yellowback_math_tests.cpp
+identical qa/yellowback-vault-params.py
+identical qa/test_yellowback_vault_params.py
+identical qa/test_yellowback_release_heights.py
+identical qa/test_yellowback_cross_line.py
+identical qa/yellowback-cross-line.manifest
+identical qa/yellowback-cross-line.py
+tree src/crypto/pq
+tree src/vault
+tree src/yellowback
+shim src/vault/checker.cpp 42ae5411a640da8ee43aa0cb6a14d040fc685dc5890af297bf5809068c4c68a4 fedce11fa3604966ca1f5b2fad3f03c84389437b02b6f8f0be26e28c3f24e526
+shim src/vault/db.cpp a3914a2e5d661bce428fdf786f9e24dc861487440d1a422cde7d9e9998e6fc1d 8af2bc7f0aa3ab4951060a467790f3c3df97df89dae585bfb97266353be3d6da
+shim src/vault/node.cpp 58064ba0c1ef015bf229b2ccddee97aadde1807403ed6f416a036c13e9838dce 49f85d229f8f2067781212c1ca5857a556bec89dd8d0e1bc89efe3f503a01b04
+shim src/vault/node.h dfb3fb423b1b40a2b5d0bfb1a535b5ee35835908565c36f3c24260225a4702cc 717e27f71b38edca7d93295eec21ade608712f0185c8ed18ea990455706ca6dc
+shim src/yellowback/index.cpp bc9b3d6bedb9d39be39e285ad95578c445e7b22cdd0ed1df4016c6445c034c2f 74741bc41ac0ee310b0141d2ed9c73b38c55ac9feca16cdf05acd681d9f9f4cd
+shim src/yellowback/index.h 010c3798e5f17ac78d4d044dfc941abccacfc0017f34146fab0b8d20b39f150b a1301cb72e288a9481234a54530465c1028fcc2a7a407fbf04ed0f0e5280f1a7
+shim src/yellowback/params.h 981dc4d1e12aa83788ba68074ccbd24817e57af7a9ef297506cfc7398a5244db 1bbb739ec036ade352181ad15be32210cb02c9f62ecd5af94aff074d41ff3a71
+shim src/yellowback/policy.cpp 9860f4b74658f25f03d92b59cc43b3bc9050507a49447d2368e3aecfa1a65f89 e8903c770b03a67923fcac563f827ac0b925c0f992adf3376247c9b8ffccc61a
+shim src/yellowback/txbuilder.cpp 23796dc8421254595864f1f29b6e4061ff5ea673beb390a8065e1349e362e816 690f84bb0687f78f9979c2f1f661d188d0416faef418670d653f6e386b4dac96
+shim src/yellowback/txbuilder.h aa34fc1909efa95c2806eb1e2b8ea1cf27b01bf3afc9e3cbfe01b24aee5c312d 8cb4cf2d19c89525dca1462555f543f6953ed5252f533b84d06fcb681232166f
+shim src/yellowback/wallet.cpp d0afc072a2b014d67e0cd777f357e1a215e907d15a638dd4c21bf761c13cd9b0 55a83a0e6a352d985c50184c1e76dcad8eeda0cfe36e2ef42e275d0f8608ff49

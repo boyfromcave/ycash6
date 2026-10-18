@@ -10,8 +10,9 @@
 # nVaultMinSetMaturity diverges from the other node line on mainnet, testnet or regtest.
 #
 # Reads the tree through qa/yellowback-vault-params.py (class bodies, not a first match).
-# Protocol version is not a release-guard input (W3-P-1 part D is deferred: this script does
-# not require PROTOCOL_VERSION or MIN_PEER_PROTO_VERSION to move).
+# Enforces release rules R1-R7 (audit W3-P-1). Part D is deferred: PROTOCOL_VERSION is not
+# bumped here, and R3-R5 refuse a tag until that bump. MIN_PEER_PROTO_VERSION must stay at
+# or below the live floor (R5).
 #
 # Usage: qa/yellowback-release-heights.sh [--warn] [--root DIR] [--other-json FILE] [--release-version VER]
 #   --warn               exit 0 after reporting unset or divergent parameters (a proving run)
@@ -62,11 +63,17 @@ if [ -n "$other" ] && [ ! -f "$other" ]; then
 fi
 
 set +e
-python3 - "$json" "$other" "$warn" "$where" <<'PY'
+python3 - "$json" "$other" "$warn" "$where" "$script_dir" <<'PY'
+import importlib.util
 import json
+import os
 import sys
 
-mine_path, other_path, warn, where = sys.argv[1:5]
+mine_path, other_path, warn, where, script_dir = sys.argv[1:6]
+spec = importlib.util.spec_from_file_location(
+    "yellowback_vault_params", os.path.join(script_dir, "yellowback-vault-params.py"))
+vp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(vp)
 with open(mine_path, encoding="utf-8") as fh:
     mine = json.load(fh)
 
@@ -84,45 +91,16 @@ print("mainnet Yellowback: UPGRADE_VAULT height %s, pqFalconHeight %s, nVaultMin
     show(att),
 ))
 
-problems = []
-
-
-def unset_height(value):
-    return not isinstance(value, int) or value <= 0
-
-
-def unset_falcon(value):
-    # 0 is set: Falcon follows UPGRADE_VAULT from its first block. A missing height is unset.
-    return not isinstance(value, int) or value < 0
-
-
-def unset_maturity(value):
-    return not isinstance(value, int) or value <= 0
-
-
-if unset_height(main.get("vault_activation_height")):
-    problems.append("the mainnet UPGRADE_VAULT activation height is unset")
-if unset_falcon(main.get("pq_falcon_height")):
-    problems.append("the mainnet pqFalconHeight is unset")
-if unset_maturity(main.get("vault_min_set_maturity")):
+problems = list(vp.release_problems(mine))
+maturity = main.get("vault_min_set_maturity")
+if not isinstance(maturity, int) or isinstance(maturity, bool) or maturity <= 0:
     problems.append("the mainnet nVaultMinSetMaturity is unset")
-if not isinstance(att, str) or not att or set(att) <= set("0"):
-    problems.append("the mainnet YED attestor set (MainParams attestorSetId) is unset")
 
 if other_path:
     with open(other_path, encoding="utf-8") as fh:
         theirs = json.load(fh)
-    names = {
-        "vault_activation_height": "UPGRADE_VAULT activation height",
-        "pq_falcon_height": "pqFalconHeight",
-        "vault_min_set_maturity": "nVaultMinSetMaturity",
-    }
-    for net in ("main", "test", "regtest"):
-        for field, label in names.items():
-            left = mine.get(net, {}).get(field)
-            right = theirs.get(net, {}).get(field)
-            if left != right:
-                problems.append("divergent %s %s: %s != %s" % (net, label, show(left), show(right)))
+    for diff in vp.compare(mine, theirs):
+        problems.append("divergent " + diff)
 
 for problem in problems:
     print("problem: " + problem)

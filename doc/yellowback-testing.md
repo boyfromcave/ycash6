@@ -39,12 +39,14 @@ Checks that enforce it:
 - `qa/yellowback-audit.sh`'s **golden-separate-commit** check (report-only for one release cycle, then blocking): over the
   branch's commits (`YB_GOLDEN_BASE..HEAD`, default the merge base with `origin/upgrade/vault`), a commit that touches
   either golden file must touch nothing under `src/yellowback/` and must not change `yellowback_model.py`.
-- The CI step **Cross-line vectors, overlay trees and Vault chain parameters** (and ycash-dd's audit leg of the
-  same check) compares the golden, the vault vectors, the arithmetic cases, the model and `SERIALISATION.md`
-  across `ycash-dd` and `ycash6`, and every git-tracked file under `src/vault` and `src/yellowback`. A file
-  under those trees may differ only when `qa/yellowback-cross-line-allow.txt` pins both sha256 hashes (the
-  reviewed 6.20.0 shims). Editing a pinned file, or letting any other file in those trees diverge, fails
-  until both lines update the allow-list together.
+- The CI step **Cross-line identity (qa/yellowback-cross-line.manifest)** (and ycash-dd's audit leg of the
+  same check) runs `qa/yellowback-cross-line.py`. The manifest names the nine vector files, the qa golden
+  and model sources, `src/pqkey.{h,cpp}`, `doc/yellowback-spec.md`, and the trees `src/crypto/pq`,
+  `src/vault` and `src/yellowback`. A file under those trees may differ only when the manifest pins both
+  sha256 hashes (the 11 reviewed 6.20.0 shims). Editing a pinned file fails until both lines update the
+  manifest together. `qa/yellowback-cross-line-trees.py` still checks the two overlay trees against
+  `qa/yellowback-cross-line-allow.txt` with the same pins.
+  Locally: `python3 qa/yellowback-cross-line.py --this-line y6 --other-dir ../ycash-dd --other-rev upgrade/vault`.
 
 The state hash lives in two places with distinct roles: the C++ `GOLDEN_HASH` (the reviewer-recomputed pin) and the
 file's `stateHash` (the artifact). The Python tests read the file; they keep no third copy.
