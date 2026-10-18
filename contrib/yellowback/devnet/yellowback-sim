@@ -503,6 +503,15 @@ class Liquidator(Persona):
 
     def act(self, tip):
         self.release_matured(tip)
+        # U-23: vault_release is what turns CLAIMING into CLAIMED, claimDelay blocks after the
+        # claim. A wait=true mint, claim or notice holds this thread until its carrier confirms
+        # or -yellowbackcarriertimeout (600s). The 2026-10-18 nightly lost the attestor preset
+        # that way (ycash6 run 39108579496): claim d68ceee167 confirmed near height 250, the next
+        # carrier was broadcast two seconds later, and this thread never came back, so the vault
+        # was still CLAIMING when the 114-block budget ran out. Hawkeye's D-3 drill on the same
+        # ycashd waits for the release before it starts the next act. Do that here.
+        if self.claims:
+            return
         if not self.inventory_tried:
             self.inventory_tried = True
             result = self.mint(self.inventory_cents, CLASS_C[1])      # the longest lock: inventory, not a bet
@@ -545,6 +554,8 @@ class Liquidator(Persona):
                 self.tally.note(self.name, "vault %s is claimable but no bundle can be built yet" % vault[:16])
                 continue
             self.claim(row)
+            if self.claims:
+                return                                 # release this one before the next wait=true
         # the emergency path: a notice on any foreign vault under the emergency ratio
         for row in active:
             vault = row["txid"]
