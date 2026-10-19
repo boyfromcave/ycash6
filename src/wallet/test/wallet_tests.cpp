@@ -6,12 +6,16 @@
 
 #include "wallet/wallet.h"
 
+#include <map>
+#include <random>
 #include <set>
 #include <stdint.h>
 #include <utility>
 #include <vector>
 
+#include "wallet/db.h"
 #include "wallet/test/wallet_test_fixture.h"
+#include "wallet/walletdb.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -330,6 +334,69 @@ BOOST_AUTO_TEST_CASE(coin_selection_tests)
         }
     }
     empty_wallet();
+}
+
+// A sound wallet file whose free pages hold the bytes of overwritten and erased records. An
+// aggressive salvage of it reports DB_VERIFY_BAD and emits stale copies; Recover() (-salvagewallet)
+// must still succeed and write back exactly the live records.
+BOOST_AUTO_TEST_CASE(salvage_sound_file_with_free_pages)
+{
+    typedef std::map<std::vector<unsigned char>, std::vector<unsigned char> > Records;
+    bool found = false;
+    for (int seed = 1; seed <= 40 && !found; seed++) {
+        fs::path dir = pathTemp / strprintf("salvage%d", seed);
+        fs::create_directories(dir);
+        CDBEnv env;
+        BOOST_REQUIRE(env.Open(dir));
+        Records live;
+        {
+            std::mt19937 rng(seed);
+            Db db(env.dbenv, 0);
+            BOOST_REQUIRE_EQUAL(db.open(NULL, "w.dat", "main", DB_BTREE, DB_CREATE, 0), 0);
+            for (int i = 0; i < 2000; i++) {
+                std::string k = "k" + std::to_string(rng() % 300);
+                std::vector<unsigned char> key(k.begin(), k.end()), value(rng() % 3000 + 1);
+                for (auto& c : value) c = rng() & 0xff;
+                Dbt datKey(key.data(), key.size()), datValue(value.data(), value.size());
+                if (rng() % 4 == 0) {
+                    db.del(NULL, &datKey, 0);
+                    live.erase(key);
+                } else {
+                    BOOST_REQUIRE_EQUAL(db.put(NULL, &datKey, &datValue, 0), 0);
+                    live[key] = value;
+                }
+            }
+            db.close(0);
+        }
+        env.CheckpointLSN("w.dat");
+        {
+            Db db(env.dbenv, 0);
+            BOOST_REQUIRE_EQUAL(db.verify("w.dat", NULL, NULL, 0), 0);
+        }
+        std::vector<CDBEnv::KeyValPair> aggressive;
+        if (env.Salvage("w.dat", true, aggressive))
+            continue;   // this seed left nothing the aggressive pass rejects
+        found = true;
+
+        BOOST_CHECK(CWalletDB::Recover(env, "w.dat"));
+        Records recovered;
+        Db db(env.dbenv, 0);
+        BOOST_REQUIRE_EQUAL(db.open(NULL, "w.dat", "main", DB_BTREE, DB_RDONLY, 0), 0);
+        Dbc* pcursor;
+        BOOST_REQUIRE_EQUAL(db.cursor(NULL, &pcursor, 0), 0);
+        Dbt datKey, datValue;
+        while (pcursor->get(&datKey, &datValue, DB_NEXT) == 0) {
+            unsigned char* k = (unsigned char*)datKey.get_data();
+            unsigned char* v = (unsigned char*)datValue.get_data();
+            recovered[std::vector<unsigned char>(k, k + datKey.get_size())] =
+                std::vector<unsigned char>(v, v + datValue.get_size());
+        }
+        pcursor->close();
+        db.close(0);
+        BOOST_CHECK_EQUAL(recovered.size(), live.size());
+        BOOST_CHECK(recovered == live);
+    }
+    BOOST_REQUIRE(found);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
