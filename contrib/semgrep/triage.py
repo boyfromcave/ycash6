@@ -11,6 +11,7 @@
 #   sync     findings.json -> at most one PR per bucket, on the bot-owned branch semgrep/<bucket>:
 #            opted-in autofixes for that bucket's findings plus its ledger contrib/semgrep/findings/<bucket>.*
 #            (first-seen date and SLA due date per finding). An empty bucket closes its PR.
+#   preview  what sync would write (PR title, body, ledger) into files, without git or GitHub.
 #
 # Standard library only, so it runs in the semgrep image, on a runner and on a laptop alike.
 
@@ -276,6 +277,43 @@ def pr_body(bucket, rows, sla, now, repo, sha, applied, run_url, human):
     return text[:PR_BODY_LIMIT]
 
 
+def pr_title(bucket, rows, sla, overdue):
+    if not rows:
+        return "semgrep: no %s findings remain (ledger cleanup)" % bucket
+    return "semgrep: %d %s finding%s, SLA %dd (due %s)%s" % (
+        len(rows), bucket, "" if len(rows) == 1 else "s", sla, rows[0]["due"], " OVERDUE" if overdue else "")
+
+
+def preview(args):
+    """What sync would put in each bucket PR, written to files: no git, no GitHub."""
+    cfg = load_config()
+    findings = load_json(args.findings)
+    now = today()
+    os.makedirs(args.out, exist_ok=True)
+    for bucket in BUCKETS:
+        sla = cfg["buckets"][bucket]["sla_days"]
+        rows = [f for f in findings if f["bucket"] == bucket]
+        if not rows:
+            print("%s: no findings, no PR" % bucket)
+            continue
+        ledger = load_json(os.path.join(LEDGER_DIR, bucket + ".json"), {"findings": []})
+        first_seen = {f["fingerprint"]: f["first_seen"] for f in ledger["findings"]}
+        for f in rows:
+            f["first_seen"] = first_seen.get(f["fingerprint"], now.isoformat())
+            f["due"] = (datetime.date.fromisoformat(f["first_seen"]) + datetime.timedelta(days=sla)).isoformat()
+        rows.sort(key=lambda f: (f["due"], f["path"], f["line"]))
+        overdue = any(f["due"] < now.isoformat() for f in rows)
+        labels = cfg["pr_labels"] + [cfg["buckets"][bucket]["label"]] + ([cfg["overdue_label"]] if overdue else [])
+        with open(os.path.join(args.out, bucket + "-pr.md"), "w", encoding="utf-8") as fh:
+            fh.write("<!-- PR title: %s -->\n<!-- branch: %s%s -> %s; labels: %s -->\n\n" % (
+                pr_title(bucket, rows, sla, overdue), cfg["branch_prefix"], bucket, cfg["base_branch"], ", ".join(labels)))
+            fh.write(pr_body(bucket, rows, sla, now, args.repo, args.sha, 0, "", False) + "\n")
+        with open(os.path.join(args.out, bucket + "-ledger.md"), "w", encoding="utf-8") as fh:
+            fh.write(ledger_markdown(bucket, rows, sla, now))
+        print("%s: %d findings -> %s-pr.md, %s-ledger.md" % (bucket, len(rows), bucket, bucket))
+    return 0
+
+
 def patch_id(a, b):
     diff = run(["git", "diff", a, b])
     return run(["git", "patch-id", "--stable"], input=diff + "\n").split(" ")[0] if diff else ""
@@ -379,11 +417,7 @@ def sync(args):
             print("%s: PR closed by a person and nothing changed since; reopens when the findings change" % bucket)
             continue
         overdue = any(f["due"] < now.isoformat() for f in rows)
-        if rows:
-            title = "semgrep: %d %s finding%s, SLA %dd (due %s)%s" % (
-                len(rows), bucket, "" if len(rows) == 1 else "s", sla, rows[0]["due"], " OVERDUE" if overdue else "")
-        else:
-            title = "semgrep: no %s findings remain (ledger cleanup)" % bucket
+        title = pr_title(bucket, rows, sla, overdue)
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
             fh.write(pr_body(bucket, rows, sla, now, args.repo, sha, applied, args.run_url, human))
             body = fh.name
@@ -416,8 +450,13 @@ def main():
     s.add_argument("--repo", required=True, help="owner/name")
     s.add_argument("--run-url", default="")
     s.add_argument("--dry-run", action="store_true")
+    v = sub.add_parser("preview", help="write what sync would put in each bucket PR, without git or GitHub")
+    v.add_argument("--findings", required=True)
+    v.add_argument("--out", required=True)
+    v.add_argument("--repo", required=True, help="owner/name, for the links")
+    v.add_argument("--sha", required=True, help="the commit that was scanned, for the links")
     args = ap.parse_args()
-    return triage(args) if args.cmd == "triage" else sync(args)
+    return {"triage": triage, "sync": sync, "preview": preview}[args.cmd](args)
 
 
 if __name__ == "__main__":
