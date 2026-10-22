@@ -5,15 +5,19 @@
 #
 # Semgrep triage and severity-grouped PRs (contrib/semgrep/README.md).
 #
-#   triage   semgrep --json output -> findings.json + summary.md, one severity bucket per finding
-#            (critical/high/medium/low), accepted findings dropped; --enforce exits 1 when a bucket
-#            named in config.json "fail_on" is non-empty.
+#   triage   semgrep --json output -> findings.json + summary.md + results.sarif, one severity bucket
+#            per finding (critical/high/medium/low), accepted findings dropped; --enforce exits 1 when a
+#            bucket named in config.json "fail_on" is non-empty.
 #   sync     findings.json -> at most one PR per bucket, on the bot-owned branch semgrep/<bucket>:
 #            opted-in autofixes for that bucket's findings plus its ledger contrib/semgrep/findings/<bucket>.*
 #            (first-seen date and SLA due date per finding). An empty bucket closes its PR.
 #   preview  what sync would write (PR title, body, ledger) into files, without git or GitHub.
 #
-# Standard library only, so it runs in the semgrep image, on a runner and on a laptop alike.
+# Nothing this writes quotes a rule's own text (message, description, help): a finding names its rule
+# and links to the rule's source at the pinned commit. The Semgrep Rules License allows use for one's
+# own purposes but not redistribution, and these files end up public (PRs, artifacts, code scanning).
+#
+# Standard library only, so it runs on a runner and on a laptop alike.
 
 import argparse
 import datetime
@@ -58,14 +62,47 @@ def matches(path, globs):
     return any(fnmatch.fnmatch(path, g) for g in globs)
 
 
-def rule_id(check_id, rule_roots):
-    """Strip the on-disk location semgrep prefixes to every check_id."""
-    for root in rule_roots:
-        for form in (root, os.path.abspath(root)):
-            prefix = form.strip("/").replace("/", ".") + "."
-            if check_id.startswith(prefix):
-                return check_id[len(prefix):]
-    return check_id
+class RuleSources:
+    """Rule ids and source links. Semgrep names a rule <dotted directory of its file>.<id>, with the
+    directory as given on the command line; that prefix is replaced by the source's id_prefix, and each
+    rule links to its file and line at the source's pinned commit (or, for local rules, at --sha)."""
+
+    def __init__(self, cfg, roots, repo, sha):
+        # roots: source name -> checkout directory (from scan.py); the local rules live in this repo.
+        self.sources = []  # (dotted prefixes, id_prefix, checkout dir, blob url base)
+        for src in cfg["rule_sources"]:
+            if src["name"] in roots:
+                base = "%s/blob/%s/" % (src["repo"].rstrip("/").removesuffix(".git"), src["commit"])
+                self.sources.append((roots[src["name"]], src["id_prefix"], base))
+        local = "https://github.com/%s/blob/%s/" % (repo, sha) if repo else ""
+        self.sources.append((cfg["local_rules"], "", local + cfg["local_rules"] + "/" if local else ""))
+        self.links = {}
+        for root, id_prefix, base in self.sources:
+            for d, _, files in os.walk(root):
+                for name in sorted(files):
+                    if not name.endswith((".yaml", ".yml")):
+                        continue
+                    rel = os.path.relpath(os.path.join(d, name), root)
+                    reldir = os.path.dirname(rel).replace(os.sep, ".")
+                    with open(os.path.join(d, name), encoding="utf-8", errors="replace") as fh:
+                        for n, text in enumerate(fh, 1):
+                            stripped = text.strip()
+                            if stripped.startswith("- id:"):
+                                rid = stripped[5:].strip().strip("'\"")
+                                full = id_prefix + (reldir + "." if reldir else "") + rid
+                                if base:
+                                    self.links.setdefault(full, "%s%s#L%d" % (base, rel.replace(os.sep, "/"), n))
+
+    def rule_id(self, check_id):
+        for root, id_prefix, _ in self.sources:
+            for form in (root, os.path.abspath(root)):
+                prefix = form.strip("/").replace("/", ".") + "."
+                if check_id.startswith(prefix):
+                    return id_prefix + check_id[len(prefix):]
+        return check_id
+
+    def link(self, rid):
+        return self.links.get(rid, "")
 
 
 def bucket_for(severity, meta, path, cfg):
@@ -74,7 +111,7 @@ def bucket_for(severity, meta, path, cfg):
     rank = severity (CRITICAL 3, ERROR/HIGH 2, WARNING/MEDIUM 1, INFO/LOW 0); an ERROR rule with HIGH
     impact and at least MEDIUM likelihood and confidence is critical; a LOW-confidence (audit-grade)
     rule drops one rank, and so does code that never ships in a release (non_production_paths). A local
-    rule may pin its bucket with metadata.bucket.
+    rule may pin its bucket with metadata.bucket; config.json bucket_overrides apply after this.
     """
     if meta.get("bucket") in BUCKETS:
         return meta["bucket"]
@@ -104,10 +141,10 @@ def triage(args):
     cfg = load_config()
     results = load_json(args.results)
     accepted = load_json(os.path.join(HERE, "accepted.json"), {"findings": {}, "rule_paths": []})
-    roots = [r for r in (args.rules_root, cfg["local_rules"]) if r]
-    findings, dropped, seen = [], {"category": 0, "excluded": 0, "accepted": 0}, {}
+    sources = RuleSources(cfg, dict(r.split("=", 1) for r in args.rules_root or []), args.repo, args.sha)
+    findings, audit, dropped, seen = [], [], {"category": 0, "excluded": 0, "accepted": 0}, {}
     for r in sorted(results["results"], key=lambda r: (r["path"], r["start"]["line"], r["check_id"])):
-        rid = rule_id(r["check_id"], roots)
+        rid = sources.rule_id(r["check_id"])
         meta = r["extra"].get("metadata", {})
         path = r["path"]
         if rid in cfg["exclude_rules"]:
@@ -126,24 +163,34 @@ def triage(args):
                 fnmatch.fnmatch(rid, a["rule"]) and matches(path, a["paths"]) for a in accepted["rule_paths"]):
             dropped["accepted"] += 1
             continue
+        bucket = bucket_for(r["extra"].get("severity", "INFO"), meta, path, cfg)
+        for o in cfg.get("bucket_overrides", []):
+            if fnmatch.fnmatch(rid, o["rule"]) and matches(path, o["paths"]):
+                bucket = o["bucket"]
         f = {
             "fingerprint": fingerprint,
-            "bucket": bucket_for(r["extra"].get("severity", "INFO"), meta, path, cfg),
+            "bucket": bucket,
             "rule": rid,
+            "rule_url": sources.link(rid),
             "severity": r["extra"].get("severity"),
             "path": path,
             "line": r["start"]["line"],
             "end_line": r["end"]["line"],
-            "message": " ".join(r["extra"].get("message", "").split()),
             "cwe": meta.get("cwe", []),
-            "references": meta.get("references", [])[:3],
         }
         # Autofix only rules a reviewer opted in (config.json autofix_rules), never in consensus or vendored
         # code: a pack's fix text is generic (it can add an import it does not write, or misorder arguments).
         if (r["extra"].get("fix") is not None and any(fnmatch.fnmatch(rid, g) for g in cfg["autofix_rules"])
                 and not matches(path, cfg["autofix_never_paths"])):
             f["fix"] = {"start": r["start"]["offset"], "end": r["end"]["offset"], "text": r["extra"]["fix"]}
-        findings.append(f)
+        # Audit-grade rules (config.json audit_rules) are leads for a reviewer, not defects: they go to
+        # audit.md/audit.json for manual review and never to a bucket, a PR, code scanning or fail_on.
+        if any(fnmatch.fnmatch(rid, g) for g in cfg.get("audit_rules", {})):
+            f.pop("bucket")
+            f.pop("fix", None)
+            audit.append(f)
+        else:
+            findings.append(f)
 
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "findings.json"), "w", encoding="utf-8") as fh:
@@ -154,25 +201,86 @@ def triage(args):
     lines += ["| %s | %d | %d days |" % (b, counts[b], cfg["buckets"][b]["sla_days"]) for b in BUCKETS]
     lines += ["", "Dropped: %(category)d outside the scanned categories, %(excluded)d excluded rules, "
               "%(accepted)d accepted (contrib/semgrep/accepted.json)." % dropped,
+              "Audit leads (config.json audit_rules; audit.md, no PR): %d." % len(audit),
               "Scan errors (files semgrep could not fully parse): %d." % len(results.get("errors", [])), ""]
     for b in BUCKETS:
         rows = [f for f in findings if f["bucket"] == b]
         if rows:
             lines += ["<details><summary>%s (%d)</summary>" % (b, len(rows)), "",
                       "| Rule | Location | Fingerprint |", "|---|---|---|"]
-            lines += ["| `%s` | `%s:%d` | `%s` |" % (f["rule"], f["path"], f["line"], f["fingerprint"])
+            lines += ["| %s | `%s:%d` | `%s` |" % (rule_cell(f), f["path"], f["line"], f["fingerprint"])
                       for f in rows[:PR_TABLE_ROWS]]
             if len(rows) > PR_TABLE_ROWS:
                 lines.append("| ... %d more in findings.json | | |" % (len(rows) - PR_TABLE_ROWS))
             lines += ["", "</details>", ""]
     with open(os.path.join(args.out, "summary.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
+    with open(os.path.join(args.out, "results.sarif"), "w", encoding="utf-8") as fh:
+        json.dump(sarif(findings, results), fh, indent=1)
+    with open(os.path.join(args.out, "audit.json"), "w", encoding="utf-8") as fh:
+        json.dump(audit, fh, indent=1)
+    by_rule = {}
+    for f in audit:
+        by_rule.setdefault(f["rule"], []).append(f)
+    alines = ["# Semgrep audit leads", "",
+              "Rules in config.json `audit_rules` flag code worth a reviewer's look, not defects; they have no",
+              "SLA and open no PR. %d leads from %d rules, most first." % (len(audit), len(by_rule)), "",
+              "| Rule | Leads | Top paths |", "|---|---:|---|"]
+    for rid, rows in sorted(by_rule.items(), key=lambda kv: -len(kv[1])):
+        paths = {}
+        for f in rows:
+            paths[f["path"]] = paths.get(f["path"], 0) + 1
+        top = ", ".join("`%s` (%d)" % kv for kv in sorted(paths.items(), key=lambda kv: -kv[1])[:3])
+        alines.append("| %s | %d | %s |" % (rule_cell(rows[0]), len(rows), top))
+    with open(os.path.join(args.out, "audit.md"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(alines) + "\n")
     print(" ".join("%s=%d" % (b, counts[b]) for b in BUCKETS))
     failing = [b for b in cfg["fail_on"] if counts[b]]
     if args.enforce and failing:
         print("semgrep: %s findings (config.json fail_on)" % "/".join(failing), file=sys.stderr)
         return 1
     return 0
+
+
+def rule_cell(f):
+    return "[`%s`](%s)" % (f["rule"], f["rule_url"]) if f.get("rule_url") else "`%s`" % f["rule"]
+
+
+# Code scanning's own severity scale (GitHub reads properties.security-severity), one value per bucket.
+SARIF_SEVERITY = {"critical": ("error", "9.5"), "high": ("error", "8.0"), "medium": ("warning", "5.5"),
+                  "low": ("note", "2.0")}
+
+
+def sarif(findings, results):
+    """SARIF 2.1.0 for code scanning, from the triaged findings: rule ids, links, CWE tags, buckets."""
+    rules, order = {}, []
+    for f in findings:
+        if f["rule"] not in rules:
+            level, sev = SARIF_SEVERITY[f["bucket"]]
+            rule = {"id": f["rule"], "name": f["rule"], "shortDescription": {"text": f["rule"]},
+                    "defaultConfiguration": {"level": level},
+                    "properties": {"tags": ["security"] + list(f["cwe"]), "security-severity": sev}}
+            if f.get("rule_url"):
+                rule["helpUri"] = f["rule_url"]
+                rule["fullDescription"] = {"text": "See the rule source: " + f["rule_url"]}
+                rule["help"] = {"text": "Rule source: " + f["rule_url"],
+                                "markdown": "Rule source: [%s](%s)" % (f["rule"], f["rule_url"])}
+            rules[f["rule"]] = rule
+            order.append(f["rule"])
+    out = []
+    for f in findings:
+        level, _ = SARIF_SEVERITY[f["bucket"]]
+        out.append({"ruleId": f["rule"], "ruleIndex": order.index(f["rule"]), "level": level,
+                    "message": {"text": "%s (%s bucket). See the rule source for details." % (f["rule"], f["bucket"])},
+                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": f["path"], "uriBaseId": "%SRCROOT%"},
+                                                        "region": {"startLine": f["line"], "endLine": f["end_line"]}}}],
+                    "partialFingerprints": {"ycashSemgrep/v1": f["fingerprint"]}})
+    version = results.get("version", "")
+    return {"$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0",
+            "runs": [{"tool": {"driver": {"name": "Semgrep Community Edition", "semanticVersion": version,
+                                          "informationUri": "https://github.com/semgrep/semgrep",
+                                          "rules": [rules[r] for r in order]}},
+                      "results": out}]}
 
 
 # ---------------------------------------------------------------------------------------------- sync
@@ -244,8 +352,8 @@ def ledger_markdown(bucket, rows, sla, now):
            "| Status | Due | First seen | Rule | Location | Fingerprint |", "|---|---|---|---|---|---|"]
     for f in rows:
         status = "OVERDUE" if f["due"] < now.isoformat() else "open"
-        out.append("| %s | %s | %s | `%s` | `%s:%d` | `%s` |" % (
-            status, f["due"], f["first_seen"], f["rule"], f["path"], f["line"], f["fingerprint"]))
+        out.append("| %s | %s | %s | %s | `%s:%d` | `%s` |" % (
+            status, f["due"], f["first_seen"], rule_cell(f), f["path"], f["line"], f["fingerprint"]))
     return "\n".join(out) + "\n"
 
 
@@ -263,12 +371,13 @@ def pr_body(bucket, rows, sla, now, repo, sha, applied, run_url, human):
     if human:
         body += ["> Commits by people are on this branch, so the workflow only refreshes the ledger here "
                  "and never force-pushes or closes it.", ""]
-    body += ["| Status | Due | Rule | Location | Message |", "|---|---|---|---|---|"]
+    body += ["Each rule links to its source, which explains the issue and the fix.", "",
+             "| Status | Due | Rule | Location | CWE |", "|---|---|---|---|---|"]
     for f in rows[:PR_TABLE_ROWS]:
-        msg = f["message"].replace("|", "\\|")
-        body.append("| %s | %s | `%s` | [`%s:%d`](%s) | %s |" % (
-            "**OVERDUE**" if f in overdue else "open", f["due"], f["rule"], f["path"], f["line"],
-            blob_link(repo, sha, f), msg[:200] + ("..." if len(msg) > 200 else "")))
+        cwe = ", ".join(c.split(":")[0] for c in f.get("cwe", []))
+        body.append("| %s | %s | %s | [`%s:%d`](%s) | %s |" % (
+            "**OVERDUE**" if f in overdue else "open", f["due"], rule_cell(f), f["path"], f["line"],
+            blob_link(repo, sha, f), cwe))
     if len(rows) > PR_TABLE_ROWS:
         body.append("\n%d more in the ledger file." % (len(rows) - PR_TABLE_ROWS))
     if run_url:
@@ -441,7 +550,10 @@ def main():
     t = sub.add_parser("triage", help="bucket semgrep --json results")
     t.add_argument("--results", required=True)
     t.add_argument("--out", required=True)
-    t.add_argument("--rules-root", help="where the semgrep-rules checkout lives (stripped from rule ids)")
+    t.add_argument("--rules-root", action="append", metavar="NAME=DIR",
+                   help="where config.json rule source NAME is checked out (repeatable; from scan.py)")
+    t.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""), help="owner/name, for local rule links")
+    t.add_argument("--sha", default=os.environ.get("GITHUB_SHA", "HEAD"), help="commit, for local rule links")
     t.add_argument("--baseline", help="the baseline ref of a diff-aware scan, for the summary heading")
     t.add_argument("--enforce", action="store_true", help="exit 1 when a fail_on bucket is non-empty")
     s = sub.add_parser("sync", help="open, update or close one PR per bucket")

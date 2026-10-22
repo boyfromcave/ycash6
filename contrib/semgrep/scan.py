@@ -13,8 +13,9 @@
                   under the cache from contrib/semgrep/requirements.txt (hash-locked, CPython 3.12)
 
 Semgrep Community Edition only: the LGPL-2.1 `semgrep` package from PyPI, no login, no registry, no
-Pro engine, --metrics=off. The rules are semgrep/semgrep-rules at config.json "rules_commit", fetched
-once into $SEMGREP_RULES_CACHE (default ~/.cache/ycash-semgrep).
+Pro engine, --metrics=off. The rules are config.json "rule_sources" (each a git repository at a pinned
+commit, never copied into this repository), fetched once into $SEMGREP_RULES_CACHE (default
+~/.cache/ycash-semgrep), plus this repository's own config.json "local_rules".
 """
 
 import argparse
@@ -49,14 +50,14 @@ def semgrep_binary(cfg, cache, install):
     return os.path.join(venv, "bin", "semgrep")
 
 
-def rules_checkout(cfg, cache):
-    rules = os.path.join(cache, "semgrep-rules-" + cfg["rules_commit"])
+def rules_checkout(src, cache):
+    rules = os.path.join(cache, "%s-%s" % (src["name"], src["commit"]))
     if not os.path.isdir(rules):
-        print("scan.py: fetching %s at %s" % (cfg["rules_repo"], cfg["rules_commit"]), flush=True)
+        print("scan.py: fetching %s at %s" % (src["repo"], src["commit"]), flush=True)
         os.makedirs(cache, exist_ok=True)
         tmp = tempfile.mkdtemp(dir=cache)
         run(["git", "-C", tmp, "init", "-q"])
-        run(["git", "-C", tmp, "fetch", "-q", "--depth", "1", cfg["rules_repo"], cfg["rules_commit"]])
+        run(["git", "-C", tmp, "fetch", "-q", "--depth", "1", src["repo"], src["commit"]])
         run(["git", "-C", tmp, "checkout", "-q", "FETCH_HEAD"])
         shutil.rmtree(os.path.join(tmp, ".git"))
         os.rename(tmp, rules)
@@ -77,15 +78,14 @@ def main():
         cfg = json.load(f)
     cache = os.environ.get("SEMGREP_RULES_CACHE") or os.path.expanduser("~/.cache/ycash-semgrep")
     semgrep = semgrep_binary(cfg, cache, args.install)
-    rules = rules_checkout(cfg, cache)
+    roots = {src["name"]: rules_checkout(src, cache) for src in cfg["rule_sources"]}
 
     os.makedirs(args.out, exist_ok=True)
     cmd = [semgrep, "scan", "--metrics=off", "--disable-version-check", "--oss-only",
            "--jobs", str(os.cpu_count() or 4), "--timeout", "30",
-           "--json", "--output", os.path.join(args.out, "results.json"),
-           "--sarif-output=" + os.path.join(args.out, "results.sarif")]
-    for p in cfg["rule_paths"]:
-        cmd += ["--config", os.path.join(rules, p)]
+           "--json", "--output", os.path.join(args.out, "results.json")]
+    for src in cfg["rule_sources"]:
+        cmd += [a for p in src["paths"] for a in ("--config", os.path.join(roots[src["name"]], p))]
     cmd += ["--config", cfg["local_rules"]]
     if args.baseline:
         base = subprocess.run(["git", "rev-parse", args.baseline], check=True, capture_output=True, text=True)
@@ -96,7 +96,8 @@ def main():
         sys.exit("scan.py: semgrep failed (%d)" % rc)
 
     triage = [sys.executable, os.path.join(HERE, "triage.py"), "triage", "--results",
-              os.path.join(args.out, "results.json"), "--out", args.out, "--rules-root", rules]
+              os.path.join(args.out, "results.json"), "--out", args.out]
+    triage += [a for name, root in roots.items() for a in ("--rules-root", "%s=%s" % (name, root))]
     if args.baseline:
         triage += ["--baseline", args.baseline]
     if args.enforce:

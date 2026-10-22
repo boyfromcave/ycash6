@@ -46,6 +46,27 @@ the PRs and `dry_run` to only print what it would do.
 | nightly 02:17 UTC | full, default branch | then `sync` |
 | `workflow_dispatch` | full, chosen ref | `sync` when the ref is the default branch |
 
+## Rule libraries
+
+`config.json` `rule_sources` lists the rule libraries, each fetched at a pinned commit at scan time and
+never copied into this repository, plus this repository's own `rules/`:
+
+| Source | License | Rule ids | Covers |
+|---|---|---|---|
+| [semgrep/semgrep-rules](https://github.com/semgrep/semgrep-rules) | Semgrep Rules License v1.0 (free; our own use only, no redistribution) | `c.…`, `python.…`, `generic.secrets.…` | C, Rust, Python, shell, Dockerfiles, secrets, GitHub Actions |
+| [trailofbits/semgrep-rules](https://github.com/trailofbits/semgrep-rules) | AGPL-3.0 | `trailofbits.…` | Python, shell, GitHub Actions, Rust panics |
+| [0xdea/semgrep-rules](https://github.com/0xdea/semgrep-rules) | MIT | `0xdea.…` | C/C++ memory, integer and unsafe-API bugs (node lines only) |
+| `contrib/semgrep/rules/` | this repository's | `ycash.…` | Ycash-specific checks |
+
+**Nothing this tooling writes quotes a rule's text.** PRs, ledgers, artifacts and the SARIF for code
+scanning name each rule and link to its source at the pinned commit; Semgrep's raw `results.json`, which
+does quote the rules, stays on the runner. That keeps the Semgrep rules within "our own use".
+
+**Audit leads.** Some rules are leads for a reviewer rather than defects (0xdea's "interesting API calls",
+"typos", every signed/unsigned mix …: thousands of hits). `config.json` `audit_rules` (rule → reason) sends
+them to `semgrep-out/audit.md` / `audit.json`, part of every run's artifact, instead of to a bucket: no
+SLA, no PR, no code scanning alert, never fails a check. Read it when hardening an area.
+
 ## Buckets and SLAs
 
 Only rules whose `metadata.category` is `security` count. Each finding gets one bucket:
@@ -60,7 +81,8 @@ Only rules whose `metadata.category` is `security` count. Each finding gets one 
 A LOW-confidence (audit-grade) rule drops one bucket, and so does code that never ships in a release
 (`non_production_paths`; in the node lines `qa/`, `src/test/`, `contrib/`, `zcutil/`, docs …; in
 librustzcash6 tests, benches, examples …). A local rule can pin its
-bucket with `metadata.bucket`. The SLA clock starts on the day a finding is first seen and is carried
+bucket with `metadata.bucket`, and `config.json` `bucket_overrides` (rule, paths, bucket, reason) set a
+bucket for a rule over paths, applied last. The SLA clock starts on the day a finding is first seen and is carried
 from run to run in the ledger.
 
 ## The bucket PRs
@@ -110,10 +132,10 @@ there); prefer `accepted.json`.
 
 ## Changing the policy
 
-- **Rules**: `rule_paths` are directories of [semgrep/semgrep-rules](https://github.com/semgrep/semgrep-rules)
-  at `rules_commit`. Moving the pin changes the findings; do it in its own PR and read the diff of
-  `semgrep-out/summary.md`. The rules are fetched at that commit, never copied in (their license is the
-  Semgrep Rules License). `exclude_rules` drops a rule repo-wide, with the reason as its value.
+- **Rules**: each `rule_sources` entry names a repository, a `commit` and the `paths` scanned in it.
+  Moving a pin changes the findings; do it in its own PR and read the diff of `semgrep-out/summary.md`.
+  `exclude_rules` drops a rule repo-wide and `audit_rules` moves it to the audit report, each with the
+  reason as its value.
 - **Semgrep**: `semgrep_version` here and `requirements.txt` (its header has the command) move together;
   `scan.py` refuses a semgrep of another version.
 - **What fails a PR**: `fail_on` (default `["critical"]`).

@@ -15,8 +15,8 @@ name: semgrep
 #                         (first seen, due date). Updated in place, closed when the bucket is empty.
 #
 # Semgrep Community Edition only: the LGPL-2.1 `semgrep` package from PyPI, hash-locked
-# (contrib/semgrep/requirements.txt), with semgrep/semgrep-rules fetched at config.json "rules_commit": no
-# registry, no login, no Pro engine, no metrics. Results go to the run's step summary and artifacts, and to
+# (contrib/semgrep/requirements.txt), with the rule libraries of config.json "rule_sources" (semgrep-rules,
+# Trail of Bits, 0xdea) fetched at pinned commits: no registry, no login, no Pro engine, no metrics. Results go to the run's step summary and artifacts, and to
 # GitHub code scanning (SARIF; free for public repositories). PRs opened with the default GITHUB_TOKEN do not start
 # other workflows; set the repository secret SEMGREP_PR_TOKEN (contents + pull requests: write) to have CI
 # run on them. GITHUB_TOKEN also needs "Allow GitHub Actions to create and approve pull requests".
@@ -87,7 +87,14 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: semgrep
-          path: semgrep-out/
+          # The triaged files only: semgrep's raw results.json quotes the rules' own text, which stays
+          # on the runner (contrib/semgrep/triage.py, top comment).
+          path: |
+            semgrep-out/findings.json
+            semgrep-out/summary.md
+            semgrep-out/results.sarif
+            semgrep-out/audit.md
+            semgrep-out/audit.json
           retention-days: 30
           if-no-files-found: ignore
 
