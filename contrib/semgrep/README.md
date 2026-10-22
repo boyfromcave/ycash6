@@ -25,6 +25,8 @@ are each repository's own.
 contrib/semgrep/scan.py                          # full scan -> semgrep-out/summary.md, findings.json
 contrib/semgrep/scan.py --baseline upgrade/vault # only what this branch adds, as a PR would see it
 contrib/semgrep/scan.py --baseline upgrade/vault --enforce   # and fail like the PR check does
+contrib/semgrep/triage.py preview --findings semgrep-out/findings.json --out semgrep-out/preview \
+  --repo boyfromcave/ycash-dd --sha HEAD          # the bucket PRs' titles, bodies and ledgers, as files
 ```
 
 It needs `semgrep` at exactly `config.json` `semgrep_version` on PATH (`pip install semgrep==1.179.0`), or
