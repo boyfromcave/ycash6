@@ -11,7 +11,7 @@ rules:
       include: ["src/script/script.h"]
     pattern-regex: '\bOP_[A-Z0-9_]+\s*=\s*0x[bB][b-fB-F]\b'
     message: >-
-      An opcode is defined at 0xbb-0xbf. Those bytes are DigiByte's Tapscript-only DigiDollar opcodes and
+      An opcode is defined at 0xbb-0xbf. Those bytes are DigiByte's Tapscript-only stablecoin opcodes and
       hit SCRIPT_ERR_BAD_OPCODE in Ycash's interpreter; vault-upgrade opcodes are allocated above
       OP_NOP10 (0xc0, 0xc1, ...) and gated on UPGRADE_VAULT (workspace CLAUDE.md rule 3, docs/mapping.md §2).
     severity: ERROR
