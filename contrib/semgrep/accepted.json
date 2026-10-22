@@ -1,0 +1,21 @@
+{
+  "_comment": "Accepted Semgrep findings (contrib/semgrep/README.md, 'Accepting a finding'). findings: fingerprint -> {rule, path, reason, by, date}. rule_paths: [{rule (glob), paths (globs), reason, by, date}]. Every entry needs a reason a reviewer can check.",
+  "findings": {},
+  "rule_paths": [
+    {
+      "rule": "yaml.github-actions.security.*",
+      "paths": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/ci-skip.yml",
+        ".github/workflows/ci-status.yml",
+        ".github/workflows/lints.yml",
+        ".github/workflows/audits.yml",
+        ".github/workflows/book.yml",
+        ".github/workflows/release-docker-hub.yml"
+      ],
+      "reason": "Upstream zcashd workflows kept byte-for-byte except a trigger/if scoping: they run only for upstream's master or only in zcash/* (release-docker-hub.yml), so their findings are upstream's. The same files and reason as .github/zizmor.yml.",
+      "by": "semgrep CI setup",
+      "date": "2026-10-22"
+    }
+  ]
+}
