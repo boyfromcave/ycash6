@@ -1,13 +1,17 @@
 # Semgrep scanning
 
-Static analysis with [Semgrep](https://semgrep.dev) on every push, every PR and nightly, with its
+Static analysis with [Semgrep Community Edition](https://github.com/semgrep/semgrep) (the free, LGPL-2.1
+CLI; no account, no Pro engine, nothing paid) on every push, every PR and nightly, with its
 findings grouped by severity into **at most four PRs**, one per bucket, each with its own SLA. The same
-files are in `ycash-dd` and `ycash6`, except `accepted.json`, which is each line's own.
+pattern is in `ycash-dd`, `ycash6` and `librustzcash6`: the workflow, `scan.py`, `triage.py` and
+`requirements.txt` are identical in all three; `config.json` (what to scan), `accepted.json` and `rules/`
+are each repository's own.
 
 | File | What it is |
 |---|---|
 | `.github/workflows/semgrep.yml` | the CI workflow (triggers below) |
-| `contrib/semgrep/scan.sh` | the scan, the same on a laptop and in CI |
+| `contrib/semgrep/scan.py` | the scan, the same on a laptop and in CI |
+| `contrib/semgrep/requirements.txt` | semgrep and its dependencies, hash-locked |
 | `contrib/semgrep/triage.py` | `triage` (bucket the results) and `sync` (the per-bucket PRs); stdlib Python |
 | `contrib/semgrep/config.json` | the pins and the policy: rule packs, buckets, SLAs, paths, what fails a PR |
 | `contrib/semgrep/accepted.json` | findings accepted with a reason (they leave the buckets) |
@@ -18,13 +22,13 @@ files are in `ycash-dd` and `ycash6`, except `accepted.json`, which is each line
 ## Running it
 
 ```bash
-contrib/semgrep/scan.sh                          # full scan -> semgrep-out/summary.md, findings.json
-contrib/semgrep/scan.sh --baseline upgrade/vault # only what this branch adds, as a PR would see it
-contrib/semgrep/scan.sh --baseline upgrade/vault --enforce   # and fail like the PR check does
+contrib/semgrep/scan.py                          # full scan -> semgrep-out/summary.md, findings.json
+contrib/semgrep/scan.py --baseline upgrade/vault # only what this branch adds, as a PR would see it
+contrib/semgrep/scan.py --baseline upgrade/vault --enforce   # and fail like the PR check does
 ```
 
-It needs `semgrep` at exactly `config.json` `semgrep_version` (`pip install semgrep==1.179.0`) or docker
-(it then runs the pinned image). The rules are fetched once into `~/.cache/ycash-semgrep`. Nothing goes
+It needs `semgrep` at exactly `config.json` `semgrep_version` on PATH (`pip install semgrep==1.179.0`), or
+`--install` to put it in a venv from the hash-locked `requirements.txt` (CPython 3.12, as CI does). The rules are fetched once into `~/.cache/ycash-semgrep`. Nothing goes
 to semgrep.dev: no registry, no login, `--metrics=off`. A full scan takes about 2–3 minutes.
 
 In CI the workflow can also be started by hand (Actions → semgrep → Run workflow), with `sync` to update
@@ -106,8 +110,8 @@ there); prefer `accepted.json`.
   at `rules_commit`. Moving the pin changes the findings; do it in its own PR and read the diff of
   `semgrep-out/summary.md`. The rules are fetched at that commit, never copied in (their license is the
   Semgrep Rules License). `exclude_rules` drops a rule repo-wide, with the reason as its value.
-- **Semgrep**: `semgrep_version` and `semgrep_image` (by digest) here, and the `container.image` of
-  `.github/workflows/semgrep.yml`, move together; `scan.sh` refuses a semgrep of another version.
+- **Semgrep**: `semgrep_version` here and `requirements.txt` (its header has the command) move together;
+  `scan.py` refuses a semgrep of another version.
 - **What fails a PR**: `fail_on` (default `["critical"]`).
 
 ## Repository settings
@@ -116,4 +120,7 @@ there); prefer `accepted.json`.
   create and approve pull requests*, and they do not start other workflows. To have CI run on the bucket
   PRs, add a fine-grained token as the secret `SEMGREP_PR_TOKEN` (this repository; contents and pull
   requests: write); the workflow prefers it.
-- Results also go to *Security → Code scanning* (category `semgrep`).
+- Results also go to *Security → Code scanning* (category `semgrep`). Code scanning is GitHub's place to
+  store and show the alerts of any scanner that writes SARIF; it is free for public repositories. Semgrep
+  finds, GitHub displays: inline PR annotations, alert history, dismissals. The bucket PRs and their SLA
+  ledger work without it.

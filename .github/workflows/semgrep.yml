@@ -14,9 +14,10 @@ name: semgrep
 #                         on the bot-owned branches semgrep/<bucket>: that bucket's autofixes and its ledger
 #                         (first seen, due date). Updated in place, closed when the bucket is empty.
 #
-# The scan runs in the semgrep image pinned by digest (config.json "semgrep_image" names the same one), with
-# semgrep/semgrep-rules fetched at config.json "rules_commit": no registry, no login, no metrics. Results go
-# to code scanning (SARIF) and to the run's artifacts. PRs opened with the default GITHUB_TOKEN do not start
+# Semgrep Community Edition only: the LGPL-2.1 `semgrep` package from PyPI, hash-locked
+# (contrib/semgrep/requirements.txt), with semgrep/semgrep-rules fetched at config.json "rules_commit": no
+# registry, no login, no Pro engine, no metrics. Results go to the run's step summary and artifacts, and to
+# GitHub code scanning (SARIF; free for public repositories). PRs opened with the default GITHUB_TOKEN do not start
 # other workflows; set the repository secret SEMGREP_PR_TOKEN (contents + pull requests: write) to have CI
 # run on them. GITHUB_TOKEN also needs "Allow GitHub Actions to create and approve pull requests".
 on:
@@ -48,8 +49,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-    container:
-      image: semgrep/semgrep:1.179.0@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
     outputs:
       full: ${{ steps.mode.outputs.full }}
     steps:
@@ -59,14 +58,12 @@ jobs:
           persist-credentials: false
       - name: Mode
         id: mode
-        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           baseline= enforce=
           if [ "$EVENT" = pull_request ]; then
             baseline=$PR_BASE enforce=--enforce
@@ -77,14 +74,13 @@ jobs:
           echo "enforce=$enforce" >> "$GITHUB_OUTPUT"
           if [ -z "$baseline" ]; then echo "full=true" >> "$GITHUB_OUTPUT"; else echo "full=false" >> "$GITHUB_OUTPUT"; fi
       - name: Scan
-        shell: bash
         env:
           BASELINE: ${{ steps.mode.outputs.baseline }}
           ENFORCE: ${{ steps.mode.outputs.enforce }}
           SEMGREP_RULES_CACHE: ${{ runner.temp }}/semgrep-rules
         run: |
           rc=0
-          contrib/semgrep/scan.sh ${BASELINE:+--baseline "$BASELINE"} $ENFORCE --out semgrep-out || rc=$?
+          python3 contrib/semgrep/scan.py --install ${BASELINE:+--baseline "$BASELINE"} $ENFORCE --out semgrep-out || rc=$?
           cat semgrep-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
           exit "$rc"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

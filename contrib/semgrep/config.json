@@ -1,7 +1,6 @@
 {
   "_comment": "Semgrep scan policy for this node line (contrib/semgrep/README.md). Identical in ycash-dd and ycash6.",
   "semgrep_version": "1.179.0",
-  "semgrep_image": "semgrep/semgrep:1.179.0@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b",
   "rules_repo": "https://github.com/semgrep/semgrep-rules",
   "rules_commit": "16b9e6d45f10649f6a531ec4838ed9924372c3bc",
   "rule_paths": [
