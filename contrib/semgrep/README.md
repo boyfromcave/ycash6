@@ -26,7 +26,7 @@ contrib/semgrep/scan.py                          # full scan -> semgrep-out/summ
 contrib/semgrep/scan.py --baseline upgrade/vault # only what this branch adds, as a PR would see it
 contrib/semgrep/scan.py --baseline upgrade/vault --enforce   # and fail like the PR check does
 contrib/semgrep/triage.py preview --findings semgrep-out/findings.json --out semgrep-out/preview \
-  --repo boyfromcave/ycash-dd --sha HEAD          # the bucket PRs' titles, bodies and ledgers, as files
+  --repo boyfromcave/<repo> --sha HEAD            # the bucket PRs' titles, bodies and ledgers, as files
 ```
 
 It needs `semgrep` at exactly `config.json` `semgrep_version` on PATH (`pip install semgrep==1.179.0`), or
@@ -57,8 +57,9 @@ Only rules whose `metadata.category` is `security` count. Each finding gets one 
 | medium | 90 days | `WARNING`/`MEDIUM` rules |
 | low | 180 days | `INFO`/`LOW` rules |
 
-A LOW-confidence (audit-grade) rule drops one bucket, and so does code that never ships in `ycashd`
-(`non_production_paths`: `qa/`, `src/test/`, `contrib/`, `zcutil/`, docs …). A local rule can pin its
+A LOW-confidence (audit-grade) rule drops one bucket, and so does code that never ships in a release
+(`non_production_paths`; in the node lines `qa/`, `src/test/`, `contrib/`, `zcutil/`, docs …; in
+librustzcash6 tests, benches, examples …). A local rule can pin its
 bucket with `metadata.bucket`. The SLA clock starts on the day a finding is first seen and is carried
 from run to run in the ledger.
 
@@ -71,8 +72,9 @@ and, once a finding is past due, `sla:overdue` (and `OVERDUE` in the title). Its
 - the ledger `contrib/semgrep/findings/<bucket>.md` / `.json`: every finding with rule, location,
   fingerprint, first seen and due date;
 - autofixes for that bucket's findings, **only** for rules listed in `config.json` `autofix_rules`
-  (empty by default) and never under `autofix_never_paths` (consensus, script, primitives, PoW,
-  `main.cpp`, the vendored post-quantum code). The packs' fix text is generic — it can call a module it
+  (empty by default) and never under `autofix_never_paths` (consensus and vendored code: in the node
+  lines script, primitives, PoW, `main.cpp`, the post-quantum code; in librustzcash6 the protocol,
+  transaction, proof and Equihash crates). The packs' fix text is generic — it can call a module it
   does not import or misorder arguments — so a rule is opted in only after its fix has been reviewed.
 
 Each run rebuilds the branch from the scanned commit and pushes only when the PR's change differs, so an

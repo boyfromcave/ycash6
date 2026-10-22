@@ -1,7 +1,7 @@
 name: semgrep
 
 # Semgrep static analysis, with one rolling PR per severity bucket (contrib/semgrep/README.md).
-# The same file in ycash-dd and ycash6.
+# The same file in ycash-dd, ycash6 and librustzcash6; what each scans is its contrib/semgrep/config.json.
 #
 #   pull_request          diff-aware scan against the PR's base: only findings the PR adds are reported,
 #                         and the job fails when one lands in a config.json "fail_on" bucket (critical).

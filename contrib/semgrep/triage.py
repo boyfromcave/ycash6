@@ -73,7 +73,7 @@ def bucket_for(severity, meta, path, cfg):
 
     rank = severity (CRITICAL 3, ERROR/HIGH 2, WARNING/MEDIUM 1, INFO/LOW 0); an ERROR rule with HIGH
     impact and at least MEDIUM likelihood and confidence is critical; a LOW-confidence (audit-grade)
-    rule drops one rank, and so does code that never ships in ycashd (non_production_paths). A local
+    rule drops one rank, and so does code that never ships in a release (non_production_paths). A local
     rule may pin its bucket with metadata.bucket.
     """
     if meta.get("bucket") in BUCKETS:
