@@ -176,7 +176,8 @@ def triage(args):
             "path": path,
             "line": r["start"]["line"],
             "end_line": r["end"]["line"],
-            "cwe": meta.get("cwe", []),
+            # Rules give cwe as a list or as one string; keep a list of unique entries.
+            "cwe": list(dict.fromkeys([meta["cwe"]] if isinstance(meta.get("cwe"), str) else meta.get("cwe", []))),
         }
         # Autofix only rules a reviewer opted in (config.json autofix_rules), never in consensus or vendored
         # code: a pack's fix text is generic (it can add an import it does not write, or misorder arguments).
@@ -259,7 +260,8 @@ def sarif(findings, results):
             level, sev = SARIF_SEVERITY[f["bucket"]]
             rule = {"id": f["rule"], "name": f["rule"], "shortDescription": {"text": f["rule"]},
                     "defaultConfiguration": {"level": level},
-                    "properties": {"tags": ["security"] + list(f["cwe"]), "security-severity": sev}}
+                    "properties": {"tags": list(dict.fromkeys(["security"] + f["cwe"])),
+                                   "security-severity": sev}}
             if f.get("rule_url"):
                 rule["helpUri"] = f["rule_url"]
                 rule["fullDescription"] = {"text": "See the rule source: " + f["rule_url"]}
