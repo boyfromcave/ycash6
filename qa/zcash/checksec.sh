@@ -6,6 +6,7 @@
 # Copyright (c) 2014-2020, Brian Davis
 # Copyright (c) 2013, Robin David
 # Copyright (c) 2009-2011, Tobias Klein
+# Copyright (c) 2026 The Ycash developers (Ycash modifications)
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
