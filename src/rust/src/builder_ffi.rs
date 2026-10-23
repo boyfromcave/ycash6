@@ -256,7 +256,7 @@ pub(crate) fn shielded_signature_digest(
     // it back and forward across the FFI with this change. We should similarly refactor
     // the Sapling code to do the same.
     let consensus_branch_id = BranchId::try_from(consensus_branch_id)
-        .expect("caller should provide a valid consensus branch ID");
+        .map_err(|e| format!("Invalid consensus branch ID: {}", e))?;
     let tx = Transaction::read(tx_bytes, consensus_branch_id)
         .map_err(|e| format!("Failed to parse transaction: {}", e))?;
     // This method should only be called with an in-progress transaction that contains no
