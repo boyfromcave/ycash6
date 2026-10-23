@@ -195,8 +195,9 @@ env:
   # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
   # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md). Since the fee merge: 26ae6b7, which adds the
   # generator's fees mode (--check-fees, rpcversion 8) and docs/plans/yellowback-quantum-fees-rpc-delta.md.
-  # 6ac627a records RED-5a/RED-5b in the plans the fees-line spec copy is generated from.
-  YB_WORKSPACE_COMMIT: 6ac627a6b730504e095236e8e78da4d66af29642
+  # 6ac627a records RED-5a/RED-5b in the plans the fees-line spec copy is generated from; 74e3ba2 (#10)
+  # adds the remaining W3-Y-3 and W3-N-4 plan text the spec copy now carries.
+  YB_WORKSPACE_COMMIT: 74e3ba2b48530265f393a26f08f5de68b604a065
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
