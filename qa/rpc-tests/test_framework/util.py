@@ -794,8 +794,30 @@ def nustr(branch_id):
 def nuparams(branch_id, height):
     return '-nuparams=%s:%d' % (nustr(branch_id), height)
 
-def tarfile_extractall(tarfile, path):
-    if sys.version_info >= (3, 11, 4):
-        tarfile.extractall(path=path, filter='data')
-    else:
-        tarfile.extractall(path=path)
+def tarfile_extractall(tgz, path):
+    """Extract the archive ``tgz`` under ``path`` without letting a member escape it.
+
+    Python 3.11.4+ (and the 3.8-3.10 security backports) have tarfile's ``data`` filter, which
+    refuses absolute names, ``..``, links that point outside ``path`` and device files. On an
+    interpreter without it, the same rules are checked here before anything is written."""
+    if hasattr(tarfile, 'data_filter'):
+        tgz.extractall(path=path, filter='data')
+        return
+    root = os.path.realpath(path)
+
+    def inside(name):
+        target = os.path.realpath(os.path.join(root, name))
+        return target == root or target.startswith(root + os.sep)
+
+    members = tgz.getmembers()
+    for m in members:
+        if os.path.isabs(m.name) or not inside(m.name):
+            raise ValueError("tar member %r escapes %s" % (m.name, path))
+        if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+            raise ValueError("tar member %r is not a file, directory or link" % m.name)
+        if m.issym() and (os.path.isabs(m.linkname) or
+                          not inside(os.path.join(os.path.dirname(m.name), m.linkname))):
+            raise ValueError("tar symlink %r -> %r escapes %s" % (m.name, m.linkname, path))
+        if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
+            raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
+    tgz.extractall(path=path, members=members)

@@ -63,6 +63,90 @@
       "reason": "(CAmount)(12.5 * COIN) is a constant expression copied from GetBlockSubsidy (src/main.cpp), exactly 1250000000 in IEEE-754; the issued-supply sum itself is arith_uint256 integer arithmetic.",
       "by": "secops CI setup",
       "date": "2026-10-23"
+    },
+    "70677cd782d38469": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "50b4fcf75281545f": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "7fc7767636c97c2e": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "3637855b69a9d83c": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bd7e5184822a1311": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "87dda12061daf6cb": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "7a0703c069db3226": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d3aa4d226926aa89": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "dbb0b38cd61406c0": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "Developer devnet harness (contrib/yellowback/devnet/README.md), run by hand on a throwaway regtest: the program is $YCASHD/$YCASH_CLI (default <repo>/src/ycashd, ycash-cli), named by the operator running it, and the rest of argv is fixed flags plus the harness's own datadir/ports. argv list, no shell; the environment is the operator's own.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "aef13e1600c62ce7": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "Developer devnet harness (contrib/yellowback/devnet/README.md), run by hand on a throwaway regtest: the program is $YCASHD/$YCASH_CLI (default <repo>/src/ycashd, ycash-cli), named by the operator running it, and the rest of argv is fixed flags plus the harness's own datadir/ports. argv list, no shell; the environment is the operator's own.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "4735d663633d1096": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/test_framework/pq.py",
+      "reason": "Functional-test helper (qa/rpc-tests): compiles the in-tree Falcon sources with $CC (shlex-split, default cc) into a sha256-named temp .so. $CC is the test runner's own toolchain choice, like any build; argv list, no shell, and the source paths are fixed tree files.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0188e2a81c669ead": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/yellowback_stratum.py",
+      "reason": "Functional test yellowback_stratum.py (qa/pull-tester/rpc-tests.py): argv is sys.executable + the in-tree contrib/yellowback/pool/check-coinbase script, ycash-cli beside $ZCASHD (the test runner's binary, default <repo>/src/ycashd) and the test's own tmpdir. argv list, no shell.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [

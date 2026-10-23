@@ -116,10 +116,10 @@ def generate_release_note(version, prev, clear):
         latest_tag = prev
     else:
         # fetches latest tags, so that latest_tag will be correct
-        subprocess.Popen(['git fetch -t'], shell=True, stdout=subprocess.PIPE).communicate()[0]
-        latest_tag = subprocess.Popen(['git describe --abbrev=0'], shell=True, stdout=subprocess.PIPE).communicate()[0].strip()
+        subprocess.Popen(['git', 'fetch', '-t'], stdout=subprocess.PIPE).communicate()[0]
+        latest_tag = subprocess.Popen(['git', 'describe', '--abbrev=0'], stdout=subprocess.PIPE).communicate()[0].decode('utf-8').strip()
     print("Previous release tag: ", latest_tag)
-    notes = subprocess.Popen(['git shortlog --no-merges {0}..HEAD'.format(latest_tag)], shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate()[0]
+    notes = subprocess.Popen(['git', 'shortlog', '--no-merges', '{0}..HEAD'.format(latest_tag)], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate()[0]
     lines = notes.decode("utf-8", "replace").split('\n')
     lines = [alias_authors_in_release_notes(line) for line in lines]
     temp_release_note = os.path.join(doc_dir, 'release-notes.md')

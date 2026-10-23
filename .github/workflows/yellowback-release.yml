@@ -240,7 +240,8 @@ jobs:
       - name: Build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
         if: matrix.kind == 'legacy'
         run: |
-          docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy .
+          docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy \
+            --build-arg BUILD_UID="$(id -u)" --build-arg BUILD_GID="$(id -g)" .
           mkdir -p legacy-out
           docker run --rm -v "$PWD/legacy-out:/out" ycash-legacy
           floor=$(objdump -T legacy-out/ycashd | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)

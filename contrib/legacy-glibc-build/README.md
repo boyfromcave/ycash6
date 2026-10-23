@@ -23,11 +23,15 @@ Rust-internal thin-LTO is used, not cross-language C++/Rust LTO.
 ## Recommended: Docker
 
 ```sh
-docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy .
+docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy \
+    --build-arg BUILD_UID="$(id -u)" --build-arg BUILD_GID="$(id -g)" .
+mkdir -p legacy-out
 docker run --rm -v "$PWD/legacy-out:/out" ycash-legacy
 ```
 
-Binaries land in `./legacy-out/`. The container prints the produced binary's
+Binaries land in `./legacy-out/`, owned by you. The build runs as the
+unprivileged user `builder`; the two build args give it your uid/gid so it can
+write the mounted directory (they default to 1000). The container prints the produced binary's
 glibc floor at the end — it must be `<= 2.27` to run on 18.04.
 
 ## Manual (building directly on an 18.04 host/chroot)
