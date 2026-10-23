@@ -1,0 +1,36 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# cargo-deny policy for the node's own Rust graph (Cargo.toml / Cargo.lock at the root: src/rust, the
+# librustzcash glue). The attestor agent has its own (contrib/yellowback/attest/deny.toml); the root
+# deny.toml is upstream zcashd's licence policy, used by audits.yml. CI: .github/workflows/secops.yml,
+# job cargo-deny:
+#   cargo deny --locked --manifest-path Cargo.toml --config contrib/secops/deny-node.toml check advisories bans sources
+# Every ignore carries its reason; the same list, with an expiry, is in osv-scanner.toml. Cargo.lock is
+# in the frozen set and must keep ycash6-stock's crates-io set (yellowback-tests.yml, nightly), so a fix
+# that needs a lock bump is a deliberate change to both branches, not an edit here.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-gnullvm", "x86_64-unknown-freebsd"]
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2026-0202", reason = "cxx 1.0.194: let_cxx_string! is unsound on a C++ exception; it is never used in src/. cxx must match the cxxbridge code generator depends builds (depends/packages/native_cxxbridge.mk), so it moves in a coordinated depends bump." },
+    { id = "RUSTSEC-2026-0190", reason = "anyhow 1.0.102: Error::downcast_mut is unsound; nothing here calls it (no hit in src/rust). Frozen lock (header)." },
+    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch 0.9.18: the fmt::Pointer impl of Atomic/Shared; reached only through rayon (bellman proving), which never formats those pointers. Frozen lock (header)." },
+    { id = "RUSTSEC-2026-0214", reason = "gumdrop is unmaintained (no vulnerability): argument parsing in src/rust/bin/wallet_tool.rs; informational." },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained (no vulnerability): compile-time only, via getset in orchard/zcash_primitives (librustzcash6); informational." },
+]
+
+[bans]
+# Duplicate versions are the 6.20.0 graph as upstream left it; bans would only report them.
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The librustzcash fork the root Cargo.toml [patch.crates-io] pins by rev (zcash_* crates, Vault branch ID).
+allow-git = ["https://github.com/boyfromcave/librustzcash6.git"]

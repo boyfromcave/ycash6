@@ -1,3 +1,5 @@
+# checkov:skip=CKV_DOCKER_2:Upstream zcashd image (apt.z.cash package; release-docker-hub.yml runs only in zcash/*); liveness is the orchestrator's, as upstream ships it
+# checkov:skip=CKV_DOCKER_3:Upstream zcashd's image kept as upstream ships it (it creates a zcashd user but does not switch to it); not a Ycash release artifact: the Ycash image is contrib/docker/ycashd/Dockerfile, which runs as uid 2001
 FROM debian:12
 
 RUN apt-get update \

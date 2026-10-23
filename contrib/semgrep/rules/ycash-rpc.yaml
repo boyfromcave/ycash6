@@ -1,0 +1,86 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# Ycash-specific Semgrep rules for the node's own RPC surface and the Yellowback module
+# (contrib/semgrep/README.md). Tests: ycash-rpc.cpp beside this file, run with
+# `contrib/semgrep/scan.py --test` (CI: .github/workflows/secops.yml, job semgrep-rules).
+rules:
+  - id: ycash.rpc.int-param-without-range-check
+    languages: [cpp]
+    paths:
+      # The RPC files this fork wrote (vault primitive, Yellowback module, atomic swaps). Upstream
+      # Bitcoin/Zcash RPC files keep upstream's own checks and are not this rule's business.
+      include:
+        - "/src/rpc/yellowback.cpp"
+        - "/src/rpc/yellowbackwallet.cpp"
+        - "/src/rpc/vault.cpp"
+        - "/src/rpc/atomicswap.cpp"
+        - "/contrib/semgrep/rules/ycash-rpc.cpp"
+    patterns:
+      - pattern-either:
+          - pattern: $T $V = $P[$N].get_int();
+          - pattern: $T $V = $P[$N].get_int64();
+          - pattern: '$T $V = $C ? $P[$N].get_int() : $D;'
+          - pattern: '$T $V = $C ? $P[$N].get_int64() : $D;'
+      # Checked where it is read: the value appears in a later `if` condition of the same block (a bound,
+      # a size comparison, a sentinel test). A simpler test than "compared against a bound", chosen so the
+      # rule stays well inside scan.py's 30 s per-file timeout on the 2,600-line RPC files.
+      - pattern-not-inside: |
+          $T $V = $E;
+          ...
+          if (<... $V ...>) $S;
+    message: >-
+      An integer RPC parameter ($V) is read with get_int()/get_int64() and never range-checked in this
+      handler (it never appears in an `if` condition after it is read). A negative or oversized value then reaches size_t/uint32_t conversions, loop bounds or the
+      wallet's builders. Check it where it is read (the C-6 convention: `if (count < 0 || skip < 0) throw
+      JSONRPCError(RPC_INVALID_PARAMETER, ...)`), or, when a callee validates it, accept the finding in
+      contrib/semgrep/accepted.json naming that callee.
+    severity: WARNING
+    metadata:
+      category: security
+      impact: MEDIUM
+      likelihood: LOW
+      confidence: MEDIUM
+      cwe: ["CWE-1284: Improper Validation of Specified Quantity in Input"]
+      references: ["src/rpc/yellowback.cpp yed_listvaults (C-6)"]
+
+  - id: ycash.yellowback.floating-point
+    languages: [cpp, c]
+    paths:
+      # The Yellowback module and the vault primitive: state every full node must compute bit-for-bit.
+      include:
+        - "/src/yellowback/**"
+        - "/src/vault/**"
+        - "/contrib/semgrep/rules/ycash-rpc.cpp"
+    pattern-either:
+      - pattern: (double $X)
+      - pattern: (float $X)
+      - pattern: double $X;
+      - pattern: float $X;
+      - pattern: double $X = $E;
+      - pattern: float $X = $E;
+      - pattern: $E.get_real()
+      - pattern: std::stod(...)
+      - pattern: std::stof(...)
+      - pattern: atof(...)
+      - pattern: strtod(...)
+      - pattern: std::pow(...)
+      - pattern: std::sqrt(...)
+      - pattern: std::log(...)
+      - pattern: std::exp(...)
+    message: >-
+      Floating point in the Yellowback module or the vault primitive. Their quantities are integer only
+      (src/yellowback/math.h: arith_uint256 for every product, floor division, nullopt for undefined;
+      docs/mapping.md §13, V17): IEEE-754 results differ across compilers and platforms, so a node that
+      computes module state in floating point can disagree with its peers. DigiByte's volatility code is
+      floating point (ref/digibyte/src/consensus/volatility.cpp) and is not ported.
+    severity: ERROR
+    metadata:
+      category: security
+      bucket: high
+      impact: HIGH
+      likelihood: LOW
+      confidence: HIGH
+      cwe: ["CWE-1339: Insufficient Precision or Accuracy of a Real Number"]
+      references: ["src/yellowback/math.h", "docs/mapping.md §13"]

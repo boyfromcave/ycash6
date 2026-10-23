@@ -11,6 +11,7 @@
 # (zcutil/fetch-params.sh only fetches the optional Sprout file), so nothing else is needed.
 # Runs as uid 2001 with the datadir at /var/lib/ycash; contrib/docker/ycashd/entrypoint.sh
 # turns YCASHD_* environment variables into ycash.conf (README.md there).
+# checkov:skip=CKV_DOCKER_2:A node image: readiness is block sync, which an orchestrator probes with ycash-cli (ycash-infra deploys it with its own probes); a fixed HEALTHCHECK would restart a syncing node
 FROM ubuntu:22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \

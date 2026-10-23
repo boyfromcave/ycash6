@@ -1,0 +1,9 @@
+# gitleaks configuration (the `gitleaks` job of .github/workflows/secops.yml; SECURITY-CI.md).
+# The default rule set, plus one path allowlist. Individual accepted findings live in
+# .gitleaksignore, each under a reason.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Golden test vectors (vault_vectors.json, yellowback_attest_vectors.json, pq_vectors.json, pq_wallet_vectors.json): fixed regtest/test keys, signatures and hashes that both node lines must reproduce byte for byte; never keys of a live network."
+paths = ['''^src/test/data/[^/]+_vectors\.json$''']

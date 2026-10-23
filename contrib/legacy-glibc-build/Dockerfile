@@ -13,6 +13,8 @@
 #   docker run --rm -v "$PWD/legacy-out:/out" ycash-legacy
 # Binaries land in ./legacy-out/ and run on Ubuntu 18.04+.
 
+# checkov:skip=CKV_DOCKER_2:A throwaway build container (docker run --rm, produces binaries); it runs no service
+# checkov:skip=CKV_DOCKER_3:A throwaway build container (docker run --rm, README.md) whose only output is the binaries copied to the mounted /out; it runs no service and holds no secret
 FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND=noninteractive

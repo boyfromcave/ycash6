@@ -1,0 +1,8 @@
+# Security overrides for contrib/secops/checkov-requirements.txt: transitive dependencies of Checkov moved
+# past what the --exclude-newer cut-off would pick, to releases that fix a published advisory (OSV-Scanner,
+# .github/workflows/secops.yml), as contrib/semgrep/security-overrides.txt does for Semgrep. Drop a line
+# once the cut-off date passes the fixed release.
+#   certifi    PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2 (emSign roots with compromised intermediates)
+#   gitpython  GHSA-83vg-56qc-22m7 (submodule .git path validated after clone)
+certifi==2026.10.19
+gitpython==3.2.1

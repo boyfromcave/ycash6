@@ -1,14 +1,69 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# Dependabot: security updates only, one grouped PR per ecosystem (SECURITY-CI.md). Version
+# updates are suppressed (open-pull-requests-limit: 0) because every dependency here is
+# exact-pinned and bumped deliberately (Cargo.lock committed, builds --locked; the zcash_* crates
+# are pinned by [patch.crates-io] to boyfromcave/librustzcash6 and are never Dependabot's to move;
+# actions are SHA-pinned; pip files are hash-locked). Enable "Dependabot security updates" in
+# Settings -> Code security for the grouped security PRs to open.
+# Not listed: depends/patches/native_cxxbridge/Cargo.lock is a build input of depends (bumped with
+# the cxx package it patches, depends/packages/native_cxxbridge.mk), and qa/supply-chain is
+# cargo-vet's store. OSV-Scanner (secops.yml) still scans every lockfile.
 version: 2
 updates:
-- package-ecosystem: github-actions
-  directory: "/"
-  schedule:
-    interval: daily
-    timezone: Etc/UTC
-  open-pull-requests-limit: 10
-  reviewers:
-  - str4d
-  assignees:
-  - str4d
-  labels:
-  - "A-CI"
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/contrib/yellowback/attest"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directories:
+      - "/qa"
+      - "/contrib/semgrep"
+      - "/contrib/secops"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - "/contrib/docker"
+      - "/contrib/docker/ycashd"
+      - "/contrib/legacy-glibc-build"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
