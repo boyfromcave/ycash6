@@ -51,16 +51,6 @@ ignoreUntil = 2027-01-21T00:00:00Z
 reason = "paste is unmaintained (no vulnerability): a compile-time macro crate in the agent's graph; the agent's own cargo audit / cargo deny (yellowback-tests.yml `agent`) report it as a warning. Informational."
 
 [[IgnoredVulns]]
-id = "GHSA-89v8-rhwq-hf77"
-ignoreUntil = 2027-01-21T00:00:00Z
-reason = "asteval 1.0.6 sandbox escape: Checkov 3.3.26 pins asteval==1.0.6 and uses it to evaluate Terraform expressions; the job scans Dockerfiles only. Fixed by the next checkov release that moves the pin."
-
-[[IgnoredVulns]]
-id = "GHSA-9w56-46f6-3qhx"
-ignoreUntil = 2027-01-21T00:00:00Z
-reason = "asteval 1.0.6 (numpy ctypes escape): same pin and same reason as GHSA-89v8-rhwq-hf77."
-
-[[IgnoredVulns]]
 id = "GHSA-wj6h-64fc-37mp"
 ignoreUntil = 2027-01-21T00:00:00Z
 reason = "python-ecdsa Minerva timing side channel (no fixed release): a Checkov dependency that signs nothing in this job; a timing attack needs a signer to observe."

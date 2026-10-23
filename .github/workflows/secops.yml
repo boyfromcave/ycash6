@@ -206,7 +206,7 @@ jobs:
       - name: Install Checkov (hash-locked)
         run: |
           python3 -m venv "$RUNNER_TEMP/checkov"
-          "$RUNNER_TEMP/checkov/bin/pip" install --quiet --require-hashes -r contrib/secops/checkov-requirements.txt
+          "$RUNNER_TEMP/checkov/bin/pip" install --quiet --no-deps --require-hashes -r contrib/secops/checkov-requirements.txt
           "$RUNNER_TEMP/checkov/bin/checkov" --version
       - name: Checkov (Dockerfiles)
         run: |
