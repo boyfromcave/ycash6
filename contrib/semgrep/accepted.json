@@ -574,6 +574,48 @@
       "reason": "Test-only NIST DRBG (KAT vector replay): the memset is the DRBG's defined initial state (key = 0, V = 0) before Update(seed) overwrites both, not a wipe at end of life; the key is a published test vector derivation, not a wallet secret.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "2a3fbc3f298ef4a7": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[4..36] is then exactly 32 bytes, so the [u8; 32] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "b555194cd590b2b7": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[36..40] is then exactly 4 bytes, so the [u8; 4] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "dbbb76ee99a1bbc9": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[40..42] is then exactly 2 bytes, so the [u8; 2] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "8b690ac55e729450": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[42..46] is then exactly 4 bytes, so the [u8; 4] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "78ec1d4c5b49bfd6": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[46..] is then exactly ENTRY_SIZE = 69 bytes, and Entry::decode returns None only when its input is not ENTRY_SIZE bytes (its inner [0..4]/[4..69] conversions are then exact), so the expect cannot fire on any gossip frame.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "3fda061f7d72e355": {
+      "rule": "rust.lang.security.current-exe",
+      "path": "contrib/yellowback/attest/src/direct.rs",
+      "reason": "test-only: inside #[cfg(test)] mod tests (an_outsider_flood_is_refused_at_the_handshake), where current_exe() re-runs the test binary itself as a child process to measure the flood CPU; no production path calls current_exe and no security decision depends on the path.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
