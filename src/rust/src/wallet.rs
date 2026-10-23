@@ -754,7 +754,9 @@ impl Wallet {
             fvk.clone(),
             dnote.note,
             MerklePath::from_parts(
-                u64::from(*position).try_into().unwrap(),
+                u64::from(*position)
+                    .try_into()
+                    .map_err(|_| SpendRetrievalError::NoteNotPositioned(outpoint))?,
                 path.try_into().unwrap(),
             ),
         ))

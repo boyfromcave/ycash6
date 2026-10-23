@@ -196,6 +196,34 @@
       "reason": "InitSignatureCache(size_t nMaxCacheSize): `nMaxCacheSize <= 0` on an unsigned value is exactly `== 0`, which is the intended 'cache disabled' early return; the only caller is init.cpp, which has already refused a value <= 0 and passes half of a positive int64 budget. Upstream Zcash code in src/script/ (workspace CLAUDE.md rule 7): not rewritten as == 0.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "718b643cf0ac1459": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/bin/wallet_tool.rs",
+      "reason": "zcashd-wallet-tool is an interactive CLI, not FFI. unconfirmed starts as 0..words.len() and the loop runs min(3, words.len()) times, popping one element per iteration, so before the i-th pop it holds words.len()-i >= 1 elements; gen_range(0..len) on the line above would already need it non-empty.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "4bc745737559a941": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "u32 -> usize try_into is infallible wherever this crate builds: it links std (std::collections, libc), and every Rust target with std has a usize of at least 32 bits (the 16-bit targets, msp430/avr, are no_std), so the unwrap cannot fire.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ca9612abe98ef9ef": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "append_bundle_commitments: the same loop iteration just called commitment_tree.append() and returned NoteCommitmentTreeFull if it failed, so the BridgeTree has a current_bridge and bridgetree 0.7.0 BridgeTree::mark() returns None only when current_bridge is None (empty tree).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "9642c1d815b426b2": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "path comes from BridgeTree::<_, u32, 32>::witness(), which returns NonEmptyFrontier::witness(DEPTH): one element per WitnessAddrsIter step from level 0 to DEPTH, i.e. exactly 32 = MERKLE_DEPTH_ORCHARD, or an Err that is already mapped to WitnessNotAvailableAtDepth; the Vec -> [_; 32] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
