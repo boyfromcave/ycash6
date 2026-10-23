@@ -1,0 +1,1254 @@
+{
+ "bucket": "low",
+ "sla_days": 180,
+ "findings": [
+  {
+   "fingerprint": "6ac557ad7213f71e",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/security-check.py",
+   "line": 22,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "27d6b0dd7692d93c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/security-check.py",
+   "line": 36,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "8e7c9c37c4673592",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/security-check.py",
+   "line": 93,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "561ac82aa8a451d9",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/security-check.py",
+   "line": 107,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e96e4b8f79ed759c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/security-check.py",
+   "line": 123,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "c73f10430fac9dd6",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 96,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "5f42505e02632179",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 112,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "dea442fd3d386fd3",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 140,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "fb42dc53e4d02f96",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/devtools/test-security-check.py",
+   "line": 24,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "6d33382aab01f295",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/simulations/worstcase.py",
+   "line": 24,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "335d35bf22f90d4e",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/simulations/worstcase.py",
+   "line": 29,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "fa4346881c83a92c",
+   "rule": "python.lang.security.use-defusedcsv",
+   "path": "contrib/yellowback/attest/calibrate/pinrate.py",
+   "line": 77,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "1d923782fb8746df",
+   "rule": "python.lang.security.use-defusedcsv",
+   "path": "contrib/yellowback/attest/calibrate/spreads.py",
+   "line": 91,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2a3fbc3f298ef4a7",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/cosig.rs",
+   "line": 207,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b555194cd590b2b7",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/cosig.rs",
+   "line": 208,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "dbbb76ee99a1bbc9",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/cosig.rs",
+   "line": 209,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "8b690ac55e729450",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/cosig.rs",
+   "line": 210,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "78ec1d4c5b49bfd6",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/cosig.rs",
+   "line": 211,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "3fda061f7d72e355",
+   "rule": "rust.lang.security.current-exe",
+   "path": "contrib/yellowback/attest/src/direct.rs",
+   "line": 1042,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "cd44ebfba7791346",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/transport/mod.rs",
+   "line": 115,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e29feff9e265189d",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/transport/mod.rs",
+   "line": 119,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9531c82c6d2b54f0",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/transport/mod.rs",
+   "line": 120,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "525159a36258f600",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/bridge-sim",
+   "line": 253,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "6fb7ae832bfb62bb",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 77,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "6de33f576e78eedf",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 89,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "1fdbb5811f505c69",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 119,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "3d930f029a092016",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 174,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "67f05e766efc4130",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 185,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "c6c7ca8ce6fbc868",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/upgrade-walk",
+   "line": 206,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0283b0d03269a887",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "contrib/yellowback/devnet/upgrade-walk",
+   "line": 415,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "961161379692d4f4",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/upgrade-walk",
+   "line": 472,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "1165d7b63e25086c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/upgrade-walk",
+   "line": 488,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "be4c7ff65e46b289",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/upgrade-walk",
+   "line": 1298,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "620603ce7c5b3c71",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+   "line": 50,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "696bac1cb7c2a9e4",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+   "line": 53,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "bf1e086d79249182",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+   "line": 61,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "ac21eb1bbc88c3e6",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+   "line": 125,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "bf61c2ad80673244",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+   "line": 207,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e43dbf552b3a1fd1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 310,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "4ce616506a34a3ec",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 485,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "4497cecc56958d5c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 537,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0c854b3ef865a6bc",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1068,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "13b4c7a2bb98cc13",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1135,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "bd4270838b072c97",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1212,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "a7a2aadd43f0aab3",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1504,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2569424437b76ee2",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1512,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e697c0d5ee4f3651",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/devnet/yellowback-devnet",
+   "line": 1559,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b93c6351f95ffda9",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/yellowback/pool/check-coinbase",
+   "line": 38,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "a54bc2973db29539",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/pull-tester/rpc-tests.py",
+   "line": 382,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "98efc19faffdf124",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/pull-tester/rpc-tests.py",
+   "line": 456,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "669845c8c0c8a9fa",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/pull-tester/rpc-tests.py",
+   "line": 549,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "69f3caf79fae7151",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/show_help.py",
+   "line": 629,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0ba2a11e65cf3fdf",
+   "rule": "python.lang.security.audit.httpsconnection-detected",
+   "path": "qa/rpc-tests/test_framework/authproxy.py",
+   "line": 88,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "4250833dd2230d0f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/test_framework/pq.py",
+   "line": 577,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "03c8dda28b4de016",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/test_framework/util.py",
+   "line": 304,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "00f2b74d058fc58c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/test_framework/util.py",
+   "line": 525,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b7621daaa0a391d1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/vault_upgrade.py",
+   "line": 82,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b873a2292fc57073",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_attest_agent.py",
+   "line": 146,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "517ed4865be04dd1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_cancel_agent.py",
+   "line": 159,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "787fb8ca7c87aeed",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_cancel_agent.py",
+   "line": 278,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e934148191c1b514",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_chainviz.py",
+   "line": 175,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d2a534e5545021a7",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "qa/rpc-tests/yellowback_chainviz.py",
+   "line": 203,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "6f67505f2e49bc66",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_devnet_roles.py",
+   "line": 126,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "15652666b9e64a53",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_devnet_roles.py",
+   "line": 131,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9f932e39d0dc4dd7",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_devnet_upgrade.py",
+   "line": 147,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "c31742553a904ee9",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_quote.py",
+   "line": 108,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "36d7befadaa15ff1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_quote.py",
+   "line": 137,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0d8af7fc9f1db9bd",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 120,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e486b86ea3830e1f",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 137,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9e7a0224ac9cc960",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 153,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d83a9dbd4b8dc3bf",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 164,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0acd15048e27b685",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_cross_line.py",
+   "line": 50,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "47cc100ed393c157",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_cross_line_trees.py",
+   "line": 25,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2fffc8f61a4dcda2",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_cross_line_trees.py",
+   "line": 47,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b7d2856de34a6b98",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_release_heights.py",
+   "line": 77,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "0e9211884d138084",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_release_heights.py",
+   "line": 142,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "c83bd7700bf6fd3b",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_release_heights.py",
+   "line": 155,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "cfe2d60e8a7a187d",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/test_yellowback_release_heights.py",
+   "line": 182,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "5055bfe7dfa27dad",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/yellowback-cross-line-trees.py",
+   "line": 34,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "aed25f27c8e476f5",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/yellowback-cross-line.py",
+   "line": 35,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "dfb13c2e3c89b847",
+   "rule": "trailofbits.generic.wget-no-check-certificate",
+   "path": "qa/zcash/checksec.sh",
+   "line": 140,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "5b3831eefa9059ee",
+   "rule": "trailofbits.generic.curl-insecure",
+   "path": "qa/zcash/checksec.sh",
+   "line": 143,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "57b1aa970304ff3b",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 78,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "a58783d6888b7c67",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 90,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "08987a4cf456a7a3",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 119,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "08987a4cf456a7a3-1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 123,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "787bd6e1f3ce608f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 174,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "bb9015620ec8ea2d",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 187,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d2880b6fb2329419",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/full_test_suite.py",
+   "line": 234,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "7eb2c61263517934",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/smoke_tests.py",
+   "line": 603,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "ac8ecfc8bfcbbe49",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "qa/zcash/smoke_tests.py",
+   "line": 619,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "f22f4e25a229f927",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 217,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "6c4d2b21d7806d39",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 224,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "293fe4c4d3adc657",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 287,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "580006244717f169",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 300,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "fa53556fb96683ce",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 359,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e7778075ba597562",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/bitcoin-tx.cpp",
+   "line": 419,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "ea6bd004c6446de8",
+   "rule": "0xdea.rules.c.raptor-ret-stack-address",
+   "path": "src/chainparams.cpp",
+   "line": 1020,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "ff2237cffafdde97",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/coins.cpp",
+   "line": 568,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 554,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac-1",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 628,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac-2",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 676,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac-3",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 758,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac-4",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 823,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9760fcc2f19c3eac-5",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/crypto/pq/falcon/fips202.c",
+   "line": 884,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "f07b1d9bbeeee65c",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/falcon/keygen.c",
+   "line": 1704,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "adbb6109b61f5e31",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/falcon/keygen.c",
+   "line": 1705,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "862c741d63a3ea9a",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/falcon/ycash_falcon_sign.c",
+   "line": 195,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "064e7c239662624f",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/sha2_256.c",
+   "line": 233,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b6039c70590768ff",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/sha2_256.c",
+   "line": 237,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "96cb5c99d76eb27b",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/sha2_512.c",
+   "line": 295,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "37914a382b774330",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/sha2_512.c",
+   "line": 299,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "dab8bc03b2426a58",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_dsa.c",
+   "line": 126,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2207acd35377915f",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_dsa.c",
+   "line": 494,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2207acd35377915f-1",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_dsa.c",
+   "line": 519,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "677c987f38763474",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_sha2.c",
+   "line": 190,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "df7ff2c25b167256",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_sha2.c",
+   "line": 237,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "af13c438132a2834",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/crypto/pq/slhdsa/slh_sha2.c",
+   "line": 360,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "9d78a6f23ea25eea",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/hash.cpp",
+   "line": 50,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "781d61351c1f0cc4",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/init.cpp",
+   "line": 705,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "478d6c4cea151f43",
+   "rule": "generic.secrets.gitleaks.generic-api-key",
+   "path": "src/keystore.h",
+   "line": 456,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "ffd61d67689687d5",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/main.cpp",
+   "line": 8274,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d1ff9b02550a1be2",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 195,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "3fbece1257581003",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 196,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b52dfe1448647288",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 234,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2560c734b48e01b2",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 235,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d021ffc4264dcc59",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 239,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "7778d8ea244ac673",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 302,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "945c59b5f086ae7f",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/prevector.h",
+   "line": 171,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "66948d26aa90d6a1",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/prevector.h",
+   "line": 430,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "91c44c4c299ec764",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/rest.cpp",
+   "line": 465,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e7251e4a466f74bb",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/rpc/yellowbackwallet.cpp",
+   "line": 1895,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e7251e4a466f74bb-1",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/rpc/yellowbackwallet.cpp",
+   "line": 2007,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "8dfc765d6759472f",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/script/interpreter.cpp",
+   "line": 1465,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "b2de0eeaede8da87",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/script/sign.cpp",
+   "line": 397,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "77218025acfb1cfc",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "src/test/bctest.py",
+   "line": 61,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "48f4336d717c65d2",
+   "rule": "ycash.crypto.secret-memset",
+   "path": "src/test/pq_crypto_tests.cpp",
+   "line": 115,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d0363e8b59e867d1",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/test/raii_event_tests.cpp",
+   "line": 37,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "17c2639c301efd13",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/tinyformat.h",
+   "line": 696,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "05c657d02ffc8efc",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/torcontrol.cpp",
+   "line": 147,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "188ec11bf730a971",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/torcontrol.cpp",
+   "line": 151,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "35ffc43f58495a56",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/uint256.h",
+   "line": 28,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "35ffc43f58495a56-1",
+   "rule": "c.lang.security.insecure-use-memset",
+   "path": "src/uint256.h",
+   "line": 43,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "4129e3a2d9e7a259",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/util/strencodings.cpp",
+   "line": 388,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "09bd6f0b0ff8452e",
+   "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+   "path": "src/util/system.cpp",
+   "line": 98,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "53cb172e510742ff",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/wallet/asyncrpcoperation_common.cpp",
+   "line": 54,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d0525d1842f0346c",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/wallet/db.h",
+   "line": 142,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "8d0469c7691afba4",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/wallet/db.h",
+   "line": 270,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d0525d1842f0346c-1",
+   "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+   "path": "src/wallet/db.h",
+   "line": 271,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "45161070d06ea199",
+   "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+   "path": "src/wallet/wallet_tx_builder.cpp",
+   "line": 444,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "d68ddca122bf316c",
+   "rule": "bash.lang.security.ifs-tampering",
+   "path": "test/lint/lint-locale-dependence.sh",
+   "line": 194,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "4c4706a61fcdc4e6",
+   "rule": "bash.lang.security.ifs-tampering",
+   "path": "test/lint/lint-shell.sh",
+   "line": 42,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "2318cc05676f9c1a",
+   "rule": "bash.lang.security.ifs-tampering",
+   "path": "test/lint/lint-shell.sh",
+   "line": 52,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "205ae336c66e31f3",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "zcutil/make-release.py",
+   "line": 499,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e927cd5908558aee",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "zcutil/make-release.py",
+   "line": 506,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  },
+  {
+   "fingerprint": "e927cd5908558aee-1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "zcutil/make-release.py",
+   "line": 529,
+   "first_seen": "2026-10-23",
+   "due": "2027-04-21"
+  }
+ ]
+}
