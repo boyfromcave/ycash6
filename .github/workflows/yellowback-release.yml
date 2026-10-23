@@ -99,17 +99,19 @@ jobs:
         # A tag never releases unless R1-R7 hold (qa/yellowback-vault-params.py --release main)
         # and every compared Vault field matches ycash-dd at vault-params/v<version>.
         # A workflow_dispatch proving run only warns, and compares with ycash-dd upgrade/vault.
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
           url="https://github.com/boyfromcave/ycash-dd.git"
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            ref="refs/tags/vault-params/v${{ steps.v.outputs.version }}"
+            ref="refs/tags/vault-params/v${VERSION}"
             set +e
             git ls-remote --exit-code --tags "$url" "$ref"
             lrc=$?
             set -e
             if [ "$lrc" -eq 2 ]; then
-              echo "refusing to release: pairing tag vault-params/v${{ steps.v.outputs.version }} is missing on ycash-dd (tag ycash-dd first; doc/yellowback-release.md)"
+              echo "refusing to release: pairing tag vault-params/v${VERSION} is missing on ycash-dd (tag ycash-dd first; doc/yellowback-release.md)"
               exit 1
             fi
             if [ "$lrc" -ne 0 ]; then

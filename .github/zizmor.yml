@@ -2,25 +2,28 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 #
-# zizmor configuration. The Ycash workflows (yellowback-tests.yml, yellowback-release.yml and the
-# actions under .github/actions/) are kept zizmor-clean with no entry here. The entries below are
-# the upstream zcashd workflows and dependabot file, which this fork keeps byte-for-byte except for
-# a trigger/if scoping (each file's "Ycash (2026-10-06)" note): ci.yml, ci-skip.yml, lints.yml and
-# audits.yml run only for upstream's `master` (no fork branch is ever PR'd into it) and
-# release-docker-hub.yml only in zcash/*; ci-status.yml follows ci.yml and book.yml only pushes to
-# master. Their findings are upstream's, recorded here rather than rewritten.
+# zizmor configuration (the `zizmor` job of secops.yml runs zizmor at a pinned version over every
+# workflow, action and the dependabot file; SECURITY-CI.md). Since 2026-10-23 every workflow,
+# the upstream zcashd ones included, is fixed rather than ignored: every `uses:` pinned to a
+# commit, `persist-credentials: false` on every checkout, least-privilege permissions, no
+# template expansion in a `run:` block. The upstream workflows (ci.yml, ci-skip.yml, ci-status.yml,
+# lints.yml, audits.yml, book.yml, release-docker-hub.yml) keep their content and their
+# trigger/if scoping (each file's "Ycash (2026-10-06)" note); only those mechanical hardenings
+# were applied. What remains below is a design property of a file, not an unfixed finding.
 rules:
-  unpinned-uses:
-    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
   dangerous-triggers:
+    # Upstream's required-status bridge: ci-skip.yml uses pull_request_target (scoped to master)
+    # and ci-status.yml workflow_run, because posting a commit status on a fork PR needs a token
+    # the fork's own run does not get. Neither checks out or runs PR code (ci-skip.yml fetches the
+    # PR commits only to list the changed paths; its own comment), and both are least-privilege.
     ignore: [ci-skip.yml, ci-status.yml]
-  template-injection:
-    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
   archived-uses:
+    # lints.yml's clippy job uses actions-rs/clippy-check (archived upstream, now SHA-pinned).
+    # Replacing it would change what that upstream job reports; it runs only for PRs into master.
     ignore: [lints.yml]
-  artipacked:
-    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
-  excessive-permissions:
-    ignore: [ci.yml, ci-skip.yml, ci-status.yml, lints.yml, audits.yml, book.yml, release-docker-hub.yml]
-  dependabot-cooldown:
-    ignore: [dependabot.yml]
+  self-repository:
+    # The `$/...` self-repository syntax this help-level audit proposes for `uses: ./.github/actions/*`
+    # is not understood by the actionlint release yellowback-tests.yml's `lint` job pins. Every
+    # job that uses a local action checks out this repository at the triggering commit first, and
+    # no workflow here checks out other code (no pull_request_target job uses a local action).
+    disable: true

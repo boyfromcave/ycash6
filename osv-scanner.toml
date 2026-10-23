@@ -1,0 +1,86 @@
+# OSV-Scanner accepted vulnerabilities (the `osv-scanner` job of .github/workflows/secops.yml;
+# SECURITY-CI.md "Accepting a finding"). Every entry has a reason and an ignoreUntil at most
+# 90 days out: on that date the finding fails the scan again and is re-triaged.
+# Triaged 2026-10-23. The root Cargo.lock is not bumped here: it is in the frozen set
+# (qa/yellowback-frozen-files.txt) and the nightly stock-reference job requires its crates-io set
+# to equal branch ycash6-stock's (yellowback-tests.yml, "Check out the stock 6.20.0 tree"), so a
+# lock bump is a deliberate change to both branches, not part of the CI setup.
+
+# --- Cargo.lock (the node's Rust library) and depends/patches/native_cxxbridge/Cargo.lock ---
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0202"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "cxx 1.0.194: let_cxx_string! is unsound on a C++ exception. The node never uses let_cxx_string! (no hit in src/), and cxx must stay at the version of the cxxbridge code generator depends builds (depends/packages/native_cxxbridge.mk 1.0.194); the fix is a coordinated depends bump (cxx + native_cxxbridge + its vendored lock), not a lockfile edit."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0190"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "anyhow 1.0.102 (Error::downcast_mut unsound; fixed 1.0.103), in Cargo.lock and the cxxbridge build tool's lock: no code here calls downcast_mut (no hit in src/rust). The root lock is frozen and must match ycash6-stock's crates-io set (header); bump both together with the cxx depends bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0204"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "crossbeam-epoch 0.9.18 (invalid pointer dereference in the fmt::Pointer impl of Atomic/Shared; fixed 0.9.20): reached only through rayon (bellman proving), which never formats those pointers. The root lock is frozen and must match ycash6-stock's crates-io set (header)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0214"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "gumdrop 0.8.1 is unmaintained (no vulnerability): the argument parser of the node's Rust helper binaries; no maintained drop-in yet. Informational."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "proc-macro-error2 is unmaintained (no vulnerability): a compile-time proc-macro dependency of getset, pulled by orchard / zcash_primitives (librustzcash6); it moves when upstream drops it. Informational."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "atomic-polyfill is unmaintained (no vulnerability): pulled by heapless for targets without native atomics, none of which the node builds for (cargo-deny's target graph excludes it). Informational."
+
+# --- contrib/yellowback/attest/Cargo.lock (the attestation agent) ---
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "paste is unmaintained (no vulnerability): a compile-time macro crate in the agent's graph; the agent's own cargo audit / cargo deny (yellowback-tests.yml `agent`) report it as a warning. Informational."
+
+# --- contrib/semgrep/requirements.txt (the Semgrep CLI's CI-only environment; never shipped) ---
+
+[[IgnoredVulns]]
+id = "GHSA-84m7-p3x7-pcfv"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "mcp 1.29.0 (StreamableHTTP session accumulation): semgrep 1.179.0 pins mcp==1.29.0 for its MCP server mode, which scan.py never starts; fixed by the next semgrep_version bump (contrib/semgrep/config.json)."
+
+[[IgnoredVulns]]
+id = "GHSA-xcq7-p3pf-p88h"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "opentelemetry-api 1.37.0 (unbounded tracestate parsing): semgrep 1.179.0 pins ~=1.37.0; scan.py runs with metrics/tracing off and parses no remote tracestate. Fixed by the next semgrep_version bump."
+
+[[IgnoredVulns]]
+id = "GHSA-6q48-6c7w-9gw2"
+ignoreUntil = 2026-11-23T00:00:00Z
+reason = "certifi 2026.7.22 (emSign roots with compromised intermediates): the fixed 2026.10.19 is four days old, inside the two-week release-age rule of requirements.txt's --exclude-newer; contrib/semgrep/requirements.txt is shared verbatim with ycash-dd, so it is regenerated there and copied (owner of the bump: the ycash-dd semgrep scaffolding). CI-only."
+
+
+# --- contrib/secops/checkov-requirements.txt (the Checkov job's CI-only environment; never shipped) ---
+
+[[IgnoredVulns]]
+id = "GHSA-83vg-56qc-22m7"
+ignoreUntil = 2026-11-23T00:00:00Z
+reason = "gitpython 3.2.0 (submodule .git path checked after clone): Checkov runs with --framework dockerfile over this checkout and never clones (no external module download). The fixed 3.2.1 (2026-10-14) is inside the two-week release-age rule; take it at the next regeneration."
+
+[[IgnoredVulns]]
+id = "GHSA-89v8-rhwq-hf77"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "asteval 1.0.6 sandbox escape: Checkov 3.3.26 pins asteval==1.0.6 and uses it to evaluate Terraform expressions; the job scans Dockerfiles only. Fixed by the next checkov release that moves the pin."
+
+[[IgnoredVulns]]
+id = "GHSA-9w56-46f6-3qhx"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "asteval 1.0.6 (numpy ctypes escape): same pin and same reason as GHSA-89v8-rhwq-hf77."
+
+[[IgnoredVulns]]
+id = "GHSA-wj6h-64fc-37mp"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "python-ecdsa Minerva timing side channel (no fixed release): a Checkov dependency that signs nothing in this job; a timing attack needs a signer to observe."

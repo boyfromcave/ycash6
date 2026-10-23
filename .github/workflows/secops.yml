@@ -1,0 +1,227 @@
+name: secops
+
+# Security CI beside semgrep.yml and codeql.yml (SECURITY-CI.md): one job per leg, the same design
+# in every Yellowback repo. Every tool is a pinned release, verified before it runs: a release
+# binary against the sha256 recorded below, a Python tool through `pip install --require-hashes`.
+# Results go to the step summary and to GitHub code scanning (SARIF, category = the tool), never
+# to a PR or an issue.
+#
+#   zizmor        every workflow, local action and the dependabot file (.github/zizmor.yml).
+#                 Fails on any finding.
+#   gitleaks      secrets: a pull_request scans the PR's commits, a push the pushed commits, the
+#                 nightly and workflow_dispatch the full history. Fails on a leak not accepted in
+#                 .gitleaksignore / .gitleaks.toml.
+#   osv-scanner   known vulnerabilities in every tracked lockfile (Cargo.lock files, hash-locked pip
+#                 requirement files). Fails on one not accepted in osv-scanner.toml.
+#   cargo-deny    RustSec advisories, bans and sources over the root Cargo.lock (deny.toml), --locked.
+#                 Beside upstream's cargo vet (audits.yml), which it does not replace; the agent crate
+#                 has its own cargo audit + cargo deny in yellowback-tests.yml `agent`.
+#   checkov       the Dockerfiles (contrib/docker, contrib/legacy-glibc-build). Fails on a failed
+#                 check not skipped in the Dockerfile with a reason.
+#
+# Triggers: pull_request and push on the node-line branches, nightly 03:43 UTC, workflow_dispatch.
+on:
+  push:
+    branches:
+      - upgrade/vault
+      - harden/yellowback
+  pull_request:
+    branches:
+      - upgrade/vault
+      - harden/yellowback
+  schedule:
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: secops-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb   # gitleaks_8.30.1_linux_x64.tar.gz
+  OSV_SCANNER_VERSION: 2.6.0
+  OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 # osv-scanner_linux_amd64
+  CARGO_DENY_VERSION: 0.20.2
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  # cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+  # SARIF goes to code scanning except on a PR from a fork (its token cannot write security events).
+  UPLOAD_SARIF: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read          # zizmor's online audits read action metadata
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install zizmor (hash-locked)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/pip" install --quiet --no-deps --require-hashes -r contrib/secops/zizmor-requirements.txt
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --version
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          targets=(.github/workflows .github/actions .github/dependabot.yml)
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --config .github/zizmor.yml --format sarif "${targets[@]}" > zizmor.sarif
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --config .github/zizmor.yml --format plain "${targets[@]}" | tee zizmor.txt
+          rc=${PIPESTATUS[0]}
+          { echo '### zizmor'; echo '```'; tail -n 40 zizmor.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !cancelled() && env.UPLOAD_SARIF == 'true' && hashFiles('zizmor.sarif') != '' }}
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+  gitleaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0  # the PR's or the push's commit range, or the full history
+          persist-credentials: false
+      - name: Install gitleaks (sha256-verified)
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      - name: gitleaks
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          range=''
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$EVENT" = push ] && [ -n "$PUSH_BEFORE" ] && ! [[ "$PUSH_BEFORE" =~ ^0+$ ]] \
+               && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          fi
+          opts=()
+          if [ -n "$range" ]; then opts=(--log-opts="$range"); echo "scanning $range"; else echo "scanning the full history"; fi
+          set +e
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --config .gitleaks.toml --gitleaks-ignore-path .gitleaksignore \
+            --report-format sarif --report-path gitleaks.sarif "${opts[@]}" .
+          rc=$?
+          { echo '### gitleaks'; if [ "$rc" -eq 0 ]; then echo "no leaks (${range:-full history})"; else echo "leaks found (${range:-full history}): see the log and code scanning"; fi; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !cancelled() && env.UPLOAD_SARIF == 'true' && hashFiles('gitleaks.sarif') != '' }}
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  osv-scanner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install OSV-Scanner (sha256-verified)
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/osv-scanner" "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" --version
+      - name: OSV-Scanner (every tracked lockfile)
+        # The list is taken from git, so a new lockfile is scanned without editing this file. The
+        # vendored upstream trees carry no lockfile of ours. Requirement files are complete,
+        # hash-locked pins, so they are scanned as written (--no-resolve).
+        run: |
+          args=()
+          while IFS= read -r f; do
+            case "$f" in
+              *.txt) args+=(-L "requirements.txt:$f") ;;
+              *)     args+=(-L "$f") ;;
+            esac
+          done < <(git ls-files | grep -E '(^|/)(Cargo\.lock|[^/]*requirements[^/]*\.txt)$' | grep -Ev '^src/(leveldb|secp256k1|univalue|crc32c)/')
+          echo "scanning: ${args[*]}"
+          set +e
+          "$RUNNER_TEMP/osv-scanner" scan source --config osv-scanner.toml --no-resolve --format sarif --output-file osv.sarif "${args[@]}"
+          "$RUNNER_TEMP/osv-scanner" scan source --config osv-scanner.toml --no-resolve --format markdown --output-file osv.md "${args[@]}"
+          rc=$?
+          { echo '### OSV-Scanner'; cat osv.md; } >> "$GITHUB_STEP_SUMMARY"
+          cat osv.md
+          exit "$rc"
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !cancelled() && env.UPLOAD_SARIF == 'true' && hashFiles('osv.sarif') != '' }}
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
+
+  cargo-deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny (sha256-verified)
+        run: |
+          f="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$f"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          cargo deny --version
+      - name: cargo deny check advisories bans sources (root Cargo.lock, deny.toml)
+        # rustup installs the rust-toolchain.toml channel on first use; cargo metadata fetches the
+        # git dependency (boyfromcave/librustzcash6) the lock pins.
+        run: cargo deny --locked check advisories bans sources
+
+  checkov:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Checkov (hash-locked)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/checkov"
+          "$RUNNER_TEMP/checkov/bin/pip" install --quiet --require-hashes -r contrib/secops/checkov-requirements.txt
+          "$RUNNER_TEMP/checkov/bin/checkov" --version
+      - name: Checkov (Dockerfiles)
+        run: |
+          files=()
+          while IFS= read -r f; do files+=(-f "$f"); done < <(git ls-files | grep -E '(^|/)Dockerfile[^/]*$' | grep -Ev '^src/(leveldb|secp256k1|univalue|crc32c)/')
+          echo "scanning: ${files[*]}"
+          set +e
+          "$RUNNER_TEMP/checkov/bin/checkov" --framework dockerfile --quiet --compact "${files[@]}" \
+            --output cli --output sarif --output-file-path console,checkov.sarif
+          rc=$?
+          { echo '### Checkov'; echo "exit $rc (skipped checks carry their reason in the Dockerfile)"; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !cancelled() && env.UPLOAD_SARIF == 'true' && hashFiles('checkov.sarif') != '' }}
+        with:
+          sarif_file: checkov.sarif
+          category: checkov

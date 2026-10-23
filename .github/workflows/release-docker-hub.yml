@@ -19,11 +19,14 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
 
     - name: Set version
       id: version
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
-        VERSION="${{ inputs.version }}"
         echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
         echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
         echo "Building Docker image for zcash ${VERSION}"
@@ -57,8 +60,9 @@ jobs:
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
     - name: Copy to electriccoinco (zcashd + zcash mirror)
+      env:
+        TAG: ${{ steps.version.outputs.tag }}
       run: |
-        TAG="${{ steps.version.outputs.tag }}"
         for NAME in zcashd zcash; do
           docker buildx imagetools create \
             --tag "electriccoinco/${NAME}:${TAG}" \

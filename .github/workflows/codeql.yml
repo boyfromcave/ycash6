@@ -1,0 +1,68 @@
+name: codeql
+
+# CodeQL code scanning (SECURITY-CI.md). The same design in every Yellowback repo; the language list
+# is this repository's: the node's C++ (src/), its Rust library (src/rust, Cargo.toml), the Python
+# test framework and tooling (qa/, contrib/, zcutil/), and the GitHub Actions workflows themselves.
+#
+#   build-mode none for every language, C/C++ included: CodeQL extracts the sources without the
+#   depends + zcutil/build.sh build (1-2 h cold), so this runs in minutes; the build-backed coverage
+#   is the yellowback-tests.yml suite and its sanitizer variants. Query suite: security-extended.
+#   Vendored upstream trees (leveldb, secp256k1, univalue, crc32c, ctaes, depends) are not
+#   analysed: their findings are upstream's (the same list as .semgrepignore).
+#
+#   pull_request / push to the node-line branches, weekly Monday 05:37 UTC on the default branch.
+#   Results go to GitHub code scanning (category codeql/<language>) only: no PR, no issue. This job
+#   never fails on an alert; code scanning's own PR check shows alerts a PR introduces.
+on:
+  push:
+    branches:
+      - upgrade/vault
+      - harden/yellowback
+  pull_request:
+    branches:
+      - upgrade/vault
+      - harden/yellowback
+  schedule:
+    - cron: '37 5 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read          # the actions extractor reads workflow metadata
+      security-events: write # upload the SARIF to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [c-cpp, rust, python, actions]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - src/leveldb
+              - src/secp256k1
+              - src/univalue
+              - src/crc32c
+              - src/crypto/ctaes
+              - depends
+              - src/fuzzing
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: codeql/${{ matrix.language }}
