@@ -1,0 +1,302 @@
+{
+ "bucket": "medium",
+ "sla_days": 90,
+ "findings": [
+  {
+   "fingerprint": "70677cd782d38469",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 22,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "50b4fcf75281545f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 36,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "7fc7767636c97c2e",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 93,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "3637855b69a9d83c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 107,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "bd7e5184822a1311",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 123,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "87dda12061daf6cb",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 96,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "7a0703c069db3226",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 112,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "d3aa4d226926aa89",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 140,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "053bedc5ca15d783",
+   "rule": "dockerfile.security.missing-user",
+   "path": "contrib/legacy-glibc-build/Dockerfile",
+   "line": 44,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "dbb0b38cd61406c0",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 77,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "aef13e1600c62ce7",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 89,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "4735d663633d1096",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/test_framework/pq.py",
+   "line": 577,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0188e2a81c669ead",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 164,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "1358f38e2b0994a2",
+   "rule": "0xdea.rules.c.raptor-insecure-api-signal",
+   "path": "src/init.cpp",
+   "line": 1136,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "5479b6ca22b4bd10",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/init.cpp",
+   "line": 1730,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "1e229b6b4076c622",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/main.cpp",
+   "line": 4419,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0da0cca2aa3edd15",
+   "rule": "0xdea.rules.c.raptor-unchecked-ret-malloc",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 199,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "56e35d7149015f9a",
+   "rule": "0xdea.rules.c.raptor-integer-wraparound",
+   "path": "src/prevector.h",
+   "line": 179,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "568e5c7850ebda01",
+   "rule": "0xdea.rules.c.raptor-integer-wraparound",
+   "path": "src/prevector.h",
+   "line": 183,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "034b8af301b53b5e",
+   "rule": "0xdea.rules.c.raptor-unterminated-string-strncpy",
+   "path": "src/protocol.cpp",
+   "line": 28,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "718b643cf0ac1459",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/bin/wallet_tool.rs",
+   "line": 441,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "df156d8ac0e50208",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/builder_ffi.rs",
+   "line": 258,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "588913809c249a26",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/history.rs",
+   "line": 146,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "3ddee0708e2e5cd9",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/history.rs",
+   "line": 156,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "dbc290f2d428da2c",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/history.rs",
+   "line": 157,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "33dee579098cf6f6",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/history.rs",
+   "line": 213,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "cc83315b9851ca73",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/incremental_merkle_tree.rs",
+   "line": 76,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "2dd29416109de3d3",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/sapling/zip32.rs",
+   "line": 85,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "2dd29416109de3d3-1",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/sapling/zip32.rs",
+   "line": 100,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "4bc745737559a941",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/wallet.rs",
+   "line": 432,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ca9612abe98ef9ef",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/wallet.rs",
+   "line": 620,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "bfc8ff335469b280",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/wallet.rs",
+   "line": 757,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "9642c1d815b426b2",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "src/rust/src/wallet.rs",
+   "line": 758,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ca0632a5ae448f13",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/script/sigcache.cpp",
+   "line": 98,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ec0f8f45e3eb3fea",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 119,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ddce43778418d7d7",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 120,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0e5f756dc1dcac6f",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 122,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  }
+ ]
+}
