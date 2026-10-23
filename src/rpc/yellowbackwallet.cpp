@@ -1892,7 +1892,9 @@ UniValue yed_signcancelcosign(const UniValue& params, bool fHelp)
     const std::string s = params[0].get_str();
     const size_t colon = s.find(':');
     if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size()) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
-    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)atoi(s.substr(colon + 1)));
+    int32_t nIntent = 0;
+    if (!ParseInt32(s.substr(colon + 1), &nIntent) || nIntent < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
+    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)nIntent);
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureWalletIsUnlocked();
     LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
@@ -2004,7 +2006,9 @@ UniValue yed_buildcancel(const UniValue& params, bool fHelp)
     const std::string s = params[0].get_str();
     const size_t colon = s.find(':');
     if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size()) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
-    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)atoi(s.substr(colon + 1)));
+    int32_t nIntent = 0;
+    if (!ParseInt32(s.substr(colon + 1), &nIntent) || nIntent < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "intentoutpoint must be \"txid:n\"");
+    const COutPoint op(ParseHashV(UniValue(s.substr(0, colon)), "intentoutpoint"), (uint32_t)nIntent);
     std::vector<unsigned char> holder;
     Cents cents = 0;
     std::vector<CancelCosignEntry> entries;
