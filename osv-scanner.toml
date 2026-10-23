@@ -38,6 +38,11 @@ id = "RUSTSEC-2023-0089"
 ignoreUntil = 2027-01-21T00:00:00Z
 reason = "atomic-polyfill is unmaintained (no vulnerability): pulled by heapless for targets without native atomics, none of which the node builds for (cargo-deny's target graph excludes it). Informational."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0386"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "tokio 1.52.3 (AsyncFd safe constructors new/with_interest/try_new/try_with_interest violate I/O safety; fixed by deprecation in 1.51.6 / 1.53.3): the node constructs no AsyncFd (no hit in src/rust; its one runtime is the current-thread runtime of metrics_ffi.rs that serves the Prometheus exporter), and neither metrics-exporter-prometheus 0.12.2 nor hyper 0.14.32, the only other dependents, calls those constructors. The root lock is frozen and must match ycash6-stock's crates-io set (header); the attest agent's lock is bumped to 1.53.3."
+
 # --- contrib/yellowback/attest/Cargo.lock (the attestation agent) ---
 
 [[IgnoredVulns]]
