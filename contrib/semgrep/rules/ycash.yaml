@@ -1,0 +1,64 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# Ycash-specific Semgrep rules, scanned beside the pinned semgrep-rules packs (contrib/semgrep/README.md).
+# metadata.bucket pins a rule's bucket; without it the bucket follows severity/impact/confidence.
+rules:
+  - id: ycash.script.opcode-in-digibyte-dd-range
+    languages: [generic]
+    paths:
+      include: ["src/script/script.h"]
+    pattern-regex: '\bOP_[A-Z0-9_]+\s*=\s*0x[bB][b-fB-F]\b'
+    message: >-
+      An opcode is defined at 0xbb-0xbf. Those bytes are DigiByte's Tapscript-only stablecoin opcodes and
+      hit SCRIPT_ERR_BAD_OPCODE in Ycash's interpreter; vault-upgrade opcodes are allocated above
+      OP_NOP10 (0xc0, 0xc1, ...) and gated on UPGRADE_VAULT (workspace CLAUDE.md rule 3, docs/mapping.md §2).
+    severity: ERROR
+    metadata:
+      category: security
+      bucket: critical
+      cwe: ["CWE-670: Always-Incorrect Control Flow Implementation"]
+      references: ["docs/mapping.md §2"]
+
+  - id: ycash.crypto.non-crypto-rng
+    languages: [cpp, c]
+    paths:
+      include: ["src/**"]
+      exclude: ["src/test/**", "src/gtest/**", "src/bench/**", "src/fuzz*/**"]
+    pattern-either:
+      - pattern: rand()
+      - pattern: std::rand()
+      - pattern: srand(...)
+      - pattern: std::mt19937(...)
+      - pattern: std::mt19937_64(...)
+    message: >-
+      A non-cryptographic RNG in node code. Keys, nonces and anything an attacker can observe must come
+      from GetRandBytes/GetRandHash (src/random.h).
+    severity: WARNING
+    metadata:
+      category: security
+      impact: MEDIUM
+      likelihood: LOW
+      confidence: MEDIUM
+      cwe: ["CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)"]
+
+  - id: ycash.crypto.secret-memset
+    languages: [cpp, c]
+    paths:
+      include: ["src/**"]
+    patterns:
+      - pattern: memset($BUF, 0, sizeof($BUF));
+      - metavariable-regex:
+          metavariable: $BUF
+          regex: (?i).*(key|secret|seed|priv|nonce|passphrase).*
+    message: >-
+      memset() wiping a whole buffer that looks like secret material can be optimised away as a dead
+      store; use memory_cleanse() (src/support/cleanse.h).
+    severity: WARNING
+    metadata:
+      category: security
+      impact: MEDIUM
+      likelihood: LOW
+      confidence: MEDIUM
+      cwe: ["CWE-14: Compiler Removal of Code to Clear Buffers"]

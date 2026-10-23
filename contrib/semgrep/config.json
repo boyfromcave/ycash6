@@ -1,0 +1,122 @@
+{
+  "_comment": "Semgrep scan policy for this node line (contrib/semgrep/README.md). Identical in ycash-dd and ycash6.",
+  "semgrep_version": "1.179.0",
+  "rule_sources": [
+    {
+      "name": "semgrep-rules",
+      "repo": "https://github.com/semgrep/semgrep-rules",
+      "commit": "16b9e6d45f10649f6a531ec4838ed9924372c3bc",
+      "license": "Semgrep Rules License v1.0: free, for our own use; fetched at scan time, never copied in, never quoted in PRs",
+      "id_prefix": "",
+      "paths": [
+        "c",
+        "rust",
+        "python/lang/security",
+        "bash",
+        "dockerfile",
+        "generic/secrets",
+        "yaml/github-actions"
+      ]
+    },
+    {
+      "name": "trailofbits",
+      "repo": "https://github.com/trailofbits/semgrep-rules",
+      "commit": "31390b3a99c04c81522d1b37c8d1900aa2dd4094",
+      "license": "AGPL-3.0",
+      "id_prefix": "trailofbits.",
+      "paths": [
+        "python",
+        "generic",
+        "yaml/github-actions",
+        "rs"
+      ]
+    },
+    {
+      "name": "0xdea",
+      "repo": "https://github.com/0xdea/semgrep-rules",
+      "commit": "e0121ac19d9fa259a44f3a24d3e42c95719b17c7",
+      "license": "MIT",
+      "id_prefix": "0xdea.",
+      "paths": [
+        "rules/c"
+      ]
+    }
+  ],
+  "local_rules": "contrib/semgrep/rules",
+  "categories": [
+    "security"
+  ],
+  "exclude_rules": {
+    "rust.lang.security.unsafe-usage": "Every `unsafe` block in src/rust is the C++/Rust FFI boundary by design; the audit rule flags each one (191 hits, INFO) and would bury real findings."
+  },
+  "audit_rules": {
+    "0xdea.rules.c.raptor-typos": "Spelling-level C idioms (e.g. '=' vs '=='); -Wall already warns; 1,800+ hits per node repo",
+    "0xdea.rules.c.raptor-interesting-api-calls": "Lists every call to memory/string APIs as a starting point for manual review; 900+ hits",
+    "0xdea.rules.c.raptor-signed-unsigned-conversion": "Every signed/unsigned mix; 700+ hits, nearly all intended",
+    "0xdea.rules.c.raptor-suspicious-assert": "Every assert() with a side-effect-looking argument; 100+ hits in upstream Bitcoin/Zcash code",
+    "0xdea.rules.c.raptor-high-entropy-assignment": "Hard-coded constants (hash IVs, test vectors) look like secrets",
+    "0xdea.rules.c.raptor-missing-default-in-switch": "Style; enum switches are compiler-checked (-Wswitch)",
+    "0xdea.rules.c.raptor-use-of-source-size-in-copy": "memcpy sized by the source; all 55 hits checked 2026-10-22 and correct (fixed arrays, bounded hash buffers)",
+    "0xdea.rules.c.raptor-pointer-subtraction": "Every pointer difference; idiomatic in prevector/serialize",
+    "0xdea.rules.c.raptor-integer-truncation": "Every narrowing assignment; review lead only",
+    "0xdea.rules.c.raptor-argv-envp-access": "Every argv/getenv read",
+    "0xdea.rules.c.raptor-write-into-stack-buffer": "Every write into a local array; review lead only",
+    "0xdea.rules.c.raptor-missing-return": "The compiler already errors on it (-Werror=return-type)",
+    "0xdea.rules.c.raptor-mismatched-memory-management-cpp": "Every new/delete/malloc pairing in C++; review lead only"
+  },
+  "bucket_overrides": [],
+  "non_production_paths": [
+    "qa/**",
+    "src/test/**",
+    "src/gtest/**",
+    "src/bench/**",
+    "src/fuzz*/**",
+    "contrib/**",
+    "zcutil/**",
+    "doc/**",
+    "test/**",
+    "*.md"
+  ],
+  "buckets": {
+    "critical": {
+      "sla_days": 7,
+      "color": "b60205",
+      "label": "semgrep:critical"
+    },
+    "high": {
+      "sla_days": 30,
+      "color": "d93f0b",
+      "label": "semgrep:high"
+    },
+    "medium": {
+      "sla_days": 90,
+      "color": "fbca04",
+      "label": "semgrep:medium"
+    },
+    "low": {
+      "sla_days": 180,
+      "color": "0e8a16",
+      "label": "semgrep:low"
+    }
+  },
+  "autofix_rules": [],
+  "autofix_never_paths": [
+    "src/consensus/**",
+    "src/script/**",
+    "src/primitives/**",
+    "src/pow/**",
+    "src/main.cpp",
+    "src/crypto/pq/falcon/**",
+    "src/crypto/pq/slhdsa/**"
+  ],
+  "fail_on": [
+    "critical"
+  ],
+  "base_branch": "upgrade/vault",
+  "branch_prefix": "semgrep/",
+  "pr_labels": [
+    "security",
+    "semgrep"
+  ],
+  "overdue_label": "sla:overdue"
+}

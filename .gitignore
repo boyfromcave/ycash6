@@ -132,3 +132,4 @@ src/fuzz.cpp
 .updatecheck-token
 .env
 poetry.lock
+semgrep-out/
