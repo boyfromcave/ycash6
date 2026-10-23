@@ -63,6 +63,167 @@
       "reason": "(CAmount)(12.5 * COIN) is a constant expression copied from GetBlockSubsidy (src/main.cpp), exactly 1250000000 in IEEE-754; the issued-supply sum itself is arith_uint256 integer arithmetic.",
       "by": "secops CI setup",
       "date": "2026-10-23"
+    },
+    "70677cd782d38469": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "50b4fcf75281545f": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "7fc7767636c97c2e": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "3637855b69a9d83c": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bd7e5184822a1311": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/security-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-security` (src/Makefile.am): argv[1:] is the Makefile's own $(bin_PROGRAMS)/$(bin_SCRIPTS) build outputs and $READELF/$OBJDUMP are set on that same recipe line from configure's tool paths. The command is an argv list (no shell), so a file name is passed as one argument, never parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "87dda12061daf6cb": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "7a0703c069db3226": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d3aa4d226926aa89": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/devtools/symbol-check.py",
+      "reason": "Upstream Bitcoin devtool run only by `make check-symbols` (src/Makefile.am, GLIBC_BACK_COMPAT): argv[1:] is the Makefile's own build outputs ($(bin_PROGRAMS), plus $(bin_SCRIPTS) on the 6.20.0 line) and $READELF/$CPPFILT are set on that recipe line from configure's tool paths. Every call is an argv list or a single program path with no shell, so nothing is shell-parsed; whoever can set these already controls the build.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "dbb0b38cd61406c0": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "Developer devnet harness (contrib/yellowback/devnet/README.md), run by hand on a throwaway regtest: the program is $YCASHD/$YCASH_CLI (default <repo>/src/ycashd, ycash-cli), named by the operator running it, and the rest of argv is fixed flags plus the harness's own datadir/ports. argv list, no shell; the environment is the operator's own.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "aef13e1600c62ce7": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "Developer devnet harness (contrib/yellowback/devnet/README.md), run by hand on a throwaway regtest: the program is $YCASHD/$YCASH_CLI (default <repo>/src/ycashd, ycash-cli), named by the operator running it, and the rest of argv is fixed flags plus the harness's own datadir/ports. argv list, no shell; the environment is the operator's own.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "4735d663633d1096": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/test_framework/pq.py",
+      "reason": "Functional-test helper (qa/rpc-tests): compiles the in-tree Falcon sources with $CC (shlex-split, default cc) into a sha256-named temp .so. $CC is the test runner's own toolchain choice, like any build; argv list, no shell, and the source paths are fixed tree files.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0188e2a81c669ead": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/yellowback_stratum.py",
+      "reason": "Functional test yellowback_stratum.py (qa/pull-tester/rpc-tests.py): argv is sys.executable + the in-tree contrib/yellowback/pool/check-coinbase script, ycash-cli beside $ZCASHD (the test runner's binary, default <repo>/src/ycashd) and the test's own tmpdir. argv list, no shell.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "1358f38e2b0994a2": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-signal",
+      "path": "src/init.cpp",
+      "reason": "signal(SIGPIPE, SIG_IGN) installs the SIG_IGN disposition only; no handler function ever runs, so the portability and reentrancy concerns behind the rule (unspecified reset/restart semantics of a user handler under signal()) do not arise. The handlers that do run (HandleSIGTERM/HandleSIGHUP, which only set flags) are installed with sigaction() just above. Upstream Zcash/Bitcoin init.cpp idiom; the ignore must stay or a peer closing a socket mid-write kills the daemon.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "1e229b6b4076c622": {
+      "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+      "path": "src/main.cpp",
+      "reason": "logicalTS <= prevLogicalTS compares two unsigned int timestamps for ordering, not an unsigned value against zero: prevLogicalTS starts at 0 and is overwritten by ReadTimestampBlockIndex of the previous block, and the branch makes the insight timestamp index strictly monotonic (logicalTS = prev + 1). With prevLogicalTS == 0 the comparison is only true for logicalTS == 0, which is the intended bump. Upstream Zcash insight-explorer code in a consensus file (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0da0cca2aa3edd15": {
+      "rule": "0xdea.rules.c.raptor-unchecked-ret-malloc",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "htalloc::alloc() checks the calloc() result on the next line with assert(mem), and assertions cannot be compiled out of this node (src/crypto/common.h: #error when NDEBUG is defined), so a NULL from calloc aborts before any use. The sizes are compile-time constants (sizeof(digit0), sizeof(digit1), 2*NBUCKETS, MAXSOLS), so no attacker-chosen allocation size reaches it. Upstream tromp equihash solver in src/pow/ (workspace CLAUDE.md rule 7): converting the abort into an error path is a behaviour change in PoW code for an OOM at miner start-up, not a safety gain; accepted.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "56e35d7149015f9a": {
+      "rule": "0xdea.rules.c.raptor-integer-wraparound",
+      "path": "src/prevector.h",
+      "reason": "realloc(_union.indirect, ((size_t)sizeof(T)) * new_capacity): new_capacity is prevector::size_type (uint32_t) and the product is computed in size_t after the explicit cast, which is the explicit cast upstream Bitcoin added to this line for exactly this wraparound. Every element type instantiated (unsigned char for CScript, the CTxIn/CTxOut-sized prevectors) has sizeof(T) far below 2^32, so the product fits 64 bits; and the capacity itself is bounded by callers: deserialization grows a prevector in MAX_SIZE-bounded chunks (serialize.h Unserialize_impl) and script sizes are bounded by MAX_SCRIPT_SIZE. Consensus-adjacent header (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "568e5c7850ebda01": {
+      "rule": "0xdea.rules.c.raptor-integer-wraparound",
+      "path": "src/prevector.h",
+      "reason": "malloc(((size_t)sizeof(T)) * new_capacity): same argument as the realloc branch two lines above (fingerprint 56e35d7149015f9a): new_capacity is uint32_t, the product is computed in size_t after the explicit cast (the cast upstream Bitcoin added for this), sizeof(T) of every instantiation is tiny, and the capacity is bounded by MAX_SIZE-chunked deserialization and MAX_SCRIPT_SIZE. The result is checked with assert(new_indirect), and assertions cannot be compiled out (src/crypto/common.h). Not refactored (rule 7).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "034b8af301b53b5e": {
+      "rule": "0xdea.rules.c.raptor-unterminated-string-strncpy",
+      "path": "src/protocol.cpp",
+      "reason": "pchCommand is the 12-byte fixed-width P2P wire field (COMMAND_SIZE), serialized with FLATDATA and deliberately not NUL-terminated when the command is exactly 12 characters: that is the Bitcoin wire format. The constructor memsets it to zero first; no reader treats it as a C string: GetCommand() uses strnlen(pchCommand, COMMAND_SIZE) and IsValid() walks exactly COMMAND_SIZE bytes requiring printable ASCII then zero padding. pszCommand comes only from string literals in net.cpp PushMessage/BeginMessage, never from the network. Consensus/wire serialization (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ca0632a5ae448f13": {
+      "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+      "path": "src/script/sigcache.cpp",
+      "reason": "InitSignatureCache(size_t nMaxCacheSize): `nMaxCacheSize <= 0` on an unsigned value is exactly `== 0`, which is the intended 'cache disabled' early return; the only caller is init.cpp, which has already refused a value <= 0 and passes half of a positive int64 budget. Upstream Zcash code in src/script/ (workspace CLAUDE.md rule 7): not rewritten as == 0.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "718b643cf0ac1459": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/bin/wallet_tool.rs",
+      "reason": "zcashd-wallet-tool is an interactive CLI, not FFI. unconfirmed starts as 0..words.len() and the loop runs min(3, words.len()) times, popping one element per iteration, so before the i-th pop it holds words.len()-i >= 1 elements; gen_range(0..len) on the line above would already need it non-empty.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "4bc745737559a941": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "u32 -> usize try_into is infallible wherever this crate builds: it links std (std::collections, libc), and every Rust target with std has a usize of at least 32 bits (the 16-bit targets, msp430/avr, are no_std), so the unwrap cannot fire.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ca9612abe98ef9ef": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "append_bundle_commitments: the same loop iteration just called commitment_tree.append() and returned NoteCommitmentTreeFull if it failed, so the BridgeTree has a current_bridge and bridgetree 0.7.0 BridgeTree::mark() returns None only when current_bridge is None (empty tree).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "9642c1d815b426b2": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "src/rust/src/wallet.rs",
+      "reason": "path comes from BridgeTree::<_, u32, 32>::witness(), which returns NonEmptyFrontier::witness(DEPTH): one element per WitnessAddrsIter step from level 0 to DEPTH, i.e. exactly 32 = MERKLE_DEPTH_ORCHARD, or an Err that is already mapped to WitnessNotAvailableAtDepth; the Vec -> [_; 32] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [

@@ -82,7 +82,8 @@ fn derive_internal_fvk(fvk: &[u8; 96], dk: [u8; 32]) -> ffi::FfiFullViewingKey {
 
 /// Derive a PaymentAddress from an ExtendedFullViewingKey.
 fn address(fvk: &[u8; 96], dk: [u8; 32], j: [u8; 11]) -> Result<[u8; 43], String> {
-    let fvk = FullViewingKey::read(&fvk[..]).expect("valid Sapling FullViewingKey");
+    let fvk = FullViewingKey::read(&fvk[..])
+        .map_err(|e| format!("Invalid Sapling FullViewingKey: {}", e))?;
     let dk = sapling::zip32::DiversifierKey::from_bytes(dk);
     let j = zip32::DiversifierIndex::from(j);
 
@@ -97,7 +98,8 @@ fn find_address(
     dk: [u8; 32],
     j: [u8; 11],
 ) -> Result<ffi::FfiPaymentAddress, String> {
-    let fvk = FullViewingKey::read(&fvk[..]).expect("valid Sapling FullViewingKey");
+    let fvk = FullViewingKey::read(&fvk[..])
+        .map_err(|e| format!("Invalid Sapling FullViewingKey: {}", e))?;
     let dk = sapling::zip32::DiversifierKey::from_bytes(dk);
     let j = zip32::DiversifierIndex::from(j);
 

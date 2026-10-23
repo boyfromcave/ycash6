@@ -1726,7 +1726,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // - Orchard bundle validity.
     // Assign half of the cap to transparent signatures, and split the rest
     // between Sapling and Orchard bundles.
-    size_t nMaxCacheSize = GetArg("-maxsigcachesize", DEFAULT_MAX_SIG_CACHE_SIZE) * ((size_t) 1 << 20);
+    int64_t nMaxCacheSize = GetArg("-maxsigcachesize", DEFAULT_MAX_SIG_CACHE_SIZE) * ((int64_t) 1 << 20);
     if (nMaxCacheSize <= 0) {
         return InitError(strprintf(_("-maxsigcachesize must be at least 1")));
     }

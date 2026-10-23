@@ -73,7 +73,13 @@ pub fn read_bridge_v1<H: HashSer + Ord + Clone, R: Read>(
 
         // track the currently-incomplete parent of the tracked position at max height (the one
         // we're currently building)
-        tracking.insert(Address::above_position(*levels.last().unwrap(), pos));
+        let top_level = *levels.last().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Auth fragment position has no required levels: {:?}", pos),
+            )
+        })?;
+        tracking.insert(Address::above_position(top_level, pos));
 
         for (level, ommer_value) in levels
             .into_iter()

@@ -9,12 +9,15 @@
 # Rust stays at the tree's pinned 1.96 (its binary runs on glibc 2.17).
 #
 # Build:
-#   docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy .
+#   docker build -f contrib/legacy-glibc-build/Dockerfile -t ycash-legacy \
+#       --build-arg BUILD_UID="$(id -u)" --build-arg BUILD_GID="$(id -g)" .
+#   mkdir -p legacy-out
 #   docker run --rm -v "$PWD/legacy-out:/out" ycash-legacy
-# Binaries land in ./legacy-out/ and run on Ubuntu 18.04+.
+# Binaries land in ./legacy-out/ and run on Ubuntu 18.04+. The build runs as the
+# unprivileged user `builder`, whose uid/gid default to 1000 and are set to the
+# caller's by the build args above so it can write the mounted ./legacy-out/.
 
 # checkov:skip=CKV_DOCKER_2:A throwaway build container (docker run --rm, produces binaries); it runs no service
-# checkov:skip=CKV_DOCKER_3:A throwaway build container (docker run --rm, README.md) whose only output is the binaries copied to the mounted /out; it runs no service and holds no secret
 FROM ubuntu:18.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -34,8 +37,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # with depends' clang + libc++, and the glibc floor is still the image's 2.27.
 RUN ln -sf gcc-8 /usr/bin/gcc && ln -sf g++-8 /usr/bin/g++ && g++ --version | head -1
 
+# The build itself needs no root: run it as an unprivileged user that owns the
+# source tree (depends/ and src/ are written in place) and the /out directory.
+ARG BUILD_UID=1000
+ARG BUILD_GID=1000
+RUN groupadd -o -g "$BUILD_GID" builder \
+    && useradd -o -m -u "$BUILD_UID" -g "$BUILD_GID" -s /bin/sh builder \
+    && mkdir -p /ycash /out && chown builder:builder /ycash /out
+
 WORKDIR /ycash
-COPY . /ycash
+COPY --chown=builder:builder . /ycash
+USER builder
 
 # LEGACY_GLIBC=1 selects the Clang 18.1.8 ubuntu-18.04 toolchain in depends.
 # -j is left to the runtime CMD so the image is reusable on any core count.
