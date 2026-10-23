@@ -63,6 +63,55 @@
       "reason": "(CAmount)(12.5 * COIN) is a constant expression copied from GetBlockSubsidy (src/main.cpp), exactly 1250000000 in IEEE-754; the issued-supply sum itself is arith_uint256 integer arithmetic.",
       "by": "secops CI setup",
       "date": "2026-10-23"
+    },
+    "1358f38e2b0994a2": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-signal",
+      "path": "src/init.cpp",
+      "reason": "signal(SIGPIPE, SIG_IGN) installs the SIG_IGN disposition only; no handler function ever runs, so the portability and reentrancy concerns behind the rule (unspecified reset/restart semantics of a user handler under signal()) do not arise. The handlers that do run (HandleSIGTERM/HandleSIGHUP, which only set flags) are installed with sigaction() just above. Upstream Zcash/Bitcoin init.cpp idiom; the ignore must stay or a peer closing a socket mid-write kills the daemon.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "1e229b6b4076c622": {
+      "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+      "path": "src/main.cpp",
+      "reason": "logicalTS <= prevLogicalTS compares two unsigned int timestamps for ordering, not an unsigned value against zero: prevLogicalTS starts at 0 and is overwritten by ReadTimestampBlockIndex of the previous block, and the branch makes the insight timestamp index strictly monotonic (logicalTS = prev + 1). With prevLogicalTS == 0 the comparison is only true for logicalTS == 0, which is the intended bump. Upstream Zcash insight-explorer code in a consensus file (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0da0cca2aa3edd15": {
+      "rule": "0xdea.rules.c.raptor-unchecked-ret-malloc",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "htalloc::alloc() checks the calloc() result on the next line with assert(mem), and assertions cannot be compiled out of this node (src/crypto/common.h: #error when NDEBUG is defined), so a NULL from calloc aborts before any use. The sizes are compile-time constants (sizeof(digit0), sizeof(digit1), 2*NBUCKETS, MAXSOLS), so no attacker-chosen allocation size reaches it. Upstream tromp equihash solver in src/pow/ (workspace CLAUDE.md rule 7): converting the abort into an error path is a behaviour change in PoW code for an OOM at miner start-up, not a safety gain; accepted.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "56e35d7149015f9a": {
+      "rule": "0xdea.rules.c.raptor-integer-wraparound",
+      "path": "src/prevector.h",
+      "reason": "realloc(_union.indirect, ((size_t)sizeof(T)) * new_capacity): new_capacity is prevector::size_type (uint32_t) and the product is computed in size_t after the explicit cast, which is the explicit cast upstream Bitcoin added to this line for exactly this wraparound. Every element type instantiated (unsigned char for CScript, the CTxIn/CTxOut-sized prevectors) has sizeof(T) far below 2^32, so the product fits 64 bits; and the capacity itself is bounded by callers: deserialization grows a prevector in MAX_SIZE-bounded chunks (serialize.h Unserialize_impl) and script sizes are bounded by MAX_SCRIPT_SIZE. Consensus-adjacent header (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "568e5c7850ebda01": {
+      "rule": "0xdea.rules.c.raptor-integer-wraparound",
+      "path": "src/prevector.h",
+      "reason": "malloc(((size_t)sizeof(T)) * new_capacity): same argument as the realloc branch two lines above (fingerprint 56e35d7149015f9a): new_capacity is uint32_t, the product is computed in size_t after the explicit cast (the cast upstream Bitcoin added for this), sizeof(T) of every instantiation is tiny, and the capacity is bounded by MAX_SIZE-chunked deserialization and MAX_SCRIPT_SIZE. The result is checked with assert(new_indirect), and assertions cannot be compiled out (src/crypto/common.h). Not refactored (rule 7).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "034b8af301b53b5e": {
+      "rule": "0xdea.rules.c.raptor-unterminated-string-strncpy",
+      "path": "src/protocol.cpp",
+      "reason": "pchCommand is the 12-byte fixed-width P2P wire field (COMMAND_SIZE), serialized with FLATDATA and deliberately not NUL-terminated when the command is exactly 12 characters: that is the Bitcoin wire format. The constructor memsets it to zero first; no reader treats it as a C string: GetCommand() uses strnlen(pchCommand, COMMAND_SIZE) and IsValid() walks exactly COMMAND_SIZE bytes requiring printable ASCII then zero padding. pszCommand comes only from string literals in net.cpp PushMessage/BeginMessage, never from the network. Consensus/wire serialization (workspace CLAUDE.md rule 7): not refactored.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ca0632a5ae448f13": {
+      "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+      "path": "src/script/sigcache.cpp",
+      "reason": "InitSignatureCache(size_t nMaxCacheSize): `nMaxCacheSize <= 0` on an unsigned value is exactly `== 0`, which is the intended 'cache disabled' early return; the only caller is init.cpp, which has already refused a value <= 0 and passes half of a positive int64 budget. Upstream Zcash code in src/script/ (workspace CLAUDE.md rule 7): not rewritten as == 0.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
