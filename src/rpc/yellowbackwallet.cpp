@@ -1544,6 +1544,8 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
     YellowbackIndex& index = *yw.Index();
     int count = params.size() > 0 && !params[0].isNull() ? params[0].get_int() : 100;
     int skip = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 0;
+    // C-6, as yed_listvaults / yed_listtokens: a negative skip would wrap in the size_t loop below.
+    if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
     LOCK2(cs_main, pwalletMain->cs_wallet);
     LOCK(mempool.cs);              // §4.3 lock order: mempool.cs (mempool.exists below) before cs_yellowback
     LOCK(index.cs_yellowback);

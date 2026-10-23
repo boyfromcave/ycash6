@@ -7,6 +7,62 @@
       "reason": "The format string is _(literal) + _(literal). _() (src/util.h) returns its input unless a translation function is set, and ycashd sets none, so the format is a compile-time literal whose six arguments match its %s count.",
       "by": "semgrep CI setup",
       "date": "2026-10-22"
+    },
+    "9d7faa1858cffaa0": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowback.cpp",
+      "reason": "yed_estimatecollateral lockBlocks: params[1] is checked isNum() and then ClassForLockBlocks() returns -1 outside every term class, which the handler refuses (mint-bad-lock) before any use.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "6a5797dd0bb3078e": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "yed_mint cents: PreflightMint -> MintGate (src/yellowback/txbuilder.cpp) refuses cents outside [minMint, maxMint] before any transaction is built.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "587c9c98eab87bae": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "yed_mint lockBlocks: PreflightMint -> MintGate refuses a lockBlocks outside every term class (mint-bad-lock) before any transaction is built.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "f6e08713abbc8086": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "yed_send cents: DoSend -> BuildTransfer refuses each amount outside [minOutput, maxOutput] (bad-xfer-amount).",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "31f2ebaf1b22bffe": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "priceMicroUsd (yed_revive): BuildRevive -> SignAttestationGuarded refuses a price outside [PRICE_MIN, PRICE_MAX] (attest-range) before signing.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "31f2ebaf1b22bffe-1": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "priceMicroUsd (yed_signattestation): SignAttestationGuarded refuses a price outside [PRICE_MIN, PRICE_MAX] (attest-range) before signing.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "a22287cf3d83e854": {
+      "rule": "ycash.rpc.int-param-without-range-check",
+      "path": "src/rpc/yellowbackwallet.cpp",
+      "reason": "citedHeight: SignAttestationGuarded refuses a citedHeight outside [startHeight, chainHeight] (attest-stale) before signing.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
+    },
+    "269dfc6ab4ea25b4": {
+      "rule": "ycash.yellowback.floating-point",
+      "path": "src/yellowback/index.cpp",
+      "reason": "(CAmount)(12.5 * COIN) is a constant expression copied from GetBlockSubsidy (src/main.cpp), exactly 1250000000 in IEEE-754; the issued-supply sum itself is arith_uint256 integer arithmetic.",
+      "by": "secops CI setup",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [

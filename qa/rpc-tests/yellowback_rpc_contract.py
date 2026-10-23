@@ -370,6 +370,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         rows = c.check('yed_listtransactions', user.yed_listtransactions())
         assert_equal({x['txid'] for x in rows} >= {mint_a['txid'], sent['txid'], many['txid']}, True)
         c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
+        assert_rpc_error('count and skip must be', user.yed_listtransactions, 1, -1)   # C-6, as yed_listtokens
+        assert_rpc_error('count and skip must be', user.yed_listtransactions, -1)
 
 # Rule: IT-7
         print('yed_listclaimable in term (IT-7): every open vault, claimable false above the threshold')

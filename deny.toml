@@ -33,16 +33,3 @@ exceptions = [
     { name = "terminfo", allow = ["WTFPL"] },
     { name = "unicode-ident", allow = ["Unicode-3.0"] },
 ]
-
-# Ycash (2026-10-23): the RustSec advisory policy of the `cargo-deny` job in
-# .github/workflows/secops.yml (`cargo deny --locked check advisories bans sources`; SECURITY-CI.md).
-# Each ignore is mirrored, with the same reason, in osv-scanner.toml, which also dates it.
-[advisories]
-version = 2
-ignore = [
-    { id = "RUSTSEC-2026-0190", reason = "anyhow 1.0.102: Error::downcast_mut is never called; Cargo.lock is frozen and must match ycash6-stock's crates-io set, so the 1.0.103 bump is a coordinated change (osv-scanner.toml)" },
-    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch 0.9.18: only rayon's internals use it and nothing formats an Atomic/Shared pointer; same frozen-lock reason as RUSTSEC-2026-0190" },
-    { id = "RUSTSEC-2026-0202", reason = "cxx 1.0.194: let_cxx_string! is never used in src/; cxx must match the cxxbridge code generator depends builds (native_cxxbridge.mk), so it moves in a coordinated depends bump" },
-    { id = "RUSTSEC-2026-0214", reason = "gumdrop is unmaintained (no vulnerability): argument parsing in src/rust/bin/wallet_tool.rs; informational" },
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained (no vulnerability): compile-time only, via getset in orchard/zcash_primitives; informational" },
-]

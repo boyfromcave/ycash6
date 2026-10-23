@@ -45,31 +45,6 @@ id = "RUSTSEC-2024-0436"
 ignoreUntil = 2027-01-21T00:00:00Z
 reason = "paste is unmaintained (no vulnerability): a compile-time macro crate in the agent's graph; the agent's own cargo audit / cargo deny (yellowback-tests.yml `agent`) report it as a warning. Informational."
 
-# --- contrib/semgrep/requirements.txt (the Semgrep CLI's CI-only environment; never shipped) ---
-
-[[IgnoredVulns]]
-id = "GHSA-84m7-p3x7-pcfv"
-ignoreUntil = 2027-01-21T00:00:00Z
-reason = "mcp 1.29.0 (StreamableHTTP session accumulation): semgrep 1.179.0 pins mcp==1.29.0 for its MCP server mode, which scan.py never starts; fixed by the next semgrep_version bump (contrib/semgrep/config.json)."
-
-[[IgnoredVulns]]
-id = "GHSA-xcq7-p3pf-p88h"
-ignoreUntil = 2027-01-21T00:00:00Z
-reason = "opentelemetry-api 1.37.0 (unbounded tracestate parsing): semgrep 1.179.0 pins ~=1.37.0; scan.py runs with metrics/tracing off and parses no remote tracestate. Fixed by the next semgrep_version bump."
-
-[[IgnoredVulns]]
-id = "GHSA-6q48-6c7w-9gw2"
-ignoreUntil = 2026-11-23T00:00:00Z
-reason = "certifi 2026.7.22 (emSign roots with compromised intermediates): the fixed 2026.10.19 is four days old, inside the two-week release-age rule of requirements.txt's --exclude-newer; contrib/semgrep/requirements.txt is shared verbatim with ycash-dd, so it is regenerated there and copied (owner of the bump: the ycash-dd semgrep scaffolding). CI-only."
-
-
-# --- contrib/secops/checkov-requirements.txt (the Checkov job's CI-only environment; never shipped) ---
-
-[[IgnoredVulns]]
-id = "GHSA-83vg-56qc-22m7"
-ignoreUntil = 2026-11-23T00:00:00Z
-reason = "gitpython 3.2.0 (submodule .git path checked after clone): Checkov runs with --framework dockerfile over this checkout and never clones (no external module download). The fixed 3.2.1 (2026-10-14) is inside the two-week release-age rule; take it at the next regeneration."
-
 [[IgnoredVulns]]
 id = "GHSA-89v8-rhwq-hf77"
 ignoreUntil = 2027-01-21T00:00:00Z

@@ -10,13 +10,14 @@ updated in place.
 
 | Leg | Workflow / job | Scans | Blocks a PR when | Results |
 |---|---|---|---|---|
-| Semgrep | `semgrep.yml` | C++, Rust, Python, shell, Dockerfiles, workflows, secrets (`contrib/semgrep/config.json`) | the PR adds a **critical** finding | code scanning (`semgrep`), at most four rolling `semgrep/<bucket>` PRs ([contrib/semgrep/README.md](contrib/semgrep/README.md)) |
+| Semgrep | `semgrep.yml` | C++, Rust, Python, shell, Dockerfiles, workflows, secrets (`contrib/semgrep/config.json`), plus this repo's rules: RPC integer parameters range-checked where read, no floating point in the Yellowback module / vault primitive (`contrib/semgrep/rules/ycash-rpc.yaml`) | the PR adds a **critical** finding | code scanning (`semgrep`), at most four rolling `semgrep/<bucket>` PRs ([contrib/semgrep/README.md](contrib/semgrep/README.md)) |
 | CodeQL | `codeql.yml` | `c-cpp`, `rust`, `python`, `actions`; `build-mode: none`, `security-extended`; vendored upstream trees excluded | never by itself (code scanning's PR check shows new alerts) | code scanning (`codeql/<language>`) |
 | zizmor | `secops.yml` `zizmor` | every workflow, local action and `.github/dependabot.yml` | any finding | code scanning (`zizmor`), step summary |
 | gitleaks | `secops.yml` `gitleaks` | secrets: the PR's commits; on push the pushed commits; nightly and on dispatch the full history | a leak not accepted | code scanning (`gitleaks`), step summary |
 | OSV-Scanner | `secops.yml` `osv-scanner` | every tracked `Cargo.lock` and hash-locked pip requirement file | a known vulnerability not accepted | code scanning (`osv-scanner`), step summary |
-| cargo-deny | `secops.yml` `cargo-deny` | RustSec advisories, bans and sources over the root `Cargo.lock` (`deny.toml`), `--locked` | an advisory not ignored, a banned crate or an unknown source | job log |
+| cargo-deny | `secops.yml` `cargo-deny` | RustSec advisories, bans and sources over the root `Cargo.lock` (`contrib/secops/deny-node.toml`; the root `deny.toml` stays upstream's licence policy), `--locked` | an advisory not ignored, a banned crate or an unknown source | job log |
 | Checkov | `secops.yml` `checkov` | the Dockerfiles | a failed check not skipped | code scanning (`checkov`), step summary |
+| Semgrep rule tests | `secops.yml` `semgrep-rules` | the local rules (`contrib/semgrep/rules/*.yaml`) against their annotated test files | a rule test fails | job log |
 | Dependabot | `.github/dependabot.yml` | security updates for cargo, pip, github-actions, docker | — | one grouped `security` PR per ecosystem; version updates are off (every dependency is pinned and bumped deliberately) |
 
 Beside these, the existing supply-chain checks stay as they are: upstream's `cargo vet` (`audits.yml`)
@@ -26,7 +27,7 @@ Python package ships from here). Nothing scans consensus code differently: findi
 `src/consensus`, `src/script`, `src/primitives`, `src/pow` and `src/main.cpp` are reported like any
 other, and their fixes go through the consensus review gate, never through a scanner autofix.
 
-Schedules (UTC): Semgrep nightly 02:17, secops nightly 03:43, CodeQL weekly Monday 05:37.
+Schedules (UTC): Semgrep nightly 02:17, secops nightly 03:43, CodeQL weekly Monday 04:41.
 
 ## Accepting a finding
 
@@ -45,7 +46,8 @@ to get a run green.
   accepted**: rotate it first, then decide whether history needs rewriting.
 - **OSV-Scanner**: an `[[IgnoredVulns]]` entry in `osv-scanner.toml` with `reason` and an
   `ignoreUntil` at most 90 days out; on that date the scan fails again and the finding is re-triaged.
-  A RustSec ID accepted there is also listed, with the same reason, in `deny.toml` `[advisories]`.
+  A RustSec ID accepted there is also listed, with the same reason, in `contrib/secops/deny-node.toml`
+  `[advisories]`.
 - **Checkov**: `# checkov:skip=<CHECK_ID>:<reason>` in the Dockerfile.
 
 ## Repository settings this relies on

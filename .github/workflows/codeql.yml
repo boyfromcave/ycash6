@@ -10,20 +10,15 @@ name: codeql
 #   Vendored upstream trees (leveldb, secp256k1, univalue, crc32c, ctaes, depends) are not
 #   analysed: their findings are upstream's (the same list as .semgrepignore).
 #
-#   pull_request / push to the node-line branches, weekly Monday 05:37 UTC on the default branch.
+#   every pull_request, push to upgrade/vault, weekly Monday 04:41 UTC on the default branch.
 #   Results go to GitHub code scanning (category codeql/<language>) only: no PR, no issue. This job
 #   never fails on an alert; code scanning's own PR check shows alerts a PR introduces.
 on:
   push:
-    branches:
-      - upgrade/vault
-      - harden/yellowback
+    branches: ['upgrade/vault']
   pull_request:
-    branches:
-      - upgrade/vault
-      - harden/yellowback
   schedule:
-    - cron: '37 5 * * 1'
+    - cron: '41 4 * * 1'
   workflow_dispatch:
 
 permissions: {}
@@ -35,6 +30,8 @@ concurrency:
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
+    # A fork's PR token cannot upload to code scanning; the push / schedule runs cover forks' code once merged.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
