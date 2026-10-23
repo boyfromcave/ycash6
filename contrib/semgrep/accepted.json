@@ -224,6 +224,97 @@
       "reason": "path comes from BridgeTree::<_, u32, 32>::witness(), which returns NonEmptyFrontier::witness(DEPTH): one element per WitnessAddrsIter step from level 0 to DEPTH, i.e. exactly 32 = MERKLE_DEPTH_ORCHARD, or an Err that is already mapped to WitnessNotAvailableAtDepth; the Vec -> [_; 32] conversion cannot fail.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "fa4346881c83a92c": {
+      "rule": "python.lang.security.use-defusedcsv",
+      "path": "contrib/yellowback/attest/calibrate/pinrate.py",
+      "reason": "write_csv writes only numbers this tool computed: _iso(ts) (strftime of an int), the int ts and repr(float) of a price already parsed by float(). No cell can start with = + - @ text, so there is nothing for defusedcsv to neutralise; the file is a local calibration output.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "1d923782fb8746df": {
+      "rule": "python.lang.security.use-defusedcsv",
+      "path": "contrib/yellowback/attest/calibrate/spreads.py",
+      "reason": "append_row writes row_for(): an strftime timestamp, an int, str() of parsed prices, and an errors cell built as '<name>: <error>' where <name> is one of the constant SOURCES names (coingecko, safetrade, nonkyc). Feed error text therefore never starts a cell, so formula injection cannot occur; the file is a local calibration log.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0283b0d03269a887": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/yellowback/devnet/upgrade-walk",
+      "reason": "http_json is called only with the chain-viz base URL that this devnet walk started itself and recorded in its own state dir (127.0.0.1 port), plus fixed /api/vaults and /api/health paths. Operator-local, http only, no file:// path from outside.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "13b4c7a2bb98cc13": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/yellowback/devnet/yellowback-devnet",
+      "reason": "stratum_status opens the literal 'http://127.0.0.1:%d/status' with the integer status port of the yolo process the devnet started (its own state record). The scheme and host are constants.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d2a534e5545021a7": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "qa/rpc-tests/yellowback_chainviz.py",
+      "reason": "self.url is the 'listening on <url>' line printed by the chain-viz process this regtest test spawned on a loopback port; the paths are fixed /api/* strings in the test.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "e486b86ea3830e1f": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "qa/rpc-tests/yellowback_stratum.py",
+      "reason": "status() opens the literal 'http://127.0.0.1:%d/status' with the integer port of the yolo process this regtest test spawned. The scheme and host are constants.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0ba2a11e65cf3fdf": {
+      "rule": "python.lang.security.audit.httpsconnection-detected",
+      "path": "qa/rpc-tests/test_framework/authproxy.py",
+      "reason": "Upstream Bitcoin test-framework AuthServiceProxy. Since Python 3.4.3 (PEP 476) http.client.HTTPSConnection uses ssl.create_default_context(), which verifies the certificate and host name, and the qa tests talk to regtest nodes on 127.0.0.1 over plain http anyway.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "478d6c4cea151f43": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "src/keystore.h",
+      "reason": "The match is a C++ declaration (struct CCryptedPQKey's cryptedSeed member / typedef std::map<CPQKeyID, CCryptedPQKey> CryptedPQKeyMap): identifiers, not a key value. No literal is present.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "620603ce7c5b3c71": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 50): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "696bac1cb7c2a9e4": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 53): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bf1e086d79249182": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 61): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ac21eb1bbc88c3e6": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 125): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bf61c2ad80673244": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 207): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
@@ -254,6 +345,29 @@
       "reason": "Test vectors, regtest keys and documentation examples, not real secrets (checked 2026-10-22). A secret anywhere else is still reported.",
       "by": "semgrep CI setup",
       "date": "2026-10-22"
+    },
+    {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "paths": [
+        "qa/**",
+        "contrib/devtools/**",
+        "contrib/simulations/**",
+        "contrib/yellowback/**",
+        "zcutil/**",
+        "src/test/bctest.py"
+      ],
+      "reason": "Test harnesses, devnet scripts, release and build devtools run by a developer on their own machine. Every hit was read (2026-10-23, ~70 per node line): each passes an argv list (no shell=True, no os.system/os.popen, no shell string) built from constants, the tool's own command-line flags, paths under its own scratch/state dir, or values the test itself generated; none takes argv from the network or from a file another party controls. The one shell-string site, contrib/devtools/fix-copyright-headers.py, was rewritten to argv lists. A subprocess call in src/, depends/ or anywhere else is still reported.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    {
+      "rule": "bash.lang.security.ifs-tampering",
+      "paths": [
+        "test/lint/**"
+      ],
+      "reason": "Lint scripts that set IFS only to join an array: 'local IFS=\"$1\"' inside join_array (lint-locale-dependence.sh) and '$(IFS=\",\"; echo \"${arr[*]}\")' in a command substitution subshell (lint-shell.sh). Both scopes end immediately, so the caller's IFS is never changed.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   ]
 }
