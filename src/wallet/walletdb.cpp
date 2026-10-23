@@ -1510,8 +1510,15 @@ bool CWalletDB::Recover(CDBEnv& dbenv, const std::string& filename, bool fOnlyKe
         return false;
     }
 
+    // A plain salvage reads only the live records. The aggressive one also emits deleted and
+    // overwritten copies from free pages, which can come before the live one (DB_NOOVERWRITE below
+    // keeps the first) or return DB_VERIFY_BAD on a sound file; use it only when the plain one fails.
     std::vector<CDBEnv::KeyValPair> salvagedData;
-    bool fSuccess = dbenv.Salvage(newFilename, true, salvagedData);
+    bool fSuccess = dbenv.Salvage(newFilename, false, salvagedData);
+    if (!fSuccess) {
+        salvagedData.clear();
+        fSuccess = dbenv.Salvage(newFilename, true, salvagedData);
+    }
     if (salvagedData.empty())
     {
         LogPrintf("Salvage(aggressive) found no records in %s.\n", newFilename);
