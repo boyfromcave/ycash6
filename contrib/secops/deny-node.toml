@@ -23,6 +23,7 @@ ignore = [
     { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch 0.9.18: the fmt::Pointer impl of Atomic/Shared; reached only through rayon (bellman proving), which never formats those pointers. Frozen lock (header)." },
     { id = "RUSTSEC-2026-0214", reason = "gumdrop is unmaintained (no vulnerability): argument parsing in src/rust/bin/wallet_tool.rs; informational." },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained (no vulnerability): compile-time only, via getset in orchard/zcash_primitives (librustzcash6); informational." },
+    { id = "RUSTSEC-2026-0386", reason = "tokio 1.52.3: AsyncFd safe constructors violate I/O safety; the node constructs no AsyncFd (no hit in src/rust; metrics_ffi.rs builds a current-thread runtime for the Prometheus exporter only), nor do metrics-exporter-prometheus 0.12.2 or hyper 0.14.32. Frozen lock (header)." },
 ]
 
 [bans]
