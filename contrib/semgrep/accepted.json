@@ -315,6 +315,13 @@
       "reason": "A recorded regtest devnet transcript (line 207): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "79a428c2eee39060": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "os.chmod(shim, 0o700) on the ycash-cli shell shim this devnet check writes into its own scratch dir: owner read/write/execute only, no group or other bits. It must be executable because the Perl stratum server it launches, as the same user, runs it as ycash-cli. It holds no key or wallet data, only paths. Hardened from 0o755 on 2026-10-23.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
