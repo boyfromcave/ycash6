@@ -4,5 +4,8 @@
 # once the cut-off date passes the fixed release.
 #   certifi    PYSEC-2026-4320 / GHSA-6q48-6c7w-9gw2 (emSign roots with compromised intermediates)
 #   gitpython  GHSA-83vg-56qc-22m7 (submodule .git path validated after clone)
+#   asteval    GHSA-89v8-rhwq-hf77, GHSA-9w56-46f6-3qhx (sandbox escapes); Checkov 3.3.26 pins
+#              asteval==1.0.6, so the job installs with --no-deps (as ycash-infra does)
 certifi==2026.10.19
 gitpython==3.2.1
+asteval==1.0.9
