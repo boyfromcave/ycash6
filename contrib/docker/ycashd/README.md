@@ -56,3 +56,12 @@ docker run -d --name ycashd -v ycashd_data:/var/lib/ycash \
 
 On Kubernetes, mount a `Secret` volume (`defaultMode: 0400`, pod `fsGroup: 2001`): the image runs
 as uid 2001, which must be able to read the file.
+
+## Health
+
+The image's `HEALTHCHECK` runs `ycash-cli getblockchaininfo` every 60 s (30 s timeout, three failures
+to unhealthy, a 30-minute start period for the block-index load of a mainnet datadir). It reads the
+same `ycash.conf` as ycashd (`YCASHD_CONF`, else `$YCASHD_DATADIR/ycash.conf`) and connects on
+loopback, so it needs no extra setting; a syncing node reports healthy. Docker only reports the
+status. A Compose file can override it (`docker-compose.regtest.yml` polls every 5 s), and Kubernetes
+ignores it in favour of the pod's probes.

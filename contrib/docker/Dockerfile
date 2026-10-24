@@ -1,5 +1,4 @@
-# checkov:skip=CKV_DOCKER_2:Upstream zcashd image (apt.z.cash package; release-docker-hub.yml runs only in zcash/*); liveness is the orchestrator's, as upstream ships it
-# checkov:skip=CKV_DOCKER_3:Upstream zcashd's image kept as upstream ships it (it creates a zcashd user but does not switch to it); not a Ycash release artifact: the Ycash image is contrib/docker/ycashd/Dockerfile, which runs as uid 2001
+# checkov:skip=CKV_DOCKER_2:Upstream zcashd's image (installs zcashd from apt.z.cash; release-docker-hub.yml runs only in zcash/*), not a Ycash artifact: the Ycash image, contrib/docker/ycashd/Dockerfile, has the HEALTHCHECK
 FROM debian:12
 
 RUN apt-get update \
@@ -42,4 +41,8 @@ ENV HOME="/srv/$ZCASHD_USER"
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+# Ycash (2026-10-24): run as the user the image creates and gives its home to; the entrypoint needs
+# no root (zcash-fetch-params and the conf touch write under $HOME). A host directory bind-mounted
+# over /srv/zcashd/.zcash or .zcash-params must be writable by uid $ZCASHD_UID.
+USER $ZCASHD_USER
 ENTRYPOINT ["/entrypoint.sh"]

@@ -18,7 +18,8 @@ name: secops
 #                 upstream's licence policy (deny.toml), which it does not replace; the agent crate has
 #                 its own cargo audit + cargo deny in yellowback-tests.yml `agent`.
 #   checkov       the Dockerfiles (contrib/docker, contrib/legacy-glibc-build). Fails on a failed
-#                 check not skipped in the Dockerfile with a reason.
+#                 check not skipped in the Dockerfile with a reason; the reasoned skips are taken out
+#                 of the uploaded SARIF (contrib/secops/checkov-sarif-skips.py).
 #   semgrep-rules the local Semgrep rules' tests (contrib/semgrep/scan.py --test).
 #
 # Triggers: every pull_request, push to upgrade/vault, nightly 03:43 UTC, workflow_dispatch.
@@ -217,6 +218,12 @@ jobs:
           "$RUNNER_TEMP/checkov/bin/checkov" --framework dockerfile --quiet --compact "${files[@]}" \
             --output cli --output sarif --output-file-path console,checkov.sarif
           rc=$?
+          # Checkov keeps a skipped check in its SARIF as a warning with an inSource suppression, which
+          # code scanning ignores (it opened an alert per reasoned skip): drop the reasoned ones, fail
+          # on a skip without a reason.
+          if [ -f checkov.sarif ]; then
+            python3 contrib/secops/checkov-sarif-skips.py checkov.sarif || rc=1
+          fi
           { echo '### Checkov'; echo "exit $rc (skipped checks carry their reason in the Dockerfile)"; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
       - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3

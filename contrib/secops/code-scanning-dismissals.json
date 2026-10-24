@@ -42,6 +42,20 @@
       "path": "src/crypto/pq/slhdsa/slh_dsa.c",
       "reason": "false positive",
       "comment": "slh_sig_sz and ht_verify multiply fields of the static FIPS 205 SHA2 parameter tables: the largest products are 49856 (256f signature) and (hp+len)*n = 2400 (256s), far below 2^32. Ycash uses SHA2-128s: 7856 and 704."
+    },
+    {
+      "tool": "checkov",
+      "rule": "CKV_DOCKER_2",
+      "path": "contrib/legacy-glibc-build/Dockerfile",
+      "reason": "won't fix",
+      "comment": "Throwaway build container (docker run --rm): its CMD runs zcutil/build.sh, copies ycashd/ycash-cli/ycash-tx to /out and exits; no service to probe. Reasoned checkov:skip in the file; already runs as USER builder."
+    },
+    {
+      "tool": "checkov",
+      "rule": "CKV_DOCKER_2",
+      "path": "contrib/docker/Dockerfile",
+      "reason": "won't fix",
+      "comment": "Upstream zcashd image (installs zcashd from apt.z.cash), published only by release-docker-hub.yml, which runs only in zcash/*; not a Ycash artifact. The Ycash image contrib/docker/ycashd/Dockerfile has the HEALTHCHECK. Reasoned checkov:skip in the file."
     }
   ]
 }
