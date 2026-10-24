@@ -48,7 +48,9 @@ to get a run green.
   `ignoreUntil` at most 90 days out; on that date the scan fails again and the finding is re-triaged.
   A RustSec ID accepted there is also listed, with the same reason, in `contrib/secops/deny-node.toml`
   `[advisories]`.
-- **Checkov**: `# checkov:skip=<CHECK_ID>:<reason>` in the Dockerfile.
+- **Checkov**: `# checkov:skip=<CHECK_ID>:<reason>` in the Dockerfile. The reason is required: a
+  skip without one fails the job, and only reasoned skips are removed from the SARIF the job
+  uploads (`contrib/secops/checkov-sarif-skips.py`; code scanning does not honour SARIF suppressions).
 
 ## Repository settings this relies on
 

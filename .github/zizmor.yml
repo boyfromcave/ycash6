@@ -14,8 +14,8 @@ rules:
   dangerous-triggers:
     # Upstream's required-status bridge: ci-skip.yml uses pull_request_target (scoped to master)
     # and ci-status.yml workflow_run, because posting a commit status on a fork PR needs a token
-    # the fork's own run does not get. Neither checks out or runs PR code (ci-skip.yml fetches the
-    # PR commits only to list the changed paths; its own comment), and both are least-privilege.
+    # the fork's own run does not get. Neither checks out, fetches or runs PR code (ci-skip.yml
+    # lists the changed paths through the REST API; its own comment), and both are least-privilege.
     ignore: [ci-skip.yml, ci-status.yml]
   archived-uses:
     # lints.yml's clippy job uses actions-rs/clippy-check (archived upstream, now SHA-pinned).

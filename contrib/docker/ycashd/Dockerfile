@@ -11,7 +11,6 @@
 # (zcutil/fetch-params.sh only fetches the optional Sprout file), so nothing else is needed.
 # Runs as uid 2001 with the datadir at /var/lib/ycash; contrib/docker/ycashd/entrypoint.sh
 # turns YCASHD_* environment variables into ycash.conf (README.md there).
-# checkov:skip=CKV_DOCKER_2:A node image: readiness is block sync, which an orchestrator probes with ycash-cli (ycash-infra deploys it with its own probes); a fixed HEALTHCHECK would restart a syncing node
 FROM ubuntu:22.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -41,4 +40,13 @@ USER ycash
 ENV HOME=/srv/ycash
 VOLUME ["/var/lib/ycash"]
 EXPOSE 8832 8833 18832 18833
+# Liveness: the RPC server answers getblockchaininfo. It answers while the node syncs, so a syncing
+# node is healthy; it errors (-28) while the block index loads, which the start period covers on a
+# mainnet datadir. ycash-cli takes its credentials and port from the same ycash.conf the entrypoint
+# wrote (or the mounted YCASHD_CONF; with no rpcpassword there, the datadir's .cookie), so nothing
+# secret is on a command line, and reaches ycashd on loopback, which ycashd always allows. Docker
+# only reports the status; Kubernetes ignores it and uses its own probes (ycash-infra).
+HEALTHCHECK --interval=60s --timeout=30s --start-period=30m --retries=3 \
+  CMD d="${YCASHD_DATADIR:-/var/lib/ycash}"; \
+      ycash-cli -datadir="$d" -conf="${YCASHD_CONF:-$d/ycash.conf}" -rpcclienttimeout=25 getblockchaininfo >/dev/null || exit 1
 ENTRYPOINT ["ycashd-entrypoint"]
