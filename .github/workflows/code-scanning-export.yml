@@ -1,11 +1,13 @@
 # Export the repository's open code-scanning alerts as a JSON artifact.
 #
-# Manual only. The Claude GitHub App's installation token cannot read code scanning, so this
+# Manual, or a push to its own export branch (a workflow_dispatch needs the file on the default branch). The Claude GitHub App's installation token cannot read code scanning, so this
 # workflow does it with the job's own GITHUB_TOKEN (security-events: read) and leaves the list
 # as a run artifact for whoever triages the alerts. It changes nothing in the repository.
 name: code-scanning-export
 on:
   workflow_dispatch:
+  push:
+    branches: ['claude/semgrep-security-issues-5rnmte-alerts']
 permissions: {}
 jobs:
   export:
