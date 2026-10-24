@@ -1,0 +1,47 @@
+{
+  "_comment": "Code-scanning alerts dismissed by .github/workflows/code-scanning.yml (contrib/secops/code-scanning-triage.py). One entry per tool + rule + path glob: reason is one of 'false positive', 'won't fix', 'used in tests'; comment is the argument a reviewer can check (280 characters reach GitHub). A real finding is fixed in code, never listed here.",
+  "dismissals": [
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/incorrect-allocation-error-handling",
+      "path": "src/main.cpp",
+      "reason": "false positive",
+      "comment": "AddToBlockIndex: assert(pindexNew) after a throwing new is dead but harmless (failure is std::bad_alloc, never null). Upstream Zcash code, unchanged from the -legacy baseline; consensus file, so not tidied."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/offset-use-before-range-check",
+      "path": "src/arith_uint256.h",
+      "reason": "false positive",
+      "comment": "base_uint operator++/--: i starts at 0 and is incremented only after i < WIDTH-1 holds, so every pn[i] read has 0 <= i <= WIDTH-1; the use-then-check order is the intended carry loop. Upstream Bitcoin/Zcash header, unchanged."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/incorrect-not-operator-usage",
+      "path": "src/crypto/aes.cpp",
+      "reason": "false positive",
+      "comment": "Intentional constant-time padding check in upstream Bitcoin Core AES256CBC decrypt: !padsize is a 0/1 bool OR'd bitwise with (padsize > AES_BLOCKSIZE) to avoid a branch; fail stays 0/1 and padsize *= !fail. Unchanged from baseline."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/suspicious-pointer-scaling",
+      "path": "src/crypto/pq/falcon/keygen.c",
+      "reason": "false positive",
+      "comment": "Unmodified PQClean Falcon solve_NTRU_binary_depth1: rt1 = (fpr *)tmp reuses the uint32_t scratch as fpr, rt2..rt6 step n fprs by design. Scratch is a union with fpr (aligned), 14336 B; the 5.5n fprs used (n=256) are 11264 B."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/integer-multiplication-cast-to-long",
+      "path": "src/crypto/pq/falcon/sign.c",
+      "reason": "false positive",
+      "comment": "Unmodified PQClean Falcon sampler: z0 = gaussian0_sampler() is a count over its 18-row table, so 0 <= z0 <= 18 and z0 * z0 <= 324; no int overflow before the int64_t conversion."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "cpp/integer-multiplication-cast-to-long",
+      "path": "src/crypto/pq/slhdsa/slh_dsa.c",
+      "reason": "false positive",
+      "comment": "slh_sig_sz and ht_verify multiply fields of the static FIPS 205 SHA2 parameter tables: the largest products are 49856 (256f signature) and (hp+len)*n = 2400 (256s), far below 2^32. Ycash uses SHA2-128s: 7856 and 704."
+    }
+  ]
+}
