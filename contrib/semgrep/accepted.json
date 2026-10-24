@@ -224,6 +224,398 @@
       "reason": "path comes from BridgeTree::<_, u32, 32>::witness(), which returns NonEmptyFrontier::witness(DEPTH): one element per WitnessAddrsIter step from level 0 to DEPTH, i.e. exactly 32 = MERKLE_DEPTH_ORCHARD, or an Err that is already mapped to WitnessNotAvailableAtDepth; the Vec -> [_; 32] conversion cannot fail.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "fa4346881c83a92c": {
+      "rule": "python.lang.security.use-defusedcsv",
+      "path": "contrib/yellowback/attest/calibrate/pinrate.py",
+      "reason": "write_csv writes only numbers this tool computed: _iso(ts) (strftime of an int), the int ts and repr(float) of a price already parsed by float(). No cell can start with = + - @ text, so there is nothing for defusedcsv to neutralise; the file is a local calibration output.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "1d923782fb8746df": {
+      "rule": "python.lang.security.use-defusedcsv",
+      "path": "contrib/yellowback/attest/calibrate/spreads.py",
+      "reason": "append_row writes row_for(): an strftime timestamp, an int, str() of parsed prices, and an errors cell built as '<name>: <error>' where <name> is one of the constant SOURCES names (coingecko, safetrade, nonkyc). Feed error text therefore never starts a cell, so formula injection cannot occur; the file is a local calibration log.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0283b0d03269a887": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/yellowback/devnet/upgrade-walk",
+      "reason": "http_json is called only with the chain-viz base URL that this devnet walk started itself and recorded in its own state dir (127.0.0.1 port), plus fixed /api/vaults and /api/health paths. Operator-local, http only, no file:// path from outside.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "13b4c7a2bb98cc13": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/yellowback/devnet/yellowback-devnet",
+      "reason": "stratum_status opens the literal 'http://127.0.0.1:%d/status' with the integer status port of the yolo process the devnet started (its own state record). The scheme and host are constants.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d2a534e5545021a7": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "qa/rpc-tests/yellowback_chainviz.py",
+      "reason": "self.url is the 'listening on <url>' line printed by the chain-viz process this regtest test spawned on a loopback port; the paths are fixed /api/* strings in the test.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "e486b86ea3830e1f": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "qa/rpc-tests/yellowback_stratum.py",
+      "reason": "status() opens the literal 'http://127.0.0.1:%d/status' with the integer port of the yolo process this regtest test spawned. The scheme and host are constants.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "0ba2a11e65cf3fdf": {
+      "rule": "python.lang.security.audit.httpsconnection-detected",
+      "path": "qa/rpc-tests/test_framework/authproxy.py",
+      "reason": "Upstream Bitcoin test-framework AuthServiceProxy. Since Python 3.4.3 (PEP 476) http.client.HTTPSConnection uses ssl.create_default_context(), which verifies the certificate and host name, and the qa tests talk to regtest nodes on 127.0.0.1 over plain http anyway.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "478d6c4cea151f43": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "src/keystore.h",
+      "reason": "The match is a C++ declaration (struct CCryptedPQKey's cryptedSeed member / typedef std::map<CPQKeyID, CCryptedPQKey> CryptedPQKeyMap): identifiers, not a key value. No literal is present.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "620603ce7c5b3c71": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 50): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "696bac1cb7c2a9e4": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 53): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bf1e086d79249182": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 61): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ac21eb1bbc88c3e6": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 125): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "bf61c2ad80673244": {
+      "rule": "generic.secrets.gitleaks.generic-api-key",
+      "path": "contrib/yellowback/devnet/upgrade-walk-transcript.txt",
+      "reason": "A recorded regtest devnet transcript (line 207): the matched hex is a member/owner public key, set id or txid from a throwaway regtest chain. Public values, no private key, seed or WIF anywhere in the file (grepped for priv/secret/seed/wif/xprv).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "79a428c2eee39060": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/yellowback/devnet/stratum-perl-check",
+      "reason": "os.chmod(shim, 0o700) on the ycash-cli shell shim this devnet check writes into its own scratch dir: owner read/write/execute only, no group or other bits. It must be executable because the Perl stratum server it launches, as the same user, runs it as ycash-cli. It holds no key or wallet data, only paths. Hardened from 0o755 on 2026-10-23.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "f22f4e25a229f927": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The vout is range-checked right after (vout < 0 || vout > maxVout throws), so atoi's silent truncation can only produce a rejected or a smaller-but-valid index chosen by the operator.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "6c4d2b21d7806d39": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The optional nSequence is a free 32-bit field by design; any value is a valid sequence number and the result is shown in the hex the operator inspects.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "293fe4c4d3adc657": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The deletion index is bounds-checked right after (inIdx < 0 || inIdx >= vin.size() throws).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "580006244717f169": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The deletion index is bounds-checked right after (outIdx < 0 || outIdx >= vout.size() throws).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "fa53556fb96683ce": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The sighash height is checked right after (nHeight <= 0 throws); it only selects the consensus branch ID for the operator's own signature.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "e7778075ba597562": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/bitcoin-tx.cpp",
+      "reason": "Developer CLI tool (ycash-tx): the string is an argv operand typed by the operator, not network or file data. The prevtxs vout was already type-checked as a JSON number by checkObject() (UniValue::VNUM), and nOut < 0 throws, so atoi sees a numeric literal the operator supplied.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "781d61351c1f0cc4": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/init.cpp",
+      "reason": "The string is the index part of a block file name (blk%05u.dat) in the node's own datadir, enumerated by the node itself: the key is substr(3,5) of a 12-character blk?????.dat filename in its own blocks/ directory, so atoi sees at most five characters and cannot overflow; a non-numeric name simply does not equal the counter and the file is removed, which is the function's purpose. Upstream Bitcoin Core/Zcash code (CleanupBlockRevFiles).",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ffd61d67689687d5": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/main.cpp",
+      "reason": "Consensus file (workspace CLAUDE.md rules 2, 7): not tidied. The string is the operator's own -dropmessagestest debug option, not peer data; GetRand(0) on a non-numeric value just drops every message, which is the test knob's documented effect. Upstream Bitcoin Core/Zcash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "188ec11bf730a971": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/torcontrol.cpp",
+      "reason": "The three characters are the status code of a reply from the operator's own Tor control port, a trusted local daemon; a non-numeric code yields 0, which no handler treats as success (250 is checked by value). Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "4129e3a2d9e7a259": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/util/strencodings.cpp",
+      "reason": "This is the std::string overload of atoi() itself, the wrapper every other hit calls; it adds nothing to the libc call. Upstream Bitcoin Core/Zcash code; the callers are reviewed individually.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "09bd6f0b0ff8452e": {
+      "rule": "0xdea.rules.c.raptor-insecure-api-ato",
+      "path": "src/util/system.cpp",
+      "reason": "InterpretBool() parses the operator's own command-line/config value (-foo=1/0); only the != 0 test is used, so truncation cannot change a documented outcome. Upstream Bitcoin Core/Zcash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d1ff9b02550a1be2": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Equihash miner (src/pow, consensus-adjacent, not tidied): heap0 is allocated by htalloc::alloc(), which is calloc(); free() is its matching deallocator. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "3fbece1257581003": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Equihash miner (src/pow, consensus-adjacent, not tidied): heap1 is allocated by htalloc::alloc(), which is calloc(); free() is its matching deallocator. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "b52dfe1448647288": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Equihash miner (src/pow, consensus-adjacent, not tidied): nslots is allocated by hta.alloc() (calloc) in the constructor; free() in the destructor matches. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "2560c734b48e01b2": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Equihash miner (src/pow, consensus-adjacent, not tidied): sols is allocated by hta.alloc() (calloc) in the constructor; free() in the destructor matches. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "945c59b5f086ae7f": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/prevector.h",
+      "reason": "Consensus-adjacent (not refactorable, workspace CLAUDE.md rule 7). prevector's indirect storage is only ever obtained from malloc()/realloc() (change_capacity, the FIXME comment documents the choice), so free() is the matching deallocator. Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "66948d26aa90d6a1": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/prevector.h",
+      "reason": "Consensus-adjacent (not refactorable, workspace CLAUDE.md rule 7). The destructor frees _union.indirect, which is only ever obtained from malloc()/realloc() in change_capacity(); free() matches. Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d0363e8b59e867d1": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/test/raii_event_tests.cpp",
+      "reason": "Test-only libevent allocator hooks: event_set_mem_functions(tag_malloc, realloc, tag_free) installs the trio, so tag_free() only sees memory that tag_malloc() (malloc) or realloc() produced; the pairing is the point of the test. Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "05c657d02ffc8efc": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/torcontrol.cpp",
+      "reason": "The line comes from libevent's evbuffer_readln(), which documents that the returned buffer is malloc()'d and must be released with free(). Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d0525d1842f0346c": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/wallet/db.h",
+      "reason": "BerkeleyDB Dbt with DB_DBT_MALLOC: the library allocates the buffer with malloc() and documents free() as its deallocator; the buffer is memory_cleanse()d first. Upstream Bitcoin Core/Zcash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d0525d1842f0346c-1": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/wallet/db.h",
+      "reason": "BerkeleyDB Dbt with DB_DBT_MALLOC: the library allocates the buffer with malloc() and documents free() as its deallocator; the buffer is memory_cleanse()d first. Upstream Bitcoin Core/Zcash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "8d0469c7691afba4": {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "path": "src/wallet/db.h",
+      "reason": "BerkeleyDB Dbt with DB_DBT_MALLOC: the library allocates the buffer with malloc() and documents free() as its deallocator; the buffer is memory_cleanse()d first. Upstream Bitcoin Core/Zcash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ff2237cffafdde97": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/coins.cpp",
+      "reason": "Upstream zcashd PopHistoryNode(): every case ends in return/break; the rule trips on the braced case-0 block. No fallthrough exists.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "9d78a6f23ea25eea": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/hash.cpp",
+      "reason": "MurmurHash3 tail switch: the case 3 -> 2 -> 1 fallthrough is the algorithm (each case folds one more tail byte into k1) (marked [[fallthrough]]). Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "91c44c4c299ec764": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/rest.cpp",
+      "reason": "RF_HEX converts the body to binary and intentionally falls into RF_BINARY to deserialize it; the comment 'continue then with bin part' states it (marked [[fallthrough]]). Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "b2de0eeaede8da87": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/script/sign.cpp",
+      "reason": "Consensus-adjacent file (workspace CLAUDE.md rule 7): not tidied. CombineSignatures(): the stacked case labels (TX_NONSTANDARD, TX_NULL_DATA, TX_VAULT, TX_VAULT_INTENT, ...) share one body that returns; every case returns, no statement falls through. Upstream Bitcoin Core code plus the vault template labels.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "17c2639c301efd13": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/tinyformat.h",
+      "reason": "tinyformat conversion-specifier switch: each case sets stream flags and ends in break; the stacked labels ('u','d','i') are intentional grouping. Vendored third-party header (tinyformat), identical to upstream.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "8dfc765d6759472f": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/script/interpreter.cpp",
+      "reason": "Consensus file (workspace CLAUDE.md rules 2, 7): not tidied. The stacked labels SIGHASH_SINGLE and SIGHASH_ANYONECANPAY|SIGHASH_SINGLE share one body; every case ends in break or throw. Upstream zcashd ZIP 244 code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "53cb172e510742ff": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/wallet/asyncrpcoperation_common.cpp",
+      "reason": "Every case throws a JSONRPCError; there is no statement to fall through to. Upstream zcashd code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "45161070d06ea199": {
+      "rule": "0xdea.rules.c.raptor-missing-break-in-switch",
+      "path": "src/wallet/wallet_tx_builder.cpp",
+      "reason": "Every case returns an AddressResolutionError from the lambda; there is no statement to fall through to. Upstream zcashd code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "ea6bd004c6446de8": {
+      "rule": "0xdea.rules.c.raptor-ret-stack-address",
+      "path": "src/chainparams.cpp",
+      "reason": "GetEquihashOverride() returns &info where info is a const reference into NetworkUpgradeInfo[], the global array declared extern in src/consensus/upgrades.h (static storage), not a local. The pointer outlives the call.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "d021ffc4264dcc59": {
+      "rule": "c.lang.security.insecure-use-memset",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Zero-initialisation of the slot counters before a solve, not a wipe of secret material (the Equihash miner holds only public block-header data). src/pow is consensus-adjacent and not tidied. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "7778d8ea244ac673": {
+      "rule": "c.lang.security.insecure-use-memset",
+      "path": "src/pow/tromp/equi_miner.h",
+      "reason": "Zero-initialisation of a histogram (debug-only, under HIST/SPARK) before use, no secret involved. src/pow is consensus-adjacent and not tidied. Upstream tromp/equihash code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "35ffc43f58495a56": {
+      "rule": "c.lang.security.insecure-use-memset",
+      "path": "src/uint256.h",
+      "reason": "base_blob (uint256/uint160) holds hashes and public identifiers; the memset is zero-initialisation (constructor / SetNull), not a wipe. Secret-bearing types (CKey, CKeyingMaterial) use secure_allocator and memory_cleanse(). Consensus-adjacent header (src/primitives depend on it), not tidied. Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "35ffc43f58495a56-1": {
+      "rule": "c.lang.security.insecure-use-memset",
+      "path": "src/uint256.h",
+      "reason": "base_blob (uint256/uint160) holds hashes and public identifiers; the memset is zero-initialisation (constructor / SetNull), not a wipe. Secret-bearing types (CKey, CKeyingMaterial) use secure_allocator and memory_cleanse(). Consensus-adjacent header (src/primitives depend on it), not tidied. Upstream Bitcoin Core code.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "48f4336d717c65d2": {
+      "rule": "ycash.crypto.secret-memset",
+      "path": "src/test/pq_crypto_tests.cpp",
+      "reason": "Test-only NIST DRBG (KAT vector replay): the memset is the DRBG's defined initial state (key = 0, V = 0) before Update(seed) overwrites both, not a wipe at end of life; the key is a published test vector derivation, not a wallet secret.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "2a3fbc3f298ef4a7": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[4..36] is then exactly 32 bytes, so the [u8; 32] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "b555194cd590b2b7": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[36..40] is then exactly 4 bytes, so the [u8; 4] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "dbbb76ee99a1bbc9": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[40..42] is then exactly 2 bytes, so the [u8; 2] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "8b690ac55e729450": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[42..46] is then exactly 4 bytes, so the [u8; 4] conversion cannot fail.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "78ec1d4c5b49bfd6": {
+      "rule": "trailofbits.rs.panic-in-function-returning-result",
+      "path": "contrib/yellowback/attest/src/cosig.rs",
+      "reason": "Frame::decode returns Err(FrameError::Size) unless b.len() == FRAME_SIZE (= 4+32+4+2+4+ENTRY_SIZE = 115, pinned by the cosig tests), and Magic otherwise, before this line; b[46..] is then exactly ENTRY_SIZE = 69 bytes, and Entry::decode returns None only when its input is not ENTRY_SIZE bytes (its inner [0..4]/[4..69] conversions are then exact), so the expect cannot fire on any gossip frame.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    "3fda061f7d72e355": {
+      "rule": "rust.lang.security.current-exe",
+      "path": "contrib/yellowback/attest/src/direct.rs",
+      "reason": "test-only: inside #[cfg(test)] mod tests (an_outsider_flood_is_refused_at_the_handshake), where current_exe() re-runs the test binary itself as a child process to measure the flood CPU; no production path calls current_exe and no security decision depends on the path.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   },
   "rule_paths": [
@@ -254,6 +646,48 @@
       "reason": "Test vectors, regtest keys and documentation examples, not real secrets (checked 2026-10-22). A secret anywhere else is still reported.",
       "by": "semgrep CI setup",
       "date": "2026-10-22"
+    },
+    {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "paths": [
+        "qa/**",
+        "contrib/devtools/**",
+        "contrib/simulations/**",
+        "contrib/yellowback/**",
+        "zcutil/**",
+        "src/test/bctest.py"
+      ],
+      "reason": "Test harnesses, devnet scripts, release and build devtools run by a developer on their own machine. Every hit was read (2026-10-23, ~70 per node line): each passes an argv list (no shell=True, no os.system/os.popen, no shell string) built from constants, the tool's own command-line flags, paths under its own scratch/state dir, or values the test itself generated; none takes argv from the network or from a file another party controls. The one shell-string site, contrib/devtools/fix-copyright-headers.py, was rewritten to argv lists. A subprocess call in src/, depends/ or anywhere else is still reported.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    {
+      "rule": "bash.lang.security.ifs-tampering",
+      "paths": [
+        "test/lint/**"
+      ],
+      "reason": "Lint scripts that set IFS only to join an array: 'local IFS=\"$1\"' inside join_array (lint-locale-dependence.sh) and '$(IFS=\",\"; echo \"${arr[*]}\")' in a command substitution subshell (lint-shell.sh). Both scopes end immediately, so the caller's IFS is never changed.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    {
+      "rule": "c.lang.security.insecure-use-memset",
+      "paths": [
+        "src/crypto/pq/falcon/**",
+        "src/crypto/pq/slhdsa/**"
+      ],
+      "reason": "Vendored PQ reference code (PQClean Falcon, slh-dsa-c), not edited (src/crypto/pq/README.md). Each of the 13 hits was read on 2026-10-23: they are initialisations, not wipes - keygen.c u0/v0 extended-GCD accumulators set to 0/1 before use; ycash_falcon_sign.c zero-padding of the public signature buffer after the encoded signature; sha2_256.c/sha2_512.c the SHA-2 padding block; slh_dsa.c the csum byte buffer and the not-yet-computed PK.root slot of sk; slh_sha2.c the HMAC ipad padding and the PK.seed padding block. Secret wipes are done by the vendored barriers the audit leg 'PQ secret wipes' (qa/yellowback-audit.sh) checks: wipe() in ycash_falcon_sign.c (volatile stores) and slh_wipe()/slh_wipe_var() in slh_dsa.c (local patch P3). Noted, not changed: slh_sha2.c's HMAC pad (derived from SK.prf) is not wiped after use in prf_msg; it lives in the slh_var_t/stack frame that slh_wipe_var() covers at the caller.",
+      "by": "secops triage",
+      "date": "2026-10-23"
+    },
+    {
+      "rule": "0xdea.rules.c.raptor-mismatched-memory-management",
+      "paths": [
+        "src/crypto/pq/falcon/fips202.c"
+      ],
+      "reason": "Vendored PQClean fips202.c, not edited. All six hits are the shake/sha3 *_inc_ctx_release() functions, which free() a ctx that the matching *_inc_init()/*_inc_ctx_clone() obtained from malloc() (same file); the Ycash local patch for shake256incctx (inline state) removes the allocation and the free together.",
+      "by": "secops triage",
+      "date": "2026-10-23"
     }
   ]
 }

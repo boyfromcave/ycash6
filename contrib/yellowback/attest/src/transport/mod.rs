@@ -12,6 +12,8 @@ pub mod iroh;
 use std::future::Future;
 use std::pin::Pin;
 
+use anyhow::Context;
+
 use crate::config::TransportConfig;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -111,13 +113,14 @@ pub async fn open_with_cancel(cfg: &TransportConfig, network: &str, cancel_topic
             let mut v =
                 iroh::IrohTransport::open_topics(relays, fallback_relays, peers, secret_key_file.as_deref(), &names)
                     .await?;
+            // open_topics returns one transport per name or an error; a short vector is still an error, not a panic.
             let c: Option<Box<dyn Transport>> = if cancel_topic {
-                Some(Box::new(v.pop().expect("three topics")))
+                Some(Box::new(v.pop().context("iroh: cancel topic missing")?))
             } else {
                 None
             };
-            let b = v.pop().expect("binding topic");
-            let a = v.pop().expect("attestation topic");
+            let b = v.pop().context("iroh: binding topic missing")?;
+            let a = v.pop().context("iroh: attestation topic missing")?;
             Topics {
                 attest: Box::new(a),
                 cancel: c,

@@ -6,6 +6,7 @@
 # Copyright (c) 2014-2020, Brian Davis
 # Copyright (c) 2013, Robin David
 # Copyright (c) 2009-2011, Tobias Klein
+# Copyright (c) 2026 The Ycash developers (Ycash modifications)
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -137,10 +138,10 @@ EOF
 fetch() {
   if type wget > /dev/null 2>&1 ; then
     ${debug} && echo "fetching update via wget"
-    wget --no-check-certificate -O "${2}" "${1}" >/dev/null 2>&1
+    wget -O "${2}" "${1}" >/dev/null 2>&1
   elif type curl > /dev/null 2>&1 ; then
     ${debug} && echo "fetching update via curl"
-    curl --insecure --remote-name -o "${2}" "${1}" >/dev/null 2>&1
+    curl --remote-name -o "${2}" "${1}" >/dev/null 2>&1
   else
     echo 'Warning: Neither wget nor curl is available. online updates unavailable' >&2
     exit 1

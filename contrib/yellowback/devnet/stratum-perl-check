@@ -116,7 +116,7 @@ def write_shim(scratch, node):
                 "  printf '%%s' \"$out\"; exit $rc\n"
                 "fi\n"
                 "exec %s \"$@\"\n" % (real, shim_dir, real))
-    os.chmod(shim, 0o755)
+    os.chmod(shim, 0o700)  # owner-only: the shim is run by this user's own processes
     return shim_dir
 
 
