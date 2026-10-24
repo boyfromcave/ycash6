@@ -1,0 +1,41 @@
+# Export the repository's open code-scanning alerts as a JSON artifact.
+#
+# Manual only. The Claude GitHub App's installation token cannot read code scanning, so this
+# workflow does it with the job's own GITHUB_TOKEN (security-events: read) and leaves the list
+# as a run artifact for whoever triages the alerts. It changes nothing in the repository.
+name: code-scanning-export
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      security-events: read
+    steps:
+      - name: List open code-scanning alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate -X GET "repos/$REPO/code-scanning/alerts" -f state=open -f per_page=100 > alerts.json
+          python3 - <<'PY'
+          import json
+          raw=open('alerts.json').read()
+          # --paginate concatenates one JSON array per page; join them.
+          dec=json.JSONDecoder(); i=0; alerts=[]
+          while i < len(raw):
+              while i < len(raw) and raw[i].isspace(): i+=1
+              if i>=len(raw): break
+              obj,j=dec.raw_decode(raw,i); alerts+=obj; i=j
+          json.dump(alerts, open('alerts.json','w'), indent=1)
+          from collections import Counter
+          c=Counter((a['tool']['name'], a['rule'].get('security_severity_level') or a['rule'].get('severity')) for a in alerts)
+          print(len(alerts),'open alerts'); [print(' ',k,v) for k,v in sorted(c.items(), key=str)]
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: code-scanning-alerts
+          path: alerts.json
+          retention-days: 7
