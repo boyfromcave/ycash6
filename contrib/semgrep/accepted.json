@@ -655,9 +655,10 @@
         "contrib/simulations/**",
         "contrib/yellowback/**",
         "zcutil/**",
-        "src/test/bctest.py"
+        "src/test/bctest.py",
+        "contrib/secops/**"
       ],
-      "reason": "Test harnesses, devnet scripts, release and build devtools run by a developer on their own machine. Every hit was read (2026-10-23, ~70 per node line): each passes an argv list (no shell=True, no os.system/os.popen, no shell string) built from constants, the tool's own command-line flags, paths under its own scratch/state dir, or values the test itself generated; none takes argv from the network or from a file another party controls. The one shell-string site, contrib/devtools/fix-copyright-headers.py, was rewritten to argv lists. A subprocess call in src/, depends/ or anywhere else is still reported.",
+      "reason": "Test harnesses, devnet scripts, release and build devtools run by a developer on their own machine. Every hit was read (2026-10-23, ~70 per node line): each passes an argv list (no shell=True, no os.system/os.popen, no shell string) built from constants, the tool's own command-line flags, paths under its own scratch/state dir, or values the test itself generated; none takes argv from the network or from a file another party controls. The one shell-string site, contrib/devtools/fix-copyright-headers.py, was rewritten to argv lists. A subprocess call in src/, depends/ or anywhere else is still reported. contrib/secops/code-scanning-triage.py (2026-10-24): argv lists built from constants and the workflow-supplied repository name; runs only in the code-scanning workflow with its own token.",
       "by": "secops triage",
       "date": "2026-10-23"
     },
