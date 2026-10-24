@@ -66,12 +66,12 @@ pub fn recover(msg: &[u8; 32], sig: &[u8; SIG_SIZE]) -> Option<[u8; 33]> {
         return None;
     }
     let s = Signature::from_slice(&sig[1..65]).ok()?;
-    if s.normalize_s().is_some() {
+    if s.normalize_s() != s {
         return None; // high S: the node refuses it rather than repairing it
     }
     let recid = RecoveryId::from_byte(sig[0] - 31)?;
     let key = VerifyingKey::recover_from_prehash(msg, &s, recid).ok()?;
-    let point = key.to_encoded_point(true);
+    let point = key.to_sec1_point(true);
     point.as_bytes().try_into().ok()
 }
 
@@ -104,7 +104,7 @@ pub fn verify_attestation(
     let Ok(s) = Signature::from_slice(sig) else {
         return false;
     };
-    if s.normalize_s().is_some() {
+    if s.normalize_s() != s {
         return false;
     }
     vk.verify_prehash(&attest_message(seq, price, cited_height, block_hash), &s)
@@ -268,14 +268,16 @@ pub mod testkit {
     }
 
     pub fn pubkey(k: &SigningKey) -> [u8; 33] {
-        k.verifying_key().to_encoded_point(true).as_bytes().try_into().unwrap()
+        k.verifying_key().to_sec1_point(true).as_bytes().try_into().unwrap()
     }
 
     pub fn sign(k: &SigningKey, msg: &[u8; 32]) -> [u8; SIG_SIZE] {
-        let (sig, recid) = k.sign_prehash_recoverable(msg).unwrap();
-        let (sig, recid) = match sig.normalize_s() {
-            Some(low) => (low, RecoveryId::from_byte(recid.to_byte() ^ 1).unwrap()),
-            None => (sig, recid),
+        let (sig, recid) = k.sign_prehash_recoverable(msg);
+        let low = sig.normalize_s();
+        let (sig, recid) = if low != sig {
+            (low, RecoveryId::from_byte(recid.to_byte() ^ 1).unwrap())
+        } else {
+            (sig, recid)
         };
         let mut out = [0u8; SIG_SIZE];
         out[0] = 31 + recid.to_byte();
