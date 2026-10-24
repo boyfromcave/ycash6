@@ -58,20 +58,35 @@ class Stratum:
         self.record = open(record, "a") if record else None
         self.verbose = verbose
 
-    def _log(self, direction, line):
+    def _record(self, direction, line):
         if self.record:
             self.record.write(json.dumps({"ts": round(time.time(), 3), "dir": direction, "line": line}) + "\n")
             self.record.flush()
+
+    def _log(self, direction, line):
+        self._record(direction, line)
         if self.verbose:
             print("%s %s" % ("->" if direction == "send" else "<-", line), flush=True)
 
-    def call(self, method, params):
-        msg = {"id": self.next_id, "method": method, "params": params}
+    def _send(self, method, params):
+        rid = self.next_id
         self.next_id += 1
-        line = json.dumps(msg, separators=(",", ":"))
+        line = json.dumps({"id": rid, "method": method, "params": params}, separators=(",", ":"))
         self.sock.sendall((line + "\n").encode())
+        return rid, line
+
+    def call(self, method, params):
+        rid, line = self._send(method, params)
         self._log("send", line)
-        return msg["id"]
+        return rid
+
+    def authorize(self, user, password):
+        """mining.authorize: `--record` keeps the exact wire line (the replay fixture), `--verbose` masks the password."""
+        rid, line = self._send("mining.authorize", [user, password])
+        self._record("send", line)
+        if self.verbose:
+            print('-> {"id":%d,"method":"mining.authorize","params":[%s,"***"]}' % (rid, json.dumps(user)), flush=True)
+        return rid
 
     def readable(self, timeout=0):
         if b"\n" in self.buf: return True
@@ -143,7 +158,7 @@ class Miner:
         reply = self.expect_reply(rid)
         self.nonce1 = bytes.fromhex(reply["result"][1])
         if len(self.nonce1) >= NONCE_LEN: raise ConnectionError("nonce1 leaves no room for nonce2")
-        rid = self.st.call("mining.authorize", [self.args.user, self.args.password])
+        rid = self.st.authorize(self.args.user, self.args.password)
         reply = self.expect_reply(rid)
         if reply.get("result") is not True: raise ConnectionError("authorize refused: %r" % (reply,))
         rid = self.st.call("mining.extranonce.subscribe", [])

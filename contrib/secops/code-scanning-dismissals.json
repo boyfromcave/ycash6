@@ -56,6 +56,69 @@
       "path": "contrib/docker/Dockerfile",
       "reason": "won't fix",
       "comment": "Upstream zcashd image (installs zcashd from apt.z.cash), published only by release-docker-hub.yml, which runs only in zcash/*; not a Ycash artifact. The Ycash image contrib/docker/ycashd/Dockerfile has the HEALTHCHECK. Reasoned checkov:skip in the file."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/clear-text-logging-sensitive-data",
+      "path": "qa/rpc-tests/yellowback_rpc_contract.py",
+      "reason": "used in tests",
+      "comment": "Regtest functional test: the printed values are attestor seq numbers, txids and heights; the only 'secret' in the flow is hot_secret_for(), a fixed regtest-only attestor key set from test_framework/yellowback_attest.py, not a key that exists on any public network."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/clear-text-logging-sensitive-data",
+      "path": "qa/rpc-tests/yellowback_cancel_agent.py",
+      "reason": "used in tests",
+      "comment": "Regtest functional test: the printed values are attestor seq numbers, txids and heights; the only 'secret' in the flow is hot_secret_for(), a fixed regtest-only attestor key set from test_framework/yellowback_attest.py, not a key that exists on any public network."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/clear-text-logging-sensitive-data",
+      "path": "qa/rpc-tests/yellowback_demo_v6.py",
+      "reason": "used in tests",
+      "comment": "Regtest functional test: the printed values are attestor seq numbers, txids and heights; the only 'secret' in the flow is hot_secret_for(), a fixed regtest-only attestor key set from test_framework/yellowback_attest.py, not a key that exists on any public network."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/clear-text-logging-sensitive-data",
+      "path": "share/rpcuser/rpcuser.py",
+      "reason": "false positive",
+      "comment": "Upstream Bitcoin's rpcauth generator: printing the freshly generated random password, once, to the operator who ran it is the tool's output (it is the only place the password ever exists); nothing is written to a log."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/weak-sensitive-data-hashing",
+      "path": "share/rpcuser/rpcuser.py",
+      "reason": "false positive",
+      "comment": "HMAC-SHA256(salt, password) is the rpcauth format ycashd verifies (httprpc.cpp); the password is 32 bytes of os.urandom, so no slow KDF is needed against guessing, and changing the hash would break every rpcauth line."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "py/overly-permissive-file",
+      "path": "contrib/yellowback/test_yellowback_quote.py",
+      "reason": "used in tests",
+      "comment": "Unit test: write() defaults to 0600; the 0644/0640 modes are passed on purpose by the tests that check the agent refuses a group/world-readable config holding rpc_password (audit D-7). The files are throwaway temp fixtures."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "rust/cleartext-logging",
+      "path": "contrib/yellowback/attest/src/transport/iroh.rs",
+      "reason": "false positive",
+      "comment": "The flagged sink is Vec::remove(0) on the opened transports, not a log call; the taint is the iroh SecretKey inside the Endpoint. The crate logs only endpoint.id() (the public key) and the key file's path, never the secret bytes (open_topics, load_or_create_secret)."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "rust/cleartext-logging",
+      "path": "contrib/yellowback/attest/src/transport/mod.rs",
+      "reason": "false positive",
+      "comment": "The flagged sink is Vec::remove(0) on the transports open_topics returns, not a log call; the taint is the iroh SecretKey inside the Endpoint. The crate logs only endpoint.id() (the public key) and the key file's path, never the secret bytes (transport/iroh.rs)."
+    },
+    {
+      "tool": "CodeQL",
+      "rule": "rust/cleartext-transmission",
+      "path": "contrib/yellowback/attest/src/rpc.rs",
+      "reason": "false positive",
+      "comment": "Field-insensitive taint: the cancel runtime holding the iroh key also holds the Node, so self.url ([node] rpc_url) is flagged; the iroh key never enters a request. Node credentials: config.rs refuses http:// with credentials to a non-loopback host unless allow_insecure_rpc (D-7)."
     }
   ]
 }
