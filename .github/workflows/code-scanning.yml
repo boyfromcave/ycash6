@@ -13,7 +13,7 @@
 name: code-scanning
 on:
   push:
-    branches: ['upgrade/vault', 'claude/semgrep-security-issues-5rnmte-alerts']  # the second only while this lands
+    branches: ['upgrade/vault']
     paths: ['contrib/secops/code-scanning-dismissals.json', '.github/workflows/code-scanning.yml']
   schedule:
     - cron: '53 3 * * *'
