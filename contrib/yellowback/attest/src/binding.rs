@@ -126,12 +126,12 @@ pub fn recover_signer(msg: &str, sig: &[u8; 65]) -> Option<[u8; 33]> {
         return None;
     }
     let s = Signature::from_slice(&sig[1..]).ok()?;
-    if s.normalize_s().is_some() {
+    if s.normalize_s() != s {
         return None;
     }
     let recid = RecoveryId::from_byte(sig[0] - 31)?;
     let key = VerifyingKey::recover_from_prehash(&message_hash(msg), &s, recid).ok()?;
-    key.to_encoded_point(true).as_bytes().try_into().ok()
+    key.to_sec1_point(true).as_bytes().try_into().ok()
 }
 
 /// A signed binding: the statement's text and the member key's signature.
