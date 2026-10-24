@@ -1,0 +1,4 @@
+{
+  "_comment": "Code-scanning alerts dismissed by .github/workflows/code-scanning.yml (contrib/secops/code-scanning-triage.py). One entry per tool + rule + path glob: reason is one of 'false positive', 'won't fix', 'used in tests'; comment is the argument a reviewer can check (280 characters reach GitHub). A real finding is fixed in code, never listed here.",
+  "dismissals": []
+}
