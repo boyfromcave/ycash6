@@ -35,6 +35,11 @@ jobs:
           from collections import Counter
           c=Counter((a['tool']['name'], a['rule'].get('security_severity_level') or a['rule'].get('severity')) for a in alerts)
           print(len(alerts),'open alerts'); [print(' ',k,v) for k,v in sorted(c.items(), key=str)]
+          # One compact line per alert in the log too, for readers who cannot fetch artifacts.
+          print('ALERTS-BEGIN')
+          for a in alerts:
+              print('ALERT', json.dumps({k:a.get(k) for k in ('number','state','created_at','dismissed_at','url','html_url')}|{'tool':a['tool']['name'],'rule':a['rule']['id'],'severity':a['rule'].get('security_severity_level') or a['rule'].get('severity'),'desc':a['rule'].get('description'),'location':a['most_recent_instance'].get('location'),'message':a['most_recent_instance'].get('message',{}).get('text'),'ref':a['most_recent_instance'].get('ref')}, separators=(',',':')))
+          print('ALERTS-END')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
