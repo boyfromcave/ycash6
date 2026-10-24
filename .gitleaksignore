@@ -1,5 +1,5 @@
 # gitleaks: accepted findings (SECURITY-CI.md "Accepting a finding"). Fingerprint = commit:file:rule:line.
-# Triaged 2026-10-23 over the full history (gitleaks 8.30.1, default rules). The golden vector files
+# Triaged 2026-10-23 over the full history (gitleaks 8.30.1, default rules); re-checked 2026-10-24 on an unshallow clone. The golden vector files
 # src/test/data/*_vectors.json are allowlisted by path in .gitleaks.toml; everything else is listed here,
 # grouped under the reason it is not a secret. A new finding is never added without a reason line.
 
@@ -66,6 +66,7 @@ e2da10180da3b8ae5a70acf17c0c63aea59a5550:src/test/pq_wallet_tests.cpp:generic-ap
 e2da10180da3b8ae5a70acf17c0c63aea59a5550:src/test/yellowback_fuzz_tests.cpp:generic-api-key:97
 e2da10180da3b8ae5a70acf17c0c63aea59a5550:src/test/yellowback_payload_tests.cpp:generic-api-key:53
 e2da10180da3b8ae5a70acf17c0c63aea59a5550:src/test/yellowback_payload_tests.cpp:generic-api-key:57
+e68389ca89e7c5b18d61543b0ccedda4dc14595a:src/test/pq_wallet_tests.cpp:generic-api-key:59
 fc46118128a3518b02a788da984dc156c309aef6:src/test/key_tests.cpp:generic-api-key:28
 fc46118128a3518b02a788da984dc156c309aef6:src/test/key_tests.cpp:generic-api-key:29
 fc46118128a3518b02a788da984dc156c309aef6:src/test/key_tests.cpp:generic-api-key:30
