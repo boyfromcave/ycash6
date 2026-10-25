@@ -365,8 +365,8 @@ project workspace's plans.
   price. Neither alone can mint against a price it sets. A single signer is never a price.
 - Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED you
   minted; redeeming before the term ends also costs an early-redeem fee of 5 %, 2.5 % or 1 % of your
-  collateral for a short, medium or long term. If your collateral falls below 125 % of your debt at
-  the attested price, anyone may close your vault by paying your debt; you then receive whatever
+  debt for a short, medium or long term. If your collateral falls below 125 % of your debt at the
+  attested price, anyone may close your vault by paying your debt; you then receive whatever
   collateral is worth more than 125 % of the debt — which, at the threshold, is usually nothing.
   Before that happens, your wallet will warn you, and redeeming stops it.
 - **Wrapped Ycash is a federated bridge.** YEC behind wYEC is released only by its bonded signer
