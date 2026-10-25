@@ -2019,8 +2019,12 @@ jobs:
             src/fuzzing/PQ*/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
+        # A PR opened with the default GITHUB_TOKEN leaves its own workflows waiting for approval
+        # (the 2026-10-25 corpus PRs), so, like semgrep.yml, this uses the repository secret
+        # SEMGREP_PR_TOKEN (contents + pull requests: write) when it is set and falls back to the
+        # job token otherwise.
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SEMGREP_PR_TOKEN || github.token }}
         run: |
           if git diff --cached --quiet; then echo "no new corpus files"; exit 0; fi
           branch="weekly-fuzz/$(date +%Y%m%d)"
