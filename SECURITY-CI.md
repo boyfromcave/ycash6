@@ -5,7 +5,7 @@ Reporting a vulnerability is [SECURITY.md](SECURITY.md); this file is the automa
 runs in every Yellowback repository; the tool versions are shared, and each tool is a pinned release
 verified before it runs (a sha256 recorded in the workflow, or `pip install --require-hashes`).
 
-Three workflows. None of them opens an issue; only Semgrep and Dependabot open PRs, a bounded number,
+Four workflows (`semgrep.yml`, `codeql.yml`, `secops.yml`, `code-scanning.yml`). None of them opens an issue; only Semgrep and Dependabot open PRs, a bounded number,
 updated in place.
 
 | Leg | Workflow / job | Scans | Blocks a PR when | Results |
@@ -18,6 +18,7 @@ updated in place.
 | cargo-deny | `secops.yml` `cargo-deny` | RustSec advisories, bans and sources over the root `Cargo.lock` (`contrib/secops/deny-node.toml`; the root `deny.toml` stays upstream's licence policy), `--locked` | an advisory not ignored, a banned crate or an unknown source | job log |
 | Checkov | `secops.yml` `checkov` | the Dockerfiles | a failed check not skipped | code scanning (`checkov`), step summary |
 | Semgrep rule tests | `secops.yml` `semgrep-rules` | the local rules (`contrib/semgrep/rules/*.yaml`) against their annotated test files | a rule test fails | job log |
+| Code-scanning triage | `code-scanning.yml` | — (applies `contrib/secops/code-scanning-dismissals.json` to the open alerts of every tool above: on a push that changes it, nightly, by hand) | never | dismissed alerts in code scanning, the open alerts in the step summary and the `code-scanning-alerts` artifact |
 | Dependabot | `.github/dependabot.yml` | security updates for cargo, pip, github-actions, docker | — | one grouped `security` PR per ecosystem; version updates are off (every dependency is pinned and bumped deliberately) |
 
 Beside these, the existing supply-chain checks stay as they are: upstream's `cargo vet` (`audits.yml`)
@@ -27,7 +28,7 @@ Python package ships from here). Nothing scans consensus code differently: findi
 `src/consensus`, `src/script`, `src/primitives`, `src/pow` and `src/main.cpp` are reported like any
 other, and their fixes go through the consensus review gate, never through a scanner autofix.
 
-Schedules (UTC): Semgrep nightly 02:17, secops nightly 03:43, CodeQL weekly Monday 04:41.
+Schedules (UTC): Semgrep nightly 02:17, secops nightly 03:43, code-scanning triage nightly 03:53, CodeQL weekly Monday 04:41.
 
 ## Accepting a finding
 
@@ -36,8 +37,10 @@ to get a run green.
 
 - **Semgrep**: `contrib/semgrep/accepted.json`, or `exclude_rules` / `audit_rules` / `bucket_overrides`
   in `contrib/semgrep/config.json` ([contrib/semgrep/README.md](contrib/semgrep/README.md)).
-- **CodeQL**: dismiss the alert in code scanning with a reason ("false positive" / "won't fix" and a
-  comment).
+- **CodeQL** (and any other code-scanning alert): an entry in `contrib/secops/code-scanning-dismissals.json`
+  (tool + rule + path glob, a reason of "false positive" / "won't fix" / "used in tests", and a comment);
+  `code-scanning.yml` dismisses the matching alerts and re-dismisses them when a scan re-opens them.
+  Not by hand in the web UI, so the decision is in the repository's history.
 - **zizmor**: `.github/zizmor.yml`, per rule and file, with the reason as a comment; or an inline
   `# zizmor: ignore[<rule>] -- <reason>` on the line.
 - **gitleaks**: the finding's fingerprint (`commit:file:rule:line`, printed by the job) in
