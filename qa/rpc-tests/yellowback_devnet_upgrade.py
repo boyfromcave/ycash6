@@ -27,7 +27,7 @@ summary that every step passed:
   cancel    a wrong-price claim cancelled by one attestor: burn lost, the vault ACTIVE again
   interm    an in-term claim (in-term claims plan): a class-A vault crosses theta in term, a claim
             above theta refused, the claim at theta accepted and released, the owner's in-term
-            redeems (D-IT-15) paying the early-redeem fee, 5 % of the collateral (IT-9); SKIPs
+            redeems (D-IT-15) paying the early-redeem fee, 5 % of the debt at the mint price (IT-9'); SKIPs
             (and passes) on a node whose yed_getinfo.params.inTermClaims is not true
   invalid   an invalid mint refused by every Yellowback mempool, its block rejected by every node
   bridge    the WYEC bridge persona (bridge-sim), both shapes: lock -> mock burn -> intent ->

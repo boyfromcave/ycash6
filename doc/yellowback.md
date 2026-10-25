@@ -43,7 +43,7 @@ rules do not apply here. This file is the user-facing guide to the node and its 
 - **Redemption burns the debt.** `yed_redeem` at any height after the mint spends the vault on its
   owner branch, burns the vault's minted cents, pays the pool fee and returns the collateral; before
   the lock height it also pays the early-redeem fee, 5 % (class A), 2.5 % (B) or 1 % (C) of the
-  collateral (IT-9), which `yed_estimateredeem` quotes first. A vault spend without that burn is an
+  debt at the vault's mint price (IT-9′), which `yed_estimateredeem` quotes first. A vault spend without that burn is an
   invalid transaction.
 - **Underwater vaults can be claimed, after a delay.** At any height after the mint anyone holding
   enough YED can `yed_claim` a vault whose collateral is worth less than 125 % of its debt at the
@@ -222,8 +222,8 @@ term, in grace and past it alike. Anyone may claim by burning the full debt; the
 collateral worth 125 % of the debt at that price, capped at the collateral, and whatever is left
 returns to the owner; the attestor set may cancel a wrong-price claim within `CLAIM_DELAY`. The
 owner's redeem is open from the block after the mint as well, always for the full debt; before the
-term's `lockHeight` it pays the early-redeem fee `earlyRedeemFeeBps[class]` of the collateral (500 /
-250 / 100 bps, through the pool fee output; `yed_estimateredeem` quotes it, `yed_redeem` reports it
+term's `lockHeight` it pays the early-redeem fee `earlyRedeemFeeBps[class]` of the debt at the vault's mint price (500 /
+250 / 100 bps, IT-9′, through the pool fee output; `yed_estimateredeem` quotes it, `yed_redeem` reports it
 as `earlyRedeemFeeZat`); `yed_getinfo.params` says `inTermClaims: true`.
 
 **Launch parameters.** Three flat tiers, the longer the term the higher the collateral ratio:

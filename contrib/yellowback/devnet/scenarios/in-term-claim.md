@@ -34,8 +34,8 @@ Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"c
    close your vault by paying your debt; you then receive whatever collateral is worth more than
    125 % of the debt — which, at the threshold, is usually nothing. Before that happens, your
    wallet will warn you, and redeeming stops it."* — and, beside it, the early-redeem fee: a redeem
-   before the term ends pays 5 % (class A), 2.5 % (B) or 1 % (C) of the collateral on top of the
-   pool fee (D-IT-16). Is it where you would look before locking YEC? Is "usually nothing" read
+   before the term ends pays 5 % (class A), 2.5 % (B) or 1 % (C) of the debt at the mint price on top
+   of the pool fee (D-IT-16, IT-9′). Is it where you would look before locking YEC? Is "usually nothing" read
    as *you lose the collateral*? Is the fee read as the price of "redeem at any time"?
    - notes:
 
@@ -65,7 +65,7 @@ Expect `"inTermClaims": true`, `"claimThresholdBps": 12500` (θ = 125 %) and `"c
    it from the wallet now, well before its `lockHeight`. It goes through (D-IT-15: the owner path
    is open from the block after the mint), and it costs the early-redeem fee: first
    `cli -- yed_estimateredeem <txid>` quotes `"early": true`, `"earlyRedeemFeeBps": 500` and
-   `"earlyRedeemFeeZat"` = 5 % of the collateral (`0.3 YEC` of 6 YEC), and `yed_redeem` then
+   `"earlyRedeemFeeZat"` = 5 % of the debt at the mint price (`0.1 YEC`: 5 % of $100 at $50), and `yed_redeem` then
    reports the same `earlyRedeemFeeZat` inside its `feeZat` (paid to the pool, IT-9). Does the
    wallet show the fee before you confirm, and is it clear that waiting for `lockHeight` avoids
    it? For class A the fee (15 % of the debt at 300 %) is close to what a claim would cost you
