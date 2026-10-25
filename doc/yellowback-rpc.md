@@ -1232,6 +1232,10 @@ Result of `yed_estimatecollateral`:
 }
 ```
 
+The document's sample vault was minted when class A's base ratio was 500 %; under D-IT-4 class A is 300 %
+(`baseRatioBps` 30000), B 400 % and C 500 %, so a class-A mint of $1,000 at this price needs 151,133,501,260 zat today.
+The sample is kept because the claim and redeem examples below are built on it.
+
 ### `yed_listattestors [height]` (v3)
 
 Arguments: `height` (number, optional; default the index tip; `seated`/`pinned`/`weight` are
