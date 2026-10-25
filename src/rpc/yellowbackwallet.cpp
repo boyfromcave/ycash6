@@ -960,7 +960,7 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             "enforcement fee to an eligible pool and sends the rest of the collateral to \"to\"; refused unless an enforcing\n"
             "miner would accept it (mempool-check-failed:<verdict>). VOID: releases the collateral with no burn, no fee and\n"
             "no payload (L14). An ACTIVE vault redeems at any height after its mint (IT-1); before lockHeight the\n"
-            "early-redeem fee earlyRedeemFeeBps[class] of the collateral is added to the pool fee (IT-9) -- quote it\n"
+            "early-redeem fee earlyRedeemFeeBps[class] of the debt at the mint price is added to the pool fee (IT-9') -- quote it\n"
             "first with yed_estimateredeem. A VOID release needs the tip at its owner height (vault-locked).\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"

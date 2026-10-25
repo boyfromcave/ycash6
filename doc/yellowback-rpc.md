@@ -68,7 +68,7 @@ is the contract delta this file implements).** A vault is claimable at any heigh
 once its collateral is worth less than θ × debt (`claimThresholdBps`, 125 %) at the attested claim
 price, and its owner may redeem at any height (the V template's `ownerHeight` and `appHeight` are
 both `refHeight + 1`); a redeem before `lockHeight` pays the early-redeem fee
-`earlyRedeemFeeBps[class]` of the collateral on top of the pool fee. For a client: `yed_getinfo.params`
+`earlyRedeemFeeBps[class]` of the collateral on top of the pool fee (as it was at `rpcversion` 6; since `rpcversion` 8 it is of the debt at `pMint`, IT-9′, below). For a client: `yed_getinfo.params`
 gains `claimThresholdBps`, `sigmaMultMaxBps`, `earlyRedeemFeeBps` (per class, also on each `classes`
 row) and `inTermClaims: true`; `yed_listclaimable` lists every ACTIVE vault whose claim branch is
 open, each with `claimable` and `lockHeight` — rows with `claimable: false` are vaults above the
@@ -1232,6 +1232,10 @@ Result of `yed_estimatecollateral`:
 }
 ```
 
+The document's sample vault was minted when class A's base ratio was 500 %; under D-IT-4 class A is 300 %
+(`baseRatioBps` 30000), B 400 % and C 500 %, so a class-A mint of $1,000 at this price needs 151,133,501,260 zat today.
+The sample is kept because the claim and redeem examples below are built on it.
+
 ### `yed_listattestors [height]` (v3)
 
 Arguments: `height` (number, optional; default the index tip; `seated`/`pinned`/`weight` are
@@ -1841,7 +1845,7 @@ the collateral; default a fresh own transparent address). One step (V24):
   `mintedCents` of the wallet's YED, pays the FEE-1 fee to `payee(R, vaultOutpoint)`, sends the
   rest of the collateral to `to`. **Before `lockHeight`** (the redeem confirming at `tip + 1 <
   lockHeight`) the fee output also carries the early-redeem fee, `earlyRedeemFeeBps[class]` of the
-  collateral (IT-9: 5 % class A, 2.5 % B, 1 % C; `bad-redeem-early-fee` when a transaction does not
+  debt at the vault's mint price `pMint` (IT-9′: 5 % class A, 2.5 % B, 1 % C; `bad-redeem-early-fee` when a transaction does not
   carry it); `earlyRedeemFeeZat` is that part of `feeZat` (`0` at or past `lockHeight` and under
   FEE-0). A wallet quotes it with `yed_estimateredeem` before the owner confirms. Runs `MempoolCheck` first and refuses (`mempool-check-failed:
   <verdict>`) rather than commit anything MP-1 would refuse (K7); on success `CommitTransaction`

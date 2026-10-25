@@ -246,7 +246,7 @@ worth less than θ = 125 % of its debt at the attested claim price, at any heigh
   on every Yellowback node; the claim at θ accepted with the H-9.3 bounds; the release after
   `claimDelay`; the residual to the owner, or why there is none; the owner redeeming in term
   (D-IT-15), above θ and under it ahead of a claimant, each paying the early-redeem fee quoted by
-  `yed_estimateredeem` (IT-9: 5 % of the collateral for class A); one state hash) that prints
+  `yed_estimateredeem` (IT-9′: 5 % of the debt at the mint price for class A); one state hash) that prints
   `SKIP` with the reason on a node without the feature, so the walk and
   `yellowback_devnet_upgrade.py` pass on both;
 - `yellowback_devnet_roles.py` shocks mid-term when the feature is on and asserts the liquidator
@@ -254,8 +254,8 @@ worth less than θ = 125 % of its debt at the attested claim price, at any heigh
 - `scenarios/in-term-claim.md` is the explainer's example, clicked through with YecWallet.
 
 **Disclosure (IT-8, D-IT-17).** Every wallet, document and demo that offers a mint on this rule set
-carries the trust statement's collateral promise, verbatim (`doc/yellowback.md`, *Trust statement*;
-generated from the plan by the workspace's `make spec-in-term`):
+carries the trust statement's collateral promise, verbatim (`doc/yellowback.md`, *Trust statement*, kept
+identical to `doc/yellowback-spec.md` section 8.1, which the workspace's `make spec-in-term` generates from the plan):
 
 > Your YEC is locked for the term you choose. You can redeem at any time by paying back the YED you
 > minted. If your collateral falls below 125 % of your debt at the attested price, anyone may close
@@ -264,8 +264,8 @@ generated from the plan by the workspace's `make spec-in-term`):
 > you, and redeeming stops it.
 
 and, beside it, the early-redeem fee (D-IT-16, IT-9): a redeem before the term's `lockHeight` pays
-5 % (class A), 2.5 % (B) or 1 % (C) of the collateral on top of the pool fee
-(`yed_getinfo.params.earlyRedeemFeeBps`; `yed_estimateredeem` quotes it before the owner confirms,
+5 % (class A), 2.5 % (B) or 1 % (C) of the debt at the vault's mint price on top of the pool fee
+(IT-9′; `yed_getinfo.params.earlyRedeemFeeBps`; `yed_estimateredeem` quotes it before the owner confirms,
 `yed_redeem` reports it as `earlyRedeemFeeZat`). Wallets show the claimable price per vault
 (`yed_getvault.underwaterAt`, `yed_listclaimable` rows with `claimable: false` until it is reached).
 The owner's redeem is open from the block after the mint (D-IT-15), so "redeeming stops it" is

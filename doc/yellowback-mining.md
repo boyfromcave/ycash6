@@ -275,7 +275,7 @@ owner. There is no per-pool switch: the fix is a release.
 
 **Scenario 2 — a wrong-price claim.** What you see: a claimant intent on a vault that is not
 underwater at the market. What happens: the YED attestor set cancels it during `CLAIM_DELAY`
-(I-2, `vault_buildcancel` + `set_signcancel`); the claimant's burn is forfeited (U-24). Nothing to
+(I-2, `vault_buildcancel` + `set_signcancel`); the claimant's burn is refunded (CAN-1; the U-24 forfeit was given up). Nothing to
 do on the pool.
 
 **Scenario 3 — price manipulation** (a pool, or a majority of quote-tagged blocks, moves a median).
