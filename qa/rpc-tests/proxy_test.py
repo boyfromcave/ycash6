@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) 2015-2016 The Bitcoin Core developers
 # Copyright (c) 2017-2022 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 import socket
-import os
 
 from test_framework.socks5 import Socks5Configuration, Socks5Command, Socks5Server, AddressType
 from test_framework.test_framework import BitcoinTestFramework
@@ -41,32 +41,38 @@ class ProxyTest(BitcoinTestFramework):
 
         self.have_ipv6 = test_ipv6_local()
         # Create two proxies on different ports
+        # Port 0: the OS picks a free ephemeral port (32768 and up on Linux), above every fixed port
+        # the tests use (node p2p/rpc 11000-20999, stratum, zmq, chain-viz, rpcbind), so parallel runs
+        # cannot collide; each conf's addr is set to the bound port once its server exists.
         # ... one unauthenticated
         self.conf1 = Socks5Configuration()
-        self.conf1.addr = ('127.0.0.1', 13000 + (os.getpid() % 1000))
+        self.conf1.addr = ('127.0.0.1', 0)
         self.conf1.unauth = True
         self.conf1.auth = False
         # ... one supporting authenticated and unauthenticated (Tor)
         self.conf2 = Socks5Configuration()
-        self.conf2.addr = ('127.0.0.1', 14000 + (os.getpid() % 1000))
+        self.conf2.addr = ('127.0.0.1', 0)
         self.conf2.unauth = True
         self.conf2.auth = True
         if self.have_ipv6:
             # ... one on IPv6 with similar configuration
             self.conf3 = Socks5Configuration()
             self.conf3.af = socket.AF_INET6
-            self.conf3.addr = ('::1', 15000 + (os.getpid() % 1000))
+            self.conf3.addr = ('::1', 0)
             self.conf3.unauth = True
             self.conf3.auth = True
         else:
             print("Warning: testing without local IPv6 support")
 
         self.serv1 = Socks5Server(self.conf1)
+        self.conf1.addr = self.serv1.s.getsockname()[:2]
         self.serv1.start()
         self.serv2 = Socks5Server(self.conf2)
+        self.conf2.addr = self.serv2.s.getsockname()[:2]
         self.serv2.start()
         if self.have_ipv6:
             self.serv3 = Socks5Server(self.conf3)
+            self.conf3.addr = self.serv3.s.getsockname()[:2]
             self.serv3.start()
 
     def setup_nodes(self):
