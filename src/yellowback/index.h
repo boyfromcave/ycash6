@@ -70,6 +70,36 @@ namespace yellowback {
 /** Undo records older than this many blocks below the tip are pruned (V2: 4,096, the crash walk). */
 static const int UNDO_KEEP = 4096;
 
+/** SyncToChain logs its replay progress every this many blocks (cf. DigiByte v9.26.7 b544af7fa3). */
+static const int SYNC_PROGRESS_INTERVAL = 1000;
+
+/**
+ * The invariant audit (cf. DigiByte v9.26.7 19c8b1c272, src/index/digidollarstatsindex.cpp SupplyVerification):
+ * the Totals record re-derived from the records it summarises, read only, in one pass over Tokens and Vaults.
+ *   supplyCents   = sum of Tokens[*].cents (every YED output not yet spent; a claim's burn left supply with the
+ *                   claim, and a cancel's refund came back as a token, so a CLAIMING vault adds nothing here)
+ *   collateralZat = sum of collateralZat over ACTIVE and CLAIMING vaults (IT-6: a claimed vault's collateral stays
+ *                   in the system ratio until its claimant intent is released)
+ *   activeVaults, voidVaults, closedVaults, claimedVaults = the count of Vaults records in that status
+ *   unbackedCents = 0 (nothing has written it since the vault upgrade)
+ * and the tip snapshot's supplyCents / collateralZat equal the Totals they were copied from (SNAP).
+ */
+struct IndexAudit
+{
+    bool ok;
+    std::vector<std::string> mismatches;   //!< one line per disagreement, "<field>: stored X, records Y"
+    Totals stored;
+    Totals derived;
+    std::optional<int> tipHeight;
+    uint64_t tokens;                       //!< Tokens records read
+    uint64_t vaults;                       //!< Vaults records read
+
+    IndexAudit() : ok(true), tokens(0), vaults(0) {}
+};
+
+/** Run the audit over `view` (no writes; the caller holds whatever lock guards the view). */
+IndexAudit AuditIndexRecords(const StateView& view);
+
 /** The miner-side configuration read only on the miner path (§3.10). The signal flag, the kill switch,
  *  the template policy and -yellowbackrequirehealthy left with the vault upgrade (§6). */
 struct MinerConfig
@@ -256,12 +286,28 @@ public:
      * stored tip is not in the active chain (covers the index being ahead of
      * an unflushed chainstate after a crash, V2), then apply forward from
      * disk. Wipes and rebuilds when the schema or network differs, an undo
-     * record is missing, or the chain is below startHeight. Takes cs_main.
-     * Returns false only when the index ends up unhealthy.
+     * record is missing, the chain is below startHeight, or the stored rules version is not
+     * RULES_VERSION. Takes cs_main. Logs progress every SYNC_PROGRESS_INTERVAL blocks and polls
+     * `interrupt` (init passes ShutdownRequested) and Stop() before each block: an interrupted replay leaves the
+     * index unhealthy for the session (never "synced"); every block applied so far was committed
+     * with its tip, so the next start resumes from there. Ends with the invariant audit
+     * (VerifyIndex). Returns false only when the index ends up unhealthy.
      */
-    bool SyncToChain();
+    bool SyncToChain(const std::function<bool()>& interrupt = std::function<bool()>());
 
-    /** Make every later hook return at once (shutdown). */
+    /** The invariant audit at the stored tip (AuditIndexRecords; takes cs_yellowback). A mismatch marks the
+     *  index unhealthy, with the log line telling the operator to restart with -reindex-yellowback. */
+    IndexAudit VerifyIndex();
+    /** True for the rest of the session when SyncToChain was interrupted (shutdown requested mid-replay). */
+    bool WasInterrupted() const { return interrupted; }
+
+    /**
+     * Shutdown: every later hook returns at once without touching the state. Fail closed: a
+     * stopped index can no longer evaluate a block, so CheckConnect reports a failure (never an
+     * empty pass) and CommitConnect / UndoDisconnect return false. Shutdown() stops the miner,
+     * the network and the YED wallet thread first, so no block reaches a stopped index
+     * (cf. DigiByte v9.26.7 a6a0c1690f).
+     */
     void Stop();
     /** Commit anything pending and fsync. */
     void Flush(bool fSync);
@@ -398,7 +444,7 @@ public:
     /** The W8 cache every evaluation this index runs goes through (also handed to the RPC dry runs). */
     SigCache* GetSigCache() { return &sigCache; }
     const LruSigCache& SigCacheStats() const { return sigCache; }
-    /** True for the rest of the session when SyncToChain found a foreign SCHEMA_VERSION and rebuilt (yed_getinfo.rebuilt). */
+    /** True for the rest of the session when SyncToChain found a foreign SCHEMA_VERSION or RULES_VERSION and rebuilt (yed_getinfo.rebuilt). */
     bool WasRebuilt() const { return rebuilt; }
     void SetAttestPolicy(const AttestPolicy& p) { attestPolicy = p; }
     const AttestPolicy& GetAttestPolicy() const { return attestPolicy; }
@@ -452,8 +498,9 @@ private:
     std::unique_ptr<YellowbackDB> db;
     bool healthy;
     std::string unhealthyReason;
-    bool stopped;
+    std::atomic<bool> stopped;   //!< read without cs_yellowback by the notifier hooks and the YED wallet thread
     bool rebuilt;
+    bool interrupted;
 
     MinerConfig miner;
     PayeePolicy payeePolicy;

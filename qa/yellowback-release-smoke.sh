@@ -28,6 +28,12 @@ for b in "$ycashd" "$cli" "$tx"; do
 done
 [ "$mode" = "--version-only" ] && { echo "smoke (version only): ok"; exit 0; }
 
+# The rpcversion the node must report: YELLOWBACK_RPC_VERSION in the tree the binaries were built
+# from (this script's checkout), never a copy that drifts from it.
+src_rpc="$(cd "$(dirname "$0")/.." && pwd)/src/rpc/yellowback.cpp"
+rpcversion=$(sed -n 's/^static const int YELLOWBACK_RPC_VERSION = \([0-9][0-9]*\);.*/\1/p' "$src_rpc" 2>/dev/null || true)
+[ -n "$rpcversion" ] || { echo "cannot read YELLOWBACK_RPC_VERSION from $src_rpc"; exit 1; }
+
 datadir=$(mktemp -d "${TMPDIR:-/tmp}/ycash-smoke.XXXXXX")
 rpc=(-regtest -datadir="$datadir" -rpcport=18732 -rpcuser=smoke -rpcpassword=smoke)
 cleanup() { "$cli" "${rpc[@]}" stop >/dev/null 2>&1 || true; sleep 2; rm -rf "$datadir"; }
@@ -64,6 +70,6 @@ wait $pid || true
 start -yellowbackattestorset="$setid"
 info=$("$cli" "${rpc[@]}" yed_getinfo)
 echo "$info"
-echo "$info" | grep -q '"rpcversion": 5' || { echo "yed_getinfo: expected rpcversion 5"; exit 1; }
+echo "$info" | grep -q "\"rpcversion\": $rpcversion\b" || { echo "yed_getinfo: expected rpcversion $rpcversion"; exit 1; }
 echo "$info" | grep -q '"status": "active"' || { echo "yed_getinfo: expected the vault upgrade active"; exit 1; }
 echo "smoke: ok"

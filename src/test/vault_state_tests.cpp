@@ -886,6 +886,60 @@ BOOST_AUTO_TEST_CASE(cancel_relocks)
     BOOST_CHECK(!c.Try(SpendTx(c, back, 2, {CTxOut(10000, Recipient(64))})));
 }
 
+// The set-state invariant audit (cf. DigiByte v9.26.7 19c8b1c272): every set's lockedValue equals the sum of its unspent V
+// outputs through lock, unlock (intent + re-lock), cancel and spend; a corrupted lockedValue or V record is reported.
+BOOST_AUTO_TEST_CASE(audit_locked_value)
+{
+    Chain c;
+    CKey owner = MakeKey(50);
+    SetId s = SetWithMembers(c, {MakeKey(1)});
+    VaultParams vp = VaultFor(s, owner);
+    CScript vspk = BuildVault(vp);
+    BOOST_CHECK(AuditLockedValue(c.kv).empty());
+    COutPoint vout = Lock(c, vp, 10000);
+    std::vector<SetValueAudit> sets;
+    BOOST_CHECK(AuditLockedValue(c.kv, &sets).empty());
+    BOOST_REQUIRE_EQUAL(sets.size(), 1u);
+    BOOST_CHECK(sets[0].setId == s);
+    BOOST_CHECK_EQUAL(sets[0].stored, 10000);
+    BOOST_CHECK_EQUAL(sets[0].derived, 10000);
+
+    CScript ispk = BuildIntent(IntentFor(vp, vspk, Recipient(60)));
+    CMutableTransaction unlock = SpendTx(c, vout, 1, {CTxOut(4000, ispk), CTxOut(6000, vspk)});
+    BOOST_REQUIRE(!c.Block1(unlock));
+    BOOST_CHECK(AuditLockedValue(c.kv).empty());     // the intent's 4000 left the set; the re-lock's 6000 stays
+    COutPoint iout = FindOut(unlock, ispk);
+    COutPoint relock = FindOut(unlock, vspk);
+    c.Empty(2);
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, iout, 2, {CTxOut(4000, vspk)})));   // cancel: back into the set
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 10000);
+    BOOST_CHECK(AuditLockedValue(c.kv).empty());
+
+    // A corrupted lockedValue is caught.
+    const MemoryKV good = c.kv;
+    SetRecord bad = *GetSet(c.kv, s);
+    bad.lockedValue += 1;
+    CDataStream ss(SER_DISK, PROTOCOL_VERSION);
+    ss << bad;
+    c.kv.data[KeySet(s)] = std::string(ss.begin(), ss.end());
+    std::vector<std::string> m = AuditLockedValue(c.kv);
+    BOOST_REQUIRE_EQUAL(m.size(), 1u);
+    BOOST_CHECK(m[0].find("lockedValue stored 10001, unspent V outputs 10000") != std::string::npos);
+
+    // So is a lost V record (the index no longer lists an unspent vault the set still counts).
+    c.kv = good;
+    c.kv.data.erase(KeyTemplateOut(relock));
+    m = AuditLockedValue(c.kv);
+    BOOST_REQUIRE_EQUAL(m.size(), 1u);
+    BOOST_CHECK(m[0].find("lockedValue stored 10000, unspent V outputs 4000") != std::string::npos);
+
+    // Spending the vaults empties the set and the audit stays clean.
+    c.kv = good;
+    BOOST_REQUIRE(!c.Block1(SpendTx(c, relock, 2, {CTxOut(6000, Recipient(63))})));
+    BOOST_CHECK_EQUAL(GetSet(c.kv, s)->lockedValue, 4000);
+    BOOST_CHECK(AuditLockedValue(c.kv).empty());
+}
+
 BOOST_AUTO_TEST_CASE(template_out_index)
 {
     // The 'v' index (vault_list; an intent's height for the start-up replay): every V / I output

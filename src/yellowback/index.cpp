@@ -57,7 +57,7 @@ TemplateView::~TemplateView() {}
 // Construction, health, storage
 
 YellowbackIndex::YellowbackIndex(const Params& paramsIn, const fs::path& dir, size_t cacheSize, bool fWipe)
-    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false), rebuilt(false),
+    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false), rebuilt(false), interrupted(false),
       payeePolicy(PayeePolicy::Defaults(paramsIn))
 {
     paramSets.push_back(paramsIn);
@@ -227,7 +227,7 @@ bool YellowbackIndex::UndoOne(const uint256& hash, std::string& error)
     return true;
 }
 
-bool YellowbackIndex::SyncToChain()
+bool YellowbackIndex::SyncToChain(const std::function<bool()>& interrupt)
 {
     LOCK(cs_main);
     LOCK(cs_yellowback);
@@ -246,6 +246,14 @@ bool YellowbackIndex::SyncToChain()
         Wipe("schema changed");
         tip = std::nullopt;
     }
+    if (tip.has_value() && State(*db).GetRulesVersion() != RULES_VERSION) {
+        // The same records judged under other rules (cf. DigiByte v9.26.7 digidollar_state.h rules_version):
+        // the release that changed how stored heights are judged bumped RULES_VERSION, so rebuild.
+        LogPrintf("yellowback: index rules version %u differs from %u; rebuilding from the chain\n", State(*db).GetRulesVersion(), RULES_VERSION);
+        rebuilt = true;
+        Wipe("rules version changed");
+        tip = std::nullopt;
+    }
     if (tip.has_value() && tip->network != params.network) {
         Wipe("network changed");
         tip = std::nullopt;
@@ -260,9 +268,20 @@ bool YellowbackIndex::SyncToChain()
         }
     }
 
+    // From here on every block the index holds is judged under this binary's rules: stamp them (node-local, unhashed).
+    db->Write(keys::RulesVersion(), SerializeRecord(RulesVersionRecord()));
+    if (!db->Commit(false)) {
+        SetUnhealthy("database write failed (rules version)");
+        return false;
+    }
+
     const CBlockIndex* chainTip = chainActive.Tip();
     if (!chainTip || chainTip->nHeight < params.startHeight) {
-        if (tip.has_value()) Wipe("chain below start height (reindex?)");
+        if (tip.has_value()) {
+            Wipe("chain below start height (reindex?)");
+            db->Write(keys::RulesVersion(), SerializeRecord(RulesVersionRecord()));
+            db->Commit(false);
+        }
         LogPrintf("yellowback: chain below start height %d; index empty\n", params.startHeight);
         return true;
     }
@@ -281,12 +300,33 @@ bool YellowbackIndex::SyncToChain()
         }
         tip = State(*db).GetTip();
     }
+    if (!tip.has_value()) {
+        // A walk-back or a wipe may have erased the stamp with everything else.
+        db->Write(keys::RulesVersion(), SerializeRecord(RulesVersionRecord()));
+        db->Commit(false);
+    }
 
     int from = tip.has_value() ? tip->height + 1 : params.startHeight;
     if (from <= chainTip->nHeight) {
         LogPrintf("yellowback: syncing index from height %d to %d\n", from, chainTip->nHeight);
     }
     for (int h = from; h <= chainTip->nHeight; h++) {
+        // Startup progress and cancellation (cf. DigiByte v9.26.7 b544af7fa3). Fail closed: an interrupted replay
+        // is never "synced"; each applied block was committed with its tip, so the next start resumes from there.
+        // A stopped index (Stop(), shutdown) is an interruption too, as every hook treats it: fail closed.
+        if (stopped || (interrupt && interrupt())) {
+            db->Commit(true);
+            interrupted = true;
+            const std::string reason = strprintf("startup replay interrupted at height %d of %d (shutdown requested); a restart resumes from height %d", h, chainTip->nHeight, h);
+            LogPrintf("yellowback: %s\n", reason);
+            healthy = false;          // set first so SetUnhealthy does not add its -reindex-yellowback advice: none is needed
+            SetUnhealthy(reason);
+            return false;
+        }
+        if (h > from && (h - from) % SYNC_PROGRESS_INTERVAL == 0) {
+            LogPrintf("yellowback: syncing index: height %d of %d (%d%%)\n", h, chainTip->nHeight,
+                      (int)((int64_t)(h - from) * 100 / std::max(1, chainTip->nHeight - from + 1)));
+        }
         const CBlockIndex* pindex = chainActive[h];
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, ::Params().GetConsensus())) {
@@ -302,8 +342,94 @@ bool YellowbackIndex::SyncToChain()
     db->Commit(true);
     std::optional<TipRecord> finalTip = State(*db).GetTip();
     LogPrintf("yellowback: index at height %d\n", finalTip.has_value() ? finalTip->height : -1);
+    // The invariant audit (cf. DigiByte v9.26.7 19c8b1c272): saved totals are re-derived from the records, never trusted.
+    if (!VerifyIndex().ok) return false;
     PublishFeePrice();
     return true;
+}
+
+IndexAudit AuditIndexRecords(const StateView& view)
+{
+    IndexAudit a;
+    State st(const_cast<StateView&>(view));
+    if (view.Exists(keys::Totals())) {
+        Totals t;
+        if (!st.Get(keys::Totals(), t)) a.mismatches.push_back("Totals: the stored record does not deserialize");
+        else a.stored = t;
+    }
+    std::optional<TipRecord> tip = st.GetTip();
+    if (tip.has_value()) a.tipHeight = tip->height;
+
+    view.Iterate(std::string(1, 'K'), [&](const std::string& k, const std::string& raw) {
+        TokenRecord tok;
+        a.tokens++;
+        if (!DeserializeRecord(raw, tok)) {
+            a.mismatches.push_back(strprintf("Tokens: the record for %s:%u does not deserialize", keys::OutPointHashOf(k).GetHex(), keys::OutPointIndexOf(k)));
+        } else if (tok.cents <= 0) {
+            a.mismatches.push_back(strprintf("Tokens: %s:%u holds %d cents", keys::OutPointHashOf(k).GetHex(), keys::OutPointIndexOf(k), tok.cents));
+        } else {
+            a.derived.supplyCents += tok.cents;
+        }
+        return true;
+    });
+    view.Iterate(std::string(1, 'V'), [&](const std::string& k, const std::string& raw) {
+        VaultRecord v;
+        a.vaults++;
+        if (!DeserializeRecord(raw, v)) {
+            a.mismatches.push_back(strprintf("Vaults: the record for %s:%u does not deserialize", keys::OutPointHashOf(k).GetHex(), keys::OutPointIndexOf(k)));
+            return true;
+        }
+        switch (v.Status()) {
+        case VaultStatus::ACTIVE: a.derived.collateralZat += v.collateralZat; a.derived.activeVaults++; break;
+        case VaultStatus::CLAIMING: a.derived.collateralZat += v.collateralZat; break;   // IT-6: counted until released
+        case VaultStatus::VOIDED: a.derived.voidVaults++; break;
+        case VaultStatus::CLOSED: a.derived.closedVaults++; break;
+        case VaultStatus::CLAIMED: a.derived.claimedVaults++; break;
+        default:
+            a.mismatches.push_back(strprintf("Vaults: %s:%u has status %u", keys::OutPointHashOf(k).GetHex(), keys::OutPointIndexOf(k), (unsigned)v.status));
+        }
+        return true;
+    });
+
+    auto cmp = [&](const char* field, int64_t stored, int64_t derived) {
+        if (stored != derived) a.mismatches.push_back(strprintf("Totals.%s: stored %d, records %d", field, stored, derived));
+    };
+    cmp("supplyCents", a.stored.supplyCents, a.derived.supplyCents);
+    cmp("collateralZat", a.stored.collateralZat, a.derived.collateralZat);
+    cmp("activeVaults", a.stored.activeVaults, a.derived.activeVaults);
+    cmp("voidVaults", a.stored.voidVaults, a.derived.voidVaults);
+    cmp("closedVaults", a.stored.closedVaults, a.derived.closedVaults);
+    cmp("claimedVaults", a.stored.claimedVaults, a.derived.claimedVaults);
+    cmp("unbackedCents", a.stored.unbackedCents, a.derived.unbackedCents);
+
+    // SNAP copied the tip's totals into its snapshot; the two must still agree.
+    if (tip.has_value()) {
+        std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)tip->height);
+        if (!snap.has_value()) {
+            a.mismatches.push_back(strprintf("Snapshots: no snapshot at the tip height %d", tip->height));
+        } else {
+            if (snap->blockHash != tip->blockHash) a.mismatches.push_back(strprintf("Snapshots[%d].blockHash: %s, tip %s", tip->height, snap->blockHash.GetHex(), tip->blockHash.GetHex()));
+            if (snap->supplyCents != a.stored.supplyCents) a.mismatches.push_back(strprintf("Snapshots[%d].supplyCents (tip snapshot): %d, Totals %d", tip->height, snap->supplyCents, a.stored.supplyCents));
+            if (snap->collateralZat != a.stored.collateralZat) a.mismatches.push_back(strprintf("Snapshots[%d].collateralZat (tip snapshot): %d, Totals %d", tip->height, snap->collateralZat, a.stored.collateralZat));
+        }
+    }
+    a.ok = a.mismatches.empty();
+    return a;
+}
+
+IndexAudit YellowbackIndex::VerifyIndex()
+{
+    LOCK(cs_yellowback);
+    IndexAudit a = AuditIndexRecords(*db);
+    if (a.ok) {
+        LogPrintf("yellowback: invariant audit passed at height %d (%u tokens, %u vaults)\n", a.tipHeight.value_or(-1),
+                  (unsigned)a.tokens, (unsigned)a.vaults);
+        return a;
+    }
+    for (const std::string& m : a.mismatches) LogPrintf("yellowback: invariant audit: %s\n", m);
+    SetUnhealthy(strprintf("invariant audit failed at height %d: %s%s", a.tipHeight.value_or(-1), a.mismatches.front(),
+                           a.mismatches.size() > 1 ? strprintf(" (and %u more)", (unsigned)(a.mismatches.size() - 1)) : std::string()));
+    return a;
 }
 
 void YellowbackIndex::PublishFeePrice()
@@ -369,7 +495,13 @@ YellowbackIndex::ConnectCheck YellowbackIndex::CheckConnect(const CBlock& block,
     AssertLockHeld(cs_main);
     LOCK(cs_yellowback);
     ConnectCheck out;
-    if (stopped) return out;
+    // Fail closed: a stopped index (shutdown) cannot evaluate the block, and an empty `out` would
+    // be a pass -- a block accepted without the module check. Shutdown() stops every block source
+    // before the index, so this is reached only if that order is broken.
+    if (stopped) {
+        out.failure = "the Yellowback index is stopped (shutdown in progress)";
+        return out;
+    }
     if (!healthy) {
         out.failure = "the Yellowback index is unhealthy (" + unhealthyReason + "); restart with -reindex-yellowback";
         return out;

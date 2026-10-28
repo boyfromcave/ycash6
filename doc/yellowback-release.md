@@ -29,7 +29,7 @@ release to be drafted. Tier 2 jobs may fail; their asset is then missing from th
 Every build runs `qa/yellowback-release-smoke.sh` on the packaged binaries: each binary's version
 banner must be `v<V>`, and a throwaway regtest node must start on the vault upgrade, create a YED
 attestor set, restart naming it (so Yellowback is live), answer `getnetworkinfo` and `yed_getinfo`
-(`rpcversion` 5, upgrade active), and stop. The Windows `.exe` files are run on windows-latest
+(`rpcversion` equal to `YELLOWBACK_RPC_VERSION` in `src/rpc/yellowback.cpp`, 8 today; upgrade active), and stop. The Windows `.exe` files are run on windows-latest
 (version banners only). The 18.04 package's smoke test runs inside an `ubuntu:18.04` container,
 which also proves its glibc floor.
 
