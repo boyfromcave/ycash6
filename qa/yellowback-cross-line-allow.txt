@@ -29,8 +29,8 @@ src/vault/node.h dfb3fb423b1b40a2b5d0bfb1a535b5ee35835908565c36f3c24260225a4702c
 # GetBlockSubsidy is a consensus-params method; regtest crashHeight (SIGKILL
 # after FlushStateToDisk) reproduces a crash only 6.20.0's index flush can.
 # Header split: util/system.h, util/strencodings.h.
-src/yellowback/index.cpp bc9b3d6bedb9d39be39e285ad95578c445e7b22cdd0ed1df4016c6445c034c2f 74741bc41ac0ee310b0141d2ed9c73b38c55ac9feca16cdf05acd681d9f9f4cd
-src/yellowback/index.h 010c3798e5f17ac78d4d044dfc941abccacfc0017f34146fab0b8d20b39f150b a1301cb72e288a9481234a54530465c1028fcc2a7a407fbf04ed0f0e5280f1a7
+src/yellowback/index.cpp 5e79a669503d14d4c91e1d54f5267e201054cea545212783f37d7e1c7e9af381 129c2712f56c358ec8df8a6ef4bcab7b6de0da46b847280445fa9543f4ca0a9a
+src/yellowback/index.h 1e15f0108a87767231912bdc8c20a5b12af45b4008e30baeb1ccbd8269485c8f 5bed2c89ca3b3889e6ec326caa56113d224740930f70c5ebf3ac189ff99826c8
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee).
@@ -51,4 +51,4 @@ src/yellowback/txbuilder.h aa34fc1909efa95c2806eb1e2b8ea1cf27b01bf3afc9e3cbfe01b
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan drops wtxOrdered before erasing mapWallet.
 # GetDepthInMainChain and IsSpent take an anchor (std::nullopt).
-src/yellowback/wallet.cpp d0afc072a2b014d67e0cd777f357e1a215e907d15a638dd4c21bf761c13cd9b0 55a83a0e6a352d985c50184c1e76dcad8eeda0cfe36e2ef42e275d0f8608ff49
+src/yellowback/wallet.cpp 5f7187d656f94b054448576613f45ae0cdf95a6deaa1912c3f99b25137204af2 9aad598159d05d2a982328deb3307c5df94973a2b7495468219c947db829023d
