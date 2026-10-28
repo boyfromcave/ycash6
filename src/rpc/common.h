@@ -237,7 +237,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_getfeepayee",             {{o}, {s}} },
     { "yed_gethistory",              {{o, o}, {}} },
     { "yed_getinfo",                 {{}, {}} },
-    { "yed_getnewaddress",           {{}, {s}} },
+    { "yed_getnewaddress",           {{}, {s, s}} },   // type, label (N8)
     { "yed_getnotice",               {{s}, {}} },
     { "yed_getprice",                {{}, {o}} },
     { "yed_getselection",            {{o, s}, {}} },
@@ -246,6 +246,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_gettag",                  {{s}, {}} },
     { "yed_gettxinfo",               {{s}, {}} },
     { "yed_getvault",                {{s}, {}} },
+    { "yed_listaddresses",           {{}, {o}} },      // includeEmpty (N8)
     { "yed_listattestors",           {{}, {o}} },
     { "yed_listclaimable",           {{}, {o, o}} },
     { "yed_listminers",              {{}, {o, o}} },

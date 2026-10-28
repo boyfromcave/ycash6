@@ -66,6 +66,8 @@ void EnsureWalletIsUnlocked();
 namespace {
 
 const char* const UNLOCK_ACKNOWLEDGEMENT = "I understand this burns YED";
+/** The address-book purpose of a yed_getnewaddress key (N8): what yed_listaddresses includeEmpty lists. */
+const char* const YED_RECEIVE_PURPOSE = "yellowback-receive";
 
 YellowbackWallet& EnsureYW()
 {
@@ -144,6 +146,25 @@ void MempoolGate(YellowbackIndex& index, const CTransaction& tx)
     std::optional<std::string> why = index.MempoolCheckReason(tx);
     if (!why.has_value()) return;
     throw JSONRPCError(RPC_VERIFY_REJECTED, "mempool-check-failed:" + why.value() + ": an enforcing miner would refuse this vault spend (MP-1)");
+}
+
+/**
+ * N1 (cf. DigiByte v9.26.7 00136af6, the pending redemption told apart before coin selection): refuse a second
+ * spend of a vault the mempool already holds a spend of, instead of asking for more YED (`insufficient-yed`) or
+ * failing the commit as a mempool conflict. mempool.cs held.
+ */
+std::string VaultSpendPendingError(const COutPoint& vault)
+{
+    const std::optional<uint256> spender = MempoolSpenderOf(vault);
+    if (!spender.has_value()) return "";
+    return strprintf("vault-spend-pending: the vault %s already has a spend in the mempool (%s); wait for it to confirm or expire",
+                     vault.ToString(), spender->GetHex());
+}
+
+void RefuseVaultSpendPending(const COutPoint& vault)
+{
+    const std::string error = VaultSpendPendingError(vault);
+    if (!error.empty()) throw JSONRPCError(RPC_WALLET_ERROR, error);
 }
 
 CScript ParseYedAddress(const std::string& s, const yellowback::Params& params)
@@ -393,7 +414,20 @@ Attestation ParseAttestationArg(const UniValue& v, const char* what)
     return a.value();
 }
 
-/** The carrier step: build, (prove,) commit and persist the carrier; returns its record. */
+/**
+ * N3 (cf. DigiByte v9.26.7 38895edb, a mint saved before it is sent): the carrier record goes to carriers.dat before
+ * the carrier is committed, so a carrier that reaches the network can always be swept back; `carrier-record-failed`
+ * when the file cannot be written (nothing is sent), and the record is dropped again when the commit fails.
+ */
+void CommitCarrier(YellowbackWallet& yw, const BuiltTx& built, CReserveKey& reservekey)
+{
+    std::string error;
+    if (!yw.CommitWithCarrierRecord(built.carrier.value(), [&]() { Commit(yw, built, &reservekey); return true; }, error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, error);
+    }
+}
+
+/** The carrier step: build, (prove,) persist the carrier record, then commit; returns its record. */
 CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>& bundle, int refHeight,
                           const std::vector<unsigned char>& selector, const std::string& from)
 {
@@ -412,8 +446,7 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
             ThrowBuildError(e);
         }
         if (!built.NeedsProving()) {
-            Commit(yw, built, &reservekey);
-            yw.RecordCarrier(built.carrier.value());
+            CommitCarrier(yw, built, reservekey);
             return built.carrier.value();
         }
     }
@@ -423,8 +456,7 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
         throw JSONRPCError(RPC_WALLET_ERROR, e.what());
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
-    Commit(yw, built, &reservekey);
-    yw.RecordCarrier(built.carrier.value());
+    CommitCarrier(yw, built, reservekey);
     return built.carrier.value();
 }
 
@@ -597,7 +629,10 @@ UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std
                        int64_t maxBurnCents)
 {
     uint256 txid;
-    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier, minOutZat, maxBurnCents); }, false, true, txid);
+    BuiltTx built = RunVaultSpend(yw, [&]() {
+        RefuseVaultSpendPending(COutPoint(vaultTxid, 0));   // N1: before coin selection
+        return BuildClaim(yw, vaultTxid, to, carrier, minOutZat, maxBurnCents);
+    }, false, true, txid);
     yw.SpendCarrier(carrier.outpoint);
     return ClaimResult(txid, built, carrier);
 }
@@ -689,18 +724,23 @@ void SchedulePending(YellowbackWallet& yw, const CarrierRecord& carrier, std::fu
 
 UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() > 1)
+    if (fHelp || params.size() > 2)
         throw std::runtime_error(
-            "yed_getnewaddress ( \"type\" )\n\nA fresh Yellowback (YED) address of this wallet. The default follows the holder policy\n"
+            "yed_getnewaddress ( \"type\" \"label\" )\n\nA fresh Yellowback (YED) address of this wallet. The default follows the holder policy\n"
             "(quantum spec A-13): a P2PKH address from the keypool (added to the address book) until Falcon is active, a\n"
             "post-quantum FN-DSA-512 address (53 characters) once it is.\n"
             "\nArguments:\n"
             "1. \"type\" (string, optional) \"p2pkh\"; \"pq\" (a post-quantum holder key: FN-DSA-512 once Falcon is active,\n"
-            "   SLH-DSA-SHA2-128s before); \"pqowner\" (an SLH-DSA-SHA2-128s key, as vault_getnewowner)\n");
+            "   SLH-DSA-SHA2-128s before); \"pqowner\" (an SLH-DSA-SHA2-128s key, as vault_getnewowner); null or \"\" = the default\n"
+            "2. \"label\" (string, optional, default \"\") stored in the wallet's address book with the address (so it travels\n"
+            "   with wallet.dat; yed_listaddresses reports it); not for \"pqowner\", whose key stays out of the address book\n");
     YellowbackWallet& yw = EnsureYW();
     LOCK2(cs_main, pwalletMain->cs_wallet);
     const bool falcon = IsPQFalconActive(::Params().GetConsensus(), chainActive.Height() + 1);
-    std::string type = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : (falcon ? "pq" : "p2pkh");
+    std::string type = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
+    if (type.empty()) type = falcon ? "pq" : "p2pkh";
+    const std::string label = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "";
+    if (type == "pqowner" && !label.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "a \"pqowner\" key stays out of the address book, so it takes no label");
     if (type == "pq" || type == "pqowner") {
         // PQ keys come from the HD seed (quantum plan §4.6). A holder key ("pq") goes into the address book under
         // its plain-YEC form (sq…, D-Q-20), as a P2PKH holder does, so the YEC its token outputs carry is not taken
@@ -709,14 +749,14 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
         const uint8_t scheme = type == "pq" && falcon ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
         CPQKeyID id;
         if (!pwalletMain->GetNewPQKey(scheme, id)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
-        if (type == "pq") pwalletMain->SetAddressBook(id, "", "receive");
+        if (type == "pq") pwalletMain->SetAddressBook(id, label, YED_RECEIVE_PURPOSE);
         return EncodeAddress(id, yw.Index()->GetParams());
     }
     if (type != "p2pkh") throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqowner\"");
     // 6.20.0: no keypool draw; a fresh HD key, exactly as stock getnewaddress (needs an unlocked wallet).
     EnsureWalletIsUnlocked();
     CPubKey key = pwalletMain->GenerateNewKey(true);
-    pwalletMain->SetAddressBook(key.GetID(), "", "receive");
+    pwalletMain->SetAddressBook(key.GetID(), label, YED_RECEIVE_PURPOSE);
     return EncodeAddress(key.GetID(), yw.Index()->GetParams());
 }
 
@@ -761,7 +801,9 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "yed_getbalance\n\nConfirmed YED (from the index) and unconfirmed YED (mempool transactions that would assign YED to this wallet).\n"
-            "Result: { \"confirmedCents\": n, \"unconfirmedCents\": n, \"height\": n }\n");
+            "spendableCents is confirmedCents less the YED this wallet's own unconfirmed transactions already spend: what\n"
+            "yed_send, yed_redeem and yed_claim can use now (their change returns in unconfirmedCents).\n"
+            "Result: { \"confirmedCents\": n, \"spendableCents\": n, \"unconfirmedCents\": n, \"height\": n }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -784,6 +826,7 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
     }
     UniValue o(UniValue::VOBJ);
     o.pushKV("confirmedCents", confirmed);
+    o.pushKV("spendableCents", yw.SpendableCents());   // N2 (cf. DigiByte v9.26.7 75d82a6e): what the selectors can spend now
     o.pushKV("unconfirmedCents", unconfirmed);
     o.pushKV("height", IndexHeight(index));
     return o;
@@ -931,7 +974,9 @@ UniValue yed_send(const UniValue& params, bool fHelp)
         throw std::runtime_error("yed_send \"yedaddress\" cents\n\nSend YED to a Yellowback address. Refuses other addresses (not-a-yellowback-address) and change below $1.00 (change-floor).\n"
             "From the Falcon height (yed_getinfo.params.pq) YED goes to post-quantum (Falcon) holders only (TOK-PQ, bad-yed-holder).\n"
             "A YED transaction built before that height with a P2PKH token output and still unconfirmed when the tip reaches\n"
-            "Falcon height - 1 is evicted from the mempool (it would be invalid in the next block): rebuild it.\n");
+            "Falcon height - 1 is evicted from the mempool (it would be invalid in the next block): rebuild it.\n"
+            "YED cannot pay the network fee: it is paid in YEC from this wallet's confirmed transparent coins (insufficient-yec\n"
+            "without them); yed_estimatesend quotes it as networkFeeZat.\n");
     YellowbackWallet& yw = EnsureYW();
     CScript dest = ParseYedAddress(params[0].get_str(), yw.Index()->GetParams());
     int64_t cents = params[1].get_int64();
@@ -961,7 +1006,8 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             "miner would accept it (mempool-check-failed:<verdict>). VOID: releases the collateral with no burn, no fee and\n"
             "no payload (L14). An ACTIVE vault redeems at any height after its mint (IT-1); before lockHeight the\n"
             "early-redeem fee earlyRedeemFeeBps[class] of the debt at the mint price is added to the pool fee (IT-9') -- quote it\n"
-            "first with yed_estimateredeem. A VOID release needs the tip at its owner height (vault-locked).\n"
+            "first with yed_estimateredeem. A VOID release needs the tip at its owner height (vault-locked). Refused\n"
+            "(vault-spend-pending) while a spend of the vault is already in the mempool.\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "2. \"to\"         (string, optional) where the collateral goes: an s1... address, or a ys1... address\n"
@@ -973,7 +1019,10 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
     const std::string to = params.size() > 1 ? params[1].get_str() : "";
     uint256 txid;
     // The VOID release spends no ACTIVE vault, so the K7 gate is a no-op for it; gate both alike.
-    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildRedeem(yw, vaultTxid, to); }, true, true, txid);
+    BuiltTx built = RunVaultSpend(yw, [&]() {
+        RefuseVaultSpendPending(COutPoint(vaultTxid, 0));   // N1: before coin selection
+        return BuildRedeem(yw, vaultTxid, to);
+    }, true, true, txid);
     return SpendResult(txid, built);
 }
 
@@ -984,7 +1033,9 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
             "yed_estimateredeem \"vaultTxid\"\n"
             "\nQuote of yed_redeem for an own vault (IT-9): the burn, the pool fee and, before lockHeight, the early-redeem\n"
             "fee a redeem confirming in the next block pays, and whether yed_redeem would go ahead now. Signs nothing,\n"
-            "locks nothing, commits nothing; never refuses for the vault's state (error says why a redeem would).\n"
+            "locks nothing, commits nothing; never refuses for the vault's state (error says why a redeem would: canRedeem is\n"
+            "judged on spendable YED, yed_getbalance.spendableCents, and is false with vault-spend-pending while a spend of\n"
+            "the vault is in the mempool).\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "\nResult: { \"vault\", \"status\", \"termClass\", \"lockHeight\", \"height\", \"early\", \"burnedCents\",\n"
@@ -1013,7 +1064,11 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     if (!v.IsOpen()) error = strprintf("vault-not-active: the vault is %s", VaultStatusName(v.Status()));
     else if (!yw.IsMineVault(v)) error = "vault-not-owned: the vault owner key is not in this wallet";
     else if ((int64_t)tip < (int64_t)v.ownerHeight) error = strprintf("vault-locked: the vault is locked until height %d (tip %d)", v.ownerHeight, tip);   // BuildRedeem's test
-    else if (active && yw.ConfirmedCents() < v.mintedCents) error = strprintf("insufficient-yed: the redeem burns %d cents; the wallet holds %d", v.mintedCents, yw.ConfirmedCents());
+    else if (!VaultSpendPendingError(out).empty()) error = VaultSpendPendingError(out);   // N1: yed_redeem's check, before selection
+    else if (active && yw.SpendableCents() < v.mintedCents) {
+        // N2: judged on the spendable YED (what the selector can use), not the confirmed figure
+        error = strprintf("insufficient-yed: the redeem burns %d cents; the wallet can spend %d now (%d confirmed)", v.mintedCents, yw.SpendableCents(), yw.ConfirmedCents());
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));
     o.pushKV("status", VaultStatusName(v.Status()));
@@ -1047,6 +1102,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
             "Refused unless an enforcing miner would accept it (mempool-check-failed:<verdict>). v3: the carrier step first\n"
             "(selector = the vault outpoint), the attestor fee when armed, and the RED-5 residual to the vault owner when due;\n"
             "claimPath is the RED-4 clause that opened the claim (\"a\" combined price, \"b\" the emergency notice).\n"
+            "Refused (vault-spend-pending) while a spend of the vault is already in the mempool, before the carrier step.\n"
             "\nArguments: as yed_redeem, then \"bundleHex\" and wait as yed_mint, then minOutZat (numeric, optional, default 0 =\n"
             "no bound): refuse (claim-out-below-min) before anything is signed when the collateral reaching \"to\" (the\n"
             "collateral less the enforcement fee, the attestor fee and the RED-5 residual) would be below this many zatoshi,\n"
@@ -1070,6 +1126,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
         LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
+        RefuseVaultSpendPending(COutPoint(vaultTxid, 0));   // N1: before the carrier and any coin selection
         try {
             pf = PreflightClaim(yw, vaultTxid, bundleArg, minOutZat, maxBurnCents);
         } catch (const std::runtime_error& e) {
@@ -1489,7 +1546,9 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
             "yed_listpositions ( \"status\" )\n"
             "\nThis wallet's vaults (owner key held): every yed_getvault field plus canRedeem (ACTIVE or VOID at or past\n"
             "the owner height: from the block after the mint, IT-1; for VOID the release), canClaim (claimable and the\n"
-            "wallet holds the debt) and earlyRedeemFeeZat (what a redeem now adds to the pool fee before lockHeight, IT-9).\n");
+            "wallet holds the debt) and earlyRedeemFeeZat (what a redeem now adds to the pool fee before lockHeight, IT-9).\n"
+            "spendPending is true while a mempool transaction spends the vault (spendTxid, present only then); canRedeem and\n"
+            "canClaim are false while it is. canClaim reads the spendable YED (yed_getbalance.spendableCents).\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
@@ -1500,7 +1559,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     State st(index.View());
     const yellowback::Params& p = index.GetParams();
     const int h = IndexHeight(index);
-    const int64_t balance = yw.ConfirmedCents();
+    const int64_t balance = yw.SpendableCents();     // N2: what a claim's selector can use now
     // v3: claimable by either RED-4 clause and canNotice under this node's pEmerg come from the
     // same estimate yed_listclaimable and yed_getvault read (yellowback::rpc::EstimateClaim).
     UniValue arr(UniValue::VARR);
@@ -1519,10 +1578,11 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("noticed", noticed);
         o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
-        o.pushKV("canRedeem", v.IsOpen() && h >= v.ownerHeight);     // IT-1 (extended): in term too
+        const bool pendingSpend = yellowback::rpc::PushSpendPending(o, out).has_value();   // N1
+        o.pushKV("canRedeem", v.IsOpen() && h >= v.ownerHeight && !pendingSpend);     // IT-1 (extended): in term too
         std::optional<CKeyID> payee;
         o.pushKV("earlyRedeemFeeZat", EarlyRedeemFeeAt(index, out, v, h, payee));   // IT-9: what a redeem now adds to the fee
-        o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
+        o.pushKV("canClaim", est.claimable && balance >= v.mintedCents && !pendingSpend);
         o.pushKV("canNotice", est.canNotice);
         arr.push_back(o);
         return true;
@@ -1538,8 +1598,12 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
             "\nThis wallet's Yellowback history from the index, newest first: type is mint, send, receive, burn, redeem,\n"
             "claim (this wallet claimed, incl. its own vault), claimed (an own vault was claimed), claim_release / claim_cancel\n"
             "(the intent of this wallet's claim released / cancelled), claim_released / claim_cancelled (the same, on an own\n"
-            "vault someone else claimed), sweep (an own vault swept), plus own\n"
-            "transactions with a payload that expired unmined (\"expired\": true, verdict \"expired\").\n");
+            "vault someone else claimed), sweep (an own vault swept), carrier (an own carrier its main transaction has not\n"
+            "completed: pending, lapsed or swept; plan A6), plus\n"
+            "own transactions with a payload that expired unmined (\"expired\": true, verdict \"expired\", typed by the payload:\n"
+            "mint, send, redeem, claim, register, notice, equivocation, revive, cancel). time is the block time (UTC seconds;\n"
+            "null without a block). A two-step action's rows share carrierTxid and mainTxid (\"\" on other rows); carrierOutcome\n"
+            "is pending, completed (the main transaction spent the carrier), lapsed (its window passed) or swept.\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     int count = params.size() > 0 && !params[0].isNull() ? params[0].get_int() : 100;
@@ -1552,6 +1616,51 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
     EnsureHealthy(index);
     State st(index.View());
     const int h = IndexHeight(index);
+    const int chainTip = chainActive.Height();
+    // N7: the block time of a row's height (UTC seconds), null without a block on the active chain
+    auto blockTime = [&](int height) -> UniValue {
+        if (height < 0 || height > chainTip || chainActive[height] == nullptr) return NullUniValue;
+        return UniValue(chainActive[height]->GetBlockTime());
+    };
+    // Plan A6: this wallet's carriers and what spent them. A carrier input is recognised by its scriptSig's shape
+    // (ParseCarrierScriptSig); a spender with a payload is the main transaction, one without is a sweep. A live
+    // spender (confirmed or in the mempool) decides the outcome; `main` is the main transaction, live or not (an
+    // expired one still names the action).
+    struct CarrierUse { uint256 main; bool mainLive = false; bool live = false; bool livePayload = false; };
+    std::map<COutPoint, CarrierUse> carrierSpends;
+    std::map<uint256, COutPoint> carrierOf;          // a main transaction -> the carrier it spends
+    for (const auto& kv : pwalletMain->mapWallet) {
+        const CWalletTx& wtx = kv.second;
+        bool hasCarrier = false;
+        for (const CTxIn& in : wtx.vin) if (ParseCarrierScriptSig(in.scriptSig).has_value()) hasCarrier = true;
+        if (!hasCarrier) continue;
+        const int depth = wtx.GetDepthInMainChain(std::nullopt);
+        const bool live = depth > 0 || (depth == 0 && mempool.exists(kv.first));
+        const bool payload = FindPayload(wtx).has_value();
+        for (const CTxIn& in : wtx.vin) {
+            if (!ParseCarrierScriptSig(in.scriptSig).has_value()) continue;
+            CarrierUse& u = carrierSpends[in.prevout];
+            if (payload) {
+                carrierOf[kv.first] = in.prevout;
+                if (u.main.IsNull() || (live && !u.mainLive)) { u.main = kv.first; u.mainLive = live; }
+            }
+            if (live) { u.live = true; u.livePayload = payload; }
+        }
+    }
+    for (const CarrierRecord& c : yw.OutstandingCarriers()) carrierSpends.insert(std::make_pair(c.outpoint, CarrierUse()));
+    auto carrierOutcome = [&](const COutPoint& c) -> std::string {
+        const CarrierUse& u = carrierSpends[c];
+        std::map<uint256, CWalletTx>::const_iterator f = pwalletMain->mapWallet.find(c.hash);
+        const uint32_t expiry = f != pwalletMain->mapWallet.end() ? f->second.nExpiryHeight : 0;
+        return CarrierOutcome(u.live, u.livePayload, chainTip, expiry);
+    };
+    // The A6 fields of a row: a two-step main transaction names its carrier and itself; other rows carry "".
+    auto pushCarrierFields = [&](UniValue& o, const uint256& txid) {
+        std::map<uint256, COutPoint>::const_iterator c = carrierOf.find(txid);
+        o.pushKV("carrierTxid", c != carrierOf.end() ? c->second.hash.GetHex() : std::string());
+        o.pushKV("mainTxid", c != carrierOf.end() ? txid.GetHex() : std::string());
+        o.pushKV("carrierOutcome", c != carrierOf.end() ? carrierOutcome(c->second) : std::string());
+    };
 
     // U-23 pre-pass: the vaults this wallet claimed (a claim's TxLog names the vault in closedVaults and
     // the burn in spentTokens; its release / cancel names the same vault), and where each cancel
@@ -1645,6 +1754,8 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         o.pushKV("payee", PayeeToJSON(l.hasPayee, l.payee));
         o.pushKV("unbacked", unbacked);
         o.pushKV("expired", false);
+        o.pushKV("time", blockTime(l.height));
+        pushCarrierFields(o, txid);
         rows.push_back({ l.height, o });
         return true;
     });
@@ -1656,11 +1767,17 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         if (st.GetTxLog(kv.first).has_value() || mempool.exists(kv.first)) continue;
         if (wtx.nExpiryHeight == 0 || (int64_t)wtx.nExpiryHeight > (int64_t)chainActive.Height()) continue;
         if (wtx.GetDepthInMainChain(std::nullopt) > 0) continue;
+        // N7 (cf. DigiByte v9.26.7 77a5b156): typed by the payload; a REDEEM payload on a vault this wallet does not own is a claim
+        bool foreignVault = false;
+        if (fp->payload.type == PayloadType::REDEEM && !wtx.vin.empty()) {
+            std::optional<VaultRecord> v = st.GetVault(wtx.vin[0].prevout);
+            foreignVault = v.has_value() && !yw.IsMineVault(v.value());
+        }
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", kv.first.GetHex());
         o.pushKV("height", -1);
         o.pushKV("confirmations", 0);
-        o.pushKV("type", fp->payload.type == PayloadType::MINT ? "mint" : fp->payload.type == PayloadType::REDEEM ? "redeem" : "send");
+        o.pushKV("type", ExpiredRowType((uint8_t)fp->payload.type, foreignVault));
         o.pushKV("verdict", "expired");
         o.pushKV("path", "");
         o.pushKV("yedIn", 0);
@@ -1671,11 +1788,117 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         o.pushKV("payee", NullUniValue);
         o.pushKV("unbacked", false);
         o.pushKV("expired", true);
+        o.pushKV("time", NullUniValue);
+        pushCarrierFields(o, kv.first);
         rows.push_back({ (int)wtx.nExpiryHeight, o });
+    }
+    // Plan A6: a row for each own carrier whose main transaction did not complete it (pending, lapsed or swept;
+    // outstanding in carriers.dat or spent by an own transaction), so a two-step action that never completed still
+    // shows, across restarts. A completed carrier has no row of its own: its main transaction's row names it.
+    for (const auto& cs : carrierSpends) {
+        const COutPoint& c = cs.first;
+        std::map<uint256, CWalletTx>::const_iterator f = pwalletMain->mapWallet.find(c.hash);
+        if (f == pwalletMain->mapWallet.end()) continue;
+        const std::string outcome = carrierOutcome(c);
+        if (outcome == "completed") continue;
+        const CWalletTx& wtx = f->second;
+        const int depth = wtx.GetDepthInMainChain(std::nullopt);
+        const int height = depth > 0 ? chainTip - depth + 1 : -1;
+        const int sortKey = depth > 0 ? height : (depth == 0 && mempool.exists(c.hash) ? chainTip + 1 : (int)wtx.nExpiryHeight);
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", c.hash.GetHex());
+        o.pushKV("height", height);
+        o.pushKV("confirmations", depth > 0 ? depth : 0);
+        o.pushKV("type", "carrier");
+        o.pushKV("verdict", "");
+        o.pushKV("path", "");
+        o.pushKV("yedIn", 0);
+        o.pushKV("yedOut", 0);
+        o.pushKV("burned", 0);
+        o.pushKV("amountCents", 0);
+        o.pushKV("feeZat", 0);
+        o.pushKV("payee", NullUniValue);
+        o.pushKV("unbacked", false);
+        o.pushKV("expired", false);
+        o.pushKV("time", depth > 0 ? blockTime(height) : NullUniValue);
+        o.pushKV("carrierTxid", c.hash.GetHex());
+        o.pushKV("mainTxid", cs.second.main.IsNull() ? std::string() : cs.second.main.GetHex());
+        o.pushKV("carrierOutcome", outcome);
+        rows.push_back({ sortKey, o });
     }
     std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.height > b.height; });
     UniValue arr(UniValue::VARR);
     for (size_t i = skip; i < rows.size() && (int)arr.size() < count; i++) arr.push_back(rows[i].o);
+    return arr;
+}
+
+// N8: cf. DigiByte v9.26.7 src/rpc/digidollar.cpp listdigidollaraddresses (5539554c, b3cb2482): labels, per-address
+// activity and the unused receive addresses.
+UniValue yed_listaddresses(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1)
+        throw std::runtime_error(
+            "yed_listaddresses ( includeEmpty )\n"
+            "\nThis wallet's Yellowback (YED) addresses: every address that holds YED or appears in the history, with its\n"
+            "address-book label, the confirmed YED it holds, how many\n"
+            "indexed transactions moved YED to or from it and the block time of the last one. Sorted by address.\n"
+            "\nArguments:\n"
+            "1. includeEmpty (boolean, optional, default false) also list the unused addresses yed_getnewaddress issued\n"
+            "\nResult: [ { \"address\", \"label\", \"confirmedCents\", \"txCount\", \"lastUsed\" } ]  (lastUsed: UTC seconds, null when unused)\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const bool includeEmpty = params.size() > 0 && !params[0].isNull() && params[0].get_bool();
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    const yellowback::Params& p = index.GetParams();
+    struct Entry { int64_t cents = 0; int64_t txCount = 0; int lastHeight = -1; };
+    std::map<CScript, Entry> byScript;
+    for (const YedCoin& c : yw.AllCoins()) byScript[c.token.scriptPubKey].cents += c.token.cents;
+    index.View().Iterate("L", [&](const std::string& k, const std::string& raw) {
+        TxLogRecord l;
+        if (!DeserializeRecord(raw, l)) return true;
+        std::set<CScript> touched;
+        for (const AssignedOutput& a : l.assigned) if (yw.IsMineScript(a.scriptPubKey)) touched.insert(a.scriptPubKey);
+        for (const AssignedOutput& a : l.spentTokens) if (yw.IsMineScript(a.scriptPubKey)) touched.insert(a.scriptPubKey);
+        for (const CScript& s : touched) {
+            Entry& e = byScript[s];
+            e.txCount++;
+            e.lastHeight = std::max(e.lastHeight, (int)l.height);
+        }
+        return true;
+    });
+    if (includeEmpty) {
+        for (const auto& ab : pwalletMain->mapAddressBook) {
+            if (ab.second.purpose != YED_RECEIVE_PURPOSE) continue;
+            if (!std::get_if<CKeyID>(&ab.first) && !std::get_if<CPQKeyID>(&ab.first)) continue;
+            byScript.insert(std::make_pair(GetScriptForDestination(ab.first), Entry()));
+        }
+    }
+    const int chainTip = chainActive.Height();
+    std::map<std::string, UniValue> out;             // sorted by address
+    for (const auto& kv : byScript) {
+        const std::string address = ScriptToYedAddress(kv.first, p);
+        if (address.empty()) continue;
+        const std::optional<CTxDestination> dest = HolderKey(kv.first);
+        std::string label;
+        if (dest.has_value()) {
+            std::map<CTxDestination, CAddressBookData>::const_iterator ab = pwalletMain->mapAddressBook.find(dest.value());
+            if (ab != pwalletMain->mapAddressBook.end()) label = ab->second.name;
+        }
+        const Entry& e = kv.second;
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("address", address);
+        o.pushKV("label", label);
+        o.pushKV("confirmedCents", e.cents);
+        o.pushKV("txCount", e.txCount);
+        const bool timed = e.lastHeight >= 0 && e.lastHeight <= chainTip && chainActive[e.lastHeight] != nullptr;
+        o.pushKV("lastUsed", timed ? UniValue(chainActive[e.lastHeight]->GetBlockTime()) : NullUniValue);
+        out[address] = o;
+    }
+    UniValue arr(UniValue::VARR);
+    for (const auto& kv : out) arr.push_back(kv.second);
     return arr;
 }
 
@@ -1706,7 +1929,9 @@ UniValue yed_estimatesend(const UniValue& params, bool fHelp)
             "\nArguments:\n"
             "1. recipients  (object or numeric, required) {\"yedaddress\": cents, ...} as yed_sendmany, or just the total cents\n"
             "\nResult: { \"amountCents\", \"recipients\", \"workable\", \"stage\", \"inputs\": [{\"txid\",\"vout\",\"cents\"}],\n"
-            "          \"selectedCents\", \"changeCents\", \"spendableCents\", \"error\", \"alternatives\" }\n");
+            "          \"selectedCents\", \"changeCents\", \"spendableCents\", \"networkFeeZat\", \"error\", \"alternatives\" }\n"
+            "networkFeeZat is the YEC network fee the send pays (YED cannot pay it), priced on the selected YED inputs as yed_send\n"
+            "prices it (a post-quantum YEC funding coin can raise it); null when the amount is not workable.\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     int64_t amount = 0;
@@ -1755,6 +1980,7 @@ UniValue yed_estimatesend(const UniValue& params, bool fHelp)
     o.pushKV("selectedCents", e.selectedCents);
     o.pushKV("changeCents", e.changeCents);
     o.pushKV("spendableCents", e.spendableCents);
+    o.pushKV("networkFeeZat", e.networkFeeZat.has_value() ? UniValue(e.networkFeeZat.value()) : NullUniValue);   // N6
     o.pushKV("error", e.error);
     if (e.workable) {
         o.pushKV("alternatives", NullUniValue);
@@ -2186,6 +2412,7 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_claim",            &yed_claim,             false },
     { "yellowback", "yed_listpositions",    &yed_listpositions,     false },
     { "yellowback", "yed_listtransactions", &yed_listtransactions,  false },
+    { "yellowback", "yed_listaddresses",    &yed_listaddresses,     false },   // N8
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
     { "yellowback", "yed_estimateredeem",   &yed_estimateredeem,    false },   // IT-9

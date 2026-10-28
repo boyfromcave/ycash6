@@ -13,6 +13,7 @@
 #include "yellowback/script.h"
 #include "yellowback/view.h"
 
+#include <optional>
 #include <string>
 
 /**
@@ -74,6 +75,28 @@ uint32_t SignerBranchId();
  * (`error` "non-BIP68-final" or "bad-txns-vault-timelock"). Requires cs_main.
  */
 bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32_t branchId, std::string& error);
+
+/**
+ * The txid of the mempool transaction that spends `out`, nullopt when none (mempool.mapNextTx). The wallet RPCs
+ * read it for a vault (yed_getvault / yed_listpositions `spendPending`, the `vault-spend-pending` refusal; cf.
+ * DigiByte v9.26.7 src/rpc/digidollar.cpp, the pending-redemption check of 00136af6). mempool.cs held.
+ */
+std::optional<uint256> MempoolSpenderOf(const COutPoint& out);
+
+/** The cents of every MINT payload in the mempool (MINT-6 at inclusion, audit C-3). mempool.cs held. */
+Cents MempoolMintCents();
+
+/**
+ * MINTPOL-1 (plan §4.6) for a mint of `cents` in `termClass` at the reference height R: nullopt when yed_mint's gate
+ * passes, else the refusal `"<identifier>: <reason>"` exactly as yed_mint throws it (mintpol-not-active, -no-price,
+ * -global-ratio, -divergence, -unarmed, -cap). `pendingMintCents` is MempoolMintCents(). The wallet's MintGate and
+ * the node-context yed_estimatecollateral (`mintBlocked`, `mintBlockedReason`; cf. DigiByte v9.26.7
+ * estimatecollateral's minting_restricted, e18654a3) read the same function. cs_yellowback held.
+ */
+std::optional<std::string> MintPolicyRefusal(const State& st, const Params& p, int R, int termClass, Cents cents, Cents pendingMintCents);
+
+/** The identifier of a refusal string: the text before its first ':' (the whole string when there is none). */
+std::string RefusalIdentifier(const std::string& refusal);
 
 } // namespace yellowback
 

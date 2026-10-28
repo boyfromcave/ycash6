@@ -196,6 +196,41 @@ struct PQFeeFollower
     CAmount Follow(const std::vector<std::pair<CScript, CAmount>>& selected);
 };
 
+/**
+ * The YEC input caps of SelectYec (cf. DigiByte v9.26.7 src/wallet/coinselection.cpp ErrorMaxWeightExceeded,
+ * b54e3861 "too many coins"): a wallet of many small coins (pool payouts) would otherwise build a transaction whose
+ * size-priced fee hits the YedMaxTxFee cap and that the mempool refuses. 400 P2PKH inputs are about 60 kB; 75,000
+ * bytes of inputs keep the whole transaction well under MAX_TX_SIZE_BEFORE_SAPLING (100 kB), with room for a V,
+ * post-quantum YED inputs and the outputs.
+ */
+static const size_t MAX_YEC_INPUTS = 400;
+static const size_t MAX_YEC_INPUT_BYTES = 75000;
+
+/** The estimated bytes of spending one plain YEC coin: PQSpendInputSize for a TX_PQPKH, 150 otherwise. */
+size_t YecInputBytes(const CScript& scriptPubKey);
+
+/** What PickYecCoins chose. */
+struct YecPick
+{
+    bool ok = false;                        //!< `picked` covers `needed`
+    bool tooMany = false;                   //!< even largest-first crosses a cap (`too-many-coins`)
+    bool largestFirst = false;              //!< the smallest-first pass crossed a cap and largest-first was used
+    std::vector<size_t> picked;             //!< indices into the candidates, in selection order
+    CAmount selected = 0;
+    CAmount needed = 0;                     //!< `needed` as the fee follower left it
+};
+
+/**
+ * SelectYec's choice over `candidates` (script, value): smallest-first, as before; when that order crosses
+ * `maxInputs` coins or `maxBytes` of estimated input bytes (YecInputBytes) before covering `needed`, largest-first,
+ * which takes the fewest coins; `tooMany` when that crosses a cap too. `follow` (may be null) raises `needed` as PQ
+ * coins are taken (B L-1; priced with `prior`, the transaction's YEC inputs already selected, plus the picks) and is
+ * updated only on success. Pure.
+ */
+YecPick PickYecCoins(const std::vector<std::pair<CScript, CAmount>>& candidates, CAmount needed,
+                     const std::vector<std::pair<CScript, CAmount>>& prior, PQFeeFollower* follow,
+                     size_t maxInputs = MAX_YEC_INPUTS, size_t maxBytes = MAX_YEC_INPUT_BYTES);
+
 /** A vault spend's fixed inputs (REDEEM, CLAIM, the VOID release and the SWEEP). */
 struct VaultSpendShape
 {
@@ -513,6 +548,9 @@ struct SendEstimate
     std::string error;                  //!< "" | "insufficient-yed" | "change-floor" | "too-many-inputs"
     std::optional<int64_t> below;       //!< H2 alternatives, only when !workable
     std::optional<int64_t> above;
+    /** The YEC network fee the transfer pays, priced as BuildTransfer prices it on the selected YED inputs (YED cannot
+     *  pay it; a post-quantum YEC funding coin can raise it, the fee follower); nullopt when !workable. */
+    std::optional<CAmount> networkFeeZat;
 
     SendEstimate() : amountCents(0), recipients(0), workable(false), stage("none"), selectedCents(0),
                      changeCents(0), spendableCents(0) {}

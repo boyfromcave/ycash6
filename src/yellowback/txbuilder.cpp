@@ -93,6 +93,63 @@ CAmount PQFeeFollower::Follow(const std::vector<std::pair<CScript, CAmount>>& se
     return rise;
 }
 
+size_t YecInputBytes(const CScript& scriptPubKey)
+{
+    const std::optional<CTxDestination> h = HolderKey(scriptPubKey);
+    const CPQKeyID* id = h.has_value() ? std::get_if<CPQKeyID>(&h.value()) : nullptr;
+    if (id && scriptPubKey == GetScriptForPQKey(*id)) return PQSpendInputSize(id->scheme);
+    return 150;                                   // a P2PKH input, as YedEstimatedSize counts it
+}
+
+YecPick PickYecCoins(const std::vector<std::pair<CScript, CAmount>>& candidates, CAmount needed,
+                     const std::vector<std::pair<CScript, CAmount>>& prior, PQFeeFollower* follow, size_t maxInputs, size_t maxBytes)
+{
+    std::vector<size_t> order(candidates.size());
+    for (size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return candidates[a].second < candidates[b].second; });
+
+    // One pass in `ord`; tooMany as soon as a coin would cross either cap (the fee follower runs on a copy).
+    auto attempt = [&](const std::vector<size_t>& ord, PQFeeFollower& f) {
+        YecPick r;
+        r.needed = needed;
+        std::vector<std::pair<CScript, CAmount>> all = prior;
+        size_t bytes = 0;
+        for (size_t i : ord) {
+            r.picked.push_back(i);
+            r.selected += candidates[i].second;
+            bytes += YecInputBytes(candidates[i].first);
+            if (r.picked.size() > maxInputs || bytes > maxBytes) {
+                r.tooMany = true;
+                return r;
+            }
+            if (follow) {
+                all.push_back(candidates[i]);
+                r.needed += f.Follow(all);
+            }
+            if (r.selected >= r.needed) {
+                r.ok = true;
+                return r;
+            }
+        }
+        return r;                                 // every coin taken and still short: insufficient
+    };
+    PQFeeFollower f1 = follow ? *follow : PQFeeFollower();
+    YecPick r = attempt(order, f1);
+    if (r.ok) {
+        if (follow) *follow = f1;
+        return r;
+    }
+    if (!r.tooMany) return r;
+    // Smallest-first spends dust first (the wallet's own consolidation), but it crossed a cap: largest-first takes the
+    // fewest coins that cover `needed`, so it is the one order that can still fit.
+    std::reverse(order.begin(), order.end());
+    PQFeeFollower f2 = follow ? *follow : PQFeeFollower();
+    YecPick big = attempt(order, f2);
+    big.largestFirst = true;
+    if (big.ok && follow) *follow = f2;
+    return big;
+}
+
 // ---------------------------------------------------------------- pure shapes (§3.5)
 
 std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFeeVoutOut)
@@ -664,8 +721,9 @@ struct Context
     }
 
     /**
-     * Smallest-first confirmed YEC inputs covering `needed`; returns the amount selected.
-     * `only`: restrict to outputs paying that script (an s1… funding address).
+     * Confirmed YEC inputs covering `needed` (PickYecCoins: smallest-first, largest-first when that would take more
+     * than MAX_YEC_INPUTS coins or MAX_YEC_INPUT_BYTES; `too-many-coins` when even that would); returns the amount
+     * selected. `only`: restrict to outputs paying that script (an s1… funding address).
      */
     CAmount SelectYec(CAmount needed, CMutableTransaction& mtx, std::vector<std::pair<CScript, CAmount>>& prevs,
                       const CScript* only = nullptr, const std::string& onlyText = "", PQFeeFollower* follow = nullptr) const
@@ -674,8 +732,8 @@ struct Context
         yw.SettleYecLocks();   // F-1: hand back the inputs of a spender that failed
         std::vector<COutput> coins;
         wallet.AvailableCoins(coins, std::nullopt, true, nullptr, false, true, false, 1);
-        std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() < b.Value(); });
-        CAmount selected = 0;
+        std::vector<COutPoint> outs;
+        std::vector<std::pair<CScript, CAmount>> candidates;
         for (const COutput& c : coins) {
             if (!c.fSpendable) continue;
             if (only && c.tx->vout[c.i].scriptPubKey != *only) continue;
@@ -689,20 +747,24 @@ struct Context
             // not stamped it yet (wallet depth -1), so IsSpent no longer counts it and AvailableCoins
             // offers the coin again; choosing it would make the commit fail as a double spend.
             if (!CoinAvailable(o)) continue;
-            mtx.vin.push_back(CTxIn(o));
-            prevs.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
-            selected += c.Value();
-            if (follow) {
-                // B L-1: a PQ coin raises the size-priced fee; `needed` follows it
-                needed += follow->Follow(prevs);
-            }
-            if (selected >= needed) break;
+            outs.push_back(o);
+            candidates.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
         }
-        if (selected < needed) {
+        const YecPick pick = PickYecCoins(candidates, needed, prevs, follow);   // B L-1: a PQ coin raises the fee; `needed` follows it
+        if (pick.tooMany) {
+            throw std::runtime_error(strprintf("too-many-coins: covering %s YEC would take more than %u coins (or %u bytes of inputs)%s; "
+                                               "combine small coins first by sending them to yourself, then retry",
+                                               FormatMoney(pick.needed), (unsigned)MAX_YEC_INPUTS, (unsigned)MAX_YEC_INPUT_BYTES, only ? " at " + onlyText : std::string()));
+        }
+        if (!pick.ok) {
             throw std::runtime_error(strprintf("insufficient-yec: need %s, have %s confirmed and unlocked%s",
-                                               FormatMoney(needed), FormatMoney(selected), only ? " at " + onlyText : ""));
+                                               FormatMoney(pick.needed), FormatMoney(pick.selected), only ? " at " + onlyText : ""));
         }
-        return selected;
+        for (size_t i : pick.picked) {
+            mtx.vin.push_back(CTxIn(outs[i]));
+            prevs.push_back(candidates[i]);
+        }
+        return pick.selected;
     }
 
     /**
@@ -1162,18 +1224,6 @@ struct MintGateFacts
     MintGateFacts() : termClass(0), lockHeight(0), claimHeight(0) {}
 };
 
-/** The cents of every MINT payload in the mempool (mempool.cs is held by the RPC layer, N25: before cs_yellowback). */
-Cents MempoolMintCents()
-{
-    AssertLockHeld(mempool.cs);
-    Cents total = 0;
-    for (CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.begin(); it != mempool.mapTx.end(); ++it) {
-        std::optional<FoundPayload> fp = FindPayload(it->GetTx());
-        if (fp.has_value() && fp->payload.type == PayloadType::MINT) total += (Cents)fp->payload.cents;
-    }
-    return total;
-}
-
 MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
 {
     const Params& p = ctx.params;
@@ -1191,44 +1241,13 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     g.claimHeight = g.lockHeight + p.grace;
     if (g.claimHeight >= (int64_t)LOCKTIME_THRESHOLD) throw std::runtime_error("mint-bad-lock: lockHeight + GRACE reaches LOCKTIME_THRESHOLD");
 
-    // MINTPOL-1 (§4.6): haltMask == 0 at R, the cap has room (the activation state machine left with the upgrade, §6).
+    // MINTPOL-1 (§4.6): one function with yed_estimatecollateral's mintBlocked (policy.h MintPolicyRefusal); the
+    // mempool's mints count against the cap (audit C-3; mempool.cs is held by the RPC layer, N25: before cs_yellowback).
+    const std::optional<std::string> refusal = MintPolicyRefusal(ctx.st, p, R, g.termClass, cents, MempoolMintCents());
+    if (refusal.has_value()) throw std::runtime_error(refusal.value());
     std::optional<Snapshot> S = SnapshotAt(ctx.st, p, R);
-    if (!S.has_value() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
-    if (S->haltMask & HALT_NO_PRICE) throw std::runtime_error("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
-    if ((S->haltMask & HALT_GLOBAL_RATIO) && ctx.params.baseRatioBps[g.termClass] < ctx.params.recapRatioBps) {
-        // W16, IT-5: only a class whose base ratio reaches the recapitalisation floor mints through a global-ratio halt
-        std::string open;
-        for (int c = 0; c < NUM_CLASSES; c++) if (ctx.params.IsClassEnabled(c) && ctx.params.baseRatioBps[c] >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
-        throw std::runtime_error(strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose base ratio is at least %d %% can mint until it recovers%s",
-                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")"));
-    }
-    if (S->haltMask & HALT_DIVERGENCE) throw std::runtime_error("mintpol-divergence: minting is halted while the price windows diverge (HALT-3)");
-    if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) throw std::runtime_error("mintpol-not-active: an unknown halt bit is set at the reference height");
-    // H-1 (MINT-4): with MINT_REQUIRES_ARMED a mint at an unarmed R would confirm VOID (mint-halted-unarmed)
-    if (p.mintRequiresArmed && !ArmedAt(ctx.st.View(), p, R)) throw std::runtime_error("mintpol-unarmed: minting needs an ARMED attestation layer at the reference height (MINT_REQUIRES_ARMED)");
     g.S = S.value();
     g.xMint = S->PMint();
-    if (!g.xMint.has_value()) throw std::runtime_error("mintpol-no-price: pMint is undefined at the reference height");
-    const Totals totals = ctx.st.GetTotals();
-    std::optional<Cents> cap = SupplyCapCents(S->issuedZat, g.xMint, p.supplyCapBps);
-    // W20, IT-5: the cap is soft above the recapitalisation floor -- a mint over it is refused unless its
-    // class base ratio reaches RECAP_RATIO_BPS (MINT-6, amended; class C with the in-term parameter set).
-    const bool belowFloor = p.baseRatioBps[g.termClass] < p.recapRatioBps;
-    std::string openAbove;
-    for (int c = 0; c < NUM_CLASSES; c++) if (p.IsClassEnabled(c) && p.baseRatioBps[c] >= p.recapRatioBps) openAbove += (openAbove.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
-    const std::string above = strprintf("; above the cap only a term class with a base ratio of at least %d %% can mint (W20, IT-5)%s",
-                                        p.recapRatioBps / 100, openAbove.empty() ? "" : " (class " + openAbove + ")");
-    if (cap.has_value() && totals.supplyCents + cents > cap.value() && belowFloor) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents%s", std::max<Cents>(0, cap.value() - totals.supplyCents), above));
-    }
-    // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
-    // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
-    // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
-    const Cents pending = MempoolMintCents();
-    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value() && belowFloor) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool%s",
-                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending, above));
-    }
     return g;
 }
 
@@ -1697,6 +1716,9 @@ SendEstimate EstimateTransfer(YellowbackWallet& yw, int64_t amountCents, size_t 
         for (size_t i : s.inputs) e.inputs.push_back(coins[i]);
         e.selectedCents = s.selected;
         e.changeCents = s.change;
+        std::vector<CScript> scripts;
+        for (const YedCoin& c : e.inputs) scripts.push_back(c.token.scriptPubKey);
+        e.networkFeeZat = YedNetworkFee(scripts, std::nullopt);   // BuildTransfer's fee0 (B L-1)
         return e;
     }
     e.error = s.insufficient ? "insufficient-yed" : (s.tooManyInputs ? "too-many-inputs" : "change-floor");

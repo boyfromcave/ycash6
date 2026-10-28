@@ -1245,6 +1245,7 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
 
     YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "txid");
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs (spendPending) before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
@@ -1253,7 +1254,9 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
     if (!v.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault-not-found: no vault at " + txid.GetHex() + ":0");
     const int tip = IndexHeight(index);
     std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    return VaultToJSON(out, v.value(), index, snap);
+    UniValue o = VaultToJSON(out, v.value(), index, snap);
+    rpc::PushSpendPending(o, out);
+    return o;
 }
 
 UniValue yed_listvaults(const UniValue& params, bool fHelp)
@@ -1689,7 +1692,9 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
             "R = tip - REF_LAG (or at the given P_mint, PRICE_MIN..PRICE_MAX). requiredZat is MINT-5's ratio clause only;\n"
             "requiredZatFloored = requiredZat rounded up to 1,000 is what a mint locks (MINT-5': the 4 * FEE_MIN floor went with\n"
             "D-Q-23). protocolFeeCents / protocolFeeZat (FEE-1' at the estimate's pMint) and attestFeeZat (half of it when ARMED)\n"
-            "are the mint's fees. Does not apply MINTPOL-1.\n");
+            "are the mint's fees. Never refuses for MINTPOL-1: mintBlocked says whether yed_mint would refuse at this R (the\n"
+            "halts, MINT_REQUIRES_ARMED, the supply cap with the mempool's mints) and mintBlockedReason is the identifier it\n"
+            "would throw (\"\" when not blocked), so a wallet can show the figure next to the reason.\n");
 
     YellowbackIndex& index = EnsureIndex();
     if (!params[0].isNum() || !params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "cents and lockBlocks must be numbers");
@@ -1701,6 +1706,7 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     if (cents < p.minMint || cents > p.maxMint) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cents must be between %d and %d", p.minMint, p.maxMint));
     }
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs (the cap's pending mints) before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
@@ -1783,6 +1789,11 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     o.pushKV("bundleSeqs", SeqsToJSON(bundleSeqs));
     o.pushKV("attestFeeZat", attestFeeZat);
     o.pushKV("divergenceBps", divergenceBps.has_value() ? UniValue(divergenceBps.value()) : NullUniValue);
+    // MINTPOL-1 at R, as yed_mint's gate reads it (policy.h MintPolicyRefusal; cf. DigiByte v9.26.7 estimatecollateral's
+    // minting_restricted, e18654a3): judged on the snapshot even when a priceMicroUsd override priced the figure.
+    const std::optional<std::string> blocked = MintPolicyRefusal(st, p, refH, termClass, (Cents)cents, MempoolMintCents());
+    o.pushKV("mintBlocked", blocked.has_value());
+    o.pushKV("mintBlockedReason", blocked.has_value() ? RefusalIdentifier(blocked.value()) : std::string());
     return o;
 }
 
@@ -2171,6 +2182,14 @@ void PushNoticeFields(UniValue& o, const State& st, const Params& p, const COutP
     o.pushKV("noticed", n.has_value());
     o.pushKV("noticeHeight", n.has_value() ? UniValue(n->height) : NullUniValue);
     o.pushKV("emergencyOpenAt", n.has_value() ? UniValue((int64_t)n->refHeight + p.emergencyPersist) : NullUniValue);
+}
+
+std::optional<uint256> PushSpendPending(UniValue& o, const COutPoint& vault)
+{
+    const std::optional<uint256> spender = MempoolSpenderOf(vault);
+    o.pushKV("spendPending", spender.has_value());
+    if (spender.has_value()) o.pushKV("spendTxid", spender->GetHex());   // present only while pending
+    return spender;
 }
 
 ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, const VaultRecord& v, int tip)
