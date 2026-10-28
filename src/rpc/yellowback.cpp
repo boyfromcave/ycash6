@@ -470,7 +470,9 @@ UniValue SnapshotToJSON(int height, const Snapshot& s)
     o.pushKV("issuedZat", s.issuedZat);
     o.pushKV("supplyCents", s.supplyCents);
     o.pushKV("collateralZat", s.collateralZat);
+    o.pushKV("openDebtCents", s.openDebtCents);                 // HALT-2 (owner 2026-10-28): globalRatioBps's denominator
     o.pushKV("globalRatioBps", PriceOrNull(s.GlobalRatioBps()));
+    o.pushKV("globalRatioDenominator", "openDebt");
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
     return o;
 }
@@ -815,6 +817,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     for (int i = 0; i < NUM_CLASSES; i++) early.push_back(p.earlyRedeemFeeBps[i]);
     prm.pushKV("earlyRedeemFeeBps", early);                    // IT-9': per class, bps of the debt at pMint on a redeem before lockHeight (D-Q-23)
     prm.pushKV("globalRatioHaltBps", p.globalRatioHaltBps);
+    prm.pushKV("globalRatioDenominator", "openDebt");     // HALT-2 (owner 2026-10-28): the ratio divides by open vault debt
     prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16, IT-5: the class base ratio a mint needs to pass a global-ratio halt or the cap
     prm.pushKV("claimThresholdBps", p.claimThresholdBps);  // θ (D-IT-2)
     prm.pushKV("sigmaMultMaxBps", p.sigmaMultMaxBps);
@@ -925,6 +928,7 @@ static UniValue TotalsToJSON(const Totals& t)
     o.pushKV("closedVaults", (int64_t)t.closedVaults);
     o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
     o.pushKV("unbackedCents", t.unbackedCents);
+    o.pushKV("openDebtCents", t.openDebtCents);   // HALT-2's denominator (owner 2026-10-28)
     return o;
 }
 
@@ -936,7 +940,8 @@ UniValue yed_verifyindex(const UniValue& params, bool fHelp)
             "\nThe invariant audit the node runs at startup (cf. DigiByte v9.26.7 SupplyVerification): re-derives the Totals\n"
             "record from the stored Tokens and Vaults records (supplyCents = the sum of every unspent YED token; collateralZat\n"
             "and activeVaults from the ACTIVE vaults, collateralZat also from the CLAIMING ones, IT-6; each status count from\n"
-            "its records), checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
+            "its records; openDebtCents from the ACTIVE and CLAIMING vaults' mintedCents, and supplyCents <= openDebtCents, HALT-2),\n"
+            "checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
             "V outputs in the vault set-state database. Reads every Tokens and Vaults record once. Writes nothing; a mismatch\n"
             "marks the index unhealthy (the node then stops at the next block): restart with -reindex-yellowback (Yellowback\n"
             "totals) or -reindex (a set's lockedValue). Answers on an unhealthy index too.\n"
@@ -985,6 +990,8 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_getstats\n"
             "\nTotals plus the tip snapshot: supply, collateral, vault counts, prices, sigma, global ratio, cap, halts.\n"
+            "globalRatioBps (HALT-2) is collateralZat at pMint against openDebtCents, the mintedCents of every ACTIVE and\n"
+            "CLAIMING vault (globalRatioDenominator \"openDebt\"); supplyCents (<= openDebtCents) is what MINT-6 caps.\n"
             "mintableClasses: the term classes a mint can use now -- every enabled class when nothing halts and the cap has room;\n"
             "under a GLOBAL_RATIO halt alone (W16) and once the cap is reached (W20), those whose base ratio reaches\n"
             "params.recapRatioBps (IT-5: class C with the in-term parameter set); none under any other halt, and none while\n"
@@ -1007,6 +1014,7 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     o.pushKV("closedVaults", (int64_t)t.closedVaults);
     o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
     o.pushKV("unbackedCents", t.unbackedCents);
+    o.pushKV("openDebtCents", t.openDebtCents);                 // HALT-2 (owner 2026-10-28): the ACTIVE and CLAIMING vaults' debt
     o.pushKV("issuedZat", s.issuedZat);
     o.pushKV("pFast", PriceOrNull(s.PFast()));
     o.pushKV("pMid", PriceOrNull(s.PMid()));
@@ -1015,6 +1023,7 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     o.pushKV("pClaim", PriceOrNull(s.PClaim()));
     o.pushKV("sigmaMultBps", s.sigmaMultBps);
     o.pushKV("globalRatioBps", PriceOrNull(s.GlobalRatioBps()));
+    o.pushKV("globalRatioDenominator", "openDebt");             // collateral against open debt, not supplyCents (DigiByte's selected_health_denominator)
     std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), index.GetParams().supplyCapBps);
     o.pushKV("supplyCapCents", PriceOrNull(cap));
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));

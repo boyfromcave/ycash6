@@ -1521,6 +1521,23 @@ BOOST_AUTO_TEST_CASE(invariant_audit_catches_a_corrupt_total)
     IndexAudit c = AuditIndexRecords(copy);
     BOOST_CHECK(!c.ok);
     BOOST_CHECK(c.mismatches[0].find("Totals.collateralZat") != std::string::npos);
+    // HALT-2 (owner 2026-10-28): a corrupt openDebtCents is caught against the vaults' mintedCents and the tip snapshot,
+    // and one below supply breaks supplyCents <= openDebtCents as well
+    {
+        MemoryStateView d = copy;
+        Totals u = State(d).GetTotals();
+        u.collateralZat += 1;          // undo the corruption above
+        BOOST_CHECK_EQUAL(u.openDebtCents, 10000);
+        u.openDebtCents -= 1;
+        d.Write(keys::Totals(), SerializeRecord(u));
+        IndexAudit e = AuditIndexRecords(d);
+        BOOST_CHECK(!e.ok);
+        BOOST_REQUIRE_EQUAL(e.mismatches.size(), 3u);
+        BOOST_CHECK(e.mismatches[0].find("Totals.openDebtCents: stored 9999, records 10000") != std::string::npos);
+        BOOST_CHECK(e.mismatches[1].find("supplyCents 10000 exceeds openDebtCents 9999") != std::string::npos);
+        BOOST_CHECK(e.mismatches[2].find("openDebtCents (tip snapshot)") != std::string::npos);
+        BOOST_CHECK_EQUAL(e.derived.openDebtCents, 10000);
+    }
 
     // Corrupt the stored supply in the index itself.
     {
@@ -1532,9 +1549,11 @@ BOOST_AUTO_TEST_CASE(invariant_audit_catches_a_corrupt_total)
     }
     IndexAudit a = live.index->VerifyIndex();
     BOOST_CHECK(!a.ok);
-    BOOST_REQUIRE_EQUAL(a.mismatches.size(), 2u);   // the Totals against the Tokens, and the tip snapshot against the Totals
+    // the Totals against the Tokens, supply above open debt (HALT-2's invariant), and the tip snapshot against the Totals
+    BOOST_REQUIRE_EQUAL(a.mismatches.size(), 3u);
     BOOST_CHECK(a.mismatches[0].find("Totals.supplyCents: stored 10123, records 10000") != std::string::npos);
-    BOOST_CHECK(a.mismatches[1].find("tip snapshot") != std::string::npos);
+    BOOST_CHECK(a.mismatches[1].find("supplyCents 10123 exceeds openDebtCents 10000") != std::string::npos);
+    BOOST_CHECK(a.mismatches[2].find("tip snapshot") != std::string::npos);
     BOOST_CHECK(!live.index->IsHealthy());
     BOOST_CHECK(live.index->UnhealthyReason().find("invariant audit failed") != std::string::npos);
     // Fail closed: the next block is a node failure, never an acceptance.

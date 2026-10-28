@@ -33,11 +33,13 @@
 // an input no node can deliver. The harness keeps the rest of the block arbitrary.
 //
 // Totals are seeded consistently (supply = sum of the tokens, collateral =
-// sum of the ACTIVE vaults), regtest params are fixed at {1, 0, 0, 0} and
-// the block hash is SHA256 of the whole input. Then the four properties
+// sum of the ACTIVE vaults, open debt = sum of the ACTIVE and CLAIMING vaults'
+// mintedCents), regtest params are fixed at {1, 0, 0, 0} and
+// the block hash is SHA256 of the whole input. Then the properties
 // (N34): (i) apply -> undo byte identity, (ii) overlay evaluation equals the
 // base result, (iii) blockInvalid => enforcementOn was computed at H,
-// (iv) supplyCents == sum of the Tokens.
+// (iv) supplyCents == sum of the Tokens, (v) openDebtCents == the ACTIVE and
+// CLAIMING vaults' mintedCents (HALT-2, owner 2026-10-28; sums wrap as u64).
 //
 // YellowbackPayee: u8 nTags (mod 65) x { u8 dh, u64 price, u8 keyIdx, u8 judgementBits (1 = written,
 // 2 = evaluated, 4 = inBand, 8 = penalized) }, u8 rsel (R = START + rsel), u8 selLen + selector bytes,
@@ -128,6 +130,18 @@ inline int64_t SumTokens(const yellowback::StateView& view)
     return sum;
 }
 
+/** The ACTIVE and CLAIMING vaults' mintedCents (property (v)), summed as u64 so a seeded i64 wraps instead of overflowing. */
+inline uint64_t SumOpenDebt(const yellowback::StateView& view)
+{
+    uint64_t sum = 0;
+    view.Iterate("V", [&](const std::string&, const std::string& raw) {
+        yellowback::VaultRecord v;
+        if (yellowback::DeserializeRecord(raw, v) && (v.Status() == yellowback::VaultStatus::ACTIVE || v.Status() == yellowback::VaultStatus::CLAIMING)) sum += (uint64_t)v.mintedCents;
+        return true;
+    });
+    return sum;
+}
+
 /**
  * Seed the view per the grammar and return the height and block. Returns
  * false when the CBlock does not deserialise or repeats a txid (the input
@@ -165,6 +179,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         v.mintHeight = P.startHeight;
         v.pMint = 50000;             // FEE-1': the seeded snapshot price (the grammar's ev_prev), so RED-3' prices the corpus' fee outputs; the grammar is unchanged
         st.Put(keys::Vault(COutPoint(Fill((uint8_t)(i + 1)), 0)), v);
+        if (v.Status() == VaultStatus::ACTIVE || v.Status() == VaultStatus::CLAIMING) totals.openDebtCents = (int64_t)((uint64_t)totals.openDebtCents + (uint64_t)v.mintedCents);
         switch (v.Status()) {
         case VaultStatus::ACTIVE: totals.activeVaults++; totals.collateralZat += v.collateralZat; break;
         case VaultStatus::VOIDED: totals.voidVaults++; break;
@@ -218,8 +233,8 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
  * The YellowbackEvaluate body. Returns 0 (ok), 1 (input discarded: the
  * block did not deserialise or repeats a txid), or a negative code naming the violated
  * property: -1 apply/undo identity, -2 overlay equivalence, -3 an invalid
- * block names its verdict, -4 supply == sum of tokens. An exception is the
- * caller's failure (the target is total).
+ * block names its verdict, -4 supply == sum of tokens, -5 open debt == the ACTIVE
+ * and CLAIMING vaults' mintedCents. An exception is the caller's failure (the target is total).
  */
 inline int RunEvaluate(const std::vector<unsigned char>& data)
 {
@@ -250,6 +265,8 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
     if (ev.blockInvalid && (ev.verdict.empty() || ev.reason.empty())) return -3;
     // (iv), given a consistent seed
     if (!ev.blockInvalid && supplyBefore == tokensBefore && State(base).GetTotals().supplyCents != SumTokens(base)) return -4;   // an invalid block is never applied (U-21)
+    // (v): the seed is always consistent (above)
+    if (!ev.blockInvalid && (uint64_t)State(base).GetTotals().openDebtCents != SumOpenDebt(base)) return -5;
     // (i)
     UndoBlock(base, undo);
     if (!(base == before)) return -1;

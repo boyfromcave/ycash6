@@ -814,9 +814,11 @@
         "blockHash": "0f3a9c1e5b7d2a4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f",
         "collateralZat": 62500000000,
         "globalRatioBps": 49750,
+        "globalRatioDenominator": "openDebt",
         "haltMask": [],
         "height": 331,
         "issuedZat": 1656250000000,
+        "openDebtCents": 250000,
         "pClaim": 2000000,
         "pFast": 2000000,
         "pMid": 2000000,
@@ -965,6 +967,7 @@
             "priceSource": "pMint"
           }
         },
+        "globalRatioDenominator": "openDebt",
         "globalRatioHaltBps": 25000,
         "grace": 24,
         "inTermClaims": true,
@@ -1143,6 +1146,7 @@
       "closedVaults": 2,
       "collateralZat": 62500000000,
       "globalRatioBps": 49750,
+      "globalRatioDenominator": "openDebt",
       "haltMask": [],
       "height": 331,
       "issuedZat": 1656250000000,
@@ -1152,6 +1156,7 @@
         "C"
       ],
       "mintingAllowed": true,
+      "openDebtCents": 250000,
       "pClaim": 2000000,
       "pFast": 2000000,
       "pMid": 2000000,
@@ -1700,6 +1705,7 @@
         "claimedVaults": 0,
         "closedVaults": 2,
         "collateralZat": 62500000000,
+        "openDebtCents": 1500000,
         "supplyCents": 1500000,
         "unbackedCents": 0,
         "voidVaults": 0
@@ -1717,6 +1723,7 @@
         "claimedVaults": 0,
         "closedVaults": 2,
         "collateralZat": 62500000000,
+        "openDebtCents": 1500000,
         "supplyCents": 1500000,
         "unbackedCents": 0,
         "voidVaults": 0

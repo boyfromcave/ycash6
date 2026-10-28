@@ -337,8 +337,19 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
 
 # Rule: MINT-2
         print('expired_transaction_display: an observer mint left unmined past nExpiryHeight')
+        # HALT-2 reads open debt (owner 2026-10-28; upgrade plan section 15.10, in-term IT-6): C and D, minted while
+        # pMint still read about $50, sit near 240 % at $40 against their own $200 of debt, below the regtest 250 % halt. The
+        # supply ratio read about twice that, because A and B were redeemed and 98 + 1 YED were burned outside a
+        # redemption (plain_yec_burn_recorded, under_assigned_raw_transfer): those burns leave supply, never debt, so
+        # C's and D's debt is partly stranded. The halt is the intended reading; the expired mint is class C (500 %,
+        # the recapitalisation floor, IT-5), which passes it -- its class is immaterial to what this step checks.
+        st = nodes[2].yed_getstats()
+        assert_equal((st['openDebtCents'], st['globalRatioDenominator']), (20000, 'openDebt'))
+        assert_greater_than(st['openDebtCents'], st['supplyCents'])
+        assert 'GLOBAL_RATIO' in st['haltMask'], st['haltMask']
+        assert_greater_than(25000, st['globalRatioBps'])
         self.split_network()
-        expired = self.mint(observer, 10000, 48, miner=STOCK)   # the observer sits on the stock half of the split
+        expired = self.mint(observer, 10000, 145, miner=STOCK)  # class C; the observer sits on the stock half of the split
         assert expired['txid'] in observer.getrawmempool()
         self.mine_round_robin(POOLS, REF_WINDOW + 1)
         self.join_network()

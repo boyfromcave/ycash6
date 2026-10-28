@@ -545,10 +545,12 @@ def supply_cap_cents(issued_zat, p_mint, cap_bps):
     return u256(c * cap_bps) // BPS
 
 
-def global_ratio_bps(collateral_zat, p_mint, supply_cents):
-    if p_mint is None or supply_cents <= 0:
+def global_ratio_bps(collateral_zat, p_mint, debt_cents):
+    """HALT-2's ratio: collateral at p_mint against debt_cents, which SNAP passes as Totals.openDebtCents (the
+    mintedCents of every ACTIVE and CLAIMING vault; owner 2026-10-28), not supplyCents."""
+    if p_mint is None or debt_cents <= 0:
         return None
-    return u256(collateral_zat * p_mint) // (COIN * supply_cents)
+    return u256(collateral_zat * p_mint) // (COIN * debt_cents)
 
 
 def is_underwater(collateral_zat, p_claim, minted_cents, threshold_bps):
@@ -1701,7 +1703,7 @@ class TxLogRecord(object):
 
 class Totals(object):
     __slots__ = ('supply_cents', 'collateral_zat', 'active_vaults', 'void_vaults', 'closed_vaults',
-                 'claimed_vaults', 'unbacked_cents')
+                 'claimed_vaults', 'unbacked_cents', 'open_debt_cents')
 
     def __init__(self):
         self.supply_cents = 0
@@ -1711,12 +1713,13 @@ class Totals(object):
         self.closed_vaults = 0
         self.claimed_vaults = 0
         self.unbacked_cents = 0
+        self.open_debt_cents = 0      # HALT-2 (owner 2026-10-28): the mintedCents of every ACTIVE and CLAIMING vault
 
     def as_dict(self):
         return {'supplyCents': self.supply_cents, 'collateralZat': self.collateral_zat,
                 'activeVaults': self.active_vaults, 'voidVaults': self.void_vaults,
                 'closedVaults': self.closed_vaults, 'claimedVaults': self.claimed_vaults,
-                'unbackedCents': self.unbacked_cents}
+                'unbackedCents': self.unbacked_cents, 'openDebtCents': self.open_debt_cents}
 
 
 class AttestorRecord(object):
@@ -1807,7 +1810,7 @@ class Snapshot(object):
     __slots__ = ('block_hash', 'tagged', 'quote', 'p_fast', 'p_mid',
                  'p_slow', 'p_mint', 'p_claim', 'sigma_mult_bps', 'issued_zat', 'supply_cents',
                  'collateral_zat', 'global_ratio_bps', 'halt_mask', 'virtual',
-                 'attest', 'seated', 'pinned_keys', 'pinned_seqs')
+                 'attest', 'seated', 'pinned_keys', 'pinned_seqs', 'open_debt_cents')
 
     def __init__(self):
         self.block_hash = '00' * 32
@@ -1831,6 +1834,7 @@ class Snapshot(object):
         self.seated = []          # sorted seq
         self.pinned_keys = []     # sorted 20-byte key hashes (PIN-1)
         self.pinned_seqs = []     # sorted seq (PIN-2)
+        self.open_debt_cents = 0  # Totals.openDebtCents at H: globalRatioBps's denominator (HALT-2, owner 2026-10-28)
 
     @classmethod
     def virtual_snapshot(cls):
@@ -1848,7 +1852,8 @@ class Snapshot(object):
                 'pFast': self.p_fast, 'pMid': self.p_mid, 'pSlow': self.p_slow,
                 'pMint': self.p_mint, 'pClaim': self.p_claim, 'sigmaMultBps': self.sigma_mult_bps,
                 'issuedZat': self.issued_zat, 'supplyCents': self.supply_cents,
-                'collateralZat': self.collateral_zat, 'globalRatioBps': self.global_ratio_bps,
+                'collateralZat': self.collateral_zat, 'openDebtCents': self.open_debt_cents,
+                'globalRatioBps': self.global_ratio_bps, 'globalRatioDenominator': 'openDebt',
                 'haltMask': self.halt_names(), 'xMint': self.p_mint, 'xClaim': self.p_claim,
                 'attest': self.attest.as_dict(), 'seated': list(self.seated),
                 'pinnedKeys': [k.hex() for k in self.pinned_keys], 'pinnedSeqs': list(self.pinned_seqs)}
@@ -1948,7 +1953,8 @@ def _ser_snapshot(s):
             + _i64(s.supply_cents) + _i64(s.collateral_zat)
             + _i64(0 if s.global_ratio_bps is None else s.global_ratio_bps) + _u32(s.halt_mask)
             + _ser_attest(s.attest) + _u16_vec(s.seated)
-            + _compact(len(s.pinned_keys)) + b''.join(bytes(k) for k in s.pinned_keys) + _u16_vec(s.pinned_seqs))
+            + _compact(len(s.pinned_keys)) + b''.join(bytes(k) for k in s.pinned_keys) + _u16_vec(s.pinned_seqs)
+            + _i64(s.open_debt_cents))      # appended last (SCHEMA_VERSION 15)
 
 
 def _ser_attestor(a):
@@ -1987,7 +1993,8 @@ def _ser_token(t):
 
 def _ser_totals(t):
     return (_i64(t.supply_cents) + _i64(t.collateral_zat) + _u32(t.active_vaults) + _u32(t.void_vaults)
-            + _u32(t.closed_vaults) + _u32(t.claimed_vaults) + _i64(t.unbacked_cents))
+            + _u32(t.closed_vaults) + _u32(t.claimed_vaults) + _i64(t.unbacked_cents)
+            + _i64(t.open_debt_cents))      # appended last (SCHEMA_VERSION 15)
 
 
 def _outpoint_sort_key(op):
@@ -2000,7 +2007,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 14       # VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3); 13 was IntentRecord.refundScript (CAN-1, audit 03/H-1); 12 was liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
+    SCHEMA_VERSION = 15       # Totals.openDebtCents and Snapshot.openDebtCents (HALT-2 reads open debt, owner 2026-10-28); 14 was VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3); 13 was IntentRecord.refundScript (CAN-1, audit 03/H-1); 12 was liveness by attestation and the join refusals (seats re-reviews); 11 was seat ranking and eviction (owner 2026-10-11) and the D-Q-30 bond minimum (view.h); 10 was the D-Q-28 bond minimum (never merged); 9 was VaultRecord.pMint (FEE-1', D-Q-23); 8 was in-term claims: VaultRecord.appHeight (IT-1) (view.h)
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -2072,7 +2079,7 @@ class YellowbackModel(object):
         cap_reached = cap is not None and self.totals.supply_cents + self.params.min_mint > cap
         d.update({'issuedZat': s.issued_zat, 'pFast': s.p_fast, 'pMid': s.p_mid, 'pSlow': s.p_slow,
                   'pMint': s.p_mint, 'pClaim': s.p_claim, 'sigmaMultBps': s.sigma_mult_bps,
-                  'globalRatioBps': s.global_ratio_bps,
+                  'globalRatioBps': s.global_ratio_bps, 'globalRatioDenominator': 'openDebt',
                   'supplyCapCents': cap,
                   'haltMask': s.halt_names(), 'mintingAllowed': s.halt_mask == 0 and not cap_reached})
         return d
@@ -2401,11 +2408,25 @@ class YellowbackModel(object):
 
         # SNAP
         self._snap(height, block_hash, subsidy_zat, tag)
+        bad = self.open_debt_violation()
+        if bad is not None:
+            raise ModelMismatch('open-debt invariant at height %d: %s' % (height, bad))
         self.tip_height = height
         self.tip_hash = block_hash
         verdict = BlockVerdict(height, block_hash, False, '')
         self.blocks[height] = verdict
         return verdict
+
+    def open_debt_violation(self):
+        """The open-debt invariant (HALT-2, owner 2026-10-28; C++ OpenDebtInvariantViolation): openDebtCents is the
+        mintedCents of the ACTIVE and CLAIMING vaults, and supplyCents <= openDebtCents.  None when both hold."""
+        t = self.totals
+        open_debt = sum(v.minted_cents for v in self.vaults.values() if v.status in (V_ACTIVE, V_CLAIMING))
+        if t.open_debt_cents != open_debt:
+            return "openDebtCents %d is not the ACTIVE and CLAIMING vaults' mintedCents %d" % (t.open_debt_cents, open_debt)
+        if t.supply_cents > t.open_debt_cents:
+            return 'supplyCents %d exceeds openDebtCents %d' % (t.supply_cents, t.open_debt_cents)
+        return None
 
     def _snap(self, height, block_hash, subsidy_zat, tag):
         p = self.params
@@ -2494,12 +2515,14 @@ class YellowbackModel(object):
         s.issued_zat = prev.issued_zat + subsidy_zat
         s.supply_cents = self.totals.supply_cents
         s.collateral_zat = self.totals.collateral_zat
-        s.global_ratio_bps = global_ratio_bps(s.collateral_zat, s.p_mint, s.supply_cents)
+        s.open_debt_cents = self.totals.open_debt_cents
+        # HALT-2 (owner 2026-10-28; cf. DigiByte v9.26.6 src/digidollar/health.cpp:109-114): collateral against open debt
+        s.global_ratio_bps = global_ratio_bps(s.collateral_zat, s.p_mint, s.open_debt_cents)
         # HALT-1..3 (HALT-4, ACT-4 and ACT-6 left with the vault upgrade)
         mask = 0
         if s.p_mint is None:
             mask |= HALT_NO_PRICE
-        if s.p_mint is not None and s.supply_cents > 0 and s.global_ratio_bps < p.global_ratio_halt_bps:
+        if s.p_mint is not None and s.open_debt_cents > 0 and s.global_ratio_bps < p.global_ratio_halt_bps:
             mask |= HALT_GLOBAL_RATIO
         if None not in (s.p_fast, s.p_mid, s.p_slow):
             if (s.p_fast * BPS < (BPS - p.divergence_bps) * s.p_mid
@@ -2714,6 +2737,7 @@ class YellowbackModel(object):
         if not cancel:
             v.status = V_CLAIMED
             self.totals.collateral_zat -= v.collateral_zat      # IT-6: the collateral leaves the system ratio at release
+            self.totals.open_debt_cents -= v.minted_cents       # HALT-2 (owner 2026-10-28): and its debt with it
             self.totals.claimed_vaults += 1
             rec.closed_vaults.append(ir.vault)
             return None
@@ -3180,6 +3204,7 @@ class YellowbackModel(object):
             self.tokens[(tx.txid, 1)] = Token(pl.cents, tx.vout[1].value, tx.vout[1].script, height)
             self.totals.supply_cents += pl.cents
             self.totals.collateral_zat += vout0.value
+            self.totals.open_debt_cents += v.minted_cents     # HALT-2 (owner 2026-10-28): open until its redeem or release
             self.totals.active_vaults += 1
             rec.yed_out = pl.cents
             rec.assigned = [(1, pl.cents)]
@@ -3406,6 +3431,9 @@ class YellowbackModel(object):
         # released (the debt left supply with this spend's burn); the owner's redeem removes it at once
         if path == 'owner':
             self.totals.collateral_zat -= v.collateral_zat
+            # HALT-2 (owner 2026-10-28): the owner's redeem closes the debt; a claim leaves it open with the CLAIMING
+            # collateral until the release, and a cancel needs no change
+            self.totals.open_debt_cents -= v.minted_cents
         self.totals.active_vaults -= 1
         if path == 'owner':
             self.totals.closed_vaults += 1
@@ -3714,7 +3742,9 @@ def compare_history(model, node):
         _check(int(row['issuedZat']) == s.issued_zat, 'issuedZat', h, 'model=%r rpc=%r' % (s.issued_zat, row['issuedZat']))
         _check(int(row['supplyCents']) == s.supply_cents, 'supplyCents', h)
         _check(int(row['collateralZat']) == s.collateral_zat, 'collateralZat', h)
+        _check(int(row['openDebtCents']) == s.open_debt_cents, 'openDebtCents', h, 'model=%r rpc=%r' % (s.open_debt_cents, row['openDebtCents']))
         _check(_price_eq(s.global_ratio_bps, row.get('globalRatioBps')), 'globalRatioBps', h)
+        _check(row.get('globalRatioDenominator') == 'openDebt', 'globalRatioDenominator', h)
         rpc_mask = row.get('haltMask', [])
         if isinstance(rpc_mask, int):
             _check(rpc_mask == s.halt_mask, 'haltMask', h)
@@ -3865,10 +3895,11 @@ def compare_stats(model, node):
     st = node.yed_getstats()
     m = model.stats()
     for name in ('height', 'supplyCents', 'collateralZat', 'activeVaults', 'voidVaults', 'closedVaults',
-                 'claimedVaults', 'unbackedCents', 'issuedZat', 'sigmaMultBps'):
+                 'claimedVaults', 'unbackedCents', 'openDebtCents', 'issuedZat', 'sigmaMultBps'):
         _check(int(st[name]) == m[name], 'yed_getstats.%s' % name, extra='model=%r rpc=%r' % (m[name], st[name]))
     for name in ('pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'):
         _check(_price_eq(m[name], st.get(name)), 'yed_getstats.%s' % name, extra='model=%r rpc=%r' % (m[name], st.get(name)))
+    _check(st.get('globalRatioDenominator') == 'openDebt', 'yed_getstats.globalRatioDenominator')
     _check(set(str(x).upper() for x in st.get('haltMask', [])) == set(m['haltMask']), 'yed_getstats.haltMask')
     _check(bool(st.get('mintingAllowed')) == m['mintingAllowed'], 'yed_getstats.mintingAllowed')
 

@@ -26,6 +26,7 @@ from decimal import Decimal
 from test_framework.util import assert_equal, assert_greater_than
 from test_framework.yellowback_util import (
     BPS,
+    CLAIM_DELAY,
     COIN,
     MAX_MINT,
     PAYEE_WINDOW,
@@ -246,9 +247,40 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal((claimed['feeZat'], claimed['earlyRedeemFeeZat'], claimed['attestFeeZat']), (vault_fee_zat(vbig), 0, 0))
         self.sync_all()
         self.mine(POOLS[0])
+        claim_height = user.getblockcount()
         c = user.yed_getvault(mints[MAX_MINT]['txid'])
         assert_equal((c['status'], c['feePaidZat'], c['pMint']), ('CLAIMING', vault_fee_zat(vbig), p_mint))
         self.checkpoint('claim')
+
+# Rule: HALT-2 IT-6
+        print('HALT-2 reads open debt (owner 2026-10-28): the CLAIMING $100,000 and the $100 vault, both at 90 % at $750, halt the cheap classes, and under any halt bit the fee policy publishes no price; release the claim and recapitalise with one class C vault so the dollar cap runs at a priced tip')
+        # Every vault left was minted at $2,500 at 300 %, so at $750 the honest system ratio is 90 %: HALT-2 is right to
+        # fire. Before the amendment the claim's burn took the $100,000 out of the denominator (supply) while IT-6 kept
+        # its collateral in the numerator, so the ratio read far above 250 % and the fee price stayed published. Under
+        # any halt bit, HALT_GLOBAL_RATIO included, PublishFeePrice publishes no price and the wallets use -pqfeerate
+        # (fees spec section 5.1, review M-1, docs/plans/yellowback-quantum-fees-spec.md), which is what the dollar-cap
+        # step below would otherwise read (100 zat/kB).
+        st = user.yed_getstats()
+        assert_equal((st['supplyCents'] <= st['openDebtCents'], st['openDebtCents'], st['globalRatioDenominator']), (True, MAX_MINT + 10000, 'openDebt'))
+        assert 'GLOBAL_RATIO' in st['haltMask'], st['haltMask']
+        assert_equal(user.yed_getinfo()['params']['fees']['network']['priceSource'], 'fallback')
+        intent = '%s:0' % claimed['txid']
+        while user.getblockcount() + 1 < claim_height + CLAIM_DELAY:
+            self.mine(POOLS[1])
+        self.sync_all(blocks_only=True)
+        claimant.vault_release(intent)                              # the claimed debt and its collateral leave together (IT-6)
+        self.sync_all()
+        self.mine(POOLS[2])
+        assert_equal(user.yed_getvault(mints[MAX_MINT]['txid'])['status'], 'CLAIMED')
+        assert_equal(user.yed_getstats()['openDebtCents'], 10000)  # the $100 vault, still 90 %: still halted
+        recap = self.mint(user, 10000, TERMS['C'])                   # class C (500 %) passes the global-ratio halt alone (IT-5)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(recap['txid'])['status'], 'ACTIVE')
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        st = user.yed_getstats()
+        assert_equal((st['openDebtCents'], st['haltMask']), (20000, []))   # (90 % + 500 %) / 2 = 295 % >= 250 %
+        self.checkpoint('released and recapitalised')
 
         print('the dollar cap: -yellowbackfeeusdperkb=100 -maxtxfee=0.02 -yellowbackmaxtxfeeusd=20 -> max(0.02 YEC, $20 at $750) accepted by the wallet\'s own mempool')
         # ($2 at $750 is 266,667 zat, below -maxtxfee: the default dollar cap binds only below $100/YEC, so the cap is raised to $20 here)
@@ -345,7 +377,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.checkpoint('plain PQ fee cap')
 
         print('the price feed stops: the network fee falls back to -pqfeerate; FEE-0 skips the protocol fee (and the early fee)')
-        m = self.mint(user, 10000, TERMS['C'])          # class C: the only class that mints under HALT-2 (the claimed vault dragged the global ratio down)
+        m = self.mint(user, 10000, TERMS['C'])          # class C, as the recapitalising vault above (no halt is set here since the release)
         self.sync_all()
         self.mine(POOLS[0])
         vlast = user.yed_getvault(m['txid'])

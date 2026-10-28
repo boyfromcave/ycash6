@@ -324,7 +324,9 @@ IT-2); `params.inTermClaims` is `true` on a node with that rule (a client tells 
 `params.earlyRedeemFeeBps` is the per-class early-redeem fee (IT-9′: 500 / 250 / 100, of the
 debt at the vault's `pMint`, on an owner redeem confirming below `lockHeight`), repeated on each `classes` row;
 `params.sigmaMultMaxBps` is the volatility multiplier's cap (`10000` with `sigmaRefBps` `0`: the
-multiplier is pinned at 1, so a class's required ratio is its `baseRatioBps`, IT-4). `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
+multiplier is pinned at 1, so a class's required ratio is its `baseRatioBps`, IT-4).
+`params.globalRatioDenominator` is `"openDebt"`: HALT-2 compares the ACTIVE and CLAIMING vaults' collateral with
+their open debt (`yed_getstats.openDebtCents`), not with `supplyCents` (owner decision 2026-10-28). `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
 (stage (i)–(iii) of §4.6; `0` when the node runs without a wallet) and `protectedByIndex` is
 `true` whenever that layer is attached: the GUI treats a mismatch between `lockedOutputs` and the
 length of `yed_listunspent` as the trigger for `yed_lockcoins`.
@@ -438,6 +440,7 @@ Result of `yed_getinfo`:
     ],
     "earlyRedeemFeeBps": [ 500, 250, 100 ],
     "globalRatioHaltBps": 25000,
+    "globalRatioDenominator": "openDebt",
     "recapRatioBps": 50000,
     "claimThresholdBps": 12500,
     "sigmaMultMaxBps": 10000,
@@ -554,8 +557,10 @@ SupplyVerification): the `Totals` record is re-derived from the records it summa
 over `Tokens` and `Vaults` -- `supplyCents` is the sum of every unspent YED token's cents (a claim's burn left
 supply with the claim and a cancel's refund came back as a token, so a `CLAIMING` vault adds nothing),
 `collateralZat` the collateral of the `ACTIVE` and `CLAIMING` vaults (IT-6), `activeVaults`, `voidVaults`,
-`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0 -- and the tip
-snapshot's `supplyCents` / `collateralZat` must equal the `Totals` they were copied from. Every signer set's
+`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0, `openDebtCents` the
+`mintedCents` of the `ACTIVE` and `CLAIMING` vaults (HALT-2's denominator, 2026-10-28), with `supplyCents <=
+openDebtCents` checked too -- and the tip snapshot's `supplyCents` / `collateralZat` / `openDebtCents` must equal
+the `Totals` they were copied from. Every signer set's
 `lockedValue` in the vault set-state database is re-derived the same way, as the sum of its unspent V outputs
 (`sets`). `stored` is the `Totals` record, `records` the re-derived one; `mismatches` has one line per
 disagreement and is empty when `ok`. The command writes nothing, but a mismatch marks the index unhealthy, with
@@ -574,8 +579,8 @@ Result of `yed_verifyindex`:
   "ok": true,
   "tokens": 4,
   "vaults": 5,
-  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
-  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0, "openDebtCents": 1500000 },
+  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0, "openDebtCents": 1500000 },
   "sets": [ { "setid": "4c1d9b2e7a6f5e8d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d", "lockedValueZat": 62500000000, "recordsZat": 62500000000 } ],
   "mismatches": [],
   "healthy": true,
@@ -586,13 +591,17 @@ Result of `yed_verifyindex`:
 ### `yed_getstats`
 
 Arguments: none. `Totals` plus the tip snapshot. `supplyCents` is the circulating supply -- the YED
-that can still be presented, the system's liability -- and `globalRatioBps` (HALT-2) reads it. It is
-not the sum of the open vaults' `mintedCents`: YED burned outside a redemption (XFER-2's remainder, a
-non-Yellowback spend) leaves supply but not the debt, and a claim's burn leaves supply while its
-vault is CLAIMING; an attestor-set cancel puts the claim's whole burn back (CAN-1, audit 03/H-1,
-03/M-1), so a cancel no longer leaves a re-created vault's debt outside `supplyCents`. `pClaim` is
+that can still be presented -- and MINT-6's cap reads it. **`openDebtCents`** (added 2026-10-28,
+additive) is the sum of the `mintedCents` of every ACTIVE and CLAIMING vault, and `globalRatioBps`
+(HALT-2) divides by it: `collateralZat` at `pMint` against the open debt, the same vaults the
+collateral counts (IT-6). **`globalRatioDenominator`** names that denominator and is always
+`"openDebt"` (owner decision 2026-10-28; DigiByte v9.26.6 made the same move, `selected_health_denominator`).
+The two differ: YED burned outside a redemption (an over-burn, XFER-2's remainder, a non-Yellowback
+spend) leaves supply but not the debt, and a claim's burn leaves supply while its vault is CLAIMING
+(an attestor-set cancel puts the claim's whole burn back, CAN-1); a release closes the debt. So
+`supplyCents <= openDebtCents` always, and the gap is debt no YED is left to burn. `pClaim` is
 `null` when undefined (fewer than the minimum fill on the mid or slow window); `globalRatioBps` is
-`null` when there is no supply or no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
+`null` when there is no open debt or no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
 `haltMask` is the decoded tip `haltMask` as an array of names (empty when minting is open);
 `mintingAllowed` is `activation == active && haltMask == [] && !supplyCapReached` and, when
 `yed_getinfo.mintRequiresArmed`, the tip ARMED (H-1) — every enabled class can mint.
@@ -617,6 +626,7 @@ Result of `yed_getstats`:
   "closedVaults": 2,
   "claimedVaults": 0,
   "unbackedCents": 0,
+  "openDebtCents": 250000,
   "issuedZat": 1656250000000,
   "pFast": 2000000,
   "pMid": 2000000,
@@ -625,6 +635,7 @@ Result of `yed_getstats`:
   "pClaim": 2000000,
   "sigmaMultBps": 10000,
   "globalRatioBps": 49750,
+  "globalRatioDenominator": "openDebt",
   "supplyCapCents": null,
   "haltMask": [],
   "mintingAllowed": true,
@@ -1536,7 +1547,9 @@ else `RPC_INVALID_PARAMETER`). The `Snapshots` records (§3.6) for `from ≤ h �
 `haltMask` decoded to names, undefined prices and ratio `null` (`signalCount` and `activation`
 left with ACT-1..7, upgrade plan §6).
 `tagged` is whether the block carried a valid tag, `quote` whether that tag carried a quote
-(`priceMicroUsd ≠ 0`). `yellowback_model.py` compares every field of every row.
+(`priceMicroUsd ≠ 0`). `openDebtCents` is `Snapshots[h].openDebtCents` (SCHEMA_VERSION 15), the
+denominator of that row's `globalRatioBps`; `globalRatioDenominator` is always `"openDebt"` (see
+`yed_getstats`). `yellowback_model.py` compares every field of every row.
 
 Result of `yed_gethistory`:
 
@@ -1556,7 +1569,9 @@ Result of `yed_gethistory`:
     "issuedZat": 1656250000000,
     "supplyCents": 250000,
     "collateralZat": 62500000000,
+    "openDebtCents": 250000,
     "globalRatioBps": 49750,
+    "globalRatioDenominator": "openDebt",
     "haltMask": []
   }
 ]
