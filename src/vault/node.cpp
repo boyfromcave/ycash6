@@ -22,6 +22,7 @@
 #include "vault/checker.h"
 #include "vault/template.h"
 
+#include <map>
 #include <set>
 
 namespace vault {
@@ -356,8 +357,9 @@ void TemplateRun::Commit()
     trial.reset();
 }
 
-bool Reconcile(const CChainParams& chainparams, std::string& err)
+bool Reconcile(const CChainParams& chainparams, std::string& err, const std::function<bool()>& interrupt, bool* interrupted)
 {
+    if (interrupted) *interrupted = false;
     AssertLockHeld(cs_main);
     if (!g_vaultdb) return true;
     const Consensus::Params& params = chainparams.GetConsensus();
@@ -411,6 +413,18 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
     const int tip = chainActive.Height();
     if (start <= tip) LogPrintf("vault: replaying blocks %d..%d into the set-state database\n", start, tip);
     for (int64_t h = start; h <= tip; h++) {
+        // Startup progress and cancellation (cf. DigiByte v9.26.7 b544af7fa3). Fail closed: an interrupted replay is
+        // never reported complete; each replayed block was committed with its tip marker, so the next start resumes.
+        if (interrupt && interrupt()) {
+            g_vaultdb->Flush();
+            if (interrupted) *interrupted = true;
+            err = strprintf("vault: replay interrupted at height %d of %d (shutdown requested); a restart resumes from height %d", h, tip, h);
+            LogPrintf("%s\n", err);
+            return false;
+        }
+        if (h > start && (h - start) % RECONCILE_PROGRESS_INTERVAL == 0) {
+            LogPrintf("vault: replaying: height %d of %d (%d%%)\n", h, tip, (int)((h - start) * 100 / std::max<int64_t>(1, tip - start + 1)));
+        }
         CBlockIndex* pindex = chainActive[h];
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, params)) {
@@ -448,6 +462,44 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
     }
     g_vaultdb->Flush();
     return true;
+}
+
+std::vector<std::string> AuditLockedValue(const KVReader& kv, std::vector<SetValueAudit>* sets)
+{
+    std::vector<std::string> mismatches;
+    std::map<SetId, CAmount> derived;
+    for (const auto& r : ListTemplateOuts(kv)) {
+        if (r.second.kind != 0) continue;   // an intent's value left its set's locked value at the unlock
+        VaultParams v;
+        if (MatchVault(r.second.scriptPubKey, v) != Shape::MATCH) {
+            mismatches.push_back(strprintf("vault %s:%u: its indexed scriptPubKey is not a V", r.first.hash.GetHex(), r.first.n));
+            continue;
+        }
+        derived[v.setId] += r.second.value;
+    }
+    for (const SetId& id : ListSets(kv)) {
+        std::optional<SetRecord> s = GetSet(kv, id);
+        if (!s) {
+            mismatches.push_back(strprintf("set %s: its record does not deserialize", id.GetHex()));
+            continue;
+        }
+        SetValueAudit a;
+        a.setId = id;
+        a.stored = s->lockedValue;
+        auto it = derived.find(id);
+        if (it != derived.end()) {
+            a.derived = it->second;
+            derived.erase(it);
+        }
+        if (a.stored != a.derived) {
+            mismatches.push_back(strprintf("set %s: lockedValue stored %d, unspent V outputs %d", id.GetHex(), a.stored, a.derived));
+        }
+        if (sets) sets->push_back(a);
+    }
+    for (const auto& d : derived) {
+        mismatches.push_back(strprintf("set %s: no set record, unspent V outputs %d", d.first.GetHex(), d.second));
+    }
+    return mismatches;
 }
 
 uint256 StateHash(const KVReader& kv)

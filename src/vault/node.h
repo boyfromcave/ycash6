@@ -10,9 +10,11 @@
 #include "vault/db.h"
 #include "vault/state.h"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 class CBlock;
 class CBlockIndex;
@@ -141,10 +143,34 @@ private:
     std::optional<VaultState> trial;
 };
 
+/** Reconcile logs its replay progress every this many blocks (cf. DigiByte v9.26.7 b544af7fa3). */
+static const int RECONCILE_PROGRESS_INTERVAL = 1000;
+
 /** Start-up reconciliation (U-18): disconnect the database back to chainActive using its own
  *  undo, then replay chainActive's blocks from disk up to the tip. False with `err` set when
- *  the database cannot be brought to the tip (a missing block or undo file). */
-bool Reconcile(const CChainParams& chainparams, std::string& err);
+ *  the database cannot be brought to the tip (a missing block or undo file). Logs progress every
+ *  RECONCILE_PROGRESS_INTERVAL blocks and polls `interrupt` (init passes ShutdownRequested) before
+ *  each block: an interrupted replay returns false with `*interrupted` set and is never reported
+ *  complete; every block replayed so far was committed with its tip marker, so the next start
+ *  resumes from there. */
+bool Reconcile(const CChainParams& chainparams, std::string& err,
+               const std::function<bool()>& interrupt = std::function<bool()>(), bool* interrupted = nullptr);
+
+/** One signer set's locked value, stored and re-derived (AuditLockedValue). */
+struct SetValueAudit
+{
+    SetId setId;
+    CAmount stored = 0;
+    CAmount derived = 0;
+};
+
+/**
+ * The invariant audit of the set state (cf. DigiByte v9.26.7 19c8b1c272, the Yellowback index's
+ * AuditIndexRecords): every set's lockedValue re-derived as the sum of the values of the unspent V
+ * outputs ('v' records of kind V) whose setId is that set, in one pass, read only. Returns one line
+ * per mismatch (empty = consistent); `sets`, when given, receives every set's pair.
+ */
+std::vector<std::string> AuditLockedValue(const KVReader& kv, std::vector<SetValueAudit>* sets = nullptr);
 
 /** A digest of every state key ('s', 'm', 'b', 'v') in byte order: equal on two nodes iff
  *  their set state is equal (vault_getinfo "statehash"). */

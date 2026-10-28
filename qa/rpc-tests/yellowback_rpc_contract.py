@@ -79,8 +79,8 @@ CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 
 # Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
     'yed_buildcancel': {'warnings'},                      # the dropped co-signatures (cancel-limit round 2)
-    'yed_getvault': {'intents', 'refundHolder', 'heldResiduals'},   # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1); CAN-3's held residuals
-    'yed_listpositions': {'intents', 'heldResiduals'},
+    'yed_getvault': {'intents', 'refundHolder', 'heldResiduals', 'spendTxid'},   # while CLAIMING (U-23; CAN-1's refund holder, 03/H-1); CAN-3's held residuals; spendTxid while spendPending
+    'yed_listpositions': {'intents', 'heldResiduals', 'spendTxid'},
     'yed_listvaults': {'intents', 'refundHolder', 'heldResiduals'},
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
@@ -101,9 +101,12 @@ NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'par
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
             'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
             'yed_listclaimable': {'underwaterAt', 'pClaim'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
-            'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
+            'yed_listtransactions': {'payee', 'time'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
             'yed_estimatecollateral': {'requiredZat', 'requiredZatFloored', 'pMint'},
             'yed_estimateredeem': {'payee', 'pMint'},
+            # the DigiByte v9.26.7 wallet follow-ups: no fee to price when unworkable; no block for an expired or
+            # unconfirmed row; an address never used
+            'yed_estimatesend': {'networkFeeZat'}, 'yed_listaddresses': {'lastUsed'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
             'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'}}
@@ -227,7 +230,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('no-payout-address', user.yed_setquote, 50_000_000, 1)
         r = user.yed_getinfo()['height'] - REF_LAG
         c.check('yed_getfeepayee', user.yed_getfeepayee(r))
-        c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
+        est = c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
+        assert_equal((est['mintBlocked'], est['mintBlockedReason']), (False, ''))       # MINTPOL-1 open (N5)
         fee = c.check('yed_estimatefee', user.yed_estimatefee(10000))
         assert_equal((fee['feeCents'], fee['feeZat']), (100, protocol_fee_zat(10000, fee['pMint'])))      # FEE-1': the $1 floor
         assert_equal(user.yed_estimatefee(1_000_000, 18_000)['feeZat'], 305_555_555_556)                   # $55 at $0.018
@@ -253,6 +257,17 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         bad = c.check('yed_validateaddress', user.yed_validateaddress(user.getnewaddress()))
         assert_equal((bad['isvalid'], bad['reason']), (False, 'not-a-yellowback-address'))
         c.check('yed_getbalance', user.yed_getbalance())
+        # N8 (cf. DigiByte v9.26.7 5539554c): a label in the address book, the unused address listed only with includeEmpty
+        labelled = c.check('yed_getnewaddress', user.yed_getnewaddress('', 'savings'))
+        assert_rpc_error('takes no label', user.yed_getnewaddress, 'pqowner', 'x')
+        rows = {r['address']: r for r in c.check('yed_listaddresses', user.yed_listaddresses(True))}
+        assert_equal((rows[labelled]['label'], rows[labelled]['confirmedCents'], rows[labelled]['txCount'], rows[labelled]['lastUsed']),
+                     ('savings', 0, 0, None))
+        assert addr in rows
+        assert_equal(c.check('yed_listaddresses', user.yed_listaddresses()), [])
+        # N9: the stock validateaddress knows no YED address; yed_validateaddress is the call
+        assert_equal(user.validateaddress(labelled)['isvalid'], False)
+        assert_equal(user.yed_validateaddress(labelled)['isvalid'], True)
         assert_equal(c.check('yed_listunspent', user.yed_listunspent()), [])
         assert_equal(c.check('yed_lockcoins', user.yed_lockcoins()), [])
         assert_equal(c.check('yed_listpositions', user.yed_listpositions()), [])
@@ -284,6 +299,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         vault_a = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
         assert_equal(vault_a['status'], 'ACTIVE')
         assert 'intents' not in vault_a
+        assert_equal(vault_a['spendPending'], False)                                    # N1: no spend in the mempool
+        assert 'spendTxid' not in vault_a
         assert_equal(vault_a['scriptPubKey'], raw['vout'][0]['scriptPubKey']['hex'])
         assert_rpc_error('vault-not-found', user.yed_getvault, void_txid)
         c.check('yed_listvaults', user.yed_listvaults())
@@ -313,6 +330,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         positions = c.check('yed_listpositions', user.yed_listpositions())
         assert_equal(len(positions), 3)
         assert_equal(len(c.check('yed_listpositions', user.yed_listpositions('VOID'))), 0)
+        # N8: every address that holds YED, with its history
+        used = c.check('yed_listaddresses', user.yed_listaddresses())
+        assert_equal(sum(r['confirmedCents'] for r in used), user.yed_getbalance()['confirmedCents'])
+        assert all(r['txCount'] >= 1 and r['lastUsed'] is not None for r in used), used
 
         print('yed_send, yed_sendmany, their refusals')
         assert_rpc_error('not-a-yellowback-address', user.yed_send, user.getnewaddress(), 100)
@@ -335,12 +356,14 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         est = c.check('yed_estimatesend', user.yed_estimatesend(10000))
         assert_equal(est['workable'], True)
         assert_equal(est['alternatives'], None)
+        assert_greater_than(est['networkFeeZat'], 0)                                    # N6: the YEC fee, YED cannot pay it
         assert_greater_than(len(est['inputs']), 0)
         band = c.check('yed_estimatesend', user.yed_estimatesend(band_amount))
         assert_equal(band['workable'], False)
         assert_equal(band['error'], 'change-floor')
         assert_equal(band['stage'], 'none')
         assert band['alternatives'] is not None
+        assert_equal(band['networkFeeZat'], None)
         c.check('yed_estimatesend', user.yed_estimatesend({claimant.yed_getnewaddress(): 10000}))
         # audit C-10: each amount is range-checked before the sum (two amounts whose sum would wrap int64)
         assert_rpc_error('bad-xfer-amount', user.yed_estimatesend,
@@ -361,6 +384,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(info_h10['lockedOutputs'], len(user.yed_listunspent()))
 
         sent = c.check('yed_send', user.yed_send(claimant.yed_getnewaddress(), 10000))
+        # N2 (cf. DigiByte v9.26.7 75d82a6e): the send's inputs are confirmed but no longer spendable
+        bal = c.check('yed_getbalance', user.yed_getbalance())
+        assert_greater_than(bal['confirmedCents'], bal['spendableCents'])
+        assert_equal(user.yed_estimatesend(100)['spendableCents'], bal['spendableCents'])
         self.sync_all()
         self.mine(POOLS[2])
         many = c.check('yed_sendmany', user.yed_sendmany({claimant.yed_getnewaddress(): 100, user.yed_getnewaddress(): 200}))
@@ -370,6 +397,13 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         rows = c.check('yed_listtransactions', user.yed_listtransactions())
         assert_equal({x['txid'] for x in rows} >= {mint_a['txid'], sent['txid'], many['txid']}, True)
         c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
+        # N7 (plan A6): a mint row names its carrier and itself; a completed carrier has no row of its own
+        row_a = [x for x in rows if x['txid'] == mint_a['txid']][0]
+        assert_equal((row_a['carrierTxid'], row_a['mainTxid'], row_a['carrierOutcome']), (mint_a['carrierTxid'], mint_a['txid'], 'completed'))
+        assert_equal(row_a['time'], user.getblock(user.getblockhash(row_a['height']))['time'])
+        assert_equal([x for x in rows if x['type'] == 'carrier'], [])
+        row_sent = [x for x in rows if x['txid'] == sent['txid']][0]
+        assert_equal((row_sent['carrierTxid'], row_sent['mainTxid'], row_sent['carrierOutcome']), ('', '', ''))
         assert_rpc_error('count and skip must be', user.yed_listtransactions, 1, -1)   # C-6, as yed_listtokens
         assert_rpc_error('count and skip must be', user.yed_listtransactions, -1)
 
@@ -410,6 +444,16 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('vault-not-found', user.yed_estimateredeem, '33' * 32)
         redeemed = c.check('yed_redeem', user.yed_redeem(mint_b['txid']))
         assert_equal(redeemed['burnedCents'], 10000)
+        # N1 (cf. DigiByte v9.26.7 00136af6): the redemption is pending; a second one is refused before any selection
+        pending = c.check('yed_getvault', user.yed_getvault(mint_b['txid']))
+        assert_equal((pending['status'], pending['spendPending'], pending['spendTxid']), ('ACTIVE', True, redeemed['txid']))
+        pos_pending = [x for x in c.check('yed_listpositions', user.yed_listpositions()) if x['txid'] == mint_b['txid']][0]
+        assert_equal((pos_pending['spendPending'], pos_pending['spendTxid'], pos_pending['canRedeem'], pos_pending['canClaim']),
+                     (True, redeemed['txid'], False, False))
+        assert_rpc_error('vault-spend-pending', user.yed_redeem, mint_b['txid'])
+        again = c.check('yed_estimateredeem', user.yed_estimateredeem(mint_b['txid']))
+        assert_equal(again['canRedeem'], False)
+        assert again['error'].startswith('vault-spend-pending'), again
         assert_equal((redeemed['earlyRedeemFeeZat'], redeemed['feeZat'], redeemed['payee']), (early_fee, quote['feeZat'], quote['payee']))
         assert_greater_than(redeemed['feeZat'], early_fee)                                 # FEE-1 on top of it
         self.sync_all()
@@ -478,6 +522,19 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
 
         seqs = self.v3_node_context(c, mint_a['txid'])
         self.v3_wallet_context(c, seqs)
+
+        print('the invariant audit after the whole flow: Totals and every set lockedValue match their records (cf. DigiByte SupplyVerification)')
+        for i in (0, 5):
+            audit = c.check('yed_verifyindex', self.nodes[i].yed_verifyindex())
+            assert_equal(audit['mismatches'], [])
+            assert_equal(audit['ok'], True)
+            assert_equal(audit['stored'], audit['records'])
+            assert_equal(audit['height'], self.nodes[i].getblockcount())
+            assert_equal(audit['stored']['supplyCents'], self.nodes[i].yed_getstats()['supplyCents'])
+            assert_greater_than(audit['vaults'], 0)
+            assert_greater_than(len(audit['sets']), 0)
+            for row in audit['sets']:
+                assert_equal(row['lockedValueZat'], row['recordsZat'])
 
         print('a storage fault stops the observer (U-21: an index that cannot evaluate a block stops the node)')
         self.restart_quiet(5, ['-yellowbacktestfault=storage:commit'])

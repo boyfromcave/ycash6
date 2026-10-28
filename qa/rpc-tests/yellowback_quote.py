@@ -114,12 +114,18 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         if p is None:
             return None
         if p.poll() is None:
-            p.terminate()
-            try:
-                p.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
+            # SIGTERM, then once more before SIGKILL: a stop that once landed inside a poll's error handling
+            # was swallowed (fixed in the agent: _Stop is a BaseException); a second chance keeps a slow
+            # runner from turning that into a -9 here, while a hung agent still fails the clean-exit assert
+            for attempt in range(2):
+                p.terminate()
+                try:
+                    p.wait(timeout=10)
+                    break
+                except subprocess.TimeoutExpired:
+                    if attempt == 1:
+                        p.kill()
+                        p.wait()
         return p.returncode
 
     def tearDown(self):

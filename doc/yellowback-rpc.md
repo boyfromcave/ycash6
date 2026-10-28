@@ -283,6 +283,16 @@ is the only technical guard against sending YED to software that does not run th
 and the *destination* of `yed_redeem` (§4.6), never as YED recipients (a claim pays an intent,
 whose recipient is transparent).
 
+**Integration note: validate a YED address with `yed_validateaddress`, never the stock
+`validateaddress`** (cf. DigiByte v9.26.7 `validateaddress`'s pointer to `validateddaddress`,
+abda0647). The stock command knows only the plain-YEC prefixes, so it returns `isvalid: false` for
+every `yb…`/`yt…`/`yr…` address, a valid one included; `yed_validateaddress` decodes both YED
+forms (35-character P2PKH, 53-character post-quantum), says whether the key is this wallet's and
+gives the `s…`/`sq…` twin of the same key (`transparentAddress`). An exchange or a payment
+integration that checks a withdrawal address with `validateaddress` would refuse every YED
+address; one that checks a YED address's twin with it would accept a plain-YEC address, which
+burns YED (H9). The stock help text is unchanged.
+
 ---
 
 ## Node context (`src/rpc/yellowback.cpp`; no wallet needed)
@@ -536,6 +546,43 @@ Result of `yed_getstatehash`:
   "height": 331,
   "blockhash": "0f3a9c1e5b7d2a4c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f",
   "statehash": "9b4e2f1c8d7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c"
+}
+```
+
+### `yed_verifyindex`
+
+Arguments: none. Additive (rpcversion 8, no bump). The invariant audit the node also runs at every start, after
+the index reaches the tip (cf. DigiByte v9.26.7 `19c8b1c272`, `src/index/digidollarstatsindex.cpp`
+SupplyVerification): the `Totals` record is re-derived from the records it summarises, read only, in one pass
+over `Tokens` and `Vaults` -- `supplyCents` is the sum of every unspent YED token's cents (a claim's burn left
+supply with the claim and a cancel's refund came back as a token, so a `CLAIMING` vault adds nothing),
+`collateralZat` the collateral of the `ACTIVE` and `CLAIMING` vaults (IT-6), `activeVaults`, `voidVaults`,
+`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0 -- and the tip
+snapshot's `supplyCents` / `collateralZat` must equal the `Totals` they were copied from. Every signer set's
+`lockedValue` in the vault set-state database is re-derived the same way, as the sum of its unspent V outputs
+(`sets`). `stored` is the `Totals` record, `records` the re-derived one; `mismatches` has one line per
+disagreement and is empty when `ok`. The command writes nothing, but a mismatch marks the index unhealthy, with
+the log line `yellowback: index unhealthy: invariant audit failed … restart with -reindex-yellowback` (a set's
+`lockedValue`: restart with `-reindex`), and the node stops at the next block (U-21); at start a mismatch
+refuses to start the same way. It answers on an unhealthy index too. Cost: one read of every `Tokens` and
+`Vaults` record under `cs_main`. `rulesVersion` is the stamp the index carries (`RULES_VERSION`, `R` key, not
+in the state hash): a release that changes how stored heights are judged bumps it and every node rebuilds its
+index at start, `yed_getinfo.rebuilt` reporting it.
+
+Result of `yed_verifyindex`:
+
+```json
+{
+  "height": 331,
+  "ok": true,
+  "tokens": 4,
+  "vaults": 5,
+  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "sets": [ { "setid": "4c1d9b2e7a6f5e8d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d", "lockedValueZat": 62500000000, "recordsZat": 62500000000 } ],
+  "mismatches": [],
+  "healthy": true,
+  "rulesVersion": 1
 }
 ```
 
@@ -818,6 +865,14 @@ is the block the standing notice confirmed in and `emergencyOpenAt` = `notice.re
 EMERGENCY_PERSIST`, the first `refHeight` at which RED-4 clause (b) can open a claim; both
 `null` when `noticed` is `false`. `yed_getnotice` gives the whole record.
 
+**Pending spend** (cf. DigiByte v9.26.7 00136af6; additive, `rpcversion` unchanged).
+`spendPending` is true while a transaction in this node's mempool spends the vault outpoint (a
+redemption, a claim or a release not yet mined; `mempool.mapNextTx`), and **`spendTxid`**
+(**optional**, present only then) is its txid. The record above is still the confirmed one: a
+pending redemption leaves the vault `ACTIVE` until it confirms. `yed_redeem` and `yed_claim` refuse
+`vault-spend-pending` while it is set, and `yed_listpositions` reports `canRedeem` / `canClaim`
+false.
+
 Result of `yed_getvault`:
 
 ```json
@@ -851,7 +906,8 @@ Result of `yed_getvault`:
   "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
   "noticed": false,
   "noticeHeight": null,
-  "emergencyOpenAt": null
+  "emergencyOpenAt": null,
+  "spendPending": false
 }
 ```
 
@@ -1200,8 +1256,16 @@ equals it since rpcversion 8 (MINT-5′ dropped the `4 · FEE_MIN` clause, D-Q-2
 `cents` at the estimate's `pMint` (the price the vault stores, which every later fee of it is struck at;
 `null` with `pMint`). `priceMicroUsd` must lie in `[PRICE_MIN, PRICE_MAX]`. Refuses with
 `mint-bad-lock` (`lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD`)
-and `mint-unsatisfiable` (`requiredZat > MAX_MONEY`, K14). It does not apply MINTPOL-1: a halted
-gate still estimates, so the Mint page can show the figure next to the halt reason.
+and `mint-unsatisfiable` (`requiredZat > MAX_MONEY`, K14). It never refuses for MINTPOL-1: a halted
+gate still estimates, so the Mint page can show the figure next to the halt reason, and
+`mintBlocked` / `mintBlockedReason` (cf. DigiByte v9.26.7 `estimatecollateral`'s
+`minting_restricted`, e18654a3; additive) say whether `yed_mint` would refuse at this `R` and with
+which identifier: `mintpol-not-active`, `mintpol-no-price`, `mintpol-global-ratio` (for this term
+class: a class whose base ratio reaches `RECAP_RATIO_BPS` is not blocked by it), `mintpol-divergence`,
+`mintpol-unarmed` or `mintpol-cap` (counting the MINT payloads in this node's mempool, audit C-3),
+`""` when `mintBlocked` is false. It is the same function `yed_mint`'s gate runs, judged on the
+snapshot at `R` even when a `priceMicroUsd` override priced the figure; the bundle refusals below
+stay refusals.
 
 **v3.** While `Snapshots[R]` is armed the estimate uses the **combined** `pMint = min(xMint,
 aMint)` of PRICE-2 with the bundle this node would build from its pool for a MINT at `R` (empty
@@ -1237,7 +1301,9 @@ Result of `yed_estimatecollateral`:
   "armed": true,
   "bundleSeqs": [ 1, 2 ],
   "attestFeeZat": 125944584,
-  "divergenceBps": 25
+  "divergenceBps": 25,
+  "mintBlocked": false,
+  "mintBlockedReason": ""
 }
 ```
 
@@ -1560,15 +1626,23 @@ an offline copy of `wallet.dat`.
 
 ### `yed_getnewaddress [type]`
 
-Arguments: `type` (string, optional; rpcversion 7): `"p2pkh"` a fresh keypool key (35 characters),
+Arguments: `type` (string, optional; rpcversion 7; `null` or `""` = the default below), then
+`label` (string, optional; see below — the heading keeps `[type]` because the workspace's quantum
+contract delta §4.10 pins this command's argument list, so the generated contract's `args` names
+`type` alone until that delta is updated): `"p2pkh"` a fresh keypool key (35 characters),
 `"pq"` a fresh post-quantum holder key (FN-DSA-512 once Falcon is active, SLH-DSA-SHA2-128s before),
 `"pqowner"` a fresh SLH-DSA key, as `vault_getnewowner` (53 characters each); PQ keys derive from the HD
 seed (the wallet must be unlocked); a `"pq"` holder key goes into the address book under its plain-YEC
 `sq…`/`tq…`/`rq…` form (keys issued by a build before the SQ follow-ups are not added retroactively), a
 `"pqowner"` key stays out of it; the default
 follows the holder policy (quantum plan D-Q-2, A-13): `"p2pkh"` while `params.pq.falconActive` is
-false, `"pq"` once it is true. A Yellowback address string (`yb…` mainnet, `yt…` testnet, `yr…`
-regtest). The result is a bare string.
+false, `"pq"` once it is true. `label` (string, optional, default `""`; cf. DigiByte v9.26.7
+5539554c): stored with the address in the wallet's address book, so it travels with `wallet.dat`
+(`yed_listaddresses` reports it); refused (`RPC_INVALID_PARAMETER`) with `"pqowner"`, whose key
+stays out of the address book. The address-book purpose of a key this command issues is
+`yellowback-receive` (was `receive`), which is how `yed_listaddresses includeEmpty` finds the unused
+ones. A Yellowback address string (`yb…` mainnet, `yt…` testnet, `yr…` regtest). The result is a
+bare string.
 
 **ycashd 6.20.0:** the transparent keypool is gone (keys are HD, drawn by `GenerateNewKey` as
 stock `getnewaddress` does), so this command — and every builder that draws a fresh owner, token,
@@ -1614,13 +1688,19 @@ Result of `yed_validateaddress`:
 
 Arguments: none. `confirmedCents` from the index's `Tokens` that are mine, `unconfirmedCents`
 the mempool's payload assignments to this wallet (a dry run per transaction), `height` the index
-tip the confirmed figure was read at.
+tip the confirmed figure was read at. `spendableCents` (cf. DigiByte v9.26.7 75d82a6e) is
+`confirmedCents` less the tokens this wallet's own unconfirmed transactions already spend (the
+`spentUnconfirmed` rows of `yed_listunspent`): what `yed_send`, `yed_redeem` and `yed_claim` can
+select now. After sending $40 from a $100 token the figures are `confirmedCents` 10000,
+`spendableCents` 0 and `unconfirmedCents` 6000 (the change) until the send confirms; gate a send or
+a redeem on `spendableCents`, not `confirmedCents`.
 
 Result of `yed_getbalance`:
 
 ```json
 {
   "confirmedCents": 100000,
+  "spendableCents": 100000,
   "unconfirmedCents": 0,
   "height": 331
 }
@@ -1754,8 +1834,11 @@ A TRANSFER **never burns** (H2): when no selection leaves change of `0` or `≥ 
 command refuses with `change-floor` rather than build one. `yed_estimatesend` runs the same
 selector without signing or locking. Refusals: `not-a-yellowback-address`, `insufficient-yed`,
 `change-floor` (YED change would lie in `(0, MIN_OUTPUT)`; the message carries the nearest
-workable amounts below and above, H2), `too-many-inputs`,
-`RPC_INVALID_PARAMETER` for an amount outside `[MIN_OUTPUT, MAX_OUTPUT]`.
+workable amounts below and above, H2), `too-many-inputs`, `insufficient-yec`, `too-many-coins`,
+`RPC_INVALID_PARAMETER` for an amount outside `[MIN_OUTPUT, MAX_OUTPUT]`. **YED cannot pay the
+network fee** (cf. DigiByte v9.26.7 65744b63): it is paid in YEC from the wallet's confirmed
+transparent coins, so a wallet holding YED and no YEC is refused `insufficient-yec`;
+`yed_estimatesend.networkFeeZat` quotes it.
 
 Result of `yed_send`:
 
@@ -1801,6 +1884,11 @@ workable amounts: `below` the largest workable amount strictly below the request
 smallest strictly above it, each `null` when there is none. `alternatives` is `null` when
 `workable`. The command never refuses for the amount itself; `RPC_INVALID_PARAMETER` only for a
 malformed argument, an amount outside `[MIN_OUTPUT, MAX_OUTPUT]`, or more than 14 recipients.
+`networkFeeZat` (cf. DigiByte v9.26.7 65744b63; additive) is the YEC network fee the send pays —
+YED cannot pay it — priced as `yed_send` prices it on the selected YED inputs (the Yellowback
+size-priced fee, `params.fees.network`); a post-quantum YEC coin chosen to fund it can raise it by
+its size. *null when* `workable` is false (there are no inputs to price). A wallet shows it in the
+send confirmation.
 
 Result of `yed_estimatesend`:
 
@@ -1816,6 +1904,7 @@ Result of `yed_estimatesend`:
   "selectedCents": 10000,
   "changeCents": 6000,
   "spendableCents": 10000,
+  "networkFeeZat": 12500000,
   "error": "",
   "alternatives": null
 }
@@ -1875,7 +1964,9 @@ i.e. at most $0.99. `burnedCents` stays the vault's debt; `extraBurnCents` is bu
 Refusals: `vault-not-found`, `vault-not-owned`,
 `vault-not-active` (CLOSED or CLAIMED only), `vault-locked` (tip below the vault's `ownerHeight`:
 in practice a VOID vault before `lockHeight`, or a vault minted before the in-term rule), `insufficient-yed`, `change-floor`, `mempool-check-failed:<verdict>`,
-`RPC_WALLET_ERROR` for a locked wallet.
+`vault-spend-pending` (a spend of the vault is already in the mempool — `yed_getvault.spendTxid`;
+checked before any coin is selected, so a second click is not answered with `insufficient-yed`; cf.
+DigiByte v9.26.7 00136af6), `RPC_WALLET_ERROR` for a locked wallet.
 
 Result of `yed_redeem`:
 
@@ -1905,7 +1996,9 @@ output, the protocol fee plus the early fee, exactly `yed_redeem`'s `feeZat`
 release pays nothing and burns nothing). Signs
 nothing, locks nothing, commits nothing. It refuses only `vault-not-found`; for every other reason
 `yed_redeem` would refuse now, `canRedeem` is `false` and `error` carries that identifier
-(`vault-not-active`, `vault-not-owned`, `vault-locked`, `insufficient-yed`; `""` otherwise). The
+(`vault-not-active`, `vault-not-owned`, `vault-locked`, `vault-spend-pending`, `insufficient-yed`;
+`""` otherwise). `insufficient-yed` is judged on the **spendable** YED (`yed_getbalance.spendableCents`:
+tokens an own unconfirmed transaction already spends do not count), as the selector judges it. The
 network fee and any H4 sub-dollar remainder are not part of the quote (`yed_redeem` reports them).
 
 Result of `yed_estimateredeem`:
@@ -1966,8 +2059,9 @@ that script's spending conditions.
 `vault-not-active`, `claim-not-yet` (tip below the vault's `appHeight`: only a vault minted before
 the in-term rule, in term), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
-`mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`,
-`claim-out-below-min`, `claim-burn-above-max`, `carrier-wait-busy`.
+`mempool-check-failed:<verdict>`, `vault-spend-pending` (before the carrier step: a spend of the
+vault is already in the mempool), **v3** `bundle-insufficient`, `bundle-malformed`,
+`claim-out-below-min`, `claim-burn-above-max`, `carrier-wait-busy`, `carrier-record-failed`.
 
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
@@ -2328,7 +2422,8 @@ Result of `yed_signattestation`:
 Arguments: `status` (string, optional; as `yed_listvaults`). The wallet's own vaults (a vault is
 mine iff the wallet holds the owner's post-quantum key, `HavePQKey(ownerScheme ‖ ownerHash)`): every `yed_getvault` field plus `canRedeem` (true for an
 ACTIVE or VOID vault at or past its `ownerHeight` — in term too since IT-1; for VOID it is the
-Release, L14), `canClaim` (true when `claimable` and the wallet holds `≥ mintedCents`) and
+Release, L14), `canClaim` (true when `claimable` and the wallet can spend `≥ mintedCents` now,
+`yed_getbalance.spendableCents`) and
 `earlyRedeemFeeZat` (IT-9: what a redeem confirming in the next block adds to the pool fee, `0` at
 or past `lockHeight`, for a vault that is not ACTIVE, and under FEE-0 — the Positions page shows it
 beside `underwaterAt`). `scriptPubKey` and, while
@@ -2340,6 +2435,10 @@ plan §6).
 the tip snapshot is armed, no notice stands, and the vault is under `EMERGENCY_RATIO_BPS` under
 this node's `pEmerg` but not claimable — the wallet offers "post notice", v3 §4.8); `canClaim`
 is now RED-4 by either clause.
+
+`spendPending` and **`spendTxid`** (**optional**) as `yed_getvault`: while a spend of the vault is in
+the mempool `canRedeem` and `canClaim` are `false` (the Positions page shows "redemption pending
+(txid)" and disables Redeem; cf. DigiByte v9.26.7 00136af6).
 
 Result of `yed_listpositions`:
 
@@ -2376,6 +2475,7 @@ Result of `yed_listpositions`:
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null,
+    "spendPending": false,
     "canRedeem": false,
     "earlyRedeemFeeZat": 0,
     "canClaim": false,
@@ -2407,6 +2507,24 @@ transaction). `amountCents` is the signed effect on this wallet. `unbacked` is t
 closed an own vault without its burn; `expired` rows have `height: -1`, `confirmations: 0`,
 `verdict: "expired"`. `payee` `null` where there is no fee output.
 
+**DigiByte v9.26.7 follow-ups** (additive, `rpcversion` unchanged). `time` is the block time of the
+row's `height` in UTC seconds (cf. DigiByte v9.26.7 ea78ad18 / 3f09a4a9; *null when* the row has no
+block: an expired or unconfirmed row). An `expired` row is typed by its payload (cf. 77a5b156): `mint`,
+`send`, `redeem` (`claim` when it spends a vault this wallet does not own), `register`, `notice`,
+`equivocation`, `revive` or `cancel`, never a blanket `send`. **Two-step actions (v3 plan A6):**
+`carrierTxid` and `mainTxid` join the rows of one carrier-bearing action — a MINT, CLAIM, CLAIM_NOTICE
+or EQUIVOCATION row names the carrier it spends and itself; every other row carries `""` in both —
+and `carrierOutcome` is what became of that carrier: `completed` (its main transaction, confirmed or
+in the mempool, spent it), `swept` (`yed_sweepcarriers` reclaimed it), `lapsed` (the tip passed the
+carrier's expiry height `R + REF_WINDOW`: the main transaction can no longer be built and the sweep
+will reclaim it) or `pending` (waiting for its confirmation and the main transaction); `""` on a row
+without a carrier. A carrier that did **not** complete gets a row of its own, `type: "carrier"`, with
+`carrierTxid` its txid, `mainTxid` the main transaction that tried to spend it (`""` when none was
+built), `height` / `confirmations` / `time` of the carrier funding transaction (`-1` / `0` / `null`
+while unconfirmed) and every amount `0` — so a mint whose second step never happened shows as
+pending or failed across a restart (the outstanding records are `carriers.dat`'s, plus the carriers an
+own transaction spent). A completed carrier has no row of its own.
+
 Result of `yed_listtransactions`:
 
 ```json
@@ -2425,7 +2543,38 @@ Result of `yed_listtransactions`:
     "feeZat": 629722922,
     "payee": "smQvTmAz2ExamplePayoutAddress1111111",
     "unbacked": false,
-    "expired": false
+    "expired": false,
+    "time": 1792540800,
+    "carrierTxid": "5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c",
+    "mainTxid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+    "carrierOutcome": "completed"
+  }
+]
+```
+
+### `yed_listaddresses [includeEmpty]`
+
+Arguments: `includeEmpty` (boolean, optional, default `false`). This wallet's Yellowback (YED)
+addresses (cf. DigiByte v9.26.7 `listdigidollaraddresses`, 5539554c, b3cb2482): every address that
+holds YED now or appears in the indexed history (a token assigned to it or spent from it), plus,
+with `includeEmpty`, every unused address `yed_getnewaddress` issued (address-book purpose
+`yellowback-receive`; addresses issued by a build before this command are listed once used). Sorted
+by `address`. `label` is the address-book label (`yed_getnewaddress`'s `label`, `""` when none),
+`confirmedCents` the YED it holds in the index's `Tokens`, `txCount` how many indexed transactions
+assigned YED to it or spent YED from it, and `lastUsed` the block time (UTC seconds) of the last of
+them, *null when* it was never used. A P2PKH holder is listed in its 35-character form, a post-quantum
+holder in its 53-character form.
+
+Result of `yed_listaddresses`:
+
+```json
+[
+  {
+    "address": "yrExampleOwnerAddress111111111111111",
+    "label": "savings",
+    "confirmedCents": 100000,
+    "txCount": 1,
+    "lastUsed": 1792540800
   }
 ]
 ```
@@ -2458,7 +2607,7 @@ what `yellowback_rpc_contract.py` uses.
 | `yed-burn-refused` | `sendrawtransaction` (the stock RPC) | with `-yellowback`, a raw transaction that spends a `Tokens` outpoint of this wallet without a payload that reassigns it (no payload, or a TRANSFER that assigns nothing): pass `allowyedburn = true` to send it anyway |
 | `not-a-yellowback-address` | `yed_send`, `yed_sendmany`, `yed_validateaddress` (in `reason`, no throw) | the recipient is not a `yb…`/`yt…`/`yr…` address of this network: pass an `s1…`/`sm…` address |
 | `verdict-parent-not-tip` | `yed_getblockverdict` | the block's parent is not the index tip and the block is not a rejected child of it (N12): pass the tip's grandparent |
-| `insufficient-yed` | `yed_redeem`, `yed_claim`, `yed_send`, `yed_sendmany` | wallet YED below the burn or amount |
+| `insufficient-yed` | `yed_redeem`, `yed_claim`, `yed_send`, `yed_sendmany` | wallet YED below the burn or amount (the spendable YED: tokens an own unconfirmed transaction spends do not count) |
 | `mempool-check-failed:<verdict>` | `yed_redeem`, `yed_claim` | `MempoolCheck` returned the named RED verdict (K7); provoke with a redemption whose reference snapshot has no `pClaim` where the claim path is chosen (`vault-claim-not-underwater`) |
 | `fee-no-eligible-payee` | `yed_getfeepayee` | `E(refHeight)` empty (FEE-0; not an error for the wallet, which omits the output): a `refHeight` below the first quote tag |
 | `quote-out-of-range` | `yed_setquote` | price outside `[PRICE_MIN, PRICE_MAX]` and not `0` |
@@ -2498,7 +2647,10 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim` (`to`; a claim's must be transparent) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `yb…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
 | `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
 | `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
-| `insufficient-yec` | `yed_mint` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes: `yed_mint … <an empty s1… address>` |
+| `insufficient-yec` | `yed_mint`, `yed_send`, `yed_sendmany`, `yed_claim` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes (YED never pays the network fee): `yed_mint … <an empty s1… address>` |
+| `too-many-coins` | `yed_mint`, `yed_send`, `yed_sendmany`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | covering the YEC the transaction needs would take more than 400 plain YEC inputs or 75,000 estimated bytes of them even largest-first (the selector goes smallest-first and falls back to largest-first when that would cross either cap; cf. DigiByte v9.26.7 b54e3861). Message grammar: `too-many-coins: covering <amount> YEC would take more than 400 coins (or 75000 bytes of inputs); combine small coins first by sending them to yourself, then retry`: a wallet of 1,000 pool payouts of 0.00001 YEC funding a 0.005 YEC fee |
+| `vault-spend-pending` | `yed_redeem`, `yed_claim`, `yed_estimateredeem` (in `error`, no throw) | a transaction in this node's mempool already spends the vault (`yed_getvault.spendPending`; the message names its txid); checked before any coin is selected (cf. DigiByte v9.26.7 00136af6): `yed_redeem` twice before a block |
+| `carrier-record-failed` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | the carrier record could not be written to `<datadir>/yellowback/carriers.dat`, which is written **before** the carrier is committed (cf. DigiByte v9.26.7 38895edb): nothing was sent. A record whose commit then fails is removed again. Provoke with an unwritable `<datadir>/yellowback` |
 | `wallet-locked` | every signing command; on 6.20.0 also `yed_getnewaddress` and every fresh-key draw | the wallet is encrypted and locked (`walletpassphrase` first); the stock `EnsureWalletIsUnlocked` message may precede it |
 | `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`); on 6.20.0 only the `CReserveKey` change paths can raise it (see `yed_getnewaddress`) |
 | `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
@@ -2534,11 +2686,12 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_gethistory` | 0, 1 |
 | `yed_mint` | 0, 1 |
 | `yed_listtransactions` | 0, 1 (unchanged) |
+| `yed_listaddresses` | 0 (`includeEmpty`) |
 | `yed_send` | 1 (unchanged) |
 | `yed_sendmany` | 0 (unchanged; the object) |
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
-| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions`, `yed_estimateredeem` | none (all strings) |
+| `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions`, `yed_estimateredeem`, `yed_getnewaddress` | none (all strings; `yed_getnewaddress` takes `type` and `label`) |
 | `yed_claim` | 3, 4, 5 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit; `maxBurnCents` since rpcversion 4) |
 | `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
 | `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |

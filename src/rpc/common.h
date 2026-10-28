@@ -237,7 +237,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_getfeepayee",             {{o}, {s}} },
     { "yed_gethistory",              {{o, o}, {}} },
     { "yed_getinfo",                 {{}, {}} },
-    { "yed_getnewaddress",           {{}, {s}} },
+    { "yed_getnewaddress",           {{}, {s, s}} },
     { "yed_getnotice",               {{s}, {}} },
     { "yed_getprice",                {{}, {o}} },
     { "yed_getselection",            {{o, s}, {}} },
@@ -246,6 +246,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_gettag",                  {{s}, {}} },
     { "yed_gettxinfo",               {{s}, {}} },
     { "yed_getvault",                {{s}, {}} },
+    { "yed_listaddresses",           {{}, {o}} },
     { "yed_listattestors",           {{}, {o}} },
     { "yed_listclaimable",           {{}, {o, o}} },
     { "yed_listminers",              {{}, {o, o}} },
@@ -269,6 +270,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_unlockcoin",              {{s, o, s}, {}} },
     { "yed_validateaddress",         {{s}, {}} },
     { "yed_validaterawtransaction",  {{s}, {}} },
+    { "yed_verifyindex",             {{}, {}} },
     { "yed_withdrawbond",            {{o}, {s}} },
     // end yellowback
     // the vault primitive (doc/vault-rpc.md)

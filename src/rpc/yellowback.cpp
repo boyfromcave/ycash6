@@ -36,6 +36,7 @@
 #include "txmempool.h"
 #include "util/strencodings.h"
 #include "util/time.h"
+#include "vault/node.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #endif
@@ -917,6 +918,70 @@ UniValue yed_getstatehash(const UniValue& params, bool fHelp)
     return o;
 }
 
+static UniValue TotalsToJSON(const Totals& t)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("supplyCents", t.supplyCents);
+    o.pushKV("collateralZat", t.collateralZat);
+    o.pushKV("activeVaults", (int64_t)t.activeVaults);
+    o.pushKV("voidVaults", (int64_t)t.voidVaults);
+    o.pushKV("closedVaults", (int64_t)t.closedVaults);
+    o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
+    o.pushKV("unbackedCents", t.unbackedCents);
+    return o;
+}
+
+UniValue yed_verifyindex(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "yed_verifyindex\n"
+            "\nThe invariant audit the node runs at startup (cf. DigiByte v9.26.7 SupplyVerification): re-derives the Totals\n"
+            "record from the stored Tokens and Vaults records (supplyCents = the sum of every unspent YED token; collateralZat\n"
+            "and activeVaults from the ACTIVE vaults, collateralZat also from the CLAIMING ones, IT-6; each status count from\n"
+            "its records), checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
+            "V outputs in the vault set-state database. Reads every Tokens and Vaults record once. Writes nothing; a mismatch\n"
+            "marks the index unhealthy (the node then stops at the next block): restart with -reindex-yellowback (Yellowback\n"
+            "totals) or -reindex (a set's lockedValue). Answers on an unhealthy index too.\n"
+            "\nResult:\n"
+            "{ \"height\": n, \"ok\": true|false, \"tokens\": n, \"vaults\": n, \"stored\": {totals}, \"records\": {totals},\n"
+            "  \"sets\": [ { \"setid\": \"hex\", \"lockedValueZat\": n, \"recordsZat\": n } ], \"mismatches\": [ \"text\", ... ],\n"
+            "  \"healthy\": true|false, \"rulesVersion\": n }\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(cs_main);                     // the set-state database changes only under cs_main
+    LOCK(index.cs_yellowback);
+    IndexAudit a = index.VerifyIndex();
+    std::vector<vault::SetValueAudit> sets;
+    std::vector<std::string> setMismatches;
+    if (vault::g_vaultdb) setMismatches = vault::AuditLockedValue(*vault::g_vaultdb, &sets);
+    for (const std::string& m : setMismatches) LogPrintf("vault: invariant audit: %s\n", m);
+    if (!setMismatches.empty()) index.SetUnhealthy("vault set-state invariant audit failed: " + setMismatches.front() + "; restart with -reindex");
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", a.tipHeight.value_or(-1));
+    o.pushKV("ok", a.ok && setMismatches.empty());
+    o.pushKV("tokens", (int64_t)a.tokens);
+    o.pushKV("vaults", (int64_t)a.vaults);
+    o.pushKV("stored", TotalsToJSON(a.stored));
+    o.pushKV("records", TotalsToJSON(a.derived));
+    UniValue arr(UniValue::VARR);
+    for (const vault::SetValueAudit& sa : sets) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("setid", sa.setId.GetHex());
+        r.pushKV("lockedValueZat", sa.stored);
+        r.pushKV("recordsZat", sa.derived);
+        arr.push_back(r);
+    }
+    o.pushKV("sets", arr);
+    UniValue mm(UniValue::VARR);
+    for (const std::string& m : a.mismatches) mm.push_back(m);
+    for (const std::string& m : setMismatches) mm.push_back(m);
+    o.pushKV("mismatches", mm);
+    o.pushKV("healthy", index.IsHealthy());
+    o.pushKV("rulesVersion", (int64_t)State(index.View()).GetRulesVersion());
+    return o;
+}
+
 UniValue yed_getstats(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
@@ -1252,6 +1317,7 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
 
     YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "txid");
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs (spendPending) before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
@@ -1260,7 +1326,9 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
     if (!v.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault-not-found: no vault at " + txid.GetHex() + ":0");
     const int tip = IndexHeight(index);
     std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
-    return VaultToJSON(out, v.value(), index, snap);
+    UniValue o = VaultToJSON(out, v.value(), index, snap);
+    rpc::PushSpendPending(o, out);
+    return o;
 }
 
 UniValue yed_listvaults(const UniValue& params, bool fHelp)
@@ -1696,7 +1764,9 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
             "R = tip - REF_LAG (or at the given P_mint, PRICE_MIN..PRICE_MAX). requiredZat is MINT-5's ratio clause only;\n"
             "requiredZatFloored = requiredZat rounded up to 1,000 is what a mint locks (MINT-5': the 4 * FEE_MIN floor went with\n"
             "D-Q-23). protocolFeeCents / protocolFeeZat (FEE-1' at the estimate's pMint) and attestFeeZat (half of it when ARMED)\n"
-            "are the mint's fees. Does not apply MINTPOL-1.\n");
+            "are the mint's fees. Never refuses for MINTPOL-1: mintBlocked says whether yed_mint would refuse at this R (the\n"
+            "halts, MINT_REQUIRES_ARMED, the supply cap with the mempool's mints) and mintBlockedReason is the identifier it\n"
+            "would throw (\"\" when not blocked), so a wallet can show the figure next to the reason.\n");
 
     YellowbackIndex& index = EnsureIndex();
     if (!params[0].isNum() || !params[1].isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "cents and lockBlocks must be numbers");
@@ -1708,6 +1778,7 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     if (cents < p.minMint || cents > p.maxMint) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cents must be between %d and %d", p.minMint, p.maxMint));
     }
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs (the cap's pending mints) before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
@@ -1790,6 +1861,11 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     o.pushKV("bundleSeqs", SeqsToJSON(bundleSeqs));
     o.pushKV("attestFeeZat", attestFeeZat);
     o.pushKV("divergenceBps", divergenceBps.has_value() ? UniValue(divergenceBps.value()) : NullUniValue);
+    // MINTPOL-1 at R, as yed_mint's gate reads it (policy.h MintPolicyRefusal; cf. DigiByte v9.26.7 estimatecollateral's
+    // minting_restricted, e18654a3): judged on the snapshot even when a priceMicroUsd override priced the figure.
+    const std::optional<std::string> blocked = MintPolicyRefusal(st, p, refH, termClass, (Cents)cents, MempoolMintCents());
+    o.pushKV("mintBlocked", blocked.has_value());
+    o.pushKV("mintBlockedReason", blocked.has_value() ? RefusalIdentifier(blocked.value()) : std::string());
     return o;
 }
 
@@ -2127,6 +2203,7 @@ static const CRPCCommand commands[] =
   //  ---------  ----------------------------  ----------------------------  ----------
     { "yellowback", "yed_getinfo",                 &yed_getinfo,                  true  },
     { "yellowback", "yed_getstatehash",            &yed_getstatehash,             true  },
+    { "yellowback", "yed_verifyindex",             &yed_verifyindex,              true  },
     { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
     { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
     { "yellowback", "yed_getactivation",           &yed_getactivation,            true  },
@@ -2178,6 +2255,14 @@ void PushNoticeFields(UniValue& o, const State& st, const Params& p, const COutP
     o.pushKV("noticed", n.has_value());
     o.pushKV("noticeHeight", n.has_value() ? UniValue(n->height) : NullUniValue);
     o.pushKV("emergencyOpenAt", n.has_value() ? UniValue((int64_t)n->refHeight + p.emergencyPersist) : NullUniValue);
+}
+
+std::optional<uint256> PushSpendPending(UniValue& o, const COutPoint& vault)
+{
+    const std::optional<uint256> spender = MempoolSpenderOf(vault);
+    o.pushKV("spendPending", spender.has_value());
+    if (spender.has_value()) o.pushKV("spendTxid", spender->GetHex());   // present only while pending
+    return spender;
 }
 
 ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, const VaultRecord& v, int tip)

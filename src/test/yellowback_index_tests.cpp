@@ -668,7 +668,10 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
         BOOST_CHECK_EQUAL(index2.GetTip()->blockHash.ToString(), n1.hash.ToString());
     }
 
-    // Stop(): later deliveries return at once and change nothing (D2).
+    // Stop(): later deliveries return at once and change nothing (D2), and fail closed: a stopped
+    // index reports a failure for every block (never an empty pass, which would accept the block
+    // without the module check), under fJustCheck (TestBlockValidity) as well; the commit and
+    // the undo refuse (cf. DigiByte v9.26.7 a6a0c1690f).
     YellowbackIndex index3(params, pathTemp / "yellowback-test3", 1 << 20, true);
     BOOST_CHECK(index3.SyncToChain());
     index3.Stop();
@@ -676,9 +679,21 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     index3.testBeforeApply = [] { throw std::runtime_error("must not run"); };
     {
         LOCK(cs_main);
-        BOOST_CHECK_NO_THROW(index3.CheckConnect(n1.block, n1.idx.get(), false));
+        for (bool fJustCheck : { false, true }) {
+            YellowbackIndex::ConnectCheck stoppedCheck;
+            BOOST_CHECK_NO_THROW(stoppedCheck = index3.CheckConnect(n1.block, n1.idx.get(), fJustCheck));
+            BOOST_CHECK(stoppedCheck.failure.has_value());
+            BOOST_CHECK(!stoppedCheck.invalid.has_value());
+            if (stoppedCheck.failure.has_value()) BOOST_CHECK(stoppedCheck.failure->find("stopped") != std::string::npos);
+        }
+        BOOST_CHECK(!index3.CommitConnect(n1.block, n1.idx.get()));
+        BOOST_CHECK(!index3.UndoDisconnect(n1.idx.get()));
     }
     BOOST_CHECK(index3.IsHealthy());
+    {
+        LOCK(index3.cs_yellowback);
+        BOOST_CHECK(!index3.GetTip().has_value());   // nothing was applied
+    }
 
     // A disconnect below startHeight is ignored.
     YellowbackIndex index4(params, pathTemp / "yellowback-test4", 1 << 20, true);
@@ -1466,6 +1481,173 @@ BOOST_FIXTURE_TEST_CASE(schema3_rebuild_flag, TestChain100Setup)
         BOOST_REQUIRE(faulted.SyncToChain());
         BOOST_CHECK(faulted.WasRebuilt());
         BOOST_CHECK(HashOf(faulted) == h0);
+    }
+}
+
+// The invariant audit (cf. DigiByte v9.26.7 19c8b1c272, digidollarstatsindex.cpp SupplyVerification): the Totals record
+// re-derived from Tokens and Vaults; a corrupted stored total is caught, marks the index unhealthy, and the hooks refuse.
+BOOST_AUTO_TEST_CASE(invariant_audit_catches_a_corrupt_total)
+{
+    Live live(pathTemp / "yb-audit");
+    live.Activate();
+    live.MintActive();
+    {
+        IndexAudit a = live.index->VerifyIndex();
+        BOOST_CHECK(a.ok);
+        BOOST_CHECK(a.mismatches.empty());
+        BOOST_CHECK_EQUAL(a.tokens, 1u);
+        BOOST_CHECK_EQUAL(a.vaults, 1u);
+        BOOST_CHECK_EQUAL(a.derived.supplyCents, 10000);
+        BOOST_CHECK_EQUAL(a.derived.activeVaults, 1u);
+        BOOST_CHECK(SerializeRecord(a.derived) == SerializeRecord(a.stored));
+        BOOST_CHECK_EQUAL(a.tipHeight.value_or(-1), live.Tip());
+    }
+    BOOST_CHECK(live.index->IsHealthy());
+
+    // A pure function of the view: the same verdict over an in-memory copy, and a corrupted copy fails it.
+    MemoryStateView copy;
+    {
+        LOCK(live.index->cs_yellowback);
+        // table by table: every key starts with its table's upper-case letter (view.h), and an empty prefix would reach
+        // CDBWrapper::Seek with an empty key (&ssKey[0] on an empty stream, UBSan)
+        for (char prefix = 'A'; prefix <= 'Z'; prefix++) {
+            live.index->View().Iterate(std::string(1, prefix), [&](const std::string& k, const std::string& v) { copy.Write(k, v); return true; });
+        }
+    }
+    BOOST_CHECK(AuditIndexRecords(copy).ok);
+    Totals t = State(copy).GetTotals();
+    t.collateralZat -= 1;
+    copy.Write(keys::Totals(), SerializeRecord(t));
+    IndexAudit c = AuditIndexRecords(copy);
+    BOOST_CHECK(!c.ok);
+    BOOST_CHECK(c.mismatches[0].find("Totals.collateralZat") != std::string::npos);
+
+    // Corrupt the stored supply in the index itself.
+    {
+        LOCK(live.index->cs_yellowback);
+        Totals bad = State(live.index->View()).GetTotals();
+        bad.supplyCents += 123;
+        live.index->MutableView().Write(keys::Totals(), SerializeRecord(bad));
+        live.index->Flush(true);
+    }
+    IndexAudit a = live.index->VerifyIndex();
+    BOOST_CHECK(!a.ok);
+    BOOST_REQUIRE_EQUAL(a.mismatches.size(), 2u);   // the Totals against the Tokens, and the tip snapshot against the Totals
+    BOOST_CHECK(a.mismatches[0].find("Totals.supplyCents: stored 10123, records 10000") != std::string::npos);
+    BOOST_CHECK(a.mismatches[1].find("tip snapshot") != std::string::npos);
+    BOOST_CHECK(!live.index->IsHealthy());
+    BOOST_CHECK(live.index->UnhealthyReason().find("invariant audit failed") != std::string::npos);
+    // Fail closed: the next block is a node failure, never an acceptance.
+    Chain::Node& n = live.chain.Add(Builder::Block(live.Tip() + 1, Builder::Quote(50000, (live.Tip() + 1) % 3)), live.tip);
+    BOOST_CHECK(Connect(*live.index, n).has_value());
+}
+
+// The audit at startup: SyncToChain re-derives the Totals after reaching the tip and refuses a corrupted index.
+BOOST_FIXTURE_TEST_CASE(invariant_audit_at_startup, TestChain100Setup)
+{
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
+    {
+        YellowbackIndex index(params, pathTemp / "yb-audit-start", 1 << 20, true);
+        BOOST_REQUIRE(index.SyncToChain());
+        BOOST_CHECK(index.IsHealthy());
+        LOCK(index.cs_yellowback);
+        Totals bad;
+        bad.supplyCents = 5;                 // no token exists on this chain
+        index.MutableView().Write(keys::Totals(), SerializeRecord(bad));
+        index.Flush(true);
+    }
+    {
+        YellowbackIndex reopened(params, pathTemp / "yb-audit-start", 1 << 20, false);
+        BOOST_CHECK(!reopened.SyncToChain());
+        BOOST_CHECK(!reopened.IsHealthy());
+        BOOST_CHECK(!reopened.WasInterrupted());
+        BOOST_CHECK(reopened.UnhealthyReason().find("Totals.supplyCents: stored 5, records 0") != std::string::npos);
+    }
+    {
+        // -reindex-yellowback (fWipe) is the operator's recovery.
+        YellowbackIndex rebuilt(params, pathTemp / "yb-audit-start", 1 << 20, true);
+        BOOST_CHECK(rebuilt.SyncToChain());
+        BOOST_CHECK(rebuilt.IsHealthy());
+    }
+}
+
+// The rules-version stamp (cf. DigiByte v9.26.7 digidollar_state.h rules_version): an index stamped by a binary with
+// another RULES_VERSION is wiped and rebuilt at start (WasRebuilt); an unstamped index reads as version 1.
+BOOST_FIXTURE_TEST_CASE(rules_version_mismatch_rebuilds, TestChain100Setup)
+{
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
+    uint256 h0;
+    {
+        YellowbackIndex index(params, pathTemp / "yb-rules", 1 << 20, true);
+        BOOST_REQUIRE(index.SyncToChain());
+        BOOST_CHECK(!index.WasRebuilt());
+        h0 = HashOf(index);
+        LOCK(index.cs_yellowback);
+        BOOST_CHECK_EQUAL(State(index.View()).GetRulesVersion(), RULES_VERSION);
+        BOOST_CHECK(index.View().Exists(keys::RulesVersion()));
+        RulesVersionRecord other;
+        other.rulesVersion = RULES_VERSION + 1;                    // the index a later (or earlier) release judged
+        index.MutableView().Write(keys::RulesVersion(), SerializeRecord(other));
+        // a marker no rebuild-free reopen would erase: an undo record of a block that does not exist
+        index.MutableView().Write(keys::Undo(uint256S("0xabcdef")), SerializeRecord(UndoRecord()));
+        index.Flush(true);
+    }
+    {
+        YellowbackIndex reopened(params, pathTemp / "yb-rules", 1 << 20, false);
+        BOOST_REQUIRE(reopened.SyncToChain());
+        BOOST_CHECK(reopened.WasRebuilt());
+        BOOST_CHECK_EQUAL(TipHeightOf(reopened), 100);
+        BOOST_CHECK(HashOf(reopened) == h0);                       // the stamp is outside the state hash
+        LOCK(reopened.cs_yellowback);
+        BOOST_CHECK_EQUAL(State(reopened.View()).GetRulesVersion(), RULES_VERSION);
+        BOOST_CHECK(!reopened.View().Exists(keys::Undo(uint256S("0xabcdef"))));   // wiped
+        // an index from before the stamp (no R key) reads as version 1 and is kept
+        reopened.MutableView().Erase(keys::RulesVersion());
+        reopened.MutableView().Write(keys::Undo(uint256S("0xabcdef")), SerializeRecord(UndoRecord()));
+        reopened.Flush(true);
+    }
+    {
+        YellowbackIndex same(params, pathTemp / "yb-rules", 1 << 20, false);
+        BOOST_REQUIRE(same.SyncToChain());
+        BOOST_CHECK_EQUAL(RULES_VERSION == 1, !same.WasRebuilt());
+        BOOST_CHECK(HashOf(same) == h0);
+        LOCK(same.cs_yellowback);
+        BOOST_CHECK_EQUAL(RULES_VERSION == 1, same.View().Exists(keys::Undo(uint256S("0xabcdef"))));
+        BOOST_CHECK_EQUAL(State(same.View()).GetRulesVersion(), RULES_VERSION);   // stamped again
+    }
+}
+
+// Startup replay cancellation (cf. DigiByte v9.26.7 b544af7fa3): a shutdown requested mid-replay stops SyncToChain, which
+// fails closed (unhealthy, WasInterrupted, never "synced"); the blocks applied so far were committed, so the next start
+// resumes from there and reaches the same state as an uninterrupted sync.
+BOOST_FIXTURE_TEST_CASE(sync_to_chain_interrupt_resumes, TestChain100Setup)
+{
+    yellowback::Params params = RegtestParams(1, 0, 0, TestSet());
+    uint256 h0;
+    {
+        YellowbackIndex full(params, pathTemp / "yb-intr-full", 1 << 20, true);
+        BOOST_REQUIRE(full.SyncToChain());
+        h0 = HashOf(full);
+    }
+    {
+        YellowbackIndex index(params, pathTemp / "yb-intr", 1 << 20, true);
+        int polls = 0;
+        BOOST_CHECK(!index.SyncToChain([&] { return ++polls > 40; }));
+        BOOST_CHECK(index.WasInterrupted());
+        BOOST_CHECK(!index.IsHealthy());
+        BOOST_CHECK(index.UnhealthyReason().find("interrupted at height 41") != std::string::npos);
+        BOOST_CHECK_EQUAL(TipHeightOf(index), 40);
+        LOCK2(cs_main, index.cs_yellowback);
+        BOOST_CHECK(!index.IsSynced());
+    }
+    {
+        YellowbackIndex resumed(params, pathTemp / "yb-intr", 1 << 20, false);
+        BOOST_REQUIRE(resumed.SyncToChain([] { return false; }));
+        BOOST_CHECK(!resumed.WasInterrupted());
+        BOOST_CHECK(resumed.IsHealthy());
+        BOOST_CHECK(!resumed.WasRebuilt());
+        BOOST_CHECK_EQUAL(TipHeightOf(resumed), 100);
+        BOOST_CHECK(HashOf(resumed) == h0);
     }
 }
 
