@@ -29,8 +29,9 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # GetBlockSubsidy is a consensus-params method. The regtest crash:<height>
 # test fault (SIGKILL after FlushStateToDisk) is on both lines since the
 # DigiByte v9.26.7 review (workspace rule 5); the pins were updated then.
-# Header split: util/system.h, util/strencodings.h.
-src/yellowback/index.cpp 7ad18f6993c74a65c197d81d31b5ab30ad74e7fcc9cc6032b2e06b302c517c8c b15097057cffb4762d2a26473e13226e386d5978358058440d432f3beaa0d737
+# Header split: util/system.h, util/strencodings.h. The invariant audit also
+# re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
+src/yellowback/index.cpp dbe871c1517e6e8d4af5210128612a2ad8ad0745e940a170578eff7814308d84 74c772a80d7303d499177276e777cb4687ef76d01b08dfd2500a970441aa2c90
 src/yellowback/index.h ed97ab254128b9b00b2524fbddb73aaa4375ce7f50b8293d4dfec5684ded5883 641209c7e44572bb425981302d021ffe8f01379404b7756d5e7e7c11c91da52c
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0

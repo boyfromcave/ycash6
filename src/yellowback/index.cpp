@@ -380,8 +380,9 @@ IndexAudit AuditIndexRecords(const StateView& view)
             return true;
         }
         switch (v.Status()) {
-        case VaultStatus::ACTIVE: a.derived.collateralZat += v.collateralZat; a.derived.activeVaults++; break;
-        case VaultStatus::CLAIMING: a.derived.collateralZat += v.collateralZat; break;   // IT-6: counted until released
+        // HALT-2 (owner 2026-10-28): openDebtCents is the mintedCents of the same ACTIVE and CLAIMING vaults
+        case VaultStatus::ACTIVE: a.derived.collateralZat += v.collateralZat; a.derived.openDebtCents += v.mintedCents; a.derived.activeVaults++; break;
+        case VaultStatus::CLAIMING: a.derived.collateralZat += v.collateralZat; a.derived.openDebtCents += v.mintedCents; break;   // IT-6: counted until released
         case VaultStatus::VOIDED: a.derived.voidVaults++; break;
         case VaultStatus::CLOSED: a.derived.closedVaults++; break;
         case VaultStatus::CLAIMED: a.derived.claimedVaults++; break;
@@ -401,6 +402,11 @@ IndexAudit AuditIndexRecords(const StateView& view)
     cmp("closedVaults", a.stored.closedVaults, a.derived.closedVaults);
     cmp("claimedVaults", a.stored.claimedVaults, a.derived.claimedVaults);
     cmp("unbackedCents", a.stored.unbackedCents, a.derived.unbackedCents);
+    cmp("openDebtCents", a.stored.openDebtCents, a.derived.openDebtCents);
+    // HALT-2's invariant (state.h OpenDebtInvariantViolation): every YED is some open vault's debt unless it was burned
+    if (a.stored.supplyCents > a.stored.openDebtCents) {
+        a.mismatches.push_back(strprintf("Totals: supplyCents %d exceeds openDebtCents %d", a.stored.supplyCents, a.stored.openDebtCents));
+    }
 
     // SNAP copied the tip's totals into its snapshot; the two must still agree.
     if (tip.has_value()) {
@@ -411,6 +417,7 @@ IndexAudit AuditIndexRecords(const StateView& view)
             if (snap->blockHash != tip->blockHash) a.mismatches.push_back(strprintf("Snapshots[%d].blockHash: %s, tip %s", tip->height, snap->blockHash.GetHex(), tip->blockHash.GetHex()));
             if (snap->supplyCents != a.stored.supplyCents) a.mismatches.push_back(strprintf("Snapshots[%d].supplyCents (tip snapshot): %d, Totals %d", tip->height, snap->supplyCents, a.stored.supplyCents));
             if (snap->collateralZat != a.stored.collateralZat) a.mismatches.push_back(strprintf("Snapshots[%d].collateralZat (tip snapshot): %d, Totals %d", tip->height, snap->collateralZat, a.stored.collateralZat));
+            if (snap->openDebtCents != a.stored.openDebtCents) a.mismatches.push_back(strprintf("Snapshots[%d].openDebtCents (tip snapshot): %d, Totals %d", tip->height, snap->openDebtCents, a.stored.openDebtCents));
         }
     }
     a.ok = a.mismatches.empty();

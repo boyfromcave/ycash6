@@ -557,8 +557,10 @@ SupplyVerification): the `Totals` record is re-derived from the records it summa
 over `Tokens` and `Vaults` -- `supplyCents` is the sum of every unspent YED token's cents (a claim's burn left
 supply with the claim and a cancel's refund came back as a token, so a `CLAIMING` vault adds nothing),
 `collateralZat` the collateral of the `ACTIVE` and `CLAIMING` vaults (IT-6), `activeVaults`, `voidVaults`,
-`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0 -- and the tip
-snapshot's `supplyCents` / `collateralZat` must equal the `Totals` they were copied from. Every signer set's
+`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0, `openDebtCents` the
+`mintedCents` of the `ACTIVE` and `CLAIMING` vaults (HALT-2's denominator, 2026-10-28), with `supplyCents <=
+openDebtCents` checked too -- and the tip snapshot's `supplyCents` / `collateralZat` / `openDebtCents` must equal
+the `Totals` they were copied from. Every signer set's
 `lockedValue` in the vault set-state database is re-derived the same way, as the sum of its unspent V outputs
 (`sets`). `stored` is the `Totals` record, `records` the re-derived one; `mismatches` has one line per
 disagreement and is empty when `ok`. The command writes nothing, but a mismatch marks the index unhealthy, with
@@ -577,8 +579,8 @@ Result of `yed_verifyindex`:
   "ok": true,
   "tokens": 4,
   "vaults": 5,
-  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
-  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0, "openDebtCents": 1500000 },
+  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0, "openDebtCents": 1500000 },
   "sets": [ { "setid": "4c1d9b2e7a6f5e8d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d", "lockedValueZat": 62500000000, "recordsZat": 62500000000 } ],
   "mismatches": [],
   "healthy": true,

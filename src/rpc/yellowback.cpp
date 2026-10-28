@@ -928,6 +928,7 @@ static UniValue TotalsToJSON(const Totals& t)
     o.pushKV("closedVaults", (int64_t)t.closedVaults);
     o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
     o.pushKV("unbackedCents", t.unbackedCents);
+    o.pushKV("openDebtCents", t.openDebtCents);   // HALT-2's denominator (owner 2026-10-28)
     return o;
 }
 
@@ -939,7 +940,8 @@ UniValue yed_verifyindex(const UniValue& params, bool fHelp)
             "\nThe invariant audit the node runs at startup (cf. DigiByte v9.26.7 SupplyVerification): re-derives the Totals\n"
             "record from the stored Tokens and Vaults records (supplyCents = the sum of every unspent YED token; collateralZat\n"
             "and activeVaults from the ACTIVE vaults, collateralZat also from the CLAIMING ones, IT-6; each status count from\n"
-            "its records), checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
+            "its records; openDebtCents from the ACTIVE and CLAIMING vaults' mintedCents, and supplyCents <= openDebtCents, HALT-2),\n"
+            "checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
             "V outputs in the vault set-state database. Reads every Tokens and Vaults record once. Writes nothing; a mismatch\n"
             "marks the index unhealthy (the node then stops at the next block): restart with -reindex-yellowback (Yellowback\n"
             "totals) or -reindex (a set's lockedValue). Answers on an unhealthy index too.\n"

@@ -1705,6 +1705,7 @@
         "claimedVaults": 0,
         "closedVaults": 2,
         "collateralZat": 62500000000,
+        "openDebtCents": 1500000,
         "supplyCents": 1500000,
         "unbackedCents": 0,
         "voidVaults": 0
@@ -1722,6 +1723,7 @@
         "claimedVaults": 0,
         "closedVaults": 2,
         "collateralZat": 62500000000,
+        "openDebtCents": 1500000,
         "supplyCents": 1500000,
         "unbackedCents": 0,
         "voidVaults": 0
