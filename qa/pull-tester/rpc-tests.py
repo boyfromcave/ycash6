@@ -66,6 +66,11 @@ BASE_SCRIPTS= [
     'yellowback_mint_armed.py',
     'yellowback_wallet_restore.py',
     'yellowback_claim.py',
+    # Reorgs across the vault activation block and across a mint with a dependent transfer, restarts
+    # against the saved totals, the owner-redeem / claim height boundaries (DigiByte v9.26.7 review).
+    'yellowback_activation_reorg.py',
+    'yellowback_reorg_restart.py',
+    'yellowback_redeem_boundary.py',
     'yellowback_fee.py',
     'yellowback_fees.py',
     'yellowback_fees_reaccept.py',
