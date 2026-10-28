@@ -261,7 +261,13 @@ public:
      */
     bool SyncToChain();
 
-    /** Make every later hook return at once (shutdown). */
+    /**
+     * Shutdown: every later hook returns at once without touching the state. Fail closed: a
+     * stopped index can no longer evaluate a block, so CheckConnect reports a failure (never an
+     * empty pass) and CommitConnect / UndoDisconnect return false. Shutdown() stops the miner,
+     * the network and the YED wallet thread first, so no block reaches a stopped index
+     * (cf. DigiByte v9.26.7 a6a0c1690f).
+     */
     void Stop();
     /** Commit anything pending and fsync. */
     void Flush(bool fSync);
@@ -452,7 +458,7 @@ private:
     std::unique_ptr<YellowbackDB> db;
     bool healthy;
     std::string unhealthyReason;
-    bool stopped;
+    std::atomic<bool> stopped;   //!< read without cs_yellowback by the notifier hooks and the YED wallet thread
     bool rebuilt;
 
     MinerConfig miner;

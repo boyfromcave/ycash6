@@ -210,14 +210,21 @@ public:
     size_t PendingCompletions() const;
     /** The startup sweep and the completion thread's idle work: set by the RPC layer; runs under no lock of ours. */
     std::function<void()> onIdle;
-    /** Stop the completion thread (idempotent; the destructor does the same). */
+    /** Stop and join the completion thread (idempotent; the destructor does the same). */
     void StopThread();
+    /**
+     * Shutdown (after the index is unregistered and stopped): join the completion thread and clear
+     * the hooks Attach set on the index, so nothing can call into this object once it is deleted.
+     */
+    void Detach();
     ~YellowbackWallet();
 
 private:
     /** F-1: erase a transaction CommitTransaction recorded but the mempool refused (never mined, never relayed). */
     void RemoveOrphan(const uint256& txid);
     void CompletionLoop();
+    /** The completion thread's exit test: StopThread, a requested shutdown, or a stopped index. */
+    bool Stopping() const;
     void StartupSweep();
     void LoadCarriers();
     bool SaveCarriers() const;

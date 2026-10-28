@@ -668,7 +668,10 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
         BOOST_CHECK_EQUAL(index2.GetTip()->blockHash.ToString(), n1.hash.ToString());
     }
 
-    // Stop(): later deliveries return at once and change nothing (D2).
+    // Stop(): later deliveries return at once and change nothing (D2), and fail closed: a stopped
+    // index reports a failure for every block (never an empty pass, which would accept the block
+    // without the module check), under fJustCheck (TestBlockValidity) as well; the commit and
+    // the undo refuse (cf. DigiByte v9.26.7 a6a0c1690f).
     YellowbackIndex index3(params, pathTemp / "yellowback-test3", 1 << 20, true);
     BOOST_CHECK(index3.SyncToChain());
     index3.Stop();
@@ -676,9 +679,21 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     index3.testBeforeApply = [] { throw std::runtime_error("must not run"); };
     {
         LOCK(cs_main);
-        BOOST_CHECK_NO_THROW(index3.CheckConnect(n1.block, n1.idx.get(), false));
+        for (bool fJustCheck : { false, true }) {
+            YellowbackIndex::ConnectCheck stoppedCheck;
+            BOOST_CHECK_NO_THROW(stoppedCheck = index3.CheckConnect(n1.block, n1.idx.get(), fJustCheck));
+            BOOST_CHECK(stoppedCheck.failure.has_value());
+            BOOST_CHECK(!stoppedCheck.invalid.has_value());
+            if (stoppedCheck.failure.has_value()) BOOST_CHECK(stoppedCheck.failure->find("stopped") != std::string::npos);
+        }
+        BOOST_CHECK(!index3.CommitConnect(n1.block, n1.idx.get()));
+        BOOST_CHECK(!index3.UndoDisconnect(n1.idx.get()));
     }
     BOOST_CHECK(index3.IsHealthy());
+    {
+        LOCK(index3.cs_yellowback);
+        BOOST_CHECK(!index3.GetTip().has_value());   // nothing was applied
+    }
 
     // A disconnect below startHeight is ignored.
     YellowbackIndex index4(params, pathTemp / "yellowback-test4", 1 << 20, true);
