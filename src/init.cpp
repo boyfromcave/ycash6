@@ -103,8 +103,19 @@ static CZMQNotificationInterface* pzmqNotificationInterface = NULL;
 // accessing block files don't count towards the fd_set size limit
 // anyway.
 #define MIN_CORE_FILEDESCRIPTORS 0
+#define INSIGHT_DB_FILEDESCRIPTORS 0
 #else
-#define MIN_CORE_FILEDESCRIPTORS 150
+// The stock 150 reserves the block index and coins LevelDB instances (64 open files each, dbwrapper.cpp
+// max_open_files) and the block files. The vault upgrade adds two more instances at the same 64 files each,
+// <datadir>/vaults (vault/db.cpp, every node) and <datadir>/yellowback (yellowback/db.cpp, where YED is live),
+// reserved here before the connections are assigned so a low limit cannot starve them at runtime (an index
+// storage failure stops the node, U-21; cf. DigiByte v9.26.6 test/functional/feature_file_descriptors.py).
+#define VAULT_DB_FILEDESCRIPTORS 64
+#define YELLOWBACK_DB_FILEDESCRIPTORS 64
+#define MIN_CORE_FILEDESCRIPTORS (150 + VAULT_DB_FILEDESCRIPTORS + YELLOWBACK_DB_FILEDESCRIPTORS)
+// The 6.20.0 line keeps the insight explorer index in a LevelDB of its own (<datadir>/blocks/insight-index) with a
+// 256-file table cache (txdb.cpp InsightExplorerDBOptions); reserved on top when -insightexplorer is set.
+#define INSIGHT_DB_FILEDESCRIPTORS 256
 #endif
 
 /** Used to pass flags to the Bind() function */
@@ -1188,11 +1199,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     nMaxConnections = std::max(nUserMaxConnections, 0);
 
     // Trim requested connection counts, to fit into system limitations
-    nMaxConnections = std::max(std::min(nMaxConnections, FD_SETSIZE - nBind - MIN_CORE_FILEDESCRIPTORS), 0);
-    int nFD = RaiseFileDescriptorLimit(nMaxConnections + MIN_CORE_FILEDESCRIPTORS);
-    if (nFD < MIN_CORE_FILEDESCRIPTORS)
-        return InitError(_("Not enough file descriptors available."));
-    nMaxConnections = std::min(nFD - MIN_CORE_FILEDESCRIPTORS, nMaxConnections);
+    const int nCoreFD = MIN_CORE_FILEDESCRIPTORS + (fExperimentalInsightExplorer ? INSIGHT_DB_FILEDESCRIPTORS : 0);
+    nMaxConnections = std::max(std::min(nMaxConnections, FD_SETSIZE - nBind - nCoreFD), 0);
+    int nFD = RaiseFileDescriptorLimit(nMaxConnections + nCoreFD);
+    if (nFD < nCoreFD)
+        return InitError(strprintf("%s (%d needed, %d available; macOS defaults to 256 open files per process: raise the limit with `ulimit -n`)",
+                                   _("Not enough file descriptors available."), nCoreFD, nFD));
+    nMaxConnections = std::min(nFD - nCoreFD, nMaxConnections);
 
     if (nMaxConnections < nUserMaxConnections)
         InitWarning(strprintf(_("Reducing -maxconnections from %d to %d, because of system limitations."), nUserMaxConnections, nMaxConnections));
@@ -2257,8 +2270,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     {
         LOCK(cs_main);
         std::string vaultErr;
-        if (!fReindex && !fReindexChainState && !vault::Reconcile(chainparams, vaultErr))
+        bool vaultInterrupted = false;
+        if (!fReindex && !fReindexChainState && !vault::Reconcile(chainparams, vaultErr, ShutdownRequested, &vaultInterrupted)) {
+            if (vaultInterrupted) {
+                LogPrintf("Shutdown requested. Exiting.\n");
+                return false;
+            }
             return InitError(vaultErr + ". " + _("Restart with -reindex to rebuild the vault database."));
+        }
+        // The invariant audit (cf. DigiByte v9.26.7 19c8b1c272): every set's lockedValue against its unspent V outputs.
+        std::vector<std::string> vaultMismatches = vault::AuditLockedValue(*vault::g_vaultdb);
+        for (const std::string& m : vaultMismatches) LogPrintf("vault: invariant audit: %s\n", m);
+        if (!vaultMismatches.empty()) {
+            return InitError(strprintf("vault: the set-state database fails its invariant audit (%s). ", vaultMismatches.front()) +
+                             _("Restart with -reindex to rebuild the vault database."));
+        }
     }
 
     // ********************************************************* Step 8: load wallet
@@ -2370,7 +2396,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                       cfg.payoutKey.has_value() ? yellowbackKeyIO.EncodeDestination(CTxDestination(cfg.payoutKey.value())) : std::string("none"));
         }
         // The index is consensus state (U-21): a node that cannot bring it to the tip does not start.
-        if (!yellowback::g_yellowback->SyncToChain()) {
+        if (!yellowback::g_yellowback->SyncToChain(ShutdownRequested)) {
+            if (yellowback::g_yellowback->WasInterrupted()) {
+                LogPrintf("Shutdown requested. Exiting.\n");
+                return false;
+            }
             return InitError(strprintf(_("The Yellowback index could not be brought to the tip: %s. Restart with -reindex-yellowback."), yellowback::g_yellowback->UnhealthyReason()));
         }
         RegisterValidationInterface(yellowback::g_yellowback);

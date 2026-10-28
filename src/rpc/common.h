@@ -269,6 +269,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_unlockcoin",              {{s, o, s}, {}} },
     { "yed_validateaddress",         {{s}, {}} },
     { "yed_validaterawtransaction",  {{s}, {}} },
+    { "yed_verifyindex",             {{}, {}} },
     { "yed_withdrawbond",            {{o}, {s}} },
     // end yellowback
     // the vault primitive (doc/vault-rpc.md)

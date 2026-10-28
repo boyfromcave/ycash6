@@ -63,6 +63,11 @@
  *
  *   Z                     AttestorSetRecord (attestorSetId's SET_CREATE parameters; hashed)
  *
+ * The rules-version stamp (cf. DigiByte v9.26.7 src/digidollar/digidollar_state.h rules_version) adds
+ *
+ *   R                     RulesVersionRecord (RULES_VERSION the stored heights were judged under; node-local,
+ *                         written by SyncToChain, never by a block, NOT part of the state hash)
+ *
  * and Attestors becomes the module's mirror of attestorSetId's members, keyed by the
  * seq the module assigns at each SET_JOIN (the bundle format is unchanged).
  *
@@ -82,6 +87,16 @@
 namespace yellowback {
 
 static const uint32_t SCHEMA_VERSION = 14;  //!< 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+
+/**
+ * The rules version (cf. DigiByte v9.26.7 src/digidollar/digidollar_state.h rules_version): bumped by a release
+ * that changes how already-indexed heights are judged without changing any record's bytes (a rule fix whose
+ * records keep their layout), so SyncToChain wipes and rebuilds an index stamped with another value. A record
+ * layout change bumps SCHEMA_VERSION instead. The stamp lives under its own key (R), outside the state hash,
+ * so the cross-node state hash and the Python model are unchanged by it. An index without the key was written
+ * before the stamp existed and reads as version 1, the rules this stamp was introduced with.
+ */
+static const uint32_t RULES_VERSION = 1;
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -755,6 +770,18 @@ struct ParamsRecord
     }
 };
 
+/** RulesVersion (R): the RULES_VERSION of the binary that last brought the index to the chain. Not hashed. */
+struct RulesVersionRecord
+{
+    uint32_t rulesVersion;
+
+    RulesVersionRecord() : rulesVersion(RULES_VERSION) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) { READWRITE(rulesVersion); }
+};
+
 /** One undo entry: the value a key had before the block (or none). Restoring every entry restores the state byte for byte. */
 struct UndoEntry
 {
@@ -810,6 +837,7 @@ std::string BundleLog(uint32_t height);
 std::string Notice(const COutPoint& out);
 std::string Intent(const COutPoint& out);
 std::string AttestorSet();
+std::string RulesVersion();
 extern const char PREFIX_ATTESTOR;
 extern const char PREFIX_BUNDLELOG;
 extern const char PREFIX_NOTICE;
@@ -867,6 +895,8 @@ public:
     std::optional<NoticeRecord> GetNotice(const COutPoint& out) const;
     std::optional<IntentRecord> GetIntent(const COutPoint& out) const;
     std::optional<AttestorSetRecord> GetAttestorSet() const;
+    /** The stored rules version; 1 when the key is absent (an index written before the stamp). */
+    uint32_t GetRulesVersion() const;
     /** Every Attestors record in seq order. */
     std::vector<std::pair<uint16_t, AttestorRecord>> Attestors() const;
     /** Every Intents record in outpoint key order (CAN-3: a cancel moves the residuals its position holds). */

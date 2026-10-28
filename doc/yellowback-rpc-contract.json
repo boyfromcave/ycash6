@@ -1635,6 +1635,43 @@
       "yedOut": 0
     }
   },
+  "yed_verifyindex": {
+    "args": "",
+    "returns": {
+      "healthy": true,
+      "height": 331,
+      "mismatches": [],
+      "ok": true,
+      "records": {
+        "activeVaults": 3,
+        "claimedVaults": 0,
+        "closedVaults": 2,
+        "collateralZat": 62500000000,
+        "supplyCents": 1500000,
+        "unbackedCents": 0,
+        "voidVaults": 0
+      },
+      "rulesVersion": 1,
+      "sets": [
+        {
+          "lockedValueZat": 62500000000,
+          "recordsZat": 62500000000,
+          "setid": "4c1d9b2e7a6f5e8d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d"
+        }
+      ],
+      "stored": {
+        "activeVaults": 3,
+        "claimedVaults": 0,
+        "closedVaults": 2,
+        "collateralZat": 62500000000,
+        "supplyCents": 1500000,
+        "unbackedCents": 0,
+        "voidVaults": 0
+      },
+      "tokens": 4,
+      "vaults": 5
+    }
+  },
   "yed_withdrawbond": {
     "args": "<seq> [to]",
     "returns": {

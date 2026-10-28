@@ -133,6 +133,7 @@ std::string BundleLog(uint32_t height) { return std::string(1, PREFIX_BUNDLELOG)
 std::string Notice(const COutPoint& out) { return OutPointKey(PREFIX_NOTICE, out); }
 std::string Intent(const COutPoint& out) { return OutPointKey('I', out); }
 std::string AttestorSet() { return "Z"; }
+std::string RulesVersion() { return "R"; }
 
 uint16_t SeqOf(const std::string& key)
 {
@@ -207,6 +208,7 @@ YB_RECORD(BundleLogRecord)
 YB_RECORD(NoticeRecord)
 YB_RECORD(IntentRecord)
 YB_RECORD(AttestorSetRecord)
+YB_RECORD(RulesVersionRecord)
 #undef YB_RECORD
 
 const char* VaultStatusName(VaultStatus s)
@@ -355,6 +357,13 @@ Totals State::GetTotals() const
     Totals t;
     if (!Get(keys::Totals(), t)) return Totals();
     return t;
+}
+
+uint32_t State::GetRulesVersion() const
+{
+    RulesVersionRecord r;
+    if (!Get(keys::RulesVersion(), r)) return 1;
+    return r.rulesVersion;
 }
 
 std::optional<ParamsRecord> State::GetParamsRecord() const
