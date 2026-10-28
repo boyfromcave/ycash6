@@ -199,7 +199,10 @@ env:
   # adds the remaining W3-Y-3 and W3-N-4 plan text the spec copy now carries.
   # d535e16 (#17) states the early-redeem fee as the node charges it (a share of the debt at pMint, pool payee
   # only) in the in-term plan the spec copy is generated from, and marks rpcversion 6 as that plan's revision-1 contract.
-  YB_WORKSPACE_COMMIT: d535e16626c06c80de7c05b5fbae760e7351d195
+  # 87576cc (boyfromcave/yellowback#19, not yet on upgrade/vault) amends HALT-2 to read open debt (upgrade plan
+  # section 15.10, in-term IT-6), which the spec copy and the contract's new fields come from; move this to #19's
+  # squash-merge commit when #19 lands.
+  YB_WORKSPACE_COMMIT: 87576cc4442cc2eedf2c0f8816d0140543c11487
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
