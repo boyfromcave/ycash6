@@ -285,6 +285,15 @@ refused beyond 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` that would d
 H − 4,095 finds no undo record and stops the node, and a plain restart stops again: restart with
 `-reindex`, which rebuilds everything from the block files (and forgets the invalidation).
 
+**A restart while holding an `invalidateblock` across an activation keeps the branch on this line.**
+6.20.0's `RewindBlockIndex` keeps every block-index entry below `BLOCK_VALID_CONSENSUS`, which
+includes every invalidated one (upstream Ycash `1770fce16`), so a node restarted after
+`invalidateblock` of a block below a network upgrade's activation height (the vault upgrade's or any
+other) still holds the whole branch with its marks, and `reconsiderblock` brings it back. The v4.5.0
+line (`ycash-dd`) does not: its stock `RewindBlockIndex` keeps only the activation block, with a
+dangling parent, and the start aborts under `-checkblockindex`. `qa/rpc-tests/vault_activation_restart.py`
+pins both behaviours.
+
 ## How your YED is protected from being spent as plain YEC
 
 A YED output is an ordinary 10,000-zatoshi P2PKH output; the dollars it carries live in the
