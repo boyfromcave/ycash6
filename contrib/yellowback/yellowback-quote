@@ -223,26 +223,34 @@ class QuoteAgent:
         return "published"
 
 
-class _Stop(Exception):
-    pass
+class _Stop(BaseException):
+    """Raised by the SIGTERM / SIGINT handler. A BaseException, not an Exception: a poll runs inside
+    `except Exception` blocks (the yed_setquote call, every source sample), and a stop raised there was
+    swallowed as one more failure, so the agent ignored SIGTERM and was SIGKILLed (exit -9)."""
 
 
 def run_loop(agent, poll_seconds, sleep=time.sleep):
+    stopping = []
+
     def _stop(signum, frame):
+        stopping.append(signum)      # also seen by the loop, should anything still catch the exception
         raise _Stop()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     LOG.info("yellowback-quote running: poll every %d s, clear after %d failed polls%s",
              poll_seconds, agent.fail_polls, " (mock price %s)" % agent.feed.mock_file if agent.feed.mock_file else "")
     try:
-        while True:
+        while not stopping:
             started = time.time()
             agent.poll()
+            if stopping:
+                break
             delay = poll_seconds - (time.time() - started)
             if delay > 0:
                 sleep(delay)
     except _Stop:
-        LOG.info("stopping")
+        pass
+    LOG.info("stopping")
     return EXIT_OK
 
 
