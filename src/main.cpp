@@ -6937,10 +6937,6 @@ bool static LoadBlockIndexDB(const CChainParams& chainparams)
                 pindex->nChainOrchardValue = 0;
             }
         }
-        // A descendant of a failed entry is failed: RewindBlockIndex erases the
-        // failed branch whole, never a parent under a kept (e.g. headers-only) child.
-        if (pindex->pprev && (pindex->pprev->nStatus & BLOCK_FAILED_MASK))
-            pindex->nStatus |= BLOCK_FAILED_CHILD;
         // Construct in-memory chain of branch IDs.
         // Relies on invariant: a block that does not activate a network upgrade
         // will always be valid under the same consensus rules as its parent.
@@ -7400,8 +7396,7 @@ bool RewindBlockIndex(const CChainParams& chainparams, bool& clearWitnessCaches)
     // nCachedBranchId is not applicable to them (see chain.h). Treat them as
     // retained — erasing them forces redundant re-download of headers and
     // block data already on disk after an interrupted sync. A failed entry is
-    // erased, so that it is judged again (LoadBlockIndexDB marks its
-    // descendants failed too, so the whole failed branch goes with it).
+    // erased, so that it is judged again (and every descendant with it, below).
     auto sufficientlyValidated = [&chainparams](const CBlockIndex* pindex) {
         if (!pindex->IsValid(BLOCK_VALID_CONSENSUS))
             return !(pindex->nStatus & BLOCK_FAILED_MASK);   // keep unconnected, erase failed (re-evaluate)
@@ -7494,18 +7489,29 @@ bool RewindBlockIndex(const CChainParams& chainparams, bool& clearWitnessCaches)
     // Collect blocks to be removed (blocks in mapBlockIndex must be at least BLOCK_VALID_TREE).
     // We do this after actual disconnecting, otherwise we'll end up writing the lack of data
     // to disk before writing the chainstate, resulting in a failure to continue if interrupted.
+    // Parents are visited before children (as in LoadBlockIndexDB), so the erase
+    // set is closed under descendants: an entry built on an erased one is erased
+    // with it, never kept under a deleted pprev (e.g. a never-connected child of a
+    // block connected under stale rules, or of a failed one).
+    std::vector<std::pair<int, CBlockIndex*> > vSortedByHeight;
+    vSortedByHeight.reserve(mapBlockIndex.size());
+    for (const auto& item : mapBlockIndex)
+        vSortedByHeight.push_back(std::make_pair(item.second->nHeight, item.second));
+    std::sort(vSortedByHeight.begin(), vSortedByHeight.end());
+    std::set<const CBlockIndex*> setErase;
     std::vector<const CBlockIndex*> vBlocks;
-    for (BlockMap::iterator it = mapBlockIndex.begin(); it != mapBlockIndex.end(); it++) {
-        CBlockIndex* pindexIter = it->second;
+    for (const auto& item : vSortedByHeight) {
+        CBlockIndex* pindexIter = item.second;
 
         // Note: If we encounter an insufficiently validated block that
         // is on chainActive, it must be because we are a pruning node, and
         // this block or some successor doesn't HAVE_DATA, so we were unable to
         // rewind all the way.  Blocks remaining on chainActive at this point
         // must not have their validity reduced.
-        if (!sufficientlyValidated(pindexIter) && !chainActive.Contains(pindexIter)) {
+        if ((!sufficientlyValidated(pindexIter) || setErase.count(pindexIter->pprev)) && !chainActive.Contains(pindexIter)) {
             // Add to the list of blocks to remove
             vBlocks.push_back(pindexIter);
+            setErase.insert(pindexIter);
             if (pindexIter == pindexBestInvalid) {
                 // Reset invalid block marker if it was pointing to this block
                 pindexBestInvalid = NULL;
