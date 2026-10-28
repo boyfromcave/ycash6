@@ -1493,7 +1493,11 @@ BOOST_AUTO_TEST_CASE(invariant_audit_catches_a_corrupt_total)
     MemoryStateView copy;
     {
         LOCK(live.index->cs_yellowback);
-        live.index->View().Iterate("", [&](const std::string& k, const std::string& v) { copy.Write(k, v); return true; });
+        // table by table: every key starts with its table's upper-case letter (view.h), and an empty prefix would reach
+        // CDBWrapper::Seek with an empty key (&ssKey[0] on an empty stream, UBSan)
+        for (char prefix = 'A'; prefix <= 'Z'; prefix++) {
+            live.index->View().Iterate(std::string(1, prefix), [&](const std::string& k, const std::string& v) { copy.Write(k, v); return true; });
+        }
     }
     BOOST_CHECK(AuditIndexRecords(copy).ok);
     Totals t = State(copy).GetTotals();
