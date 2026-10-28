@@ -121,7 +121,7 @@ env:
   # yellowback_attest_rejoin joined on 2026-10-11 (the seats review B1 probe; ported from ycash-dd 423019c40).
   # yellowback_attest_live joined on 2026-10-11 (attestations as liveness only from BUNDLE-1-verified bundles; ported from ycash-dd 8a1624527).
   # vault_dos and vault_pq_relay joined on 2026-10-12 (remedial audit 07/F-1 mempool DoS carve-out, 07/F-6 PQ orphan size).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
   SANITIZER_SCRIPTS: yellowback_index
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
@@ -460,13 +460,16 @@ jobs:
           echo "shard $SHARD/$OF of $SUITE: ${sel[*]}"
           qa/pull-tester/rpc-tests.py --fail-on-skip -j4 "${flags[@]}" --nocleanup "${sel[@]}"
       - name: Upload node logs on failure
+        # warn, not ignore, on every failure-log upload: a path that matches nothing (a moved TMPDIR,
+        # a renamed node directory) shows as a warning on the run instead of losing the logs silently
+        # (cf. DigiByte v9.26.7 b41399e611).
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-test-logs-${{ matrix.suite }}-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   # Formatting and workflow lint (push tier). rustfmt over the node's own Rust (src/rust) with the
   # toolchain the build pins (rust-toolchain.toml); actionlint over every workflow (.github/actionlint.yaml). Clippy is not
@@ -1525,7 +1528,7 @@ jobs:
         with:
           name: yellowback-nightly-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:
@@ -1598,7 +1601,7 @@ jobs:
         with:
           name: yellowback-lockorder-pr-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   sanitizers-pr:
     name: sanitizers (PR, overlay unit suites)
@@ -1724,7 +1727,7 @@ jobs:
         with:
           name: yellowback-lockorder-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:
@@ -1810,7 +1813,7 @@ jobs:
         with:
           name: yellowback-sanitizer-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:

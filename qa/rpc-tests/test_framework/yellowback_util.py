@@ -1260,7 +1260,7 @@ def _outpoint(o):
 def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None, expiry=None,
                           to=None, ref_height=None, extra_outputs=None, owner_wif=None,
                           branch_id=SIGNING_BRANCH_ID, selector=None, carrier=None, carrier_wif=None,
-                          charge_extra=False, extra_vin=None, value_adjust=0, owner_sk=None):
+                          charge_extra=False, extra_vin=None, value_adjust=0, owner_sk=None, lock_time=None):
     """A vault spend assembled here (section 3.4/3.5), the adversarial builder for every
     "without a burn" case (K18) and, with ``payload=encode_redeem(...)`` and ``fee=(addr, zat)``,
     the *correct* spends too.
@@ -1285,7 +1285,8 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     its ``CARRIER_VALUE`` joins ``vout[0]``; with ``charge_extra`` the values of
     ``extra_outputs`` (the attestor fee, RED-5's residual) come out of ``vout[0]`` too.
     Alternatively ``extra_vin`` (``[(txid, n, sequence)]``) appends unsigned inputs after the
-    burns and ``value_adjust`` is added to ``vout[0]`` verbatim.  Returns the hex."""
+    burns and ``value_adjust`` is added to ``vout[0]`` verbatim.  ``lock_time`` overrides
+    ``nLockTime`` (the CLTV boundary cases of yellowback_redeem_boundary.py).  Returns the hex."""
     assert path in ('owner', 'claim')
     owner = vault_owner(vault)
     owner_height, app_height = vault_owner_height(vault), vault_app_height(vault)
@@ -1327,7 +1328,8 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
             if ref_height is None:
                 ref_height = node.getblockcount() - REF_LAG
         expiry = int(ref_height) + REF_WINDOW
-    lock_time = owner_height if path == "owner" else app_height         # IT-1: the V's own CLTVs (both refHeight + 1 since the plan)
+    if lock_time is None:
+        lock_time = owner_height if path == "owner" else app_height     # IT-1: the V's own CLTVs (both refHeight + 1 since the plan)
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
     carrier_vin = None
     if carrier is not None:
