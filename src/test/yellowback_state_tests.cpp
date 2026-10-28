@@ -65,7 +65,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "7a38e41dac6ddeb54cd02f5862a4abf1918309a5323d48b4318742f311c0dc34";   // SCHEMA_VERSION 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "ee6a9f157175b6e084df52f96dc5039e4d411189352542f329971e6dd7bb0c0b";   // SCHEMA_VERSION 15: HALT-2 divides by Totals.openDebtCents (owner 2026-10-28; Snapshot.openDebtCents; build_golden buys the stranded mint4 back with a class C mint at 232-233), 22 rejected blocks; 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -741,15 +741,15 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
             // One rejected block per verdict, in order (audit 03/T-1; test_yellowback_model.golden_rejected is the same list;
-            // the emergency claim of build_golden landed at 300, the Falcon height is 400).
+            // the emergency claim of build_golden landed at 299, the Falcon height is 400).
             static const std::vector<std::pair<int, std::string>> expected = {
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
                 { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
-                { 300, "red5-residual" }, { 300, "red5-residual" }, { 300, "red5-claimant-short" },
-                { 301, "intent-cancel-no-vault" }, { 301, "intent-cancel-no-refund" }, { 301, "intent-cancel-cosign" },
-                { 309, "intent-cancel-residual" }, { 311, "intent-residual-held" },
-                { 341, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
+                { 299, "red5-residual" }, { 299, "red5-residual" }, { 299, "red5-claimant-short" },
+                { 300, "intent-cancel-no-vault" }, { 300, "intent-cancel-no-refund" }, { 300, "intent-cancel-cosign" },
+                { 308, "intent-cancel-residual" }, { 310, "intent-residual-held" },
+                { 340, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
             BOOST_REQUIRE((size_t)invalidBlocks < expected.size());
             BOOST_CHECK_EQUAL(height, expected[invalidBlocks].first);
@@ -778,6 +778,8 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
     BOOST_CHECK_EQUAL((int)t.closedVaults, doc["totals"]["closedVaults"].get_int());
     BOOST_CHECK_EQUAL((int)t.claimedVaults, doc["totals"]["claimedVaults"].get_int());
     BOOST_CHECK_EQUAL(t.unbackedCents, doc["totals"]["unbackedCents"].get_int64());
+    BOOST_CHECK_EQUAL(t.openDebtCents, doc["totals"]["openDebtCents"].get_int64());     // HALT-2's denominator (SCHEMA_VERSION 15)
+    BOOST_CHECK(!OpenDebtInvariantViolation(view).has_value());
     // FEE-1': every vault record the vector leaves -- the attestor cancel's re-created one included -- carries its mint price
     int vaults = 0;
     view.Iterate("V", [&](const std::string&, const std::string& raw) {
