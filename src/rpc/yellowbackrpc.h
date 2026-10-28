@@ -57,6 +57,12 @@ struct ClaimEstimate
 
 ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, const VaultRecord& v, int tipHeight);
 
+/**
+ * `spendPending` and `spendTxid` (yed_getvault, yed_listpositions): whether a mempool transaction already spends the
+ * vault outpoint, and its txid (present only when pending). Returns the spender. mempool.cs held.
+ */
+std::optional<uint256> PushSpendPending(UniValue& o, const COutPoint& vault);
+
 } // namespace rpc
 } // namespace yellowback
 

@@ -274,14 +274,39 @@ bool YellowbackWallet::SaveCarriers() const
     return WriteFileSynced(CarriersFile(), std::vector<unsigned char>(ss.begin(), ss.end()));
 }
 
-void YellowbackWallet::RecordCarrier(const CarrierRecord& c)
+bool YellowbackWallet::RecordCarrier(const CarrierRecord& c)
 {
     LOCK(wallet->cs_wallet);
+    bool updated = false;
     for (CarrierRecord& e : carriers) {
-        if (e.outpoint == c.outpoint) { e = c; SaveCarriers(); return; }
+        if (e.outpoint == c.outpoint) { e = c; updated = true; break; }
     }
-    carriers.push_back(c);
-    if (!SaveCarriers()) LogPrintf("yellowback: WARNING: cannot write %s; carrier %s would be lost on restart\n", CarriersFile().string(), c.outpoint.ToString());
+    if (!updated) carriers.push_back(c);
+    const bool saved = SaveCarriers();
+    if (!saved) LogPrintf("yellowback: WARNING: cannot write %s; carrier %s would be lost on restart\n", CarriersFile().string(), c.outpoint.ToString());
+    return saved;
+}
+
+bool YellowbackWallet::CommitWithCarrierRecord(const CarrierRecord& c, const std::function<bool()>& commit, std::string& error)
+{
+    if (!RecordCarrier(c)) {
+        SpendCarrier(c.outpoint);
+        error = strprintf("carrier-record-failed: cannot write %s, so the carrier could not be swept back after a restart; nothing was sent",
+                          CarriersFile().string());
+        return false;
+    }
+    bool ok = false;
+    try {
+        ok = commit();
+    } catch (...) {
+        SpendCarrier(c.outpoint);   // nothing was committed: forget the record again
+        throw;
+    }
+    if (!ok) {
+        SpendCarrier(c.outpoint);
+        error = "transaction commit failed: the carrier was not committed";
+    }
+    return ok;
 }
 
 void YellowbackWallet::SpendCarrier(const COutPoint& out)
@@ -410,6 +435,22 @@ void YellowbackWallet::StopThread()
     if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) thread.join();
 }
 
+bool YellowbackWallet::Stopping() const
+{
+    return stopThread || ShutdownRequested() || (index && index->IsStopped());
+}
+
+void YellowbackWallet::Detach()
+{
+    StopThread();
+    onIdle = nullptr;
+    if (index) {
+        LOCK(index->cs_yellowback);
+        index->onSyncTransaction = nullptr;
+        index->onReconcile = nullptr;
+    }
+}
+
 void YellowbackWallet::CompletionLoop()
 {
     RenameThread("yellowback-wallet");
@@ -419,7 +460,7 @@ void YellowbackWallet::CompletionLoop()
             pendingCv.wait_for(lk, std::chrono::milliseconds(1000), [this]() { return wake || stopThread.load(); });
             wake = false;
         }
-        if (stopThread || ShutdownRequested() || index->IsStopped()) break;
+        if (Stopping()) break;
         // Snapshot the pending set, run each completion outside pendingMutex (a completion takes
         // cs_main, cs_wallet and cs_yellowback itself), then drop the finished ones.
         std::vector<std::pair<COutPoint, std::function<bool()>>> work;
@@ -442,8 +483,11 @@ void YellowbackWallet::CompletionLoop()
                 std::lock_guard<std::mutex> g(pendingMutex);
                 pending.erase(kv.first);
             }
-            if (stopThread) return;
+            // Shutdown is checked between completions too: a completion takes cs_main and the
+            // wallet, which Shutdown() is about to tear down (cf. DigiByte v9.26.7 c9d6abdf26).
+            if (Stopping()) return;
         }
+        if (Stopping()) return;
         if (onIdle) {
             try {
                 onIdle();
@@ -509,6 +553,35 @@ int64_t YellowbackWallet::ConfirmedCents() const
     int64_t sum = 0;
     for (const YedCoin& c : AllCoins()) sum += c.token.cents;
     return sum;
+}
+
+int64_t YellowbackWallet::SpendableCents() const
+{
+    int64_t sum = 0;
+    for (const YedCoin& c : SpendableCoins()) sum += c.token.cents;
+    return sum;
+}
+
+std::string CarrierOutcome(bool spenderLive, bool spenderHasPayload, int tipHeight, uint32_t carrierExpiryHeight)
+{
+    if (spenderLive) return spenderHasPayload ? "completed" : "swept";
+    if (carrierExpiryHeight != 0 && (int64_t)tipHeight > (int64_t)carrierExpiryHeight) return "lapsed";
+    return "pending";
+}
+
+std::string ExpiredRowType(uint8_t payloadType, bool spendsForeignVault)
+{
+    switch ((PayloadType)payloadType) {
+    case PayloadType::MINT: return "mint";
+    case PayloadType::TRANSFER: return "send";
+    case PayloadType::REDEEM: return spendsForeignVault ? "claim" : "redeem";
+    case PayloadType::ATTESTOR_REGISTER: return "register";
+    case PayloadType::CLAIM_NOTICE: return "notice";
+    case PayloadType::EQUIVOCATION: return "equivocation";
+    case PayloadType::ATTESTOR_REVIVE: return "revive";
+    case PayloadType::CANCEL_COSIGN: return "cancel";
+    }
+    return "send";
 }
 
 void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)

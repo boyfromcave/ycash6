@@ -313,7 +313,8 @@ bool YellowbackIndex::SyncToChain(const std::function<bool()>& interrupt)
     for (int h = from; h <= chainTip->nHeight; h++) {
         // Startup progress and cancellation (cf. DigiByte v9.26.7 b544af7fa3). Fail closed: an interrupted replay
         // is never "synced"; each applied block was committed with its tip, so the next start resumes from there.
-        if (interrupt && interrupt()) {
+        // A stopped index (Stop(), shutdown) is an interruption too, as every hook treats it: fail closed.
+        if (stopped || (interrupt && interrupt())) {
             db->Commit(true);
             interrupted = true;
             const std::string reason = strprintf("startup replay interrupted at height %d of %d (shutdown requested); a restart resumes from height %d", h, chainTip->nHeight, h);
@@ -494,7 +495,13 @@ YellowbackIndex::ConnectCheck YellowbackIndex::CheckConnect(const CBlock& block,
     AssertLockHeld(cs_main);
     LOCK(cs_yellowback);
     ConnectCheck out;
-    if (stopped) return out;
+    // Fail closed: a stopped index (shutdown) cannot evaluate the block, and an empty `out` would
+    // be a pass -- a block accepted without the module check. Shutdown() stops every block source
+    // before the index, so this is reached only if that order is broken.
+    if (stopped) {
+        out.failure = "the Yellowback index is stopped (shutdown in progress)";
+        return out;
+    }
     if (!healthy) {
         out.failure = "the Yellowback index is unhealthy (" + unhealthyReason + "); restart with -reindex-yellowback";
         return out;

@@ -288,7 +288,7 @@ public:
      * disk. Wipes and rebuilds when the schema or network differs, an undo
      * record is missing, the chain is below startHeight, or the stored rules version is not
      * RULES_VERSION. Takes cs_main. Logs progress every SYNC_PROGRESS_INTERVAL blocks and polls
-     * `interrupt` (init passes ShutdownRequested) before each block: an interrupted replay leaves the
+     * `interrupt` (init passes ShutdownRequested) and Stop() before each block: an interrupted replay leaves the
      * index unhealthy for the session (never "synced"); every block applied so far was committed
      * with its tip, so the next start resumes from there. Ends with the invariant audit
      * (VerifyIndex). Returns false only when the index ends up unhealthy.
@@ -301,7 +301,13 @@ public:
     /** True for the rest of the session when SyncToChain was interrupted (shutdown requested mid-replay). */
     bool WasInterrupted() const { return interrupted; }
 
-    /** Make every later hook return at once (shutdown). */
+    /**
+     * Shutdown: every later hook returns at once without touching the state. Fail closed: a
+     * stopped index can no longer evaluate a block, so CheckConnect reports a failure (never an
+     * empty pass) and CommitConnect / UndoDisconnect return false. Shutdown() stops the miner,
+     * the network and the YED wallet thread first, so no block reaches a stopped index
+     * (cf. DigiByte v9.26.7 a6a0c1690f).
+     */
     void Stop();
     /** Commit anything pending and fsync. */
     void Flush(bool fSync);
@@ -492,7 +498,7 @@ private:
     std::unique_ptr<YellowbackDB> db;
     bool healthy;
     std::string unhealthyReason;
-    bool stopped;
+    std::atomic<bool> stopped;   //!< read without cs_yellowback by the notifier hooks and the YED wallet thread
     bool rebuilt;
     bool interrupted;
 
