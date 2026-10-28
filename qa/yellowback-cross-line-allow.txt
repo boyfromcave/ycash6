@@ -38,17 +38,17 @@ src/yellowback/params.h 981dc4d1e12aa83788ba68074ccbd24817e57af7a9ef297506cfc739
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).
-src/yellowback/policy.cpp 9860f4b74658f25f03d92b59cc43b3bc9050507a49447d2368e3aecfa1a65f89 e8903c770b03a67923fcac563f827ac0b925c0f992adf3376247c9b8ffccc61a
+src/yellowback/policy.cpp 71796abe703b38f8d92526f87d4ab18e3e4307162f2312a92604609438f1391b 2fc8e15e19675825c378555f4eb4c54cfb62ff530365c7f569e3f14c0a4a62b8
 
 # P-2 fee path. 6.20.0 prices with NetworkFee over a sized probe and reprices
 # until the ZIP-317 conventional fee covers the shape it selects. The builder
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp 23796dc8421254595864f1f29b6e4061ff5ea673beb390a8065e1349e362e816 690f84bb0687f78f9979c2f1f661d188d0416faef418670d653f6e386b4dac96
-src/yellowback/txbuilder.h aa34fc1909efa95c2806eb1e2b8ea1cf27b01bf3afc9e3cbfe01b24aee5c312d 8cb4cf2d19c89525dca1462555f543f6953ed5252f533b84d06fcb681232166f
+src/yellowback/txbuilder.cpp 98db370e0f86980e0546c56a09350317d5ef4daa52658a8e41255ed95237cecc 16b21f6c90c5d5d7cd74056d1c66b5c954c237e234b3eef471e537e863d8f3d6
+src/yellowback/txbuilder.h 981c476d76940d08968bb3b446cb160fad139929660bf673ed61f63fbcf80ac8 85a326a8f00d3ec56534236ead6f956a35f84ca57ebb3d4a3eb3d309d42f67e4
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan drops wtxOrdered before erasing mapWallet.
 # GetDepthInMainChain and IsSpent take an anchor (std::nullopt).
-src/yellowback/wallet.cpp 5f7187d656f94b054448576613f45ae0cdf95a6deaa1912c3f99b25137204af2 9aad598159d05d2a982328deb3307c5df94973a2b7495468219c947db829023d
+src/yellowback/wallet.cpp 808eeca62b8ecdd51357c15147bbe09e925dd775456a82ca0ccdb7c3ec2c3f39 4baf0e8812479378946f41b5c02f55d6ad671b5d5b259568c1ef99d8044c7f5d
