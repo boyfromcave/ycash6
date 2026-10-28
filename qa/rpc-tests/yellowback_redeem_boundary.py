@@ -24,7 +24,8 @@ appHeight exactly. The vault owner is a post-quantum key of the user's wallet (v
     not on its height;
   - the V's CLTV: an owner spend with nLockTime ownerHeight - 1 is refused at every height, one with
     ownerHeight + 1 is non-final in block H + 1 and valid in block H + 2;
-  - tip ownerHeight + 1: yed_redeem's spend (nLockTime ownerHeight) confirms;
+  - tip ownerHeight + 1: still redeemable; tip ownerHeight + 2: yed_redeem's spend (nLockTime ownerHeight)
+    confirms;
   - one state hash on every node and the Python model at the end.
 
 Nodes: 0 user (the owner), 1 stock, 2-4 pools, 5 observer.
@@ -181,17 +182,31 @@ class YellowbackRedeemBoundaryTest(YellowbackTestFramework):
         assert_equal(nodes[2].yed_getvault(v_raw['txid'])['status'], 'CLOSED')
 
 # Rule: RED-1 IT-1
-        print('tip H + 1 = ownerHeight + 1: yed_redeem; nLockTime ownerHeight + 1 is final in block H + 2')
+        print('tip H + 1 = ownerHeight + 1: still redeemable; nLockTime ownerHeight + 1 is final in block H + 2')
         assert_equal(user.yed_estimateredeem(v_rpc['txid'])['canRedeem'], True)
-        redeemed = user.yed_redeem(v_rpc['txid'])
-        assert_equal(redeemed['burnedCents'], CENTS)
-        assert_equal(user.getrawtransaction(redeemed['txid'], 1)['locktime'], h)
-        self.sync_all()
+        # cltv_plus burns v_cltv's token, which the wallet does not know is taken: mine it before yed_redeem
+        # runs, or the wallet's coin selection (any 10000-cent coin) may pick that token and the raw block
+        # then double-spends the redeem out of every mempool (the intermittent ACTIVE seen in CI).
         result, _ = mine_block_raw(pool, [cltv_plus])
         assert result is None, result
         self.sync_all(blocks_only=True)
+        assert_equal(user.getblockcount(), h + 2)
         assert_equal(nodes[2].yed_getvault(v_cltv['txid'])['status'], 'CLOSED')
-        self.mine(POOLS[2])
+        print('tip H + 2: yed_redeem\'s spend (nLockTime ownerHeight) confirms')
+        assert_equal(user.yed_estimateredeem(v_rpc['txid'])['canRedeem'], True)
+        redeemed = user.yed_redeem(v_rpc['txid'])
+        assert_equal(redeemed['burnedCents'], CENTS)
+        raw = user.getrawtransaction(redeemed['txid'], 1)
+        assert_equal(raw['locktime'], h)
+        assert (v_cltv['txid'], 1) not in [(i['txid'], i['vout']) for i in raw['vin']]
+        self.sync_all()
+        for i in (0, 2, 3, 4):
+            assert redeemed['txid'] in nodes[i].getrawmempool(), 'the redeem is not in node %d\'s mempool' % i
+        block = self.mine(POOLS[2])[0]
+        assert redeemed['txid'] in [t if isinstance(t, str) else t['txid'] for t in nodes[POOLS[2]].getblock(block)['tx']], \
+            'the redeem is not in the mined block'
+        self.sync_all(blocks_only=True)
+        assert_equal(nodes[2].getbestblockhash(), block)
         assert_equal(nodes[2].yed_getvault(v_rpc['txid'])['status'], 'CLOSED')
         assert_equal(nodes[2].yed_getvault(v_claim['txid'])['status'], 'ACTIVE')
         assert_banscore_zero([nodes[i] for i in (0, 2, 3, 4)])
