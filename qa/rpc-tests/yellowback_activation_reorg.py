@@ -5,8 +5,8 @@
 
 """
 A reorg across the UPGRADE_VAULT activation block itself, with vault and YED state on the chain
-(cf. DigiByte v9.26.7 test/functional/digidollar_thawday_node_matrix.py and
-digidollar_thawday_reference_reorg.py, which rewind a follower below the activation height):
+(cf. DigiByte v9.26.7's thaw-day node-matrix and reference-reorg functional tests, which rewind a
+follower below the activation height):
 
   - the standard setup activates the vault upgrade at VAULT_ACTIVATION, creates the YED attestor set
     in the block after it, fills the price windows, and the user mints a vault;

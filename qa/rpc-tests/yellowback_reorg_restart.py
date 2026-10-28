@@ -5,8 +5,8 @@
 
 """
 A mint and a YED transfer that spends its token, disconnected and reconnected together, then
-restarts (cf. DigiByte v9.26.7 cfc01a24b4, test/functional/wallet_digidollar_transfer_ancestor_reorg.py,
-and its saved-totals checks, digidollar_rpc_totals_cache_tests.cpp):
+restarts (cf. DigiByte v9.26.7 cfc01a24b4, its transfer-ancestor reorg wallet test, and the
+saved-totals checks of 19c8b1c272):
 
   - mint M (the two-step wallet mint; its block b1), then T = yed_send of part of M's token to the
     observer (its block b2);

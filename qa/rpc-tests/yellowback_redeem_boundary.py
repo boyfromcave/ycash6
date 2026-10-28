@@ -6,7 +6,7 @@
 """
 The owner-redeem and claim height boundaries, RPC against consensus, one block either side
 (cf. DigiByte v9.26.7 243512bfbb, a vault reported redeemable one block early, and
-test/functional/digidollar_redemption_unlock_boundary.py).
+its redemption unlock-boundary functional test).
 
 Since IT-1 (extended) a YED vault's V has ownerHeight = appHeight = refHeight + 1, and MINT-3 takes
 refHeight <= H - 1 for a mint in block H, so the earliest a vault can confirm is its ownerHeight.
