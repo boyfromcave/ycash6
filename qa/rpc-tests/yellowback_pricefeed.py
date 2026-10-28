@@ -237,6 +237,8 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         st = user.yed_getstats()
         assert_equal(st['pMint'], 41_666_667)
         assert_equal(st['globalRatioBps'], 25000)
+        # HALT-2 divides by open debt (owner 2026-10-28): the one vault's 10,000 cents, equal to supply here (nothing burned)
+        assert_equal((st['openDebtCents'], st['supplyCents'], st['globalRatioDenominator']), (10000, 10000, 'openDebt'))
         assert 'GLOBAL_RATIO' not in st['haltMask']
         self.quote('41.666666')
         self.mine_round_robin(POOLS, MIN_FILL[0])

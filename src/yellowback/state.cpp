@@ -514,6 +514,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
         log.assigned.push_back(a);
         totals.supplyCents += (Cents)p.cents;
         totals.collateralZat += vault.collateralZat;
+        totals.openDebtCents += vault.mintedCents;      // HALT-2 (owner 2026-10-28): the vault's debt is open until its redeem or release
         totals.activeVaults++;
         log.yedOut = p.cents;
         log.verdict = verdict::OK;
@@ -784,6 +785,9 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
     // IT-6 (D-IT-14): a claimed vault's collateral stays in the system ratio until its claimant intent is
     // released (the debt left supply with this spend's burn); the owner's redeem removes it at once.
     if (ownerPath) totals.collateralZat -= vault.collateralZat;
+    // HALT-2 (owner 2026-10-28): the owner's redeem closes the debt; a claim leaves it open with the CLAIMING
+    // collateral (IT-6), so the system ratio counts both until the release, and a cancel needs no change
+    if (ownerPath) totals.openDebtCents -= vault.mintedCents;
     if (totals.activeVaults > 0) totals.activeVaults--;
     if (ownerPath) {
         totals.closedVaults++;
@@ -957,6 +961,7 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         vault->status = (uint8_t)VaultStatus::CLAIMED;
         ctx.st.Put(keys::Vault(in.record.vault), vault.value());
         totals.collateralZat -= vault->collateralZat;      // IT-6: the collateral leaves the system ratio at release
+        totals.openDebtCents -= vault->mintedCents;        // HALT-2 (owner 2026-10-28): and its debt with it
         totals.claimedVaults++;
         log.closedVaults.push_back(in.record.vault);
         return verdict::OK;
@@ -1830,13 +1835,17 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
     const Totals totals = st.GetTotals();
     s.supplyCents = totals.supplyCents;
     s.collateralZat = totals.collateralZat;
-    std::optional<int64_t> ratio = GlobalRatioBps(s.collateralZat, pMint, s.supplyCents);
+    s.openDebtCents = totals.openDebtCents;
+    // HALT-2 (owner 2026-10-28; cf. DigiByte v9.26.6 src/digidollar/health.cpp:109-114): the collateral of the ACTIVE and
+    // CLAIMING vaults against their open debt, not against the circulating supply (a burn outside a redemption -- an
+    // over-burn, a cenotaph, a claim's burn while IT-6 keeps its collateral -- leaves supply, never debt)
+    std::optional<int64_t> ratio = GlobalRatioBps(s.collateralZat, pMint, s.openDebtCents);
     s.globalRatioBps = ratio.value_or(0);
 
     // HALT-1..3 (HALT-4's NOT_ACTIVE, ACT-4's PARTICIPATION and ACT-6's ENFORCEMENT left with the upgrade, §6)
     uint32_t mask = 0;
     if (!pMint.has_value()) mask |= HALT_NO_PRICE;                                                          // HALT-1
-    if (pMint.has_value() && s.supplyCents > 0 && ratio.has_value() && ratio.value() < P.globalRatioHaltBps) mask |= HALT_GLOBAL_RATIO; // HALT-2
+    if (pMint.has_value() && s.openDebtCents > 0 && ratio.has_value() && ratio.value() < P.globalRatioHaltBps) mask |= HALT_GLOBAL_RATIO; // HALT-2
     if (pFast.has_value() && pMid.has_value() && pSlow.has_value()) {                                       // HALT-3
         const int64_t k = BPS - P.divergenceBps;
         if (pFast.value() * BPS < k * pMid.value() || pMid.value() * BPS < k * pSlow.value()) mask |= HALT_DIVERGENCE;
@@ -1968,6 +1977,24 @@ void UndoBlock(StateView& view, const UndoRecord& undo)
         if (e.hadValue) view.Write(e.key, e.value);
         else view.Erase(e.key);
     }
+}
+
+std::optional<std::string> OpenDebtInvariantViolation(const StateView& view)
+{
+    Totals t;
+    std::string rawTotals;
+    if (view.Read(keys::Totals(), rawTotals) && !DeserializeRecord(rawTotals, t)) return std::string("the Totals record does not deserialise");
+    uint64_t open = 0;
+    view.Iterate(std::string(1, 'V'), [&](const std::string&, const std::string& raw) {
+        VaultRecord v;
+        if (DeserializeRecord(raw, v) && (v.Status() == VaultStatus::ACTIVE || v.Status() == VaultStatus::CLAIMING)) open += (uint64_t)v.mintedCents;
+        return true;
+    });
+    if ((uint64_t)t.openDebtCents != open) {
+        return "openDebtCents " + std::to_string(t.openDebtCents) + " is not the ACTIVE and CLAIMING vaults' mintedCents " + std::to_string((int64_t)open);
+    }
+    if (t.supplyCents > t.openDebtCents) return "supplyCents " + std::to_string(t.supplyCents) + " exceeds openDebtCents " + std::to_string(t.openDebtCents);
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------

@@ -161,6 +161,7 @@ inline std::optional<Cents> SupplyCapCents(CAmount issuedZat, std::optional<Micr
 /**
  * globalRatioBps = collateralZat * pMint / (COIN * supplyCents); nullopt when
  * supplyCents == 0 ("no supply", never halts) or the price is undefined.
+ * HALT-2 passes Totals.openDebtCents as the denominator (owner 2026-10-28).
  */
 inline std::optional<int64_t> GlobalRatioBps(CAmount collateralZat, std::optional<MicroUsd> pMint, Cents supplyCents)
 {

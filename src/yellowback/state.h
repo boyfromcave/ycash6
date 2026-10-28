@@ -200,6 +200,15 @@ std::optional<std::string> ApplyBlock(StateView& view, const Params& params, con
 void UndoBlock(StateView& view, const UndoRecord& undo);
 
 /**
+ * The open-debt invariant (HALT-2, owner 2026-10-28): Totals.openDebtCents is the sum of mintedCents over the ACTIVE
+ * and CLAIMING Vaults records, and supplyCents <= openDebtCents (a YED is some open vault's debt unless it was burned;
+ * a burn lowers supply alone, a redeem's burn covers at least the debt it closes, RED-2, and a release closes a debt
+ * whose burn the claim already took). nullopt when both hold, else which one failed. A consistency check for tests,
+ * the fuzz harness and audits; never a verdict. Sums wrap (uint64) rather than overflow on a corrupt record.
+ */
+std::optional<std::string> OpenDebtInvariantViolation(const StateView& view);
+
+/**
  * SNAP for height H after the block's transactions (§3.7, §3.8; v3 §3.8
  * order): the REG-4 judgement for the tag at H - PEER_LAG (writes
  * Judgements), then the v3 passes —

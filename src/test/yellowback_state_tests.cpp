@@ -4273,7 +4273,8 @@ BOOST_AUTO_TEST_CASE(undo_identity_v3)
         if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end()) {
             MintOpts o;
             o.attestPayee = -1;
-            std::string v = MintVerdictOf(f, f.MintV3(10000, g.poolPrice, o, { L }));
+            o.termClass = 2;     // HALT-2 counts the CLAIMING vault's debt (owner 2026-10-28): GLOBAL_RATIO is set, class C mints (IT-5)
+            std::string v = MintVerdictOf(f, f.MintV3(10000, g.poolPrice, o, { L }, 145));
             BOOST_REQUIRE_MESSAGE(v == "" || v == verdict::MINT_HALTED_GLOBAL_RATIO || v == verdict::MINT_HALTED_DIVERGENCE, v);
             if (f.BundleRow(f.tip).has_value()) rows++;
         } else {
@@ -4646,12 +4647,15 @@ BOOST_AUTO_TEST_CASE(in_term_halt_ratio_counts_claiming_vault)
     CMutableTransaction claim = f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o);
     BOOST_REQUIRE_EQUAL(Spend(f, w, claim).verdict, verdict::OK);
     // D-IT-14: the debt left supply with the burn, the collateral stays until release; the snapshot reads post-claim state.
+    // HALT-2 (owner 2026-10-28): the ratio divides by open debt, the CLAIMING vault's included, not by supply.
     BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMING);
     BOOST_CHECK_EQUAL(f.GetTotals().supplyCents, 10000);
+    BOOST_CHECK_EQUAL(f.GetTotals().openDebtCents, 20000);
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, 2 * each);
     BOOST_CHECK_EQUAL(f.GetTotals().activeVaults, 1u);
     BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, 2 * each);
-    BOOST_CHECK_EQUAL(f.Snap(f.tip).GlobalRatioBps().value(), GlobalRatioBps(2 * each, 9000, 10000).value());
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).openDebtCents, 20000);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).GlobalRatioBps().value(), GlobalRatioBps(2 * each, 9000, 20000).value());
     // Release after CLAIM_DELAY: the collateral leaves.
     const COutPoint intent(CTransaction(claim).GetHash(), 0);
     CMutableTransaction rel;
@@ -4663,6 +4667,8 @@ BOOST_AUTO_TEST_CASE(in_term_halt_ratio_counts_claiming_vault)
     BOOST_CHECK_EQUAL(f.Vault(w)->status, (uint8_t)VaultStatus::CLAIMED);
     BOOST_CHECK_EQUAL(f.GetTotals().collateralZat, each);
     BOOST_CHECK_EQUAL(f.Snap(f.tip).collateralZat, each);
+    BOOST_CHECK_EQUAL(f.GetTotals().openDebtCents, 10000);                 // ... and its debt with it
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).GlobalRatioBps().value(), GlobalRatioBps(each, 9000, 10000).value());
 }
 
 // ===========================================================================
@@ -5593,6 +5599,112 @@ BOOST_AUTO_TEST_CASE(r12_failing_notice_leaves_no_bundle_row)
     CMutableTransaction third = g.f.NoticeTx(g.w, fresh, g.f.BundleFor(fresh, g.Selector(), g.attPrice));
     g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { third });
     BOOST_CHECK_EQUAL(g.f.Refused(CTransaction(third).GetHash()), verdict::LIVENESS_UNHELD);
+}
+
+// ===========================================================================
+// HALT-2 reads open debt (owner 2026-10-28; cf. DigiByte v9.26.6 2c1f09a0d8 src/digidollar/health.cpp:109-114):
+// Totals.openDebtCents, the mintedCents of every ACTIVE and CLAIMING vault, and the invariant supply <= open debt
+
+// Rule: HALT-2
+// Rule: IT-6
+// Rule: RED-2
+// Rule: CAN-1
+// Rule: UNDO
+BOOST_AUTO_TEST_CASE(halt2_open_debt_totals_invariant_and_undo)
+{
+    Fixture f{ 1, 0, 0, 10 };    // ATTEST_ARM_MIN 10: the four members never arm the chain, so the claims stay unarmed
+    f.Activate();
+    f.Register(4);               // CAN-2: a member to co-sign the cancel
+    const int base = f.tip;
+    const MemoryStateView before = f.view;
+    BOOST_CHECK(!OpenDebtInvariantViolation(f.view).has_value());
+    auto check = [&](Cents supply, Cents debt, const char* step) {
+        const Totals t = f.GetTotals();
+        BOOST_CHECK_MESSAGE(t.supplyCents == supply, strprintf("%s: supplyCents %d, expected %d", step, t.supplyCents, supply));
+        BOOST_CHECK_MESSAGE(t.openDebtCents == debt, strprintf("%s: openDebtCents %d, expected %d", step, t.openDebtCents, debt));
+        BOOST_CHECK_MESSAGE(t.supplyCents <= t.openDebtCents, step);
+        const std::optional<std::string> bad = OpenDebtInvariantViolation(f.view);
+        BOOST_CHECK_MESSAGE(!bad.has_value(), strprintf("%s: %s", step, bad.value_or("")));
+        BOOST_CHECK_EQUAL(f.Snap(f.tip).openDebtCents, debt);       // the snapshot carries the denominator
+        BOOST_CHECK_EQUAL(f.Snap(f.tip).supplyCents, supply);
+    };
+    // MINT: both totals rise by the debt
+    const uint256 a = f.MintActive(10000);
+    check(10000, 10000, "mint a");
+    const uint256 b = f.MintActive(10000);
+    const uint256 c = f.MintActive(10000);
+    check(30000, 30000, "mint b, c");
+    // RED-2 over-burn: a's owner burns 15,000 (a's token and b's) for a 10,000 debt and keeps 5,000; open debt falls by
+    // a's mintedCents only, supply by the whole burn
+    SpendOpts ro; ro.assigned = { Assignment(3, 5000) };
+    CMutableTransaction redeem = f.SpendTx(a, { COutPoint(a, 1), COutPoint(b, 1) }, f.tip, ro);
+    BOOST_REQUIRE_EQUAL(Spend(f, a, redeem).verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(f.Vault(a)->status, (uint8_t)VaultStatus::CLOSED);
+    check(15000, 20000, "over-burn redeem");
+    // a failed transfer (XFER-2, the cenotaph rule): the whole input burns, the debt stays open
+    CMutableTransaction xfer = f.TransferTx({ COutPoint(CTransaction(redeem).GetHash(), 3) }, { Assignment(0, 6000) });
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { xfer });
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(xfer).GetHash())->verdict, "transfer-over-assigned");
+    check(10000, 20000, "cenotaph");
+    // the pools fall to $0.009: b (stranded: its YED is gone) and c are under theta
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    const CAmount each = f.Vault(c)->collateralZat;
+    // CLAIM: the burn leaves supply, the debt stays open with the CLAIMING collateral (IT-6)
+    SpendOpts co; co.ownerPath = false;
+    const int claimRef = f.tip;
+    CMutableTransaction claim = f.SpendTx(c, { COutPoint(c, 1) }, claimRef, co);
+    BOOST_REQUIRE_EQUAL(Spend(f, c, claim).verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(f.Vault(c)->status, (uint8_t)VaultStatus::CLAIMING);
+    check(0, 20000, "claim");
+    // HALT-2 divides by open debt: with no supply left the ratio is still defined and halts (it was undefined on supply)
+    const Snapshot afterClaim = f.Snap(f.tip);
+    BOOST_CHECK_EQUAL(afterClaim.GlobalRatioBps().value(), GlobalRatioBps(f.GetTotals().collateralZat, afterClaim.PMint(), 20000).value());
+    BOOST_CHECK(!GlobalRatioBps(f.GetTotals().collateralZat, afterClaim.PMint(), afterClaim.supplyCents).has_value());
+    BOOST_CHECK(afterClaim.haltMask & HALT_GLOBAL_RATIO);
+    // CANCEL (CAN-1): the refund re-credits supply, the re-created vault carries the same open debt
+    const COutPoint intent(CTransaction(claim).GetHash(), 0);
+    CMutableTransaction cancel;
+    cancel.vin.push_back(CTxIn(intent, CScript() << valtype(65, 0) << OP_2, 0xFFFFFFFF));
+    cancel.vin.push_back(CTxIn(f.FakeInput()));
+    cancel.vout.push_back(RelockOf(f, COutPoint(c, 0), each));
+    cancel.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(f.ownerKey.GetPubKey().GetID())));
+    cancel.vin.push_back(f.CarrierIn(EncodeCancelCosigns({ f.Cosign(0, 50000, intent, claimRef) })));
+    cancel.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::CancelCosign()))));
+    f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { cancel });
+    BOOST_REQUIRE_EQUAL(f.Refused(CTransaction(cancel).GetHash()), "");
+    const uint256 reopened = CTransaction(cancel).GetHash();
+    BOOST_CHECK_EQUAL(f.Vault(reopened)->status, (uint8_t)VaultStatus::ACTIVE);
+    check(10000, 20000, "cancel");
+    // CLAIM again with the refund, then RELEASE after CLAIM_DELAY: the debt closes with the collateral
+    const int reclaimRef = f.tip;
+    CMutableTransaction reclaim = f.SpendTx(reopened, { COutPoint(reopened, 1) }, reclaimRef, co);
+    BOOST_REQUIRE_EQUAL(Spend(f, reopened, reclaim).verdict, verdict::OK);
+    check(0, 20000, "reclaim");
+    CMutableTransaction rel;
+    rel.vin.push_back(CTxIn(COutPoint(CTransaction(reclaim).GetHash(), 0), CScript() << OP_1, (uint32_t)f.P.claimDelay));
+    rel.vin.push_back(CTxIn(f.FakeInput()));
+    rel.vout.push_back(CTxOut(each, GetScriptForDestination(f.userKey.GetPubKey().GetID())));
+    f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3), { rel });
+    BOOST_REQUIRE_EQUAL(f.Refused(CTransaction(rel).GetHash()), "");
+    BOOST_CHECK_EQUAL(f.Vault(reopened)->status, (uint8_t)VaultStatus::CLAIMED);
+    check(0, 10000, "release");                          // b's debt: open, its collateral stranded (no YED left to burn it)
+    // UNDO: key-level, so the appended field rolls back with the record; undoing every block restores the start byte for byte
+    const Totals atEnd = f.GetTotals();
+    f.Undo();
+    check(0, 20000, "undo release");
+    BOOST_CHECK(!(SerializeRecord(f.GetTotals()) == SerializeRecord(atEnd)));
+    while (f.tip > base) f.Undo();
+    BOOST_CHECK(f.view == before);
+    BOOST_CHECK_EQUAL(f.GetTotals().openDebtCents, 0);
+    // the check reports a corrupt record (it is a consistency check, never a verdict)
+    Totals t = f.GetTotals();
+    t.supplyCents = 1;
+    t.openDebtCents = 1;
+    State(f.view).Put(keys::Totals(), t);
+    BOOST_CHECK(OpenDebtInvariantViolation(f.view).has_value());   // 1 open debt with no vault
+    t.openDebtCents = 0;
+    State(f.view).Put(keys::Totals(), t);
+    BOOST_CHECK(OpenDebtInvariantViolation(f.view).has_value());   // supply above open debt
 }
 
 BOOST_AUTO_TEST_SUITE_END()
