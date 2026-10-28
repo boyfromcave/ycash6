@@ -78,6 +78,8 @@ class YellowbackRedeemBoundaryTest(YellowbackTestFramework):
         token = ym.p2pkh_script(ym.address_key_hash(node.yed_getnewaddress()))
         hex_, _ = build_mint_tx(node, CENTS, LOCK, ref, coll, fee_addr=fee_addr, owner_pubkey=owner,
                                 token_script=token, p_mint=p_mint)
+        # lock the funding inputs: the next raw mint's funding must not pick a coin this one spends
+        node.lockunspent(False, [{'txid': i.prev_txid, 'vout': i.prev_n} for i in ym.tx_from_hex(hex_).vin])
         txid = node.sendrawtransaction(hex_)
         v = vault_from_mint(hex_, LOCK, ref, owner)
         v.update({'mintedCents': CENTS, 'pMint': p_mint, 'termClass': 'A', 'hex': hex_})
