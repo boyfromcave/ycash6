@@ -118,7 +118,10 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         print('activate at $50; fund the claimant')
         self.activate(POOLS, quote_usd=50)
         self.mine_round_robin(POOLS, REF_LAG + 1)
-        user.sendtoaddress(claimant.getnewaddress(), 5)
+        # 50 YEC: at the $0.01 crash below only HALT-2 is set once the windows agree, so the dollar fee price stays
+        # published (fees spec section 5.1, amendment 2026-10-28) and the claimant's claim pays $0.05/KB = 5 YEC/KB,
+        # capped at -yellowbackmaxtxfee (10 YEC) per transaction, from its own YEC
+        user.sendtoaddress(claimant.getnewaddress(), 50)
         self.sync_all()
         self.mine(POOLS[0])
         self.arm()

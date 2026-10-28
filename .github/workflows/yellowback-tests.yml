@@ -201,7 +201,10 @@ env:
   # only) in the in-term plan the spec copy is generated from, and marks rpcversion 6 as that plan's revision-1 contract.
   # caa5fbf (#19) amends HALT-2 to read open debt (upgrade plan section 15.10, in-term IT-6), which the spec
   # copy and the contract's new fields come from.
-  YB_WORKSPACE_COMMIT: caa5fbf8f4ebcbec5f855334caa42eeeb2a53f56
+  # 65cb8b1 (the fee-publication workspace PR's head; move this pin to its squash commit when that PR merges) amends
+  # fees spec section 5.1: fee publication follows price trust, so HALT-2 alone keeps the dollar fee price. The spec
+  # copy and the contract it generates are unchanged by it.
+  YB_WORKSPACE_COMMIT: 65cb8b1f282381abe261f3d72cb11b6bb1cca873
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at

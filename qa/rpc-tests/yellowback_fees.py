@@ -17,7 +17,10 @@
 #   - the claimant pays the protocol fee of the vault it closes and no early fee;
 #   - the network fee of a PQ-owner redeem: the Yellowback $/KB rate (its 5,000 zat/KB floor at a high price),
 #     the dollar cap max(-maxtxfee, $2 at the price) accepted by the wallet's own mempool, and the -pqfeerate
-#     fallback once the price feed stops (FEE-0 then skips the protocol fee too).
+#     fallback once the price feed stops (FEE-0 then skips the protocol fee too);
+#   - fee publication follows price trust (fees spec section 5.1, amendment 2026-10-28): under a pure HALT-2 halt (open
+#     debt at 90 %, the windows agreeing) the dollar fee price stays published and the dollar cap runs; HALT-1 (the
+#     price feed stops) withholds it.
 #
 # Rule: FEE-1' RED-3' IT-9' AFEE-1' MINT-2' MINT-5' MINT-8' D-Q-23 D-Q-24 D-Q-25
 
@@ -253,34 +256,21 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.checkpoint('claim')
 
 # Rule: HALT-2 IT-6
-        print('HALT-2 reads open debt (owner 2026-10-28): the CLAIMING $100,000 and the $100 vault, both at 90 % at $750, halt the cheap classes, and under any halt bit the fee policy publishes no price; release the claim and recapitalise with one class C vault so the dollar cap runs at a priced tip')
+        print('HALT-2 reads open debt (owner 2026-10-28): the CLAIMING $100,000 and the $100 vault, both at 90 % at $750, halt the cheap classes; the price is still trusted, so the dollar fee price stays published (fees spec section 5.1, amendment 2026-10-28)')
         # Every vault left was minted at $2,500 at 300 %, so at $750 the honest system ratio is 90 %: HALT-2 is right to
         # fire. Before the amendment the claim's burn took the $100,000 out of the denominator (supply) while IT-6 kept
-        # its collateral in the numerator, so the ratio read far above 250 % and the fee price stayed published. Under
-        # any halt bit, HALT_GLOBAL_RATIO included, PublishFeePrice publishes no price and the wallets use -pqfeerate
-        # (fees spec section 5.1, review M-1, docs/plans/yellowback-quantum-fees-spec.md), which is what the dollar-cap
-        # step below would otherwise read (100 zat/kB).
+        # its collateral in the numerator, so the ratio read far above 250 %. HALT-2 says the vaults are thin, not that
+        # the price is wrong: the windows agree (no HALT-3) and a price exists (no HALT-1), so PublishFeePrice keeps the
+        # dollar fee price (FeePriceTrusted, docs/plans/yellowback-quantum-fees-spec.md section 5.1) and HALT-2 restricts
+        # minting only. The dollar-cap step below runs under this pure HALT-2 halt.
         st = user.yed_getstats()
         assert_equal((st['supplyCents'] <= st['openDebtCents'], st['openDebtCents'], st['globalRatioDenominator']), (True, MAX_MINT + 10000, 'openDebt'))
-        assert 'GLOBAL_RATIO' in st['haltMask'], st['haltMask']
-        assert_equal(user.yed_getinfo()['params']['fees']['network']['priceSource'], 'fallback')
-        intent = '%s:0' % claimed['txid']
-        while user.getblockcount() + 1 < claim_height + CLAIM_DELAY:
-            self.mine(POOLS[1])
-        self.sync_all(blocks_only=True)
-        claimant.vault_release(intent)                              # the claimed debt and its collateral leave together (IT-6)
-        self.sync_all()
-        self.mine(POOLS[2])
-        assert_equal(user.yed_getvault(mints[MAX_MINT]['txid'])['status'], 'CLAIMED')
-        assert_equal(user.yed_getstats()['openDebtCents'], 10000)  # the $100 vault, still 90 %: still halted
-        recap = self.mint(user, 10000, TERMS['C'])                   # class C (500 %) passes the global-ratio halt alone (IT-5)
-        self.sync_all()
-        self.mine(POOLS[0])
-        assert_equal(user.yed_getvault(recap['txid'])['status'], 'ACTIVE')
-        self.mine_round_robin(POOLS, REF_LAG + 1)
-        st = user.yed_getstats()
-        assert_equal((st['openDebtCents'], st['haltMask']), (20000, []))   # (90 % + 500 %) / 2 = 295 % >= 250 %
-        self.checkpoint('released and recapitalised')
+        assert_equal(st['haltMask'], ['GLOBAL_RATIO'])                                              # a pure HALT-2 halt
+        net = user.yed_getinfo()['params']['fees']['network']
+        assert_equal((net['priceSource'], net['priceMicroUsd']), ('tip', usd_to_micro(DOWN)))
+        assert_equal(net['yellowback']['zatPerKB'], rate_zat_per_kb(YED_USD, usd_to_micro(DOWN)))   # dollars per KB, not -pqfeerate
+        assert_greater_than(net['yellowback']['zatPerKB'], net['fallbackZatPerKB'])
+        self.checkpoint('HALT-2 keeps the fee price')
 
         print('the dollar cap: -yellowbackfeeusdperkb=100 -maxtxfee=0.02 -yellowbackmaxtxfeeusd=20 -> max(0.02 YEC, $20 at $750) accepted by the wallet\'s own mempool')
         # ($2 at $750 is 266,667 zat, below -maxtxfee: the default dollar cap binds only below $100/YEC, so the cap is raised to $20 here)
@@ -292,6 +282,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         cap_zat = max(2000000, rate_zat_per_kb(20 * 10 ** 6, p_now, 0))
         assert_equal((net['yellowback']['maxTxFeeUsdMicro'], net['yellowback']['maxTxFeeZat']), (20 * 10 ** 6, cap_zat))
         assert_greater_than(cap_zat, 2000000)                                                         # $20 at $750 = 0.0267 YEC > -maxtxfee 0.02
+        assert_equal((user.yed_getstats()['haltMask'], net['priceSource']), (['GLOBAL_RATIO'], 'tip'))   # still the pure HALT-2 halt
         v100 = user.yed_getvault(mints[10000]['txid'])
         while user.getblockcount() + 1 < v100['lockHeight']:
             self.mine(POOLS[1])
@@ -304,6 +295,22 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.restart(USER, [])
         self.sync_all(blocks_only=True)
         self.checkpoint('dollar cap')
+
+# Rule: HALT-2 IT-6
+        print('release the claim: the claimed debt and its collateral leave together (IT-6), open debt falls to 0 and HALT-2 clears')
+        intent = '%s:0' % claimed['txid']
+        while user.getblockcount() + 1 < claim_height + CLAIM_DELAY:
+            self.mine(POOLS[1])
+        self.sync_all(blocks_only=True)
+        claimant.vault_release(intent)
+        self.sync_all()
+        self.mine(POOLS[2])
+        assert_equal(user.yed_getvault(mints[MAX_MINT]['txid'])['status'], 'CLAIMED')
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        st = user.yed_getstats()
+        assert_equal((st['openDebtCents'], st['haltMask']), (0, []))       # the $100 vault was redeemed in the dollar-cap step
+        assert_equal(user.yed_getinfo()['params']['fees']['network']['priceSource'], 'tip')
+        self.checkpoint('released')
 
         print('review L-1: an owner redeem whose dollar-priced network fee exceeds the vault pays max(flat, floor rate x size) instead of failing')
         small = self.mint(user, 10000, TERMS['C'])
@@ -376,8 +383,8 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all(blocks_only=True)
         self.checkpoint('plain PQ fee cap')
 
-        print('the price feed stops: the network fee falls back to -pqfeerate; FEE-0 skips the protocol fee (and the early fee)')
-        m = self.mint(user, 10000, TERMS['C'])          # class C, as the recapitalising vault above (no halt is set here since the release)
+        print('the price feed stops (HALT-1, the price is not trusted): the network fee falls back to -pqfeerate; FEE-0 skips the protocol fee (and the early fee)')
+        m = self.mint(user, 10000, TERMS['C'])          # class C (no halt is set here since the release)
         self.sync_all()
         self.mine(POOLS[0])
         vlast = user.yed_getvault(m['txid'])
