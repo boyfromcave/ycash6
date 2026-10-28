@@ -10,9 +10,10 @@ qa/yellowback-cross-line.manifest).
 RewindBlockIndex (src/main.cpp) runs at every start and erases the entries that are not
 "sufficiently validated". On both lines (owner decision 2026-10-28) an entry that never ran
 ConnectBlock (below BLOCK_VALID_CONSENSUS) is kept unless it has failed (upstream Ycash 1770fce16
-plus the workspace upstream report's section 3.2 refinement), and LoadBlockIndexDB marks every
-descendant of a failed entry failed too, so a failed branch is erased whole and its blocks are
-judged again when they come back, as v4.5.0 always did.
+plus the workspace upstream report's section 3.2 refinement), and the erase set is closed under
+descendants (every entry built on an erased one is erased with it), so a failed branch is erased
+whole and its blocks are judged again when they come back, as v4.5.0 always did, and no kept entry
+is left under a deleted parent.
 
 The defect this pins as fixed: after `invalidateblock` of a block below a network upgrade's
 activation height whose branch contains the activation block, stock v4.5.0 erased the invalidated
@@ -29,6 +30,13 @@ Node 4, the upstream benefit: a never-connected side branch with its data on dis
 node 0's chain, less work) is kept across the restart; a second one (from node 1's chain) whose
 second block is invalidated while off the active chain leaves its later blocks unmarked on disk,
 and the restart erases them with it rather than keeping them under a deleted parent.
+
+Nodes 5 and 6, the late upgrader: node 5 runs without the vault upgrade and connects blocks past
+its activation height under the old rules; node 6 builds a sibling on node 5's block ACT + 1, which
+node 5 stores and never connects (less work). Node 5 then restarts with the upgrade at ACT: the
+blocks from ACT up carry a stale branch id and are rewound and erased, and the never-connected
+child, which has not failed, goes with its parent instead of being kept under it. The restart is
+clean, and node 5 mines across the activation under the new rules.
 
 The no-checkblockindex and -reindex recovery starts of the earlier form are gone with the abort.
 """
@@ -61,17 +69,22 @@ CASES = {
     3: ('Vault', VAULT_ARGS, ACT),
 }
 SIDE_NODE = 4                # node 0's and node 1's rules, so their blocks are valid here
+LATE, PEER = 5, 6            # the late upgrader and the peer that extends its pre-upgrade chain
+
+# Each node's upgrade arguments; LATE's change to VAULT_ARGS at its upgrade restart.
+ARGS = {i: CASES[i][1] for i in CASES}
+ARGS.update({SIDE_NODE: SAPLING_ARGS, LATE: list(YCASH_UPGRADE_ARGS), PEER: list(YCASH_UPGRADE_ARGS)})
 
 
 def node_args(i):
-    return (CASES[i][1] if i in CASES else SAPLING_ARGS) + ['-checkblockindex=1']
+    return ARGS[i] + ['-checkblockindex=1']
 
 
 class VaultActivationRestartTest(BitcoinTestFramework):
 
     def __init__(self):
         super().__init__()
-        self.num_nodes = len(CASES) + 1
+        self.num_nodes = len(ARGS)
         self.setup_clean_chain = True   # v4.5.0 harness
         self.cache_behavior = 'clean'   # 6.20.0 harness (each harness ignores the other's)
 
@@ -106,6 +119,7 @@ class VaultActivationRestartTest(BitcoinTestFramework):
         side = self.nodes[SIDE_NODE]
         side.generate(TOP)
         self.check_side_branches(side, raw[0][:SIDE], raw[1][:SIDE])
+        self.check_late_upgrader()
 
         for i in sorted(CASES):
             name, _, bad = CASES[i]
@@ -136,6 +150,38 @@ class VaultActivationRestartTest(BitcoinTestFramework):
             n = self.restart(i)
             assert_equal(n.getbestblockhash(), tip)
 
+    def expect_erased(self, n, hashes, what):
+        for h in hashes:
+            try:
+                n.getblockheader(h)
+            except JSONRPCException as e:
+                assert_equal(e.error['code'], -5)                       # Block not found
+            else:
+                raise AssertionError('%s %s survived the restart' % (what, h))
+
+    def check_late_upgrader(self):
+        late, peer = self.nodes[LATE], self.nodes[PEER]
+        late.generate(TOP)                                  # past ACT, without the vault upgrade
+        old = [late.getblockhash(h) for h in range(ACT, TOP + 1)]
+        for _, block in self.raw_chain(late, 1, ACT + 1):
+            assert_equal(peer.submitblock(block), None)
+        child = peer.generate(1)[0]                         # at ACT + 2, on node 5's block ACT + 1
+        assert child != old[2], 'node 6 mined node 5\'s own block'
+        assert_equal(late.submitblock(peer.getblock(child, 0)), 'inconclusive')   # stored, never connected
+        assert_equal(self.tips(late), [(ACT + 2, 'valid-headers'), (TOP, 'active')])
+
+        print('late upgrader: the upgrade restart erases the stale blocks and the never-connected child with them')
+        ARGS[LATE] = VAULT_ARGS
+        late = self.restart(LATE)
+        assert_equal(late.getblockcount(), ACT - 1)
+        assert_equal(self.tips(late), [(ACT - 1, 'active')])
+        self.expect_erased(late, old + [child], 'late upgrader block')
+        late.generate(2)                                    # across the activation, under the new rules
+        assert_equal(late.getblockcount(), ACT + 1)
+        late = self.restart(LATE)
+        assert_equal(late.getblockcount(), ACT + 1)
+        assert_equal(self.tips(late), [(ACT + 1, 'active')])
+
     def check_side_branches(self, n, kept, failed):
         assert kept[0][0] != failed[0][0], 'node 0 and node 1 mined the same first block'
         for _, block in kept + failed:
@@ -154,13 +200,7 @@ class VaultActivationRestartTest(BitcoinTestFramework):
         assert_equal(self.tips(n), [(1, 'valid-headers'), (SIDE, 'valid-headers'), (TOP, 'active')])
         assert_equal(n.getblock(kept[-1][0], 0), kept[-1][1])          # kept with its data
         assert_equal(n.getblockheader(failed[0][0])['height'], 1)
-        for h, _ in failed[1:]:
-            try:
-                n.getblockheader(h)
-            except JSONRPCException as e:
-                assert_equal(e.error['code'], -5)                       # erased
-            else:
-                raise AssertionError('side branch block %s survived the restart' % h)
+        self.expect_erased(n, [h for h, _ in failed[1:]], 'side branch block')
         for _, block in failed[1:]:
             assert_equal(n.submitblock(block), 'inconclusive')         # judged again, accepted
         assert_equal(self.tips(n), expected)
