@@ -210,13 +210,11 @@ void Shutdown()
     StopREST();
     StopRPC();
     StopHTTPServer();
-    // Yellowback (plan D2): unregister, then stop and flush under cs_yellowback; never deleted here.
-    if (yellowback::g_yellowback) {
-        UnregisterValidationInterface(yellowback::g_yellowback);
-        yellowback::g_yellowback->Stop();
-        yellowback::g_yellowback->Flush(true);
-    }
+    // The YED wallet's completion thread runs completions that take cs_main and the wallet:
+    // join it before anything it uses is torn down (cf. DigiByte v9.26.7 c9d6abdf26).
 #ifdef ENABLE_WALLET
+    if (yellowback::g_yellowbackWallet)
+        yellowback::g_yellowbackWallet->StopThread();
     if (pwalletMain)
         pwalletMain->Flush(false);
 #endif
@@ -226,6 +224,23 @@ void Shutdown()
     StopNode();
     StopTorControl();
     UnregisterNodeSignals(GetNodeSignals());
+    // Yellowback (plan D2): unregister, then stop and flush under cs_yellowback; never deleted here.
+    // Only now, with the miner, the network, RPC and the YED wallet thread stopped, so no block
+    // can connect against a stopped index (which fails closed: cf. DigiByte v9.26.7 a6a0c1690f).
+    if (yellowback::g_yellowback) {
+        UnregisterValidationInterface(yellowback::g_yellowback);
+        yellowback::g_yellowback->Stop();
+        yellowback::g_yellowback->Flush(true);
+    }
+    // The YED wallet holds raw pointers to pwalletMain and the index: detach and delete it before
+    // the coins view and the wallet go.
+#ifdef ENABLE_WALLET
+    if (yellowback::g_yellowbackWallet) {
+        yellowback::g_yellowbackWallet->Detach();
+        delete yellowback::g_yellowbackWallet;
+        yellowback::g_yellowbackWallet = nullptr;
+    }
+#endif
 
     {
         LOCK(cs_main);

@@ -456,6 +456,34 @@ BOOST_AUTO_TEST_CASE(completion_thread_retries_and_survives_throws)
     yw.StopThread();   // idempotent
 }
 
+// Shutdown (cf. DigiByte v9.26.7 c9d6abdf26): the completion thread stops between completions once
+// the index is stopped, so no completion runs into a coins view or wallet Shutdown() is deleting;
+// StopThread joins promptly with work still pending, and Detach clears the index hooks.
+BOOST_AUTO_TEST_CASE(completion_thread_stops_with_the_index)
+{
+    std::atomic<int> firstCalls(0), secondCalls(0);
+    YellowbackWallet yw(wallet, index.get());
+    // Out(0x01) sorts first: it stops the index (as Shutdown() does) and asks to be retried.
+    yw.AddPendingCompletion(Out(0x01, 0), [&]() { ++firstCalls; index->Stop(); return false; });
+    yw.AddPendingCompletion(Out(0x02, 0), [&]() { ++secondCalls; return true; });
+    yw.Attach();
+    BOOST_REQUIRE(index->onReconcile);
+    index->onReconcile();
+    for (int i = 0; i < 200 && firstCalls.load() == 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    BOOST_CHECK_EQUAL(firstCalls.load(), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));   // past one idle wake-up
+    BOOST_CHECK_EQUAL(firstCalls.load(), 1);
+    BOOST_CHECK_EQUAL(secondCalls.load(), 0);
+    BOOST_CHECK_EQUAL(yw.PendingCompletions(), 2U);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    yw.Detach();
+    BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+    BOOST_CHECK(!index->onReconcile);
+    BOOST_CHECK(!index->onSyncTransaction);
+    yw.Detach();   // idempotent
+}
+
 // H5: the overlay's locks survive `lockunspent true` (UnlockAllCoins, then ReapplyLocks), and
 // ReleaseLock (yed_unlockcoin) gives one outpoint back for good.
 BOOST_AUTO_TEST_CASE(locks_release_and_reapply)

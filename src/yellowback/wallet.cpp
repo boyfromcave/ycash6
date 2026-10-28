@@ -435,6 +435,22 @@ void YellowbackWallet::StopThread()
     if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) thread.join();
 }
 
+bool YellowbackWallet::Stopping() const
+{
+    return stopThread || ShutdownRequested() || (index && index->IsStopped());
+}
+
+void YellowbackWallet::Detach()
+{
+    StopThread();
+    onIdle = nullptr;
+    if (index) {
+        LOCK(index->cs_yellowback);
+        index->onSyncTransaction = nullptr;
+        index->onReconcile = nullptr;
+    }
+}
+
 void YellowbackWallet::CompletionLoop()
 {
     RenameThread("yellowback-wallet");
@@ -444,7 +460,7 @@ void YellowbackWallet::CompletionLoop()
             pendingCv.wait_for(lk, std::chrono::milliseconds(1000), [this]() { return wake || stopThread.load(); });
             wake = false;
         }
-        if (stopThread || ShutdownRequested() || index->IsStopped()) break;
+        if (Stopping()) break;
         // Snapshot the pending set, run each completion outside pendingMutex (a completion takes
         // cs_main, cs_wallet and cs_yellowback itself), then drop the finished ones.
         std::vector<std::pair<COutPoint, std::function<bool()>>> work;
@@ -467,8 +483,11 @@ void YellowbackWallet::CompletionLoop()
                 std::lock_guard<std::mutex> g(pendingMutex);
                 pending.erase(kv.first);
             }
-            if (stopThread) return;
+            // Shutdown is checked between completions too: a completion takes cs_main and the
+            // wallet, which Shutdown() is about to tear down (cf. DigiByte v9.26.7 c9d6abdf26).
+            if (Stopping()) return;
         }
+        if (Stopping()) return;
         if (onIdle) {
             try {
                 onIdle();

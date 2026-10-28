@@ -128,7 +128,7 @@ C generate 1                         # the set exists from the next block
 C stop
 echo "yellowbackattestorset=<setid from set_create>" >> $D/ycash.conf
 src/ycashd -datadir=$D -daemon
-C -rpcwait yed_getinfo          # rpcversion 5; upgrade.status "active"; attest.status "UNARMED"
+C -rpcwait yed_getinfo          # rpcversion 8; upgrade.status "active"; attest.status "UNARMED"
 ```
 
 **Every validating node of a regtest or devnet network must be started with the same
