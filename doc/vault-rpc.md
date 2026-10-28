@@ -522,9 +522,10 @@ set is released (dormant or wound down). An intent has only selector 3. The owne
 post-quantum key this wallet must hold (an external owner signs outside the node); the fee is
 max(10,000 zat, the vault/Yellowback rate × size), capped at the vault/Yellowback cap (above):
 the rate is `-yellowbackfeeusdperkb` (default $0.05/KB) at the attested price -- the highest of the
-Yellowback index tip's window medians, none while a halt bit is set -- never below
+Yellowback index tip's window medians, none while the price is not trusted (HALT-1 or HALT-3; HALT-2
+alone keeps it, fees spec §5.1 amendment 2026-10-28) -- never below
 max(5,000 zat/KB, `-pqfeerate`); without an attested price (no Yellowback index, below its start,
-under a halt) it is `-pqfeerate` (quantum plan §4.5, D-Q-23 (b), D-Q-26;
+under HALT-1 or HALT-3) it is `-pqfeerate` (quantum plan §4.5, D-Q-23 (b), D-Q-26;
 `yed_getinfo.params.fees.network` reports the values in force). On 6.20.0 the fee is never below
 the transaction's ZIP-317 conventional fee (an SLH-DSA owner spend is ~54 logical actions, 27,000
 zat), so a node with `-txunpaidactionlimit=0` relays it. When the priced fee would leave a dust

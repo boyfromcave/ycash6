@@ -767,7 +767,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         fees.pushKV("earlyRedeemFeeBps", early2);
         const AttestedFeePolicy& fp = ::attestedFeePolicy;
         UniValue network(UniValue::VOBJ);
-        const std::optional<int64_t> feePrice = AttestedFeePrice();   // review M-1: the tip's highest window median, none under a halt
+        const std::optional<int64_t> feePrice = AttestedFeePrice();   // review M-1: the tip's highest window median, none unless the price is trusted (HALT-2 alone publishes, 2026-10-28)
         network.pushKV("priceMicroUsd", feePrice.has_value() ? UniValue(feePrice.value()) : NullUniValue);
         network.pushKV("priceSource", feePrice.has_value() ? "tip" : "fallback");
         UniValue plain(UniValue::VOBJ);

@@ -726,9 +726,60 @@ BOOST_AUTO_TEST_CASE(fee_price_is_the_highest_window)
     const MicroUsd high = std::max(s.PFast().value(), std::max(s.PMid().value(), s.PSlow().value()));
     BOOST_CHECK_LT(s.PMint().value(), high);
     BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), high);
-    // a crash that sets a halt bit (HALT_DIVERGENCE here): no attested fee price, the fallback
+    // a crash that sets a price-trust halt bit (HALT_DIVERGENCE here): no attested fee price, the fallback
     for (int i = 0; i < 12; i++) live.MineQuote(20000);
-    BOOST_REQUIRE(live.b->Snap(live.Tip()).haltMask != 0u);
+    BOOST_REQUIRE(live.b->Snap(live.Tip()).haltMask & HALT_DIVERGENCE);
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+    live.index->SetUnhealthy("test");
+    BOOST_CHECK(!AttestedFeePrice().has_value());
+}
+
+// Rule: HALT-2 HALT-1 HALT-3
+// Fees spec section 5.1, amendment 2026-10-28 (U-27): fee publication follows price trust. HALT-1 (no price) and
+// HALT-3 (diverged windows) withhold the dollar fee price; HALT-2 (the vaults are thin, the price is armed and
+// agreed) does not -- it restricts minting only. The predicate is an allow-list: any other bit, a reserved one or
+// one added later, withholds the price until it is listed in FEE_PRICE_TRUSTED_HALTS.
+BOOST_AUTO_TEST_CASE(fee_price_follows_price_trust_not_halt2)
+{
+    BOOST_CHECK(FeePriceTrusted(0));
+    BOOST_CHECK(FeePriceTrusted(HALT_GLOBAL_RATIO));
+    BOOST_CHECK(!FeePriceTrusted(HALT_NO_PRICE));
+    BOOST_CHECK(!FeePriceTrusted(HALT_DIVERGENCE));
+    BOOST_CHECK(!FeePriceTrusted(HALT_GLOBAL_RATIO | HALT_NO_PRICE));
+    BOOST_CHECK(!FeePriceTrusted(HALT_GLOBAL_RATIO | HALT_DIVERGENCE));
+    BOOST_CHECK(!FeePriceTrusted(HALT_NOT_ACTIVE));
+    BOOST_CHECK(!FeePriceTrusted(HALT_PARTICIPATION));
+    BOOST_CHECK(!FeePriceTrusted(HALT_ENFORCEMENT));
+    BOOST_CHECK(!FeePriceTrusted(1u << 6));                         // a bit nobody has classified yet
+    BOOST_CHECK(!FeePriceTrusted(Snapshot::Virtual().haltMask));
+    BOOST_CHECK_EQUAL(FEE_PRICE_TRUSTED_HALTS, (uint32_t)HALT_GLOBAL_RATIO);
+
+    // End to end through the index: one 300 % vault at $0.05, then $0.035 (210 %, below the 25,000 bps halt). While
+    // the windows disagree HALT-3 withholds the price; once they agree the tip is a pure HALT-2 halt and the highest
+    // window median is published again.
+    Live live(pathTemp / "yb-fee-price-halt2");
+    live.Activate();
+    live.MintActive();
+    BOOST_REQUIRE_EQUAL(live.b->Snap(live.Tip()).haltMask, 0u);
+    bool pure = false;
+    for (int i = 0; i < 160 && !pure; i++) {
+        live.MineQuote(35000);
+        const Snapshot s = live.b->Snap(live.Tip());
+        if (s.haltMask & HALT_DIVERGENCE) BOOST_CHECK(!AttestedFeePrice().has_value());
+        pure = s.haltMask == (uint32_t)HALT_GLOBAL_RATIO;
+    }
+    BOOST_REQUIRE(pure);
+    const Snapshot s = live.b->Snap(live.Tip());
+    BOOST_CHECK_GT(s.openDebtCents, 0);
+    BOOST_CHECK_LT(s.globalRatioBps, live.P.globalRatioHaltBps);
+    const MicroUsd high = std::max(s.PFast().value(), std::max(s.PMid().value(), s.PSlow().value()));
+    BOOST_CHECK_EQUAL(AttestedFeePrice().value_or(0), high);         // HALT-2 alone: the dollar fee price stands
+    BOOST_CHECK_LE(s.PMint().value(), high);
+    // HALT-3 on top of HALT-2 (a second crash): withheld
+    for (int i = 0; i < 12; i++) live.MineQuote(15000);
+    const Snapshot crashed = live.b->Snap(live.Tip());
+    BOOST_REQUIRE(crashed.haltMask & HALT_DIVERGENCE);
+    BOOST_CHECK(crashed.haltMask & HALT_GLOBAL_RATIO);
     BOOST_CHECK(!AttestedFeePrice().has_value());
     live.index->SetUnhealthy("test");
     BOOST_CHECK(!AttestedFeePrice().has_value());

@@ -92,7 +92,9 @@ mint may not exceed max(10 % of the supply cap, $10,000) (`mint-vault-share`, MI
 cap's base is the circulating YEC supply at the tip (`params.supplyCap`, D-Q-25); a claim's residual is due
 from $0.48 at `pMint` (never below 100,000 zat, RED-5′). Network fees of post-quantum and Yellowback
 transactions are **dollars per KB** at the attested tip price — the highest of the tip's window medians
-(`params.fees.network.priceMicroUsd`; none while any halt bit is set) — (`params.fees.network`: plain PQ
+(`params.fees.network.priceMicroUsd`; published while the price is trusted: none, `priceSource: "fallback"`, under
+HALT-1 `NO_PRICE` or HALT-3 `DIVERGENCE`; HALT-2 `GLOBAL_RATIO` alone keeps it, since it restricts minting only —
+fees spec §5.1, amendment 2026-10-28) — (`params.fees.network`: plain PQ
 $0.02/KB, vault/Yellowback $0.05/KB, floor max(5,000 zat/KB, `-pqfeerate`), the Yellowback cap
 min(max(`-maxtxfee`, $2 at the price), `-yellowbackmaxtxfee`, default 10 YEC:
 `yellowback.maxTxFeeCeilingZat`), which caps plain post-quantum transfers too (D-Q-26: the node's own wallet
