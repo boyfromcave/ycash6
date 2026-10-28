@@ -49,7 +49,7 @@ class VaultActivationRestartTest(BitcoinTestFramework):
     def __init__(self):
         super().__init__()
         self.num_nodes = len(CASES)
-        self.setup_clean_chain = True
+        self.cache_behavior = 'clean'   # 6.20.0 harness: replaces setup_clean_chain
 
     def setup_network(self, split=False):
         self.nodes = [start_node(i, self.options.tmpdir, CASES[i][1] + ['-checkblockindex=1'])
