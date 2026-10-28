@@ -300,6 +300,32 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.node.setquotes(), [(50000, 0), (50000, 0)])
         self.assertTrue(all(0 < d <= 1 for d in polls))
 
+    def test_stop_during_a_poll_is_not_swallowed(self):
+        # a SIGTERM that lands inside a poll (here: during the yed_setquote call, inside _setquote's
+        # `except Exception`) stops the daemon at once with exit 0; before _Stop was a BaseException it
+        # was logged as an RPC failure and the loop polled on (the -9 of yellowback_quote.py's stop_agent)
+        write(self.mock, "0.05")
+
+        class StopDuringSetquote(FakeNode):
+            def call(self, method, *params):
+                if method == "yed_setquote":
+                    self.calls.append((method,) + params)
+                    raise yq._Stop()
+                return FakeNode.call(self, method, *params)
+        node = StopDuringSetquote()
+        polls = []
+
+        def sleep(delay):
+            polls.append(delay)
+            if len(polls) == 5:
+                raise yq._Stop()          # a guard: the broken loop would otherwise never end
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = yq.main(["--conf", self.conf, "--mock-price", self.mock], node_factory=lambda cfg: node, sleep=sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(node.setquotes(), [(50000, 0)])   # stopped inside the first poll
+        self.assertEqual(polls, [])                       # never slept: no second poll
+        self.assertTrue(issubclass(yq._Stop, BaseException) and not issubclass(yq._Stop, Exception))
+
     def test_mock_price_is_regtest_only(self):
         # Rule: audit D-11 -- the mock file is never pushed on a network other than regtest
         for network in ("main", "test"):
