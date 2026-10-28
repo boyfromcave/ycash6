@@ -162,4 +162,70 @@ bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, uint32
     return true;
 }
 
+std::optional<uint256> MempoolSpenderOf(const COutPoint& out)
+{
+    AssertLockHeld(mempool.cs);
+    std::map<COutPoint, CInPoint>::const_iterator it = mempool.mapNextTx.find(out);
+    if (it == mempool.mapNextTx.end() || it->second.ptx == nullptr) return std::nullopt;
+    return it->second.ptx->GetHash();
+}
+
+Cents MempoolMintCents()
+{
+    AssertLockHeld(mempool.cs);
+    Cents total = 0;
+    for (CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.begin(); it != mempool.mapTx.end(); ++it) {
+        std::optional<FoundPayload> fp = FindPayload(it->GetTx());
+        if (fp.has_value() && fp->payload.type == PayloadType::MINT) total += (Cents)fp->payload.cents;
+    }
+    return total;
+}
+
+std::optional<std::string> MintPolicyRefusal(const State& st, const Params& p, int R, int termClass, Cents cents, Cents pendingMintCents)
+{
+    // MINTPOL-1 (§4.6): haltMask == 0 at R, the cap has room (the activation state machine left with the upgrade, §6).
+    std::optional<Snapshot> S = SnapshotAt(st, p, R);
+    if (!S.has_value() || (S->haltMask & HALT_NOT_ACTIVE)) return std::string("mintpol-not-active: Yellowback is not active at the reference height");
+    if (S->haltMask & HALT_NO_PRICE) return std::string("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && p.baseRatioBps[termClass] < p.recapRatioBps) {
+        // W16, IT-5: only a class whose base ratio reaches the recapitalisation floor mints through a global-ratio halt
+        std::string open;
+        for (int c = 0; c < NUM_CLASSES; c++) if (p.IsClassEnabled(c) && p.baseRatioBps[c] >= p.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+        return strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose base ratio is at least %d %% can mint until it recovers%s",
+                         p.globalRatioHaltBps / 100, p.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")");
+    }
+    if (S->haltMask & HALT_DIVERGENCE) return std::string("mintpol-divergence: minting is halted while the price windows diverge (HALT-3)");
+    if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) return std::string("mintpol-not-active: an unknown halt bit is set at the reference height");
+    // H-1 (MINT-4): with MINT_REQUIRES_ARMED a mint at an unarmed R would confirm VOID (mint-halted-unarmed)
+    if (p.mintRequiresArmed && !ArmedAt(st.View(), p, R)) return std::string("mintpol-unarmed: minting needs an ARMED attestation layer at the reference height (MINT_REQUIRES_ARMED)");
+    const std::optional<MicroUsd> xMint = S->PMint();
+    if (!xMint.has_value()) return std::string("mintpol-no-price: pMint is undefined at the reference height");
+    const Totals totals = st.GetTotals();
+    std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, p.supplyCapBps);
+    // W20, IT-5: the cap is soft above the recapitalisation floor -- a mint over it is refused unless its
+    // class base ratio reaches RECAP_RATIO_BPS (MINT-6, amended; class C with the in-term parameter set).
+    const bool belowFloor = p.baseRatioBps[termClass] < p.recapRatioBps;
+    std::string openAbove;
+    for (int c = 0; c < NUM_CLASSES; c++) if (p.IsClassEnabled(c) && p.baseRatioBps[c] >= p.recapRatioBps) openAbove += (openAbove.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+    const std::string above = strprintf("; above the cap only a term class with a base ratio of at least %d %% can mint (W20, IT-5)%s",
+                                        p.recapRatioBps / 100, openAbove.empty() ? "" : " (class " + openAbove + ")");
+    if (cap.has_value() && totals.supplyCents + cents > cap.value() && belowFloor) {
+        return strprintf("mintpol-cap: supply cap headroom is %d cents%s", std::max<Cents>(0, cap.value() - totals.supplyCents), above);
+    }
+    // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
+    // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
+    // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
+    if (cap.has_value() && pendingMintCents > 0 && totals.supplyCents + pendingMintCents + cents > cap.value() && belowFloor) {
+        return strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool%s",
+                         std::max<Cents>(0, cap.value() - totals.supplyCents - pendingMintCents), pendingMintCents, above);
+    }
+    return std::nullopt;
+}
+
+std::string RefusalIdentifier(const std::string& refusal)
+{
+    const size_t colon = refusal.find(':');
+    return colon == std::string::npos ? refusal : refusal.substr(0, colon);
+}
+
 } // namespace yellowback

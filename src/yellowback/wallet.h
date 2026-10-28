@@ -126,6 +126,12 @@ public:
     /** Every YED output that is mine (for listing). */
     std::vector<YedCoin> AllCoins() const;
     int64_t ConfirmedCents() const;
+    /**
+     * ConfirmedCents() less the tokens this wallet's own unconfirmed transactions already spend: the sum of
+     * SpendableCoins(), what the selectors can use now (yed_getbalance.spendableCents; cf. DigiByte v9.26.7 75d82a6e,
+     * the spendable figure next to the pending one). cs_wallet and cs_yellowback held by the caller.
+     */
+    int64_t SpendableCents() const;
 
     // ---- committing
     /**
@@ -184,8 +190,18 @@ public:
     YellowbackIndex* Index() const { return index; }
 
     // ---- v3: carriers (W7). All take cs_wallet themselves; the file is rewritten and fsynced on every change.
-    /** Persist a carrier the wallet just broadcast. */
-    void RecordCarrier(const CarrierRecord& c);
+    /**
+     * Persist a carrier (in memory, and carriers.dat rewritten and fsynced). Returns false when the file could not be
+     * written; the record is then held in memory only (lost on restart).
+     */
+    bool RecordCarrier(const CarrierRecord& c);
+    /**
+     * The carrier step's order (cf. DigiByte v9.26.7 38895edb, "save before broadcast"): record `c` in carriers.dat,
+     * then run `commit`. When the file cannot be written the record is dropped again, `commit` is never run and
+     * `error` says why (nothing was sent); when `commit` returns false or throws, the record is dropped (the
+     * exception propagates). True once `commit` succeeded with the record on disk.
+     */
+    bool CommitWithCarrierRecord(const CarrierRecord& c, const std::function<bool()>& commit, std::string& error);
     /** Forget a carrier whose spending transaction was committed (or swept). */
     void SpendCarrier(const COutPoint& out);
     std::optional<CarrierRecord> GetCarrier(const COutPoint& out) const;
@@ -237,6 +253,22 @@ private:
     bool startupSweepDone;
     std::thread thread;
 };
+
+/**
+ * Plan A6 (v3 plan, the A5-b findings; cf. DigiByte v9.26.7 77a5b156, failed attempts shown consistently): what became
+ * of a carrier, yed_listtransactions.carrierOutcome. `completed` when a confirmed or mempool transaction with a
+ * Yellowback payload spends it (the main transaction), `swept` when one without a payload does (yed_sweepcarriers),
+ * else `lapsed` once the tip has passed the carrier's expiry height R + REF_WINDOW (the main transaction can no
+ * longer be built; the sweep reclaims it), else `pending`.
+ */
+std::string CarrierOutcome(bool spenderLive, bool spenderHasPayload, int tipHeight, uint32_t carrierExpiryHeight);
+
+/**
+ * The yed_listtransactions `type` of an own transaction whose payload expired unmined (cf. DigiByte v9.26.7 77a5b156):
+ * by payload -- mint, send, redeem (claim when it spends a vault this wallet does not own), register, notice,
+ * equivocation, revive, cancel.
+ */
+std::string ExpiredRowType(uint8_t payloadType, bool spendsForeignVault);
 
 /**
  * H7: does this raw transaction destroy YED that belongs to this wallet? True when it spends a
