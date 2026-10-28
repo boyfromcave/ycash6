@@ -6937,6 +6937,10 @@ bool static LoadBlockIndexDB(const CChainParams& chainparams)
                 pindex->nChainOrchardValue = 0;
             }
         }
+        // A descendant of a failed entry is failed: RewindBlockIndex erases the
+        // failed branch whole, never a parent under a kept (e.g. headers-only) child.
+        if (pindex->pprev && (pindex->pprev->nStatus & BLOCK_FAILED_MASK))
+            pindex->nStatus |= BLOCK_FAILED_CHILD;
         // Construct in-memory chain of branch IDs.
         // Relies on invariant: a block that does not activate a network upgrade
         // will always be valid under the same consensus rules as its parent.
@@ -7395,10 +7399,12 @@ bool RewindBlockIndex(const CChainParams& chainparams, bool& clearWitnessCaches)
     // Entries below BLOCK_VALID_CONSENSUS have not run ConnectBlock, so
     // nCachedBranchId is not applicable to them (see chain.h). Treat them as
     // retained — erasing them forces redundant re-download of headers and
-    // block data already on disk after an interrupted sync.
+    // block data already on disk after an interrupted sync. A failed entry is
+    // erased, so that it is judged again (LoadBlockIndexDB marks its
+    // descendants failed too, so the whole failed branch goes with it).
     auto sufficientlyValidated = [&chainparams](const CBlockIndex* pindex) {
         if (!pindex->IsValid(BLOCK_VALID_CONSENSUS))
-            return true;
+            return !(pindex->nStatus & BLOCK_FAILED_MASK);   // keep unconnected, erase failed (re-evaluate)
 
         // Connected: must have run under the expected consensus branch.
         const Consensus::Params& consensus = chainparams.GetConsensus();

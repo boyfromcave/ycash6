@@ -89,8 +89,9 @@ BASE_SCRIPTS= [
     'yellowback_chainviz.py',
     # The vault primitive network upgrade (docs/plans/yellowback-upgrade-plan.md §15.9).
     'vault_upgrade.py',
-    # A restart holding an invalidated branch across an activation block: this line keeps the branch
-    # (upstream Ycash 1770fce16); the v4.5.0 line's script of the same name pins its abort.
+    # What a restart keeps of the block index (RewindBlockIndex): an invalidated branch across an
+    # activation block is erased whole and judged again; a never-connected one is kept. Byte-identical
+    # on both lines (qa/yellowback-cross-line.manifest).
     'vault_activation_restart.py',
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
