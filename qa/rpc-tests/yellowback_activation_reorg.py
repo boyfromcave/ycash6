@@ -151,10 +151,8 @@ class YellowbackActivationReorgTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(user.yed_getbalance()['confirmedCents'], 0)
         self.assert_agree('below the activation')
 
-        # No restart here: on ycash-dd (not ycash6) a node restarted while it holds the invalidated branch
-        # across the activation aborts in CheckBlockIndex (-checkblockindex, "nNodes == forward.size()"):
-        # stock v4.5.0 RewindBlockIndex keeps the activation block with a dangling parent. That restart is
-        # owned by vault_activation_restart.py on both lines (abort pinned on ycash-dd, kept branch on ycash6).
+        # No restart here: a restart while holding the invalidated branch across the activation (it is
+        # erased and judged again, the same on both lines) is owned by vault_activation_restart.py.
 
 # Rule: UNDO SNAP
         print('new_branch_across_activation: the stock node mines a different activation block; a new set is created on it')
