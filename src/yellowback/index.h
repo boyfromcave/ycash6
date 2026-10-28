@@ -74,6 +74,19 @@ static const int UNDO_KEEP = 4096;
 static const int SYNC_PROGRESS_INTERVAL = 1000;
 
 /**
+ * Fee publication follows price trust (fees spec section 5.1, amendment 2026-10-28; upgrade plan U-27). Node
+ * policy, never read by block validity. The dollar fee price is published when the price is trusted: when no halt
+ * bit is set at the tip except those listed here, an explicit allow-list. HALT_GLOBAL_RATIO (HALT-2) is on it
+ * because it says the vaults are thin while the price stays armed and agreed; it restricts minting only.
+ * HALT_NO_PRICE (HALT-1, no trustworthy price) and HALT_DIVERGENCE (HALT-3, the windows disagree) are not, nor are
+ * the reserved bits. The rule is stated positively so that any future halt bit must decide explicitly whether it
+ * affects price trust: a bit not added here withholds the fee price (the -pqfeerate fallback).
+ */
+static const uint32_t FEE_PRICE_TRUSTED_HALTS = HALT_GLOBAL_RATIO;
+/** True when a snapshot with this haltMask carries a price the fee policy may use (see FEE_PRICE_TRUSTED_HALTS). */
+inline bool FeePriceTrusted(uint32_t haltMask) { return (haltMask & ~FEE_PRICE_TRUSTED_HALTS) == 0; }
+
+/**
  * The invariant audit (cf. DigiByte v9.26.7 19c8b1c272, src/index/digidollarstatsindex.cpp SupplyVerification):
  * the Totals record re-derived from the records it summarises, read only, in one pass over Tokens and Vaults.
  *   supplyCents   = sum of Tokens[*].cents (every YED output not yet spent; a claim's burn left supply with the
@@ -338,7 +351,8 @@ public:
 
     /** Mark unhealthy (also used by unit tests to exercise the RPC refusal). */
     void SetUnhealthy(const std::string& reason);
-    /** D-Q-23 (b), review M-1: publish the tip's highest window median to the network-fee policy (policy.h SetAttestedFeePrice); a halt bit or no price = fallback. */
+    /** D-Q-23 (b), review M-1: publish the tip's highest window median to the network-fee policy (policy.h SetAttestedFeePrice) when the price is
+     *  trusted (FeePriceTrusted: HALT-2 alone still publishes, fees spec section 5.1 amendment 2026-10-28); otherwise, or with no price, the fallback. */
     void PublishFeePrice();
 
     // ------------------------------------------------------------------ hooks (cs_main held)

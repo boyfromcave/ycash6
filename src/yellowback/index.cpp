@@ -443,14 +443,18 @@ void YellowbackIndex::PublishFeePrice()
 {
     // D-Q-23 (b), review M-1: the network-fee policy prices its dollars-per-KB targets at the HIGHEST of the index
     // tip's window medians (max(pFast, pMid, pSlow), pClaim-style): the min-of-windows xMint is a collateral price,
-    // and under a falling market it would make the wallet overpay the network in YEC. Any halt bit at the tip (a
-    // stale or diverged price, HALT-3 included), no tip, or an unhealthy index = the -pqfeerate fallback.
+    // and under a falling market it would make the wallet overpay the network in YEC. Published when the price is
+    // trusted (FeePriceTrusted, index.h; fees spec section 5.1 amendment 2026-10-28, U-27): HALT-1 (no price) and
+    // HALT-3 (diverged windows) withhold it, HALT-2 (thin vaults, the price still armed and agreed) does not -- it
+    // restricts minting only. Any future halt bit must decide explicitly whether it affects price trust; until it is
+    // listed in FEE_PRICE_TRUSTED_HALTS it withholds the price. An untrusted price, no tip, or an unhealthy index =
+    // the -pqfeerate fallback. Node policy only: nothing in block validity reads the published price.
     std::optional<int64_t> price;
     if (healthy && !stopped) {
         std::optional<TipRecord> tip = State(*db).GetTip();
         if (tip.has_value() && tip->height >= params.startHeight) {
             std::optional<Snapshot> s = State(*db).GetSnapshot((uint32_t)tip->height);
-            if (s.has_value() && s->haltMask == 0) {
+            if (s.has_value() && FeePriceTrusted(s->haltMask)) {
                 for (const std::optional<MicroUsd>& w : { s->PFast(), s->PMid(), s->PSlow() }) {
                     if (w.has_value() && (!price.has_value() || w.value() > price.value())) price = w.value();
                 }

@@ -164,7 +164,7 @@ unsigned int GetPQSigOpCount(const CScript& script);
  * The fallback fee rate wallets charge a transaction that spends a post-quantum input (TX_PQPKH, or a
  * V/I owner path), -pqfeerate (quantum plan §4.5): 1x the per-kB relay floor (-minrelaytxfee) by
  * default. Since D-Q-23 (b) it is the rate used only while no attested price exists (below the
- * Yellowback start height, under HALT_NO_PRICE, with no index): with a price the rates below are
+ * Yellowback start height, under HALT_NO_PRICE or HALT_DIVERGENCE, with no index): with a price the rates below are
  * dollars per KB. Not a relay or consensus rule: relay stays minRelayTxFee per byte.
  */
 extern CFeeRate pqFeeRate;
@@ -174,7 +174,8 @@ extern CFeeRate pqFeeRate;
  * yb-calibration adjustments D-Q-23a; policy only, nothing in consensus): wallets target dollars per
  * KB at the attested price -- the HIGHEST of the index tip's window medians (max(pFast, pMid, pSlow),
  * pClaim-style, so a depressed min-of-windows never makes the wallet overpay in YEC; review M-1), and
- * none while any halt bit is set at the tip -- bounded below by max(floorZatPerKB, -pqfeerate) (review
+ * none while the price is not trusted at the tip (HALT-1 or HALT-3; HALT-2 alone still publishes it, fees spec
+ * section 5.1 amendment 2026-10-28: yellowback::FeePriceTrusted) -- bounded below by max(floorZatPerKB, -pqfeerate) (review
  * A-7) and, for the vault/Yellowback paths, above by min(max(-maxtxfee, yedMaxTxFeeUsdMicro at the
  * price), -yellowbackmaxtxfee) (review M-1: an absolute YEC ceiling). Every number is a parameter (one
  * place here; yed_getinfo.params.fees.network reports them). A transaction with a PQ input takes the
