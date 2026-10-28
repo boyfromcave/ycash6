@@ -546,6 +546,43 @@ Result of `yed_getstatehash`:
 }
 ```
 
+### `yed_verifyindex`
+
+Arguments: none. Additive (rpcversion 8, no bump). The invariant audit the node also runs at every start, after
+the index reaches the tip (cf. DigiByte v9.26.7 `19c8b1c272`, `src/index/digidollarstatsindex.cpp`
+SupplyVerification): the `Totals` record is re-derived from the records it summarises, read only, in one pass
+over `Tokens` and `Vaults` -- `supplyCents` is the sum of every unspent YED token's cents (a claim's burn left
+supply with the claim and a cancel's refund came back as a token, so a `CLAIMING` vault adds nothing),
+`collateralZat` the collateral of the `ACTIVE` and `CLAIMING` vaults (IT-6), `activeVaults`, `voidVaults`,
+`closedVaults` and `claimedVaults` the count of records in that status, `unbackedCents` 0 -- and the tip
+snapshot's `supplyCents` / `collateralZat` must equal the `Totals` they were copied from. Every signer set's
+`lockedValue` in the vault set-state database is re-derived the same way, as the sum of its unspent V outputs
+(`sets`). `stored` is the `Totals` record, `records` the re-derived one; `mismatches` has one line per
+disagreement and is empty when `ok`. The command writes nothing, but a mismatch marks the index unhealthy, with
+the log line `yellowback: index unhealthy: invariant audit failed … restart with -reindex-yellowback` (a set's
+`lockedValue`: restart with `-reindex`), and the node stops at the next block (U-21); at start a mismatch
+refuses to start the same way. It answers on an unhealthy index too. Cost: one read of every `Tokens` and
+`Vaults` record under `cs_main`. `rulesVersion` is the stamp the index carries (`RULES_VERSION`, `R` key, not
+in the state hash): a release that changes how stored heights are judged bumps it and every node rebuilds its
+index at start, `yed_getinfo.rebuilt` reporting it.
+
+Result of `yed_verifyindex`:
+
+```json
+{
+  "height": 331,
+  "ok": true,
+  "tokens": 4,
+  "vaults": 5,
+  "stored": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "records": { "supplyCents": 1500000, "collateralZat": 62500000000, "activeVaults": 3, "voidVaults": 0, "closedVaults": 2, "claimedVaults": 0, "unbackedCents": 0 },
+  "sets": [ { "setid": "4c1d9b2e7a6f5e8d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d", "lockedValueZat": 62500000000, "recordsZat": 62500000000 } ],
+  "mismatches": [],
+  "healthy": true,
+  "rulesVersion": 1
+}
+```
+
 ### `yed_getstats`
 
 Arguments: none. `Totals` plus the tip snapshot. `supplyCents` is the circulating supply -- the YED

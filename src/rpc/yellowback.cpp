@@ -36,6 +36,7 @@
 #include "txmempool.h"
 #include "util/strencodings.h"
 #include "util/time.h"
+#include "vault/node.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #endif
@@ -911,6 +912,70 @@ UniValue yed_getstatehash(const UniValue& params, bool fHelp)
     o.pushKV("height", h);
     o.pushKV("blockhash", tip.has_value() ? tip->blockHash.GetHex() : "");
     o.pushKV("statehash", index.GetStateHash().GetHex());
+    return o;
+}
+
+static UniValue TotalsToJSON(const Totals& t)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("supplyCents", t.supplyCents);
+    o.pushKV("collateralZat", t.collateralZat);
+    o.pushKV("activeVaults", (int64_t)t.activeVaults);
+    o.pushKV("voidVaults", (int64_t)t.voidVaults);
+    o.pushKV("closedVaults", (int64_t)t.closedVaults);
+    o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
+    o.pushKV("unbackedCents", t.unbackedCents);
+    return o;
+}
+
+UniValue yed_verifyindex(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "yed_verifyindex\n"
+            "\nThe invariant audit the node runs at startup (cf. DigiByte v9.26.7 SupplyVerification): re-derives the Totals\n"
+            "record from the stored Tokens and Vaults records (supplyCents = the sum of every unspent YED token; collateralZat\n"
+            "and activeVaults from the ACTIVE vaults, collateralZat also from the CLAIMING ones, IT-6; each status count from\n"
+            "its records), checks the tip snapshot against the Totals, and every signer set's lockedValue against its unspent\n"
+            "V outputs in the vault set-state database. Reads every Tokens and Vaults record once. Writes nothing; a mismatch\n"
+            "marks the index unhealthy (the node then stops at the next block): restart with -reindex-yellowback (Yellowback\n"
+            "totals) or -reindex (a set's lockedValue). Answers on an unhealthy index too.\n"
+            "\nResult:\n"
+            "{ \"height\": n, \"ok\": true|false, \"tokens\": n, \"vaults\": n, \"stored\": {totals}, \"records\": {totals},\n"
+            "  \"sets\": [ { \"setid\": \"hex\", \"lockedValueZat\": n, \"recordsZat\": n } ], \"mismatches\": [ \"text\", ... ],\n"
+            "  \"healthy\": true|false, \"rulesVersion\": n }\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(cs_main);                     // the set-state database changes only under cs_main
+    LOCK(index.cs_yellowback);
+    IndexAudit a = index.VerifyIndex();
+    std::vector<vault::SetValueAudit> sets;
+    std::vector<std::string> setMismatches;
+    if (vault::g_vaultdb) setMismatches = vault::AuditLockedValue(*vault::g_vaultdb, &sets);
+    for (const std::string& m : setMismatches) LogPrintf("vault: invariant audit: %s\n", m);
+    if (!setMismatches.empty()) index.SetUnhealthy("vault set-state invariant audit failed: " + setMismatches.front() + "; restart with -reindex");
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", a.tipHeight.value_or(-1));
+    o.pushKV("ok", a.ok && setMismatches.empty());
+    o.pushKV("tokens", (int64_t)a.tokens);
+    o.pushKV("vaults", (int64_t)a.vaults);
+    o.pushKV("stored", TotalsToJSON(a.stored));
+    o.pushKV("records", TotalsToJSON(a.derived));
+    UniValue arr(UniValue::VARR);
+    for (const vault::SetValueAudit& sa : sets) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("setid", sa.setId.GetHex());
+        r.pushKV("lockedValueZat", sa.stored);
+        r.pushKV("recordsZat", sa.derived);
+        arr.push_back(r);
+    }
+    o.pushKV("sets", arr);
+    UniValue mm(UniValue::VARR);
+    for (const std::string& m : a.mismatches) mm.push_back(m);
+    for (const std::string& m : setMismatches) mm.push_back(m);
+    o.pushKV("mismatches", mm);
+    o.pushKV("healthy", index.IsHealthy());
+    o.pushKV("rulesVersion", (int64_t)State(index.View()).GetRulesVersion());
     return o;
 }
 
@@ -2131,6 +2196,7 @@ static const CRPCCommand commands[] =
   //  ---------  ----------------------------  ----------------------------  ----------
     { "yellowback", "yed_getinfo",                 &yed_getinfo,                  true  },
     { "yellowback", "yed_getstatehash",            &yed_getstatehash,             true  },
+    { "yellowback", "yed_verifyindex",             &yed_verifyindex,              true  },
     { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
     { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
     { "yellowback", "yed_getactivation",           &yed_getactivation,            true  },

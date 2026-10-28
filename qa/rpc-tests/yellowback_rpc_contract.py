@@ -523,6 +523,19 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         seqs = self.v3_node_context(c, mint_a['txid'])
         self.v3_wallet_context(c, seqs)
 
+        print('the invariant audit after the whole flow: Totals and every set lockedValue match their records (cf. DigiByte SupplyVerification)')
+        for i in (0, 5):
+            audit = c.check('yed_verifyindex', self.nodes[i].yed_verifyindex())
+            assert_equal(audit['mismatches'], [])
+            assert_equal(audit['ok'], True)
+            assert_equal(audit['stored'], audit['records'])
+            assert_equal(audit['height'], self.nodes[i].getblockcount())
+            assert_equal(audit['stored']['supplyCents'], self.nodes[i].yed_getstats()['supplyCents'])
+            assert_greater_than(audit['vaults'], 0)
+            assert_greater_than(len(audit['sets']), 0)
+            for row in audit['sets']:
+                assert_equal(row['lockedValueZat'], row['recordsZat'])
+
         print('a storage fault stops the observer (U-21: an index that cannot evaluate a block stops the node)')
         self.restart_quiet(5, ['-yellowbacktestfault=storage:commit'])
         nodes[POOLS[0]].generate(1)

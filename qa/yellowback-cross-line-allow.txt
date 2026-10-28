@@ -22,15 +22,15 @@ src/vault/db.cpp a3914a2e5d661bce428fdf786f9e24dc861487440d1a422cde7d9e9998e6fc1
 # TemplateRun live here, with ZIP-244 PrecomputedTransactionData prevouts and
 # an explicit non-v4 refusal (quantum spec R-A3). Includes logging.h and util/system.h.
 # IsByteLevelActFailure is the same function on both lines; these hashes include it.
-src/vault/node.cpp 58064ba0c1ef015bf229b2ccddee97aadde1807403ed6f416a036c13e9838dce 49f85d229f8f2067781212c1ca5857a556bec89dd8d0e1bc89efe3f503a01b04
-src/vault/node.h dfb3fb423b1b40a2b5d0bfb1a535b5ee35835908565c36f3c24260225a4702cc 717e27f71b38edca7d93295eec21ade608712f0185c8ed18ea990455706ca6dc
+src/vault/node.cpp f7a44eb314d7a7fc12f32df84615cc328ed8d22e9d94fce5d59d29f65e2c0582 70b6eb75d9b672194c0eaee529aa54803cae409a6e78616cb1bc440d3f357f1c
+src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e77 be14006df7c7c7447de4839a80124fd0f452e792f345a7774e11190e91aad7d0
 
 # CCriticalBlock became UniqueLock; ChainTip frontiers are MerkleFrontiers;
 # GetBlockSubsidy is a consensus-params method; regtest crashHeight (SIGKILL
 # after FlushStateToDisk) reproduces a crash only 6.20.0's index flush can.
 # Header split: util/system.h, util/strencodings.h.
-src/yellowback/index.cpp 5e79a669503d14d4c91e1d54f5267e201054cea545212783f37d7e1c7e9af381 129c2712f56c358ec8df8a6ef4bcab7b6de0da46b847280445fa9543f4ca0a9a
-src/yellowback/index.h 1e15f0108a87767231912bdc8c20a5b12af45b4008e30baeb1ccbd8269485c8f 5bed2c89ca3b3889e6ec326caa56113d224740930f70c5ebf3ac189ff99826c8
+src/yellowback/index.cpp a7a68d159b8e229c0bb812be07538cf5160ed24049473446ad018a92a3cc6118 b15097057cffb4762d2a26473e13226e386d5978358058440d432f3beaa0d737
+src/yellowback/index.h 19b39e0c37f749faa4997b03c1e4634ee36e09c505a8dc8df85d390a069e3b34 641209c7e44572bb425981302d021ffe8f01379404b7756d5e7e7c11c91da52c
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee).
