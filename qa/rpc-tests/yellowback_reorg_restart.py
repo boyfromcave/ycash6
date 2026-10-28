@@ -59,7 +59,9 @@ def coin_rows(node):
 
 
 def stats_without_height(stats):
-    return {k: v for k, v in stats.items() if k != 'height'}
+    """yed_getstats without what follows the chain height: the new branch may carry M and T in one
+    block instead of two (issuedZat counts the block subsidies)."""
+    return {k: v for k, v in stats.items() if k not in ('height', 'issuedZat')}
 
 
 # Rule: UNDO XFER-1
