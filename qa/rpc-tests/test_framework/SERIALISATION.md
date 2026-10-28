@@ -35,14 +35,14 @@ of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of re
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 13`, `string network` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 15`, `string network` |
 | 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
 | 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan), `i64 pMint` (FEE-1', quantum plan D-Q-23: MINT-5's price at the mint, micro-USD per YEC, the price every later fee of the vault converts at; schema 9, appended last so every earlier field keeps its offset), `u8 cancelCount`, `i32 lastCancelHeight` (**CAN-2**, the cancel-limit design, schema 14, appended last: the position's cancels counted by the escalation schedule and the height of its last cancel; 0/0 at the mint, carried by every re-creation) |
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
-| 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents` |
-| 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone) |
+| 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents`, `i64 openDebtCents` (**HALT-2**, owner 2026-10-28, appended last: `SCHEMA_VERSION` 15) |
+| 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone); `i64 openDebtCents` (**HALT-2**, appended last: `SCHEMA_VERSION` 15) |
 | 9 | `Params` | `P` | `i32 startHeight` (the `UPGRADE_VAULT` activation height, U-22), `i32 sigmaRefBps`, `i32 supplyCapBps`, `uint256 attestorSetId` (32 internal bytes; it replaced v3's `i32 enforceUntil`, **U-22**); v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1: `u8 mintRequiresArmed` |
 | 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice`. `Attestors`: `bytes attestorPubKey`, `bytes bondPubKey`, `COutPoint bondOutpoint`, `i64 bondZat`, `u32 bondLocktime`, `u8 flags`, `i32 registerHeight`, `u8 status` (`PENDING, ELIGIBLE, DORMANT, EJECTED, WITHDRAWN`), `i32 statusHeight`, `i32 bondSpentHeight`, `i32 seatedSince`, then **(P4-b)** `i32 lastAct`, `bool bondFrozen` |
 | 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height`, `bytes refundScript` (**CAN-1**, audit 03/H-1, schema 13, appended last: on the claimant intent the scriptPubKey of the token the claim spent at its lowest-index YED input; empty on the residual), `i32 claimRefHeight` (**C4b**, schema 14: the claim's REDEEM `refHeight`, on both intents), `COutPoint heldBy` (**CAN-3**, schema 14: on a residual whose claimant intent was cancelled the re-created position, else null = 32 zero bytes and `n = 0xffffffff`) |
@@ -105,6 +105,15 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
 - **(U-21)** ACT-1..6 are gone: no signal count, no Activation record, no carried PARTICIPATION /
   ENFORCEMENT bits and no ACT-5 enforcement predicate. The module is active from `START_HEIGHT`
   (the `UPGRADE_VAULT` activation height) and every invalid block is rejected.
+- **HALT-2 reads open debt (owner decision 2026-10-28; upgrade plan §15.10, in-term IT-6).**
+  `Totals.openDebtCents` is the sum of `mintedCents` over the ACTIVE and CLAIMING vaults: `+ mintedCents`
+  at a MINT, `− mintedCents` at an owner redeem and at a claimant intent's release, unchanged at a claim
+  and at a cancel (the re-created vault carries the same debt). `Snapshots[H].openDebtCents` copies it and
+  `globalRatioBps = collateralZat · pMint / (COIN · openDebtCents)`, undefined when `openDebtCents ≤ 0`;
+  HALT-2 sets `GLOBAL_RATIO` when `pMint` is defined, `openDebtCents > 0` and the ratio is below
+  `GLOBAL_RATIO_HALT_BPS`. `supplyCents` is unchanged and still what MINT-6/6b read. Invariant:
+  `supplyCents ≤ openDebtCents` and `openDebtCents` = the records' sum after every applied block
+  (`YellowbackModel.open_debt_violation`, checked by `feed_block`; C++ `OpenDebtInvariantViolation`).
 
 ## 3. Money-rule choices (§3.8)
 
@@ -293,7 +302,8 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   (`appHeight`, i.e. from the block after the mint) the claim is valid iff clause (a) or (b) holds, in term, in
   grace and past it alike. `Totals.collateralZat` keeps a CLAIMING vault's collateral until its claimant
   intent is released (D-IT-14): the claim spend leaves it, the release subtracts it, a cancel adds only the
-  re-lock's difference; the debt leaves `supplyCents` with the claim's burn as before. MINT-4/MINT-6's
+  re-lock's difference; the debt leaves `supplyCents` with the claim's burn as before and stays in
+  `openDebtCents` until the release (HALT-2, 2026-10-28). MINT-4/MINT-6's
   recapitalisation gate is `baseRatioBps[class] >= recapRatioBps` **(IT-5)**, the sigma multiplier being
   pinned at 1 by `sigmaRefBps = 0` **(IT-4)**. Both are parsed only in their exact shape with in-range fields
   (`parse_vault_template` / `parse_intent_template`: rebuild and compare); the model implements

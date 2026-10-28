@@ -1545,6 +1545,43 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(t.supply_cents, self.before.supply_cents)
         self.assertEqual(t.supply_cents, self.after_claim + 10_000)
 
+    # Rule: HALT-2
+    # Rule: IT-6
+    # Rule: CAN-1
+    def test_open_debt_counts_claiming_and_cancel(self):
+        """HALT-2 reads open debt (owner 2026-10-28): the mintedCents of every ACTIVE and CLAIMING vault; a claim and a
+        cenotaph leave supply, not debt; a cancel changes neither; a release closes the debt; supply <= open debt."""
+        c, m = self.c, self.c.model
+        self.assertEqual((self.before.supply_cents, self.before.open_debt_cents), (20_000, 20_000))
+        self.assertEqual((m.totals.supply_cents, m.totals.open_debt_cents), (10_000, 20_000))
+        s = m.snapshot(c.height)
+        self.assertEqual((s.supply_cents, s.open_debt_cents), (10_000, 20_000))
+        self.assertEqual(s.global_ratio_bps, ym.global_ratio_bps(m.totals.collateral_zat, s.p_mint, 20_000))
+        self.assertTrue(s.halt_mask & ym.HALT_GLOBAL_RATIO)               # both vaults under 250 % at $0.009
+        self.assertIsNone(m.open_debt_violation())
+        raw = self.cancel()
+        self.assertEqual(self.mine(raw), '')
+        self.assertEqual((m.totals.supply_cents, m.totals.open_debt_cents), (20_000, 20_000))
+        self.assertIsNone(m.open_debt_violation())
+        pos = (txid_of(raw), 0)
+        claim = c.spend_tx(pos, None, 'claim', [(txid_of(raw), 1)], c.height - 1, KEY1, c.vault_fee(pos, owner=False))
+        self.assertEqual(self.mine(claim), '')
+        self.assertEqual((m.totals.supply_cents, m.totals.open_debt_cents), (10_000, 20_000))
+        self.assertEqual(self.mine(c.release_tx((txid_of(claim), 0), self.coll)), '')
+        self.assertEqual(m.vaults[pos].status, ym.V_CLAIMED)
+        self.assertEqual((m.totals.supply_cents, m.totals.open_debt_cents), (10_000, 10_000))
+        xfer = c.transfer_tx([self.spare], [(0, 20_000)])               # over-assigned: the cenotaph burns the 10,000
+        self.assertEqual(self.mine(xfer), '')
+        self.assertEqual(m.txlog[txid_of(xfer)].verdict, 'transfer-over-assigned')
+        self.assertEqual((m.totals.supply_cents, m.totals.open_debt_cents), (0, 10_000))   # the second vault's debt: stranded
+        self.assertEqual(m.snapshot(c.height).open_debt_cents, 10_000)
+        self.assertIsNotNone(m.snapshot(c.height).global_ratio_bps)       # defined on open debt (undefined on a zero supply)
+        self.assertIsNone(m.open_debt_violation())
+        m.totals.supply_cents = 10_001                                    # the check reports supply above open debt
+        self.assertIn('exceeds', m.open_debt_violation())
+        m.totals.supply_cents, m.totals.open_debt_cents = 0, 1
+        self.assertIn('mintedCents', m.open_debt_violation())
+
     # Rule: CAN-1
     def test_claim_records_the_refund_holder(self):
         ir = self.c.model.intents[self.intent]
@@ -2003,9 +2040,19 @@ def build_golden():
             i = h - 225
             txs_at['reg%d' % i] = c.register_tx(ATTESTORS[i], h + 200, 10 * ym.COIN)
             txs.append(txs_at['reg%d' % i])
-        elif h == 230:                                          # burn the last 6,000 cents so the global ratio is undefined again
+        elif h == 230:                                          # burn the last 6,000 cents: supply 0, open debt still mint4's 10,000
             txs_at['burn'] = c.transfer_tx([(txid_of(txs_at['claim3']), 3)], [])
             txs.append(txs_at['burn'])
+        elif h == 232:                                          # HALT-2 reads open debt (owner 2026-10-28): mint4 is stranded at ~54 %,
+            ref = 230                                           # so a class C mint passes the halt (IT-5, recap) to buy it back
+            txs_at['mintc'] = c.mint_tx(10_000, 150, ref, collateral_for(c, 10_000, ref, term_class=2), fee_key=KEY2, term_class=2)
+            txs.append(txs_at['mintc'])
+        elif h == 233:                                          # mint4's owner redeems it with mintc's YED: open debt is mintc's at 500 %
+            v = c.model.vaults[(txid_of(txs_at['mint4']), 0)]
+            script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
+            txs_at['redeem4'] = c.spend_tx((txid_of(txs_at['mint4']), 0), script, 'owner', [(txid_of(txs_at['mintc']), 1)], 231,
+                                           KEY3, c.vault_fee((txid_of(txs_at['mint4']), 0), h), collateral_out=v.collateral_zat - 10 ** 9)
+            txs.append(txs_at['redeem4'])
         elif h == 250:                                          # MINT-9: a mint with a bundle at R = 248 (ARMED at 243)
             ref = 248
             bundle, sel = c.bundle_for(ref, b'', {'*': 9_000})
@@ -2133,8 +2180,13 @@ def build_golden():
                 seq0 = sel[0]
                 atts[0] = ya.sign_attestation(ATTESTORS[seq0][0], seq0, 9_000, ref, c.block_hash(ref - 1))   # signs the wrong block hash
                 bundle = ya.encode_bundle(atts)
-            else:                                               # the bundle mint5's vault would get as a claim selector, replayed on a mint
-                bundle, sel = c.bundle_for(ref, ya.outpoint_selector(txid_of(txs_at['mint5']), 0), {'*': 9_000})
+            else:                                               # the bundle a vault would get as a claim selector, replayed on a mint:
+                # mint5's vault, or the first other vault whose selection differs from the mint's (a selection that happens
+                # to coincide would verify, so the block would not be the rejected one this case pins)
+                mint_sel = c.model.selected(ref, b'')
+                ops = [(txid_of(txs_at[k]), 0) for k in ('mint5', 'mint1', 'mint3', 'mint4', 'mintc')]
+                op = next(o for o in ops if c.model.selected(ref, ya.outpoint_selector(*o)) != mint_sel)
+                bundle, sel = c.bundle_for(ref, ya.outpoint_selector(*op), {'*': 9_000})
             fee = c.mint_fee(10_000, ref, p_mint=min(x, 9_000))
             bad.append(c.rejected(lambda: c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref, p_mint=min(x, 9_000)), fee_key=KEY1,
                                                     carrier=bundle, p_mint=min(x, 9_000),
@@ -2314,22 +2366,22 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0e\x00\x00\x00')        # SCHEMA_VERSION 14 (the cancel limit: CAN-2, C4b, CAN-3)
+        self.assertEqual(pre[37:41], b'\x0f\x00\x00\x00')        # SCHEMA_VERSION 15 (HALT-2 reads open debt, owner 2026-10-28)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
-        self.assertEqual(pre[50:90], bytes(40))
+        self.assertEqual(pre[50:98], bytes(48))                      # Totals, openDebtCents (i64) appended last
         # P: startHeight, sigmaRefBps, supplyCapBps (i32), attestorSetId (32 internal bytes), v3's attestArmMin
         # u32 (3) and bundleCarrier u8 (0 = scriptsig), H-1's mintRequiresArmed u8 (0) (M13)
-        self.assertEqual(pre[90:141], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00'
+        self.assertEqual(pre[98:149], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00'
                          + bytes.fromhex(s)[::-1] + b'\x03\x00\x00\x00' + b'\x00' + b'\x00')
         # v3 (section 3.6): AttestorSeq (N + u16 next) and Attest (M + status u8 + i32 triggerHeight + i32 armHeight) always present
-        self.assertEqual(pre[141:144], b'N\x00\x00')
-        self.assertEqual(pre[144:], b'M' + bytes(9))
+        self.assertEqual(pre[149:152], b'N\x00\x00')
+        self.assertEqual(pre[152:], b'M' + bytes(9))
         m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, s, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
-        self.assertEqual(m2.state_hash_preimage()[135:141], b'\x00\x00\x00\x00' + b'\x02' + b'\x00')
+        self.assertEqual(m2.state_hash_preimage()[143:149], b'\x00\x00\x00\x00' + b'\x02' + b'\x00')
         self.assertNotEqual(m2.state_hash(), m.state_hash())
         m3 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, s, mint_requires_armed=True))
-        self.assertEqual(m3.state_hash_preimage()[140:141], b'\x01')
+        self.assertEqual(m3.state_hash_preimage()[148:149], b'\x01')
         self.assertNotEqual(m3.state_hash(), m.state_hash())
         self.assertEqual(m.state_hash(), ym.sha256(pre).hex())
 
@@ -2343,7 +2395,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[i + 5:i + 25], KEY1)
         self.assertEqual(pre[i + 25:i + 33], (50_000).to_bytes(8, 'little'))
         self.assertEqual(pre[i + 33:i + 36], b'\x01\x02\x01')
-        j = 49 + 36 + 41                                              # Tip, Tags[1], Totals
+        j = 49 + 36 + 49                                              # Tip, Tags[1], Totals (openDebtCents appended, SCHEMA_VERSION 15)
         self.assertEqual(pre[j:j + 5], b'S\x00\x00\x00\x01')
         rec = pre[j + 5:]
         self.assertEqual(rec[:32], bytes.fromhex(c.block_hash(1))[::-1])
@@ -2356,7 +2408,8 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(rec[110:114], b'\x02\x00\x00\x00')           # NO_PRICE (active from START, U-22)
         self.assertEqual(rec[114:123], bytes(9))                      # v3: attest UNARMED/0/0
         self.assertEqual(rec[123:126], b'\x00\x00\x00')               # seated, pinnedKeys, pinnedSeqs empty
-        self.assertEqual(rec[126:127], b'P')
+        self.assertEqual(rec[126:134], bytes(8))                      # openDebtCents (appended last, SCHEMA_VERSION 15)
+        self.assertEqual(rec[134:135], b'P')
 
     # Rule: N18
     def test_golden_vector(self):
@@ -2384,15 +2437,22 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.vaults[(txid_of(txs_at['mint3']), 0)].status, ym.V_CLAIMED)
         self.assertEqual(m.txlog[txid_of(txs_at['release3'])].type, 'CLAIM_RELEASE')
         v4 = m.vaults[(txid_of(txs_at['mint4']), 0)]
-        self.assertEqual((v4.status, v4.unbacked), (ym.V_ACTIVE, False))               # the sweep was refused
+        self.assertEqual((v4.status, v4.unbacked), (ym.V_CLOSED, False))               # the sweep was refused; redeem4 closed it
+        self.assertEqual(m.txlog[txid_of(txs_at['redeem4'])].verdict, 'ok')            # HALT-2 on open debt: mint4 bought back with
+        self.assertEqual(m.txlog[txid_of(txs_at['mintc'])].verdict, 'ok')              # a class C mint that passed the halt (IT-5)
+        self.assertTrue(m.snapshots[230].halt_mask & ym.HALT_GLOBAL_RATIO)             # supply 0, mint4's 10,000 still open
+        self.assertIsNotNone(m.snapshots[230].global_ratio_bps)
+        self.assertEqual((m.snapshots[230].supply_cents, m.snapshots[230].open_debt_cents), (0, 10_000))
+        self.assertFalse(m.snapshots[248].halt_mask & ym.HALT_GLOBAL_RATIO)            # mintc at 500 %: mint5 can mint at 250
         self.assertEqual(m.txlog[txid_of(txs_at['xfer2'])].verdict, 'transfer-over-assigned')
         self.assertEqual(m.txlog[txid_of(txs_at['redeem1'])].verdict, 'ok')
         self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].verdict, 'ok')
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 3_823_416_013_613, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held; RED-5b leaves more of it in the reopened vault
-                                              'voidVaults': 0, 'closedVaults': 1, 'claimedVaults': 1,
-                                              'unbackedCents': 0})
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 8_775_196_019_613, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held; RED-5b leaves more of it in the reopened vault; mintc at 500 %
+                                              'voidVaults': 0, 'closedVaults': 2, 'claimedVaults': 1,
+                                              'unbackedCents': 0, 'openDebtCents': 20_000})          # mintc's 10,000 (its YED closed mint4) and mint5's
+        self.assertIsNone(m.open_debt_violation())
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
         # the v3 tail (v3 plan section 3.8): arming, a bundled mint, a bundle-less VOID mint, notice + emergency claim
         # with a residual, dormancy, ejection, revival, bond spends
