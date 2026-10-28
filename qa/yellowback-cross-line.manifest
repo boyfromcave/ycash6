@@ -43,6 +43,7 @@ identical qa/test_yellowback_release_heights.py
 identical qa/test_yellowback_cross_line.py
 identical qa/yellowback-cross-line.manifest
 identical qa/yellowback-cross-line.py
+identical qa/rpc-tests/vault_activation_restart.py
 tree src/crypto/pq
 tree src/vault
 tree src/yellowback
