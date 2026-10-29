@@ -1,5 +1,7 @@
 # `contrib/yellowback/devnet/` — the one-laptop Yellowback network, and walking the roles
 
+<!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
+
 Two scripts and four checklists:
 
 | File | Role |
@@ -11,6 +13,7 @@ Two scripts and four checklists:
 | `stratum-perl-check` | proves `stratum-miner` against the Perl reference pools in `ref/yolo` on a two-node regtest and records `fixtures/stratum-perl-*.jsonl`; `YCASHD`/`YCASH_CLI` name the binaries |
 | `upgrade-walk` | the whole ecosystem on the vault upgrade, walked end to end on a running `up --role attestor --no-heartbeat --no-walk --no-sim` devnet; writes a transcript (section 6, `scenarios/upgrade-walk.md`; recorded run: `upgrade-walk-transcript.txt`) |
 | `bridge-sim` | the WYEC bridge persona (upgrade plan §4, P3): a guardian or relayer set, a mock burn feed, the daemon that posts, releases and cancels; `yellowback-devnet bridge …` drives it (section 6) |
+| `testnet_join.py` | join mode: `up --network testnet-yb-fast` (or `-yb-slow`, `-legacy`) starts one node of a public testnet and the seat's roles instead of building a chain (section 9) |
 | `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists (`up --role` copies the role's into the session's `NOTES.md`), the upgrade walk's, and `in-term-claim.md`: the in-term claims plan's example clicked through with YecWallet (section 7) |
 
 ## 0. Before you start
@@ -366,3 +369,40 @@ tallied in `sim stats` next to the action:
 `yellowback_devnet_roles.py` asserts them (step 5 of its docstring) on the default, Falcon-live devnet;
 `--no-pqfalcon` runs the pre-Falcon regime. `yellowback_devnet_upgrade.py` asserts the walk's `pq` and `falcon`
 evidence and takes `--pqfalconheight N` / `--no-pqfalcon` the same way.
+
+## 9. Joining a public testnet (`up --network`, testnet plan §3.2)
+
+In plain words: the commands above build a private chain on your laptop. The three Ycash testnets
+(`testnet-yb-fast`, `testnet-yb-slow`, `testnet-legacy`, testnet plan Revision 3) are shared
+networks that already exist, so there is nothing to build: `up --network <name>` starts one node of
+that network on your laptop, connects it to the peers you give it, and sets up the seat you chose
+around it. Commands that would only make sense on your own private chain, like mining 50 blocks at
+once or moving the price, refuse and say why.
+
+```bash
+yellowback-devnet up --network testnet-yb-fast --role user --addnode 203.0.113.7 --bootstrap   # a wallet node; the prefix restored first
+yellowback-devnet up --network testnet-yb-slow --role pool --stratum --addnode-file peers.txt  # yolo beside the node, for your 192,7 miners
+yellowback-devnet up --network testnet-legacy --rpc http://user:pass@127.0.0.1:19032          # attach to a node you already run
+yellowback-devnet status | check | wait-blocks N | cli -- getblockchaininfo | wallet | lightwalletd | pool 4 stratum start|stop|status | down
+```
+
+| | regtest (default) | a testnet (`--network`) |
+|---|---|---|
+| chain | built by `up`, private | joined; `-testnet -testnetprofile=<p>`, its ports and datadir (`contrib/yellowback/profiles/<network>.toml`) |
+| nodes | 8 or 11 | one: your seat's (node 0 user, node 4 pool, node 8 attestor), started with a random RPC password in `node<N>/ycash.conf`, or attached with `--rpc` (`--rpc-cookie FILE` for cookie auth) |
+| peers | each other | `--addnode HOST[:PORT]` (repeatable) and `--addnode-file` (one per line, `#` comments); the fixed seeds arrive with rc1. `--listen` accepts inbound peers |
+| first sync | none | `--bootstrap [SOURCE]` restores the published prefix with `contrib/bootstrap/ycash-bootstrap` before the first start |
+| user seat | funded from node 0 | an address to fund from the network's faucet; the user node keeps the address index for `lightwalletd` |
+| pool seat | `generate` or stratum-miner | a payout address; `--stratum` runs yolo beside the node for real Equihash 192,7 miners |
+| attestor seat | automated attestors around you | `attest-8.toml` with the node's credentials; the bond, the registration and the transport are yours (`doc/yellowback-attestor.md`). Refused on `testnet-legacy` (no Yellowback) |
+| refused | — | `mine` (use `wait-blocks N`), `heartbeat`, `price`, `attestor N …`, `notice`, `bridge`, `vectors`, `report`, `sim` (the personas use regtest's term classes and windows) |
+
+`wait-blocks N` works on both: it returns when N more blocks have arrived on your seat's node; waits
+count blocks, so 75 s blocks only make them longer. The `upgrade-walk` on a joined devnet runs one
+step, `network` (the node is on the network its profile names: chain, profile, prefix checkpoint,
+fork, Vault height, attestor set or none), and prints every other step as `NOT ON <network>` with
+its reason (`scenarios/upgrade-walk.md`, "On a testnet").
+
+`qa/rpc-tests` has no join-mode test (a public testnet is not reachable from CI);
+`test_testnet_join.py` beside this file runs `up --network`, `status`, `check`, `wait-blocks`, the
+refusals, the walk's `network` step and `down` against a stand-in node.

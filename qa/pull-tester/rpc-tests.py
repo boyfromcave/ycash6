@@ -96,6 +96,12 @@ BASE_SCRIPTS= [
     # -stopatheight (testnet plan §4.3): a clean stop at exactly the height, mined and synced.
     # Byte-identical on both lines (qa/yellowback-cross-line.manifest).
     'stopatheight.py',
+    # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk
+    # refused, the bundle restored by a real import. Byte-identical on both lines.
+    'ycash_bootstrap.py',
+    # The launch ceremony's regtest rehearsal (testnet plan §2.2): contrib/testnet/ceremony/ceremony
+    # rehearse for fast and legacy. Byte-identical on both lines.
+    'testnet_ceremony.py',
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',

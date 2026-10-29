@@ -1,0 +1,59 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The network profile (testnet plan §3.1, Revision 3) of testnet-yb-fast: the iteration network,
+# Vault at 510,400 and every Yellowback lifecycle window shortened (the fast column, T-16).
+# Values mirror the compiled parameters (src/chainparams.cpp, src/chainparamsbase.cpp);
+# test_ybprofile.py checks them against those files. Format: README.md beside this file.
+
+name = "testnet-yb-fast"
+chain = "test"                  # getblockchaininfo.chain, NetworkIDString(): "test" on all three testnets
+testnet_profile = "fast"        # -testnetprofile, getblockchaininfo.testnetprofile
+
+[node]
+args = ["-testnet", "-testnetprofile=fast"]
+datadir = "testnet-yb-fast"
+p2p_port = 18833
+rpc_port = 18832
+magic = "f77962d3"
+genesis = "05a60a92d99d85997cce3b87616c089f6124d7342af37106edc76126334a2c38"
+private = false                 # a public network: tools join it, they never create it
+
+[mining]
+generate = false                # blocks come from miners (pools, or setgenerate at the launch ceremony)
+equihash_prefix = [200, 9]      # Zcash testnet's, below the fork
+equihash = [192, 7]             # Ycash's, from the fork (UPGRADE_YCASH)
+
+[heights]
+ycash_fork = 510248
+vault = 510400                  # UPGRADE_VAULT (H_V)
+
+[yellowback]
+enabled = true
+attestor_set = "compiled"
+set_maturity = 48               # nVaultMinSetMaturity = YED BOND_MATURITY (D4)
+liveness_window = 1152          # the set's livenesswindow (>= ATTESTOR_LIVENESS_MIN)
+house_seats = 7                 # T-5: seven house seats
+house_bond_yec = 10000          # bondMinFloorZat: the floor while no YED collateral exists (D-Q-30)
+lifecycle_column = "fast"
+
+[prefix]
+release = "testnet-prefix-v1"   # the ycash-infra release; shared by the three testnets (magic-neutral)
+url = "https://github.com/boyfromcave/ycash-infra/releases/download/testnet-prefix-v1/"
+network = "zcash-testnet"
+file_stem = "zcash-testnet-prefix-v1"
+sha256sums_sha256 = "c7b55a2a6770df8108d910572cca2dbf643a0418eb0b2d556879928a43cbc403"
+last_height = 510247            # = the compiled checkpoint
+last_hash = "0000ec904003d5591290064b0b4d3ccddffe87ef2a3a131284438959bf68fb31"
+chaintx = 717489                # transactions from genesis to last_height (the checkpoint data, chainparams.cpp)
+checkpoints = ["38000:001e9a2d2e2892b88e9998cf7b079b41d59dd085423a921fe8386cecc42287b8", "207500:0000257c4331b098045023fcfbfa2474681f4564ab483f84e4e1ad078e4acf44", "280000:000420e7fcc3a49d729479fb0b560dd7b8617b178a08e9e389620a9d1dd6361a"]
+
+[seeds]
+addnode = []                    # the fixed seeds arrive with rc1; until then pass --addnode
+
+[endpoints]
+lightwalletd = ""
+chain_viz = ""
+faucet = ""
+bundle = ""
