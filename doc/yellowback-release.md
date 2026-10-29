@@ -141,28 +141,51 @@ When setting them in a release:
   <https://explorer.ycash.xyz/api/v1/network/info>, and leave slack for the time between the
   commit and the tag.
 - The attestor set must exist on chain before the release can name it.
-- Set the same Vault parameters on `ycash-dd`. Tag `ycash-dd` `vault-params/v6.22.N` first. Its guard
+- Set the same Vault parameters on `ycash-dd`. Tag `ycash-dd` `vault-params/v<V>` first. Its guard
   (`.github/workflows/yellowback-release-guard.yml`) runs `qa/yellowback-release-heights.sh` and
-  refuses the tag unless the version is 6.22.x and release rules R1–R7 hold: a positive mainnet
-  activation height (R1), a non-zero mainnet attestor set (R2), `UPGRADE_VAULT.nProtocolVersion`
-  above 270013 (R3), `PROTOCOL_VERSION` at least that value (R4), `MIN_PEER_PROTO_VERSION` at or
-  below 270013 (R5), mainnet `pqFalconHeight` 0 (R6), and, per testnet profile, the height and
-  that network's own attestor set both set or both unset, testnet-legacy never with a height (R7). It also refuses any compared Vault field that differs from ycash6
-  (`v6.22.N` when that tag already exists, otherwise `upgrade/vault`).
-- Then tag ycash6 `v6.22.N`. This release workflow refuses the tag when
-  `vault-params/v6.22.N` is missing on ycash-dd, when R1–R7 fail, or when any compared Vault
-  field differs (`qa/yellowback-release-heights.sh`). A `workflow_dispatch` run only warns, and
-  compares with ycash-dd `upgrade/vault`.
-- Protocol version stays deferred (audit W3-P-1 part D). The table is in the upgrade plan's P8
-  checklist. R3–R5 are enforced at the tag, so a tag cannot ship until the bump. When it is taken,
-  raise `UPGRADE_VAULT.nProtocolVersion` and `PROTOCOL_VERSION` to the same value on both lines
-  together. Do not raise `MIN_PEER_PROTO_VERSION` to the Vault version.
+  refuses the tag unless the version is a 6.22.x release version and the rules of its stage hold
+  (below). It also refuses any compared Vault field that differs from ycash6 (`v<V>` when that tag
+  already exists, otherwise `upgrade/vault`).
+- Then tag ycash6 `v<V>`. This release workflow refuses the tag when `vault-params/v<V>` is
+  missing on ycash-dd, when the stage's rules fail, or when any compared Vault field differs
+  (`qa/yellowback-release-heights.sh --release-version <V>`). A `workflow_dispatch` run only
+  warns, and compares with ycash-dd `upgrade/vault`.
+
+The rules (audit W3-P-1; testnet plan §5.1, T-8):
+
+| Rule | What it requires |
+|---|---|
+| R1 | a positive mainnet `UPGRADE_VAULT` activation height |
+| R2 | a non-zero mainnet attestor set (`MainParams` `attestorSetId`) |
+| R3 | mainnet `UPGRADE_VAULT.nProtocolVersion` above 270013, the live network's protocol version |
+| R4 | `PROTOCOL_VERSION` at least that value |
+| R5 | `MIN_PEER_PROTO_VERSION` at or below 270013 (never the Vault version: it would refuse every stock peer before activation) |
+| R6 | mainnet `pqFalconHeight` 0 |
+| R7 | per testnet profile, the height and that network's own attestor set both set or both unset; testnet-legacy never has a height |
+
+Which rules a tag needs depends on the stage its version names:
+
+| Tag | Required | Not required |
+|---|---|---|
+| `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height | heights, sets, protocol version |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
+| `v6.22.N` (final) | R1–R7 | — |
+
+`qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with
+neither it applies the final rules, the strictest.
+
+**Protocol version (taken with rc1, T-8; upgrade plan P8 part D).** `UPGRADE_VAULT.nProtocolVersion`
+is 270200 on main, every testnet profile and regtest, and `PROTOCOL_VERSION` is 270200, on both
+lines. `MIN_PEER_PROTO_VERSION` stays at the live floor (270013 here; 170002 on ycash-dd, which R5
+allows). Before Vault activates nothing changes for peers. Once Vault is the current epoch a node
+disconnects a peer below 270200, so the testnets are the first place the epoch gate drops a stale
+peer: a drill before mainnet.
 
 | Network | `UPGRADE_VAULT` height | `attestorSetId` | Set in |
 |---|---|---|---|
 | main | unset | unset | not yet: the release that passes the launch gates |
-| test, profile fast | 510,400 (placeholder, N1) | unset (`TestFastParams`) | its launch ceremony; its rc1 names the set |
-| test, profile slow | unset | unset (`TestParams`) | its first rc, about a week of blocks after launch (T-15) |
+| test, profile fast | 510,400 (placeholder, N1) | unset (`TestFastParams`) | its launch ceremony; its rc1 names the set (an rc refuses to tag until then) |
+| test, profile slow | unset | unset (`TestParams`) | its first rc sets the height, about a week of blocks after launch (T-15); a later rc names the set, created after the activation |
 | test, profile legacy | never | none | never: the control network, YED off |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
