@@ -432,14 +432,17 @@ public:
             uint256S("000420e7fcc3a49d729479fb0b560dd7b8617b178a08e9e389620a9d1dd6361a");
         consensus.vUpgrades[Consensus::UPGRADE_YCASH].nProtocolVersion = 270007;
         consensus.vUpgrades[Consensus::UPGRADE_YCASH].nActivationHeight = 510248;
-        consensus.vUpgrades[Consensus::UPGRADE_YCASH].hashActivationBlock =
-            uint256S("0305d164e8f4dc75b9e9a6a15b7b381dbc1c9cb55f1534267be7c125923255c8");
+        // Re-forked testnet (testnet plan §2.1, §2.2): Zcash testnet through 510,247, then a new Ycash
+        // fork block, mined at the launch ceremony. Its hash is pinned here as hashActivationBlock by
+        // rc1; until then it is unset (std::nullopt), so the old branch's fork block is not required.
+        // Blossom, Heartwood and Canopy follow the fork at once (two blocks per epoch), not 150,000
+        // blocks later; no testnet funding stream, YDF or halving height depends on them before 900,000.
         consensus.vUpgrades[Consensus::UPGRADE_BLOSSOM].nProtocolVersion = 270008;
-        consensus.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight = 661610;
+        consensus.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight = 510250;
         consensus.vUpgrades[Consensus::UPGRADE_HEARTWOOD].nProtocolVersion = 270010;
-        consensus.vUpgrades[Consensus::UPGRADE_HEARTWOOD].nActivationHeight = 661622;
+        consensus.vUpgrades[Consensus::UPGRADE_HEARTWOOD].nActivationHeight = 510252;
         consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nProtocolVersion = 270012;
-        consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nActivationHeight = 661634;
+        consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nActivationHeight = 510254;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nProtocolVersion = 270014;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -452,11 +455,14 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
-        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
+        // Vault (plan §15.1) on the re-forked testnet (testnet plan §2.1): H_V, a placeholder until the
+        // launch ceremony fixes it (§2.2). The protocol version is today's PROTOCOL_VERSION, so it
+        // gates no peer until the release bump (N4).
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
-            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 510400;
+        // D-Q-31 exit window on the testnet: 1,152 blocks (one day at 75 s), not mainnet's 16,128.
+        // D4: pending owner confirmation.
+        consensus.nVaultMinSetMaturity = 1152;
         // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.
@@ -533,13 +539,19 @@ public:
                       "MAX_FUTURE_BLOCK_TIME_MTP is too low given block target spacing");
         consensus.nFutureTimestampSoftForkHeight = consensus.vUpgrades[Consensus::UPGRADE_BLOSSOM].nActivationHeight + 6;
 
-        // The best chain should have at least this much work.
-        consensus.nMinimumChainWork = uint256S("000000000000000000000000000000000000000000000000000000263c0984a2");
+        // The best chain should have at least this much work. Re-forked testnet (testnet plan §2.1,
+        // F-T2): the chain work of Zcash testnet block 280,000, the last activation block whose hash is
+        // pinned (Sapling), so IsInitialBlockDownload never reaches the activation-hash check below it.
+        // It stays below the prefix's work at 510,247 (0x19496c5dab) while UPGRADE_YCASH's hash is
+        // unset; rc1 pins the fork block and raises this to a height above the fork.
+        consensus.nMinimumChainWork = uint256S("000000000000000000000000000000000000000000000000000000023bc0da20");
 
-        pchMessageStart[0] = 0xfa;
-        pchMessageStart[1] = 0x1a;
-        pchMessageStart[2] = 0xf9;
-        pchMessageStart[3] = 0xbf;
+        // Re-forked testnet (T-2): a magic of its own, so no Zcash testnet node and no node of the old
+        // Ycash testnet (fa 1a f9 bf) ever handshakes.
+        pchMessageStart[0] = 0xf7;
+        pchMessageStart[1] = 0x79;
+        pchMessageStart[2] = 0x62;
+        pchMessageStart[3] = 0xd3;
         nDefaultPort = 18833;
         nPruneAfterHeight = 1000;
 
@@ -554,8 +566,8 @@ public:
 
         vFixedSeeds.clear();
         vSeeds.clear();
-        vSeeds.push_back(CDNSSeedData("ycash.xyz", "testseed.ycash.xyz")); // Ycash
-
+        // Re-forked testnet (D1): fixed seeds only, no DNS seed. The seed nodes' addresses go in
+        // pnSeed6_test (src/chainparamsseeds.h), supplied with rc1; net.cpp uses them at once.
         vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test, pnSeed6_test + ARRAYLEN(pnSeed6_test));
 
         fMiningRequiresPeers = true;
@@ -569,11 +581,12 @@ public:
             boost::assign::map_list_of
             (0, consensus.hashGenesisBlock)
             (38000, uint256S("0x001e9a2d2e2892b88e9998cf7b079b41d59dd085423a921fe8386cecc42287b8"))
-            // Post-Ycash-fork testnet checkpoint, from ycash-official.
-            (650000, uint256S("0x005dd2092f75382581468e870b51233a8950bf9c396689c513e5a80f00c14609")),
-            1633853210,  // * UNIX timestamp of last checkpoint block
-            862651,      // * total number of transactions between genesis and last checkpoint
-            765          //   total number of tx / (checkpoint block height / (24 * 24))
+            // Zcash testnet's last block before the re-fork (testnet-prefix-v1 manifest). The old
+            // branch's 650,000 is gone; checkpoints above the fork come with each rc (plan §4.2).
+            (510247, uint256S("0x0000ec904003d5591290064b0b4d3ccddffe87ef2a3a131284438959bf68fb31")),
+            1559796960,  // * UNIX timestamp of last checkpoint block
+            717489,      // * total number of transactions between genesis and last checkpoint
+            810          //   total number of tx / (checkpoint block height / (24 * 24))
         };
 
         // Hardcoded fallback value for the Sprout shielded value pool balance
@@ -697,7 +710,7 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet/testnet 16,128)
+        consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet 16,128, testnet 1,152)
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

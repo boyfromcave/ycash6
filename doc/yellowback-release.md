@@ -129,8 +129,9 @@ none of these options affect.
 Yellowback is live on a network from its `UPGRADE_VAULT` activation height (`src/chainparams.cpp`)
 once that network names its YED attestor set (`attestorSetId` in `src/yellowback/params.cpp`). Both
 are consensus parameters, so they ship only in a release, never as an operator flag. Neither is set
-on mainnet or testnet yet: they are set by the release that passes the launch gates, and testnet
-had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering).
+on mainnet yet: they are set by the release that passes the launch gates. The re-forked testnet
+(testnet plan §2.1, §2.2) has a placeholder height (510,400) and no set: the launch ceremony fixes
+the height and creates the set, and rc1 names it (until then R7 refuses a tag).
 
 When setting them in a release:
 - The activation height leaves time for every node to upgrade: a node that has not upgraded by
@@ -158,14 +159,15 @@ When setting them in a release:
 | Network | `UPGRADE_VAULT` height | `attestorSetId` | Set in |
 |---|---|---|---|
 | main | unset | unset | not yet: the release that passes the launch gates |
-| test | unset | unset | not yet |
+| test | 510,400 (placeholder, N1) | unset | the launch ceremony; rc1 names the set |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
 - **S-0 and V-1's APP clause are retroactive on private chains.** They apply from the activation
   block, so a regtest, devnet or kind chain built by an earlier build that holds a template spend of
   a pre-activation coin, or a V with an APP branch on a tag no module governs, fails the vault
   database's replay on restart (the error names the cause) and a fresh node splits from it: restart
-  such a chain from scratch. Mainnet and testnet have no activation height, so nothing there changes.
+  such a chain from scratch. Mainnet has no activation height, so nothing there changes; the re-forked
+  testnet starts after these rules.
 - **`-prune` is refused** wherever `UPGRADE_VAULT` has an activation height: a node that pruned
   before its network set one must re-download the chain without `-prune` (there is no `-reindex` on a
   pruned node).

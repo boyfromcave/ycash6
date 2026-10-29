@@ -1857,7 +1857,7 @@ class NodeConn(asyncore.dispatcher):
     }
     MAGIC_BYTES = {
         "mainnet": b"\x24\xe9\x27\x64",   # mainnet
-        "testnet3": b"\xfa\x1a\xf9\xbf",  # testnet3
+        "testnet": b"\xf7\x79\x62\xd3",   # the re-forked testnet (datadir testnet-yb)
         "regtest": b"\xaa\xe8\x3f\x5f"    # regtest
     }
 

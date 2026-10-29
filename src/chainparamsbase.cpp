@@ -47,7 +47,9 @@ public:
     CBaseTestNetParams()
     {
         nRPCPort = 18832;
-        strDataDir = "testnet3";
+        // Re-forked testnet (testnet plan §2.1, T-2): a new directory name, so a leftover testnet3,
+        // which holds the old Ycash testnet branch, is never opened (its blocks would abort the node).
+        strDataDir = "testnet-yb";
     }
 };
 static CBaseTestNetParams testNetParams;
