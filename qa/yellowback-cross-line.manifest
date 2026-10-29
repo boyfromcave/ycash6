@@ -44,6 +44,8 @@ identical qa/test_yellowback_cross_line.py
 identical qa/yellowback-cross-line.manifest
 identical qa/yellowback-cross-line.py
 identical qa/rpc-tests/vault_activation_restart.py
+identical qa/rpc-tests/stopatheight.py
+identical src/test/testnet_params_tests.cpp
 tree src/crypto/pq
 tree src/vault
 tree src/yellowback

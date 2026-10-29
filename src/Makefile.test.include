@@ -126,6 +126,7 @@ BITCOIN_TESTS =\
   test/sync_tests.cpp \
   test/test_util.cpp \
   test/test_util.h \
+  test/testnet_params_tests.cpp \
   test/torcontrol_tests.cpp \
   test/transaction_tests.cpp \
   test/txvalidationcache_tests.cpp \
