@@ -260,7 +260,7 @@ jobs:
         if: matrix.leg == 'x402' || matrix.leg == 'hawkeye'
         with:
           node-version: 22
-      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         if: matrix.leg == 'hawkeye'
         with:
           version: v1.7.1

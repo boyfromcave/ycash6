@@ -44,7 +44,7 @@ class Install(unittest.TestCase):
                 continue
             with open(os.path.join(stage, b), "w", encoding="utf-8") as fh:
                 fh.write("#!/bin/sh\necho 'Ycash Daemon version %s'\n" % (banner or "v" + version))
-            os.chmod(os.path.join(stage, b), 0o755)
+            os.chmod(os.path.join(stage, b), 0o700)   # owner only: the stub need not be world-readable
         path = os.path.join(self.pkgdir, name + ".tar.gz")
         with tarfile.open(path, "w:gz") as tar:
             tar.add(stage, arcname=name)
