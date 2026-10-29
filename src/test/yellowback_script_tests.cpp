@@ -1144,7 +1144,10 @@ BOOST_AUTO_TEST_CASE(pq_falcon_mirror_equals_consensus)
 // while that height is unset (P8). yed_getinfo.params.pq.falconHeight reports this mirror.
 BOOST_AUTO_TEST_CASE(pq_falcon_mirror_public_networks)
 {
-    for (const std::string& net : { CBaseChainParams::MAIN, CBaseChainParams::TESTNET }) {
+    // The re-forked testnet (testnet plan §2.1): the mirror is the placeholder vault height 510,400.
+    BOOST_CHECK_EQUAL(::Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconHeight, 0);
+    BOOST_CHECK_EQUAL(yellowback::PQFalconHeightOf(::Params(CBaseChainParams::TESTNET).GetConsensus()), 510400);
+    for (const std::string& net : { CBaseChainParams::MAIN }) {
         Consensus::Params c = ::Params(net).GetConsensus();
         BOOST_CHECK_EQUAL(c.pqFalconHeight, 0);
         BOOST_CHECK_EQUAL(c.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);

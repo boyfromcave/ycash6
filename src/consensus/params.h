@@ -227,8 +227,9 @@ struct Params {
 
     /**
      * D-Q-31 (owner, 2026-10-11): the least maturity a vault signer set may be created with -- every set's members
-     * have at least this exit window (the bond exit delay is the set's maturity). 16,128 blocks (14 days) on mainnet
-     * and testnet; regtest 2 so the suites run. Read once at init into vault::SetMinSetMaturity.
+     * have at least this exit window (the bond exit delay is the set's maturity). 16,128 blocks (14 days) on mainnet;
+     * testnet-yb-slow the same, testnet-yb-fast 48 (testnet plan D4); regtest 2 so the suites run. Read once at init into
+     * vault::SetMinSetMaturity.
      */
     uint32_t nVaultMinSetMaturity = 16128;
 

@@ -709,8 +709,15 @@ BOOST_AUTO_TEST_CASE(pq_flag_plumbing)
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetConsensus().pqFalconHeight, 0);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconHeight, 0);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).GetConsensus().pqFalconHeight, NONE);
-    for (const std::string& net : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET}) {
-        // No vault height is set on a public network yet (P8): no Falcon, no vault flags, at any height.
+    // The re-forked testnet (testnet plan §2.1) has the ceremony's placeholder vault height, 510,400: Falcon with it.
+    {
+        const Consensus::Params& test = Params(CBaseChainParams::TESTNET).GetConsensus();
+        BOOST_CHECK(!IsPQFalconActive(test, 510399));
+        BOOST_CHECK(IsPQFalconActive(test, 510400));
+        BOOST_CHECK(GetVaultScriptFlags(510400, test) & SCRIPT_VERIFY_PQ_FALCON);
+    }
+    for (const std::string& net : {CBaseChainParams::MAIN}) {
+        // No vault height is set on mainnet yet (P8): no Falcon, no vault flags, at any height.
         Consensus::Params pub = Params(net).GetConsensus();
         BOOST_CHECK_EQUAL(pub.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight, NONE);
         BOOST_CHECK(!IsPQFalconActive(pub, 0));

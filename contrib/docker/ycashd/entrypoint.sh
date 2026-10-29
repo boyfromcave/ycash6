@@ -30,7 +30,12 @@ else
     if [ "${YCASHD_INSIGHT:-1}" = "1" ]; then echo "experimentalfeatures=1"; echo "insightexplorer=1"; echo "txindex=1"; fi
     case "$NET" in
       mainnet) ;;
-      testnet) echo "testnet=1" ;;
+      testnet)
+        # One of three compiled-in testnets (testnet plan Revision 3), each with its own datadir, ports
+        # and magic; ycashd refuses -testnet without a profile.
+        echo "testnet=1"
+        echo "testnetprofile=${YCASHD_TESTNET_PROFILE:?YCASHD_TESTNET_PROFILE is required with YCASHD_NETWORK=testnet (fast, slow or legacy)}"
+        ;;
       regtest)
         echo "regtest=1"
         echo "rpcport=${YCASHD_RPC_PORT:-18832}"

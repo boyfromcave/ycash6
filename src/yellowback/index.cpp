@@ -1131,7 +1131,8 @@ int PQFalconHeightOf(const Consensus::Params& consensus)
     return std::max(vault, falcon);
 }
 
-std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out)
+std::optional<std::string> ParamsFromArgs(const std::string& networkId, const std::string& testnetProfile,
+                                          const Consensus::Params& consensus, Params& out)
 {
     // U-22: START_HEIGHT is the UPGRADE_VAULT activation height and the attestor set is per network
     // (regtest -yellowbackattestorset). The regtest-only overrides of §3.1 (M13) are -yellowbacksigmaref,
@@ -1150,7 +1151,11 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
         for (const char* f : REGTEST_FLAGS) {
             if (mapArgs.count(f)) return std::string(f) + " is regtest-only";
         }
-        out = ParamsForNetwork(networkId);
+        // testnet plan Revision 3 (T-16): testnet-yb-fast reads the fast column; testnet-yb-slow the testnet
+        // column (mainnet's values); testnet-legacy the same, inert (no UPGRADE_VAULT height: startHeight 0).
+        if (networkId == "test" && testnetProfile != "fast" && testnetProfile != "slow" && testnetProfile != "legacy")
+            return "unknown testnet profile '" + testnetProfile + "' (fast, slow or legacy)";
+        out = networkId == "test" && testnetProfile == "fast" ? TestFastParams() : ParamsForNetwork(networkId);
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         out.pqFalconHeight = PQFalconHeightOf(consensus);
         out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25

@@ -122,6 +122,16 @@ void SetCommon(Params& p)
     p.mintRequiresArmed   = true;   // H-1: MINT-4 refuses an unarmed mint (mint-halted-unarmed)
 }
 
+/** The testnet's identity, the same on all three testnet profiles: network "test", the yt… versions. */
+void SetTestnet(Params& t)
+{
+    t.network = "test";
+    t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
+    t.pqAddressVersion = { 0x57, 0x1E }; // renders "yt…", 53 characters (quantum spec §4)
+    // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
+    t.startHeight = 0;
+}
+
 } // namespace
 
 Params::Params()
@@ -184,13 +194,62 @@ const Params& TestParams()
 {
     static Params p = [] {
         Params t;
-        t.network = "test";
         SetCommon(t);
-        t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
-        t.pqAddressVersion = { 0x57, 0x1E }; // renders "yt…", 53 characters (quantum spec §4)
-        // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
-        t.startHeight = 0;
+        SetTestnet(t);
+        assert(t.bondMaturity >= t.attestMaxAge);
         return t;
+    }();
+    return p;
+}
+
+const Params& TestFastParams()
+{
+    // The testnet-yb-fast column (testnet plan Revision 3, T-16). One rule scales every lifecycle window,
+    // the block counts that say how long a vault term, claim, bond, seat or notice lasts:
+    //
+    //     fast = max(floor, ceil(mainnet x 48 / 16,128))   (that is, ceil(mainnet / 336), at least the floor)
+    //
+    // 48 / 16,128 is the set maturity's own ratio (D4: nVaultMinSetMaturity 48 on this network, 16,128 on
+    // mainnet). A floor is the least value one of the invariants asserted below needs, and nothing else.
+    // Everything that is not a lifecycle window stays the testnet column's (mainnet's): the price windows
+    // and fills, the volatility sampling, PIN_WINDOW, ATTEST_MAX_AGE, the attestation interval and
+    // EMERGENCY_PERSIST (all tied to the 75 s block, not to a lifecycle); counts, amounts, ratios and fees;
+    // and the miner and wallet policy windows. Its attestor set is its own (never testnet-yb-slow's).
+    static Params p = [] {
+        Params f;
+        SetCommon(f);
+        SetTestnet(f);
+        //                                             mainnet    floor (the invariant it serves)
+        f.claimDelay          = 20;     // CLAIM_DELAY     576      ATTEST_MAX_AGE: two signing intervals to cancel
+        f.grace               = 103;    // GRACE        34,560      -
+        f.classMin[0] = 103;  f.classMax[0] = 309;    //  34,560 / 103,680  A
+        f.classMin[1] = 310;  f.classMax[1] = 618;    // 103,681 / 207,360  B; min floor classMax[0] + 1 (contiguous)
+        f.classMin[2] = 619;  f.classMax[2] = 1252;   // 207,361 / 420,480  C; min floor classMax[1] + 1 (contiguous)
+        f.attestArmDelay      = 20;     // ARM-2         1,152      ATTEST_MAX_AGE: a fresh bundle from every member
+        f.emergencyNoticeTtl  = 88;     // NOT-1         1,152      EMERGENCY_PERSIST + REF_WINDOW: an opened emergency
+                                        //                          outlives a whole ref window
+        f.bondMaturity        = 48;     // BOND_MATURITY 16,128     ATTEST_MAX_AGE; = nVaultMinSetMaturity 48 (D4)
+        f.ageCap              = 618;    // AGE_CAP     207,360      -
+        f.foundingWindow      = 24;     // FOUNDING      8,064      -
+        f.seatAgeUnit         = 4;      // SEAT_AGE_UNIT 1,152      1
+        f.seatAgeCap          = 1252;   // SEAT_AGE_CAP 420,480     SEAT_AGE_UNIT
+        f.attestorLivenessMin = 40;     // B3            1,152      2 x ATTEST_MAX_AGE (the regtest column's relation)
+        f.cancelQuiet         = 80;     // CAN-2/3       8,064      CANCEL_SIGNERS_MAX x CLAIM_DELAY: the whole
+                                        //                          cancel schedule fits in one quiet window
+        f.dormancyBlocks      = 48;     // S15          16,128      DORMANCY_MIN_BUNDLES (one BundleLog row a block)
+        f.dormancyCheck       = 1;      // S15              48      1 (0 turns the check off)
+        // The invariants, asserted for every column by testnet_params_tests.
+        assert(f.bondMaturity >= f.attestMaxAge);
+        assert(f.claimDelay >= f.attestMaxAge);
+        assert(f.attestArmDelay >= f.attestMaxAge);
+        assert(f.emergencyNoticeTtl >= f.emergencyPersist + f.refWindow);
+        assert(f.attestorLivenessMin >= 2 * f.attestMaxAge);
+        assert(f.cancelQuiet >= f.cancelSignersMax * f.claimDelay);
+        assert(f.dormancyBlocks >= f.dormancyMinBundles && f.dormancyCheck >= 1 && f.dormancyCheck <= f.dormancyBlocks);
+        assert(f.seatAgeUnit >= 1 && f.seatAgeCap >= f.seatAgeUnit);
+        for (int i = 1; i < NUM_CLASSES; i++) assert(f.classMin[i] == f.classMax[i - 1] + 1);
+        assert(f.classMin[0] > 0 && (int64_t)f.classMax[NUM_CLASSES - 1] + f.grace < (int64_t)LOCKTIME_THRESHOLD);
+        return f;
     }();
     return p;
 }
@@ -297,7 +356,7 @@ const Params& SelectParams(const std::vector<Params>& sets, int height)
 const Params& ParamsForNetwork(const std::string& networkId)
 {
     if (networkId == "main") return MainParams();
-    if (networkId == "test") return TestParams();
+    if (networkId == "test") return TestParams();   // the address versions are the same on every testnet profile
     if (networkId == "regtest") {
         static Params r = RegtestParams(0, 0, 0, uint256());
         return r;

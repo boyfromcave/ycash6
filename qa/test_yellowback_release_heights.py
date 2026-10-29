@@ -34,6 +34,11 @@ const Params& TestParams()
     static Params p = [] { Params t; return t; }();
     return p;
 }
+const Params& TestFastParams()
+{
+    static Params p = [] { Params f; return f; }();
+    return p;
+}
 """
 VERSION_H = "static const int PROTOCOL_VERSION = 270200;\nstatic const int MIN_PEER_PROTO_VERSION = 170002;\n"
 
@@ -54,11 +59,32 @@ static %s %s;
 """ % (cls, cls, proto, height, extra, cls, cls.lower())
 
 
+def testnet(fast=NO, proto=270200):
+    """CTestNetParams and its three profile subclasses (testnet plan Revision 3); slow and legacy unset."""
+    out = """class CTestNetParams : public CChainParams {
+protected:
+    CTestNetParams() {
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = %s;
+    }
+};
+""" % proto
+    for cls, height in (("CTestNetFastParams", fast), ("CTestNetSlowParams", NO), ("CTestNetLegacyParams", NO)):
+        out += """class %s : public CTestNetParams {
+public:
+    %s() {
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            %s;
+    }
+};
+""" % (cls, cls, height)
+    return out
+
+
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
                test_height=NO, reg_extra="        consensus.nVaultMinSetMaturity = 2;\n",
                att=ATT, params_h=PARAMS_H):
     chain = (klass("CMainParams", main_height, main_extra)
-             + klass("CTestNetParams", test_height)
+             + testnet(test_height)
              + klass("CRegTestParams", NO, reg_extra))
     files = {
         "src/chainparams.cpp": chain,

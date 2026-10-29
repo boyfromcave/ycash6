@@ -149,12 +149,17 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_info)
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).EquihashN(4000000), 48U);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).EquihashK(4000000), 5U);
 
-    for (auto network : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
+    for (auto network : {CBaseChainParams::MAIN, CBaseChainParams::REGTEST}) {
         const Consensus::Params& params = Params(network).GetConsensus();
         BOOST_CHECK_EQUAL(params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight,
                           Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
         BOOST_CHECK_EQUAL(GetVaultScriptFlags(4000000, params), 0U);
     }
+    // The re-forked testnet (testnet plan §2.1) has the ceremony's placeholder height H_V = 510,400.
+    const Consensus::Params& testParams = Params(CBaseChainParams::TESTNET).GetConsensus();
+    BOOST_CHECK_EQUAL(testParams.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight, 510400);
+    BOOST_CHECK_EQUAL(GetVaultScriptFlags(510399, testParams), 0U);
+    BOOST_CHECK(GetVaultScriptFlags(510400, testParams) & SCRIPT_VERIFY_VAULT);
     // Mainnet's current epoch stays Canopy at any height.
     BOOST_CHECK_EQUAL(CurrentEpochBranchId(4000000, Params(CBaseChainParams::MAIN).GetConsensus()),
                       NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId);

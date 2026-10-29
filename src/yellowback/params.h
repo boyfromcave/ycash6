@@ -296,9 +296,15 @@ struct Params
     }
 };
 
-/** Mainnet and testnet parameters; startHeight is set per release (§3.1, K10). */
+/**
+ * Mainnet and testnet parameters; startHeight is set per release (§3.1, K10). TestParams is the testnet
+ * column, mainnet's values: testnet-yb-slow's (and testnet-legacy's, where YED never starts).
+ * TestFastParams is testnet-yb-fast's: the lifecycle windows scaled by one rule (params.cpp; testnet
+ * plan Revision 3, T-16), every other value the testnet column's.
+ */
 const Params& MainParams();
 const Params& TestParams();
+const Params& TestFastParams();
 
 /**
  * Regtest parameters (§3.1 regtest column). startHeight is the UPGRADE_VAULT activation height

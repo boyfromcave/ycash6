@@ -155,6 +155,8 @@ static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
 static const unsigned int INVENTORY_BROADCAST_MAX = 7 * INVENTORY_BROADCAST_INTERVAL;
 
 static const int64_t DEFAULT_MAX_TIP_AGE = 24 * 60 * 60;
+/** -stopatheight default: 0, never stop (from Bitcoin Core; testnet plan §4.3). */
+static const int DEFAULT_STOPATHEIGHT = 0;
 
 /** Default for -permitbaremultisig */
 static const bool DEFAULT_PERMIT_BAREMULTISIG = true;

@@ -1,5 +1,6 @@
 // Copyright (c) 2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -20,6 +21,13 @@ public:
     static const std::string MAIN;
     static const std::string TESTNET;
     static const std::string REGTEST;
+    /**
+     * The compiled-in testnet profiles (-testnetprofile, testnet plan Revision 3, T-14). All three are
+     * chain "test" (NetworkIDString); they differ in datadir, ports, magic and the Vault timing.
+     */
+    static const std::string TESTNET_FAST;
+    static const std::string TESTNET_SLOW;
+    static const std::string TESTNET_LEGACY;
 
     const std::string& DataDir() const { return strDataDir; }
     int RPCPort() const { return nRPCPort; }
@@ -48,9 +56,22 @@ void SelectBaseParams(const std::string& chain);
 
 /**
  * Looks for -regtest, -testnet and returns the appropriate BIP70 chain name.
- * @return CBaseChainParams::MAX_NETWORK_TYPES if an invalid combination is given. CBaseChainParams::MAIN by default.
+ * With -testnet it also reads -testnetprofile, which is then required, and selects that profile
+ * (SelectTestnetProfile); -testnetprofile without -testnet is refused.
+ * @throws std::runtime_error on an invalid combination, or a missing or unknown testnet profile.
+ * @return CBaseChainParams::MAIN by default.
  */
 std::string ChainNameFromCommandLine();
+
+/**
+ * Selects the testnet profile (fast, slow or legacy) that SelectBaseParams and SelectParams use for
+ * CBaseChainParams::TESTNET; call it before them. Until a profile is selected it is fast (unit tests).
+ * @throws std::runtime_error on an unknown profile.
+ */
+void SelectTestnetProfile(const std::string& profile);
+
+/** The selected testnet profile (CBaseChainParams::TESTNET_FAST, _SLOW or _LEGACY). */
+const std::string& SelectedTestnetProfile();
 
 /**
  * Return true if SelectBaseParamsFromCommandLine() has been called to select

@@ -129,8 +129,11 @@ none of these options affect.
 Yellowback is live on a network from its `UPGRADE_VAULT` activation height (`src/chainparams.cpp`)
 once that network names its YED attestor set (`attestorSetId` in `src/yellowback/params.cpp`). Both
 are consensus parameters, so they ship only in a release, never as an operator flag. Neither is set
-on mainnet or testnet yet: they are set by the release that passes the launch gates, and testnet
-had no reachable peers on 2026-10-02 (no fixed seeds; `testseed.ycash.xyz` not answering).
+on mainnet yet: they are set by the release that passes the launch gates. The re-forked testnet
+(testnet plan §2.1, §2.2) has three compiled-in profiles (`-testnet -testnetprofile=fast|slow|legacy`,
+Revision 3). testnet-yb-fast has a placeholder height (510,400) and no set: its launch ceremony fixes
+the height and creates the set, and its rc1 names it (until then R7 refuses a tag). testnet-yb-slow
+has neither until its first rc sets both. testnet-legacy never activates Vault.
 
 When setting them in a release:
 - The activation height leaves time for every node to upgrade: a node that has not upgraded by
@@ -143,8 +146,8 @@ When setting them in a release:
   refuses the tag unless the version is 6.22.x and release rules R1–R7 hold: a positive mainnet
   activation height (R1), a non-zero mainnet attestor set (R2), `UPGRADE_VAULT.nProtocolVersion`
   above 270013 (R3), `PROTOCOL_VERSION` at least that value (R4), `MIN_PEER_PROTO_VERSION` at or
-  below 270013 (R5), mainnet `pqFalconHeight` 0 (R6), and testnet height and attestor set both set
-  or both unset (R7). It also refuses any compared Vault field that differs from ycash6
+  below 270013 (R5), mainnet `pqFalconHeight` 0 (R6), and, per testnet profile, the height and
+  that network's own attestor set both set or both unset, testnet-legacy never with a height (R7). It also refuses any compared Vault field that differs from ycash6
   (`v6.22.N` when that tag already exists, otherwise `upgrade/vault`).
 - Then tag ycash6 `v6.22.N`. This release workflow refuses the tag when
   `vault-params/v6.22.N` is missing on ycash-dd, when R1–R7 fail, or when any compared Vault
@@ -158,17 +161,21 @@ When setting them in a release:
 | Network | `UPGRADE_VAULT` height | `attestorSetId` | Set in |
 |---|---|---|---|
 | main | unset | unset | not yet: the release that passes the launch gates |
-| test | unset | unset | not yet |
+| test, profile fast | 510,400 (placeholder, N1) | unset (`TestFastParams`) | its launch ceremony; its rc1 names the set |
+| test, profile slow | unset | unset (`TestParams`) | its first rc, about a week of blocks after launch (T-15) |
+| test, profile legacy | never | none | never: the control network, YED off |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
 - **S-0 and V-1's APP clause are retroactive on private chains.** They apply from the activation
   block, so a regtest, devnet or kind chain built by an earlier build that holds a template spend of
   a pre-activation coin, or a V with an APP branch on a tag no module governs, fails the vault
   database's replay on restart (the error names the cause) and a fresh node splits from it: restart
-  such a chain from scratch. Mainnet and testnet have no activation height, so nothing there changes.
+  such a chain from scratch. Mainnet has no activation height, so nothing there changes; the re-forked
+  testnet starts after these rules.
 - **`-prune` is refused** wherever `UPGRADE_VAULT` has an activation height: a node that pruned
   before its network set one must re-download the chain without `-prune` (there is no `-reindex` on a
-  pruned node).
+  pruned node). That includes a testnet-yb-slow node that prunes before the rc that sets its height;
+  testnet-legacy may prune.
 
 ## Parameter changes
 

@@ -560,6 +560,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-mocktime=<n>", "Replace actual time with <n> seconds since epoch. Incompatible with -clockoffset (default: 0)");
         strUsage += HelpMessageOpt("-maxsigcachesize=<n>", strprintf("Limit total size of signature and bundle caches to <n> MiB (default: %u)", DEFAULT_MAX_SIG_CACHE_SIZE));
         strUsage += HelpMessageOpt("-maxtipage=<n>", strprintf("Maximum tip age in seconds to consider node in initial block download (default: %u)", DEFAULT_MAX_TIP_AGE));
+        strUsage += HelpMessageOpt("-stopatheight=<n>", strprintf("Stop running after the active chain reaches the given height; connect no block above it (default: %u, never)", DEFAULT_STOPATHEIGHT));
     }
     strUsage += HelpMessageOpt("-minrelaytxfee=<amt>", strprintf(_("Transactions must have at least this fee rate (in %s per 1000 bytes) for relaying, mining and transaction creation (default: %s). This is not the only fee constraint."),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
@@ -1576,7 +1577,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // parameter flags and the test fault are regtest-only; the payout and payee addresses must be P2PKH (K22).
     {
         yellowback::Params yellowbackParams;
-        auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.GetConsensus(), yellowbackParams);
+        auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.TestnetProfile(), chainparams.GetConsensus(), yellowbackParams);
         if (yellowbackErr.has_value()) {
             return InitError(yellowbackErr.value());
         }
@@ -2373,7 +2374,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // only reconciles wallet coin locks.
     if (yellowback::g_yellowbackLive) {
         yellowback::Params yellowbackParams;
-        yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.GetConsensus(), yellowbackParams); // validated in step 3
+        yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.TestnetProfile(), chainparams.GetConsensus(), yellowbackParams); // validated in step 3
         yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
         // the primitive's liveness hook verifies through the index's signature cache (focused review; never deleted)
         vault::SetModuleCache(static_cast<yellowback::SigCache*>(yellowback::g_yellowback->GetSigCache()));

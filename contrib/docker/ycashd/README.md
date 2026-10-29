@@ -12,8 +12,9 @@ Variables (unset = default):
 | Variable | Default | Meaning |
 |---|---|---|
 | `YCASHD_NETWORK` | `mainnet` | `mainnet` / `testnet` / `regtest` |
+| `YCASHD_TESTNET_PROFILE` | required with `testnet` | `fast` / `slow` / `legacy`: which of the three testnets (`testnetprofile=`; testnet plan Revision 3) |
 | `YCASHD_RPC_USER`, `YCASHD_RPC_PASSWORD` | required | lightwalletd has no cookie auth |
-| `YCASHD_RPC_PORT` | 8832 / 18832 | |
+| `YCASHD_RPC_PORT` | 8832; testnet fast 18832, slow 18932, legacy 19032 | |
 | `YCASHD_RPC_BIND`, `YCASHD_RPC_ALLOWIP` | `0.0.0.0`, RFC-1918 + loopback | space-separated list |
 | `YCASHD_RPC_THREADS`, `YCASHD_RPC_WORKQUEUE` | 16, 64 | raise for a light-wallet backend |
 | `YCASHD_INSIGHT` | 1 | `experimentalfeatures` + `insightexplorer` + `txindex` (needed by lightwalletd's address RPCs; set before first sync) |

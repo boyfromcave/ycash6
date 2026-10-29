@@ -31,12 +31,15 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # DigiByte v9.26.7 review (workspace rule 5); the pins were updated then.
 # Header split: util/system.h, util/strencodings.h. The invariant audit also
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
-src/yellowback/index.cpp ef5edbdb362f161873e28e7cbe8687a113db5cc2cf606dc46764e94a3f47d0bb fa7b9ce4afd7fc16c8d29e5ce8d04b4dea09e97af302394ea6a9e9b0eb4b40bd
-src/yellowback/index.h e76d0b7d26fa73731709d1c9b9085c3d5c65686a937d47af9a4652156ea3c374 6716acc1d71d3fb1259e27fb359980af0ddb770971e756dbefa478fd06cf27eb
+# ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
+# on both lines; pins updated then.
+src/yellowback/index.cpp 5ee5ae18ca99de37efcdbcc9b62fb8c809acb36337772f8e753c65bef7373012 aa7f118e0492f03fa1e1353f2d02c69f21eb12e90179f57faa84b98e1cdd61de
+src/yellowback/index.h 241446bc6a427a7d4ef4f44fe0f510511840f9caefbd805844155512d3f77295 b3a5554369b9bf8eeae2beefe5cd9b445f299ebbe56cb73ce5c8c548bb0758a8
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
-# P-2 rule max(-yellowbackfee, ZIP-317 conventional fee).
-src/yellowback/params.h 981dc4d1e12aa83788ba68074ccbd24817e57af7a9ef297506cfc7398a5244db 1bbb739ec036ade352181ad15be32210cb02c9f62ecd5af94aff074d41ff3a71
+# P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is
+# declared on both lines (testnet plan Revision 3, 2026-10-29); pins updated then.
+src/yellowback/params.h 5aa875e281412cb8e7811e1761319961624dd154b55506e08781e39d5f6d36e5 43bc1bad3eec748e156aadfb12e426a3a05859f19c723881c45c69881033a4a5
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).

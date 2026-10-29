@@ -1625,6 +1625,7 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "\nResult:\n"
             "{\n"
             "  \"chain\": \"xxxx\",        (string) current network name as defined in BIP70 (main, test, regtest)\n"
+            "  \"testnetprofile\": \"xxxx\", (string, optional) on test only: the testnet profile (fast, slow, legacy)\n"
             "  \"blocks\": xxxxxx,         (numeric) the current number of blocks processed in the server\n"
             "  \"initial_block_download_complete\": xx, (boolean) true if the initial download of the blockchain is complete\n"
             "  \"headers\": xxxxxx,        (numeric) the current number of headers we have validated\n"
@@ -1684,6 +1685,8 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain",                 Params().NetworkIDString());
+    if (!Params().TestnetProfile().empty())   // testnet plan Revision 3 (T-14): which of the three testnets
+        obj.pushKV("testnetprofile",    Params().TestnetProfile());
     obj.pushKV("blocks",                (int)chainActive.Height());
     obj.pushKV("initial_block_download_complete", !IsInitialBlockDownload(Params().GetConsensus()));
     obj.pushKV("headers",               pindexBestHeader ? pindexBestHeader->nHeight : -1);

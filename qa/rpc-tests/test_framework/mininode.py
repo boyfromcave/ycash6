@@ -3,6 +3,7 @@
 # Copyright (c) 2012 Jeff Garzik
 # Copyright (c) 2010-2016 The Bitcoin Core developers
 # Copyright (c) 2017-2022 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -1857,7 +1858,10 @@ class NodeConn(asyncore.dispatcher):
     }
     MAGIC_BYTES = {
         "mainnet": b"\x24\xe9\x27\x64",   # mainnet
-        "testnet3": b"\xfa\x1a\xf9\xbf",  # testnet3
+        # the re-forked testnet's three profiles (-testnetprofile, testnet plan Revision 3)
+        "testnet-fast": b"\xf7\x79\x62\xd3",     # datadir testnet-yb-fast
+        "testnet-slow": b"\xf7\x79\x62\xd4",     # datadir testnet-yb-slow
+        "testnet-legacy": b"\xf7\x79\x62\xd5",   # datadir testnet-legacy
         "regtest": b"\xaa\xe8\x3f\x5f"    # regtest
     }
 
