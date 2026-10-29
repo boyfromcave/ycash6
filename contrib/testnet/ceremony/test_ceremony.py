@@ -112,6 +112,7 @@ class FakeNode:
         if method == "validateaddress":
             return {"pubkey": "02" + hhash("pk", params[0])}
         if method == "set_join":
+            assert self.height + 1 <= int(params[2]) < 500_000_000, "bondlocktime must be a height from the next block (set_join, rpc/vault.cpp)"
             txid = hhash("join", len(self.txs))
             self.txs[txid] = {"height": None, "join": params[0], "bond": params[1]}
             self.balance -= Decimal(params[1])

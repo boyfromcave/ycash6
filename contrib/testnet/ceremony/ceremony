@@ -333,7 +333,9 @@ class Ceremony:
             seat = len(joined) + 1
             address = self.call("getnewaddress")
             pubkey = self.call("validateaddress", address)["pubkey"]
-            joined_tx = self.call("set_join", setid, self.bond, 0, pubkey)
+            # bondlocktime is the bond script's CLTV height: at least the next block (bondlockmin 0); the
+            # bond's real exit delay is the set's maturity after the member leaves (vault-rpc.md, set_leave)
+            joined_tx = self.call("set_join", setid, self.bond, self.tip() + 1, pubkey)
             if not joined_tx.get("txid"):
                 raise CeremonyError("set_join for seat %d did not complete: %s" % (seat, joined_tx))
             write_secret(os.path.join(keydir, "%s-seat-%d.json" % (self.p["name"], seat)),
