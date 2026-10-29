@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""ceremony: a testnet's launch ceremony as a script (testnet plan §2.2), and its regtest rehearsal.
+
+    ceremony --network testnet-yb-fast --datadir DIR [--conf FILE] --secrets DIR [--out FILE] [--steps ...]
+    ceremony rehearse --profile fast|slow|legacy --dir DIR [--bitcoind src/ycashd] [--cli src/ycash-cli]
+
+A new testnet needs values that only exist after it has started: the hash of its fork block
+(UPGRADE_YCASH's hashActivationBlock), the txid of its YED attestor set's SET_CREATE (the
+attestorSetId), and a first post-fork checkpoint. The release that compiles them (rc1) comes
+after. This script runs the part in between on an operator's **ceremony build** (§2.2 step 1:
+the network's parameters with H_V set, the fork hash and the attestor set unset), whose node has
+imported the prefix (`ycash-bootstrap`) and is connected only to the other launch operators
+(`-connect`), and writes what the release must compile into a machine-readable record.
+
+Steps (`--steps`, default all that apply; every step is safe to re-run, the record is the state):
+  check   the node is on the network the profile names, holds the prefix (the compiled checkpoint
+          at 510,247), has no attestor set configured, and can mine (a peer; not in IBD)
+  fork    mine (or wait for) the fork block at 510,248 and record its hash
+  vault   mine to H_V - 1, so the next block activates the vault upgrade
+  set     create the YED attestor set: OPEN, 15 seats, unlock/cancel/slash 1, ratelimitbps 0
+          (P8 checklist), maturity = the network's BOND_MATURITY (the module adopts no other), the
+          profile's livenesswindow; once only: a recorded set is verified, never created again
+  seats   join the house seats (T-5: fast 7, slow 3) with fresh wallet keys; each seat's key goes
+          to --secrets (outside any git repository, mode 0600), never into the record
+  mature  mine until every house seat is past the set maturity
+  record  pick the checkpoint (the tip) and write the release values: the fork hash, the attestor
+          set id, the checkpoint with its time, chain work and transaction count
+
+testnet-legacy has no Yellowback: check, fork, record. testnet-yb-slow launches the same way
+(its Vault height comes with a later rc, T-15); once a build sets it, the set steps run.
+
+Mining: on a testnet the node mines with `setgenerate` (Equihash 192,7 from the fork; it needs a
+peer, and the node must leave initial block download, so start it with `-maxtipage=999999999`:
+the prefix's tip is from 2019); `--no-mine` waits for the other operators' blocks instead. Every
+wait counts blocks, never seconds.
+
+`rehearse` runs the same steps end to end on regtest (§3.2): a harvest node mines a prefix,
+`ycash-bootstrap --pack` bundles it, two operator nodes restore it with `ycash-bootstrap`,
+connect only to each other and run the ceremony; then a fresh node that starts with
+`-yellowbackattestorset=<the recorded set>`, as rc1 will compile it, restores the prefix and
+syncs the whole history, and must end on the same tip with the module governing that set and
+every house seat listed. Regtest keeps its own set maturity (BOND_MATURITY 8: the module adopts a
+set only at exactly that maturity, and no regtest flag changes it); the seat count and the
+fork-to-Vault distance are the --profile network's (slow, whose Vault height its rc sets, uses
+fast's 152 blocks; legacy rehearses the fork alone, no Vault). The record is written to
+DIR/ceremony-rehearsal.json (format ycash-ceremony/1, its `release` object holding the values an
+rc compiles); the nodes live in DIR/work and the house keys in DIR/secrets. Exit 0 = passed.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from decimal import Decimal
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "contrib", "yellowback", "profiles"))
+import ybprofile  # noqa: E402
+
+BOOTSTRAP = os.path.join(REPO, "contrib", "bootstrap", "ycash-bootstrap")
+FORMAT = "ycash-ceremony/1"
+STEPS = ("check", "fork", "vault", "set", "seats", "mature", "record")
+FAST_VAULT_DISTANCE = 510400 - 510248   # testnet-yb-fast's fork-to-Vault distance, which slow's rehearsal borrows
+SET_SEATS = 15                 # the module adopts only an OPEN set of 15 seats (yellowback/module.cpp AdoptedSet)
+FEE_MARGIN = Decimal("0.01")   # per join, on top of the bond, when checking the balance
+
+
+class CeremonyError(Exception):
+    pass
+
+
+def say(text):
+    print("[%s] %s" % (time.strftime("%H:%M:%S"), text), flush=True)
+
+
+def canonical(value):
+    return json.dumps(value, indent=2, sort_keys=True, default=str) + "\n"
+
+
+def inside_git(path):
+    """True if path (or a parent) is inside a git work tree: keys never go into a repository."""
+    path = os.path.realpath(path)
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+
+def prepare_secrets(path):
+    if inside_git(path):
+        raise CeremonyError("--secrets %s is inside a git repository: house seat keys never go into a repository" % path)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def write_secret(path, value):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(canonical(value))
+
+
+# ---------------------------------------------------------------------------------- rpc
+
+class CliRPC:
+    """A running node through ycash-cli (the operator's node on a testnet)."""
+
+    def __init__(self, cli, datadir, profile, conf=None, rpcport=None):
+        self.argv = [cli, "-datadir=%s" % datadir] + (["-conf=%s" % conf] if conf else []) + profile["node"]["args"] \
+            + (["-rpcport=%d" % rpcport] if rpcport else [])
+
+    @staticmethod
+    def arg(value):
+        """One ycash-cli argument: strings and numbers as they are (the client converts per method), the rest as JSON."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, Decimal)) and not isinstance(value, bool):
+            return str(value)
+        return json.dumps(value, default=str)
+
+    def call(self, method, *params):
+        argv = self.argv + [method] + [self.arg(p) for p in params]
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=900)
+        if result.returncode != 0:
+            raise CeremonyError("%s: %s" % (method, result.stderr.strip()[:400]))
+        out = result.stdout.strip()
+        try:
+            return json.loads(out, parse_float=Decimal)
+        except ValueError:
+            return out
+
+
+class ProxyRPC:
+    """A node started by the functional framework (the rehearsal)."""
+
+    def __init__(self, proxy):
+        self.proxy = proxy
+
+    def call(self, method, *params):
+        try:
+            return getattr(self.proxy, method)(*params)
+        except Exception as e:
+            raise CeremonyError("%s: %s" % (method, getattr(e, "error", e)))
+
+
+# ---------------------------------------------------------------------------------- the ceremony
+
+class Ceremony:
+    def __init__(self, rpc, profile, opts, out, fork_height=None, prefix_last=None, prefix_hash=None, sync=None, rehearsal=None):
+        self.rpc, self.p, self.opts, self.out = rpc, profile, opts, out
+        self.fork_height = fork_height or profile["heights"]["ycash_fork"]
+        self.prefix_last = profile["prefix"]["last_height"] if prefix_last is None else prefix_last
+        self.prefix_hash = prefix_hash or profile["prefix"]["last_hash"]
+        self.sync = sync or (lambda: None)
+        y = profile["yellowback"]
+        self.seats, self.bond = opts.seats or y["house_seats"], Decimal(str(opts.bond or y["house_bond_yec"]))
+        self.vault_height = None
+        if os.path.exists(out):
+            with open(out, encoding="utf-8") as f:
+                self.record = json.load(f, parse_float=Decimal)
+            if self.record.get("network") != profile["name"]:
+                raise CeremonyError("%s is the record of %s, not %s" % (out, self.record.get("network"), profile["name"]))
+        else:
+            self.record = {"format": FORMAT, "network": profile["name"], "chain": profile["chain"],
+                           "testnet_profile": profile["testnet_profile"], "rehearsal": rehearsal}
+
+    def save(self):
+        tmp = self.out + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(canonical(self.record))
+        os.replace(tmp, self.out)
+
+    def call(self, method, *params):
+        return self.rpc.call(method, *params)
+
+    def tip(self):
+        return int(self.call("getblockcount"))
+
+    # ------------------------------------------------------------------ mining and waiting
+    def mine_to(self, height):
+        """Until the tip is at least `height`: generate (regtest), setgenerate (a testnet), or wait."""
+        tip = self.tip()
+        if tip >= height:
+            return
+        if self.p["mining"]["generate"]:
+            while tip < height:
+                self.call("generate", min(50, height - tip))
+                self.sync()
+                tip = self.tip()
+            return
+        if self.opts.mine:
+            say("mining with setgenerate (genproclimit %d) from %d to %d" % (self.opts.genproclimit, tip, height))
+            self.call("setgenerate", True, self.opts.genproclimit)
+        try:
+            self.wait_height(height)
+        finally:
+            if self.opts.mine:
+                self.call("setgenerate", False)
+
+    def wait_height(self, height):
+        last_report, start = 0, self.tip()
+        while True:
+            tip = self.tip()
+            if tip >= height:
+                return
+            if time.time() - last_report >= 60:
+                say("at height %d, waiting for %d (%d to go)" % (tip, height, height - tip))
+                last_report = time.time()
+            if self.opts.max_blocks_wait and tip - start > self.opts.max_blocks_wait:
+                raise CeremonyError("passed %d blocks without reaching %d" % (self.opts.max_blocks_wait, height))
+            time.sleep(self.opts.poll)
+
+    def confirmed_height(self, txid):
+        """The height `txid` confirmed at, mining one block at a time until it does. Read from the blocks
+        themselves: an act built by set_create / set_join is not a wallet transaction (gettransaction -5)."""
+        start = self.tip()
+        for height in range(max(0, start - self.opts.confirm_blocks), start + 1):
+            if txid in self.call("getblock", self.call("getblockhash", height))["tx"]:
+                return height
+        for _ in range(self.opts.confirm_blocks):
+            self.mine_to(self.tip() + 1)
+            tip = self.tip()
+            for height in range(start + 1, tip + 1):
+                if txid in self.call("getblock", self.call("getblockhash", height))["tx"]:
+                    return height
+            start = tip
+        raise CeremonyError("%s did not confirm within %d blocks" % (txid, self.opts.confirm_blocks))
+
+    # ------------------------------------------------------------------ steps
+    def applicable(self):
+        y = self.p["yellowback"]
+        if not y["enabled"]:
+            return ("check", "fork", "record")
+        if self.vault_height is None:
+            say("%s has no Vault height in this build: the set steps wait for the rc that sets one (T-15); fork and record only" % self.p["name"])
+            return ("check", "fork", "record")
+        return STEPS
+
+    def step_check(self):
+        info = self.call("getblockchaininfo")
+        if info.get("chain") != self.p["chain"]:
+            raise CeremonyError("the node is on chain %r; %s is %r" % (info.get("chain"), self.p["name"], self.p["chain"]))
+        if self.p["testnet_profile"] and info.get("testnetprofile") != self.p["testnet_profile"]:
+            raise CeremonyError("the node runs -testnetprofile=%s, not %s" % (info.get("testnetprofile"), self.p["testnet_profile"]))
+        if int(info["blocks"]) < self.prefix_last:
+            raise CeremonyError("the node is at %d, below the prefix's %d: import it first (ycash-bootstrap)" % (info["blocks"], self.prefix_last))
+        if self.prefix_hash and self.call("getblockhash", self.prefix_last) != self.prefix_hash:
+            raise CeremonyError("block %d is not the compiled checkpoint %s" % (self.prefix_last, self.prefix_hash))
+        vault = self.call("vault_getinfo")
+        self.vault_height = None if int(vault["activationheight"]) < 0 else int(vault["activationheight"])
+        if self.p["yellowback"]["enabled"] and vault.get("attestorsetid") not in (None, self.record.get("attestor_set", {}).get("setid")):
+            raise CeremonyError("the node already governs attestor set %s: this is not a ceremony build" % vault["attestorsetid"])
+        if not self.p["yellowback"]["enabled"] and self.vault_height is not None:
+            raise CeremonyError("%s never activates Vault, yet this build has a Vault height %d" % (self.p["name"], self.vault_height))
+        if self.vault_height is not None and self.vault_height <= self.fork_height:
+            raise CeremonyError("Vault at %d is not above the fork at %d" % (self.vault_height, self.fork_height))
+        if not self.p["mining"]["generate"] and self.opts.mine:
+            if int(self.call("getconnectioncount")) < 1:
+                raise CeremonyError("the node has no peer, and a testnet node mines only with one: -connect to another operator's node")
+            if not info.get("initial_block_download_complete", True):
+                raise CeremonyError("the node is in initial block download (the prefix's tip is from 2019), so it will not mine: "
+                                    "restart it with -maxtipage=999999999 for the ceremony")
+        self.record["node"] = {"subversion": self.call("getnetworkinfo")["subversion"]}
+        self.record["prefix"] = {"last_height": self.prefix_last, "last_hash": self.call("getblockhash", self.prefix_last)}
+        self.record["heights"] = {"ycash_fork": self.fork_height, "vault": self.vault_height}
+        say("check: %s (%s), tip %d, prefix %d %s, fork %d, Vault %s"
+            % (self.p["name"], self.record["node"]["subversion"], int(info["blocks"]), self.prefix_last,
+               self.record["prefix"]["last_hash"][:16], self.fork_height, self.vault_height or "unset"))
+
+    def step_fork(self):
+        self.mine_to(self.fork_height)
+        h = self.call("getblockhash", self.fork_height)
+        block = self.call("getblock", h)
+        if block["previousblockhash"] != self.record["prefix"]["last_hash"]:
+            raise CeremonyError("the fork block %s does not follow the prefix" % h)
+        recorded = (self.record.get("fork") or {}).get("hash")
+        if recorded and recorded != h:
+            raise CeremonyError("the record names fork block %s, the node has %s (a reorg across the fork: reset)" % (recorded, h))
+        self.record["fork"] = {"height": self.fork_height, "hash": h, "time": int(block["time"])}
+        say("fork: block %d is %s" % (self.fork_height, h))
+
+    def step_vault(self):
+        self.mine_to(self.vault_height - 1)
+        say("vault: tip %d, the vault upgrade activates at the next block (%d)" % (self.tip(), self.vault_height))
+
+    def set_params(self):
+        y = self.p["yellowback"]
+        return {"seats": SET_SEATS, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1, "open": True,
+                "ratelimitbps": 0, "livenesswindow": y["liveness_window"], "maturity": y["set_maturity"],
+                "bondmin": int(self.bond), "bondlockmin": 0}
+
+    def step_set(self):
+        recorded = self.record.get("attestor_set")
+        if recorded:
+            info = self.call("set_getinfo", recorded["setid"])
+            if recorded["height"] is None:
+                recorded["height"] = self.confirmed_height(recorded["txid"])
+            say("set: %s was created at %d (re-run: verified, not created again; %s member(s))" % (recorded["setid"], recorded["height"], info.get("members")))
+            return
+        params = self.set_params()
+        created = self.call("set_create", params)
+        self.record["attestor_set"] = {"setid": created["setid"], "txid": created["txid"], "params": params, "height": None}
+        self.save()                     # before anything else can fail: the set exists from here on
+        self.record["attestor_set"]["height"] = self.confirmed_height(created["txid"])
+        self.record["attestor_set"]["createheight"] = self.call("set_getinfo", created["setid"]).get("createheight")
+        say("set: the YED attestor set %s, created at %d" % (created["setid"], self.record["attestor_set"]["height"]))
+
+    def step_seats(self):
+        setid = self.record["attestor_set"]["setid"]
+        joined = self.record.setdefault("house_seats", [])
+        need = self.seats - len(joined)
+        if need <= 0:
+            say("seats: %d house seats already joined" % len(joined))
+            return
+        balance = Decimal(str(self.call("getbalance")))
+        if balance < need * (self.bond + FEE_MARGIN):
+            raise CeremonyError("the wallet holds %s YEC; %d more house seats need %s (bond %s each): fund it and re-run --steps seats,mature,record"
+                                % (balance, need, need * (self.bond + FEE_MARGIN), self.bond))
+        keydir = prepare_secrets(self.opts.keydir)
+        for _ in range(need):
+            seat = len(joined) + 1
+            address = self.call("getnewaddress")
+            pubkey = self.call("validateaddress", address)["pubkey"]
+            # bondlocktime is the bond script's CLTV height: at least the next block (bondlockmin 0); the
+            # bond's real exit delay is the set's maturity after the member leaves (vault-rpc.md, set_leave)
+            joined_tx = self.call("set_join", setid, self.bond, self.tip() + 1, pubkey)
+            if not joined_tx.get("txid"):
+                raise CeremonyError("set_join for seat %d did not complete: %s" % (seat, joined_tx))
+            write_secret(os.path.join(keydir, "%s-seat-%d.json" % (self.p["name"], seat)),
+                         {"network": self.p["name"], "setid": setid, "seat": seat, "memberkey": pubkey, "address": address,
+                          "wif": self.call("dumpprivkey", address), "bondoutpoint": joined_tx.get("bondoutpoint")})
+            joined.append({"seat": seat, "memberkey": pubkey, "txid": joined_tx["txid"], "height": None})
+            self.save()
+        for record in joined:
+            if record["height"] is None:
+                record["height"] = self.confirmed_height(record["txid"])
+        say("seats: %d house seats joined (their key files: see --secrets)" % len(joined))
+
+    def step_mature(self):
+        heights = [self.record["attestor_set"]["height"]] + [s["height"] for s in self.record.get("house_seats", [])]
+        target = max(heights) + self.p["yellowback"]["set_maturity"]
+        self.mine_to(target)
+        info = self.call("set_getinfo", self.record["attestor_set"]["setid"])
+        self.record["attestor_set"]["at_maturity"] = {"height": self.tip(), "members": info.get("members"), "current": info.get("current")}
+        if int(info.get("members") or 0) < len(self.record.get("house_seats", [])):
+            raise CeremonyError("the set lists %s member(s), %d house seats joined" % (info.get("members"), len(self.record["house_seats"])))
+        say("mature: tip %d >= %d (the last join + maturity %d); the set lists %s member(s), %s current"
+            % (self.tip(), target, self.p["yellowback"]["set_maturity"], info.get("members"), info.get("current")))
+
+    def step_record(self):
+        height = self.tip()
+        h = self.call("getblockhash", height)
+        block = self.call("getblock", h)
+        start, chaintx = (self.prefix_last + 1, self.p["prefix"]["chaintx"]) if self.p["prefix"]["chaintx"] else (0, 0)
+        for x in range(start, height + 1):
+            chaintx += len(self.call("getblock", self.call("getblockhash", x))["tx"])
+        self.record["checkpoint"] = {"height": height, "hash": h, "time": int(block["time"]), "chainwork": block["chainwork"], "chaintx": chaintx}
+        fork = self.record.get("fork") or {}
+        aset = self.record.get("attestor_set") or {}
+        self.record["release"] = {
+            "UPGRADE_YCASH.hashActivationBlock": fork.get("hash"),
+            "UPGRADE_VAULT.nActivationHeight": self.vault_height,
+            "attestorSetId": aset.get("setid"),
+            "checkpoint": "%d:%s" % (height, h),
+            "checkpointTime": int(block["time"]),
+            "checkpointChainTx": chaintx,
+            "nMinimumChainWork": block["chainwork"],
+            "houseSeats": len(self.record.get("house_seats", [])),
+        }
+        say("record: checkpoint %d %s; fork %s; attestor set %s" % (height, h, fork.get("hash"), aset.get("setid")))
+
+    def run(self, steps=None):
+        self.step_check()
+        wanted = self.applicable() if steps is None else steps
+        for name in STEPS:
+            if name == "check" or name not in wanted:
+                continue
+            if name not in self.applicable():
+                raise CeremonyError("step %s does not apply to %s in this build" % (name, self.p["name"]))
+            getattr(self, "step_" + name)()
+            self.save()
+        self.save()
+        say("wrote %s" % self.out)
+        return self.record
+
+
+# ---------------------------------------------------------------------------------- the regtest rehearsal
+
+def rehearse(opts):
+    """§2.2 end to end on regtest: prefix -> bundle -> two operators restore it -> ceremony -> an rc1-like node syncs it."""
+    sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+    import test_framework.util as util
+    from test_framework.util import PortSeed, connect_nodes_bi, initialize_datadir, rpc_port, start_node, stop_node, sync_blocks
+    from test_framework.yellowback_util import VAULT_BRANCH_ID, YCASH_UPGRADE_ARGS, nuparams
+    like = ybprofile.load(opts.like)
+    profile = ybprofile.load("regtest")
+    # The rehearsal's profile: regtest's chain, the --profile network's seat count; regtest's own set
+    # maturity and bond (the module adopts only BOND_MATURITY, and regtest's bond floor is 5 YEC).
+    profile["yellowback"]["house_seats"] = like["yellowback"]["house_seats"] or profile["yellowback"]["house_seats"]
+    profile["yellowback"]["enabled"] = like["yellowback"]["enabled"]
+    prefix_last = opts.prefix_height
+    fork = prefix_last + 1
+    vault = fork + (FAST_VAULT_DISTANCE if not like["heights"]["vault"] else like["heights"]["vault"] - like["heights"]["ycash_fork"])
+    if not like["yellowback"]["enabled"]:
+        vault = None                                   # legacy: Vault never activates
+    profile["heights"]["vault"] = vault or 0
+    base = os.path.abspath(opts.workdir or tempfile.mkdtemp(prefix="ceremony-rehearsal-"))
+    work = os.path.join(base, "work")
+    if os.path.exists(work) and os.listdir(work):
+        raise CeremonyError("%s is not empty" % work)
+    os.makedirs(work, exist_ok=True)
+    opts.keydir = opts.keydir or os.path.join(base, "secrets")
+    out = os.path.abspath(opts.out or os.path.join(base, "ceremony-rehearsal.json"))
+    if os.path.exists(out):
+        os.remove(out)                                 # a rehearsal starts from nothing
+    PortSeed.n = opts.portseed
+    binary = os.path.abspath(opts.ycashd)
+    args = list(YCASH_UPGRADE_ARGS) + ([nuparams(VAULT_BRANCH_ID, vault)] if vault else [])
+    opts.cli = opts.cli or os.path.join(os.path.dirname(binary), "ycash-cli")   # the ycash-cli beside the ycashd under test
+    procs = {}
+
+    def start(i, extra=()):
+        if not os.path.isdir(os.path.join(work, "node%d" % i)):
+            initialize_datadir(work, i)
+        log = open(os.path.join(work, "node%d.stderr" % i), "a")
+        procs[i] = start_node(i, work, args + list(extra), binary=binary, stderr=log)
+        return procs[i]
+
+    def stop(i):
+        stop_node(procs.pop(i), i)
+
+    def bootstrap(i, bundle):
+        initialize_datadir(work, i)
+        argv = [sys.executable, "-I", BOOTSTRAP, "--network", "regtest", "--datadir", os.path.join(work, "node%d" % i),
+                "--conf", os.path.join(work, "node%d" % i, "ycash.conf"), "--source", bundle, "--ycashd", binary, "--cli", opts.cli,
+                "--poll", "0.5"] + ["--node-arg=%s" % a for a in ["-nuparams=5ba81b19:1", "-nuparams=76b809bb:1"] + args + list(util_extra(util))]
+        say("node%d: ycash-bootstrap restores the regtest prefix" % i)
+        subprocess.check_call(argv)
+
+    try:
+        say("rehearsal in %s: prefix 0..%d, fork %d, Vault %s (the %s distance), %d house seats, set maturity %d"
+            % (work, prefix_last, fork, vault or "never", opts.like, profile["yellowback"]["house_seats"], profile["yellowback"]["set_maturity"]))
+        harvest = start(0)
+        harvest.generate(prefix_last)
+        bundle = os.path.join(work, "bundle")
+        subprocess.check_call([sys.executable, "-I", BOOTSTRAP, "--network", "regtest", "--datadir", os.path.join(work, "node0"),
+                               "--rpcport", str(rpc_port(0)), "--cli", opts.cli, "--pack", bundle, "--last-height", str(prefix_last)])
+        prefix_hash = harvest.getblockhash(prefix_last)
+        stop(0)
+        for i in (1, 2):
+            bootstrap(i, bundle)
+        a, b = start(1), start(2)
+        connect_nodes_bi(procs, 1, 2)
+        nodes = [a, b]
+        ceremony = Ceremony(ProxyRPC(a), profile, opts, out, fork_height=fork, prefix_last=prefix_last, prefix_hash=prefix_hash,
+                            sync=lambda: sync_blocks(nodes), rehearsal={"like": opts.like, "prefix_height": prefix_last})
+        record = ceremony.run()
+        sync_blocks(nodes)
+        # rc1: a fresh node with the set compiled in (on regtest: -yellowbackattestorset) syncs the whole history.
+        setid = record["release"]["attestorSetId"]
+        bootstrap(3, bundle)
+        c = start(3, ["-yellowbackattestorset=%s" % setid] if setid else [])
+        connect_nodes_bi(procs, 1, 3)
+        sync_blocks([a, c], timeout=300)
+        info = c.vault_getinfo()
+        attestors = c.yed_listattestors() if setid else []
+        checks = {
+            "tip": c.getbestblockhash() == a.getbestblockhash(),
+            "fork": c.getblockhash(fork) == record["release"]["UPGRADE_YCASH.hashActivationBlock"],
+            "checkpoint": c.getblockhash(record["checkpoint"]["height"]) == record["checkpoint"]["hash"],
+        }
+        if like["yellowback"]["enabled"]:
+            checks.update({"attestorsetid": info.get("attestorsetid") == setid, "moduleactive": info.get("moduleactive") is True,
+                           "house_seats_listed": len(attestors) == len(record.get("house_seats", []))})
+        else:
+            checks.update({"no_vault": int(info.get("activationheight", -1)) < 0, "no_attestor_set": setid is None})
+        record["rehearsal"]["rc1_node"] = {"checks": checks, "attestors": [{k: r.get(k) for k in ("seq", "status", "bondZat")} for r in attestors],
+                                           "vault_statehash": info.get("statehash")}
+        ceremony.record = record
+        ceremony.save()
+        failed = sorted(k for k, v in checks.items() if not v)
+        if failed:
+            raise CeremonyError("the rc1-like node disagrees: %s (see %s)" % (", ".join(failed), out))
+        say("rehearsal passed (%s): an rc1-like node synced the ceremony's history; set %s, %d house seats listed; record %s"
+            % (opts.like, setid, len(attestors), out))
+        print(canonical(record["release"]), end="")
+        return 0
+    finally:
+        for i in list(procs):
+            try:
+                stop(i)
+            except Exception:
+                pass
+
+
+def util_extra(util):
+    """The arguments the functional framework's start_node adds on this line beyond the two -nuparams
+    (ycashd 6.20.0 needs the 2025 acknowledgement; the 4.5.0 line has no such flag)."""
+    import inspect
+    source = inspect.getsource(util.start_node)
+    return [a for a in ("-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025",) if a in source]
+
+
+def rehearse_argv(argv):
+    """`ceremony rehearse --profile P --dir D --bitcoind B [--cli C] [--prefix-height N] [--portseed N]`
+    (the entry point rc-qualify calls) as the flag form `--rehearse --like ... --workdir ... --ycashd ...`."""
+    sub = argparse.ArgumentParser(prog="ceremony rehearse", description="the launch ceremony end to end on regtest")
+    sub.add_argument("--profile", choices=("fast", "slow", "legacy"), default="fast", help="the testnet whose ceremony to rehearse")
+    sub.add_argument("--dir", required=True, help="output directory: ceremony-rehearsal.json, work/ (nodes), secrets/")
+    sub.add_argument("--bitcoind", "--ycashd", dest="ycashd", help="the ycashd to run (ycash-cli is taken from beside it unless --cli)")
+    sub.add_argument("--cli")
+    sub.add_argument("--prefix-height", type=int)
+    sub.add_argument("--portseed", type=int)
+    a = sub.parse_args(argv)
+    out = ["--rehearse", "--like", {"fast": "testnet-yb-fast", "slow": "testnet-yb-slow", "legacy": "testnet-legacy"}[a.profile], "--workdir", a.dir]
+    for flag, value in (("--ycashd", a.ycashd), ("--cli", a.cli), ("--prefix-height", a.prefix_height), ("--portseed", a.portseed)):
+        if value is not None:
+            out += [flag, str(value)]
+    return out
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["rehearse"]:
+        argv = rehearse_argv(argv[1:])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__.split("\n", 2)[2], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--network", choices=[n for n in ybprofile.NETWORKS if n != "regtest"], help="the testnet to launch")
+    ap.add_argument("--datadir", help="the ceremony node's -datadir")
+    ap.add_argument("--conf", help="its ycash.conf (default: DATADIR/ycash.conf)")
+    ap.add_argument("--rpcport", type=int, help="its RPC port (default: the profile's)")
+    ap.add_argument("--cli", help="ycash-cli (default: on PATH, else src/ycash-cli; a rehearsal: beside --ycashd)")
+    ap.add_argument("--secrets", dest="keydir", help="directory for the house seats' keys: outside any git repository")
+    ap.add_argument("--out", help="the ceremony record (default ./ceremony-<network>.json); re-runs continue from it")
+    ap.add_argument("--steps", help="comma-separated subset of: " + ",".join(STEPS) + " (check always runs)")
+    ap.add_argument("--no-mine", dest="mine", action="store_false", help="a testnet: wait for the other operators' blocks instead of setgenerate")
+    ap.add_argument("--genproclimit", type=int, default=1)
+    ap.add_argument("--seats", type=int, help="house seats (default: the profile's, T-5)")
+    ap.add_argument("--bond", help="YEC per house seat (default: the profile's, the module's bond floor)")
+    ap.add_argument("--poll", type=float, default=5.0, help="seconds between block-count polls")
+    ap.add_argument("--max-blocks-wait", type=int, default=0, help="give up after this many blocks without reaching a target (0: never)")
+    ap.add_argument("--confirm-blocks", type=int, default=6, help="blocks to wait for a ceremony transaction to confirm")
+    ap.add_argument("--rehearse", action="store_true", help="run the whole ceremony on regtest (spawns its own nodes)")
+    ap.add_argument("--like", default="testnet-yb-fast", choices=("testnet-yb-fast", "testnet-yb-slow", "testnet-legacy"), help="rehearsal: the network whose seats and fork-to-Vault distance to use")
+    ap.add_argument("--ycashd", default=os.environ.get("ZCASHD") or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd"))
+    ap.add_argument("--workdir", help="rehearsal: the output directory (default: a new temporary one)")
+    ap.add_argument("--prefix-height", type=int, default=50, help="rehearsal: the regtest prefix's last height")
+    ap.add_argument("--portseed", type=int, default=os.getpid() % 4000 + 1000, help="rehearsal: the functional framework's port seed")
+    opts = ap.parse_args(argv)
+    try:
+        if opts.rehearse:
+            opts.poll = min(opts.poll, 0.5)
+            return rehearse(opts)
+        if not (opts.network and opts.datadir and opts.keydir):
+            ap.error("a ceremony needs --network, --datadir and --secrets (or --rehearse)")
+        profile = ybprofile.load(opts.network)
+        steps = None
+        if opts.steps:
+            steps = tuple(s for s in opts.steps.split(",") if s)
+            unknown = set(steps) - set(STEPS)
+            if unknown:
+                ap.error("unknown steps: %s" % ", ".join(sorted(unknown)))
+        prepare_secrets(opts.keydir)
+        rpc = CliRPC(opts.cli or shutil.which("ycash-cli") or os.path.join(REPO, "src", "ycash-cli"), opts.datadir, profile, opts.conf, opts.rpcport)
+        out = os.path.abspath(opts.out or "ceremony-%s.json" % opts.network)
+        Ceremony(rpc, profile, opts, out).run(steps)
+        return 0
+    except CeremonyError as e:
+        print("ceremony: stopped: %s" % e, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
