@@ -81,16 +81,30 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
             h += 1
         return h
 
-    def wait_async_idle(self, node, timeout=180):
-        """Every queued async operation (the consolidation build is one) has finished."""
+    def wait_consolidation_built(self, node, known, timeout=180):
+        """The wallet hears of each block on its own thread (ThreadNotifyWallets), after
+        sync_all has returned, so the build a %100 == 45 block starts may not be queued yet when the
+        test looks: an empty async queue proves nothing. Wait for that build (an operation not in
+        known) to appear and end."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            ids = node.z_listoperationids()
-            busy = [s for s in node.z_getoperationstatus(ids) if s['status'] in ('queued', 'executing')] if ids else []
-            if not busy:
+            ids = [i for i in node.z_listoperationids() if i not in known]
+            ops = [s for s in node.z_getoperationstatus(ids) if s.get('method') == 'saplingconsolidation'] if ids else []
+            if ops and all(s['status'] not in ('queued', 'executing') for s in ops):
                 return
             time.sleep(0.5)
-        raise AssertionError('async operations still running: %r' % busy)
+        raise AssertionError('no finished consolidation build after the %100 == 45 block')
+
+    def wait_consolidation_txs(self, node, timeout=60):
+        """The commit at a %100 == 49 block also runs on the wallet's thread: wait for it to reach
+        the mempool rather than reading the mempool the moment the block is synced."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cons = self.consolidation_txs(node)
+            if cons:
+                return cons
+            time.sleep(0.5)
+        return []
 
     def purged(self, i):
         """Wallet transactions -deletetx has removed on node i, from its own accounting
@@ -164,8 +178,9 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         # Round 1: build at 45 (notes need depth >= 11 then), mint, commit at 49.
         h45 = self.next_height(45, user.getblockcount() + 12)
         print('round 1: consolidation built at %d, a mint from ys before its commit at %d' % (h45, h45 + 4))
+        known = set(user.z_listoperationids())
         self.mine_to(h45)
-        self.wait_async_idle(user)
+        self.wait_consolidation_built(user, known)
         mint1 = self.mint(user, 10000, 48, ys)                     # carrier mined at h45 + 1
         assert_equal(mint1['fundedFrom'], 'sapling')
         self.mine(POOLS[2])                                        # main transaction at h45 + 2
@@ -183,10 +198,11 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         print('round 2: consolidation committed at %d, a mint from ys with it in the mempool' % (h45 + 4))
         before = len(self.notes(user, ys))
         assert_greater_than(before, DUST_NOTES)
+        known = set(user.z_listoperationids())
         self.mine_to(h45)
-        self.wait_async_idle(user)
+        self.wait_consolidation_built(user, known)
         self.mine_to(h45 + 4)
-        cons = self.consolidation_txs(user)
+        cons = self.wait_consolidation_txs(user)
         assert_equal(len(cons), 1)                                 # the commit happened (one address, one transaction)
         spent_by_cons = len(user.getrawtransaction(cons[0], 1)['vShieldedSpend'])
         # The batch takes a random 10..44 notes, so it may hold every note of ys (the 25 YEC one
