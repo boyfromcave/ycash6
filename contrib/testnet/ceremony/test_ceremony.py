@@ -153,7 +153,7 @@ class CeremonyTest(unittest.TestCase):
         self.assertEqual(release["UPGRADE_VAULT.nActivationHeight"], 510400)
         setid = release["attestorSetId"]
         self.assertEqual(node.sets[setid], {"seats": 15, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1, "open": True,
-                                            "ratelimitbps": 0, "livenesswindow": 1152, "maturity": 48, "bondmin": 10000, "bondlockmin": 0})
+                                            "ratelimitbps": 0, "livenesswindow": 1152, "maturity": 48, "bondmin": 10, "bondlockmin": 0})
         self.assertEqual(record["attestor_set"]["height"], 510400)                 # created in the activation block
         self.assertEqual(release["houseSeats"], 7)                                   # T-5
         last_join = max(s["height"] for s in record["house_seats"])
@@ -213,7 +213,7 @@ class CeremonyTest(unittest.TestCase):
         node.heights["ab" * 32] = 510247
         with self.assertRaisesRegex(cm.CeremonyError, "compiled checkpoint"):
             self.run_ceremony("testnet-yb-fast", node)
-        poor = FakeNode(fast, vault=510400, balance=Decimal("25000"))
+        poor = FakeNode(fast, vault=510400, balance=Decimal("25"))       # 7 seats x 10 YEC need ~70
         with self.assertRaisesRegex(cm.CeremonyError, "fund it and re-run"):
             self.run_ceremony("testnet-yb-fast", poor)
         self.assertIn("set_create", poor.calls)                                       # the set exists; the record kept it
