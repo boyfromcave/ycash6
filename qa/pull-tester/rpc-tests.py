@@ -93,6 +93,9 @@ BASE_SCRIPTS= [
     # activation block is erased whole and judged again; a never-connected one is kept. Byte-identical
     # on both lines (qa/yellowback-cross-line.manifest).
     'vault_activation_restart.py',
+    # -stopatheight (testnet plan §4.3): a clean stop at exactly the height, mined and synced.
+    # Byte-identical on both lines (qa/yellowback-cross-line.manifest).
+    'stopatheight.py',
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',
