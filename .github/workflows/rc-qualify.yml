@@ -1,0 +1,462 @@
+# rc-qualify: release-candidate qualification of a tagged ycashd release (testnet plan §5.3, N4).
+#
+# In plain words: after a version tag has been built into a draft release, this workflow takes the
+# files from that draft (not a new build), checks they are the ones the release workflow signed, and
+# runs them with every other Yellowback program: the node's own test suites, the wallets, the
+# light-wallet server, the pool, the visualizer, the payment library and the bridge attestor, at the
+# commits the release train names; then the same network with the other node line (ycash-dd) mixed
+# in; then a rehearsal of the testnet launch ceremony. It writes the outcome as a record on the draft.
+# Deploying to the testnets is a separate, manual step from the private ycash-ops repository (below).
+#
+# Trigger: workflow_dispatch ON THE TAG (`gh workflow run rc-qualify.yml --ref v6.22.0-rcN`), which the
+# release workflow's `qualify` job does once the draft exists; by hand for a rerun. Any other ref is
+# refused. Inputs: the workspace ref holding releases/v<version>.yaml (default upgrade/vault) and one
+# switch per step.
+#
+# Steps (each a job; the record job collects them):
+#   candidate   the draft (or published) release of the tag: every ycashd_v*/SBOM asset matches
+#               SHA256SUMS, the linux_x86_64 package carries this repository's build provenance and
+#               SHA256SUMS the release workflow's cosign signature at this tag. Uploads `rc-package`.
+#   train       the workspace's releases/v<version>.yaml (scripts/release-train.py pins): its ycash6
+#               commit is this tag's commit, its ycash6 tag is this tag. Uploads `rc-train`.
+#   1 node-suites  yellowback-tests.yml (workflow_call, tier all) with release_package: every
+#               functional shard and the nightly's suites run the package's binaries; the unit tier
+#               uses a CI build (test_bitcoin is not packaged); yolo, chain-viz, lightwalletd-dd and the
+#               workspace at the train's pins.
+#   2 ecosystem  one job per client against the package, each at its train pin: walk (the devnet's
+#               upgrade-walk with chain-viz, lightwalletd fork + baseline and yolo), yew (W1/W2/W4,
+#               Falcon holders, PQ addresses), x402 (test:devnet), hawkeye (scenario demo, anvil),
+#               yecwallet (the QTest devnet cases). Long (hours), never in the push tier;
+#               vars.RC_QUALIFY_RUNNER names a larger runner (default ubuntu-22.04).
+#   3 cross-line  ycash-dd built at the train's vault-params commit; two of its nodes join the devnet;
+#               block hash, vault state hash and YED state hash agree at every 100th height.
+#   4 ceremony   contrib/testnet/ceremony rehearsed on regtest for the fast and slow profiles (N2).
+#   record      rc-qualify.json (every job's result, the pins, the package sha256) as a workflow
+#               artifact and, on the release, an asset `rc-qualify-<run id>.json`.
+#
+# After a green record (doc/yellowback-release.md, "Release candidates"): the owner signs SHA256SUMS
+# (ycash-ops sign-release), deploys the rc image to testnet-yb-fast, then testnet-yb-slow (and runs it
+# on testnet-legacy with Vault off) from ycash-ops, and publishes the pre-release. A red record means a
+# new rc number, never a moved tag. Step 5 (the 24 h canary from rc2 on) needs the live testnet and
+# runs from ycash-ops, not here.
+name: rc-qualify
+
+on:
+  workflow_dispatch:
+    inputs:
+      train_ref:
+        description: 'workspace (boyfromcave/yellowback) branch or commit holding releases/v<version>.yaml'
+        type: string
+        default: upgrade/vault
+      node_suites:
+        description: 'step 1: the node suites against the package'
+        type: boolean
+        default: true
+      ecosystem:
+        description: 'step 2: every client against the package'
+        type: boolean
+        default: true
+      cross_line:
+        description: 'step 3: ycash-dd nodes on the devnet, state digests compared'
+        type: boolean
+        default: true
+      ceremony:
+        description: 'step 4: the launch ceremony rehearsed on regtest'
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: rc-qualify-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WORKSPACE_REPO: boyfromcave/yellowback
+
+jobs:
+  candidate:
+    name: The draft's files are the signed release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write       # read the DRAFT release (a draft is listed only to writers); nothing is written
+      attestations: read    # gh attestation verify
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      stage: ${{ steps.tag.outputs.stage }}
+      commit: ${{ steps.tag.outputs.commit }}
+      package_sha256: ${{ steps.files.outputs.package_sha256 }}
+      draft: ${{ steps.files.outputs.draft }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Dispatched on a release tag of this line
+        id: tag
+        run: |
+          set -euo pipefail
+          [ "${GITHUB_REF_TYPE}" = tag ] || { echo "rc-qualify runs on a tag (gh workflow run rc-qualify.yml --ref v<version>), not ${GITHUB_REF}"; exit 1; }
+          version="${GITHUB_REF_NAME#v}"
+          found=$(python3 qa/yellowback-vault-params.py stage "$version") || { echo "${GITHUB_REF_NAME} is not a release tag"; exit 1; }
+          case "$found" in "6.22 "*) ;; *) echo "${GITHUB_REF_NAME} is not on the 6.22 line"; exit 1 ;; esac
+          {
+            echo "version=$version"
+            echo "stage=${found#* }"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and check the release's files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          draft=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft) \
+            || { echo "no release for $GITHUB_REF_NAME yet (the release workflow drafts it)"; exit 1; }
+          mkdir -p cand
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -D cand \
+            -p 'ycashd_v*' -p SHA256SUMS -p SHA256SUMS.cosign.bundle
+          cd cand
+          sha256sum -c SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
+            --certificate-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/yellowback-release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+          pkg="ycashd_v${VERSION}_linux_x86_64.tar.gz"
+          gh attestation verify "$pkg" -R "$GITHUB_REPOSITORY"
+          gh attestation verify SHA256SUMS -R "$GITHUB_REPOSITORY"
+          mkdir -p ../rc-package
+          cp "$pkg" SHA256SUMS ../rc-package/
+          {
+            echo "draft=$draft"
+            echo "package_sha256=$(sha256sum "$pkg" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-package
+          path: rc-package/*
+          if-no-files-found: error
+
+  train:
+    name: The release train names this tag
+    needs: candidate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      yolo: ${{ steps.pins.outputs.yolo }}
+      chainviz: ${{ steps.pins.outputs.chainviz }}
+      lwd: ${{ steps.pins.outputs.lwd }}
+      workspace: ${{ steps.pins.outputs.workspace }}
+      dd: ${{ steps.pins.outputs.dd }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Read releases/v<version>.yaml from the workspace
+        id: pins
+        env:
+          TRAIN_REF: ${{ inputs.train_ref }}
+          VERSION: ${{ needs.candidate.outputs.version }}
+          COMMIT: ${{ needs.candidate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ $TRAIN_REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "train_ref is not a ref name or commit"; exit 1; }
+          git init -q "$RUNNER_TEMP/ws"
+          git -C "$RUNNER_TEMP/ws" fetch -q --depth 1 "https://github.com/$WORKSPACE_REPO.git" "$TRAIN_REF"
+          git -C "$RUNNER_TEMP/ws" checkout -q FETCH_HEAD
+          ws_commit=$(git -C "$RUNNER_TEMP/ws" rev-parse HEAD)
+          file="$RUNNER_TEMP/ws/releases/v${VERSION}.yaml"
+          [ -f "$file" ] || { echo "the workspace at $TRAIN_REF ($ws_commit) has no releases/v${VERSION}.yaml: add the release train first (workspace releases/README.md)"; exit 1; }
+          python3 "$RUNNER_TEMP/ws/scripts/release-train.py" pins "$file" > "$RUNNER_TEMP/pins.raw"
+          qa/yellowback-rc-qualify.sh pins "$RUNNER_TEMP/pins.raw" > rc-train.env
+          get() { sed -n "s/^$1=//p" rc-train.env; }
+          [ "$(get TRAIN_YCASH6_COMMIT)" = "$COMMIT" ] || { echo "the train's ycash6 commit $(get TRAIN_YCASH6_COMMIT) is not this tag's $COMMIT"; exit 1; }
+          [ "$(get TRAIN_YCASH6_TAG)" = "$GITHUB_REF_NAME" ] || { echo "the train's ycash6 tag is $(get TRAIN_YCASH6_TAG), not $GITHUB_REF_NAME"; exit 1; }
+          echo "TRAIN_FILE_WORKSPACE_COMMIT=$ws_commit" >> rc-train.env
+          cp "$file" rc-train.yaml
+          {
+            echo "yolo=$(get TRAIN_YOLO_COMMIT)"
+            echo "chainviz=$(get TRAIN_CHAIN_VIZ_COMMIT)"
+            echo "lwd=$(get TRAIN_LIGHTWALLETD_DD_COMMIT)"
+            echo "workspace=$(get TRAIN_RELEASE_WORKSPACE)"
+            echo "dd=$(get TRAIN_YCASH_DD_COMMIT)"
+          } >> "$GITHUB_OUTPUT"
+          cat rc-train.env
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-train
+          path: |
+            rc-train.env
+            rc-train.yaml
+          if-no-files-found: error
+
+  node-suites:
+    name: 1 node suites against the package
+    needs: [candidate, train]
+    if: inputs.node_suites
+    # A called workflow's jobs keep their own permissions; this is the ceiling GitHub checks every one
+    # of them against when the call starts (yellowback-tests.yml asks for actions: write in its
+    # schedule fan-out, issues: write in the nightly variants, contents/pull-requests: write in the
+    # weekly fuzz, none of which tier "all" runs except the nightly's failure issue).
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/yellowback-tests.yml
+    with:
+      tier: all
+      release_package: true
+      yolo_commit: ${{ needs.train.outputs.yolo }}
+      chainviz_commit: ${{ needs.train.outputs.chainviz }}
+      lwd_commit: ${{ needs.train.outputs.lwd }}
+      workspace_commit: ${{ needs.train.outputs.workspace }}
+
+  ecosystem:
+    name: 2 ecosystem ${{ matrix.leg }}
+    needs: [candidate, train]
+    if: inputs.ecosystem
+    runs-on: ${{ vars.RC_QUALIFY_RUNNER || 'ubuntu-22.04' }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [walk, yew, x402, hawkeye, yecwallet]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-package
+          path: ${{ runner.temp }}/rc-package
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-train
+          path: ${{ runner.temp }}/rc-train
+      - name: The workspace layout, the release binaries and the train's pins
+        run: |
+          set -euo pipefail
+          ws="$RUNNER_TEMP/ws"; mkdir -p "$ws"
+          ln -s "$GITHUB_WORKSPACE" "$ws/ycash6"
+          qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
+          qa/yellowback-rc-qualify.sh pins "$RUNNER_TEMP/rc-train/rc-train.env" >> "$GITHUB_ENV"
+          { echo "WS=$ws"; echo "RC_OUT=$RUNNER_TEMP/rc-out"; } >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: matrix.leg == 'walk' || matrix.leg == 'yew'
+        with:
+          go-version: '1.24.7'
+          cache: false        # another repository's code: nothing from its build is cached
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: matrix.leg == 'x402' || matrix.leg == 'hawkeye'
+        with:
+          node-version: 22
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        if: matrix.leg == 'hawkeye'
+        with:
+          version: v1.7.1
+      - name: protoc (YEW's build)
+        if: matrix.leg == 'yew'
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+      - name: Qt's build tools and libraries (YecWallet)
+        if: matrix.leg == 'yecwallet'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential cmake ninja-build pkg-config libssl-dev \
+            libgl1-mesa-dev libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+      - uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        if: matrix.leg == 'yecwallet'
+        with:
+          version: '6.5.3'
+          modules: 'qtwebsockets'
+      - name: The ${{ matrix.leg }} leg against the release binary
+        env:
+          LEG: ${{ matrix.leg }}
+        run: qa/yellowback-rc-qualify.sh "$LEG"
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-ecosystem-${{ matrix.leg }}
+          path: |
+            ${{ runner.temp }}/rc-out/**/*.txt
+            ${{ runner.temp }}/rc-out/**/*.json
+            ${{ runner.temp }}/rc-out/**/*.log
+          if-no-files-found: warn
+
+  cross-line:
+    name: 3 cross-line (ycash-dd nodes on the devnet)
+    needs: [candidate, train]
+    if: inputs.cross_line
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-package
+          path: ${{ runner.temp }}/rc-package
+      - name: The release binaries
+        run: |
+          ws="$RUNNER_TEMP/ws"; mkdir -p "$ws"
+          ln -s "$GITHUB_WORKSPACE" "$ws/ycash6"
+          qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
+          { echo "WS=$ws"; echo "RC_OUT=$RUNNER_TEMP/rc-out"; } >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: boyfromcave/ycash-dd
+          ref: ${{ needs.train.outputs.dd }}
+          path: dd
+          persist-credentials: false
+      - name: Build ycash-dd at the train's vault-params commit, without caches (a tag's qualification)
+        run: |
+          set -euo pipefail
+          (cd dd && ./zcutil/build.sh -j"$(nproc)")
+          dd/src/ycashd --version | head -1
+      - name: The Zcash parameters ycash-dd loads at startup (ycash-infra zcash-params-v1, the pinned sums)
+        run: |
+          set -euo pipefail
+          dir="$HOME/.zcash-params"; mkdir -p "$dir"; cd "$dir"
+          for f in sapling-spend.params sapling-output.params sprout-groth16.params; do
+            curl -fsSL --retry 3 -o "$f" "https://github.com/boyfromcave/ycash-infra/releases/download/zcash-params-v1/$f"
+          done
+          sha256sum -c <<'EOF'
+          8e48ffd23abb3a5fd9c5589204f32d9c31285a04b78096ba40a79b75677efc13  sapling-spend.params
+          2f0ebbcbb9bb0bcffe95a397e7eba89c29eb4dde6191c339db88570e3f3fb0e4  sapling-output.params
+          b685d700c60328498fbde589c8c7c484c722b788b265b72af448a5bf0ee55b50  sprout-groth16.params
+          EOF
+      - name: Rust toolchain for the attest agent
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
+        with:
+          toolchain: stable
+      - name: Digests at every 100th height
+        run: qa/yellowback-rc-qualify.sh cross-line "$GITHUB_WORKSPACE/dd"
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-cross-line
+          path: |
+            ${{ runner.temp }}/rc-out/**/*.json
+            ${{ runner.temp }}/rc-out/**/debug.log
+            ${{ runner.temp }}/rc-out/**/stdout.log
+          if-no-files-found: warn
+
+  ceremony:
+    name: 4 ceremony rehearsal (regtest)
+    needs: [candidate]
+    if: inputs.ceremony
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-package
+          path: ${{ runner.temp }}/rc-package
+      - name: The ceremony, fast and slow profiles
+        run: |
+          ws="$RUNNER_TEMP/ws"; mkdir -p "$ws"
+          ln -s "$GITHUB_WORKSPACE" "$ws/ycash6"
+          qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
+          WS="$ws" RC_OUT="$RUNNER_TEMP/rc-out" qa/yellowback-rc-qualify.sh ceremony
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-ceremony
+          path: ${{ runner.temp }}/rc-out/**
+          if-no-files-found: warn
+
+  record:
+    name: Qualification record
+    needs: [candidate, train, node-suites, ecosystem, cross-line, ceremony]
+    if: ${{ always() && needs.candidate.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write       # upload rc-qualify-<run id>.json to the release
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-train
+          path: ${{ runner.temp }}/rc-train
+        continue-on-error: true      # a failed train job leaves none; the record says so
+      - name: rc-qualify.json
+        env:
+          VERSION: ${{ needs.candidate.outputs.version }}
+          STAGE: ${{ needs.candidate.outputs.stage }}
+          COMMIT: ${{ needs.candidate.outputs.commit }}
+          PACKAGE_SHA256: ${{ needs.candidate.outputs.package_sha256 }}
+          DRAFT: ${{ needs.candidate.outputs.draft }}
+          R_TRAIN: ${{ needs.train.result }}
+          R_NODE: ${{ needs.node-suites.result }}
+          R_ECO: ${{ needs.ecosystem.result }}
+          R_CROSS: ${{ needs.cross-line.result }}
+          R_CEREMONY: ${{ needs.ceremony.result }}
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/rc-train/rc-train.env" > rc-qualify.json <<'PY'
+          import json, os, sys
+          pins = {}
+          if os.path.exists(sys.argv[1]):
+              for line in open(sys.argv[1], encoding="utf-8"):
+                  key, _, value = line.strip().partition("=")
+                  if key:
+                      pins[key] = value
+          steps = {"train": os.environ["R_TRAIN"], "1-node-suites": os.environ["R_NODE"],
+                   "2-ecosystem": os.environ["R_ECO"], "3-cross-line": os.environ["R_CROSS"],
+                   "4-ceremony": os.environ["R_CEREMONY"]}
+          record = {
+              "tag": os.environ["GITHUB_REF_NAME"], "version": os.environ["VERSION"], "stage": os.environ["STAGE"],
+              "commit": os.environ["COMMIT"], "linux_x86_64_sha256": os.environ["PACKAGE_SHA256"],
+              "draft": os.environ["DRAFT"] == "true",
+              "run": "%s/%s/actions/runs/%s" % (os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]),
+              "steps": steps, "train": pins,
+              # A step switched off for this run is "skipped": the record is then not a qualification.
+              "qualified": all(v == "success" for v in steps.values()),
+          }
+          print(json.dumps(record, indent=2, sort_keys=True))
+          PY
+          cat rc-qualify.json
+          {
+            echo "## rc-qualify $GITHUB_REF_NAME"
+            echo
+            echo '```json'
+            cat rc-qualify.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rc-qualify
+          path: rc-qualify.json
+      - name: The record on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp rc-qualify.json "rc-qualify-$GITHUB_RUN_ID.json"
+          gh release upload "$GITHUB_REF_NAME" "rc-qualify-$GITHUB_RUN_ID.json" -R "$GITHUB_REPOSITORY"
+      - name: Qualified?
+        run: python3 -c 'import json,sys; sys.exit(0 if json.load(open("rc-qualify.json"))["qualified"] else 1)'

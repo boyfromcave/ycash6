@@ -102,18 +102,62 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    is green. Then run the workflow by hand: Actions → *yellowback release* → *Run workflow* on
    `upgrade/vault`. It builds, smoke-tests and uploads every package as a workflow artifact,
    but creates no release. Download and spot-check at least one package.
-4. **Tag and push.**
+4. **Release train.** Add `releases/v<V>.yaml` to the workspace (`boyfromcave/yellowback`,
+   its `releases/README.md`) by pull request: every component at the commit this release is
+   qualified with, ycash6 at the commit you are about to tag. Its `release-train` check must pass.
+5. **Tag and push**, ycash-dd's pairing tag first (Network parameters, below):
    ```
    git tag -a v<V> -m "ycashd v<V> (Yellowback)" <commit>
    git push origin v<V>
    ```
-   The `version` job fails if the tag differs from what `configure.ac` renders, or if it is not a
-   6.22 version.
-5. **Review the draft.** The workflow creates a **draft** release (marked pre-release for
-   `-rc`/`-beta`) with every asset, `SHA256SUMS`, and the notes from step 2. Check the asset list
-   and checksums, then publish it by hand.
+   The `version` job fails if the tag differs from what `configure.ac` renders, if it is not a
+   6.22 version, or if the rules of its stage fail.
+6. **Draft and qualification (automatic).** The workflow drafts the release (pre-release for
+   `-rc`/`-beta`) with every package, SBOM, `SHA256SUMS`, `SHA256SUMS.cosign.bundle` and the notes
+   from step 2, then starts `rc-qualify` on the tag (below). Wait for its record.
+7. **Owner's signature.** In ycash-ops: Actions → *sign-release* → repo `ycash6`, tag `v<V>`,
+   asset `SHA256SUMS`. It checks the provenance, signs and uploads `SHA256SUMS.minisig` to the draft.
+8. **Testnets (release candidates; manual, from ycash-ops).** Deploy the rc image to
+   testnet-yb-fast, then testnet-yb-slow; testnet-legacy runs the same rc with Vault off (below).
+9. **Publish** the draft by hand once the testnets hold.
 
-A bad tag is fixed with a new number, never by moving a published tag.
+A bad tag is fixed with a new number, never by moving a published tag; a red `rc-qualify` also
+means a new rc number.
+
+## Release candidates (testnet plan §5.3, Revision 3)
+
+In plain words: a release candidate is tested as released, with every other Yellowback program, and
+then run on the three practice networks before anyone is asked to install it.
+
+**Qualification.** [`.github/workflows/rc-qualify.yml`](../.github/workflows/rc-qualify.yml) runs on
+the tag (the release workflow dispatches it; by hand: Actions → *rc-qualify* → *Run workflow* on the
+tag `v<V>`, or `gh workflow run rc-qualify.yml --ref v<V>`). It downloads the files **from the
+release**, checks them against `SHA256SUMS`, the cosign signature at the tag and the build provenance,
+reads the train from the workspace, and runs:
+
+| Step | What | Where |
+|---|---|---|
+| 1 | the node's functional shards and nightly suites against the package's binaries (the unit tier and the instrumented variants are CI builds) | `yellowback-tests.yml` called with `release_package` |
+| 2 | upgrade-walk with chain-viz, lightwalletd fork and baseline and yolo; YEW's devnet suites; x402's `test:devnet`; Hawkeye's `scenario demo` on anvil; YecWallet's QTest devnet cases; each client at its train pin | `qa/yellowback-rc-qualify.sh walk\|yew\|x402\|hawkeye\|yecwallet` |
+| 3 | two ycash-dd nodes (built at the train's `vault-params` commit) on the devnet; block hash, vault and YED state hashes equal at every 100th height | `qa/yellowback-rc-qualify.sh cross-line`, `qa/yellowback-rc-crossline.py` |
+| 4 | the launch ceremony rehearsed on regtest with the fast and slow profiles' maturity | `qa/yellowback-rc-qualify.sh ceremony` (needs `contrib/testnet/ceremony`, N2) |
+
+The record, `rc-qualify-<run id>.json`, is uploaded to the release: each step's result, the train,
+the package's sha256, and `qualified` (true only when every step passed). Step 5, the 24-hour
+canary from rc2 on, needs the live testnet and is part of the deploy below.
+
+**Testnets (manual gate; deploys run from the private ycash-ops).** After a qualified record and
+the owner's signature:
+1. Build the rc's node image at the tag's commit (ycash-infra `node-image`, until the release image
+   of §5.5 exists) and pin its digest in ycash-ops.
+2. ycash-ops *deploy*: network `yb-fast`, action `upgrade`. Watch it: no fork, no state-hash
+   divergence between our nodes, peers kept; from rc2 on, the 24-hour canary.
+3. Then network `yb-slow`, the soak the gates read. The rc that first sets testnet-yb-slow's
+   `UPGRADE_VAULT` height rehearses the activation there; its attestor set is created after the
+   activation and named by a later rc.
+4. Network `legacy` runs the same rc with Vault off (no height, ever): the upgrade code, inactive,
+   must not change today's rules.
+5. Publish the pre-release. A failure at any point means a new rc number.
 
 ## Mining pools (the former "wr" build)
 
