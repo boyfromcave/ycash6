@@ -35,7 +35,7 @@ attestor_set = "compiled"
 set_maturity = 48               # nVaultMinSetMaturity = YED BOND_MATURITY (D4)
 liveness_window = 1152          # the set's livenesswindow (>= ATTESTOR_LIVENESS_MIN)
 house_seats = 7                 # T-5: seven house seats
-house_bond_yec = 10000          # bondMinFloorZat: the floor while no YED collateral exists (D-Q-30)
+house_bond_yec = 10             # bondMinFloorZat: the floor while no YED collateral exists (D-Q-30); a thousandth of mainnet's on fast (owner 2026-10-29)
 lifecycle_column = "fast"
 
 [prefix]
