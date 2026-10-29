@@ -386,10 +386,12 @@ public:
 static CMainParams mainParams;
 
 /**
- * Testnet (v3)
+ * Testnet: the re-forked testnet (testnet plan §2.1) and what its three profiles share (Revision 3,
+ * T-14). Each profile is a subclass below that sets only its own values: the Vault height, the set
+ * maturity, the magic, the P2P port and the fixed seeds (datadir and RPC port: chainparamsbase.cpp).
  */
 class CTestNetParams : public CChainParams {
-public:
+protected:
     CTestNetParams() {
         keyConstants.strNetworkID = "test";
         strCurrencyUnits = "TAY";
@@ -455,15 +457,9 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        // Vault (plan §15.1) on the re-forked testnet (testnet plan §2.1): H_V, a placeholder until the
-        // launch ceremony fixes it (§2.2). The protocol version is today's PROTOCOL_VERSION, so it
-        // gates no peer until the release bump (N4).
+        // Vault (plan §15.1): its height and the set maturity are per profile (the subclasses below). The
+        // protocol version is today's PROTOCOL_VERSION, so it gates no peer until the release bump (N4).
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 510400;
-        // D-Q-31 exit window on the testnet: 1,152 blocks (one day at 75 s), not mainnet's 16,128.
-        // D4 (owner 2026-10-29): 48 blocks, about an hour, so testnet iterates quickly; mainnet keeps 16,128.
-        // The YED module's testnet BOND_MATURITY is the same 48 (yellowback/params.cpp TestParams).
-        consensus.nVaultMinSetMaturity = 48;
         // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.
@@ -547,13 +543,7 @@ public:
         // unset; rc1 pins the fork block and raises this to a height above the fork.
         consensus.nMinimumChainWork = uint256S("000000000000000000000000000000000000000000000000000000023bc0da20");
 
-        // Re-forked testnet (T-2): a magic of its own, so no Zcash testnet node and no node of the old
-        // Ycash testnet (fa 1a f9 bf) ever handshakes.
-        pchMessageStart[0] = 0xf7;
-        pchMessageStart[1] = 0x79;
-        pchMessageStart[2] = 0x62;
-        pchMessageStart[3] = 0xd3;
-        nDefaultPort = 18833;
+        // The magic and the P2P port are per profile (the subclasses below).
         nPruneAfterHeight = 1000;
 
         genesis = CreateGenesisBlock(
@@ -567,9 +557,8 @@ public:
 
         vFixedSeeds.clear();
         vSeeds.clear();
-        // Re-forked testnet (D1): fixed seeds only, no DNS seed. The seed nodes' addresses go in
-        // pnSeed6_test (src/chainparamsseeds.h), supplied with rc1; net.cpp uses them at once.
-        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test, pnSeed6_test + ARRAYLEN(pnSeed6_test));
+        // Re-forked testnet (D1): fixed seeds only, no DNS seed. Each profile's seed addresses go in its
+        // own pnSeed6_test_* (src/chainparamsseeds.h), supplied with rc1; net.cpp uses them at once.
 
         fMiningRequiresPeers = true;
         fDefaultConsistencyChecks = false;
@@ -636,7 +625,72 @@ public:
         };
     }
 };
-static CTestNetParams testNetParams;
+
+/**
+ * testnet-yb-fast (testnet plan Revision 3): the iteration network. Vault at 510,400 (H_V, a placeholder
+ * until the launch ceremony fixes it, §2.2), a 48-block set maturity (D4), and the YED fast column
+ * (yellowback/params.cpp TestFastParams), so vault, bond and seat lifecycles run in hours.
+ * The magic f7 79 62 d3 (T-2) differs from Zcash testnet's and the old Ycash testnet's (fa 1a f9 bf).
+ */
+class CTestNetFastParams : public CTestNetParams {
+public:
+    CTestNetFastParams() {
+        strTestnetProfile = "fast";
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 510400;
+        // D-Q-31 exit window, D4 (owner 2026-10-29): 48 blocks, about an hour; mainnet keeps 16,128. The YED
+        // module's BOND_MATURITY is the same 48 in the fast column (yellowback/params.cpp TestFastParams).
+        consensus.nVaultMinSetMaturity = 48;
+        pchMessageStart[0] = 0xf7;
+        pchMessageStart[1] = 0x79;
+        pchMessageStart[2] = 0x62;
+        pchMessageStart[3] = 0xd3;
+        nDefaultPort = 18833;   // clients' testnet defaults keep working
+        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test_fast, pnSeed6_test_fast + ARRAYLEN(pnSeed6_test_fast));
+    }
+};
+
+/**
+ * testnet-yb-slow (testnet plan Revision 3, T-15): the mainnet rehearsal, every Yellowback value as on
+ * mainnet. No Vault height until its first rc sets one (about a week of blocks after launch), so the
+ * activation itself is rehearsed live.
+ */
+class CTestNetSlowParams : public CTestNetParams {
+public:
+    CTestNetSlowParams() {
+        strTestnetProfile = "slow";
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        consensus.nVaultMinSetMaturity = 16128;   // mainnet's D-Q-31 exit window, 14 days
+        pchMessageStart[0] = 0xf7;
+        pchMessageStart[1] = 0x79;
+        pchMessageStart[2] = 0x62;
+        pchMessageStart[3] = 0xd4;
+        nDefaultPort = 18933;
+        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test_slow, pnSeed6_test_slow + ARRAYLEN(pnSeed6_test_slow));
+    }
+};
+
+/**
+ * testnet-legacy (testnet plan Revision 3): the control network, today's Ycash rules. Vault never
+ * activates, so YED is off; the set maturity is the default and unused.
+ */
+class CTestNetLegacyParams : public CTestNetParams {
+public:
+    CTestNetLegacyParams() {
+        strTestnetProfile = "legacy";
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        pchMessageStart[0] = 0xf7;
+        pchMessageStart[1] = 0x79;
+        pchMessageStart[2] = 0x62;
+        pchMessageStart[3] = 0xd5;
+        nDefaultPort = 19033;
+        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test_legacy, pnSeed6_test_legacy + ARRAYLEN(pnSeed6_test_legacy));
+    }
+};
+static CTestNetFastParams testNetFastParams;
+static CTestNetSlowParams testNetSlowParams;
+static CTestNetLegacyParams testNetLegacyParams;
 
 /**
  * Regression test
@@ -711,7 +765,7 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet 16,128, testnet 1,152)
+        consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet and testnet-yb-slow 16,128, testnet-yb-fast 48)
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -884,8 +938,12 @@ const CChainParams& Params(const std::string& chain)
 {
     if (chain == CBaseChainParams::MAIN)
             return mainParams;
-    else if (chain == CBaseChainParams::TESTNET)
-            return testNetParams;
+    else if (chain == CBaseChainParams::TESTNET && SelectedTestnetProfile() == CBaseChainParams::TESTNET_FAST)
+            return testNetFastParams;
+    else if (chain == CBaseChainParams::TESTNET && SelectedTestnetProfile() == CBaseChainParams::TESTNET_SLOW)
+            return testNetSlowParams;
+    else if (chain == CBaseChainParams::TESTNET && SelectedTestnetProfile() == CBaseChainParams::TESTNET_LEGACY)
+            return testNetLegacyParams;
     else if (chain == CBaseChainParams::REGTEST)
             return regTestParams;
     else

@@ -45,6 +45,13 @@ struct CliOptions {
 
     #[options(
         no_short,
+        help = "Testnet profile, required with --testnet: fast, slow or legacy",
+        meta = "PROFILE"
+    )]
+    testnetprofile: Option<String>,
+
+    #[options(
+        no_short,
         help = "Send commands to node running on IPADDR (default: 127.0.0.1)",
         meta = "IPADDR"
     )]
@@ -89,6 +96,11 @@ impl CliOptions {
             } else {
                 None
             })
+            .chain(
+                self.testnetprofile
+                    .as_ref()
+                    .map(|o| format!("-testnetprofile={}", o)),
+            )
             .chain(
                 self.rpcconnect
                     .as_ref()

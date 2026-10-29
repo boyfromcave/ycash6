@@ -10,7 +10,9 @@
 
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
 W3-P-1). The extractor reads every parameter from the constructor body of each network class (never
-the first match in the file) and fails closed (exit 2) on any shape it does not expect.
+the first match in the file) and fails closed (exit 2) on any shape it does not expect. The testnet
+has three compiled-in profiles (testnet plan Revision 3, T-14): each is a subclass of CTestNetParams,
+read as the base constructor's body plus its own, where every parameter is assigned exactly once.
 `compare --release main` applies release rules R1-R7 to A (the tag guard). Part D, raising
 PROTOCOL_VERSION, is deferred; R3-R5 still refuse a tag until that bump. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
@@ -23,7 +25,11 @@ import subprocess
 import sys
 
 FILES = ("src/chainparams.cpp", "src/consensus/params.h", "src/version.h", "src/yellowback/params.cpp")
-NETWORKS = (("main", "CMainParams"), ("test", "CTestNetParams"), ("regtest", "CRegTestParams"))
+NETWORKS = (("main", "CMainParams"), ("regtest", "CRegTestParams"))
+TESTNET_BASE = "CTestNetParams"
+TESTNET_PROFILES = (("fast", "CTestNetFastParams"), ("slow", "CTestNetSlowParams"), ("legacy", "CTestNetLegacyParams"))
+# The YED columns: MainParams (main), TestParams (testnet-yb-slow; testnet-legacy, inert), TestFastParams.
+YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
 VERSION_CONSTANTS = ("PROTOCOL_VERSION", "MIN_PEER_PROTO_VERSION", "MIN_TESTNET_PEER_PROTO_VERSION")
 # MIN_PEER_PROTO_VERSION differs between the lines today (audit W3-P-1, part D): reported, not compared.
 VERSION_COMPARED = ("PROTOCOL_VERSION",)
@@ -90,8 +96,10 @@ def brace_body(text, signature):
     raise ParseError("src/yellowback/params.cpp: unbalanced braces in %s" % signature)
 
 
-def network_params(chainparams, params_h, cls, name):
+def network_params(chainparams, params_h, cls, name, base=None):
     body = strip_comments(constructor_body(chainparams, cls))
+    if base is not None:
+        body = strip_comments(constructor_body(chainparams, base)) + "\n" + body
     where = "%s (%s)" % (cls, name)
     vault = r"vUpgrades\[Consensus::UPGRADE_VAULT\]\.%s\s*=\s*([^;]+?)\s*;"
     falcon = optional(r"\bconsensus\.pqFalconHeight\s*=\s*([^;]+?)\s*;", body, where + " pqFalconHeight")
@@ -120,8 +128,11 @@ def extract(read):
         out["version"][const] = None if tok is None else number(tok)
     for name, cls in NETWORKS:
         out[name] = network_params(chainparams, params_h, cls, name)
+    out["test"] = {}
+    for profile, cls in TESTNET_PROFILES:
+        out["test"][profile] = network_params(chainparams, params_h, cls, "test " + profile, base=TESTNET_BASE)
     yb = {}
-    for fn in ("MainParams", "TestParams"):
+    for fn in YB_COLUMNS:
         body = brace_body(params_cpp, "const Params& %s()" % fn)
         yb[fn] = hashlib.sha256(re.sub(r"\s+", "", body).encode()).hexdigest()
         att = optional(r'attestorSetId\s*=\s*uint256S\(\s*"([0-9a-fA-F]+)"\s*\)', body, fn + " attestorSetId")
@@ -171,11 +182,15 @@ def release_problems(doc):
             problems.append("R6: the mainnet pqFalconHeight is unset")
         else:
             problems.append("R6: main.pq_falcon_height must be %s (got %r)" % (EXPECTED_PQ_FALCON_HEIGHT, falcon))
+    # R7 per testnet profile (testnet plan Revision 3): a Vault height comes with that network's YED set.
     test = doc.get("test", {})
-    test_height = _height_set(test.get("vault_activation_height"))
-    test_att = _attestor_set(yb.get("test_attestor_set_id"))
-    if test_height != test_att:
-        problems.append("R7: testnet activation height and test_attestor_set_id must both be set or both be unset")
+    for profile, key in (("fast", "testfast_attestor_set_id"), ("slow", "test_attestor_set_id")):
+        test_height = _height_set(test.get(profile, {}).get("vault_activation_height"))
+        test_att = _attestor_set(yb.get(key))
+        if test_height != test_att:
+            problems.append("R7: testnet-yb-%s activation height and %s must both be set or both be unset" % (profile, key))
+    if test.get("legacy", {}).get("vault_activation_height") != "NO_ACTIVATION_HEIGHT":
+        problems.append("R7: testnet-legacy must never set an UPGRADE_VAULT activation height")
     return problems
 
 

@@ -129,6 +129,8 @@ public:
     std::string NetworkIDString() const {
         return keyConstants.NetworkIDString();
     }
+    /** The testnet profile (fast, slow or legacy; testnet plan T-14) on "test", empty on main and regtest. */
+    const std::string& TestnetProfile() const { return strTestnetProfile; }
     /** Return the BIP44 coin type for addresses created by the zcashd embedded wallet. */
     uint32_t BIP44CoinType() const {
         return keyConstants.BIP44CoinType();
@@ -183,6 +185,7 @@ protected:
     bool fRequireStandard = false;
     bool fMineBlocksOnDemand = false;
     bool fTestnetToBeDeprecatedFieldRPC = false;
+    std::string strTestnetProfile;
     CCheckpointData checkpointData;
     std::vector<std::string> vFoundersRewardAddress;
     /** Post-fork Ycash Development Fund addresses, cycled monthly via
@@ -221,7 +224,8 @@ protected:
 const CChainParams &Params();
 
 /**
- * @returns CChainParams for the given BIP70 chain name.
+ * @returns CChainParams for the given BIP70 chain name; for "test", the selected testnet profile's
+ * (SelectTestnetProfile, chainparamsbase.h).
  */
 const CChainParams& Params(const std::string& chain);
 

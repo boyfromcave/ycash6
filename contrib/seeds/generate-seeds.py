@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 # Copyright (c) 2014 Wladimir J. van der Laan
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 '''
 Script to generate list of seed nodes for chainparams.cpp.
 
-This script expects two text files in the directory that is passed as an
-argument:
+This script expects four text files in the directory that is passed as an
+argument (one per testnet profile, testnet plan Revision 3):
 
     nodes_main.txt
-    nodes_test.txt
+    nodes_test_fast.txt
+    nodes_test_slow.txt
+    nodes_test_legacy.txt
 
 These files must consist of lines in the format 
 
@@ -20,14 +23,15 @@ These files must consist of lines in the format
     <onion>.onion
     0xDDBBCCAA (IPv4 little-endian old pnSeeds format)
 
-The output will be two data structures with the peers in binary format:
+The output will be four data structures with the peers in binary format:
 
    static SeedSpec6 pnSeed6_main[]={
    ...
    }
-   static SeedSpec6 pnSeed6_test[]={
+   static SeedSpec6 pnSeed6_test_fast[]={
    ...
    }
+   (and pnSeed6_test_slow, pnSeed6_test_legacy)
 
 These should be pasted into `src/chainparamsseeds.h`.
 '''
@@ -129,8 +133,10 @@ def main():
     with open(os.path.join(indir,'nodes_main.txt'),'r', encoding="utf8") as f:
         process_nodes(g, f, 'pnSeed6_main', 8233)
     g.write('\n')
-    with open(os.path.join(indir,'nodes_test.txt'),'r', encoding="utf8") as f:
-        process_nodes(g, f, 'pnSeed6_test', 18233)
+    for profile, port in (('fast', 18833), ('slow', 18933), ('legacy', 19033)):
+        with open(os.path.join(indir,'nodes_test_%s.txt' % profile),'r', encoding="utf8") as f:
+            process_nodes(g, f, 'pnSeed6_test_%s' % profile, port)
+        g.write('\n')
     g.write('#endif // BITCOIN_CHAINPARAMSSEEDS_H\n')
             
 if __name__ == '__main__':

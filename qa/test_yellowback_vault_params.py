@@ -25,6 +25,11 @@ const Params& TestParams()
     static Params p = [] { Params t; return t; }();
     return p;
 }
+const Params& TestFastParams()
+{
+    static Params p = [] { Params f; return f; }();
+    return p;
+}
 """
 
 
@@ -44,6 +49,29 @@ static %s %s;
 """ % (cls, cls, height, extra, cls, cls.lower())
 
 
+def testnet(fast="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT", slow="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT",
+            legacy="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT", base_extra="", fast_extra=""):
+    """CTestNetParams (the shared body) and its three profile subclasses (testnet plan Revision 3)."""
+    out = """class CTestNetParams : public CChainParams {
+protected:
+    CTestNetParams() {
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+%s    }
+};
+""" % base_extra
+    for cls, height, extra in (("CTestNetFastParams", fast, fast_extra), ("CTestNetSlowParams", slow, ""),
+                               ("CTestNetLegacyParams", legacy, "")):
+        out += """class %s : public CTestNetParams {
+public:
+    %s() {
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            %s;
+%s    }
+};
+""" % (cls, cls, height, extra)
+    return out
+
+
 def reader(chainparams, att="ab" * 32):
     files = {"src/chainparams.cpp": chainparams, "src/consensus/params.h": PARAMS_H,
              "src/version.h": VERSION_H, "src/yellowback/params.cpp": PARAMS_CPP % att}
@@ -55,33 +83,54 @@ NO = "Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT"
 
 class VaultParams(unittest.TestCase):
     def test_testnet_before_mainnet_is_not_a_first_match(self):
-        cp = klass("CTestNetParams", "11") + klass("CMainParams", NO) + klass("CRegTestParams", NO, "        consensus.nVaultMinSetMaturity = 2;\n")
+        cp = testnet(fast="11") + klass("CMainParams", NO) + klass("CRegTestParams", NO, "        consensus.nVaultMinSetMaturity = 2;\n")
         r = vp.extract(reader(cp))
         self.assertEqual(r["main"]["vault_activation_height"], "NO_ACTIVATION_HEIGHT")
-        self.assertEqual(r["test"]["vault_activation_height"], 11)
+        self.assertEqual(r["test"]["fast"]["vault_activation_height"], 11)
+        self.assertEqual(r["test"]["slow"]["vault_activation_height"], "NO_ACTIVATION_HEIGHT")
+        self.assertEqual(r["test"]["fast"]["vault_protocol_version"], 270013)   # from the shared base
         self.assertEqual(r["regtest"]["vault_min_set_maturity"], 2)
         self.assertEqual(r["main"]["vault_min_set_maturity"], 16128)
 
     def test_continuation_line_height(self):
-        cp = klass("CMainParams", "3300000") + klass("CTestNetParams", NO) + klass("CRegTestParams", NO)
+        cp = klass("CMainParams", "3300000") + testnet() + klass("CRegTestParams", NO)
         self.assertEqual(vp.extract(reader(cp))["main"]["vault_activation_height"], 3300000)
 
     def test_regtest_setter_outside_constructor_is_ignored(self):
-        cp = klass("CMainParams", NO) + klass("CTestNetParams", NO) + klass("CRegTestParams", NO)
+        cp = klass("CMainParams", NO) + testnet() + klass("CRegTestParams", NO)
         self.assertEqual(vp.extract(reader(cp))["regtest"]["pq_falcon_height"], "NO_ACTIVATION_HEIGHT")
 
     def test_duplicate_assignment_fails_closed(self):
         dup = "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 1;\n"
-        cp = klass("CMainParams", NO, dup) + klass("CTestNetParams", NO) + klass("CRegTestParams", NO)
+        cp = klass("CMainParams", NO, dup) + testnet() + klass("CRegTestParams", NO)
         with self.assertRaises(vp.ParseError):
             vp.extract(reader(cp))
 
     def test_missing_class_fails_closed(self):
         with self.assertRaises(vp.ParseError):
             vp.extract(reader(klass("CMainParams", NO)))
+        no_slow = testnet().replace("CTestNetSlowParams", "CTestNetMediumParams")
+        with self.assertRaises(vp.ParseError):
+            vp.extract(reader(klass("CMainParams", NO) + no_slow + klass("CRegTestParams", NO)))
+
+    def test_testnet_profile_reads_base_and_subclass_once(self):
+        # A profile value in the subclass, maturity from params.h when neither body assigns it.
+        mat = "        consensus.nVaultMinSetMaturity = 48;\n"
+        cp = klass("CMainParams", NO) + testnet(fast="510400", fast_extra=mat) + klass("CRegTestParams", NO)
+        r = vp.extract(reader(cp))
+        self.assertEqual(r["test"]["fast"]["vault_min_set_maturity"], 48)
+        self.assertEqual(r["test"]["legacy"]["vault_min_set_maturity"], 16128)
+        # The same parameter in the base and a subclass is ambiguous: fail closed.
+        cp = klass("CMainParams", NO) + testnet(base_extra=mat, fast_extra=mat) + klass("CRegTestParams", NO)
+        with self.assertRaises(vp.ParseError):
+            vp.extract(reader(cp))
+        height = "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 1;\n"
+        cp = klass("CMainParams", NO) + testnet(base_extra=height) + klass("CRegTestParams", NO)
+        with self.assertRaises(vp.ParseError):
+            vp.extract(reader(cp))
 
     def test_compare_names_the_field(self):
-        base = klass("CMainParams", NO) + klass("CTestNetParams", NO) + klass("CRegTestParams", NO)
+        base = klass("CMainParams", NO) + testnet() + klass("CRegTestParams", NO)
         a = vp.extract(reader(base))
         b = vp.extract(reader(base.replace("= 270013;", "= 270200;", 1)))
         self.assertEqual(vp.compare(a, a), [])
@@ -91,7 +140,7 @@ class VaultParams(unittest.TestCase):
         self.assertTrue(any("yellowback_params.main_attestor_set_id" in x for x in vp.compare(a, c)))
 
     def test_min_peer_difference_is_not_compared(self):
-        base = klass("CMainParams", NO) + klass("CTestNetParams", NO) + klass("CRegTestParams", NO)
+        base = klass("CMainParams", NO) + testnet() + klass("CRegTestParams", NO)
         a = vp.extract(reader(base))
         b = dict(a, version=dict(a["version"], MIN_PEER_PROTO_VERSION=270013))
         self.assertEqual(vp.compare(a, b), [])
@@ -104,8 +153,16 @@ class VaultParams(unittest.TestCase):
                 return f.read()
 
         r = vp.extract(read)
-        for net in ("main", "test", "regtest"):
-            self.assertEqual(r[net]["vault_protocol_version"], r["version"]["PROTOCOL_VERSION"])
+        nets = [r["main"], r["regtest"]] + [r["test"][p] for p in ("fast", "slow", "legacy")]
+        for net in nets:
+            self.assertEqual(net["vault_protocol_version"], r["version"]["PROTOCOL_VERSION"])
+        # testnet plan Revision 3: fast 510,400 / 48, slow unset until its first rc / 16,128, legacy never.
+        self.assertEqual(r["test"]["fast"]["vault_activation_height"], 510400)
+        self.assertEqual(r["test"]["fast"]["vault_min_set_maturity"], 48)
+        self.assertEqual(r["test"]["slow"]["vault_min_set_maturity"], 16128)
+        self.assertEqual(r["test"]["legacy"]["vault_activation_height"], "NO_ACTIVATION_HEIGHT")
+        for p in ("fast", "slow", "legacy"):
+            self.assertEqual(r["test"][p]["pq_falcon_height"], 0)
         self.assertEqual(r["main"]["pq_falcon_height"], 0)
         self.assertEqual(r["regtest"]["vault_min_set_maturity"], 2)
         self.assertEqual(r["main"]["vault_min_set_maturity"], 16128)
@@ -116,9 +173,10 @@ class VaultParams(unittest.TestCase):
             "version": {"PROTOCOL_VERSION": 270200, "MIN_PEER_PROTO_VERSION": 170002},
             "main": {"vault_protocol_version": 270200, "vault_activation_height": 3300000,
                      "pq_falcon_height": 0, "vault_min_set_maturity": 16128},
-            "test": {"vault_protocol_version": 270200, "vault_activation_height": "NO_ACTIVATION_HEIGHT",
-                     "pq_falcon_height": 0, "vault_min_set_maturity": 16128},
-            "yellowback_params": {"main_attestor_set_id": att, "test_attestor_set_id": None},
+            "test": {p: {"vault_protocol_version": 270200, "vault_activation_height": "NO_ACTIVATION_HEIGHT",
+                         "pq_falcon_height": 0, "vault_min_set_maturity": 16128} for p in ("fast", "slow", "legacy")},
+            "yellowback_params": {"main_attestor_set_id": att, "test_attestor_set_id": None,
+                                  "testfast_attestor_set_id": None},
         }
         self.assertEqual(vp.release_problems(doc), [])
         doc["main"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
@@ -139,9 +197,18 @@ class VaultParams(unittest.TestCase):
         doc["main"]["pq_falcon_height"] = 1
         self.assertTrue(any(p.startswith("R6:") for p in vp.release_problems(doc)))
         doc["main"]["pq_falcon_height"] = 0
-        doc["test"]["vault_activation_height"] = 100
-        self.assertTrue(any(p.startswith("R7:") for p in vp.release_problems(doc)))
-        doc["yellowback_params"]["test_attestor_set_id"] = att
+        # R7 per testnet profile: a Vault height comes with that network's own YED set; legacy never has one.
+        doc["test"]["fast"]["vault_activation_height"] = 100
+        self.assertTrue(any(p.startswith("R7: testnet-yb-fast") for p in vp.release_problems(doc)))
+        doc["yellowback_params"]["test_attestor_set_id"] = att   # slow's set does not serve fast
+        self.assertTrue(any(p.startswith("R7: testnet-yb-fast") for p in vp.release_problems(doc)))
+        self.assertTrue(any(p.startswith("R7: testnet-yb-slow") for p in vp.release_problems(doc)))
+        doc["yellowback_params"]["testfast_attestor_set_id"] = att
+        doc["test"]["slow"]["vault_activation_height"] = 200
+        self.assertEqual(vp.release_problems(doc), [])
+        doc["test"]["legacy"]["vault_activation_height"] = 300
+        self.assertTrue(any(p.startswith("R7: testnet-legacy") for p in vp.release_problems(doc)))
+        doc["test"]["legacy"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
         self.assertEqual(vp.release_problems(doc), [])
 
 

@@ -1883,7 +1883,7 @@ BOOST_AUTO_TEST_CASE(circulating_supply_closed_form_matches_the_subsidy_sum)
     // the index seeds the virtual snapshot with it: at a regtest start height every later snapshot's issuedZat is the
     // circulating supply at its height (MINT-6's base, D-Q-25)
     yellowback::Params p;
-    BOOST_REQUIRE(!ParamsFromArgs("regtest", r, p).has_value());
+    BOOST_REQUIRE(!ParamsFromArgs("regtest", "", r, p).has_value());
     BOOST_CHECK_EQUAL(p.issuedBeforeStart, p.startHeight > 0 ? CirculatingSupplyAt(p.startHeight - 1, r) : 0);
 }
 

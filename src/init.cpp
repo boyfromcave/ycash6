@@ -1577,7 +1577,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // parameter flags and the test fault are regtest-only; the payout and payee addresses must be P2PKH (K22).
     {
         yellowback::Params yellowbackParams;
-        auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.GetConsensus(), yellowbackParams);
+        auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.TestnetProfile(), chainparams.GetConsensus(), yellowbackParams);
         if (yellowbackErr.has_value()) {
             return InitError(yellowbackErr.value());
         }
@@ -2374,7 +2374,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // only reconciles wallet coin locks.
     if (yellowback::g_yellowbackLive) {
         yellowback::Params yellowbackParams;
-        yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.GetConsensus(), yellowbackParams); // validated in step 3
+        yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.TestnetProfile(), chainparams.GetConsensus(), yellowbackParams); // validated in step 3
         yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
         // the primitive's liveness hook verifies through the index's signature cache (focused review; never deleted)
         vault::SetModuleCache(static_cast<yellowback::SigCache*>(yellowback::g_yellowback->GetSigCache()));

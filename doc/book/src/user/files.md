@@ -19,5 +19,5 @@ include:
 |``wallet.dat``         | personal wallet (BDB) with keys and transactions (keep private, back this up!)
 |``.cookie``            | session RPC authentication cookie (written at start when cookie authentication is used, deleted on shutdown)
 |``.lock``              | data directory lock file (empty)
-|``testnet-yb/*``       | contains testnet versions of these files, except ``ycash.conf``, if running ``-testnet``
+|``testnet-yb-fast/*``, ``testnet-yb-slow/*``, ``testnet-legacy/*`` | contain testnet versions of these files, except ``ycash.conf``, if running ``-testnet`` with ``-testnetprofile=fast``, ``slow`` or ``legacy``
 |``onion_private_key``  | cached Tor hidden service private key for ``-listenonion``

@@ -542,10 +542,13 @@ extern int g_yellowbackMintLag;
  * -yellowbackattestorset=<setid>, mainnet and testnet unset), and on regtest the overrides
  * -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackattestarmmin, -yellowbackbundlecarrier,
  * -yellowbackmintrequiresarmed. The result is configured (Params::IsConfigured) iff YED is live on
- * this network. Returns an error string on a misconfiguration (a malformed value, a regtest flag on
- * another network, or a retired flag: -yellowbackstartheight, -yellowbackenforceuntil).
+ * this network. On "test", `testnetProfile` (CChainParams::TestnetProfile) picks the column: fast reads
+ * TestFastParams, slow and legacy TestParams (testnet plan Revision 3); elsewhere it is empty. Returns an
+ * error string on a misconfiguration (a malformed value, a regtest flag on another network, an unknown
+ * testnet profile, or a retired flag: -yellowbackstartheight, -yellowbackenforceuntil).
  */
-std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out);
+std::optional<std::string> ParamsFromArgs(const std::string& networkId, const std::string& testnetProfile,
+                                          const Consensus::Params& consensus, Params& out);
 
 /**
  * MINT-6 (quantum plan D-Q-25): the YEC circulating at `height`, the closed-form sum of GetBlockSubsidy over
