@@ -19,7 +19,10 @@ is the procedure around it.
 | `ycashd_v<V>_windows.zip` | ubuntu-22.04, cross (`HOST=x86_64-w64-mingw32`, llvm-mingw from depends) | 1 |
 | `ycashd_v<V>_ubuntu_18.04_x86_64.tar.gz` | `contrib/legacy-glibc-build` (18.04 image, glibc ≤ 2.27) | 2 |
 | `ycashd_v<V>_macos_x86_64.tar.gz` | macos-15-intel, native | 2 |
-| `SHA256SUMS` | | |
+| `ycashd_v<V>_<platform>.spdx.json` | an SPDX SBOM of each package (syft) | |
+| `SHA256SUMS` | the sha256 of every package and SBOM | |
+| `SHA256SUMS.cosign.bundle` | a keyless Sigstore signature of `SHA256SUMS` | |
+| `SHA256SUMS.minisig` | the owner's minisign signature of `SHA256SUMS`, added on the draft (below) | |
 
 Each package is a directory `ycashd_v<V>_<platform>/` holding stripped `ycashd`, `ycash-cli`,
 `ycash-tx`, `ycashd-wallet-tool` (`.exe` on Windows) and `COPYING`. No zk parameters ship or need
@@ -35,8 +38,36 @@ which also proves its glibc floor.
 
 There is **no separate mining-pool package** (see "Mining pools" below).
 
-Binaries are unsigned, as upstream's are, and builds are not reproducible (the inherited gitian
-descriptors are not maintained).
+Binaries are not code-signed, as upstream's are not, and builds are not reproducible (the inherited
+gitian descriptors are not maintained; Guix builds are a mainnet-launch item, testnet plan T-11).
+
+## Signatures and provenance (testnet plan §5.2, T-6)
+
+In plain words: anyone can check that a download is the file this repository's release workflow
+built, and that the owner vouched for it, without trusting the download site.
+
+- **Build provenance.** Every package, every SBOM and `SHA256SUMS` carries a GitHub build
+  provenance attestation (SLSA build level 2): `gh attestation verify <file> -R boyfromcave/ycash6`.
+- **Keyless cosign.** `SHA256SUMS.cosign.bundle` signs `SHA256SUMS`; its certificate names this
+  workflow at the tag:
+
+  ```
+  cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
+    --certificate-identity https://github.com/boyfromcave/ycash6/.github/workflows/yellowback-release.yml@refs/tags/v<V> \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+  ```
+- **The owner's minisign key** (key id `02C923A6C593AF18`, public key
+  `RWQYr5PFpiPJAigk86vf89bPYrJCXj5tskgRAPRYFsEXyciZo8dveOGQ`, also ycash-infra
+  `keys/ycash-release.pub`) signs `SHA256SUMS` on the draft. The signature is not made here: the
+  private ycash-ops repository's `sign-release` workflow (repo `ycash6`, tag `v<V>`, asset
+  `SHA256SUMS`) checks the file's provenance, signs it, verifies the signature against the pinned
+  key and uploads `SHA256SUMS.minisig`; its `scripts/sign-release.sh` does the same by hand. Check:
+  `minisign -Vm SHA256SUMS -P RWQYr5PFpiPJAigk86vf89bPYrJCXj5tskgRAPRYFsEXyciZo8dveOGQ`.
+- **SBOMs.** `ycashd_v<V>_<platform>.spdx.json` lists what syft finds in each package. The C++
+  depends are linked statically and carry no metadata syft can read; the Rust crates are pinned in
+  the tag's `Cargo.lock`.
+
+The draft release's notes carry these commands, after the notes of step 2.
 
 ## Version numbers
 
