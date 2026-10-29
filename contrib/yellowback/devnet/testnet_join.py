@@ -96,8 +96,10 @@ def parse_peers(items, path, default_port):
 def conf_text(profile, seat, user, password, rpcport, peers, listen):
     lines = ["# written by yellowback-devnet up --network %s (join mode)" % profile["name"],
              "testnet=1", "testnetprofile=%s" % profile["testnet_profile"], "server=1", "printtoconsole=0",
-             "rpcuser=%s" % user, "rpcpassword=%s" % password, "rpcbind=127.0.0.1", "rpcallowip=127.0.0.1",
-             "rpcport=%d" % rpcport, "listen=%d" % int(bool(listen)), "showmetrics=0"]
+             "rpcbind=127.0.0.1", "rpcallowip=127.0.0.1", "rpcport=%d" % rpcport,
+             "listen=%d" % int(bool(listen)), "showmetrics=0"]
+    lines += ["rpcuser=" + user]
+    lines += ["rpcpassword=" + password]   # random per devnet (secrets.token_hex), the file is written 0600
     if seat == 0:   # the user seat serves lightwalletd too, which needs the address index (set before the first sync)
         lines += ["experimentalfeatures=1", "insightexplorer=1", "txindex=1"]
     lines += ["addnode=%s" % p for p in peers]

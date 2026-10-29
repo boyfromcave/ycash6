@@ -223,12 +223,19 @@ class Ceremony:
             time.sleep(self.opts.poll)
 
     def confirmed_height(self, txid):
-        """The height the wallet transaction `txid` confirmed at (mining one block at a time until it does)."""
+        """The height `txid` confirmed at, mining one block at a time until it does. Read from the blocks
+        themselves: an act built by set_create / set_join is not a wallet transaction (gettransaction -5)."""
+        start = self.tip()
+        for height in range(max(0, start - self.opts.confirm_blocks), start + 1):
+            if txid in self.call("getblock", self.call("getblockhash", height))["tx"]:
+                return height
         for _ in range(self.opts.confirm_blocks):
-            tx = self.call("gettransaction", txid)
-            if int(tx.get("confirmations", 0)) > 0:
-                return int(self.call("getblock", tx["blockhash"])["height"])
             self.mine_to(self.tip() + 1)
+            tip = self.tip()
+            for height in range(start + 1, tip + 1):
+                if txid in self.call("getblock", self.call("getblockhash", height))["tx"]:
+                    return height
+            start = tip
         raise CeremonyError("%s did not confirm within %d blocks" % (txid, self.opts.confirm_blocks))
 
     # ------------------------------------------------------------------ steps
@@ -321,7 +328,7 @@ class Ceremony:
         if balance < need * (self.bond + FEE_MARGIN):
             raise CeremonyError("the wallet holds %s YEC; %d more house seats need %s (bond %s each): fund it and re-run --steps seats,mature,record"
                                 % (balance, need, need * (self.bond + FEE_MARGIN), self.bond))
-        secrets = prepare_secrets(self.opts.secrets)
+        keydir = prepare_secrets(self.opts.keydir)
         for _ in range(need):
             seat = len(joined) + 1
             address = self.call("getnewaddress")
@@ -329,7 +336,7 @@ class Ceremony:
             joined_tx = self.call("set_join", setid, self.bond, 0, pubkey)
             if not joined_tx.get("txid"):
                 raise CeremonyError("set_join for seat %d did not complete: %s" % (seat, joined_tx))
-            write_secret(os.path.join(secrets, "%s-seat-%d.json" % (self.p["name"], seat)),
+            write_secret(os.path.join(keydir, "%s-seat-%d.json" % (self.p["name"], seat)),
                          {"network": self.p["name"], "setid": setid, "seat": seat, "memberkey": pubkey, "address": address,
                           "wif": self.call("dumpprivkey", address), "bondoutpoint": joined_tx.get("bondoutpoint")})
             joined.append({"seat": seat, "memberkey": pubkey, "txid": joined_tx["txid"], "height": None})
@@ -337,7 +344,7 @@ class Ceremony:
         for record in joined:
             if record["height"] is None:
                 record["height"] = self.confirmed_height(record["txid"])
-        say("seats: %d house seats joined (keys in %s)" % (len(joined), secrets))
+        say("seats: %d house seats joined (their key files: see --secrets)" % len(joined))
 
     def step_mature(self):
         heights = [self.record["attestor_set"]["height"]] + [s["height"] for s in self.record.get("house_seats", [])]
@@ -412,7 +419,7 @@ def rehearse(opts):
     if os.path.exists(work) and os.listdir(work):
         raise CeremonyError("%s is not empty" % work)
     os.makedirs(work, exist_ok=True)
-    opts.secrets = opts.secrets or os.path.join(base, "secrets")
+    opts.keydir = opts.keydir or os.path.join(base, "secrets")
     out = os.path.abspath(opts.out or os.path.join(base, "ceremony-rehearsal.json"))
     if os.path.exists(out):
         os.remove(out)                                 # a rehearsal starts from nothing
@@ -532,7 +539,7 @@ def main(argv=None):
     ap.add_argument("--conf", help="its ycash.conf (default: DATADIR/ycash.conf)")
     ap.add_argument("--rpcport", type=int, help="its RPC port (default: the profile's)")
     ap.add_argument("--cli", help="ycash-cli (default: on PATH, else src/ycash-cli; a rehearsal: beside --ycashd)")
-    ap.add_argument("--secrets", help="directory for the house seats' keys: outside any git repository")
+    ap.add_argument("--secrets", dest="keydir", help="directory for the house seats' keys: outside any git repository")
     ap.add_argument("--out", help="the ceremony record (default ./ceremony-<network>.json); re-runs continue from it")
     ap.add_argument("--steps", help="comma-separated subset of: " + ",".join(STEPS) + " (check always runs)")
     ap.add_argument("--no-mine", dest="mine", action="store_false", help="a testnet: wait for the other operators' blocks instead of setgenerate")
@@ -553,7 +560,7 @@ def main(argv=None):
         if opts.rehearse:
             opts.poll = min(opts.poll, 0.5)
             return rehearse(opts)
-        if not (opts.network and opts.datadir and opts.secrets):
+        if not (opts.network and opts.datadir and opts.keydir):
             ap.error("a ceremony needs --network, --datadir and --secrets (or --rehearse)")
         profile = ybprofile.load(opts.network)
         steps = None
@@ -562,7 +569,7 @@ def main(argv=None):
             unknown = set(steps) - set(STEPS)
             if unknown:
                 ap.error("unknown steps: %s" % ", ".join(sorted(unknown)))
-        prepare_secrets(opts.secrets)
+        prepare_secrets(opts.keydir)
         rpc = CliRPC(opts.cli or shutil.which("ycash-cli") or os.path.join(REPO, "src", "ycash-cli"), opts.datadir, profile, opts.conf, opts.rpcport)
         out = os.path.abspath(opts.out or "ceremony-%s.json" % opts.network)
         Ceremony(rpc, profile, opts, out).run(steps)

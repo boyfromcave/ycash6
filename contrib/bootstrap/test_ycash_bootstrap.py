@@ -258,7 +258,7 @@ class RefusalTest(Quiet):
             path = os.path.join(bin_dir, name)
             with open(path, "w") as f:
                 f.write("#!/bin/sh\necho \"$@\" > %s.args\nexit %d\n" % (path, code))
-            os.chmod(path, 0o755)
+            os.chmod(path, 0o700)
         _, _, _, record = self.verify(profile, out, minisign=os.path.join(bin_dir, "good"))
         self.assertTrue(record["signed"])
         argv = read_text(os.path.join(bin_dir, "good.args")).split()
@@ -351,7 +351,7 @@ class RestoreTest(Quiet):
         for name, text in (("ycashd", FAKE_YCASHD), ("ycash-cli", FAKE_CLI)):
             with open(os.path.join(self.bin, name), "w") as f:
                 f.write(text % {"python": sys.executable})
-            os.chmod(os.path.join(self.bin, name), 0o755)
+            os.chmod(os.path.join(self.bin, name), 0o700)
         os.environ["FAKE_MAGIC"] = self.profile["node"]["magic"]
         self.datadir = os.path.join(self.tmp, "data")
 
@@ -478,7 +478,7 @@ class StateTest(Quiet):
         for name, text in (("ycashd", FAKE_YCASHD), ("ycash-cli", STATE_CLI)):
             with open(os.path.join(self.bin, name), "w") as f:
                 f.write(text % {"python": sys.executable})
-            os.chmod(os.path.join(self.bin, name), 0o755)
+            os.chmod(os.path.join(self.bin, name), 0o700)
         os.environ["FAKE_MAGIC"] = "f77962d3"
         self.datadir = os.path.join(self.tmp, "data")
 

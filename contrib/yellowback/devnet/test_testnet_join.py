@@ -77,7 +77,7 @@ class JoinTest(unittest.TestCase):
         os.makedirs(os.path.dirname(self.ycashd))
         with open(self.ycashd, "w") as f:
             f.write(FAKE_YCASHD % {"python": sys.executable})
-        os.chmod(self.ycashd, 0o755)
+        os.chmod(self.ycashd, 0o700)
 
     def tearDown(self):
         subprocess.run([sys.executable, DEVNET, "down", "--dir", self.dir], capture_output=True)

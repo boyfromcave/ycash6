@@ -45,7 +45,7 @@ class EntrypointTest(unittest.TestCase):
             path = os.path.join(self.bin, name)
             with open(path, "w") as f:
                 f.write(STUB % {"dir": self.tmp, "name": name, "extra": extra})
-            os.chmod(path, 0o755)
+            os.chmod(path, 0o700)
         self.env = {"PATH": self.bin + ":/usr/bin:/bin", "HOME": home, "YCASHD_DATADIR": self.data,
                     "YCASHD_RPC_USER": "u", "YCASHD_RPC_PASSWORD": "p"}
 

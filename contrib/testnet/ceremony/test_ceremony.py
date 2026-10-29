@@ -124,7 +124,7 @@ class FakeNode:
 class Opts:
     def __init__(self, secrets, **kw):
         self.mine, self.genproclimit, self.seats, self.bond, self.poll = True, 1, None, None, 0
-        self.max_blocks_wait, self.confirm_blocks, self.secrets = 0, 6, secrets
+        self.max_blocks_wait, self.confirm_blocks, self.keydir = 0, 6, secrets
         self.__dict__.update(kw)
 
 
@@ -161,6 +161,7 @@ class CeremonyTest(unittest.TestCase):
         self.assertEqual(release["checkpoint"], "%d:%s" % (record["checkpoint"]["height"], record["checkpoint"]["hash"]))
         self.assertEqual(release["checkpointChainTx"], 717489 + (record["checkpoint"]["height"] - 510247) + 8)   # coinbases + set + 7 joins
         self.assertEqual(node.calls.count("setgenerate") % 2, 0)                    # every start is matched by a stop
+        self.assertNotIn("gettransaction", node.calls)                              # acts are not wallet transactions (CI, both lines)
         files = sorted(os.listdir(self.secrets))
         self.assertEqual(len(files), 7)
         for name in files:
