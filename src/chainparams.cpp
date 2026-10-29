@@ -461,8 +461,9 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 510400;
         // D-Q-31 exit window on the testnet: 1,152 blocks (one day at 75 s), not mainnet's 16,128.
-        // D4: pending owner confirmation.
-        consensus.nVaultMinSetMaturity = 1152;
+        // D4 (owner 2026-10-29): 48 blocks, about an hour, so testnet iterates quickly; mainnet keeps 16,128.
+        // The YED module's testnet BOND_MATURITY is the same 48 (yellowback/params.cpp TestParams).
+        consensus.nVaultMinSetMaturity = 48;
         // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.

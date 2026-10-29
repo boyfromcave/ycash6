@@ -15,6 +15,7 @@
 #include "uint256.h"
 #include "vault/state.h"
 #include "yellowback/index.h"
+#include "yellowback/params.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -128,8 +129,11 @@ BOOST_AUTO_TEST_CASE(testnet_work_and_maturity)
     BOOST_CHECK(work > arith_uint256(0x23bc0cbb1ULL));
     BOOST_CHECK(work < arith_uint256(0x19496c5dabULL));
 
-    // T-4 (D4 pending): one day of maturity on testnet; mainnet and regtest unchanged.
-    BOOST_CHECK_EQUAL(c.nVaultMinSetMaturity, 1152U);
+    // T-4 / D4 (owner 2026-10-29): 48 blocks of maturity on testnet, the same in the YED module, so the module
+    // adopts a testnet set; mainnet and regtest unchanged.
+    BOOST_CHECK_EQUAL(c.nVaultMinSetMaturity, 48U);
+    BOOST_CHECK_EQUAL(yellowback::TestParams().bondMaturity, 48);
+    BOOST_CHECK(yellowback::TestParams().bondMaturity >= yellowback::TestParams().attestMaxAge);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetConsensus().nVaultMinSetMaturity, vault::MIN_SET_MATURITY);
     BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).GetConsensus().nVaultMinSetMaturity, 2U);
 }

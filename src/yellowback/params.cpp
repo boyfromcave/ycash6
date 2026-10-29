@@ -190,6 +190,10 @@ const Params& TestParams()
         t.pqAddressVersion = { 0x57, 0x1E }; // renders "yt…", 53 characters (quantum spec §4)
         // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
         t.startHeight = 0;
+        // D4 (owner 2026-10-29): the testnet bond maturity equals the testnet nVaultMinSetMaturity, 48 blocks
+        // (about an hour), so the YED set adopts a testnet set and testnet iterates quickly. Mainnet keeps 16,128.
+        t.bondMaturity = 48;
+        assert(t.bondMaturity >= t.attestMaxAge);
         return t;
     }();
     return p;
