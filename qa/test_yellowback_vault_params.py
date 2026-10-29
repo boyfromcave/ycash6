@@ -156,6 +156,11 @@ class VaultParams(unittest.TestCase):
         nets = [r["main"], r["regtest"]] + [r["test"][p] for p in ("fast", "slow", "legacy")]
         for net in nets:
             self.assertEqual(net["vault_protocol_version"], r["version"]["PROTOCOL_VERSION"])
+        # Testnet plan T-8: the Vault-era protocol version is taken with rc1, above the live floor,
+        # and the peer floor stays at or below it (R3-R5 hold on this tree).
+        self.assertGreater(r["version"]["PROTOCOL_VERSION"], vp.LIVE_NETWORK_PROTOCOL_VERSION)
+        self.assertLessEqual(r["version"]["MIN_PEER_PROTO_VERSION"], vp.LIVE_NETWORK_PROTOCOL_VERSION)
+        self.assertEqual([p for p in vp.release_problems(r, "rc") if p.split(":")[0] in ("R3", "R4", "R5", "R6")], [])
         # testnet plan Revision 3: fast 510,400 / 48, slow unset until its first rc / 16,128, legacy never.
         self.assertEqual(r["test"]["fast"]["vault_activation_height"], 510400)
         self.assertEqual(r["test"]["fast"]["vault_min_set_maturity"], 48)
@@ -210,6 +215,61 @@ class VaultParams(unittest.TestCase):
         self.assertTrue(any(p.startswith("R7: testnet-legacy") for p in vp.release_problems(doc)))
         doc["test"]["legacy"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
         self.assertEqual(vp.release_problems(doc), [])
+
+    def test_stage_of(self):
+        self.assertEqual(vp.stage_of("6.22.0-beta1"), ("6.22", "beta"))
+        self.assertEqual(vp.stage_of("6.22.0-rc12"), ("6.22", "rc"))
+        self.assertEqual(vp.stage_of("6.22.0"), ("6.22", "final"))
+        self.assertEqual(vp.stage_of("6.22.1-3"), ("6.22", "final"))   # BUILD > 50: a later build of a release
+        self.assertEqual(vp.stage_of("6.21.4-rc1"), ("6.21", "rc"))
+        for bad in ("", None, "6.22", "v6.22.0", "6.22.0-rc0", "6.22.0-rc", "6.22.0-alpha1", "6.22.0-rc1 ", "6.22.0-0"):
+            self.assertIsNone(vp.stage_of(bad), bad)
+
+    def test_release_rules_by_stage(self):
+        """Testnet plan §5.1 (T-8): beta, rc and final tags carry different rule sets."""
+        att = "ab" * 32
+        no = "NO_ACTIVATION_HEIGHT"
+
+        def doc(proto=270200, main_height=no, main_att=None, fast=510400, fast_att=att, slow=no, slow_att=None,
+                legacy=no):
+            net = {"vault_protocol_version": proto, "pq_falcon_height": 0, "vault_min_set_maturity": 16128}
+            return {
+                "version": {"PROTOCOL_VERSION": proto, "MIN_PEER_PROTO_VERSION": 270013},
+                "main": dict(net, vault_activation_height=main_height),
+                "test": {"fast": dict(net, vault_activation_height=fast), "slow": dict(net, vault_activation_height=slow),
+                         "legacy": dict(net, vault_activation_height=legacy)},
+                "yellowback_params": {"main_attestor_set_id": main_att, "test_attestor_set_id": slow_att,
+                                      "testfast_attestor_set_id": fast_att},
+            }
+
+        def rules(d, stage):
+            return sorted(p.split(":")[0] for p in vp.release_problems(d, stage))
+
+        rc1 = doc()
+        self.assertEqual(rules(rc1, "rc"), [])
+        self.assertEqual(rules(rc1, "final"), ["R1", "R2"])
+        self.assertEqual(rules(rc1, "beta"), [])
+        # A beta carries no heights, sets or protocol version; an rc needs the bump (R3) and fast's set.
+        beta = doc(proto=270013, fast_att=None)
+        self.assertEqual(rules(beta, "beta"), [])
+        self.assertEqual(rules(beta, "rc"), ["R3", "R7 (rc)"])
+        # Legacy never activates, at every stage.
+        for stage in vp.STAGES:
+            self.assertIn("R7", rules(doc(legacy=600000), stage))
+        # testnet-yb-slow: a height alone is its pending activation on an rc, not on a final release.
+        pending = doc(slow=520000)
+        self.assertEqual(rules(pending, "rc"), [])
+        self.assertEqual(rules(pending, "final"), ["R1", "R2", "R7"])
+        self.assertEqual(rules(doc(slow_att=att), "rc"), ["R7 (rc)"])
+        self.assertEqual(rules(doc(slow=520000, slow_att=att), "rc"), [])
+        # Mainnet on an rc: unset, or both set by the owner; never one of the two.
+        self.assertEqual(rules(doc(main_height=3300000), "rc"), ["R1/R2 (rc)"])
+        self.assertEqual(rules(doc(main_att=att), "rc"), ["R1/R2 (rc)"])
+        final = doc(main_height=3300000, main_att=att, slow=520000, slow_att=att)
+        self.assertEqual(rules(final, "rc"), [])
+        self.assertEqual(rules(final, "final"), [])
+        with self.assertRaises(ValueError):
+            vp.release_problems(final, "gamma")
 
 
 if __name__ == "__main__":

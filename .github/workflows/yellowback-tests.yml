@@ -54,6 +54,14 @@ name: yellowback tests
 #     lockorder check) and sanitizers-pr (ASan/UBSan test_bitcoin over the overlay unit suites); each
 #     builds only when the PR touches OVERLAY_PATHS and is part of the `gate` check (audit 07/F-11).
 #     The full lockorder/sanitizers variants stay nightly.
+#   workflow_call (rc-qualify.yml, testnet plan §5.3 step 1): the same tiers against a RELEASE package.
+#     With release_package, the build and nightly jobs replace src/ycashd, ycash-cli and ycash-tx by the
+#     linux_x86_64 package the caller uploaded as artifact `rc-package` (checked against its SHA256SUMS
+#     by qa/yellowback-rc-qualify.sh install) before anything runs them, so every functional shard and
+#     the nightly's suites test the released binary; test_bitcoin is not in a package, so the unit
+#     tier and the instrumented variants (lockorder, sanitizers, coverage, fuzz) stay CI builds. The
+#     caller's release train replaces the YOLO_COMMIT, CHAINVIZ_COMMIT, LWD_COMMIT and
+#     YB_WORKSPACE_COMMIT pins below (inputs; the push tier keeps its own).
 # Fail, never skip (audit 04/F-1, 04/N-4): every rpc-tests.py run passes --fail-on-skip, so a script
 # that prints a line starting with SKIP fails the run; the sidecar/agent `test -x` guards and the
 # Falcon signer probe are the early, named message. qa/yellowback-audit.sh fails a run without the flag.
@@ -80,6 +88,32 @@ on:
         type: choice
         options: [all, push, nightly, weekly]
         default: all
+  workflow_call:
+    inputs:
+      tier:
+        description: 'all, push, nightly or weekly (as the dispatch input)'
+        type: string
+        default: all
+      release_package:
+        description: 'test the release package of artifact rc-package instead of the CI build (rc-qualify)'
+        type: boolean
+        default: false
+      yolo_commit:
+        description: 'the release train''s yolo commit (empty: YOLO_COMMIT below)'
+        type: string
+        default: ''
+      chainviz_commit:
+        description: 'the release train''s chain-viz commit (empty: CHAINVIZ_COMMIT below)'
+        type: string
+        default: ''
+      lwd_commit:
+        description: 'the release train''s lightwalletd-dd commit (empty: LWD_COMMIT below)'
+        type: string
+        default: ''
+      workspace_commit:
+        description: 'the release train''s workspace commit (empty: YB_WORKSPACE_COMMIT below)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -131,7 +165,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: dc9c57a671e37821c21932b4859f9d28800d27e9
+  YOLO_COMMIT: ${{ inputs.yolo_commit || 'dc9c57a671e37821c21932b4859f9d28800d27e9' }}
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
   # this commit (bump by PR, audit I-5) and built --locked the same way, exported as CHAINVIZ_BIN.
   # Since 2026-10-06 its harden/yellowback build (H5: rpcversion 4 fields), the pin ycash-dd's CI
@@ -140,7 +174,7 @@ env:
   # On the upgrade line: chain-viz's upgrade/vault (rpcversion 5 tolerant, set/vault panels; upgrade
   # plan P6), the build yellowback_chainviz passed against on ycash-dd. It must be pushed to
   # boyfromcave/chain-viz before this pin resolves.
-  CHAINVIZ_COMMIT: dfbef2b76dc6825186ed12919b6f37c97949ca3b  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
+  CHAINVIZ_COMMIT: ${{ inputs.chainviz_commit || 'dfbef2b76dc6825186ed12919b6f37c97949ca3b' }}  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
@@ -149,7 +183,7 @@ env:
   # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (f149104, rpcversion 8:
   # an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it.
-  LWD_COMMIT: eee870be65a6c1326661ad416f5758169f23385a
+  LWD_COMMIT: ${{ inputs.lwd_commit || 'eee870be65a6c1326661ad416f5758169f23385a' }}
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
@@ -203,7 +237,7 @@ env:
   # copy and the contract's new fields come from.
   # 698870c (#22) amends fees spec section 5.1: fee publication follows price trust, so HALT-2 alone keeps the
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
-  YB_WORKSPACE_COMMIT: 698870c998e2534f45461f5bb98773d014e96829
+  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '698870c998e2534f45461f5bb98773d014e96829' }}
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -269,6 +303,15 @@ jobs:
       # check fetches sprout-groth16.params itself.
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
+      - name: Release candidate's binaries in place of the CI build (rc-qualify)
+        if: inputs.release_package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-package
+          path: ${{ runner.temp }}/rc-package
+      - name: Install the release package's ycashd, ycash-cli and ycash-tx (checked against SHA256SUMS)
+        if: inputs.release_package
+        run: qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
       - name: ccache statistics
         if: always()
         run: depends/x86_64-pc-linux-gnu/native/bin/ccache --show-stats || true
@@ -1115,6 +1158,8 @@ jobs:
         run: python3 qa/test_yellowback_release_heights.py -v
       - name: Cross-line identity checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line.py -v
+      - name: rc-qualify driver unit tests (testnet plan §5.3)
+        run: python3 qa/test_yellowback_rc_qualify.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
       - name: Quote agent and price-feed unit tests (Phase 7)
@@ -1229,6 +1274,15 @@ jobs:
       - uses: ./.github/actions/yellowback-depends
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
+      - name: Release candidate's binaries in place of the CI build (rc-qualify)
+        if: inputs.release_package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rc-package
+          path: ${{ runner.temp }}/rc-package
+      - name: Install the release package's ycashd, ycash-cli and ycash-tx (checked against SHA256SUMS)
+        if: inputs.release_package
+        run: qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
       - name: Check out the stock 6.20.0 tree (branch ycash6-stock)
         # Plan P-5: the reference node is ycash6-stock (= tag ycash6-baseline + baseline fix 3, the
         # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. It is

@@ -54,7 +54,7 @@ from test_framework.vault_harness import (
 from test_framework.yellowback_util import wif_to_secret
 from tx_expiry_helper import TestNode
 
-PROTO = 270013          # UPGRADE_VAULT's nProtocolVersion
+PROTO = 270200          # UPGRADE_VAULT's nProtocolVersion
 OP_1, OP_2, OP_3 = 0x51, 0x52, 0x53
 MANDATORY = 'mandatory-script-verify-flag-failed'
 
