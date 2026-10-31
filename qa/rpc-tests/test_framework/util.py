@@ -49,6 +49,13 @@ NU6_2_BRANCH_ID = 0x5437F330
 # Ycash vault primitive (UPGRADE_VAULT, docs/plans/yellowback-upgrade-plan.md §15.1);
 # activate on regtest with nuparams(VAULT_BRANCH_ID, h).
 VAULT_BRANCH_ID = 0x6D5B7A31
+# The testnet shadow fork's own branch IDs (docs/plans/yellowback-testnet-shadow-fork-plan.md):
+# testnet-yb-slow and testnet-legacy sign under these after their split from mainnet. A signer reads
+# the one to use from the node (signing_branch_id), never from these constants. SHADOW_BRANCH_ID is
+# also NetworkUpgradeInfo's entry for UPGRADE_SHADOW, so nuparams(SHADOW_BRANCH_ID, h) on regtest.
+SHADOW_BRANCH_ID = 0x57A24D5D          # testnet-yb-slow, UPGRADE_SHADOW
+SLOW_VAULT_BRANCH_ID = 0xE1F1CC08      # testnet-yb-slow, UPGRADE_VAULT
+LEGACY_SHADOW_BRANCH_ID = 0x35706728   # testnet-legacy, UPGRADE_SHADOW
 
 def signing_branch_id(node):
     """The consensus branch id a transaction signed now must commit to: the epoch of the next

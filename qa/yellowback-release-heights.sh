@@ -10,7 +10,7 @@
 # nVaultMinSetMaturity diverges from the other node line on mainnet, testnet or regtest.
 #
 # Reads the tree through qa/yellowback-vault-params.py (class bodies, not a first match).
-# Enforces release rules R1-R7 (audit W3-P-1). Part D is deferred: PROTOCOL_VERSION is not
+# Enforces release rules R1-R8 (audit W3-P-1; R8: the shadow-fork testnets' split height and IDs). Part D is deferred: PROTOCOL_VERSION is not
 # bumped here, and R3-R5 refuse a tag until that bump. MIN_PEER_PROTO_VERSION must stay at
 # or below the live floor (R5).
 #
