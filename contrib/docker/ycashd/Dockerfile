@@ -29,13 +29,20 @@ RUN --mount=type=cache,id=ycash6-depends-built,target=/src/depends/built \
  && mkdir -p /out && cp src/ycashd src/ycash-cli src/ycash-tx /out/ && strip /out/*
 
 FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libtinfo5 curl jq netcat-openbsd \
+# python3 and minisign: ycash-bootstrap (YCASHD_BOOTSTRAP, testnet plan §4.4) frames a bundle in Python and
+# checks the owner's minisign signature on its SHA256SUMS.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libtinfo5 curl jq netcat-openbsd python3 minisign \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --home-dir /srv/ycash --create-home --uid 2001 --shell /bin/sh ycash \
  && mkdir -p /var/lib/ycash && chown -R ycash:ycash /srv/ycash /var/lib/ycash
 COPY --from=builder /out/ycashd /out/ycash-cli /out/ycash-tx /usr/local/bin/
 COPY contrib/docker/ycashd/entrypoint.sh /usr/local/bin/ycashd-entrypoint
-RUN chmod +x /usr/local/bin/ycashd-entrypoint
+# ycash-bootstrap with the release key beside it, and the network profiles it reads (the same layout as the tree)
+COPY contrib/bootstrap/ycash-bootstrap /usr/local/share/ycash/bootstrap/ycash-bootstrap
+COPY contrib/bootstrap/keys/ /usr/local/share/ycash/bootstrap/keys/
+COPY contrib/yellowback/profiles/ybprofile.py contrib/yellowback/profiles/*.toml /usr/local/share/ycash/yellowback/profiles/
+RUN chmod +x /usr/local/bin/ycashd-entrypoint /usr/local/share/ycash/bootstrap/ycash-bootstrap \
+ && ln -s /usr/local/share/ycash/bootstrap/ycash-bootstrap /usr/local/bin/ycash-bootstrap
 USER ycash
 ENV HOME=/srv/ycash
 VOLUME ["/var/lib/ycash"]

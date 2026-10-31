@@ -58,6 +58,11 @@ Steps (each can be skipped with --skip NAME[,NAME]):
              default devnet (Falcon from the vault activation, as mainnet) only the TOK-PQ rows; `up --no-pqfalcon`: SKIP
   final      one state hash on every node (YED and vault), chain-viz and lightwalletd agree
 
+On a joined testnet (`yellowback-devnet up --network testnet-...`, testnet plan §3.2) the walk runs
+the one step that applies there, `network` (the node is on the profile's network: chain, profile,
+prefix checkpoint, fork, Vault height, the attestor set or its absence), and prints every step above
+as NOT ON <network> with the reason (ON_TESTNET below), never skipping it silently.
+
     ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk [--dir DIR] [--transcript PATH] [--skip ...] [--summary PATH]
 """
 import argparse
@@ -93,6 +98,25 @@ from test_framework.yellowback_util import (CLAIM_DELAY, PQ_OWNER_SECRETS, REF_L
                                             _low_s, _select_funding, _spk_of_address, new_pq_owner, template_coinbase, wif_to_secret)
 from test_framework import yellowback_model as ym                  # noqa: E402
 
+# Which steps run off regtest (testnet plan §3.2: "a check that cannot run on testnet is marked so in
+# the walk itself"). Every step below mines its own blocks on the eleven-node private chain and
+# most move the attested price, so none runs on a public testnet; the reason is printed per step.
+PRIVATE = "it mines its own blocks on the eleven-node private chain"
+ON_TESTNET = {
+    "clients": "yolo is mined through stratum-miner's 48,5 solver; on a testnet run `pool 4 stratum start` with a real 192,7 miner (scenario 3)",
+    "members": PRIVATE + " and stops an automated attestor to watch S15; slow's 16,128-block maturity is two weeks",
+    "mint": PRIVATE + " and needs the devnet's ARMED attestors at a mock price",
+    "transfer": "it spends the walk's own mints",
+    "pq": PRIVATE + " (vault_lock under the devnet's attestor set)",
+    "redeem": PRIVATE + " up to lockHeight",
+    "claim": "it crashes the mock price and reorgs every node",
+    "cancel": "it moves the mock price and drives an automated attestor",
+    "interm": "it moves the mock price to theta",
+    "invalid": "it mines a block solved in Python at regtest's Equihash 48,5",
+    "bridge": "the bridge persona needs the devnet's nine signer wallets",
+    "falcon": "it invalidates blocks on every node across the Falcon height",
+    "final": "it compares the state hash across the devnet's eleven nodes",
+}
 STEPS = ("clients", "members", "mint", "transfer", "pq", "redeem", "claim", "cancel", "interm", "invalid", "bridge", "falcon", "final")
 USER, STOCK, POOLS, ATTESTORS, SEAT, HOLDER, CLAIMANT = 0, 1, (2, 3, 4), (5, 6, 7), 8, 9, 10
 STRATUM_POOL = 4
@@ -131,6 +155,9 @@ class Walk:
         self.t0 = time.time()
         self.summary = {"steps": {}, "evidence": {}, "findings": []}
         self.n = self.state["num_nodes"]
+        self.network = self.state.get("network") or "regtest"
+        if self.network != "regtest":
+            return                    # a joined testnet: run() walks the network step only
         if self.n < 11 or self.state.get("role") != "attestor":
             sys.exit("upgrade-walk needs `up --role attestor --no-heartbeat --no-walk --no-sim` (eleven nodes, node 8 empty)")
         for name in ("heartbeat", "walk", "sim"):
@@ -1517,7 +1544,58 @@ class Walk:
         self.lwd_probe("end")
         self.lwd_equality("end")
 
+    # ------------------------------------------------------------------ a joined testnet
+    def s_network(self):
+        """The one step a public testnet allows: the node is on the network its profile names."""
+        sys.path.insert(0, os.path.join(dv.REPO, "contrib", "yellowback", "profiles"))
+        import ybprofile
+        profile = ybprofile.load(self.network)
+        seat = self.state["seat"]
+        self.current = "network"
+        self.out("\n[network] %s: the node is on the network its profile names (read-only)" % self.network)
+        info = self.call(seat, "getblockchaininfo", keys=["chain", "testnetprofile", "blocks", "headers"])
+        self.ok(info["chain"] == profile["chain"], "chain %s" % profile["chain"])
+        self.ok(info.get("testnetprofile") == profile["testnet_profile"], "-testnetprofile=%s" % profile["testnet_profile"])
+        last = profile["prefix"]["last_height"]
+        if info["blocks"] >= last:
+            self.ok(self.call(seat, "getblockhash", last) == profile["prefix"]["last_hash"], "block %d is the compiled checkpoint" % last)
+        else:
+            self.note("below the prefix (%d of %d): the checkpoint row waits for the sync" % (info["blocks"], last))
+        fork = profile["heights"]["ycash_fork"]
+        if info["blocks"] >= fork:
+            self.ok(self.call(seat, "getblock", self.call(seat, "getblockhash", fork))["previousblockhash"] == profile["prefix"]["last_hash"],
+                    "the fork block %d follows the prefix" % fork)
+        vault = self.call(seat, "vault_getinfo", keys=["activationheight", "attestorsetid", "moduleactive"])
+        if profile["yellowback"]["enabled"]:
+            want = profile["heights"]["vault"] or -1
+            self.ok(vault["activationheight"] == want, "Vault at %s (the profile's)" % (want if want > 0 else "no height yet"))
+            self.note("attestor set: %s" % (vault.get("attestorsetid") or "none compiled (until the network's rc names it)"))
+        else:
+            self.ok(vault["activationheight"] == -1 and not vault.get("moduleactive"), "no Vault, no Yellowback on %s" % self.network)
+        self.summary["steps"]["network"] = "PASS"
+
+    def run_joined(self):
+        self.out("upgrade-walk %s on %s, joined %s (node%d)" % (time.strftime("%Y-%m-%d %H:%M:%S"), self.dir, self.network, self.state["seat"]))
+        status = 0
+        try:
+            self.s_network()
+        except WalkFailure as failure:
+            self.out("\nWALK FAILED: %s" % failure)
+            self.summary["failed"] = str(failure)
+            status = 1
+        legacy = self.network == "testnet-legacy"
+        for name in STEPS:
+            reason = "no Yellowback on testnet-legacy (Vault never activates)" if legacy and name != "clients" else ON_TESTNET[name]
+            self.out("[%s] NOT ON %s: %s" % (name, self.network, reason))
+            self.summary["steps"][name] = "N/A on %s: %s" % (self.network, reason)
+        self.out("\n%s on %s" % ("WALK PASSED (network step)" if status == 0 else "WALK DID NOT PASS", self.network))
+        if self.args.summary:
+            with open(self.args.summary, "w") as f: json.dump(self.summary, f, indent=2, default=str)
+        return status
+
     def run(self):
+        if self.network != "regtest":
+            return self.run_joined()
         self.out("upgrade-walk %s on %s (portseed %s), node %s, %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), self.dir, self.state["portseed"],
                  self.state["bitcoind"], "skipping " + ",".join(sorted(self.skip)) if self.skip else "all steps"))
         self.out("ycash6 %s; devnet created %s; attestor set %s" % (dv.fork_commit(dv.REPO), self.state.get("created"), self.set_id))

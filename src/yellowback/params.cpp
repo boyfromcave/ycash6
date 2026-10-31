@@ -238,6 +238,11 @@ const Params& TestFastParams()
                                         //                          cancel schedule fits in one quiet window
         f.dormancyBlocks      = 48;     // S15          16,128      DORMANCY_MIN_BUNDLES (one BundleLog row a block)
         f.dormancyCheck       = 1;      // S15              48      1 (0 turns the check off)
+        // Not a window: the bond amounts (owner 2026-10-29). Mainnet's 10,000 / 20,000 YEC per seat cannot be
+        // mined soon after the fork, so the 7 house seats (T-5) could not bond and the network could not
+        // arm; testnet-yb-fast takes one thousandth (same 1:2 ratio). testnet-yb-slow keeps mainnet's.
+        f.bondMinFloorZat     = 10 * COIN;  // D-Q-30     10,000 YEC
+        f.bondMinCapZat       = 20 * COIN;  // D-Q-30     20,000 YEC
         // The invariants, asserted for every column by testnet_params_tests.
         assert(f.bondMaturity >= f.attestMaxAge);
         assert(f.claimDelay >= f.attestMaxAge);
@@ -247,6 +252,7 @@ const Params& TestFastParams()
         assert(f.cancelQuiet >= f.cancelSignersMax * f.claimDelay);
         assert(f.dormancyBlocks >= f.dormancyMinBundles && f.dormancyCheck >= 1 && f.dormancyCheck <= f.dormancyBlocks);
         assert(f.seatAgeUnit >= 1 && f.seatAgeCap >= f.seatAgeUnit);
+        assert(f.bondMinFloorZat > 0 && f.bondMinFloorZat <= f.bondMinCapZat);
         for (int i = 1; i < NUM_CLASSES; i++) assert(f.classMin[i] == f.classMax[i - 1] + 1);
         assert(f.classMin[0] > 0 && (int64_t)f.classMax[NUM_CLASSES - 1] + f.grace < (int64_t)LOCKTIME_THRESHOLD);
         return f;
