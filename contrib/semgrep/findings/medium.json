@@ -1,0 +1,38 @@
+{
+ "bucket": "medium",
+ "sla_days": 90,
+ "findings": [
+  {
+   "fingerprint": "b2a580043278e28f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/testnet_join.py",
+   "line": 181,
+   "first_seen": "2026-10-31",
+   "due": "2027-01-29"
+  },
+  {
+   "fingerprint": "61a18a10c7f058d1",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/testnet_join.py",
+   "line": 185,
+   "first_seen": "2026-10-31",
+   "due": "2027-01-29"
+  },
+  {
+   "fingerprint": "0b074fa7de4eff80",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/testnet_ceremony.py",
+   "line": 41,
+   "first_seen": "2026-10-31",
+   "due": "2027-01-29"
+  },
+  {
+   "fingerprint": "4db26b060176dd99",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/ycash_bootstrap.py",
+   "line": 54,
+   "first_seen": "2026-10-31",
+   "due": "2027-01-29"
+  }
+ ]
+}
