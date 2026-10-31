@@ -28,7 +28,7 @@ from test_framework.vault_harness import ACTIVATION, COIN, FEE, OWNER, VaultTest
 from test_framework.yellowback_util import wif_to_secret
 from tx_expiry_helper import TestNode
 
-PROTO = 270013                  # UPGRADE_VAULT's nProtocolVersion
+PROTO = 270200                  # UPGRADE_VAULT's nProtocolVersion
 PRE_ACTIVATION_PARKS = True     # ycash6: the 6.20.0 orphan bound is 99,999 bytes
 
 
