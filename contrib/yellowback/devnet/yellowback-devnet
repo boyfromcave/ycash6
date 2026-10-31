@@ -29,10 +29,15 @@ Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no
 [--seed N] [--stratum [--stratum-text TEXT]] [--pqfalconheight N | --no-pqfalcon] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
-sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
+sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N], wait-blocks N,
 cli [--node N | --datadir N] [-- args], down [--wipe], bridge {up [--shape guardians|relayer]|lock AMOUNT|burn AMOUNT RECIPIENT|rogue AMOUNT|
 silence|unsilence|recover|status|down} (the WYEC bridge persona, bridge-sim), vectors [--out DIR] [--seed N] [--count N]
 (JSON signing/address/template vectors for the YEW core, wallet plan W0c).
+
+`up --network testnet-yb-fast|testnet-yb-slow|testnet-legacy [--role user|pool|attestor] [--addnode
+HOST[:PORT] ...] [--addnode-file FILE] [--rpc URL] [--bootstrap]` joins a public testnet instead of
+building a chain (testnet plan §3.2; testnet_join.py beside this script): one node of that network,
+the seat's roles around it, and the private-chain commands refused with the reason.
 """
 import argparse
 import glob
@@ -68,6 +73,8 @@ from test_framework.yellowback_util import (ACTIVATION_BLOCKS, ATTEST_ARM_DELAY,
                                             yellowback_node_args)
 import test_framework.yellowback_util as _yu                                                # noqa: E402
 import test_framework.yellowback_model as ym                                                # noqa: E402
+sys.path.insert(0, HERE)
+import testnet_join                                                                         # noqa: E402
 
 NODES, USER, POOLS = 5, 0, (2, 3, 4)          # the v2 core; ATTESTORS extend it to eight
 STOCK = 1
@@ -151,6 +158,8 @@ YOLO = _yolo_binary()
 ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
 ATTEST_LOCK_BLOCKS = 0        # regtest bondMinLock (0 since the bond exit delay: the lock is exit + maturity in the vault state)
 ATTEST_FUND_YEC = 11          # the bond plus room for the fee
+ATTEST_SPARE_YEC = 1          # a second coin, sent after the bond: yed_buildcancel funds a cancel and its co-signature
+                              # carrier from two separate confirmed coins (the cancel's fee input is locked first)
 ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
 # P4-b: the attestor registry is the YED attestor set (a vault primitive signer set): its livenesswindow is the
 # attestors' member dormancy, so every agent sends a SET_HEARTBEAT well inside it (signing is not an act, U-19).
@@ -466,14 +475,14 @@ def lightwalletd_binary(baseline=False, override=None):
     if baseline: return os.path.join(WORKSPACE, "wt", "lightwalletd-legacy-bin", "lightwalletd-legacy")
     return os.environ.get("YELLOWBACK_LWD_BIN") or os.path.join(WORKSPACE, "wt", "lightwalletd-dd-bin", "lightwalletd")
 
-def lightwalletd_command(directory, binary, port, node=USER, extra=None):
+def lightwalletd_command(directory, binary, port, node=USER, extra=None, creds=None):
     """The zcash/lightwalletd 0.4.6 lineage (yodl): the four --rpc* flags bypass its conf file
     (frontend/rpc_client.go), --data-dir must be writable (its default is /var/lib/lightwalletd),
     --no-tls-very-insecure serves plaintext gRPC on --grpc-bind-addr, metrics on --http-bind-addr."""
-    user, password = rpc_auth_pair(node)
+    user, password = (creds["user"], creds["password"]) if creds else rpc_auth_pair(node)   # creds: a joined testnet node's (testnet_join)
     data_dir = os.path.join(node_dir(directory, node), "lightwalletd")
     os.makedirs(data_dir, exist_ok=True)
-    return [binary, "--rpcuser", user, "--rpcpassword", password, "--rpchost", "127.0.0.1", "--rpcport", str(rpc_port(node)),
+    return [binary, "--rpcuser", user, "--rpcpassword", password, "--rpchost", "127.0.0.1", "--rpcport", str(creds["port"] if creds else rpc_port(node)),
             "--no-tls-very-insecure", "--grpc-bind-addr", "127.0.0.1:%d" % port, "--http-bind-addr", "127.0.0.1:%d" % (port + 2000),
             "--data-dir", data_dir, "--log-file", os.path.join(node_dir(directory, node), "lightwalletd.log")] + list(extra or [])
 
@@ -495,7 +504,8 @@ def lightwalletd_check(state):
         except subprocess.CalledProcessError as error: return "lightwalletd probe failed: %s" % error.stderr.strip()
         if "latestHeight" in info: break
         time.sleep(5)
-    if info.get("chainName") != "regtest": return "lightwalletd reports chain %r, not regtest" % info.get("chainName")
+    chain = state.get("chain", "regtest")      # a joined testnet: "test" (testnet_join)
+    if info.get("chainName") != chain: return "lightwalletd reports chain %r, not %s" % (info.get("chainName"), chain)
     height = rpc(state, USER).getblockcount()
     if "latestHeight" not in info: return "lightwalletd has no cached block after 20s (%s)" % info.get("latestError")
     if abs(int(info["latestHeight"]) - height) > 2: return "lightwalletd is at %s, node0 at %d" % (info["latestHeight"], height)
@@ -531,7 +541,8 @@ def lightwalletd(args):
         sys.exit("lightwalletd not found at %s%s" % (binary, "; build it with lightwalletd-dd/scripts/build-baseline.sh" if args.baseline else ""))
     import shlex
     extra = shlex.split(args.extra)
-    command = lightwalletd_command(directory, binary, args.port, extra=extra)
+    joined = state.get("network", "regtest") != "regtest"
+    command = lightwalletd_command(directory, binary, args.port, extra=extra, creds=state["rpc"][str(USER)] if joined else None)
     if args.print: print(" ".join(command)); return
     if agent_alive(lwd.get("pid")): sys.exit("lightwalletd already running (pid %d); `lightwalletd stop` first" % lwd["pid"])
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -652,6 +663,13 @@ def arm_attestors(state, nodes, price, steps=6):
         result = nodes[node].yed_registerattestor(ATTEST_BOND_YEC, ATTEST_LOCK_BLOCKS)
         pubkeys[node] = result["attestorPubKey"]
         print("      node%d registered: txid %s, bond %s" % (node, result["txid"][:16], result["bondAddress"]))
+    # The registration spent the funding coin, leaving one change coin. A cancel (yed_buildcancel, the agent's cancel
+    # automation and the walk's cancel step alike) needs two: the sign-once build locks the cancel's own fee input,
+    # then the co-signature carrier selects from the coins left. Without this the second coin is whichever attestor
+    # fee a mint happened to pay this node (a hash of the reference block picks the payee), so a run could leave the
+    # canceller with one coin: "insufficient-yec: need 0.00011, have 0.00 confirmed and unlocked".
+    for node in attestors:
+        nodes[USER].sendtoaddress(nodes[node].getnewaddress(), ATTEST_SPARE_YEC)
     sync_mempools(nodes)
     pool_mine(1, "registrations confirmed")
     pool_mine(BOND_MATURITY, "bonds matured (BOND_MATURITY=%d)" % BOND_MATURITY)
@@ -710,6 +728,9 @@ def footprint(role, count, args):
         count, agents, quotes, (", " + ", ".join(extra)) if extra else "")
 
 def up(args):
+    if args.network != "regtest":
+        PortSeed.n = args.portseed
+        return testnet_join.up(args, sys.modules[__name__])
     directory = os.path.abspath(args.dir)
     role = args.role
     if role != "none" and args.no_attest: sys.exit("--role needs the attestors; drop --no-attest")
@@ -1504,6 +1525,10 @@ def wallet(args):
     subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
     print("launched on node%d%s: %s" % (node, " (your seat)" if node == seat_of(state) and role_of(state) != "none" else "", " ".join(command)))
 
+def wait_blocks(args):
+    state = load(os.path.abspath(args.dir))
+    return testnet_join.wait_blocks(rpc(state, seat_of(state)), args.blocks, args.timeout)
+
 def cli(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     if args.datadir is not None:
@@ -1908,7 +1933,10 @@ def main():
     command.add_argument("--stratum", action="store_true", help="pool seat only: run yolo (the real stratum pool) beside node 4 and mine its blocks through stratum-miner (YOLO_BIN names the binary)")
     command.add_argument("--stratum-text", metavar="TEXT", help="with --stratum: yolo rebuilds the coinbase scriptSig as height push + coinbaseaux.flags + TEXT (unset: the node's scriptSig as is)")
     command.add_argument("--no-viz", action="store_true", help="do not start chain-viz (by default `up` starts it on devnet.json when CHAINVIZ_BIN, PATH or <workspace>/chain-viz/target holds a binary)")
+    testnet_join.add_up_args(command)
     add("check", command_check); add("status", status)
+    command = add("wait-blocks", wait_blocks, help="wait until N more blocks arrive on your seat's node (any network; counted, never slept for)")
+    command.add_argument("blocks", type=int); command.add_argument("--timeout", type=int, default=0, help="seconds before giving up (default: never)")
     command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=None, help="one node; default: round-robin on the automated pools"); command.add_argument("--untagged", action="store_true", help="allow a node whose blocks carry no tag (drains the price windows)")
     command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
     command = add("price", price); command.add_argument("usd", nargs="?")
@@ -1943,6 +1971,8 @@ def main():
     add("_heartbeat", _heartbeat_run, help=argparse.SUPPRESS); add("_walk", _walk_run, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
+    if args.command not in ("up", "_heartbeat", "_walk") and testnet_join.network_of(os.path.abspath(args.dir)) != "regtest":
+        return testnet_join.dispatch(args, sys.modules[__name__]) or 0
     if args.command == "attestor" and args.action == "price" and args.usd is None:
         parser.error("attestor N price needs a USD amount")
     if args.command in ("pool",) and args.action in ("quote", "stratum") and args.value is None:

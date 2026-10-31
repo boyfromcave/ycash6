@@ -53,3 +53,16 @@ yellowback-devnet bridge status; yellowback-devnet bridge down
 
 `<dir>/bridge-sim.log` is the daemon's log; `bridge-burns.jsonl` the feed; `bridge.json` the sets
 and members; `bridge-daemon.json` what the daemon has done.
+
+## On a testnet
+
+On a joined devnet (`yellowback-devnet up --network …`, README section 9) the walk runs one step,
+`network`, and prints every step above as `NOT ON <network>` with its reason (`ON_TESTNET` in
+`upgrade-walk`); the summary records them as `N/A on <network>: …`, never as passed.
+
+| Step | regtest | testnet-yb-fast / -slow | testnet-legacy |
+|---|---|---|---|
+| `network` | not run (the devnet's own chain; every step below checks it) | chain, profile, prefix checkpoint, fork block, Vault height, attestor set or none | chain, profile, prefix checkpoint, fork block, no Vault |
+| `clients` | yes | no: yolo is mined through regtest's 48,5 Python solver; use `pool 4 stratum start` and a real miner | no (same) |
+| `members` … `falcon` | yes | no: each mines its own blocks on the eleven-node private chain, and most move the mock price or drive automated attestors | no: no Yellowback |
+| `final` | yes | no: it compares the devnet's eleven nodes | no |

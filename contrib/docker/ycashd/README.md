@@ -1,5 +1,7 @@
 # `contrib/docker/ycashd/` — the ycashd container image
 
+<!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
+
 ```bash
 docker build -f contrib/docker/ycashd/Dockerfile -t ycash/ycashd:local .      # 1-2 h the first time
 docker compose -f contrib/docker/ycashd/docker-compose.regtest.yml up -d       # a regtest node, vault upgrade from height 1
@@ -24,6 +26,8 @@ Variables (unset = default):
 | `YCASHD_PQ_FALCON_HEIGHT` | `0` | regtest only: `pqfalconheight=<h>`, OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from `<h>` once the vault upgrade is active. `0` mirrors mainnet/testnet (Falcon from the vault activation, D-Q-2); `off` = SLH-DSA only |
 | `YCASHD_PQ_FEERATE` | unset (= the relay floor) | `pqfeerate=<YEC/kB>`, the wallet's fallback fee rate for a post-quantum input |
 | `YCASHD_MNEMONIC_FILE` | unset | path of a **mounted** secret file, passed as `-mnemonicfile=<path>` (a new wallet takes its seed from the recovery phrase in the file) |
+| `YCASHD_BOOTSTRAP` | unset | before the first start, restore a checkpoint bundle into the empty datadir with `ycash-bootstrap` (testnet plan §4.4): `prefix` = the network's pinned prefix release (`testnet-prefix-v1`), or a bundle URL or directory. Testnet (with `YCASHD_TESTNET_PROFILE`) or regtest only. Skipped when the network's `blocks/` already holds data; a failed restore stops the container before `ycashd` starts |
+| `YCASHD_BOOTSTRAP_ARGS` | unset | extra `ycash-bootstrap` flags, e.g. `--require-signature` or `--verify-full` (`contrib/bootstrap/README.md`) |
 | `YCASHD_CONF_EXTRA` | | extra `ycash.conf` lines, verbatim |
 | `YCASHD_EXTRA_ARGS` | | extra command-line flags, verbatim |
 | `YCASHD_CONF` | | use this mounted `ycash.conf` instead of generating one |
@@ -57,6 +61,22 @@ docker run -d --name ycashd -v ycashd_data:/var/lib/ycash \
 
 On Kubernetes, mount a `Secret` volume (`defaultMode: 0400`, pod `fsGroup: 2001`): the image runs
 as uid 2001, which must be able to read the file.
+
+## Fast start from a bundle (`YCASHD_BOOTSTRAP`)
+
+In plain words: a new testnet node would otherwise download half a million old blocks from its
+peers. With `YCASHD_BOOTSTRAP=prefix` it instead downloads one published, fingerprinted copy of
+them, checks every fingerprint (and the owner's signature once the copy is signed), loads it
+without talking to anyone, and only then starts normally.
+
+```bash
+docker run -d --name ycashd-fast -v ycashd_fast:/var/lib/ycash -e YCASHD_NETWORK=testnet -e YCASHD_TESTNET_PROFILE=fast \
+  -e YCASHD_BOOTSTRAP=prefix -e YCASHD_RPC_USER=ycash -e YCASHD_RPC_PASSWORD=... ycash/ycashd:local
+```
+
+The entrypoint runs `ycash-bootstrap --network <net> --datadir /var/lib/ycash --conf <the generated
+ycash.conf> --source "$YCASHD_BOOTSTRAP"` once, before `ycashd`; `contrib/bootstrap/README.md`
+lists its checks. The image carries `python3` and `minisign` for it.
 
 ## Health
 

@@ -8,6 +8,8 @@ use zcash_protocol::{
 #[derive(Clone, Copy)]
 pub(crate) enum Network {
     Consensus(consensus::Network),
+    /// A testnet profile: the C++ chain parameters' upgrade heights, testnet address encodings.
+    Test(local_consensus::LocalNetwork),
     RegTest(local_consensus::LocalNetwork),
 }
 
@@ -16,7 +18,7 @@ impl DynamicUsage for Network {
         match self {
             Network::Consensus(params) => params.dynamic_usage(),
             // We know that `Option<BlockHeight>` allocates no memory.
-            Network::RegTest { .. } => 0,
+            Network::Test { .. } | Network::RegTest { .. } => 0,
         }
     }
 
@@ -24,14 +26,14 @@ impl DynamicUsage for Network {
         match self {
             Network::Consensus(params) => params.dynamic_usage_bounds(),
             // We know that `Option<BlockHeight>` allocates no memory.
-            Network::RegTest { .. } => (0, Some(0)),
+            Network::Test { .. } | Network::RegTest { .. } => (0, Some(0)),
         }
     }
 }
 
 /// Constructs a `Network` from the given network string.
 ///
-/// The heights are only for constructing a regtest network, and are ignored otherwise.
+/// The heights are used for testnet and regtest, and are ignored for mainnet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn network(
     network: &str,
@@ -55,22 +57,27 @@ pub(crate) fn network(
         }
     };
 
+    let heights = LocalNetwork {
+        overwinter: i32_to_optional_height(overwinter),
+        sapling: i32_to_optional_height(sapling),
+        ycash: i32_to_optional_height(ycash),
+        blossom: i32_to_optional_height(blossom),
+        heartwood: i32_to_optional_height(heartwood),
+        canopy: i32_to_optional_height(canopy),
+        nu5: i32_to_optional_height(nu5),
+        nu6: i32_to_optional_height(nu6),
+        nu6_1: i32_to_optional_height(nu6_1),
+        nu6_2: i32_to_optional_height(nu6_2),
+        vault: i32_to_optional_height(vault),
+    };
     let params = match network {
         "main" => Network::Consensus(consensus::Network::MainNetwork),
-        "test" => Network::Consensus(consensus::Network::TestNetwork),
-        "regtest" => Network::RegTest(LocalNetwork {
-            overwinter: i32_to_optional_height(overwinter),
-            sapling: i32_to_optional_height(sapling),
-            ycash: i32_to_optional_height(ycash),
-            blossom: i32_to_optional_height(blossom),
-            heartwood: i32_to_optional_height(heartwood),
-            canopy: i32_to_optional_height(canopy),
-            nu5: i32_to_optional_height(nu5),
-            nu6: i32_to_optional_height(nu6),
-            nu6_1: i32_to_optional_height(nu6_1),
-            nu6_2: i32_to_optional_height(nu6_2),
-            vault: i32_to_optional_height(vault),
-        }),
+        // The testnet profiles have their own upgrade heights (fast: the re-forked testnet;
+        // slow and legacy: mainnet's, as shadow forks), not the old Ycash testnet's that
+        // `consensus::Network::TestNetwork` hardcodes; the ZIP 212 coinbase check and the
+        // builders read them here.
+        "test" => Network::Test(heights),
+        "regtest" => Network::RegTest(heights),
         _ => return Err("Unsupported network kind"),
     };
 
@@ -81,6 +88,7 @@ impl consensus::Parameters for Network {
     fn network_type(&self) -> consensus::NetworkType {
         match self {
             Self::Consensus(params) => params.network_type(),
+            Self::Test(_) => consensus::NetworkType::Test,
             Self::RegTest(params) => params.network_type(),
         }
     }
@@ -88,7 +96,34 @@ impl consensus::Parameters for Network {
     fn activation_height(&self, nu: consensus::NetworkUpgrade) -> Option<consensus::BlockHeight> {
         match self {
             Self::Consensus(params) => params.activation_height(nu),
-            Self::RegTest(params) => params.activation_height(nu),
+            Self::Test(params) | Self::RegTest(params) => params.activation_height(nu),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
+
+    use super::network;
+
+    #[test]
+    fn testnet_uses_the_node_heights() {
+        // testnet-yb-fast's heights, not the old Ycash testnet's that TestNetwork hardcodes
+        // (Canopy 661,634, no Vault).
+        let net = network(
+            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400,
+        )
+        .unwrap();
+        assert_eq!(net.network_type(), NetworkType::Test);
+        assert_eq!(
+            net.activation_height(NetworkUpgrade::Canopy),
+            Some(BlockHeight::from_u32(510_254))
+        );
+        assert_eq!(
+            net.activation_height(NetworkUpgrade::Vault),
+            Some(BlockHeight::from_u32(510_400))
+        );
+        assert_eq!(net.activation_height(NetworkUpgrade::Nu5), None);
     }
 }

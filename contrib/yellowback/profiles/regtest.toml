@@ -1,0 +1,61 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The network profile (testnet plan §3.1) of regtest: the private chain the devnet builds on one
+# laptop. Every tool that differs by network (yellowback-devnet, contrib/testnet/ceremony,
+# contrib/bootstrap/ycash-bootstrap, the Docker entrypoint) reads these values instead of testing
+# the network name. Values mirror the compiled parameters (src/chainparams.cpp CRegTestParams,
+# src/chainparamsbase.cpp); test_ybprofile.py checks them against those files. The format is the
+# TOML subset README.md describes, so the tools read it without tomllib (Python 3.10).
+
+name = "regtest"
+chain = "regtest"               # getblockchaininfo.chain, NetworkIDString()
+testnet_profile = ""            # -testnetprofile; empty off the testnets
+
+[node]
+args = ["-regtest"]             # selects this network, on ycashd and ycash-cli
+datadir = "regtest"             # the network's subdirectory of -datadir
+p2p_port = 18344
+rpc_port = 18832
+magic = "aae83f5f"              # pchMessageStart: the P2P magic and the -loadblock record marker
+genesis = "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327"
+private = true                  # a tool may create this chain itself (devnet up, the ceremony rehearsal)
+
+[mining]
+generate = true                 # blocks on demand with `generate`; elsewhere blocks come from miners
+equihash_prefix = [48, 5]       # Equihash below the Ycash fork
+equihash = [48, 5]              # Equihash from the Ycash fork (regtest keeps 48,5 under every upgrade)
+
+[heights]
+ycash_fork = 1                  # -nuparams=374d694f:1, as the functional framework and the devnet start it
+vault = 103                     # -nuparams=6d5b7a31:103 (the devnet's VAULT_ACTIVATION); 0 = no height
+
+[yellowback]
+enabled = true
+attestor_set = "flag"           # "flag": -yellowbackattestorset=<setid>; "compiled": a chain parameter (rc1)
+set_maturity = 8                # the set_create maturity the devnet uses (BOND_MATURITY; nVaultMinSetMaturity is 2)
+liveness_window = 1000          # the attestor set's livenesswindow the devnet creates
+house_seats = 3                 # the devnet's automated attestors (nodes 5-7)
+house_bond_yec = 10             # bondMinCapZat on regtest: always qualifies
+lifecycle_column = "regtest"
+
+[prefix]
+release = ""                    # no published prefix: a regtest bundle is made by `ycash-bootstrap --pack`
+url = ""
+network = "regtest"             # manifest.json "network" of a regtest bundle (tests and the ceremony rehearsal)
+file_stem = "regtest-prefix-v1"
+sha256sums_sha256 = ""          # nothing pinned
+last_height = 0                 # 0 = whatever the bundle says
+last_hash = ""
+chaintx = 0                     # unknown: the ceremony counts from genesis
+checkpoints = []
+
+[seeds]
+addnode = []
+
+[endpoints]
+lightwalletd = ""
+chain_viz = ""
+faucet = ""
+bundle = ""

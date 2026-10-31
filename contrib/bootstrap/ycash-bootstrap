@@ -1,0 +1,922 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""ycash-bootstrap: restore a checkpoint bundle into an empty datadir (testnet plan §4.4).
+
+    ycash-bootstrap --network testnet-yb-fast --datadir DIR [--source URL|DIR] [--reset] [--verify-full]
+    ycash-bootstrap --network regtest --datadir DIR --pack OUT --last-height N   # make a regtest bundle
+
+Two layers (§4.0). The **prefix** (the default): Zcash testnet blocks 0..510,247 in the frozen
+format `ycash-prefix/1` (ycash-infra `bundles/prefix/FORMAT.md`), shared by the three testnets
+because it carries no network magic. The **state bundle** (`--state --source DIR|URL`): a ycash6
+datadir at a height H_B above the fork in the format `ycash-state/1` (ycash-infra
+`bundles/state/FORMAT.md`), checked against its verifiers' statements (below the prefix steps).
+
+Restoring, in order, refusing at the first failure:
+  1. the target network's subdirectory (`testnet-yb-fast`, ...) must hold no chain yet; `--reset`
+     first moves an existing wallet.dat aside and removes that subdirectory (testnet resets, T-7);
+  2. `SHA256SUMS` is fetched; its own sha256 must equal the value this release pins for the
+     network (the profile's `prefix.sha256sums_sha256`); a `SHA256SUMS.minisig` beside it must
+     verify with the owner's key (keys/ycash-release.pub; optional until the bundle is signed,
+     mandatory with `--require-signature`);
+  3. `manifest.json` must match its sum and the release: format, network, the chunk rule, the
+     last height and hash (= the compiled checkpoint), the compiled earlier checkpoints;
+  4. every chunk is downloaded and checked against `SHA256SUMS` and the manifest, then framed for
+     `-loadblock` with the network's magic (`<magic> <LE u32 length> <block>`), checking the hash
+     chain, the genesis, every manifest hash, the raw size and sha256 on the way;
+  5. `ycashd` imports the framed files with `-connect=0 -listen=0 -disablewallet` (so a wallet is
+     created, from -mnemonicfile or not, only at the node's first normal start; and `-checkpoints=0` under
+     `--verify-full`, which validates every block's scripts instead of trusting the checkpoint);
+  6. the node must reach the last height with `getblockhash` equal to the manifest at every listed
+     height and to the compiled checkpoint at the last; then it is stopped and the framed files
+     are removed. Start the node normally afterwards.
+
+A state bundle: SHA256SUMS (and its signature, as above), the canonical manifest (format, the
+profile's network and -testnetprofile, line ycash6, H_B above the fork, the tarball's name and
+sum), at least two byte-identical statements that agree with it; the tarball's sha256 and size;
+extraction of directories and regular files under `<network>/{blocks,chainstate,vaults,yellowback}`
+only (no wallet, no LevelDB LOCK/LOG, no links); then the node starts offline, settles, rolls back
+with `invalidateblock H_B+1` when it connected blocks above H_B, must produce the statement's
+fields itself (getblockhash, chainwork, gettxoutsetinfo, vault_getinfo, yed_getstatehash), and
+`reconsiderblock`s. A failure removes what was extracted.
+
+Nothing in a bundle is executed; file names are checked against the format before they become a
+path or a URL. Python standard library only (plus the `minisign` binary when a signature is
+present); run it with `python3 -I`.
+"""
+
+import argparse
+import gzip
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
+
+HERE = os.path.dirname(os.path.realpath(__file__))   # realpath: the release image links it into /usr/local/bin
+FORMAT = "ycash-prefix/1"
+CHUNK_SPAN = 50_000          # FORMAT.md: chunk k covers [50,000 k, 50,000 k + 49,999]
+MIN_BLOCK, MAX_BLOCK_SIZE = 80, 2_000_000   # LoadExternalBlockFile skips a record outside these (main.cpp)
+HEADER_FIXED = 140           # version..nonce; then the compactsize-prefixed Equihash solution
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+READ_SIZE = 1 << 20
+DEFAULT_KEY = os.path.join(HERE, "keys", "ycash-release.pub")
+
+
+def _profiles_module():
+    """contrib/yellowback/profiles/ybprofile.py from this tree, or the release image's copy."""
+    candidates = [os.environ.get("YCASH_PROFILES_DIR"), os.path.join(HERE, "..", "yellowback", "profiles"),
+                  os.path.join(HERE, "profiles"), "/usr/local/share/ycash/profiles"]
+    for directory in candidates:
+        if directory and os.path.isfile(os.path.join(directory, "ybprofile.py")):
+            sys.path.insert(0, os.path.abspath(directory))
+            os.environ.setdefault("YCASH_PROFILES_DIR", os.path.abspath(directory))
+            import ybprofile
+            return ybprofile
+    sys.exit("ycash-bootstrap: the network profiles (ybprofile.py) are not found; set YCASH_PROFILES_DIR")
+
+
+class BundleError(Exception):
+    """The bundle, or the node's import of it, failed a check. The message says which."""
+
+
+def log(text):
+    print("[%s] %s" % (time.strftime("%H:%M:%S"), text), flush=True)
+
+
+# ---------------------------------------------------------------------------------- bytes
+
+def sha256_file(path):
+    h, size = hashlib.sha256(), 0
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(READ_SIZE)
+            if not b:
+                return h.hexdigest(), size
+            h.update(b)
+            size += len(b)
+
+
+def block_hash(block):
+    """SHA-256d of the header including the Equihash solution, displayed byte-reversed (FORMAT.md)."""
+    if len(block) < HEADER_FIXED + 1:
+        raise BundleError("block shorter than a header")
+    n = block[HEADER_FIXED]
+    if n < 0xFD:
+        size = 1 + n
+    elif n == 0xFD:
+        size = 3 + struct.unpack_from("<H", block, HEADER_FIXED + 1)[0]
+    elif n == 0xFE:
+        size = 5 + struct.unpack_from("<I", block, HEADER_FIXED + 1)[0]
+    else:
+        raise BundleError("solution length does not fit a block")
+    if HEADER_FIXED + size > len(block):
+        raise BundleError("solution runs past the end of the block")
+    return hashlib.sha256(hashlib.sha256(block[:HEADER_FIXED + size]).digest()).digest()[::-1].hex()
+
+
+def prev_hash(block):
+    return block[4:36][::-1].hex()
+
+
+def chunk_ranges(last, span=CHUNK_SPAN):
+    return [(first, min(first + span - 1, last)) for first in range(0, last + 1, span)]
+
+
+def chunk_name(stem, first, last):
+    return "%s-%07d-%07d.blocks.gz" % (stem, first, last)
+
+
+def hash_heights(last):
+    """The heights manifest.json must carry: every multiple of 10,000 up to the last, and the last."""
+    return sorted(set(range(0, last + 1, 10_000)) | {last})
+
+
+# ---------------------------------------------------------------------------------- the bundle as data
+
+def parse_sums(text, stem):
+    pattern = re.compile(r"^%s-(\d{7})-(\d{7})\.blocks\.gz$" % re.escape(stem))
+    sums = {}
+    for line in text.splitlines():
+        m = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line)
+        if not m:
+            raise BundleError("SHA256SUMS line is not '<sha256>  <name>': %r" % line[:120])
+        name = m.group(2)
+        if name != "manifest.json" and not pattern.match(name):
+            raise BundleError("SHA256SUMS names an unexpected file %r" % name)
+        if name in sums:
+            raise BundleError("SHA256SUMS names %s twice" % name)
+        sums[name] = m.group(1)
+    if list(sums) != sorted(sums):
+        raise BundleError("SHA256SUMS is not sorted by name")
+    if "manifest.json" not in sums:
+        raise BundleError("SHA256SUMS does not name manifest.json")
+    return sums
+
+
+def check_manifest(manifest, profile, sums):
+    """The manifest against the format and against what this release knows (the profile)."""
+    prefix = profile["prefix"]
+    if not isinstance(manifest, dict):
+        raise BundleError("manifest.json is not an object")
+    if manifest.get("format") != FORMAT:
+        raise BundleError("manifest format %r, expected %r" % (manifest.get("format"), FORMAT))
+    if manifest.get("network") != prefix["network"]:
+        raise BundleError("manifest network %r; %s takes a %r prefix" % (manifest.get("network"), profile["name"], prefix["network"]))
+    first, last = manifest.get("first_height"), manifest.get("last_height")
+    if not (type(first) is int and type(last) is int and first == 0 and last >= 0):
+        raise BundleError("manifest first_height must be 0 and last_height an integer >= 0")
+    if prefix["last_height"] and last != prefix["last_height"]:
+        raise BundleError("manifest last_height %d; this release's checkpoint is at %d" % (last, prefix["last_height"]))
+    chunks = manifest.get("chunks")
+    ranges = chunk_ranges(last)
+    if not isinstance(chunks, list) or len(chunks) != len(ranges):
+        raise BundleError("manifest has %s chunks, the format gives %d" % (len(chunks) if isinstance(chunks, list) else "no", len(ranges)))
+    for k, (c, (cf, cl)) in enumerate(zip(chunks, ranges)):
+        if not isinstance(c, dict):
+            raise BundleError("chunk %d is not an object" % k)
+        for key in ("first_height", "last_height", "blocks", "raw_bytes", "gz_bytes"):
+            if type(c.get(key)) is not int or c[key] < 0:
+                raise BundleError("chunk %d: %s is not a non-negative integer" % (k, key))
+        for key in ("raw_sha256", "gz_sha256"):
+            if not isinstance(c.get(key), str) or not HEX64.match(c[key]):
+                raise BundleError("chunk %d: %s is not a sha256" % (k, key))
+        if (c["first_height"], c["last_height"], c["blocks"]) != (cf, cl, cl - cf + 1):
+            raise BundleError("chunk %d covers %d..%d (%d blocks), the format gives %d..%d"
+                              % (k, c["first_height"], c["last_height"], c["blocks"], cf, cl))
+        if c.get("file") != chunk_name(prefix["file_stem"], cf, cl):
+            raise BundleError("chunk %d: file %r, expected %r" % (k, c.get("file"), chunk_name(prefix["file_stem"], cf, cl)))
+        if sums.get(c["file"]) != c["gz_sha256"]:
+            raise BundleError("%s: SHA256SUMS and manifest gz_sha256 disagree" % c["file"])
+    if sorted(sums) != sorted(["manifest.json"] + [c["file"] for c in chunks]):
+        raise BundleError("SHA256SUMS names %s, the manifest needs exactly its chunks and manifest.json" % sorted(sums))
+    hashes = manifest.get("hashes")
+    if not isinstance(hashes, dict):
+        raise BundleError("manifest hashes is not an object")
+    table = {}
+    for key, value in hashes.items():
+        if not re.fullmatch(r"0|[1-9]\d*", key) or not isinstance(value, str) or not HEX64.match(value):
+            raise BundleError("manifest hashes entry %r: %r is not height: hash" % (key, value))
+        if int(key) > last:
+            raise BundleError("manifest hash at %s is above last_height %d" % (key, last))
+        table[int(key)] = value
+    missing = set(hash_heights(last)) - set(table)
+    if missing:
+        raise BundleError("manifest hashes lack heights %s" % sorted(missing)[:5])
+    if prefix["last_hash"] and table[last] != prefix["last_hash"]:
+        raise BundleError("manifest hash at %d is %s; this release's checkpoint is %s" % (last, table[last], prefix["last_hash"]))
+    expect = dict(table)
+    for item in prefix["checkpoints"]:
+        height, value = item.split(":")
+        height = int(height)
+        if height <= last:
+            if table.get(height, value) != value:
+                raise BundleError("manifest hash at %d is %s; this release compiles %s" % (height, table[height], value))
+            expect[height] = value
+    if table.get(0, profile["node"]["genesis"]) != profile["node"]["genesis"]:
+        raise BundleError("manifest genesis %s; %s's is %s" % (table[0], profile["name"], profile["node"]["genesis"]))
+    return expect
+
+
+def frame_chunk(path, chunk, out_path, magic, state, expect):
+    """Stream one chunk into a -loadblock file; state carries the previous hash across chunks."""
+    raw, raw_bytes, height = hashlib.sha256(), 0, chunk["first_height"]
+    try:
+        with gzip.open(path, "rb") as g, open(out_path, "wb") as out:
+            while True:
+                head = g.read(4)
+                if not head:
+                    break
+                if len(head) != 4:
+                    raise BundleError("%s: ends inside a length" % chunk["file"])
+                (n,) = struct.unpack("<I", head)
+                if height > chunk["last_height"]:
+                    raise BundleError("%s: more blocks than %d" % (chunk["file"], chunk["blocks"]))
+                if n < MIN_BLOCK or n > MAX_BLOCK_SIZE:
+                    raise BundleError("height %d: block length %d outside %d..%d" % (height, n, MIN_BLOCK, MAX_BLOCK_SIZE))
+                block = g.read(n)
+                if len(block) != n:
+                    raise BundleError("%s: ends inside a block" % chunk["file"])
+                raw.update(head)
+                raw.update(block)
+                raw_bytes += 4 + n
+                h = block_hash(block)
+                if height == 0:
+                    if h != state["genesis"]:
+                        raise BundleError("genesis hash %s, expected %s" % (h, state["genesis"]))
+                elif prev_hash(block) != state["prev"]:
+                    raise BundleError("height %d: hashPrevBlock %s does not link to %s" % (height, prev_hash(block), state["prev"]))
+                if height in expect and expect[height] != h:
+                    raise BundleError("height %d: hash %s, expected %s" % (height, h, expect[height]))
+                out.write(magic + head + block)
+                state["prev"] = h
+                height += 1
+    except (OSError, EOFError, zlib.error, struct.error) as e:
+        raise BundleError("%s: %s" % (chunk["file"], e))
+    if height != chunk["last_height"] + 1:
+        raise BundleError("%s: %d blocks, the manifest says %d" % (chunk["file"], height - chunk["first_height"], chunk["blocks"]))
+    if raw_bytes != chunk["raw_bytes"] or raw.hexdigest() != chunk["raw_sha256"]:
+        raise BundleError("%s: raw stream %d bytes sha256 %s, the manifest says %d bytes %s"
+                          % (chunk["file"], raw_bytes, raw.hexdigest(), chunk["raw_bytes"], chunk["raw_sha256"]))
+
+
+# ---------------------------------------------------------------------------------- fetching
+
+class Source:
+    """A bundle location: an http(s) or file URL, or a local directory. Names are checked first."""
+
+    def __init__(self, where):
+        if where.endswith("manifest.json"):
+            where = where[:-len("manifest.json")]
+        self.local = None
+        parsed = urllib.parse.urlparse(where)
+        if parsed.scheme in ("http", "https"):
+            self.base = where if where.endswith("/") else where + "/"
+        elif parsed.scheme == "file":
+            self.local = urllib.parse.unquote(parsed.path)
+        elif parsed.scheme == "":
+            self.local = where
+        else:
+            raise BundleError("unsupported bundle source %r (https://, file:// or a directory)" % where)
+        if self.local is not None and not os.path.isdir(self.local):
+            raise BundleError("bundle directory %s does not exist" % self.local)
+
+    def __str__(self):
+        return self.local if self.local is not None else self.base
+
+    def fetch(self, name, dest, optional=False):
+        """Copy `name` to dest; False when optional and absent."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise BundleError("refusing the file name %r" % name)
+        if self.local is not None:
+            src = os.path.join(self.local, name)
+            if not os.path.isfile(src):
+                if optional:
+                    return False
+                raise BundleError("%s is missing from %s" % (name, self.local))
+            shutil.copyfile(src, dest + ".part")
+        else:
+            try:
+                with urllib.request.urlopen(self.base + name, timeout=120) as reply, open(dest + ".part", "wb") as out:
+                    shutil.copyfileobj(reply, out, READ_SIZE)
+            except urllib.error.HTTPError as e:
+                if optional and e.code == 404:
+                    return False
+                raise BundleError("%s%s: HTTP %d" % (self.base, name, e.code))
+            except (urllib.error.URLError, OSError) as e:
+                raise BundleError("%s%s: %s" % (self.base, name, e))
+        os.replace(dest + ".part", dest)
+        return True
+
+
+def read_key(path):
+    """The minisign public key (the line after the untrusted comment)."""
+    try:
+        with open(path, encoding="ascii") as f:
+            lines = [line.strip() for line in f.read().splitlines() if line.strip()]
+    except OSError as e:
+        raise BundleError("cannot read the release key %s: %s" % (path, e))
+    keys = [line for line in lines if not line.startswith("untrusted comment:")]
+    if len(keys) != 1 or not re.fullmatch(r"RW[A-Za-z0-9+/]{54}", keys[0]):
+        raise BundleError("%s does not hold one minisign public key" % path)
+    return keys[0]
+
+
+def verify_signature(sums_path, sig_path, key, minisign):
+    binary = shutil.which(minisign) if os.sep not in minisign else minisign
+    if not binary:
+        raise BundleError("SHA256SUMS is signed but `%s` is not installed: install minisign to verify it" % minisign)
+    result = subprocess.run([binary, "-V", "-q", "-m", sums_path, "-x", sig_path, "-P", key],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if result.returncode != 0:
+        raise BundleError("SHA256SUMS.minisig does not verify with the release key %s: %s" % (key, result.stdout.strip()[:300]))
+
+
+def verify_bundle(source, profile, work, args):
+    """Steps 2-4: fetch and check everything; return (manifest, expect, the framed file paths, record)."""
+    download = os.path.join(work, "download")
+    framed = os.path.join(work, "framed")
+    os.makedirs(download, exist_ok=True)
+    prefix = profile["prefix"]
+    sums_path = os.path.join(download, "SHA256SUMS")
+    source.fetch("SHA256SUMS", sums_path)
+    sums_sha, _ = sha256_file(sums_path)
+    pinned = prefix["sha256sums_sha256"]
+    if pinned and sums_sha != pinned and not args.allow_unpinned:
+        raise BundleError("SHA256SUMS sha256 %s; this release pins %s for %s (%s)" % (sums_sha, pinned, profile["name"], prefix["release"]))
+    if not pinned and not args.allow_unpinned and not profile["node"]["private"]:
+        raise BundleError("this release pins no prefix for %s; --allow-unpinned trusts the signature and the checks alone" % profile["name"])
+    sig_path = sums_path + ".minisig"
+    signed = source.fetch("SHA256SUMS.minisig", sig_path, optional=True)
+    if signed:
+        verify_signature(sums_path, sig_path, read_key(args.key), args.minisign)
+        log("SHA256SUMS.minisig verifies with the release key")
+    elif args.require_signature:
+        raise BundleError("SHA256SUMS is not signed and --require-signature was given")
+    else:
+        log("SHA256SUMS is not signed (optional until the bundle is signed); it is %s by its sha256" % ("pinned" if pinned else "NOT pinned"))
+    with open(sums_path, encoding="ascii", errors="replace") as f:
+        sums = parse_sums(f.read(), prefix["file_stem"])
+    manifest_path = os.path.join(download, "manifest.json")
+    source.fetch("manifest.json", manifest_path)
+    if sha256_file(manifest_path)[0] != sums["manifest.json"]:
+        raise BundleError("manifest.json does not match SHA256SUMS")
+    try:
+        with open(manifest_path, "rb") as f:
+            manifest = json.loads(f.read().decode("utf-8"))
+    except ValueError as e:
+        raise BundleError("manifest.json is not JSON: %s" % e)
+    expect = check_manifest(manifest, profile, sums)
+    log("manifest: %s %s, heights 0..%d in %d chunk(s), last hash %s" % (manifest["format"], manifest["network"], manifest["last_height"],
+                                                                         len(manifest["chunks"]), expect[manifest["last_height"]]))
+    if os.path.isdir(framed):
+        shutil.rmtree(framed)
+    os.makedirs(framed)
+    magic = bytes.fromhex(profile["node"]["magic"])
+    state, files = {"prev": None, "genesis": profile["node"]["genesis"]}, []
+    for c in manifest["chunks"]:
+        path = os.path.join(download, c["file"])
+        if not (os.path.isfile(path) and sha256_file(path) == (c["gz_sha256"], c["gz_bytes"])):
+            log("fetching %s (%d bytes)" % (c["file"], c["gz_bytes"]))
+            source.fetch(c["file"], path)
+        got = sha256_file(path)
+        if got != (c["gz_sha256"], c["gz_bytes"]):
+            raise BundleError("%s: %d bytes sha256 %s, expected %d bytes %s" % (c["file"], got[1], got[0], c["gz_bytes"], c["gz_sha256"]))
+        out = os.path.join(framed, "blk-%07d-%07d.dat" % (c["first_height"], c["last_height"]))
+        frame_chunk(path, c, out, magic, state, expect)
+        files.append(out)
+    log("framed heights 0..%d with magic %s: tip %s" % (manifest["last_height"], profile["node"]["magic"], state["prev"]))
+    record = {"format": manifest["format"], "network": manifest["network"], "profile": profile["name"], "source": str(source),
+              "sha256sums_sha256": sums_sha, "pinned": bool(pinned) and sums_sha == pinned, "signed": signed,
+              "manifest_sha256": sums["manifest.json"], "last_height": manifest["last_height"], "tip": state["prev"],
+              "sources": manifest.get("sources", {})}
+    return manifest, expect, files, record
+
+
+# ---------------------------------------------------------------------------------- the node
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class Node:
+    """ycashd started for the import only, and ycash-cli against it (same -datadir, -conf, network)."""
+
+    def __init__(self, args, profile, port):
+        self.ycashd, self.cli_bin = args.ycashd, args.cli
+        self.common = ["-datadir=%s" % args.datadir] + (["-conf=%s" % args.conf] if args.conf else []) + profile["node"]["args"] + ["-rpcport=%d" % port]
+        self.extra = list(args.node_arg or [])
+        self.process = None
+
+    def start(self, files, verify_full, dbcache, extra=()):
+        argv = [self.ycashd] + self.common + self.extra + ["-server=1", "-connect=0", "-listen=0", "-dnsseed=0", "-discover=0", "-disablewallet=1",
+                                                           "-printtoconsole=0", "-dbcache=%d" % dbcache] + list(extra)
+        if verify_full:
+            argv.append("-checkpoints=0")
+        argv += ["-loadblock=%s" % f for f in files]
+        log("starting %s offline (-connect=0 -listen=0, %d -loadblock files%s)" % (self.ycashd, len(files), ", -checkpoints=0" if verify_full else ""))
+        self.stderr = tempfile.TemporaryFile()
+        self.process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self.stderr)
+
+    def error_text(self):
+        self.stderr.seek(0)
+        return self.stderr.read().decode(errors="replace").strip()[-500:]
+
+    def cli(self, *call, check=True):
+        result = subprocess.run([self.cli_bin] + self.common + [str(c) for c in call], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+        if check and result.returncode != 0:
+            raise BundleError("ycash-cli %s: %s" % (call[0], result.stderr.strip()[:300]))
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def stop(self):
+        if self.process is None:
+            return None
+        if self.alive():
+            if self.cli("stop", check=False) is None:
+                self.process.terminate()      # SIGTERM is a clean shutdown too
+            try:
+                self.process.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                self.process.wait(timeout=60)
+        self.stderr.close()
+        return self.process.returncode
+
+
+def debug_log(args, profile):
+    return os.path.join(args.datadir, profile["node"]["datadir"], "debug.log")
+
+
+def import_and_check(node, files, manifest, expect, args, profile):
+    last = manifest["last_height"]
+    node.start(files, args.verify_full, args.dbcache)
+    t0 = last_move = time.time()
+    blocks, prev, last_report = -1, -1, 0
+    try:
+        while True:
+            time.sleep(args.poll)
+            now = time.time()
+            if not node.alive():
+                raise BundleError("ycashd exited during the import (status %s) at height %d: %s"
+                                  % (node.process.returncode, blocks, node.error_text()))
+            if now - last_move >= args.stall_timeout:
+                raise BundleError("no new block for %ds at height %d" % (args.stall_timeout, blocks))
+            text = node.cli("getblockchaininfo", check=False)
+            if text is None:
+                continue                      # the RPC is warming up (loading the block index)
+            blocks = int(json.loads(text)["blocks"])
+            if blocks != prev:
+                prev, last_move = blocks, now
+            if now - last_report >= 60 or blocks == last:
+                log("imported %d of %d blocks (%ds)" % (blocks, last, now - t0))
+                last_report = now
+            if blocks == last:
+                break
+            if blocks > last:
+                raise BundleError("the node is at %d, above the bundle's %d" % (blocks, last))
+            try:
+                with open(debug_log(args, profile), errors="replace") as f:
+                    done = f.read().count("blocks from external file")
+            except OSError:
+                done = 0
+            if done >= len(files) and now - last_move >= args.done_grace:
+                raise BundleError("the node read every file but stopped at height %d of %d (a block was refused; see %s)"
+                                  % (blocks, last, debug_log(args, profile)))
+        checked = 0
+        for height, want in sorted(expect.items()):
+            got = node.cli("getblockhash", height)
+            if got != want:
+                raise BundleError("getblockhash %d is %s, expected %s" % (height, got, want))
+            checked += 1
+        best = node.cli("getbestblockhash")
+        if best != expect[last]:
+            raise BundleError("best block %s, expected %s" % (best, expect[last]))
+        info = json.loads(node.cli("getblockchaininfo"))
+        log("the node is at %d, %s; %d hashes checked" % (info["blocks"], best, checked))
+        return {"checked": checked, "seconds": int(time.time() - t0), "chain": info.get("chain"),
+                "testnetprofile": info.get("testnetprofile"), "verify_full": bool(args.verify_full)}
+    finally:
+        code = node.stop()
+        if code not in (0, None):
+            log("ycashd exited %s" % code)
+
+
+# ---------------------------------------------------------------------------------- pack (regtest bundles)
+
+def write_bundle(out, profile, last, get_block, sources):
+    """Write heights 0..last in the ycash-prefix/1 layout: chunks, manifest.json, SHA256SUMS.
+    get_block(height) returns (hash, serialized block); the hash is checked against the bytes."""
+    stem, wanted = profile["prefix"]["file_stem"], set(hash_heights(last))
+    hashes, chunks = {}, []
+    for first, end in chunk_ranges(last):
+        name = chunk_name(stem, first, end)
+        raw, raw_bytes, path = hashlib.sha256(), 0, os.path.join(out, name)
+        with open(path, "wb") as f, gzip.GzipFile(filename="", mode="wb", fileobj=f, compresslevel=9, mtime=0) as g:
+            for height in range(first, end + 1):
+                h, block = get_block(height)
+                if block_hash(block) != h:
+                    raise BundleError("height %d: the block hashes to %s, not %s" % (height, block_hash(block), h))
+                record = struct.pack("<I", len(block)) + block
+                g.write(record)
+                raw.update(record)
+                raw_bytes += len(record)
+                if height in wanted:
+                    hashes[str(height)] = h
+        gz_sha, gz_bytes = sha256_file(path)
+        chunks.append({"file": name, "first_height": first, "last_height": end, "blocks": end - first + 1, "raw_bytes": raw_bytes,
+                       "raw_sha256": raw.hexdigest(), "gz_bytes": gz_bytes, "gz_sha256": gz_sha})
+    manifest = {"format": FORMAT, "network": profile["prefix"]["network"], "first_height": 0, "last_height": last,
+                "chunks": chunks, "hashes": hashes, "sources": sources}
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with open(os.path.join(out, "SHA256SUMS"), "w", encoding="ascii") as f:
+        for name in sorted(["manifest.json"] + [c["file"] for c in chunks]):
+            f.write("%s  %s\n" % (sha256_file(os.path.join(out, name))[0], name))
+    return manifest
+
+
+def pack(args, profile):
+    """Write a ycash-prefix/1 bundle of heights 0..N from a running node (tests, the ceremony rehearsal)."""
+    if not profile["node"]["private"]:
+        sys.exit("--pack makes bundles of a private chain (regtest); the testnet prefix comes from ycash-infra's harvest")
+    out = args.pack
+    if os.path.exists(out) and os.listdir(out):
+        sys.exit("--pack %s is not empty" % out)
+    os.makedirs(out, exist_ok=True)
+    node = Node(args, profile, args.rpcport or profile["node"]["rpc_port"])
+
+    def get_block(height):
+        h = node.cli("getblockhash", height)
+        return h, bytes.fromhex(node.cli("getblock", h, 0))
+    manifest = write_bundle(out, profile, args.last_height, get_block,
+                            {"pack": "ycash-bootstrap --pack", "node": json.loads(node.cli("getnetworkinfo"))["subversion"]})
+    log("packed heights 0..%d into %s (%d chunk(s)); SHA256SUMS sha256 %s"
+        % (args.last_height, out, len(manifest["chunks"]), sha256_file(os.path.join(out, "SHA256SUMS"))[0]))
+    return 0
+
+
+# ---------------------------------------------------------------------------------- the state bundle (ycash-state/1)
+
+# The format is ycash-infra's bundles/state/FORMAT.md (ycash-state/1), written by its snapshotter;
+# this is its consumer side (testnet plan §4.4), not a second definition of it.
+STATE_FORMAT = "ycash-state/1"
+STATEMENT_FIELDS = ("network", "height", "blockhash", "chainwork", "utxo_hash_serialized", "vault_statehash", "yed_statehash")
+STATE_TOP_DIRS = ("blocks", "chainstate", "vaults", "yellowback")
+STATE_LEFT_OUT = re.compile(r"(^|/)(LOCK|LOG|LOG\.old)$")
+
+
+def canonical(value):
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def state_tarball_name(m):
+    return "ycash6-%s-%s-%s.tar.gz" % (m["network"], m["height"], m["flavour"])
+
+
+def check_state_manifest(raw, profile, sums):
+    """manifest.json of a state bundle against FORMAT.md and this release (the profile)."""
+    try:
+        m = json.loads(raw)
+    except ValueError as e:
+        raise BundleError("manifest.json is not JSON: %s" % e)
+    if not isinstance(m, dict) or raw != canonical(m):
+        raise BundleError("manifest.json is not canonical JSON")
+    if m.get("format") != STATE_FORMAT:
+        raise BundleError("manifest format %r, expected %r" % (m.get("format"), STATE_FORMAT))
+    for key in ("network", "height", "blockhash", "line", "flavour", "profile", "tarball", "sha256", "bytes", "created", "verifiers"):
+        if key not in m:
+            raise BundleError("manifest lacks %s" % key)
+    if m["network"] != profile["node"]["datadir"] or m["profile"] != profile["testnet_profile"]:
+        raise BundleError("manifest is for %s (%r); this is %s" % (m["network"], m["profile"], profile["name"]))
+    if m["line"] != "ycash6":
+        raise BundleError("manifest line %r: a state bundle is a ycash6 datadir" % m["line"])
+    if m["flavour"] not in ("full", "full-insight"):
+        raise BundleError("manifest flavour %r" % m["flavour"])
+    if type(m["height"]) is not int or m["height"] < profile["heights"]["ycash_fork"]:
+        raise BundleError("manifest height %r is below the fork %d (the prefix is that layer)" % (m["height"], profile["heights"]["ycash_fork"]))
+    if not isinstance(m["blockhash"], str) or not HEX64.match(m["blockhash"]):
+        raise BundleError("manifest blockhash is not a hash")
+    if m["tarball"] != state_tarball_name(m) or sums.get(m["tarball"]) != m["sha256"]:
+        raise BundleError("manifest tarball %r does not match its name rule or SHA256SUMS" % m["tarball"])
+    verifiers = m["verifiers"]
+    if not isinstance(verifiers, list) or verifiers != sorted(verifiers) or len(verifiers) < 2 or \
+            not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", v) for v in verifiers):
+        raise BundleError("manifest verifiers %r: at least two, sorted (plan §4.2)" % (verifiers,))
+    wanted = sorted(["manifest.json", m["tarball"]] + ["statement-%s.json" % v for v in verifiers])
+    if sorted(sums) != wanted:
+        raise BundleError("SHA256SUMS names %s, the manifest needs %s" % (sorted(sums), wanted))
+    for item in profile["prefix"]["checkpoints"] + ["%d:%s" % (profile["prefix"]["last_height"], profile["prefix"]["last_hash"])]:
+        height, value = item.split(":")
+        if int(height) == m["height"] and value != m["blockhash"]:
+            raise BundleError("the bundle's block %s is %s; this release compiles %s" % (height, m["blockhash"], value))
+    return m
+
+
+def parse_state_sums(text):
+    sums = {}
+    for line in text.splitlines():
+        mm = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if not mm or mm.group(2) in sums:
+            raise BundleError("SHA256SUMS line is not '<sha256>  <name>' (or names a file twice): %r" % line[:120])
+        sums[mm.group(2)] = mm.group(1)
+    if list(sums) != sorted(sums, key=str.encode):
+        raise BundleError("SHA256SUMS is not sorted by name")
+    if "manifest.json" not in sums:
+        raise BundleError("SHA256SUMS does not name manifest.json")
+    return sums
+
+
+def extract_state(tar_path, network, flavour, datadir):
+    """Extract only what FORMAT.md allows: directories and regular files under <network>/{blocks,...}."""
+    import tarfile
+    count = 0
+    with tarfile.open(tar_path, "r:gz") as t:
+        for e in t:
+            name = e.name.rstrip("/")
+            parts = name.split("/")
+            if name.startswith("/") or ".." in parts or "" in parts:
+                raise BundleError("tar: unsafe path %r" % e.name)
+            if parts[0] != network or len(parts) < 2 or parts[1] not in STATE_TOP_DIRS:
+                raise BundleError("tar: %s is not under %s/{%s}" % (e.name, network, ",".join(STATE_TOP_DIRS)))
+            if STATE_LEFT_OUT.search(name) or name == "%s/yellowback/carriers.dat" % network or parts[-1] == "wallet.dat":
+                raise BundleError("tar: %s is a file the format leaves out" % e.name)
+            if flavour == "full" and name.startswith("%s/blocks/insight-index" % network):
+                raise BundleError("tar: %s: the insight index is in the full-insight flavour only" % e.name)
+            target = os.path.join(datadir, *parts)
+            if e.isdir():
+                os.makedirs(target, exist_ok=True)
+            elif e.isfile():
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with t.extractfile(e) as src, open(target, "xb") as out:
+                    shutil.copyfileobj(src, out, READ_SIZE)
+                count += 1
+            else:
+                raise BundleError("tar: %s is neither a file nor a directory" % e.name)
+    return count
+
+
+def state_statement(node, height):
+    """The statement fields (FORMAT.md) as this node computes them at `height`."""
+    blockhash = node.cli("getblockhash", height)
+    out = {"height": height, "blockhash": blockhash,
+           "chainwork": json.loads(node.cli("getblockheader", blockhash))["chainwork"],
+           "utxo_hash_serialized": json.loads(node.cli("gettxoutsetinfo"))["hash_serialized"]}
+    vault = json.loads(node.cli("vault_getinfo"))
+    if vault.get("dbtip") is None:
+        out["vault_statehash"] = None
+    elif vault["dbtip"].get("hash") != blockhash:
+        raise BundleError("vault_getinfo is at %s, not %s" % (vault["dbtip"].get("hash"), blockhash))
+    else:
+        out["vault_statehash"] = vault.get("statehash")
+    yed = node.cli("yed_getstatehash", height, check=False)
+    if yed is None:
+        out["yed_statehash"] = None
+    else:
+        yed = json.loads(yed)
+        if yed.get("blockhash") != blockhash:
+            raise BundleError("yed_getstatehash answered for %s, not %s" % (yed.get("blockhash"), blockhash))
+        out["yed_statehash"] = yed.get("statehash")
+    return out
+
+
+def restore_state(args, profile, netdir):
+    """§4.4 for a ycash-state/1 bundle: fetch, check, extract, then the node itself checks the statements at H_B."""
+    if not args.source or args.source == "prefix":
+        sys.exit("ycash-bootstrap: --state needs --source (the bundle's directory or URL, e.g. <base>/%s/latest/)" % profile["node"]["datadir"])
+    source = Source(args.source)
+    work = args.work or os.path.join(args.datadir, "bootstrap-work")
+    download = os.path.join(work, "download")
+    os.makedirs(download, exist_ok=True)
+    sums_path = os.path.join(download, "SHA256SUMS")
+    source.fetch("SHA256SUMS", sums_path)
+    signed = source.fetch("SHA256SUMS.minisig", sums_path + ".minisig", optional=True)
+    if signed:
+        verify_signature(sums_path, sums_path + ".minisig", read_key(args.key), args.minisign)
+        log("SHA256SUMS.minisig verifies with the release key")
+    elif args.require_signature:
+        raise BundleError("SHA256SUMS is not signed and --require-signature was given")
+    else:
+        log("SHA256SUMS is not signed: the statements and the node's own check at H_B are the anchors")
+    with open(sums_path, encoding="ascii", errors="replace") as f:
+        sums = parse_state_sums(f.read())
+    path = os.path.join(download, "manifest.json")
+    source.fetch("manifest.json", path)
+    if sha256_file(path)[0] != sums["manifest.json"]:
+        raise BundleError("manifest.json does not match SHA256SUMS")
+    with open(path, encoding="utf-8") as f:
+        m = check_state_manifest(f.read(), profile, sums)
+    first = None
+    for v in m["verifiers"]:
+        name = "statement-%s.json" % v
+        spath = os.path.join(download, name)
+        source.fetch(name, spath)
+        if sha256_file(spath)[0] != sums[name]:
+            raise BundleError("%s does not match SHA256SUMS" % name)
+        with open(spath, encoding="utf-8") as f:
+            raw = f.read()
+        statement = json.loads(raw)
+        if raw != canonical(statement) or not {"network", "height", "blockhash"} <= set(statement) <= set(STATEMENT_FIELDS):
+            raise BundleError("%s is not a canonical statement" % name)
+        if any(m.get(k) != val for k, val in statement.items()):
+            raise BundleError("%s disagrees with the manifest" % name)
+        if first is not None and raw != first:
+            raise BundleError("%s differs from statement-%s.json" % (name, m["verifiers"][0]))
+        first = raw
+    statement = json.loads(first)
+    tar_path = os.path.join(download, m["tarball"])
+    if not (os.path.isfile(tar_path) and sha256_file(tar_path) == (m["sha256"], m["bytes"])):
+        log("fetching %s (%d bytes)" % (m["tarball"], m["bytes"]))
+        source.fetch(m["tarball"], tar_path)
+    if sha256_file(tar_path) != (m["sha256"], m["bytes"]):
+        raise BundleError("%s does not match the manifest's sha256 and size" % m["tarball"])
+    try:
+        files = extract_state(tar_path, m["network"], m["flavour"], args.datadir)
+    except BundleError:
+        shutil.rmtree(netdir, ignore_errors=True)      # it held no chain before: leave nothing half-extracted
+        raise
+    log("extracted %d files of %s (height %d, %s)" % (files, m["tarball"], m["height"], m["flavour"]))
+    record = {"format": STATE_FORMAT, "profile": profile["name"], "source": str(source), "height": m["height"], "blockhash": m["blockhash"],
+              "flavour": m["flavour"], "version": m.get("version"), "verifiers": m["verifiers"], "signed": signed,
+              "sha256sums_sha256": sha256_file(sums_path)[0]}
+    if args.ycashd and args.cli:
+        try:
+            record["check"] = check_state(args, profile, m, statement)
+        except BundleError:
+            shutil.rmtree(netdir, ignore_errors=True)  # a state the node does not confirm is not left behind
+            raise
+    else:
+        log("no --ycashd/--cli: the statements were not checked against a node (start it offline and compare them yourself)")
+    with open(os.path.join(netdir, "bootstrap.json"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    if not args.keep:
+        shutil.rmtree(work)
+    log("done: %s holds the %s state at height %d; start the node normally" % (netdir, profile["name"], m["height"]))
+    return 0
+
+
+def check_state(args, profile, m, statement):
+    """Start the restored node offline; roll back to H_B if it connected blocks above it (FORMAT.md, "Blocks
+    above H_B"), compare every statement field, then reconsider so the datadir keeps no failed-block mark."""
+    height = m["height"]
+    node = Node(args, profile, args.rpcport or free_port())
+    insight = ["-experimentalfeatures", "-insightexplorer", "-txindex"] if m["flavour"] == "full-insight" else []
+    node.start([], False, args.dbcache, insight)
+    try:
+        prev, still, t0 = None, 0, time.time()
+        while still < 3:                                  # until the tip has settled (it connects the blocks above H_B it holds)
+            time.sleep(args.poll)
+            if not node.alive():
+                raise BundleError("ycashd exited (status %s): %s" % (node.process.returncode, node.error_text()))
+            text = node.cli("getblockcount", check=False)
+            if text is None:
+                continue
+            tip = int(text)
+            still = still + 1 if tip == prev else 0
+            prev = tip
+            if time.time() - t0 > args.stall_timeout:
+                raise BundleError("the restored node did not settle within %ds" % args.stall_timeout)
+        if prev < height:
+            raise BundleError("the restored node is at %d, below the bundle's %d" % (prev, height))
+        invalidated = None
+        if prev > height:
+            invalidated = node.cli("getblockhash", height + 1)
+            node.cli("invalidateblock", invalidated)
+            if int(node.cli("getblockcount")) != height:
+                raise BundleError("invalidateblock %s did not bring the tip to %d" % (invalidated, height))
+        mine = state_statement(node, height)
+        mine["network"] = m["network"]
+        bad = {k: (statement[k], mine.get(k)) for k in statement if mine.get(k) != statement[k]}
+        if invalidated:
+            node.cli("reconsiderblock", invalidated)
+        if bad:
+            raise BundleError("the restored node disagrees with the statements at %d: %s" % (height, json.dumps(bad, sort_keys=True)))
+        log("the restored node agrees with the statements at %d (%s); tip %d" % (height, ", ".join(sorted(statement)), prev))
+        return {"tip": prev, "rolled_back_from": prev if invalidated else None, "fields": sorted(statement)}
+    finally:
+        node.stop()
+
+
+# ---------------------------------------------------------------------------------- restore
+
+def has_chain(netdir):
+    return any(os.path.isdir(os.path.join(netdir, d)) and os.listdir(os.path.join(netdir, d)) for d in ("blocks", "chainstate"))
+
+
+def reset(args, netdir):
+    """--reset (T-7): the network's subdirectory removed, its wallet.dat moved aside first."""
+    if not os.path.isdir(netdir):
+        return
+    wallet = os.path.join(netdir, "wallet.dat")
+    if os.path.isfile(wallet):
+        kept = os.path.join(args.datadir, "wallet-before-reset-%s-%d.dat" % (os.path.basename(netdir), int(time.time())))
+        os.replace(wallet, kept)
+        log("--reset: moved wallet.dat to %s (its transactions are on the old chain)" % kept)
+    shutil.rmtree(netdir)
+    log("--reset: removed %s" % netdir)
+
+
+def restore(args, profile):
+    netdir = os.path.join(args.datadir, profile["node"]["datadir"])
+    if args.reset:
+        reset(args, netdir)
+    if has_chain(netdir):
+        raise BundleError("%s already holds a chain: ycash-bootstrap restores into an empty datadir (--reset wipes it first)" % netdir)
+    if args.state:
+        return restore_state(args, profile, netdir)
+    where = profile["prefix"]["url"] if args.source in (None, "prefix") else args.source
+    if not where:
+        sys.exit("ycash-bootstrap: %s has no published prefix: pass --source" % profile["name"])
+    source = Source(where)
+    if not args.frame_only and not (args.ycashd and args.cli):
+        sys.exit("restoring needs --ycashd and --cli (or --frame-only DIR to stop after framing)")
+    work = args.work or os.path.join(args.datadir, "bootstrap-work")
+    os.makedirs(work, exist_ok=True)
+    log("restoring the %s prefix from %s into %s" % (profile["name"], source, netdir))
+    manifest, expect, files, record = verify_bundle(source, profile, work, args)
+    if args.frame_only:
+        os.makedirs(args.frame_only, exist_ok=True)
+        moved = []
+        for f in files:
+            moved.append(os.path.join(args.frame_only, os.path.basename(f)))
+            os.replace(f, moved[-1])
+        print("\n".join("-loadblock=%s" % f for f in moved))
+        return 0
+    node = Node(args, profile, args.rpcport or free_port())
+    record["import"] = import_and_check(node, files, manifest, expect, args, profile)
+    os.makedirs(netdir, exist_ok=True)
+    with open(os.path.join(netdir, "bootstrap.json"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    if not args.keep:
+        shutil.rmtree(work)
+    log("done: %s holds the %s prefix to height %d (%s); start the node normally" % (netdir, profile["name"], manifest["last_height"], record["tip"]))
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__.split("\n", 2)[2], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--network", required=True, help="the network profile: regtest, testnet-yb-fast, testnet-yb-slow or testnet-legacy")
+    ap.add_argument("--datadir", required=True, help="the node's -datadir (the network subdirectory goes inside it)")
+    ap.add_argument("--source", help="bundle location: https:// or file:// URL, or a directory; `prefix` (the default) is the release's pinned prefix")
+    layer = ap.add_mutually_exclusive_group()
+    layer.add_argument("--prefix", action="store_true", help="restore the prefix layer (the default)")
+    layer.add_argument("--state", action="store_true", help="restore a state bundle (ycash-state/1, ycash-infra bundles/state/FORMAT.md) from --source")
+    ap.add_argument("--reset", action="store_true", help="wipe the network's subdirectory first (wallet.dat is moved aside), for a testnet reset")
+    ap.add_argument("--verify-full", action="store_true", help="import with -checkpoints=0: validate every block's scripts")
+    ap.add_argument("--ycashd", default=shutil.which("ycashd"), help="the ycashd to import with (default: ycashd on PATH)")
+    ap.add_argument("--cli", default=shutil.which("ycash-cli"), help="the ycash-cli beside it (default: ycash-cli on PATH)")
+    ap.add_argument("--conf", help="the node's ycash.conf (its RPC credentials and settings are used for the import)")
+    ap.add_argument("--rpcport", type=int, help="the RPC port for the import run (default: a free one)")
+    ap.add_argument("--node-arg", action="append", metavar="ARG", help="an extra ycashd argument for the import, e.g. regtest's -nuparams=...")
+    ap.add_argument("--key", default=DEFAULT_KEY, help="minisign public key file (default keys/ycash-release.pub)")
+    ap.add_argument("--minisign", default="minisign", help="the minisign binary")
+    ap.add_argument("--require-signature", action="store_true", help="refuse an unsigned SHA256SUMS")
+    ap.add_argument("--allow-unpinned", action="store_true", help="accept a SHA256SUMS whose sha256 this release does not pin")
+    ap.add_argument("--work", help="download and framing directory (default DATADIR/bootstrap-work, removed afterwards)")
+    ap.add_argument("--keep", action="store_true", help="keep the work directory")
+    ap.add_argument("--frame-only", metavar="DIR", help="check and frame only: write the -loadblock files to DIR, start no node")
+    ap.add_argument("--dbcache", type=int, default=1024)
+    ap.add_argument("--poll", type=float, default=2.0, help=argparse.SUPPRESS)
+    ap.add_argument("--stall-timeout", type=int, default=1800, help="seconds without a new block before the import fails")
+    ap.add_argument("--done-grace", type=int, default=120, help=argparse.SUPPRESS)
+    ap.add_argument("--pack", metavar="OUT", help="instead: pack heights 0..--last-height of a running private-chain node into a bundle")
+    ap.add_argument("--last-height", type=int, help="with --pack: the bundle's last height")
+    args = ap.parse_args(argv)
+    ybprofile = _profiles_module()
+    try:
+        profile = ybprofile.load(args.network)
+    except ybprofile.ProfileError as e:
+        ap.error(str(e))
+    args.datadir = os.path.abspath(args.datadir)
+    try:
+        if args.pack:
+            if args.last_height is None or args.last_height < 0:
+                ap.error("--pack needs --last-height N")
+            if not args.cli:
+                ap.error("--pack needs --cli")
+            return pack(args, profile)
+        return restore(args, profile)
+    except BundleError as e:
+        print("ycash-bootstrap: refused: %s" % e, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,5 +1,7 @@
 # Scenario 1 — "I want to mint" (the `user` seat, node 0)
 
+<!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
+
 ## Before you start
 
 `yellowback-devnet` is a script in `contrib/yellowback/devnet/`, not a command on your PATH, and
@@ -85,3 +87,11 @@ Half an hour. The value is in the noticing: write against the step.
 yellowback-devnet report                # bundles this file, every log and the personas' tally
 yellowback-devnet down --wipe
 ```
+
+## On a testnet (`up --network <name> --role user`)
+
+| Network | What applies |
+|---|---|
+| testnet-yb-fast | every step with the faucet's YEC instead of node 0's; terms are the fast column's (class A 103-309 blocks), so a mint matures in hours; the price is the attestors' real feed (no `price`), blocks arrive every 75 s (`wait-blocks N`, never `mine`) |
+| testnet-yb-slow | the same with mainnet's windows: a mint's term is months, so redeem-at-maturity is not walkable; mints wait for the set's 16,128-block maturity after its activation |
+| testnet-legacy | none of the YED steps (no Yellowback); the wallet's plain YEC send/receive only |
