@@ -136,7 +136,9 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_info)
 {
     BOOST_CHECK_EQUAL(NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId, VAULT_BRANCH_ID);
     BOOST_CHECK_EQUAL(std::string(NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].strName), "Vault");
-    BOOST_CHECK(Consensus::UPGRADE_VAULT == Consensus::UPGRADE_NU6_2 + 1);   // 6.20.0: after NU6.2
+    // 6.20.0: after NU6.2 and the testnet shadow fork's upgrade (docs/plans/yellowback-testnet-shadow-fork-plan.md)
+    BOOST_CHECK(Consensus::UPGRADE_SHADOW == Consensus::UPGRADE_NU6_2 + 1);
+    BOOST_CHECK(Consensus::UPGRADE_VAULT == Consensus::UPGRADE_SHADOW + 1);
     BOOST_CHECK(Consensus::UPGRADE_ZFUTURE == Consensus::UPGRADE_VAULT + 1);
     BOOST_CHECK(IsConsensusBranchId(VAULT_BRANCH_ID));
     // 6.20.0 keeps Equihash in NetworkUpgradeInfo and walks back to the last override: Vault
