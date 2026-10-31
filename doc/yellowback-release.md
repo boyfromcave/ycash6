@@ -133,7 +133,9 @@ on mainnet yet: they are set by the release that passes the launch gates. The re
 (testnet plan §2.1, §2.2) has three compiled-in profiles (`-testnet -testnetprofile=fast|slow|legacy`,
 Revision 3). testnet-yb-fast has a placeholder height (510,400) and no set: its launch ceremony fixes
 the height and creates the set, and its rc1 names it (until then R7 refuses a tag). testnet-yb-slow
-has neither until its first rc sets both. testnet-legacy never activates Vault.
+has neither until its first rc sets both. testnet-legacy never activates Vault. testnet-yb-slow and
+testnet-legacy are shadow forks of mainnet (`doc/yellowback-testnet-shadow-fork.md`): a tag needs
+their split height H_S (`TESTNET_SHADOW_SPLIT_HEIGHT`) and their own branch IDs (R8).
 
 When setting them in a release:
 - The activation height leaves time for every node to upgrade: a node that has not upgraded by
@@ -143,14 +145,16 @@ When setting them in a release:
 - The attestor set must exist on chain before the release can name it.
 - Set the same Vault parameters on `ycash-dd`. Tag `ycash-dd` `vault-params/v6.22.N` first. Its guard
   (`.github/workflows/yellowback-release-guard.yml`) runs `qa/yellowback-release-heights.sh` and
-  refuses the tag unless the version is 6.22.x and release rules R1–R7 hold: a positive mainnet
+  refuses the tag unless the version is 6.22.x and release rules R1–R8 hold: a positive mainnet
   activation height (R1), a non-zero mainnet attestor set (R2), `UPGRADE_VAULT.nProtocolVersion`
   above 270013 (R3), `PROTOCOL_VERSION` at least that value (R4), `MIN_PEER_PROTO_VERSION` at or
   below 270013 (R5), mainnet `pqFalconHeight` 0 (R6), and, per testnet profile, the height and
-  that network's own attestor set both set or both unset, testnet-legacy never with a height (R7). It also refuses any compared Vault field that differs from ycash6
+  that network's own attestor set both set or both unset, testnet-legacy never with a height (R7),
+  and the shadow forks' split height H_S set, with branch IDs of their own after it, slow's Vault ID
+  not mainnet's (R8). It also refuses any compared Vault field that differs from ycash6
   (`v6.22.N` when that tag already exists, otherwise `upgrade/vault`).
 - Then tag ycash6 `v6.22.N`. This release workflow refuses the tag when
-  `vault-params/v6.22.N` is missing on ycash-dd, when R1–R7 fail, or when any compared Vault
+  `vault-params/v6.22.N` is missing on ycash-dd, when R1–R8 fail, or when any compared Vault
   field differs (`qa/yellowback-release-heights.sh`). A `workflow_dispatch` run only warns, and
   compares with ycash-dd `upgrade/vault`.
 - Protocol version stays deferred (audit W3-P-1 part D). The table is in the upgrade plan's P8
@@ -162,8 +166,13 @@ When setting them in a release:
 |---|---|---|---|
 | main | unset | unset | not yet: the release that passes the launch gates |
 | test, profile fast | 510,400 (placeholder, N1) | unset (`TestFastParams`) | its launch ceremony; its rc1 names the set |
-| test, profile slow | unset | unset (`TestParams`) | its first rc, about a week of blocks after launch (T-15) |
+| test, profile slow | unset (branch ID `0xe1f1cc08`, its own) | unset (`TestParams`) | its first rc, about a week of blocks after the split (T-15) |
 | test, profile legacy | never | none | never: the control network, YED off |
+
+| Shadow fork (slow, legacy) | Value | Set in |
+|---|---|---|
+| H_S, `TESTNET_SHADOW_SPLIT_HEIGHT` (`src/chainparams.cpp`) | unset | the release that launches them, from the mainnet history harvest (`mainnet-prefix-v1`) |
+| `UPGRADE_SHADOW` branch ID | slow `0x57a24d5d`, legacy `0x35706728` | fixed (`src/consensus/upgrades.h`) |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
 - **S-0 and V-1's APP clause are retroactive on private chains.** They apply from the activation
