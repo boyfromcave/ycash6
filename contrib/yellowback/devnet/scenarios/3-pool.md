@@ -1,5 +1,7 @@
 # Scenario 3 — "I am a mining pool" (the `pool` seat, node 4)
 
+<!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
+
 ## Before you start
 
 `yellowback-devnet` is a script in `contrib/yellowback/devnet/`, not a command on your PATH, and
@@ -136,3 +138,10 @@ the simulated population and the liquidator.
 yellowback-devnet report
 yellowback-devnet down --wipe
 ```
+
+## On a testnet (`up --network <name> --role pool --stratum`)
+
+| Network | What applies |
+|---|---|
+| testnet-yb-fast, testnet-yb-slow | yolo beside your node and a real Equihash 192,7 miner (stratum-miner's Python solver is regtest's 48,5 only); the quote tag needs `-yellowbackpayoutaddress` once the network's release names its attestor set |
+| testnet-legacy | yolo and a miner; no tag (no Yellowback) |

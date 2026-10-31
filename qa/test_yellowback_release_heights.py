@@ -31,15 +31,19 @@ const Params& MainParams()
 }
 const Params& TestParams()
 {
-    static Params p = [] { Params t; return t; }();
+    static Params p = [] { Params t;%s return t; }();
     return p;
 }
 const Params& TestFastParams()
 {
-    static Params p = [] { Params f; return f; }();
+    static Params p = [] { Params f;%s return f; }();
     return p;
 }
 """
+
+
+def set_id(var, att):
+    return "" if att is None else ' %s.attestorSetId = uint256S("%s");' % (var, att)
 VERSION_H = "static const int PROTOCOL_VERSION = 270200;\nstatic const int MIN_PEER_PROTO_VERSION = 170002;\n"
 
 
@@ -68,9 +72,9 @@ UPGRADES_CPP = """    { .nBranchId = SLOW_SHADOW_BRANCH_ID, .strName = "Shadow",
 """
 
 
-def testnet(fast=NO, proto=270200, split="3100000"):
+def testnet(fast=NO, proto=270200, slow=NO, split="3100000"):
     """CTestNetParams and testnet-yb-fast (testnet plan Revision 3); the shadow-fork base on mainnet and
-    testnet-yb-slow and testnet-legacy (the shadow-fork plan), Vault unset, split height `split`."""
+    testnet-yb-slow and testnet-legacy (the shadow-fork plan), legacy's Vault unset, split height `split`."""
     out = """static const int TESTNET_SHADOW_SPLIT_HEIGHT = %s;
 class CTestNetParams : public CChainParams {
 protected:
@@ -92,11 +96,11 @@ protected:
     }
 };
 """ % (split, proto, fast)
-    for cls, extra in (("CTestNetSlowParams",
-                        "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;\n"
-                        "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;\n"),
-                       ("CTestNetLegacyParams",
-                        "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = LEGACY_SHADOW_BRANCH_ID;\n")):
+    for cls, height, extra in (("CTestNetSlowParams", slow,
+                                "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;\n"
+                                "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;\n"),
+                               ("CTestNetLegacyParams", NO,
+                                "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = LEGACY_SHADOW_BRANCH_ID;\n")):
         out += """class %s : public CTestNetShadowParams {
 public:
     %s() {
@@ -104,21 +108,22 @@ public:
             %s;
 %s    }
 };
-""" % (cls, cls, NO, extra)
+""" % (cls, cls, height, extra)
     return out
 
 
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
                test_height=NO, reg_extra="        consensus.nVaultMinSetMaturity = 2;\n",
-               att=ATT, params_h=PARAMS_H, split="3100000"):
-    chain = (klass("CMainParams", main_height, main_extra)
-             + testnet(test_height, split=split)
-             + klass("CRegTestParams", NO, reg_extra))
+               att=ATT, params_h=PARAMS_H, slow_height=NO, fast_att=None, slow_att=None, proto=270200,
+               version_h=VERSION_H, split="3100000"):
+    chain = (klass("CMainParams", main_height, main_extra, proto)
+             + testnet(test_height, proto, slow_height, split)
+             + klass("CRegTestParams", NO, reg_extra, proto))
     files = {
         "src/chainparams.cpp": chain,
         "src/consensus/params.h": params_h,
-        "src/version.h": VERSION_H,
-        "src/yellowback/params.cpp": PARAMS_CPP % att,
+        "src/version.h": version_h,
+        "src/yellowback/params.cpp": PARAMS_CPP % (att, set_id("t", slow_att), set_id("f", fast_att)),
         "src/consensus/upgrades.h": UPGRADES_H,
         "src/consensus/upgrades.cpp": UPGRADES_CPP,
     }
@@ -191,6 +196,16 @@ class ReleaseHeights(unittest.TestCase):
         warn, warned = run(["--warn", "--root", root])
         self.assertEqual(warn, 0, warned)
 
+    def test_shadow_split_height_by_stage(self):
+        # WP-1 with the stages (testnet plan §5.1): H_S is an rc and final rule; a beta ships without it.
+        root = self.rc_tree("rc-nosplit", split=NO)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R8: testnet-yb-slow shadow fork not ready", out)
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta1"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release stage: beta", out)
+
     def test_unset_attestor_set_is_still_refused(self):
         root = os.path.join(self.tmp, "noset")
         write_tree(root, att="0" * 64)
@@ -224,14 +239,101 @@ class ReleaseHeights(unittest.TestCase):
         other = os.path.join(self.tmp, "same.json")
         with open(other, "w", encoding="utf-8") as fh:
             fh.write(ext.stdout)
-        code, out = run(["--root", root, "--other-json", other, "--release-version", "6.22.1-rc1"])
+        code, out = run(["--root", root, "--other-json", other, "--release-version", "6.22.1"])
         self.assertEqual(code, 0, out)
         self.assertIn("release heights: ok", out)
 
     def test_off_line_version_is_refused_even_when_warning(self):
-        code, out = run(["--warn", "--release-version", "6.21.4"])
+        code, out = run(["--warn", "--release-version", "6.21.4-rc1"])
         self.assertEqual(code, 1, out)
         self.assertIn("not 6.22.x", out)
+
+    def rc_tree(self, name, **kw):
+        """An rc-shaped tree: mainnet unset, testnet-yb-fast launched and named, the Vault-era protocol."""
+        root = os.path.join(self.tmp, name)
+        args = dict(main_height=NO, att="0" * 64, test_height="510400", fast_att=ATT)
+        args.update(kw)
+        write_tree(root, **args)
+        return root
+
+    def test_rc_tag_needs_no_mainnet_height_or_set(self):
+        # Testnet plan §5.1 (T-8): an rc carries the testnet's height and set, mainnet's stay unset.
+        root = self.rc_tree("rc")
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release stage: rc", out)
+        self.assertIn("release heights: ok", out)
+        # The same tree is not a final release: R1 and R2 refuse it.
+        code, out = run(["--root", root, "--release-version", "6.22.0"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R1:", out)
+        self.assertIn("problem: R2:", out)
+        # No version and no stage is the strictest reading (final).
+        code, out = run(["--root", root])
+        self.assertEqual(code, 1, out)
+        self.assertIn("release stage: final", out)
+
+    def test_rc_tag_needs_the_fast_set(self):
+        root = self.rc_tree("rc-noset", fast_att=None)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R7 (rc): testnet-yb-fast needs its activation height and testfast_attestor_set_id", out)
+
+    def test_rc_tag_with_slow_activation_pending(self):
+        # T-15: testnet-yb-slow's first rc sets its height; its set is created after the activation.
+        root = self.rc_tree("rc-slow", slow_height="520000")
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc2"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("testnet-yb-slow: UPGRADE_VAULT height 520000", out)
+        # A set named for slow before it has a height is refused.
+        root = self.rc_tree("rc-slow-set", slow_att="cd" * 32)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc2"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R7 (rc): testnet-yb-slow names test_attestor_set_id without an activation height", out)
+
+    def test_rc_tag_needs_the_protocol_bump(self):
+        old = VERSION_H.replace("270200", "270013")
+        root = self.rc_tree("rc-proto", proto=270013, version_h=old)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R3:", out)
+
+    def test_rc_tag_with_only_one_of_mainnet_height_and_set(self):
+        root = self.rc_tree("rc-main", main_height="3300000")
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc3"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R1/R2 (rc):", out)
+        root = self.rc_tree("rc-main-both", main_height="3300000", att=ATT)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc3"])
+        self.assertEqual(code, 0, out)
+
+    def test_beta_tag_needs_no_heights_sets_or_protocol(self):
+        old = VERSION_H.replace("270200", "270013")
+        root = os.path.join(self.tmp, "beta")
+        write_tree(root, main_height=NO, att="0" * 64, test_height="510400", proto=270013, version_h=old)
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta2"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release stage: beta", out)
+        # The maturity and parity still hold on a beta.
+        write_tree(root, main_height=NO, att="0" * 64,
+                   main_extra="        consensus.pqFalconHeight = 0;\n        consensus.nVaultMinSetMaturity = 0;\n")
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta2"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: the mainnet nVaultMinSetMaturity is unset", out)
+
+    def test_version_and_stage_must_agree(self):
+        root = self.rc_tree("agree")
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1", "--stage", "final"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("is a rc", out)
+        code, out = run(["--root", root, "--stage", "rc"])
+        self.assertEqual(code, 0, out)
+        for bad in ("6.22.0-rc0", "6.22", "v6.22.0-rc1", "6.22.0-RC1", "6.22.0-rc1-x"):
+            code, out = run(["--warn", "--root", root, "--release-version", bad])
+            self.assertEqual(code, 1, bad + ": " + out)
+            self.assertIn("refusing to release", out)
+        code, out = run(["--root", root, "--stage", "gamma"])
+        self.assertEqual(code, 1, out)
 
     def test_current_tree_warns_and_strict_follows_the_height(self):
         warn, warned = run(["--warn"])

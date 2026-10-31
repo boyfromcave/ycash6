@@ -206,3 +206,6 @@ fc46118128a3518b02a788da984dc156c309aef6:doc/payment-disclosure.md:generic-api-k
 
 # Upstream zcashd history (2018): a GitHub API token of an ECC account, committed publicly to zcash/zcash by its owner with a note that it "does not have any privileges", and removed upstream since. Not a Ycash credential; nothing here to rotate.
 49f94dbe3d740db4afdf08f971ed5fc9e962eee3:qa/zcash/updatecheck.py:generic-api-key:38
+
+# contrib/yellowback/devnet/testnet_join.py (N2 join mode): the line builds ycash.conf text from a format string, "rpcpassword=%s" % password beside "rpcbind=127.0.0.1"; the password is random per devnet at run time, nothing is committed. Reshaped in the next commit.
+48cf2bfca1c77f3d14fbfdef3434665a7acb712c:contrib/yellowback/devnet/testnet_join.py:generic-api-key:99

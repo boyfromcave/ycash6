@@ -1,3 +1,7 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
 # Every path here is the same on both node lines (workspace rule: two node lines, one overlay;
 # audit W3-P-2). identical = byte-identical file; tree = every git-tracked file under the
 # directory, same path set, byte-identical unless listed as shim; shim = may differ, pinned by
@@ -47,6 +51,14 @@ identical qa/rpc-tests/vault_activation_restart.py
 identical qa/rpc-tests/stopatheight.py
 identical src/test/testnet_params_tests.cpp
 identical doc/yellowback-testnet-shadow-fork.md
+identical qa/rpc-tests/ycash_bootstrap.py
+identical qa/rpc-tests/testnet_ceremony.py
+identical contrib/yellowback/devnet/testnet_join.py
+identical contrib/yellowback/devnet/test_testnet_join.py
+identical contrib/docker/ycashd/test_entrypoint.py
+tree contrib/bootstrap
+tree contrib/testnet
+tree contrib/yellowback/profiles
 tree src/crypto/pq
 tree src/vault
 tree src/yellowback

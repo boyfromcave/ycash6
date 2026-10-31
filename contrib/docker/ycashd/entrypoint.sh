@@ -68,6 +68,28 @@ else
     true
   } > "$CONF"
 fi
+# Bootstrap (testnet plan §4.4): YCASHD_BOOTSTRAP restores a checkpoint bundle into an empty datadir
+# before the first start: "prefix" (the network's published prefix, pinned in the release) or a bundle
+# URL or directory. ycash-bootstrap checks SHA256SUMS against the release's pin and its minisign
+# signature when there is one, frames the blocks with the network's magic and imports them with an
+# isolated ycashd (-connect=0 -listen=0, no wallet), then stops it. A datadir that already holds the
+# network's blocks is left alone, so a restart never imports twice.
+if [ -n "${YCASHD_BOOTSTRAP:-}" ]; then
+  case "${YCASHD_NETWORK:-mainnet}/${YCASHD_TESTNET_PROFILE:-}" in
+    testnet/fast) BNET=testnet-yb-fast ;;
+    testnet/slow) BNET=testnet-yb-slow ;;
+    testnet/legacy) BNET=testnet-legacy ;;
+    regtest/*) BNET=regtest ;;
+    *) echo "YCASHD_BOOTSTRAP: no bundle for YCASHD_NETWORK=${YCASHD_NETWORK:-mainnet} (testnet with a YCASHD_TESTNET_PROFILE, or regtest)" >&2; exit 2 ;;
+  esac
+  if [ -n "$(ls -A "$DATADIR/$BNET/blocks" 2>/dev/null)" ]; then
+    echo "YCASHD_BOOTSTRAP: $DATADIR/$BNET already holds blocks; starting without a restore"
+  else
+    # shellcheck disable=SC2086
+    ycash-bootstrap --network "$BNET" --datadir "$DATADIR" --conf "$CONF" --source "$YCASHD_BOOTSTRAP" \
+      --ycashd "$(command -v ycashd)" --cli "$(command -v ycash-cli)" ${YCASHD_BOOTSTRAP_ARGS:-} || { echo "YCASHD_BOOTSTRAP: the restore failed; the node is not started" >&2; exit 1; }
+  fi
+fi
 # Seed-only wallet restore: -mnemonicfile reads the secret from a file the operator MOUNTS (a Docker or
 # Kubernetes secret, e.g. /run/secrets/ycash-mnemonic). The image never contains one, and the path, not
 # the secret, is passed on the command line; it is never written into ycash.conf.

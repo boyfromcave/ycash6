@@ -57,8 +57,10 @@ GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'errorstimestamp', 'b
                     # the build's own identity, not the chain's: 'build' and 'subversion' carry the
                     # git describe string, 'version' the release number from configure.ac -- the
                     # fork is a 6.21.x/6.22.x release, the ycash6-stock reference is 6.20.0 (6200050).
+                    # 'protocolversion' is the build's too: 6.22 speaks the Vault-era 270200 (testnet
+                    # plan T-8), the stock reference 270013; peers below Vault are still accepted.
                     # Every other getinfo field, the key set included, must agree.
-                    'build', 'subversion', 'version'}
+                    'build', 'subversion', 'version', 'protocolversion'}
 
 LEGACY, FORK = 0, 1
 

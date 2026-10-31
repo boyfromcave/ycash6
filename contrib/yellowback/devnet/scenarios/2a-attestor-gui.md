@@ -1,5 +1,7 @@
 # Scenario 2a — "I am an attestor": the bonding ceremony (GUI, the `attestor` seat, node 8)
 
+<!-- Copyright (c) 2026 The Ycash developers. Distributed under the MIT software license. -->
+
 ## Before you start
 
 `yellowback-devnet` is a script in `contrib/yellowback/devnet/`, not a command on your PATH, and
@@ -57,3 +59,11 @@ hostile in the other is not one an operator will accept.
    - notes:
 
 Continue with 2b — close the GUI first.
+
+## On a testnet (`up --network <name> --role attestor`)
+
+| Network | What applies |
+|---|---|
+| testnet-yb-fast | the registration with a bond at `bondMinZat` (10,000 YEC while no collateral exists) from the faucet; maturity 48 blocks (about an hour) |
+| testnet-yb-slow | the same; maturity 16,128 blocks (two weeks), so ELIGIBLE is read days later |
+| testnet-legacy | not applicable: no Yellowback (`up` refuses the attestor seat) |

@@ -100,3 +100,30 @@ impl consensus::Parameters for Network {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use zcash_protocol::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
+
+    use super::network;
+
+    #[test]
+    fn testnet_uses_the_node_heights() {
+        // testnet-yb-fast's heights, not the old Ycash testnet's that TestNetwork hardcodes
+        // (Canopy 661,634, no Vault).
+        let net = network(
+            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400,
+        )
+        .unwrap();
+        assert_eq!(net.network_type(), NetworkType::Test);
+        assert_eq!(
+            net.activation_height(NetworkUpgrade::Canopy),
+            Some(BlockHeight::from_u32(510_254))
+        );
+        assert_eq!(
+            net.activation_height(NetworkUpgrade::Vault),
+            Some(BlockHeight::from_u32(510_400))
+        );
+        assert_eq!(net.activation_height(NetworkUpgrade::Nu5), None);
+    }
+}

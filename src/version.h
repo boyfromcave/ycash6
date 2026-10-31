@@ -1,5 +1,6 @@
 // Copyright (c) 2012-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -10,12 +11,14 @@
  * network protocol versioning
  */
 
-//! 270013 = the Canopy-era protocol version, the latest network upgrade
-//! active on Ycash (NU5+ are NO_ACTIVATION_HEIGHT). Per the Zcash convention
-//! PROTOCOL_VERSION reflects the era of the currently-active upgrade; on
-//! Ycash that is Canopy. Matches ycashd v4.5.0 and Yolk v4.3.1 on the live
-//! network.
-static const int PROTOCOL_VERSION = 270013;
+//! 270200 = the Vault-era protocol version (UPGRADE_VAULT.nProtocolVersion on
+//! every network, the same on ycash-dd), taken with 6.22.0-rc1 (testnet plan
+//! T-8; upgrade plan P8 part D). It is above every latent upgrade's version
+//! (NU5 270014/270015, NU6.x 2701xx, all NO_ACTIVATION_HEIGHT), so it collides
+//! with none. Before Vault activates it gates nobody: peers are held to
+//! MIN_PEER_PROTO_VERSION (the Canopy-era 270013 of ycashd v4.5.0 and Yolk).
+//! Once Vault is the current epoch, a peer below 270200 is disconnected.
+static const int PROTOCOL_VERSION = 270200;
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;

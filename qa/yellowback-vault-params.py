@@ -6,7 +6,8 @@
 """Extract and compare the Vault chain parameters of the two Yellowback node lines.
 
   yellowback-vault-params.py extract [--root DIR | --git-ref REF [--git-dir DIR]]
-  yellowback-vault-params.py compare A.json B.json [--release main]
+  yellowback-vault-params.py compare A.json B.json [--release main [--stage beta|rc|final]]
+  yellowback-vault-params.py stage VERSION
 
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
 W3-P-1). The extractor reads every parameter from the constructor body of each network class (never
@@ -19,8 +20,13 @@ subclass of CMainParams, read as the three constructor bodies in construction or
 assigns a parameter at most once and a later body overrides an earlier one (C++ constructor order:
 mainnet's values, then the testnet's). Their split height H_S (TESTNET_SHADOW_SPLIT_HEIGHT) and every
 network's Vault and shadow branch IDs (NetworkUpgradeInfo, or a network's own nBranchId) are read too.
-`compare --release main` applies release rules R1-R8 to A (the tag guard). Part D, raising
-PROTOCOL_VERSION, is deferred; R3-R5 still refuse a tag until that bump. This file is
+`compare --release main` applies the release rules to A (the tag guard) for the stage the tag names
+(testnet plan §5.1, T-8): a beta needs only the invariants (testnet-legacy never activates Vault;
+slow and legacy have branch IDs of their own); an rc needs R3-R6, the testnet's R7 (fast named, slow
+pending or named, legacy never) and R8 (H_S set), and mainnet's height and set only together if the
+owner sets them; a final release needs R1-R8. Part D, raising PROTOCOL_VERSION, is taken with rc1
+(T-8): UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION
+stays at or below the live floor. `stage VERSION` prints the stage of a release version. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
 """
 import argparse
@@ -45,11 +51,17 @@ YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
 VERSION_CONSTANTS = ("PROTOCOL_VERSION", "MIN_PEER_PROTO_VERSION", "MIN_TESTNET_PEER_PROTO_VERSION")
 # MIN_PEER_PROTO_VERSION differs between the lines today (audit W3-P-1, part D): reported, not compared.
 VERSION_COMPARED = ("PROTOCOL_VERSION",)
-# Live peer floor (version.h PROTOCOL_VERSION on both lines). R3 requires the Vault epoch above it.
-# Cited by audit W3-P-1. Do not bump PROTOCOL_VERSION here; P8 does, and the tag guard enforces it.
+# Live peer floor: the protocol version every Ycash node on the network speaks today (Canopy era,
+# ycashd v4.5.0 and Yolk). R3 requires the Vault epoch above it, R5 keeps MIN_PEER_PROTO_VERSION at or
+# below it. Cited by audit W3-P-1. A constant of the live network, not of this tree: it does not move
+# when this tree raises PROTOCOL_VERSION (testnet plan T-8, taken with rc1).
 LIVE_NETWORK_PROTOCOL_VERSION = 270013
 # R6. A release that deliberately names another height changes this constant in the same change.
 EXPECTED_PQ_FALCON_HEIGHT = 0
+# Release stages (testnet plan §5.1): the tag's suffix names one. configure.ac renders BUILD < 25 as
+# -beta<N>, 25..49 as -rc<N>, 50 as the release and above 50 as -<N> (a later build of a release).
+STAGES = ("beta", "rc", "final")
+RELEASE_VERSION = re.compile(r"^(?P<line>\d+\.\d+)\.\d+(?:-(?P<pre>beta|rc)[1-9]\d*|-[1-9]\d*)?$")
 
 
 class ParseError(Exception):
@@ -228,16 +240,67 @@ def _attestor_set(value):
     return isinstance(value, str) and bool(value) and not set(value) <= set("0")
 
 
-def release_problems(doc):
-    """R1-R8 for a tag of this tree (audit W3-P-1 part C). A parse failure never reaches here."""
+def stage_of(version):
+    """(line, stage) of a release version such as 6.22.0-rc1, or None when it is not one."""
+    m = RELEASE_VERSION.match(version or "")
+    if not m:
+        return None
+    return m.group("line"), m.group("pre") or "final"
+
+
+def shadow_id_problems(main, test):
+    """R8's branch-ID half (docs/plans/yellowback-testnet-shadow-fork-plan.md), an invariant at every
+    stage: slow and legacy sign after H_S under branch IDs of their own, distinct from each other and
+    from mainnet's, slow's Vault included."""
+    problems = []
+    main_vault = main.get("vault_branch_id")
+    shadow_ids = {}
+    for profile in SHADOW_PROFILES:
+        sid = test.get(profile, {}).get("shadow_branch_id")
+        if not isinstance(sid, str) or sid == main_vault:
+            problems.append("R8: %s must sign after H_S under a branch ID of its own" % PROFILE_NAMES[profile])
+        shadow_ids[profile] = sid
+    if shadow_ids.get("slow") is not None and shadow_ids.get("slow") == shadow_ids.get("legacy"):
+        problems.append("R8: testnet-yb-slow and testnet-legacy must not share a shadow branch ID")
+    slow_vault = test.get("slow", {}).get("vault_branch_id")
+    if not isinstance(slow_vault, str) or slow_vault == main_vault or slow_vault in shadow_ids.values():
+        problems.append("R8: testnet-yb-slow must activate Vault under a branch ID of its own, not mainnet's")
+    return problems
+
+
+def release_problems(doc, stage="final"):
+    """The release rules for a tag of this tree at STAGE (audit W3-P-1 part C; testnet plan §5.1).
+
+    beta   only the invariants: testnet-legacy never activates Vault, and testnet-yb-slow and
+           testnet-legacy have branch IDs of their own (R8's ID half; parity, maturity and the
+           version line are the caller's).
+    rc     R3-R6; R7 for the testnet: testnet-yb-fast has its height and its set, testnet-yb-slow
+           names a set only with a height (a height alone is its pending activation, T-15),
+           testnet-legacy never; mainnet's height and set stay unset unless the owner sets both;
+           R8: the shadow-fork split height H_S is set.
+    final  R1-R8: mainnet's height and set, per testnet profile both or neither, and H_S.
+    A parse failure never reaches here."""
+    if stage not in STAGES:
+        raise ValueError("unknown release stage %r" % (stage,))
     problems = []
     main = doc.get("main", {})
     version = doc.get("version", {})
     yb = doc.get("yellowback_params", {})
-    if not _height_set(main.get("vault_activation_height")):
-        problems.append("R1: the mainnet UPGRADE_VAULT activation height is unset")
-    if not _attestor_set(yb.get("main_attestor_set_id")):
-        problems.append("R2: the mainnet YED attestor set (MainParams attestorSetId) is unset")
+    main_height = _height_set(main.get("vault_activation_height"))
+    main_att = _attestor_set(yb.get("main_attestor_set_id"))
+    if stage == "final":
+        if not main_height:
+            problems.append("R1: the mainnet UPGRADE_VAULT activation height is unset")
+        if not main_att:
+            problems.append("R2: the mainnet YED attestor set (MainParams attestorSetId) is unset")
+    elif stage == "rc" and main_height != main_att:
+        problems.append("R1/R2 (rc): the mainnet UPGRADE_VAULT activation height and attestor set must both be set or both be unset")
+    test = doc.get("test", {})
+    if test.get("legacy", {}).get("vault_activation_height") != "NO_ACTIVATION_HEIGHT":
+        problems.append("R7: testnet-legacy must never set an UPGRADE_VAULT activation height")
+    problems.extend(shadow_id_problems(main, test))
+    if stage == "beta":
+        return problems
     vault_v = main.get("vault_protocol_version")
     if not isinstance(vault_v, int) or isinstance(vault_v, bool) or vault_v <= LIVE_NETWORK_PROTOCOL_VERSION:
         problems.append("R3: main.vault_protocol_version must be greater than %d" % LIVE_NETWORK_PROTOCOL_VERSION)
@@ -254,34 +317,21 @@ def release_problems(doc):
         else:
             problems.append("R6: main.pq_falcon_height must be %s (got %r)" % (EXPECTED_PQ_FALCON_HEIGHT, falcon))
     # R7 per testnet profile (testnet plan Revision 3): a Vault height comes with that network's YED set.
-    test = doc.get("test", {})
     for profile, key in (("fast", "testfast_attestor_set_id"), ("slow", "test_attestor_set_id")):
         test_height = _height_set(test.get(profile, {}).get("vault_activation_height"))
         test_att = _attestor_set(yb.get(key))
-        if test_height != test_att:
+        if stage == "final" and test_height != test_att:
             problems.append("R7: testnet-yb-%s activation height and %s must both be set or both be unset" % (profile, key))
-    if test.get("legacy", {}).get("vault_activation_height") != "NO_ACTIVATION_HEIGHT":
-        problems.append("R7: testnet-legacy must never set an UPGRADE_VAULT activation height")
-    # R8 (docs/plans/yellowback-testnet-shadow-fork-plan.md): slow and legacy are shadow forks of mainnet.
-    # A tag ships them only with their split height H_S set, and only under branch IDs of their own after
-    # it: distinct from each other and from mainnet's, slow's Vault included.
-    main_vault = main.get("vault_branch_id")
-    shadow_ids = {}
+        elif stage == "rc" and profile == "fast" and not (test_height and test_att):
+            problems.append("R7 (rc): testnet-yb-fast needs its activation height and %s (its launch ceremony names the set)" % key)
+        elif stage == "rc" and profile == "slow" and test_att and not test_height:
+            problems.append("R7 (rc): testnet-yb-slow names %s without an activation height" % key)
+    # R8 (rc and final; docs/plans/yellowback-testnet-shadow-fork-plan.md): slow and legacy ship only
+    # with their split height H_S set. Their own branch IDs are checked above, at every stage.
     for profile in SHADOW_PROFILES:
-        net = test.get(profile, {})
-        label = PROFILE_NAMES[profile]
-        if not _height_set(net.get("shadow_split_height")):
+        if not _height_set(test.get(profile, {}).get("shadow_split_height")):
             problems.append("R8: %s shadow fork not ready: the split height H_S (%s) is unset"
-                            % (label, SHADOW_SPLIT_CONSTANT))
-        sid = net.get("shadow_branch_id")
-        if not isinstance(sid, str) or sid in (main_vault, None):
-            problems.append("R8: %s must sign after H_S under a branch ID of its own" % label)
-        shadow_ids[profile] = sid
-    if shadow_ids.get("slow") is not None and shadow_ids.get("slow") == shadow_ids.get("legacy"):
-        problems.append("R8: testnet-yb-slow and testnet-legacy must not share a shadow branch ID")
-    slow_vault = test.get("slow", {}).get("vault_branch_id")
-    if not isinstance(slow_vault, str) or slow_vault == main_vault or slow_vault in shadow_ids.values():
-        problems.append("R8: testnet-yb-slow must activate Vault under a branch ID of its own, not mainnet's")
+                            % (PROFILE_NAMES[profile], SHADOW_SPLIT_CONSTANT))
     return problems
 
 
@@ -307,7 +357,19 @@ def main(argv):
     cp.add_argument("a")
     cp.add_argument("b")
     cp.add_argument("--release", choices=("main",), default=None)
+    cp.add_argument("--stage", choices=STAGES, default="final", help="the release stage --release applies (default final)")
+    st = sub.add_parser("stage")
+    st.add_argument("version")
     args = ap.parse_args(argv)
+
+    if args.cmd == "stage":
+        found = stage_of(args.version)
+        if found is None:
+            print("yellowback-vault-params: %r is not a release version (6.22.N, 6.22.N-rcM, 6.22.N-betaM)" % args.version,
+                  file=sys.stderr)
+            return 1
+        print("%s %s" % found)
+        return 0
 
     if args.cmd == "extract":
         if args.git_ref:
@@ -332,7 +394,7 @@ def main(argv):
         loaded_a, loaded_b = json.load(fa), json.load(fb)
     bad = compare(loaded_a, loaded_b)
     if args.release == "main":
-        bad.extend(release_problems(loaded_a))
+        bad.extend(release_problems(loaded_a, args.stage))
     for line in bad:
         print("DIFFERENT %s" % line)
     if bad:

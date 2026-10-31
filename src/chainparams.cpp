@@ -149,8 +149,9 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
-        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        // version is the Vault-era PROTOCOL_VERSION, taken with rc1 (testnet plan T-8): once Vault is
+        // the current epoch it disconnects peers below it; MIN_PEER_PROTO_VERSION stays at 270013.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270200;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
@@ -468,8 +469,8 @@ protected:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         // Vault (plan §15.1): its height and the set maturity are per profile (the subclasses below). The
-        // protocol version is today's PROTOCOL_VERSION, so it gates no peer until the release bump (N4).
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        // protocol version is the Vault-era PROTOCOL_VERSION on every profile (testnet plan T-8, N4).
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270200;
         // Falcon (OP_CHECKPQSIG scheme 0x02, FN-DSA-512) from day one (quantum plan D-Q-2, owner
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.
@@ -868,8 +869,8 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nProtocolVersion = 270150;
         consensus.vUpgrades[Consensus::UPGRADE_NU6_2].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
-        // Vault (plan §15.1): set by -nuparams=6d5b7a31:<height>.
-        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        // Vault (plan §15.1): set by -nuparams=6d5b7a31:<height>. Protocol version as main (T-8).
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270200;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet and testnet-yb-slow 16,128, testnet-yb-fast 48)

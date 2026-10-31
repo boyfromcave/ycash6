@@ -346,7 +346,13 @@ BOOST_AUTO_TEST_CASE(testnet_yed_columns)
     BOOST_CHECK_EQUAL(fast.attestorSeats, main.attestorSeats);
     BOOST_CHECK_EQUAL(fast.nReg, main.nReg);
     BOOST_CHECK_EQUAL(fast.payeeWindow, main.payeeWindow);
-    BOOST_CHECK_EQUAL(fast.bondMinFloorZat, main.bondMinFloorZat);
+    // The bond amounts are the one non-window difference (owner 2026-10-29): fast bonds at a thousandth of
+    // mainnet's so its house seats can bond soon after the fork; slow keeps mainnet's.
+    BOOST_CHECK_EQUAL(fast.bondMinFloorZat, main.bondMinFloorZat / 1000);
+    BOOST_CHECK_EQUAL(fast.bondMinCapZat, main.bondMinCapZat / 1000);
+    BOOST_CHECK_EQUAL(fast.bondShareBps, main.bondShareBps);
+    BOOST_CHECK_EQUAL(yellowback::TestParams().bondMinFloorZat, main.bondMinFloorZat);
+    BOOST_CHECK_EQUAL(yellowback::TestParams().bondMinCapZat, main.bondMinCapZat);
     BOOST_CHECK_EQUAL(fast.feeFloorCents, main.feeFloorCents);
     BOOST_CHECK_EQUAL(fast.maxMint, main.maxMint);
     BOOST_CHECK_EQUAL(fast.mintRequiresArmed, main.mintRequiresArmed);
