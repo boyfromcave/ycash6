@@ -151,6 +151,8 @@ YOLO = _yolo_binary()
 ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
 ATTEST_LOCK_BLOCKS = 0        # regtest bondMinLock (0 since the bond exit delay: the lock is exit + maturity in the vault state)
 ATTEST_FUND_YEC = 11          # the bond plus room for the fee
+ATTEST_SPARE_YEC = 1          # a second coin, sent after the bond: yed_buildcancel funds a cancel and its co-signature
+                              # carrier from two separate confirmed coins (the cancel's fee input is locked first)
 ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
 # P4-b: the attestor registry is the YED attestor set (a vault primitive signer set): its livenesswindow is the
 # attestors' member dormancy, so every agent sends a SET_HEARTBEAT well inside it (signing is not an act, U-19).
@@ -652,6 +654,13 @@ def arm_attestors(state, nodes, price, steps=6):
         result = nodes[node].yed_registerattestor(ATTEST_BOND_YEC, ATTEST_LOCK_BLOCKS)
         pubkeys[node] = result["attestorPubKey"]
         print("      node%d registered: txid %s, bond %s" % (node, result["txid"][:16], result["bondAddress"]))
+    # The registration spent the funding coin, leaving one change coin. A cancel (yed_buildcancel, the agent's cancel
+    # automation and the walk's cancel step alike) needs two: the sign-once build locks the cancel's own fee input,
+    # then the co-signature carrier selects from the coins left. Without this the second coin is whichever attestor
+    # fee a mint happened to pay this node (a hash of the reference block picks the payee), so a run could leave the
+    # canceller with one coin: "insufficient-yec: need 0.00011, have 0.00 confirmed and unlocked".
+    for node in attestors:
+        nodes[USER].sendtoaddress(nodes[node].getnewaddress(), ATTEST_SPARE_YEC)
     sync_mempools(nodes)
     pool_mine(1, "registrations confirmed")
     pool_mine(BOND_MATURITY, "bonds matured (BOND_MATURITY=%d)" % BOND_MATURITY)
