@@ -1188,7 +1188,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
 
     if (params.size() > 4 && !params[4].isNull()) {
         consensusBranchId = ParseHexToUInt32(params[4].get_str());
-        if (!IsConsensusBranchId(consensusBranchId)) {
+        if (!IsConsensusBranchId(consensusBranchId, Params().GetConsensus())) {
             throw runtime_error(params[4].get_str() + " is not a valid consensus branch id");
         }
     }

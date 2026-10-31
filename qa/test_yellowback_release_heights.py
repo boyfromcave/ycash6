@@ -63,39 +63,69 @@ static %s %s;
 """ % (cls, cls, proto, height, extra, cls, cls.lower())
 
 
-def testnet(fast=NO, proto=270200, slow=NO):
-    """CTestNetParams and its three profile subclasses (testnet plan Revision 3); legacy unset."""
-    out = """class CTestNetParams : public CChainParams {
+UPGRADES_H = """static const uint32_t SLOW_SHADOW_BRANCH_ID = 0x57a24d5d;
+static const uint32_t SLOW_VAULT_BRANCH_ID = 0xe1f1cc08;
+static const uint32_t LEGACY_SHADOW_BRANCH_ID = 0x35706728;
+"""
+UPGRADES_CPP = """    { .nBranchId = SLOW_SHADOW_BRANCH_ID, .strName = "Shadow", },
+    { .nBranchId = 0x6d5b7a31, .strName = "Vault", },
+"""
+
+
+def testnet(fast=NO, proto=270200, slow=NO, split="3100000"):
+    """CTestNetParams and testnet-yb-fast (testnet plan Revision 3); the shadow-fork base on mainnet and
+    testnet-yb-slow and testnet-legacy (the shadow-fork plan), legacy's Vault unset, split height `split`."""
+    out = """static const int TESTNET_SHADOW_SPLIT_HEIGHT = %s;
+class CTestNetParams : public CChainParams {
 protected:
     CTestNetParams() {
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = %s;
     }
 };
-""" % proto
-    for cls, height in (("CTestNetFastParams", fast), ("CTestNetSlowParams", slow), ("CTestNetLegacyParams", NO)):
-        out += """class %s : public CTestNetParams {
+class CTestNetFastParams : public CTestNetParams {
 public:
-    %s() {
+    CTestNetFastParams() {
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             %s;
     }
 };
-""" % (cls, cls, height)
+class CTestNetShadowParams : public CMainParams {
+protected:
+    CTestNetShadowParams() {
+        SetShadowSplitHeight(TESTNET_SHADOW_SPLIT_HEIGHT);
+    }
+};
+""" % (split, proto, fast)
+    for cls, height, extra in (("CTestNetSlowParams", slow,
+                                "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;\n"
+                                "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;\n"),
+                               ("CTestNetLegacyParams", NO,
+                                "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = LEGACY_SHADOW_BRANCH_ID;\n")):
+        out += """class %s : public CTestNetShadowParams {
+public:
+    %s() {
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            %s;
+%s    }
+};
+""" % (cls, cls, height, extra)
     return out
 
 
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
                test_height=NO, reg_extra="        consensus.nVaultMinSetMaturity = 2;\n",
                att=ATT, params_h=PARAMS_H, slow_height=NO, fast_att=None, slow_att=None, proto=270200,
-               version_h=VERSION_H):
+               version_h=VERSION_H, split="3100000"):
     chain = (klass("CMainParams", main_height, main_extra, proto)
-             + testnet(test_height, proto, slow_height)
+             + testnet(test_height, proto, slow_height, split)
              + klass("CRegTestParams", NO, reg_extra, proto))
     files = {
         "src/chainparams.cpp": chain,
         "src/consensus/params.h": params_h,
         "src/version.h": version_h,
         "src/yellowback/params.cpp": PARAMS_CPP % (att, set_id("t", slow_att), set_id("f", fast_att)),
+        "src/consensus/upgrades.h": UPGRADES_H,
+        "src/consensus/upgrades.cpp": UPGRADES_CPP,
     }
     for rel, text in files.items():
         path = os.path.join(root, rel)
@@ -154,6 +184,27 @@ class ReleaseHeights(unittest.TestCase):
         code, out = run(["--warn", "--root", root])
         self.assertEqual(code, 2, out)
         self.assertIn("could not extract Vault parameters", out)
+
+    def test_unset_shadow_split_height_is_refused(self):
+        # The shadow-fork plan: an rc with slow and legacy is refused while H_S is unset.
+        root = os.path.join(self.tmp, "nosplit")
+        write_tree(root, split=NO)
+        code, out = run(["--root", root])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R8: testnet-yb-slow shadow fork not ready", out)
+        self.assertIn("problem: R8: testnet-legacy shadow fork not ready", out)
+        warn, warned = run(["--warn", "--root", root])
+        self.assertEqual(warn, 0, warned)
+
+    def test_shadow_split_height_by_stage(self):
+        # WP-1 with the stages (testnet plan §5.1): H_S is an rc and final rule; a beta ships without it.
+        root = self.rc_tree("rc-nosplit", split=NO)
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R8: testnet-yb-slow shadow fork not ready", out)
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta1"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release stage: beta", out)
 
     def test_unset_attestor_set_is_still_refused(self):
         root = os.path.join(self.tmp, "noset")

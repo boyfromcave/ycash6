@@ -387,9 +387,19 @@ public:
 static CMainParams mainParams;
 
 /**
- * Testnet: the re-forked testnet (testnet plan §2.1) and what its three profiles share (Revision 3,
- * T-14). Each profile is a subclass below that sets only its own values: the Vault height, the set
+ * H_S, the testnet shadow fork's split height (docs/plans/yellowback-testnet-shadow-fork-plan.md §6.2):
+ * the last Ycash mainnet block testnet-yb-slow and testnet-legacy copy. One value for both, fixed by the
+ * mainnet history harvest (mainnet-prefix-v1) and compiled into the release that launches them.
+ * PLACEHOLDER: NO_ACTIVATION_HEIGHT means "not set"; the release guard (qa/yellowback-vault-params.py,
+ * R8) refuses a tag while it is.
+ */
+static const int TESTNET_SHADOW_SPLIT_HEIGHT = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+
+/**
+ * Testnet: the re-forked testnet (testnet plan §2.1), the history of testnet-yb-fast (Revision 3, T-14).
+ * The fast profile is a subclass below that sets only its own values: the Vault height, the set
  * maturity, the magic, the P2P port and the fixed seeds (datadir and RPC port: chainparamsbase.cpp).
+ * testnet-yb-slow and testnet-legacy are shadow forks of mainnet instead (CTestNetShadowParams).
  */
 class CTestNetParams : public CChainParams {
 protected:
@@ -651,14 +661,109 @@ public:
 };
 
 /**
- * testnet-yb-slow (testnet plan Revision 3, T-15): the mainnet rehearsal, every Yellowback value as on
- * mainnet. No Vault height until its first rc sets one (about a week of blocks after launch), so the
- * activation itself is rehearsed live.
+ * The testnet shadow fork (docs/plans/yellowback-testnet-shadow-fork-plan.md): testnet-yb-slow and
+ * testnet-legacy are Ycash mainnet through H_S, the last copied mainnet block, and testnets after it.
+ *
+ * This class is mainnet's (it derives from CMainParams), so the copied blocks validate under exactly
+ * mainnet's rules: genesis, upgrade heights and activation hashes, Equihash, powLimit and the Ycash
+ * fork's difficulty rule, checkpoints, nMinimumChainWork, the Sprout-pool and chain-supply checkpoints,
+ * and the founders-reward and YDF addresses and mandate (resolved with mainnet's key constants:
+ * FoundersRewardKeyConstants). What differs is only what a testnet must not share with mainnet: the
+ * network ID ("test"), the testnet address prefixes (copied balances display as testnet), TAY, BIP44
+ * coin type 1, the magic, ports and seeds (per profile), and, from H_S + 1, the shadow upgrade:
+ * the network's own branch IDs (replay protection both ways) and a one-time difficulty reset (pow.cpp),
+ * then testnet minimum-difficulty blocks. Nothing is owed after H_S: the YDF mandate ends below it.
  */
-class CTestNetSlowParams : public CTestNetParams {
+class CTestNetShadowParams : public CMainParams {
+protected:
+    CTestNetShadowParams() {
+        // Copied mainnet blocks pay mainnet's founders-reward and YDF scripts: keep resolving those
+        // addresses with mainnet's key constants before this network takes the testnet's.
+        foundersRewardKeyConstants = keyConstants;
+        keyConstants.strNetworkID = "test";
+        strCurrencyUnits = "TAY";
+        keyConstants.bip44CoinType = 1;
+        fTestnetToBeDeprecatedFieldRPC = true;
+
+        // The shadow upgrade (UPGRADE_SHADOW) at H_S + 1, under each profile's own branch ID.
+        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nProtocolVersion = 270013;
+        SetShadowSplitHeight(TESTNET_SHADOW_SPLIT_HEIGHT);
+        // Vault: each profile sets its own height and branch ID; a mainnet activation hash never applies.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].hashActivationBlock = std::nullopt;
+
+        // The testnet's address prefixes (as CTestNetParams), so copied balances display as testnet.
+        keyConstants.base58Prefixes[PUBKEY_ADDRESS]     = {0x1C,0x95};
+        keyConstants.base58Prefixes[SCRIPT_ADDRESS]     = {0x1C,0x2A};
+        keyConstants.base58Prefixes[SECRET_KEY]         = {0xEF};
+        keyConstants.base58Prefixes[EXT_PUBLIC_KEY]     = {0x04,0x35,0x87,0xCF};
+        keyConstants.base58Prefixes[EXT_SECRET_KEY]     = {0x04,0x35,0x83,0x94};
+        keyConstants.base58Prefixes[ZCPAYMENT_ADDRESS]  = {0x16,0x52};
+        keyConstants.base58Prefixes[ZCVIEWING_KEY]      = {0xA8,0xAC,0x0C};
+        keyConstants.base58Prefixes[ZCSPENDING_KEY]     = {0xAC,0x08};
+
+        keyConstants.bech32HRPs[SAPLING_PAYMENT_ADDRESS]      = "ytestsapling";
+        keyConstants.bech32HRPs[SAPLING_FULL_VIEWING_KEY]     = "zviewtestsapling";
+        keyConstants.bech32HRPs[SAPLING_INCOMING_VIEWING_KEY] = "zivktestsapling";
+        keyConstants.bech32HRPs[SAPLING_EXTENDED_SPEND_KEY]   = "secret-extended-key-test";
+        keyConstants.bech32HRPs[SAPLING_EXTENDED_FVK]         = "zxviewtestsapling";
+
+        keyConstants.bech32mHRPs[TEX_ADDRESS]                 = "textest";
+
+        keyConstants.base58Prefixes[LEGACY_PUBKEY_ADDRESS]     = {0x1D,0x25};
+        keyConstants.base58Prefixes[LEGACY_SCRIPT_ADDRESS]     = {0x1C,0xBA};
+        keyConstants.base58Prefixes[LEGACY_SECRET_KEY]         = {0xEF};
+        keyConstants.base58Prefixes[LEGACY_EXT_PUBLIC_KEY]     = {0x04,0x35,0x87,0xCF};
+        keyConstants.base58Prefixes[LEGACY_EXT_SECRET_KEY]     = {0x04,0x35,0x83,0x94};
+        keyConstants.base58Prefixes[LEGACY_ZCPAYMENT_ADDRESS]  = {0x16,0xB6};
+        keyConstants.base58Prefixes[LEGACY_ZCVIEWING_KEY]      = {0xA8,0xAC,0x0C};
+        keyConstants.base58Prefixes[LEGACY_ZCSPENDING_KEY]     = {0xAC,0x08};
+
+        keyConstants.bech32HRPs[LEGACY_SAPLING_PAYMENT_ADDRESS]      = "ztestsapling";
+        keyConstants.bech32HRPs[LEGACY_SAPLING_FULL_VIEWING_KEY]     = "zviewtestsapling";
+        keyConstants.bech32HRPs[LEGACY_SAPLING_INCOMING_VIEWING_KEY] = "zivktestsapling";
+        keyConstants.bech32HRPs[LEGACY_SAPLING_EXTENDED_SPEND_KEY]   = "secret-extended-key-test";
+        keyConstants.bech32HRPs[LEGACY_SAPLING_EXTENDED_FVK]         = "zxviewtestsapling";
+
+        // Fixed seeds only, no DNS seed (D1); each profile sets its own list.
+        vSeeds.clear();
+        vFixedSeeds.clear();
+    }
+
+private:
+    /**
+     * H_S, the last copied mainnet block: UPGRADE_SHADOW activates at H_S + 1, minimum-difficulty blocks
+     * are allowed from H_S + 1 (testnet rule; mainnet's blocks below it stay under mainnet's), and mainnet
+     * checkpoints above H_S are dropped (a later mainnet release may add some; the blocks above H_S here
+     * are this network's own). NO_ACTIVATION_HEIGHT: not set yet, the network has no blocks of its own.
+     */
+    void SetShadowSplitHeight(int nSplitHeight) {
+        if (nSplitHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+            consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+            return;
+        }
+        // The split follows every mainnet upgrade in effect, the YDF mandate and the chain-supply checkpoint.
+        assert(nSplitHeight >= consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nActivationHeight);
+        assert(nSplitHeight >= nYdfMandateEndHeight);
+        assert(nSplitHeight >= nChainSupplyCheckpointHeight);
+        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight = nSplitHeight + 1;
+        consensus.nPowAllowMinDifficultyBlocksAfterHeight = nSplitHeight;
+        auto& checkpoints = checkpointData.mapCheckpoints;
+        checkpoints.erase(checkpoints.upper_bound(nSplitHeight), checkpoints.end());
+    }
+};
+
+/**
+ * testnet-yb-slow (testnet plan Revision 3, T-15; shadow fork): the mainnet rehearsal on a copy of mainnet,
+ * every Yellowback value as on mainnet. Its own shadow and Vault branch IDs, never mainnet's. No Vault
+ * height until its first rc sets one (about a week of blocks after the split), so the activation itself
+ * is rehearsed live.
+ */
+class CTestNetSlowParams : public CTestNetShadowParams {
 public:
     CTestNetSlowParams() {
         strTestnetProfile = "slow";
+        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.nVaultMinSetMaturity = 16128;   // mainnet's D-Q-31 exit window, 14 days
@@ -672,13 +777,15 @@ public:
 };
 
 /**
- * testnet-legacy (testnet plan Revision 3): the control network, today's Ycash rules. Vault never
- * activates, so YED is off; the set maturity is the default and unused.
+ * testnet-legacy (testnet plan Revision 3; shadow fork): the control network on a copy of mainnet, today's
+ * Ycash rules. Its own shadow branch ID; Vault never activates, so YED is off; the set maturity is the
+ * default and unused.
  */
-class CTestNetLegacyParams : public CTestNetParams {
+class CTestNetLegacyParams : public CTestNetShadowParams {
 public:
     CTestNetLegacyParams() {
         strTestnetProfile = "legacy";
+        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = LEGACY_SHADOW_BRANCH_ID;
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         pchMessageStart[0] = 0xf7;
@@ -1004,8 +1111,12 @@ void SelectParams(const std::string& network)
 // canonical prefixes before returning so that callers (RPC output, founders
 // reward script construction) get a consistent post-fork "s3*" / "t2*"
 // (Ycash) form.
+//
+// The testnet shadow fork resolves them with mainnet's key constants
+// (FoundersRewardKeyConstants), so its copied mainnet blocks pay the same
+// scripts as on mainnet.
 std::string CChainParams::GetFoundersRewardAddressAtHeight(int nHeight) const {
-    KeyIO keyIO(*this);
+    KeyIO keyIO(FoundersRewardKeyConstants());
     if (!consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_YCASH)) {
         // Pre-Ycash-fork: inherited Zcash schedule, addresses re-encoded
         // under the canonical Ycash prefixes via ZecToYec.
@@ -1037,7 +1148,7 @@ std::string CChainParams::GetFoundersRewardAddressAtHeight(int nHeight) const {
 // Pre-fork the founders reward address is a multisig (P2SH); post-fork it can be
 // either a P2PKH or a P2SH address from vYcashFoundersRewardAddress.
 CScript CChainParams::GetFoundersRewardScriptAtHeight(int nHeight) const {
-    KeyIO keyIO(*this);
+    KeyIO keyIO(FoundersRewardKeyConstants());
     if (!consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_YCASH)) {
         assert(nHeight > 0 && nHeight <= consensus.GetLastFoundersRewardBlockHeight(nHeight));
         // GetFoundersRewardAddressAtHeight returns canonical Ycash form, so
@@ -1063,13 +1174,13 @@ CScript CChainParams::GetFoundersRewardScriptAtHeight(int nHeight) const {
 
 std::string CChainParams::GetFoundersRewardAddressAtIndex(int i) const {
     assert(i >= 0 && i < vFoundersRewardAddress.size());
-    KeyIO keyIO(*this);
+    KeyIO keyIO(FoundersRewardKeyConstants());
     return keyIO.ZecToYec(vFoundersRewardAddress[i]);
 }
 
 std::string CChainParams::GetZcashFoundersRewardAddressAtIndex(int i) const {
     assert(i >= 0 && i < vFoundersRewardAddress.size());
-    KeyIO keyIO(*this);
+    KeyIO keyIO(FoundersRewardKeyConstants());
     return keyIO.ZecToYec(vFoundersRewardAddress[i]);
 }
 

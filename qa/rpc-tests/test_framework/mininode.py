@@ -1860,8 +1860,8 @@ class NodeConn(asyncore.dispatcher):
         "mainnet": b"\x24\xe9\x27\x64",   # mainnet
         # the re-forked testnet's three profiles (-testnetprofile, testnet plan Revision 3)
         "testnet-fast": b"\xf7\x79\x62\xd3",     # datadir testnet-yb-fast
-        "testnet-slow": b"\xf7\x79\x62\xd4",     # datadir testnet-yb-slow
-        "testnet-legacy": b"\xf7\x79\x62\xd5",   # datadir testnet-legacy
+        "testnet-slow": b"\xf7\x79\x62\xd4",     # datadir testnet-yb-slow (a shadow fork of mainnet)
+        "testnet-legacy": b"\xf7\x79\x62\xd5",   # datadir testnet-legacy (a shadow fork of mainnet)
         "regtest": b"\xaa\xe8\x3f\x5f"    # regtest
     }
 

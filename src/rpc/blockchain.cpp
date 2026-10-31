@@ -1608,7 +1608,7 @@ void NetworkUpgradeDescPushBack(
     // without specifying the activation height.
     if (consensusParams.vUpgrades[idx].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
         networkUpgrades.pushKV(
-            HexInt(NetworkUpgradeInfo[idx].nBranchId),
+            HexInt(NetworkBranchId(idx, consensusParams)),   // the network's own ID (testnet shadow fork)
             NetworkUpgradeDesc(consensusParams, idx, height));
     }
 }

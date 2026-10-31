@@ -437,7 +437,8 @@ UniValue UpgradeToJSON(const yellowback::Params& p, int indexHeight)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("name", "Vault");
-    o.pushKV("branchId", strprintf("%08x", (uint32_t)0x6d5b7a31));
+    // This network's own Vault branch ID (0x6d5b7a31 but on the testnet shadow fork, NetworkBranchId).
+    o.pushKV("branchId", strprintf("%08x", NetworkBranchId(Consensus::UPGRADE_VAULT, ::Params().GetConsensus())));
     o.pushKV("status", indexHeight >= p.startHeight ? "active" : "pending");
     o.pushKV("activationHeight", p.startHeight);
     o.pushKV("attestorSetId", p.attestorSetId.GetHex());
