@@ -56,7 +56,11 @@ fn dispatch<S, T>(cbranch: u32, input: S, v1: impl FnOnce(S) -> T, v2: impl FnOn
         | BranchId::Canopy
         // Ycash activates Vault without NU5, so ConnectBlock builds V1 leaves
         // (no Orchard root) in the Vault epoch; the tree must match them.
-        | BranchId::Vault => v1(input),
+        | BranchId::Vault
+        // The testnet shadow fork's own IDs (Canopy's and Vault's rules): V1 as well.
+        | BranchId::SlowShadow
+        | BranchId::LegacyShadow
+        | BranchId::SlowVault => v1(input),
         _ => v2(input),
     }
 }
