@@ -1,0 +1,134 @@
+{
+ "bucket": "low",
+ "sla_days": 180,
+ "findings": [
+  {
+   "fingerprint": "ead408271fb184a8",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+   "line": 261,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "08a9c5555048022e",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+   "line": 354,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "08a9c5555048022e-1",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+   "line": 481,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "da53ebf11086ab1f",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "contrib/bootstrap/ycash-bootstrap",
+   "line": 312,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "ab85a931ca375e1f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/bootstrap/ycash-bootstrap",
+   "line": 341,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "2c111b7f1b566476",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/bootstrap/ycash-bootstrap",
+   "line": 433,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "7205fddcfd89b48d",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/bootstrap/ycash-bootstrap",
+   "line": 440,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "745509fe9e96d615",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/docker/ycashd/test_entrypoint.py",
+   "line": 48,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "a1ed8c0a1f5e14b8",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/testnet/ceremony/ceremony",
+   "line": 105,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "76f2045c17f9b9c8",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/testnet/ceremony/ceremony",
+   "line": 135,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "ff93ec1a7cc10fc0",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/testnet/ceremony/ceremony",
+   "line": 450,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "9a73cb73c2affd60",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+   "path": "contrib/testnet/ceremony/ceremony",
+   "line": 458,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "c87fcb8f45585348",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/yellowback/devnet/test_testnet_join.py",
+   "line": 80,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "74b5c480dbc72659",
+   "rule": "python.lang.security.dangerous-globals-use",
+   "path": "contrib/yellowback/devnet/testnet_join.py",
+   "line": 252,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "6043e88331000543",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "qa/test_yellowback_rc_qualify.py",
+   "line": 47,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  },
+  {
+   "fingerprint": "0f6ad1975b9bb0a0",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "qa/yellowback-rc-crossline.py",
+   "line": 78,
+   "first_seen": "2026-10-31",
+   "due": "2027-04-29"
+  }
+ ]
+}
