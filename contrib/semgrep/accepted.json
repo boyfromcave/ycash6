@@ -616,6 +616,146 @@
       "reason": "test-only: inside #[cfg(test)] mod tests (an_outsider_flood_is_refused_at_the_handshake), where current_exe() re-runs the test binary itself as a child process to measure the flood CPU; no production path calls current_exe and no security decision depends on the path.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    "b2a580043278e28f": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/testnet_join.py",
+      "reason": "yellowback-devnet `up --network ... --bootstrap` (operator-run local devnet tool, never reachable from RPC or P2P): list-form argv, no shell, runs sys.executable -I on the in-tree ycash-bootstrap; the --source/--bitcoind values and the ZCASHD/BITCOIND env come from the operator's own command line and shell, the same person who could run any binary directly.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "61a18a10c7f058d1": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "contrib/yellowback/devnet/testnet_join.py",
+      "reason": "yellowback-devnet join mode starts the seat's ycashd: list-form argv, no shell; the binary is --bitcoind or ZCASHD/BITCOIND from the operator's own shell (checked os.access X_OK), the args are the in-tree testnet profile's node args. Operator-run local tooling, no network or RPC input reaches it.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "0b074fa7de4eff80": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/testnet_ceremony.py",
+      "reason": "RPC test (qa/rpc-tests): list-form argv, no shell; runs the in-tree contrib/testnet/ceremony/ceremony with sys.executable, and the ycashd path is ZCASHD/BITCOIND, the variable qa/pull-tester/rpc-tests.py itself sets to the build tree ycashd and the framework uses to start every node. CI/developer controlled, no untrusted input.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "4db26b060176dd99": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "path": "qa/rpc-tests/ycash_bootstrap.py",
+      "reason": "RPC test (qa/rpc-tests): list-form argv, no shell; runs sys.executable -I on the in-tree contrib/bootstrap/ycash-bootstrap with the ycashd/ycash-cli from ZCASHD/BITCOIND, the variable qa/pull-tester/rpc-tests.py sets to the build tree ycashd, and test-built paths under its tmpdir. CI/developer controlled, no untrusted input.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "ead408271fb184a8": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+      "reason": "Unit test fake minisign: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "08a9c5555048022e": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+      "reason": "Unit test fake ycashd/ycash-cli (restore tests): the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "08a9c5555048022e-1": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+      "reason": "Unit test fake ycashd/ycash-cli (state-bundle tests), second occurrence of the same code: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "745509fe9e96d615": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/docker/ycashd/test_entrypoint.py",
+      "reason": "Docker entrypoint unit test stubs for ycashd/ycash-cli/ycash-bootstrap: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "c87fcb8f45585348": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/yellowback/devnet/test_testnet_join.py",
+      "reason": "Join-mode unit test fake ycashd: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "6043e88331000543": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "qa/test_yellowback_rc_qualify.py",
+      "reason": "rc-qualify unit test stub binaries inside a staged tarball: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "a1ed8c0a1f5e14b8": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/testnet/ceremony/ceremony",
+      "reason": "prepare_secrets() chmods the house-seat secrets directory to 0o700 (owner rwx, nothing for group/world), after refusing a path inside a git repository: the rule matches the call, but this mode is the restrictive one it asks for (a directory needs x to be entered).",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "da53ebf11086ab1f": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/bootstrap/ycash-bootstrap",
+      "reason": "Source.__init__ admits only http(s) for urlopen (file:// and paths are read locally, other schemes refused); the URL is the operator's --source, and fetch() takes only names matching [A-Za-z0-9][A-Za-z0-9._-]*. What is fetched is not trusted: SHA256SUMS must match the profile's pinned sha256 (or a public network is refused unless --allow-unpinned), every file is checked against it, and the node re-checks every block hash.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "ab85a931ca375e1f": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/bootstrap/ycash-bootstrap",
+      "reason": "verify_signature runs minisign with a list argv, no shell: the binary is the operator's --minisign (resolved with shutil.which), the arguments are a file path this tool wrote and a public key already checked against RW[A-Za-z0-9+/]{54}. Nothing from the bundle or the network reaches the argv unchecked.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "2c111b7f1b566476": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/bootstrap/ycash-bootstrap",
+      "reason": "Starts the operator's --ycashd offline (-connect=0 -listen=0) with a list argv, no shell; the args are --datadir/--conf/--node-arg from the operator's command line, the in-tree profile's node args and -loadblock paths this tool wrote in its own work directory.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "7205fddcfd89b48d": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/bootstrap/ycash-bootstrap",
+      "reason": "Runs the operator's --cli (ycash-cli) with a list argv, no shell, against the node it just started; the RPC method names are literals in this file and the parameters are heights/values it computed. Operator-run tool, no untrusted input in the argv.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "76f2045c17f9b9c8": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/testnet/ceremony/ceremony",
+      "reason": "Cli.call runs ycash-cli with a list argv, no shell: the binary and -datadir/-conf/-rpcport are the ceremony operator's options plus the in-tree profile's node args; methods are literals in this file and params are values the ceremony computed (str/JSON-encoded, each one argv element, so no injection). Operator-run launch tool.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "ff93ec1a7cc10fc0": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/testnet/ceremony/ceremony",
+      "reason": "`ceremony rehearse` (regtest rehearsal) runs sys.executable -I on the in-tree ycash-bootstrap, list argv, no shell; the arguments are its own work-directory paths, the operator's --bitcoind/--cli and fixed -nuparams. Operator/CI controlled (qa/rpc-tests/testnet_ceremony.py runs it).",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "9a73cb73c2affd60": {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-audit",
+      "path": "contrib/testnet/ceremony/ceremony",
+      "reason": "`ceremony rehearse` packs its regtest prefix with the in-tree ycash-bootstrap --pack, list argv, no shell; the arguments are its work-directory paths, the harness rpc_port(0) and the operator's --cli. Operator/CI controlled.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "74b5c480dbc72659": {
+      "rule": "python.lang.security.dangerous-globals-use",
+      "path": "contrib/yellowback/devnet/testnet_join.py",
+      "reason": "globals()['cmd_' + command] is reached only after `command not in JOIN_COMMANDS` exits, so the name is one of nine literal commands, each with a cmd_* function in this file; command is also an argparse subcommand (choices) from the operator's own command line.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
+    },
+    "0f6ad1975b9bb0a0": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "qa/yellowback-rc-crossline.py",
+      "reason": "The URL is always http://127.0.0.1:<port>/ (Rpc.__init__), the JSON-RPC port of a local release-candidate node this QA script started from its read conf; no scheme or host comes from outside, so urlopen cannot be pointed at file:// or a remote host.",
+      "by": "@boyfromcave",
+      "date": "2026-11-01"
     }
   },
   "rule_paths": [
