@@ -753,7 +753,7 @@
     "0f6ad1975b9bb0a0": {
       "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
       "path": "qa/yellowback-rc-crossline.py",
-      "reason": "The URL is always http://127.0.0.1:<port>/ (Rpc.__init__), the JSON-RPC port of a local release-candidate node this QA script started from its read conf; no scheme or host comes from outside, so urlopen cannot be pointed at file:// or a remote host.",
+      "reason": "The URL is always http://127.0.0.1:<port>/ (Rpc.__init__), the integer JSON-RPC port of a local node: read from an existing devnet node's ycash.conf, or of a node this QA script started itself; no scheme or host comes from outside, so urlopen cannot be pointed at file:// or a remote host.",
       "by": "@boyfromcave",
       "date": "2026-11-01"
     }
