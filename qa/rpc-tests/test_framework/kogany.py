@@ -820,7 +820,7 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     coinbase = None
     nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
     if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
-        coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir))
+        coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir), bool(yewd_kogany_bin()))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
     kogany_bin = yewd_kogany_bin()
@@ -942,7 +942,7 @@ def yewd_init_wallet(yewd_bin, datadir):
     return out['mineaddress'], out.get('saplingaddress')
 
 
-def yewd_coinbase_address(args, mineaddress):
+def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     """F-S4-1, F-S5-9: the coinbase address the pair's backend mines to (``mineaddress`` is
     ``yewd_init_wallet``'s pair), or None.  A node's -mineraddress/-minetolocalwallet give way to the
     wallet's own transparent address.  Both lines take a P2PKH miner address as the default YED
@@ -955,9 +955,14 @@ def yewd_coinbase_address(args, mineaddress):
     would close it)."""
     taddr = mineaddress[0] if isinstance(mineaddress, tuple) else mineaddress
     live = any(a.startswith('-yellowbackattestorset=') for a in args)
-    payout = any(a.startswith('-yellowbackpayoutaddress=') for a in args)
-    if live and not payout:
+    payouts = [a.split('=', 1)[1] for a in args if a.startswith('-yellowbackpayoutaddress=')]
+    if live and not payouts:
         return None
+    if kogany_backend and payouts and payouts[-1]:
+        # kogany takes its YED payout key from mining.miner_address only (no payout option; W5-f):
+        # a node that names -yellowbackpayoutaddress mines to that address, which the scripts'
+        # pool nodes own (import_pool_keys), so the tag names the payee ycashd's would (F-S5-12)
+        return payouts[-1]
     return taddr
 
 
