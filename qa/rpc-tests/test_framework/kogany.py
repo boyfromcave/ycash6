@@ -780,7 +780,7 @@ def same_class(cxx, kog, strict=False):
 # follows Ycash regtest: the backend line below becomes the zakurad start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
-                    '-spendzeroconfchange', '-rescan', '-wallet')
+                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet')
 YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 
 
