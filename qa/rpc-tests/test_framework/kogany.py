@@ -76,6 +76,8 @@ proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)
 ``start_sidecar(i, dirname, args)`` / ``sidecar_ycashd_args`` / ``sidecar_kogany_config`` /
 ``sidecar_enabled`` / ``SIDECAR_NODES``  the KOGANY_SIDECAR rig (util.start_node calls start_sidecar).
 ``MixedLine.sync_wait(conns, waited)``  util._sync_blocks hook: the rig's feed of a lagging kogany.
+``MixedLine.mempool_wait(conns, waited)``  util._sync_mempools hook: the rig's transaction feed (W9-a/F-3).
+``MixedLine.sync_failed(kind, conns)``  util hook before a failed sync raises: the rig's per-pair state.
 ``start_yewd_pair(i, datadir, ycashd, args)`` / ``yewd_pair_argv`` / ``split_yewd_args`` /
 ``yewd_backend_rpc_port(i)`` / ``YEWD_BACKENDS``  the YEWD_BIN pair (util.start_node calls it).
 
@@ -1089,8 +1091,9 @@ class MixedLine:
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'mempool_points': 0,
                       'verdicts': 0, 'verdict_classes': 0}
         if self.sidecar:
-            self.stats.update({'pumped_blocks': 0, 'pump_rounds': 0})
+            self.stats.update({'pumped_blocks': 0, 'pump_rounds': 0, 'fed_txs_kogany': 0, 'fed_txs_ycashd': 0})
         self.pump_after = pump_after          # the rig: seconds a lagging kogany gets before the feed
+        self.tx_feed_after = 2 * pump_after   # the rig: seconds a mempool gap gets before the tx feed
         self.pump_batch = 200
 
     @classmethod
@@ -1320,6 +1323,44 @@ class MixedLine:
                 continue
             print('  node %d: ycashd %d %s mempool %s | kogany %d %s mempool %s peers %s'
                   % (f.k, y[0], y[1], [h[:12] for h in y[2]], k[0], k[1], [h[:12] for h in k[2]], peers))
+
+    def mempool_wait(self, conns, waited):
+        """``util._sync_mempools`` hook, called while the ycashds' mempools still differ: in the rig,
+        after ``tx_feed_after`` seconds, close the relay gaps (finding W9-a/F-3).  Zakura gossips a
+        transaction once, to the peers ready at that instant, and never re-announces it; a ycashd
+        re-announces a wallet transaction only on its rebroadcast timer (minutes).  So a single missed
+        announcement leaves a ycashd without a transaction its kogany holds, or a kogany without one
+        the group holds.  The feed: a transaction of the sync group missing from kogany i goes to
+        kogany i's ``sendrawtransaction`` (kogany validates it and gossips it again); one kogany i holds
+        that ycashd i lacks goes to ycashd i from kogany i's mempool (it came from a kogany).  A
+        kogany refusal is printed, never fatal here: the sync itself still has to converge."""
+        if not (self.sidecar and self.active) or waited < self.tx_feed_after:
+            return
+        pairs = self._pairs(conns)
+        group = {}
+        for ref, _f in pairs:
+            for txid in ref.getrawmempool():
+                group.setdefault(txid, ref)
+        for ref, f in pairs:
+            try:
+                have_y = set(ref.getrawmempool())
+                have_k = set(f.rpc.getrawmempool())
+            except (OSError, JSONRPCException):
+                continue
+            for txid, src in group.items():
+                if txid in have_k:
+                    continue
+                try:
+                    f.rpc.with_timeout(self.tx_timeout).sendrawtransaction(src.getrawtransaction(txid))
+                    self.stats['fed_txs_kogany'] += 1
+                except (OSError, JSONRPCException) as e:
+                    print('kogany %d: the rig fed %s, refused: %s' % (f.k, txid[:16], _message(e)[:120]))
+            for txid in have_k - have_y:
+                try:
+                    ref.sendrawtransaction(f.rpc.getrawtransaction(txid))
+                    self.stats['fed_txs_ycashd'] += 1
+                except (OSError, JSONRPCException):
+                    pass                    # mined, evicted or a conflict meanwhile: the next round sees it
 
     def sync_wait(self, conns, waited):
         """``util._sync_blocks`` hook, called while the ycashds' tips still differ: in the rig, after
@@ -1667,6 +1708,7 @@ def _register(mixed):
     util.MIXED_HOOKS['sync_blocks'] = mixed.sync_point
     util.MIXED_HOOKS['sync_mempools'] = mixed.mempool_point
     util.MIXED_HOOKS['sync_wait'] = mixed.sync_wait
+    util.MIXED_HOOKS['mempool_wait'] = mixed.mempool_wait
     util.MIXED_HOOKS['sync_failed'] = mixed.sync_failed
     atexit.register(mixed.stop)
 

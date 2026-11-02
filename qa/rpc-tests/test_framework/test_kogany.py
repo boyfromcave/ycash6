@@ -912,6 +912,49 @@ class SidecarRigTest(unittest.TestCase):
         plain.followers = [a]
         self.assertEqual(plain._judges(FakeConn(1)), [a])      # the follower mode ignores the node
 
+    def test_mempool_feed(self):
+        class Pool:
+            def __init__(self, i, txs, refuse=()):
+                self.url = FakeConn(i).url
+                self.k = i
+                self.txs = set(txs)
+                self.refuse = set(refuse)
+                self.got = []
+                self.rpc = self
+
+            def with_timeout(self, t):
+                return self
+
+            def getrawmempool(self):
+                return sorted(self.txs)
+
+            def getrawtransaction(self, txid):
+                return 'raw-' + txid
+
+            def sendrawtransaction(self, raw):
+                txid = raw[4:]
+                if txid in self.refuse:
+                    raise JSONRPCException({'code': -26, 'message': 'policy'})
+                self.got.append(txid)
+                self.txs.add(txid)
+                return txid
+
+        m = kg.MixedLine(binary='/bin/z', sidecar=True, pump_after=5)
+        y0, y2 = Pool(0, ['a']), Pool(2, [])
+        k0, k2 = Pool(0, ['a']), Pool(2, [], refuse=['b'])
+        kg.SIDECAR_NODES.update({0: k0, 2: k2})
+        m.followers = [k0, k2]
+        m.mempool_wait([y0, y2], 1)                      # inside the grace: nothing
+        self.assertEqual((k2.got, y2.got), ([], []))
+        m.mempool_wait([y0, y2], 10)
+        self.assertEqual(k2.got, ['a'])                  # the group's transaction to the kogany that lacks it
+        m.mempool_wait([y0, y2], 11)
+        self.assertEqual(y2.got, ['a'])                  # then from kogany 2's mempool to ycashd 2
+        self.assertEqual((m.stats['fed_txs_kogany'], m.stats['fed_txs_ycashd']), (1, 1))
+        y0.txs.add('b')
+        m.mempool_wait([y0, y2], 12)                     # a refusal is printed, not fatal
+        self.assertNotIn('b', k2.txs)
+
     def test_pump_refusal_is_a_divergence(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)
         with self.assertRaises(AssertionError) as cm:

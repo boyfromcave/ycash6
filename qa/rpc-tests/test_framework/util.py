@@ -225,6 +225,7 @@ def sync_mempools(rpc_connections, wait=0.5, timeout=60):
     return result
 
 def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
+    waited = 0
     while timeout > 0:
         assert_bitcoinds_alive()
         pool = set(rpc_connections[0].getrawmempool())
@@ -234,8 +235,12 @@ def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
                 num_match = num_match+1
         if num_match == len(rpc_connections):
             break
+        hook = MIXED_HOOKS.get('mempool_wait')  # the kogany test rig's transaction feed (kogany.py)
+        if hook is not None:
+            hook(rpc_connections, waited)
         time.sleep(wait)
         timeout -= wait
+        waited += wait
 
     # Now that the mempools are in sync, wait for the internal
     # notifications to finish
