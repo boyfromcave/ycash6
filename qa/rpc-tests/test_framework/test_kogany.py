@@ -251,7 +251,12 @@ class VerdictClassTest(unittest.TestCase):
         self.assertEqual(kg.classify_kogany_block(None), kg.ACCEPT)
         self.assertEqual(kg.classify_kogany_block('duplicate'), kg.ACCEPT)
         self.assertEqual(kg.classify_kogany_block('rejected'), kg.REJECT_CONSENSUS)
-        self.assertEqual(kg.classify_kogany_block('something-new'), kg.REJECT_UNCLASSIFIED)
+        self.assertEqual(kg.classify_kogany_block('Something new'), kg.REJECT_UNCLASSIFIED)
+        # W7-e: kogany answers ycashd's BIP 22 reasons and "<code>: <reason>" texts
+        self.assertEqual(kg.classify_kogany_block('bad-cb-amount', 'block-source-transaction-subsidy'), kg.REJECT_CONSENSUS)
+        self.assertEqual(kg.classify_kogany_block('bad-prevblk'), kg.REJECT_STATE)
+        self.assertEqual(kg.classify_kogany_tx({'message': '64: non-final'}), kg.REJECT_POLICY)
+        self.assertEqual(kg.classify_kogany_tx({'message': '16: bad-txns-inputs-duplicate'}), kg.REJECT_CONSENSUS)
         self.assertEqual(kg.classify_kogany_tx(rpc_error('anything')), kg.REJECT_UNCLASSIFIED)
 
     # kogany's texts as zakurad answers them (W1-Y9 run of mempool_ycash_parity.py, 2026-11-01, and
@@ -358,7 +363,7 @@ class VerdictClassTest(unittest.TestCase):
                 self.assertIn(dos, (10, 100))
         for path, pattern, cls, src in kg.KOGANY_REASON_MAP:
             self.assertIn(path, ('block', 'tx', 'proposal'))
-            self.assertIn(cls, (kg.ACCEPT, kg.CXX) + kg.REJECT_CLASSES)
+            self.assertIn(cls, (kg.ACCEPT, kg.CXX, kg.CXX_CODE) + kg.REJECT_CLASSES)
             self.assertTrue(src)
             rx = re.compile(pattern)
             if cls == kg.CXX:

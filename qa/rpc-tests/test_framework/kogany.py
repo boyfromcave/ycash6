@@ -39,6 +39,10 @@ Environment
                           to the followers at sync points (``MixedLine._mirror``; default 0).
 ``KOGANY_ARGS``           extra ``zakurad`` arguments, whitespace-separated, placed before ``start``.
 ``KOGANY_LOG``            ``tracing.filter`` for the followers (default ``info``).
+``KOGANY_STATS_FILE``     a file the run appends one JSON line to when the followers stop: the
+                          script, the counters (sync points, statehash points, verdicts, verdict
+                          classes, mempool points) and the notes (rpc-tests.py prints a passing
+                          script's output nowhere; W9-b's results table reads this).
 ``YEWD_BIN``              path to ``yewd`` (the parity sidecar, plan section 3b): every node becomes a
                           ycashd ``-disablewallet`` backend plus a yewd in front of it on the node's
                           RPC port (``start_yewd_pair``; contract: yew/yewd/README.md "Harness mode").
@@ -521,6 +525,7 @@ REJECT_CODE_MAP = [
 # Rows marked "unverified" name a kogany text no run has produced yet (W4-d ``check::vault`` is in
 # flight on kc/snapshot-hook): they are written from the source and checked when that lands.
 CXX = 'cxx'
+CXX_CODE = 'cxx-code'   # the row's group(1) is a whole ycashd "<code>: <reason>" (classify_cxx_tx)
 
 KOGANY_REASON_MAP = [
     # --- transactions: duplicates (ycashd answers the txid of a transaction its mempool holds)
@@ -593,6 +598,13 @@ KOGANY_REASON_MAP = [
      'the header time rule (ycashd time-too-new, clock-dependent)'),
     ('block', r'^rejected$', REJECT_CONSENSUS,
      'SubmitBlockErrorResponse::Rejected: an invalid block (ycashd invalid / bad-*, DoS 100)'),
+    # --- W7-e (kogany zakura-rpc ycash_reject.rs): kogany answers in ycashd's own words, so the last
+    #     rows hand the text to REJECT_CODE_MAP: a BIP 22 reason from submitblock, a "<code>: <reason>"
+    #     from sendrawtransaction (the code decides policy, as classify_cxx_tx does)
+    ('block', r'^(?!rejected$)([a-z][a-z0-9-]*)$', CXX,
+     'W7-e: submitblock answers ycashd\'s BIP 22 reason (bad-cb-amount, bad-txns-..., ...)'),
+    ('tx', r'^([0-9]+: [A-Za-z][A-Za-z0-9_-]*)', CXX_CODE,
+     'W7-e: sendrawtransaction answers ycashd\'s "<code>: <reason>" (-26)'),
 ]
 
 def _match(pattern, reason):
@@ -668,6 +680,8 @@ def classify_kogany_text(path, text):
             continue
         if cls == CXX:
             return _cxx_class('block' if path == 'proposal' else path, m.group(1)), (p, pattern, src)
+        if cls == CXX_CODE:
+            return classify_cxx_tx({'message': m.group(1)}), (p, pattern, src)
         return cls, (p, pattern, src)
     return None, None
 
@@ -1046,6 +1060,10 @@ class MixedLine:
         to reach its tip."""
         if not self.enabled:
             return
+        if not test.nodes and not getattr(test, 'num_nodes', 0):
+            # a run without nodes (create_cache.py, which rpc-tests.py runs first under -j > 1):
+            # nothing to follow
+            return
         assert test.nodes and self.peer < len(test.nodes), 'KOGANY_PEER %s is not a node of this run' % self.peer
         if self.peer_args is None:
             raise AssertionError('kogany: the peer node %d was not started through util.start_node' % self.peer)
@@ -1064,6 +1082,14 @@ class MixedLine:
             f.stop()
         if self.followers:
             print('kogany: stopped; %s' % ', '.join('%s=%d' % kv for kv in sorted(self.stats.items())))
+            path = os.getenv('KOGANY_STATS_FILE')
+            if path:
+                with open(path, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps({'script': os.path.basename(sys.argv[0]), 'pid': os.getpid(),
+                                         'stats': dict(self.stats), 'mirrored': len(self.mirrored), 'notes': sorted(self._notes),
+                                         'unmapped': sorted(set(self.unmapped)),
+                                         'kogany_unmapped': sorted(set(self.kogany_unmapped))},
+                                        sort_keys=True) + '\n')
         self.followers = []
         if self.unmapped:
             print('kogany: unmapped ycashd reject reasons (add REJECT_CODE_MAP rows): %s'
