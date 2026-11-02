@@ -89,6 +89,59 @@ class Commands(unittest.TestCase):
         self.assertTrue(direct[1][2].endswith('kogany_mixed_smoke.py'))
 
 
+class Sidecar(unittest.TestCase):
+    """The W9-a sidecar group: a second mode for scripts already in one mixed group."""
+
+    TEXT = TEXT + "sidecar vault_primitive report W9 mirror\nsidecar yellowback_fees report W9 mempool\n"
+
+    def test_parse_and_complete(self):
+        entries, excluded, errors = ms.parse(self.TEXT)
+        self.assertEqual(errors, [])
+        p = ms.check(entries, excluded, ['vault_primitive', 'vault_rpc', 'yellowback_fees'],
+                     {'vault_primitive', 'vault_rpc', 'yellowback_fees'}, lambda s: True)
+        self.assertEqual(p, [])                           # in a mixed group and in sidecar: not "twice"
+
+    def test_sidecar_rules(self):
+        entries, excluded, _ = ms.parse(TEXT + 'sidecar vault_new report W9\nsidecar vault_rpc report W9\n'
+                                        'sidecar vault_rpc report W9\nsidecar kogany_mixed_smoke report W9 direct\n'
+                                        'sidecar nodehandling report W9\n')
+        p = ms.check(entries, excluded, [], {'vault_primitive', 'vault_rpc', 'yellowback_fees', 'vault_new',
+                                             'nodehandling'}, lambda s: True)
+        self.assertTrue(any('vault_new is in sidecar but in no mixed group' in x for x in p), p)
+        self.assertTrue(any('vault_rpc listed twice in sidecar' in x for x in p), p)
+        self.assertTrue(any('kogany_mixed_smoke: a sidecar entry runs through rpc-tests.py' in x for x in p), p)
+        self.assertTrue(any('nodehandling asserts an exact peer count' in x for x in p), p)
+
+    def test_commands_set_the_rig(self):
+        entries, _, _ = ms.parse(self.TEXT)
+        cmds = ms.commands(ms.select(entries, 'sidecar', 'report'), 'report', 2, '/s', '/t')
+        envs = sorted(tuple(sorted(c[0].items())) for c in cmds)
+        self.assertEqual(envs, [(('KOGANY_MEMPOOL', '1'), ('KOGANY_SIDECAR', '1')),
+                                (('KOGANY_MIRROR_INVALIDATE', '1'), ('KOGANY_SIDECAR', '1'))])
+        mixed = ms.commands(ms.select(entries, 'vault', 'report'), 'report', 2, '/s', '/t')
+        self.assertTrue(all('KOGANY_SIDECAR' not in c[0] for c in mixed))
+
+    def test_of_selects_by_mixed_group(self):
+        entries, _, _ = ms.parse(self.TEXT)
+        self.assertEqual([e.script for e in ms.select(entries, 'sidecar', of='fees')], ['yellowback_fees'])
+        self.assertEqual([e.script for e in ms.select(entries, 'sidecar', of='attest')], [])
+        self.assertEqual(ms.main(['run', 'vault', '--state', 'report', '--of', 'vault', '--dry-run']), 2)
+
+    def test_real_sidecar_group(self):
+        entries, excluded, _ = ms.load()
+        side = ms.select(entries, 'sidecar')
+        self.assertEqual(len(side), 50)
+        groups = ms.mixed_group_of(entries)
+        flags = {e.script: e.flags for e in entries if e.group != 'sidecar'}
+        for e in side:
+            self.assertEqual(set(e.flags), set(flags[e.script]) - {'direct'}, e.script)   # the mixed group's flags
+        self.assertEqual(sum(len(ms.select(entries, 'sidecar', of=g)) for g in ms.MIXED_GROUPS), 50)
+        self.assertNotIn('yellowback_framework_smoke', {e.script for e in side})
+        self.assertTrue({'yellowback_lifecycle', 'yellowback_claim', 'yellowback_interm', 'yellowback_fees',
+                         'yellowback_attest'} <= {e.script for e in side})
+        self.assertEqual(set(groups.values()), set(ms.MIXED_GROUPS))
+
+
 class RealManifest(unittest.TestCase):
     def test_real_manifest_is_complete(self):
         self.assertEqual(ms.main(['check']), 0)

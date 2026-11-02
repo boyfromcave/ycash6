@@ -43,6 +43,15 @@ Environment
                           ycashd ``-disablewallet`` backend plus a yewd in front of it on the node's
                           RPC port (``start_yewd_pair``; contract: yew/yewd/README.md "Harness mode").
                           Independent of ``KOGANY_BIN``.
+``KOGANY_SIDECAR``        1 (with ``KOGANY_BIN``): the ycash6 test rig of W9-a (K-3 as amended): node i is
+                          kogany i on ``p2p_port(i)`` plus ycashd i with ``-connect`` to it and
+                          ``-listen=0`` on ``rpc_port(i)`` (``start_sidecar``; "The ycash6 test rig"
+                          below).  No peer follower is started; each kogany is compared with its own
+                          ycashd at every sync point.
+``KOGANY_SIDECAR_RELAY``      0 turns off the rig's background re-announcement (``RigRelay``; default on).
+``KOGANY_SIDECAR_PUMP_AFTER``  seconds a lagging rig kogany gets before the harness feeds it its own
+                          ycashd's blocks by ``submitblock`` (default 5; ``MixedLine._pump``, finding
+                          W9-a/F-1).
 
 Framework API (for W2-d, W4-e, W5-f, W6 and the S track)
 --------------------------------------------------------
@@ -65,6 +74,11 @@ proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)
 ``zakurad_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
 ``render_toml(config, notes)``        the ``zakurad.toml`` text; ``ZAKURAD_KEY_TABLE`` /
                                       ``NU_BRANCH_TABLE`` are the map.
+``start_sidecar(i, dirname, args)`` / ``sidecar_ycashd_args`` / ``sidecar_kogany_config`` /
+``sidecar_enabled`` / ``SIDECAR_NODES``  the KOGANY_SIDECAR rig (util.start_node calls start_sidecar).
+``MixedLine.sync_wait(conns, waited)``  util._sync_blocks hook: the rig's feed of a lagging kogany.
+``MixedLine.mempool_wait(conns, waited)``  util._sync_mempools hook: the rig's transaction feed (W9-a/F-3).
+``MixedLine.sync_failed(kind, conns)``  util hook before a failed sync raises: the rig's per-pair state.
 ``start_yewd_pair(i, datadir, ycashd, args)`` / ``yewd_pair_argv`` / ``split_yewd_args`` /
 ``yewd_backend_rpc_port(i)`` / ``YEWD_BACKENDS``  the YEWD_BIN pair (util.start_node calls it).
 
@@ -82,10 +96,15 @@ p2p_nu_peer_management, signrawtransaction_offline, yellowback_framework_smoke) 
 shard list; a script's ``invalidateblock`` reaches only the ycashd node it calls, so the follower keeps the
 invalidated branch unless ``KOGANY_MIRROR_INVALIDATE=1`` (Zakura serves
 ``invalidateblock``/``reconsiderblock``; whether a wave's shard turns it on is W2-d's choice).
+In the rig (``KOGANY_SIDECAR=1``) the same limits hold per node: every ycashd has one more peer (its own
+kogany), a script's ``invalidateblock`` reaches the ycashd only (the mirror works per pair), a ``kill9``
+leaves the node's kogany running, and the blocks a ycashd mines under ``mock_clock`` reach the others only
+if kogany's real clock accepts their time.
 """
 
 import atexit
 import json
+import threading
 import os
 import re
 import socket
@@ -110,14 +129,20 @@ def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 
+# The 2 and 3 PORT_RANGEs these had are yellowback_stratum.py's stratum and status ports (21000 / 26000
+# + the seed offset + index), so kogany 0's RPC took yolo's status port (finding W9-a/F-5).  The RPC
+# range (bound in both modes) is now 5 PORT_RANGEs (36000+, below macOS's ephemeral 49152; it was
+# the unused yewd_rpc_port reservation, which moves to 8): a first move to 51000+ lost a run to an
+# ephemeral port.  The P2P range (bound by the follower mode only; the rig listens on p2p_port) is 7.
+
 def kogany_p2p_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 2 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 7 * PORT_RANGE + k + _offset()
 
 
 def kogany_rpc_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 3 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
 
 
 def kogany_v2_port(k):
@@ -189,6 +214,8 @@ ZAKURAD_KEY_TABLE = [
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
     ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
      'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
+    ('-pqfalcon=<0|1>', 'pending:W3-c', 'kogany.pq_falcon_height',
+     'ycashd\'s shorthand: -pqfalcon=1 is -pqfalconheight=0 (init.cpp); -pqfalcon=0 sets nothing'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
     ('-datacarriersize=<n>', 'live', 'mempool.max_datacarrier_bytes', 'int (W1-Y9)'),
@@ -281,6 +308,7 @@ _PENDING_FLAGS = {
     '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
     '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
     '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
+    '-pqfalcon': ('W3-c', ('kogany', 'pq_falcon_height'), lambda v: 0 if _bool01(v) else None),
 }
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
@@ -358,6 +386,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             continue
         if name in _PENDING_FLAGS:
             chunk, path, conv = _PENDING_FLAGS[name]
+            if conv(value) is None:
+                continue                  # an "off" form (-pqfalcon=0): nothing to carry
             if chunk in live:
                 _set(cfg, path, conv(value))
             else:
@@ -727,7 +757,7 @@ YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 def yewd_rpc_port(k):
     """Reserved (a yewd that listens beside, not instead of, a node); unused by the pair mode."""
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
 
 
 def yewd_backend_rpc_port(i):
@@ -830,6 +860,167 @@ def kill_yewd_backend(i):
     if p is not None and p.poll() is None:
         p.kill()
         p.wait()
+
+
+# ---------------------------------------------------------------------------
+# The ycash6 test rig (kogany plan W9-a; K-3 as amended: the rig, not the product).
+# KOGANY_SIDECAR=1 with KOGANY_BIN turns node i into kogany i + ycashd i:
+#
+#   kogany i   a zakurad in tmpdir/kogany<i>, configured from node i's own arguments, listening for
+#              P2P on p2p_port(i) (the node's address, so a script's connect_nodes(a, b) reaches
+#              kogany b) and serving its RPC on kogany_rpc_port(i);
+#   ycashd i   the unchanged ycashd with -connect=127.0.0.1:p2p_port(i) -listen=0, serving the wallet
+#              RPCs (and every other RPC) on rpc_port(i), so the scripts keep talking to it.
+#
+# What connect= needs (R-10): a plain ycashd, no valargroup-style build.  -connect makes kogany i
+# the node's only automatic peer and -listen=0 means no peer ever dials the ycashd, so every block
+# and transaction a ycashd receives comes from a kogany, which relays only what it validated.
+# The ycashd still validates everything itself (it is a full node following kogany's chain): that
+# double validation is the point of the rig, a two-line differential at every hop.  A script's
+# connect_nodes(a, b) is ycashd a's addnode to p2p_port(b) = kogany b, which -connect does not
+# block (addnode is an RPC, not an automatic connection); so ycashd a peers with kogany a and
+# kogany b, and the script's topology (and split_network's disconnectnode) carries over with a
+# kogany at every node address.  Each kogany therefore takes several inbound connections from
+# 127.0.0.1: max_connections_per_ip is raised to SIDECAR_MAX_CONNS_PER_IP (Zakura's default 1
+# would refuse the second; the W1-Y5 trap).  The ycashd mines (generate): kogany does not mine on
+# regtest (K-16), so a script's block reaches the other nodes only through a kogany that accepted
+# it.  Unlike valargroup's production sidecar, the rig keeps addnode, generate and submitblock:
+# the scripts need them.  The kogany outlives a ycashd restart (a restart with a changed kogany
+# config restarts it), so a script's stop_node/start_node leaves the chain where kogany holds it.
+
+SIDECAR_MAX_CONNS_PER_IP = 16
+SIDECAR_NODES = {}        # node index -> KoganyNode (KOGANY_SIDECAR=1)
+SIDECAR_REFUSED = {}      # node index -> why kogany i refused its config at the last start
+
+
+def sidecar_enabled(env=None):
+    """True when the run is in the test-rig mode (KOGANY_SIDECAR=1 and KOGANY_BIN set)."""
+    env = os.environ if env is None else env
+    return env.get('KOGANY_SIDECAR', '0') == '1' and bool(env.get('KOGANY_BIN'))
+
+
+def sidecar_dead_port(i):
+    """The port ycashd i advertises in the rig (``-port``): nothing listens on it."""
+    assert 0 <= i <= MAX_NODES
+    return PORT_MIN + 9 * PORT_RANGE + i + _offset()
+
+
+def sidecar_ycashd_args(i, args):
+    """ycashd i's arguments in the rig: the script's, then -connect to kogany i, -listen=0 and a
+    -port nothing listens on (the last value of a repeated option wins, so a script's own -listen is
+    overridden).  The port matters (finding W9-a/F-2): a ycashd's version message advertises
+    127.0.0.1:<its -port>, ycash.conf's port is p2p_port(i) = kogany i's listener, and Zakura's
+    crawler dials what its peers advertise, so with the conf's port every kogany learned every
+    other kogany's address and they meshed, which a network split cannot cut (kogany has no
+    disconnectnode)."""
+    return list(args) + ['-connect=127.0.0.1:%d' % p2p_port(i), '-listen=0', '-port=%d' % sidecar_dead_port(i)]
+
+
+def sidecar_kogany_config(args, i, datadir, live=None):
+    """kogany i's config from node i's ycashd arguments: ``zakurad_config`` for slot i, then
+    listening on p2p_port(i), no initial peers (the ycashds dial it), and room for one inbound
+    connection per ycashd from 127.0.0.1."""
+    cfg, notes = zakurad_config(args, i, [], datadir, live=live)
+    net = cfg['network']
+    net['listen_addr'] = '127.0.0.1:%d' % p2p_port(i)
+    net['initial_testnet_peers'] = []
+    net['max_connections_per_ip'] = SIDECAR_MAX_CONNS_PER_IP
+    return cfg, notes
+
+
+def start_sidecar(i, dirname, args):
+    """``util.start_node`` hook (KOGANY_SIDECAR=1), called before ycashd i starts: start kogany i
+    (or keep it running when its config is unchanged; restart it otherwise) and return ycashd i's
+    arguments.  ``args`` are node i's arguments without the binary."""
+    mixed = current()
+    k = SIDECAR_NODES.get(i)
+    if k is None:
+        k = KoganyNode(i, dirname, os.environ['KOGANY_BIN'], mixed.extra_args or os.getenv('KOGANY_ARGS', '').split())
+    config, notes = sidecar_kogany_config(args, i, k.datadir)
+    SIDECAR_REFUSED.pop(i, None)
+    if not k.alive() or config != k.config:
+        k.stop()
+        k.write_config(config, notes)
+        try:
+            k.start()
+        except AssertionError as e:
+            # kogany refused this config at start: an agreement if ycashd i refuses it too (a script's
+            # assert_start_raises_init_error), a divergence if ycashd i starts (sidecar_started)
+            SIDECAR_REFUSED[i] = str(e)
+            k.config = None
+    SIDECAR_NODES[i] = k
+    if k not in mixed.followers:
+        mixed.followers.append(k)
+    return sidecar_ycashd_args(i, args)
+
+
+class RigRelay(threading.Thread):
+    """The rig's background re-announcement (finding W9-a/F-3), for the waits a script does itself
+    (``wait_for_mempool`` with its own timeout, chain-viz's snapshot) and that no harness hook sees.
+    Every ``period`` seconds, per node: a transaction ycashd i has held for ``age`` seconds that
+    kogany i lacks goes to kogany i's ``sendrawtransaction``; one kogany i has held that long and
+    ycashd i lacks goes to ycashd i.  Pair-local, so a split's halves never exchange anything; kogany
+    then gossips what it took to its own peers, which is the re-announcement Zakura never makes.
+    Its own connections (one per call), never the script's.  ``KOGANY_SIDECAR_RELAY=0`` turns it off."""
+
+    def __init__(self, mixed, period=2.0, age=4.0):
+        super().__init__(name='kogany-rig-relay', daemon=True)
+        self.mixed, self.period, self.age = mixed, period, age
+        self.halt = threading.Event()
+        self.seen = {}                # (node, direction, txid) -> first time seen missing
+
+    def run(self):
+        while not self.halt.wait(self.period):
+            try:
+                self.round(time.time())
+            except Exception as e:     # never let the helper kill a run; the sync checks still judge
+                print('kogany rig relay: %r' % (e,))
+
+    def round(self, now):
+        missing = set()
+        for i, k in list(SIDECAR_NODES.items()):
+            if not k.alive() or i not in util.bitcoind_processes:
+                continue
+            y = util.get_rpc_proxy(util.rpc_url(i), i, timeout=10)
+            try:
+                have_y, have_k = set(y.getrawmempool()), set(k.rpc.getrawmempool())
+            except (OSError, JSONRPCException):
+                continue
+            for direction, txids in (('k', have_y - have_k), ('y', have_k - have_y)):
+                for txid in txids:
+                    key = (i, direction, txid)
+                    missing.add(key)
+                    first = self.seen.setdefault(key, now)
+                    if now - first < self.age:
+                        continue
+                    try:
+                        if direction == 'k':
+                            k.rpc.with_timeout(self.mixed.tx_timeout).sendrawtransaction(y.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_kogany'] = self.mixed.stats.get('relayed_txs_kogany', 0) + 1
+                        else:
+                            y.sendrawtransaction(k.rpc.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_ycashd'] = self.mixed.stats.get('relayed_txs_ycashd', 0) + 1
+                    except (OSError, JSONRPCException):
+                        pass           # refused, mined or evicted meanwhile: retried next round if still missing
+        self.seen = {key: t for key, t in self.seen.items() if key in missing}
+
+    def stop(self):
+        self.halt.set()
+        if self.is_alive():
+            self.join(10)
+
+
+def sidecar_started(i):
+    """``util.start_node`` hook after ycashd i answered: kogany i must have taken the same config."""
+    msg = SIDECAR_REFUSED.pop(i, None)
+    if msg is not None:
+        raise AssertionError('kogany %d refused a config ycashd %d accepts: %s' % (i, i, msg))
+
+
+def stop_sidecars():
+    for k in list(SIDECAR_NODES.values()):
+        k.stop()
+    SIDECAR_NODES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -959,8 +1150,9 @@ class MixedLine:
 
     def __init__(self, binary=None, followers=1, peer=None, strict=False, mempool=False,
                  sync_timeout=120, extra_args=(), yewd=None, mirror_invalidate=False,
-                 tx_timeout=10):
+                 tx_timeout=10, sidecar=False, pump_after=5.0):
         self.binary = binary
+        self.sidecar = bool(sidecar and binary)   # KOGANY_SIDECAR=1: the W9-a test rig
         self.n_followers = followers
         self.peer = peer
         self.strict = strict
@@ -973,6 +1165,7 @@ class MixedLine:
         self.tx_timeout = tx_timeout
         self.mirrored = {}
         self.followers = []
+        self.relay = None             # the rig's RigRelay thread
         self.tmpdir = None
         self.peer_args = None
         self._notes = set()
@@ -982,6 +1175,11 @@ class MixedLine:
         self.script_invalidates = False   # the script's source calls invalidateblock/reconsiderblock
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'mempool_points': 0,
                       'verdicts': 0, 'verdict_classes': 0}
+        if self.sidecar:
+            self.stats.update({'pumped_blocks': 0, 'pump_rounds': 0, 'fed_txs_kogany': 0, 'fed_txs_ycashd': 0})
+        self.pump_after = pump_after          # the rig: seconds a lagging kogany gets before the feed
+        self.tx_feed_after = 2 * pump_after   # the rig: seconds a mempool gap gets before the tx feed
+        self.pump_batch = 200
 
     @classmethod
     def from_env(cls, env=None):
@@ -997,7 +1195,9 @@ class MixedLine:
                    extra_args=env.get('KOGANY_ARGS', '').split(),
                    yewd=env.get('YEWD_BIN') or None,
                    mirror_invalidate=env.get('KOGANY_MIRROR_INVALIDATE', '0') == '1',
-                   tx_timeout=float(env.get('KOGANY_TX_TIMEOUT', '10')))
+                   tx_timeout=float(env.get('KOGANY_TX_TIMEOUT', '10')),
+                   sidecar=env.get('KOGANY_SIDECAR', '0') == '1',
+                   pump_after=float(env.get('KOGANY_SIDECAR_PUMP_AFTER', '5')))
 
     @property
     def enabled(self):
@@ -1030,8 +1230,8 @@ class MixedLine:
     def on_node_start(self, i, args, proxy):
         """``util.start_node`` hook: remember the peer's arguments; on a restart of the peer,
         restart a follower whose config changed and re-make the connection."""
-        if not self.enabled or i != self.peer:
-            return
+        if not self.enabled or self.sidecar or i != self.peer:
+            return              # the rig starts kogany i itself, before ycashd i (start_sidecar)
         self.peer_args = list(args)
         for f in self.followers:
             config, notes = self._config_for(f)
@@ -1045,6 +1245,13 @@ class MixedLine:
         """Called after ``setup_network``: start the followers against the peer and wait for them
         to reach its tip."""
         if not self.enabled:
+            return
+        if self.sidecar:
+            print('kogany: test rig, %d kogany + ycashd pair(s) (%s)' % (len(SIDECAR_NODES), self.binary))
+            self.sync_point(list(test.nodes), 'attach')
+            if os.getenv('KOGANY_SIDECAR_RELAY', '1') == '1':
+                self.relay = RigRelay(self)
+                self.relay.start()
             return
         assert test.nodes and self.peer < len(test.nodes), 'KOGANY_PEER %s is not a node of this run' % self.peer
         if self.peer_args is None:
@@ -1060,8 +1267,12 @@ class MixedLine:
         self.sync_point([test.nodes[self.peer]], 'attach')
 
     def stop(self):
+        if self.relay is not None:
+            self.relay.stop()
+            self.relay = None
         for f in self.followers:
             f.stop()
+        SIDECAR_NODES.clear()
         if self.followers:
             print('kogany: stopped; %s' % ', '.join('%s=%d' % kv for kv in sorted(self.stats.items())))
         self.followers = []
@@ -1111,6 +1322,19 @@ class MixedLine:
         except JSONRPCException:
             pass
 
+    def _pairs(self, conns):
+        """[(ycashd connection, kogany)] a sync point compares: every follower against the peer, or,
+        in the rig, each connection whose node has a kogany against that kogany."""
+        if self.sidecar:
+            out = []
+            for c in conns:
+                i = _node_index(c)
+                if i is not None and i in SIDECAR_NODES:
+                    out.append((c, SIDECAR_NODES[i]))
+            return out
+        ref = self._peer_conn(conns)
+        return [] if ref is None else [(ref, f) for f in self.followers]
+
     def _peer_conn(self, conns):
         port = rpc_port(self.peer)
         for c in conns:
@@ -1129,15 +1353,18 @@ class MixedLine:
         RPC or the peer does not serve it).  A no-op unless the peer is among ``conns``."""
         if not self.active:
             return
-        ref = self._peer_conn(conns)
-        if ref is None:
+        pairs = self._pairs(conns)
+        if not pairs:
             return
         self.stats['sync_points'] += 1
-        tip = ref.getbestblockhash()
-        for f in self.followers:
+        for ref, f in pairs:
+            tip = ref.getbestblockhash()
             if not f.alive():
                 raise AssertionError('kogany %d exited (see %s/zakurad.log)' % (f.k, f.datadir))
-            self._connect(ref, f)
+            if self.sidecar:
+                self._check_isolated(f)
+            else:
+                self._connect(ref, f)
             deadline = time.time() + self.sync_timeout
             while True:
                 try:
@@ -1148,6 +1375,8 @@ class MixedLine:
                     break
                 if self.mirror_invalidate and got is not None:
                     self._mirror(ref, f, got)
+                if self.sidecar and got is not None and time.time() > deadline - self.sync_timeout + self.pump_after:
+                    self._pump(ref, f, got)
                 if time.time() > deadline:
                     hint = self.invalidate_hint()
                     raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s%s'
@@ -1155,6 +1384,142 @@ class MixedLine:
                                             ('; ' + hint) if hint else ''))
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
+
+    def _check_isolated(self, f):
+        """The rig's topology: a kogany's only peers are ycashds that dialed it.  An outbound
+        connection is a kogany-to-kogany link the script's topology does not have (and its
+        split_network cannot cut): fail (finding W9-a/F-2)."""
+        try:
+            peers = f.rpc.getpeerinfo()
+        except (OSError, JSONRPCException):
+            return
+        out = [p.get('addr') for p in peers if p.get('inbound') is False]
+        if out:
+            raise AssertionError('kogany %d has outbound peer(s) %s: the rig leaked a kogany-to-kogany link'
+                                 % (f.k, out))
+
+    def sync_failed(self, kind, conns):
+        """``util`` hook before a failed sync_blocks/sync_mempools raises: in the rig, print every
+        pair's tip, mempool and kogany peers, so a relay gap names the hop that dropped it."""
+        if not (self.sidecar and self.active):
+            return
+        print('kogany rig: %s sync failed; per node (ycashd | kogany):' % kind)
+        for ref, f in self._pairs(conns):
+            try:
+                y = (ref.getblockcount(), ref.getbestblockhash()[:12], sorted(ref.getrawmempool()))
+                k = (f.rpc.getblockcount(), f.rpc.getbestblockhash()[:12], sorted(f.rpc.getrawmempool()))
+                peers = sorted(p.get('addr') for p in f.rpc.getpeerinfo())
+            except Exception as e:
+                print('  node %d: %r' % (f.k, e))
+                continue
+            print('  node %d: ycashd %d %s mempool %s | kogany %d %s mempool %s peers %s'
+                  % (f.k, y[0], y[1], [h[:12] for h in y[2]], k[0], k[1], [h[:12] for h in k[2]], peers))
+
+    def mempool_wait(self, conns, waited):
+        """``util._sync_mempools`` hook, called while the ycashds' mempools still differ: in the rig,
+        after ``tx_feed_after`` seconds, close the relay gaps (finding W9-a/F-3).  Zakura gossips a
+        transaction once, to the peers ready at that instant, and never re-announces it; a ycashd
+        re-announces a wallet transaction only on its rebroadcast timer (minutes).  So a single missed
+        announcement leaves a ycashd without a transaction its kogany holds, or a kogany without one
+        the group holds.  The feed: a transaction of the sync group missing from kogany i goes to
+        kogany i's ``sendrawtransaction`` (kogany validates it and gossips it again); one kogany i holds
+        that ycashd i lacks goes to ycashd i from kogany i's mempool (it came from a kogany).  A
+        kogany refusal is printed, never fatal here: the sync itself still has to converge."""
+        if not (self.sidecar and self.active) or waited < self.tx_feed_after:
+            return
+        pairs = self._pairs(conns)
+        group = {}
+        for ref, _f in pairs:
+            for txid in ref.getrawmempool():
+                group.setdefault(txid, ref)
+        for ref, f in pairs:
+            try:
+                have_y = set(ref.getrawmempool())
+                have_k = set(f.rpc.getrawmempool())
+            except (OSError, JSONRPCException):
+                continue
+            for txid, src in group.items():
+                if txid in have_k:
+                    continue
+                try:
+                    f.rpc.with_timeout(self.tx_timeout).sendrawtransaction(src.getrawtransaction(txid))
+                    self.stats['fed_txs_kogany'] += 1
+                except (OSError, JSONRPCException) as e:
+                    print('kogany %d: the rig fed %s, refused: %s' % (f.k, txid[:16], _message(e)[:120]))
+            for txid in have_k - have_y:
+                try:
+                    ref.sendrawtransaction(f.rpc.getrawtransaction(txid))
+                    self.stats['fed_txs_ycashd'] += 1
+                except (OSError, JSONRPCException):
+                    pass                    # mined, evicted or a conflict meanwhile: the next round sees it
+
+    def sync_wait(self, conns, waited):
+        """``util._sync_blocks`` hook, called while the ycashds' tips still differ: in the rig, after
+        ``pump_after`` seconds, feed each lagging kogany the blocks its own ycashd holds (``_pump``),
+        then the blocks of the highest ycashd of the sync group: a ycashd and its kogany that both lag
+        (a node whose only other link is to a kogany that gossiped the blocks while the ycashd's
+        connection was not ready, and whose ycashd then never asks again) are otherwise stuck.  A
+        kogany may refuse another node's block (that node can run other rules, the stock node
+        without the attestor set), so only its own ycashd's blocks are a divergence."""
+        if not (self.sidecar and self.active) or waited < self.pump_after:
+            return
+        pairs = self._pairs(conns)
+        best = None
+        try:
+            best = max(conns, key=lambda c: c.getblockcount())
+        except (OSError, JSONRPCException, ValueError):
+            pass
+        for ref, f in pairs:
+            for src in (ref, best):
+                if src is None:
+                    continue
+                try:
+                    got = f.rpc.getbestblockhash()
+                except (OSError, JSONRPCException):
+                    break
+                self._pump(src, f, got, own=src is ref)
+
+    def _pump(self, ref, f, got, own=True):
+        """The rig's feed (finding W9-a/F-1): kogany i is behind ycashd i on ycashd i's active chain, so
+        submit the missing blocks (up to ``pump_batch``) from ycashd i to kogany i's ``submitblock``,
+        which fully validates each one; kogany then relays them to the other ycashds by P2P.
+
+        Why: zcashd never answers a ``getdata`` for a block it lacks (no ``notfound`` for blocks), and
+        Zakura's syncer routes block requests to any ready peer, so a kogany whose other ycashd peers
+        lag waits ``BLOCK_DOWNLOAD_TIMEOUT`` (20 s) per misrouted request when one ycashd mines a burst
+        (a 101-block ``generate`` took over a minute).  The steady state (one block, gossiped by
+        ``inv``) needs no feed.  A block kogany refuses here is a cross-line divergence: ycashd i holds
+        it in its active chain.  ``KOGANY_SIDECAR_PUMP_AFTER`` (default 5 s) is the grace before the
+        feed; a large value turns it off."""
+        try:
+            tip = ref.getbestblockhash()
+            if got == tip:
+                return
+            ref_height = ref.getblockcount()
+            k_height = f.rpc.getblockcount()
+            h = min(k_height, ref_height)
+            while h > 0 and f.rpc.getblockhash(h) != ref.getblockhash(h):
+                h -= 1                     # kogany on another branch: feed from the common ancestor
+        except (OSError, JSONRPCException):
+            return
+        if ref_height <= h:
+            return                         # kogany is ahead or on a longer branch: nothing to feed
+        self.stats['pump_rounds'] += 1
+        for height in range(h + 1, min(ref_height, h + self.pump_batch) + 1):
+            block_hex = ref.getblock(ref.getblockhash(height), 0)
+            try:
+                result = f.rpc.submitblock(block_hex)
+            except JSONRPCException as e:
+                result = _message(e)
+            if classify_kogany_block(result) != ACCEPT:
+                if not own:            # another node's rules may differ: its own ycashd decides
+                    print('kogany %d: the rig fed block %d of another node, refused (%s)' % (f.k, height, result))
+                    return
+                raise AssertionError('kogany %d refused block %d of ycashd %d\'s active chain: %s'
+                                     % (f.k, height, f.k, result))
+            self.stats['pumped_blocks'] += 1
+            if not own:
+                self.stats['pumped_blocks_cross'] = self.stats.get('pumped_blocks_cross', 0) + 1
 
     def _mirror(self, ref, f, got):
         """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
@@ -1259,17 +1624,20 @@ class MixedLine:
         """``getrawmempool`` set equality with the peer (``KOGANY_MEMPOOL=1``)."""
         if not (self.active and self.mempool):
             return
-        ref = self._peer_conn(conns)
-        if ref is None:
+        pairs = self._pairs(conns)
+        if not pairs:
             return
         self.stats['mempool_points'] += 1
-        want = set(ref.getrawmempool())
-        for f in self.followers:
-            deadline = time.time() + self.sync_timeout
+        for ref, f in pairs:
+            start = time.time()
+            deadline = start + self.sync_timeout
             while True:
+                want = set(ref.getrawmempool())
                 got = set(f.rpc.getrawmempool())
                 if got == want:
                     break
+                if self.sidecar:
+                    self.mempool_wait([ref], time.time() - start)   # the rig's feed, pair by pair
                 if time.time() > deadline:
                     raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s'
                                          % (f.k, sorted(want - got), sorted(got - want)))
@@ -1289,16 +1657,27 @@ class MixedLine:
                 time.sleep(0.2)
         return False
 
-    def offer_block(self, block_hex, cxx_result, label=''):
+    def _judges(self, node):
+        """The koganys whose verdict is compared with ``node``'s: every follower, or in the rig the
+        kogany of ``node`` alone (each kogany is configured from its own ycashd, so the stock node's
+        kogany, without the attestor set, accepts what the enforcing ycashds reject -- as the stock
+        ycashd does).  A rig call without ``node`` keeps every kogany."""
+        if not self.sidecar or node is None:
+            return list(self.followers)
+        i = _node_index(node)
+        return [SIDECAR_NODES[i]] if i in SIDECAR_NODES else []
+
+    def offer_block(self, block_hex, cxx_result, label='', node=None):
         """Submit ``block_hex`` to every follower and assert the verdict class equals ycashd's
-        ``cxx_result`` (its ``submitblock`` result).  Returns the classes, or None when inert."""
+        ``cxx_result`` (its ``submitblock`` result; ``node`` the ycashd that gave it, which in the rig
+        picks the kogany that judges).  Returns the classes, or None when inert."""
         if not self.active:
             return None
         raw = bytes.fromhex(block_hex)
         prev = raw[4:36][::-1].hex()
         cxx = classify_cxx_block(cxx_result)
         out = []
-        for f in self.followers:
+        for f in self._judges(node):
             if not self._wait_parent(f, prev):
                 self.note('block offered on a parent kogany %d does not have; verdict skipped' % f.k)
                 continue
@@ -1325,14 +1704,14 @@ class MixedLine:
             return None
         return r if isinstance(r, str) else None
 
-    def offer_tx(self, tx_hex, cxx_error, label=''):
+    def offer_tx(self, tx_hex, cxx_error, label='', node=None):
         """The transaction path (``KOGANY_MEMPOOL=1``): ``cxx_error`` is None when ycashd accepted
-        ``tx_hex``, else its ``JSONRPCException``."""
+        ``tx_hex``, else its ``JSONRPCException`` (``node`` as for ``offer_block``)."""
         if not (self.active and self.mempool):
             return None
         cxx = classify_cxx_tx(cxx_error, self.unmapped)
         out = []
-        for f in self.followers:
+        for f in self._judges(node):
             text = ''
             try:
                 f.rpc.with_timeout(self.tx_timeout).sendrawtransaction(tx_hex)
@@ -1355,15 +1734,16 @@ class MixedLine:
 
     def on_block_rejected(self, node, blockhash):
         """``assert_rejected`` hook: offer the block ycashd holds as invalid to the followers."""
-        if not self.active or blockhash in self.offered:
+        key = (blockhash, _node_index(node)) if self.sidecar else blockhash   # the rig: once per node's kogany
+        if not self.active or key in self.offered:
             return
-        self.offered.add(blockhash)
+        self.offered.add(key)
         try:
             block_hex = node.getblock(blockhash, 0)
         except JSONRPCException:
             self.note('a rejected block without data on the ycashd node; verdict skipped')
             return
-        self.offer_block(block_hex, 'invalid', 'assert_rejected %s' % blockhash)
+        self.offer_block(block_hex, 'invalid', 'assert_rejected %s' % blockhash, node=node)
 
     def _assert_same(self, cxx, kog, path, label, detail, kogany_text=''):
         self.stats['verdicts'] += 1
@@ -1376,6 +1756,18 @@ class MixedLine:
             return
         raise AssertionError('verdict class differs (%s) %s: ycashd %s (%s), kogany %s (%s)'
                              % (path, label, cxx, detail, kog, kogany_text))
+
+
+def _node_index(conn):
+    """The node index whose rpc_port ``conn``'s URL names (None when none does)."""
+    try:
+        port = urlparse(conn.url).port
+    except Exception:
+        return None
+    for i in range(MAX_NODES):
+        if rpc_port(i) == port:
+            return i
+    return None
 
 
 _INVALIDATE_CALL = re.compile(r'\.(invalidateblock|reconsiderblock)\s*\(')
@@ -1428,6 +1820,9 @@ def _register(mixed):
     util.MIXED_HOOKS['start'] = mixed.on_node_start
     util.MIXED_HOOKS['sync_blocks'] = mixed.sync_point
     util.MIXED_HOOKS['sync_mempools'] = mixed.mempool_point
+    util.MIXED_HOOKS['sync_wait'] = mixed.sync_wait
+    util.MIXED_HOOKS['mempool_wait'] = mixed.mempool_wait
+    util.MIXED_HOOKS['sync_failed'] = mixed.sync_failed
     atexit.register(mixed.stop)
 
 
