@@ -13,6 +13,7 @@ Python 3.11+ (tomllib parses the generated file back).
 """
 
 import os
+import re
 import sys
 import tomllib
 import unittest
@@ -55,7 +56,7 @@ class TomlGeneratorTest(unittest.TestCase):
 
     def test_live_chunks_emit_pending_keys_in_order(self):
         _cfg, notes, t = self.gen(['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=0', '-pqfalconheight=0'],
-                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-c', 'W3-c'))
+                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e', 'W3-c'))
         h = t['network']['network']['params']['activation_heights']
         self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault'])
         self.assertEqual(h['Vault'], 103)
@@ -78,6 +79,23 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertIn('pending:W5-f: -yellowbackattestorset=%s -> yellowback.attestor_set = %s' % (SETID, SETID), notes)
         self.assertIn('ignored: -yellowbackpayoutaddress=tmXYZ', notes)
         self.assertIn('ignored: -mocktime=1700000000', notes)
+
+    def test_w5e_and_mempool_rows(self):
+        yed = ['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=7', '-yellowbacksupplycapbps=500',
+               '-yellowbackattestarmmin=2', '-yellowbackbundlecarrier=either', '-yellowbackmintrequiresarmed=1']
+        pool = ['-acceptnonstdtxn=0', '-txunpaidactionlimit=0', '-datacarriersize=1200']
+        _cfg, notes, t = self.gen(yed + pool, live=('W5-e',))
+        self.assertEqual(t['yellowback'], {'sigma_ref': 7, 'supply_cap_bps': 500, 'attest_arm_min': 2,
+                                           'bundle_carrier': 'either', 'mint_requires_armed': True})
+        self.assertEqual(t['mempool'], {'debug_enable_at_height': 0, 'accept_non_standard': False,
+                                        'tx_unpaid_action_limit': 0, 'max_datacarrier_bytes': 1200})
+        # the attestor set stays a note until W5-f registers the module (it would stop the follower)
+        self.assertTrue(any(n.startswith('pending:W5-f: -yellowbackattestorset') for n in notes), notes)
+        _cfg, notes, t = self.gen(yed)
+        self.assertNotIn('yellowback', t)
+        self.assertEqual(len([n for n in notes if n.startswith('pending:W5-e')]), 5)
+        with self.assertRaises(kg.UnmappedArgument):
+            self.gen(['-acceptnonstdtxn=yes'])
 
     def test_unmapped_arguments_refused(self):
         for bad in (['-yellowbacknewflag=1'], ['-vaultsomething=1'], ['-nuparams=deadbeef:5'], ['-frobnicate'], ['x']):
@@ -159,8 +177,74 @@ class VerdictClassTest(unittest.TestCase):
     def test_kogany_side(self):
         self.assertEqual(kg.classify_kogany_block(None), kg.ACCEPT)
         self.assertEqual(kg.classify_kogany_block('duplicate'), kg.ACCEPT)
-        self.assertEqual(kg.classify_kogany_block('rejected'), kg.REJECT_UNCLASSIFIED)
+        self.assertEqual(kg.classify_kogany_block('rejected'), kg.REJECT_CONSENSUS)
+        self.assertEqual(kg.classify_kogany_block('something-new'), kg.REJECT_UNCLASSIFIED)
         self.assertEqual(kg.classify_kogany_tx(rpc_error('anything')), kg.REJECT_UNCLASSIFIED)
+
+    # kogany's texts as zakurad answers them (W1-Y9 run of mempool_ycash_parity.py, 2026-11-01, and
+    # the Display strings of the W3-d / W4-d errors), each with ycashd's class for the same case.
+    KOGANY_TEXTS = [
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: failed to verify ZIP-317 transaction rules, transaction was not inserted to mempool: '
+         'Transaction fee is below the minimum fee rate', kg.REJECT_POLICY, '66: min relay fee not met'),
+        ('io error: failed to fill whole buffer', kg.REJECT_CONSENSUS, '16: bad-txns-oversize'),
+        ('transaction is non-standard', kg.REJECT_POLICY, '64: bad-txns-too-many-sigops'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: transaction must not be mined at a block Height(202) greater than its expiry Height(201), '
+         'failing transaction', kg.REJECT_POLICY, 'tx-expiring-soon: expiryheight is 201 but should be at least 205'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: transaction is locked until after block height 202', kg.REJECT_POLICY, '64: non-final'),
+        ('transaction already exists in mempool', kg.ACCEPT, None),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: could not find transparent input UTXO in the best chain or mempool', kg.REJECT_STATE,
+         'Missing inputs'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: could not contextually validate transaction on best chain: time-based relative lock-time: '
+         'input 0 has nSequence 0x00400005 with BIP68\'s type flag set, which the Vault upgrade makes invalid '
+         '(bad-txns-vault-timelock)', kg.REJECT_STATE, '16: bad-txns-vault-timelock'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: could not contextually validate transaction on best chain: unsatisfied relative lock-time: '
+         'a spend at Height(210) is invalid before Height(215) (bad-txns-nonfinal; non-BIP68-final in the '
+         'mempool)', kg.REJECT_POLICY, '64: non-BIP68-final'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: could not contextually validate transaction on best chain: vault rule violation in block '
+         '00ab at Height(230): bad-txns-vault-covenant', kg.REJECT_STATE, '16: bad-txns-vault-covenant'),
+        ('vault rule violation in block 00ab at Height(230): bad-vault-act-sigs', kg.REJECT_STATE,
+         '16: bad-vault-act-sigs'),
+        ('transaction did not pass consensus validation: bad-yellowback-redeem-burn', kg.REJECT_STATE,
+         '16: bad-yellowback-redeem-burn'),
+        ('transaction did not pass consensus validation: transparent double-spend: OutPoint { .. } is spent twice',
+         kg.REJECT_CONSENSUS, '16: bad-txns-inputs-duplicate'),
+        ('transaction rejected because another transaction in the mempool has already spent some of its inputs',
+         kg.REJECT_POLICY, '258: txn-mempool-conflict'),
+        ('any transaction with the same effects will be rejected from the mempool until a chain reset: '
+         'transaction was committed to the best chain', kg.REJECT_POLICY, 'transaction already in block chain'),
+        ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+         'validation: could not verify a transparent script: script failed to verify', kg.REJECT_CONSENSUS,
+         '16: mandatory-script-verify-flag-failed (Signature must be zero for failed CHECK(MULTI)SIG operation)'),
+        ('transaction did not pass consensus validation: immature transparent coinbase spend: attempt to spend '
+         'OutPoint at Height(5)', kg.REJECT_STATE, '16: bad-txns-premature-spend-of-coinbase'),
+    ]
+
+    def test_kogany_texts_agree_with_ycashd(self):
+        for text, want, cxx in self.KOGANY_TEXTS:
+            self.assertEqual(kg.classify_kogany_tx(rpc_error(text)), want, text)
+            if cxx is not None:
+                unmapped = []
+                self.assertEqual(kg.classify_cxx_tx(rpc_error(cxx), unmapped), want, cxx)
+                self.assertEqual(unmapped, [], cxx)
+
+    def test_cxx_rows_carry_ycash6_reason(self):
+        cls, row = kg.classify_kogany_text('tx', 'x (bad-txns-vault-timelock) y')
+        self.assertEqual((cls, row[2].split()[0]), (kg.REJECT_STATE, 'W3-d'))
+        # the same reason in a block is consensus, through the proposal text
+        proposal = 'vaultrejected-reason-bad-txns-vault-covenant-height-height-230-hash-hash-00ab'
+        self.assertEqual(kg.classify_kogany_block('rejected', proposal), kg.REJECT_CONSENSUS)
+        self.assertEqual(kg.classify_kogany_block('rejected', 'time-too-far-in-the-future'), kg.REJECT_STATE)
+        self.assertEqual(kg.classify_cxx_block('time-too-new'), kg.REJECT_STATE)
+        # a proposal no row names leaves the bare 'rejected'
+        self.assertEqual(kg.classify_kogany_block('rejected', 'something-else'), kg.REJECT_CONSENSUS)
+        self.assertEqual(kg.classify_kogany_block(None, 'ignored-when-accepted'), kg.ACCEPT)
 
     def test_same_class(self):
         self.assertTrue(kg.same_class(kg.ACCEPT, kg.ACCEPT))
@@ -178,6 +262,13 @@ class VerdictClassTest(unittest.TestCase):
             self.assertTrue(pattern)
             if cls == kg.REJECT_CONSENSUS:
                 self.assertIn(dos, (10, 100))
+        for path, pattern, cls, src in kg.KOGANY_REASON_MAP:
+            self.assertIn(path, ('block', 'tx', 'proposal'))
+            self.assertIn(cls, (kg.ACCEPT, kg.CXX) + kg.REJECT_CLASSES)
+            self.assertTrue(src)
+            rx = re.compile(pattern)
+            if cls == kg.CXX:
+                self.assertEqual(rx.groups, 1, pattern)
 
 
 class FakeFollower:
@@ -261,6 +352,89 @@ class YewdPairTest(unittest.TestCase):
         cxx = {util.rpc_port(i) for i in range(util.MAX_NODES + 1)} | {util.p2p_port(i) for i in range(util.MAX_NODES + 1)}
         self.assertNotIn(kg.yewd_backend_rpc_port(2), cxx)
         self.assertNotIn(kg.yewd_backend_rpc_port(2), {kg.kogany_rpc_port(k) for k in range(9)})
+
+
+class FakeRPC:
+    """A node answering fixed vault_getinfo / yed_getstatehash results (or raising)."""
+
+    def __init__(self, vault=None, yed=None):
+        self.vault, self.yed = vault, yed
+
+    def _answer(self, v):
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    def vault_getinfo(self):
+        return self._answer(self.vault)
+
+    def yed_getstatehash(self):
+        return self._answer(self.yed)
+
+    def getbestblockhash(self):
+        return 'aa' * 32
+
+
+class FakeStateFollower:
+    k = 0
+
+    def __init__(self, rpc):
+        self.rpc = rpc
+
+
+VINFO = {'branchid': '6d5b7a31', 'activationheight': 200, 'active': True, 'height': 210, 'attestorsetid': None,
+         'moduleactive': False, 'dbtip': {'hash': 'aa' * 32, 'height': 210}, 'sets': 1, 'vaults': 1, 'intents': 0,
+         'lockedvalue': kg.Decimal('25.00000000'), 'statehash': 'cd' * 32}
+MISSING = JSONRPCException({'code': -32601, 'message': 'Method not found'})
+
+
+class SyncPointTest(unittest.TestCase):
+
+    def run_point(self, ref, kog, strict=False):
+        m = kg.MixedLine(binary='/bin/z', strict=strict)
+        m._compare_statehash(ref, FakeStateFollower(kog), 'test')
+        return m
+
+    def test_equal_state_counts(self):
+        kog = dict(VINFO, lockedvalue=25)              # an integer amount compares as a Decimal
+        m = self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(kog, MISSING))
+        self.assertEqual(m.stats['statehash_vault'], 1)
+        self.assertEqual(m.stats['statehash_yed'], 0)
+
+    def test_no_statehash_yet_is_skipped(self):
+        w7a = {'branchid': '6d5b7a31', 'activationheight': -1, 'active': False, 'height': 210, 'dbtip': None}
+        m = self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(w7a, MISSING))
+        self.assertEqual(m.stats['statehash_vault'], 0)
+        self.assertTrue(any('W4-d' in n for n in m._notes))
+        self.assertTrue(any('activationheight' in n for n in m._notes))
+        with self.assertRaises(AssertionError):           # the W7 note is fatal under KOGANY_STRICT
+            self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(w7a, MISSING), strict=True)
+
+    def test_state_difference_fails(self):
+        for key, value in (('statehash', 'ce' * 32), ('dbtip', {'hash': 'bb' * 32, 'height': 210}),
+                           ('vaults', 2), ('lockedvalue', kg.Decimal('24'))):
+            with self.assertRaises(AssertionError) as cm:
+                self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(dict(VINFO, **{key: value}), MISSING))
+            self.assertIn(key, str(cm.exception))
+
+    def test_branch_id_always_compared(self):
+        with self.assertRaises(AssertionError):
+            self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(dict(VINFO, branchid='00000000', statehash=None), MISSING))
+
+    def test_kogany_without_the_method(self):
+        m = self.run_point(FakeRPC(VINFO, MISSING), FakeRPC(MISSING, MISSING))
+        self.assertEqual(m.stats['statehash_vault'], 0)
+        self.assertTrue(any('not served' in n for n in m._notes))
+
+    def test_yed_statehash(self):
+        yed = {'height': 210, 'blockhash': 'aa' * 32, 'statehash': 'ef' * 32}
+        m = self.run_point(FakeRPC(VINFO, yed), FakeRPC(VINFO, dict(yed)))
+        self.assertEqual(m.stats['statehash_yed'], 1)
+        with self.assertRaises(AssertionError):
+            self.run_point(FakeRPC(VINFO, yed), FakeRPC(VINFO, dict(yed, statehash='ee' * 32)))
+        unavailable = JSONRPCException({'code': -32603, 'message': 'the YED index is not available'})
+        m = self.run_point(FakeRPC(VINFO, yed), FakeRPC(VINFO, unavailable))
+        self.assertEqual(m.stats['statehash_yed'], 0)
 
 
 class MixedLineHookTest(unittest.TestCase):
