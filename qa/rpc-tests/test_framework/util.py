@@ -102,7 +102,13 @@ def get_rpc_proxy(url, node_number, timeout=None):
     coverage_logfile = coverage.get_filename(
         COVERAGE_DIR, node_number) if COVERAGE_DIR else None
 
-    return coverage.AuthServiceProxyWrapper(proxy, coverage_logfile)
+    proxy = coverage.AuthServiceProxyWrapper(proxy, coverage_logfile)
+    if os.getenv("YEWD_BIN"):
+        # column 3 (YEWD_KOGANY): a pair's generate solved by the harness when a ycash6 peer judges it,
+        # on every proxy of the node (helpers make their own, yellowback_attest.two_step)
+        from . import kogany
+        proxy = kogany.yewd_wrap_proxy(node_number, proxy)
+    return proxy
 
 
 def p2p_port(n):
@@ -628,10 +634,6 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     if os.getenv("PYTHON_DEBUG", ""):
         print("start_node: RPC successfully started for node {} with pid {}".format(i, bitcoind_processes[i].pid))
     proxy = get_rpc_proxy(url, i, timeout=timewait)
-    if os.getenv("YEWD_BIN"):
-        # column 3 (YEWD_KOGANY): a pair's generate solved by the harness when a ycash6 peer judges it
-        from . import kogany
-        proxy = kogany.yewd_wrap_proxy(i, proxy)
 
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
