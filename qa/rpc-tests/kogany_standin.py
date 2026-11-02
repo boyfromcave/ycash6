@@ -50,6 +50,9 @@ def main(argv):
             '-rpccookiefile=' + os.path.join(rpc['cookie_dir'], '.cookie'),
             '-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025']
     for nu, h in net['network']['params']['activation_heights'].items():
+        if nu == 'pq_falcon_height':            # not an upgrade: ycashd's -pqfalconheight (W3-c/F-1)
+            args.append('-pqfalconheight=%d' % h)
+            continue
         if nu not in BRANCH_OF:
             sys.exit('kogany_standin.py: no branch id for %s' % nu)
         args.append('-nuparams=%s:%d' % (BRANCH_OF[nu], h))
@@ -60,8 +63,6 @@ def main(argv):
         args.append('-yellowbackattestorset=%s' % yb['attestor_set'])
     if 'sigma_ref' in yb:
         args.append('-yellowbacksigmaref=%d' % yb['sigma_ref'])
-    if 'pq_falcon_height' in cfg.get('kogany', {}):
-        args.append('-pqfalconheight=%d' % cfg['kogany']['pq_falcon_height'])
     os.execv(args[0], args)
 
 

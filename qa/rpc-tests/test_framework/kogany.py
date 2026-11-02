@@ -212,9 +212,10 @@ ZAKURAD_KEY_TABLE = [
      '"scriptsig" / "opreturn" / "either" (W5-e)'),
     ('-yellowbackmintrequiresarmed=<0|1>', 'live:W5-f', 'yellowback.mint_requires_armed', 'bool (W5-e)'),
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
-    ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
-     'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
-    ('-pqfalcon=<0|1>', 'pending:W3-c', 'kogany.pq_falcon_height',
+    ('-pqfalconheight=<h>', 'live', 'network.network.params.activation_heights.pq_falcon_height',
+     'the regtest Falcon height (kogany ConfiguredActivationHeights::pq_falcon, finding W3-c/F-1 resolved); '
+     'not an upgrade: no branch id, 0 is valid'),
+    ('-pqfalcon=<0|1>', 'live', 'network.network.params.activation_heights.pq_falcon_height',
      'ycashd\'s shorthand: -pqfalcon=1 is -pqfalconheight=0 (init.cpp); -pqfalcon=0 sets nothing'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
@@ -307,8 +308,14 @@ _PENDING_FLAGS = {
     '-yellowbackattestarmmin': ('W5-f', ('yellowback', 'attest_arm_min'), int),
     '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
     '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
-    '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
-    '-pqfalcon': ('W3-c', ('kogany', 'pq_falcon_height'), lambda v: 0 if _bool01(v) else None),
+}
+
+# The Falcon height (W3-c/F-1): a key of the regtest activation heights, though not an upgrade
+# (kogany `ConfiguredActivationHeights::pq_falcon`, toml `pq_falcon_height`).  None: nothing to carry.
+FALCON_KEY = 'pq_falcon_height'
+_FALCON_FLAGS = {
+    '-pqfalconheight': int,
+    '-pqfalcon': lambda v: 0 if _bool01(v) else None,
 }
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
@@ -380,6 +387,11 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             else:
                 notes.append('%s: %s -> activation_heights.%s = %s' % (status, a, key, h))
             continue
+        if name in _FALCON_FLAGS:
+            value = _FALCON_FLAGS[name](value)
+            if value is not None:
+                heights[FALCON_KEY] = value
+            continue
         if name in _LIVE_FLAGS:
             path, conv = _LIVE_FLAGS[name]
             _set(cfg, path, conv(value))
@@ -405,7 +417,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     # Zakura keeps one upgrade per height, the later variant winning (testnet.rs:924-929), and
     # refuses a map out of order; ycashd's regtest puts every Ycash upgrade at 1, which is the
     # same chain either way (Canopy rules from 1).  Order the keys as ConfiguredActivationHeights.
-    order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6']
+    order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6',
+             FALCON_KEY]
     ordered = {k: heights[k] for k in order if k in heights}
 
     root = os.path.abspath(datadir)
@@ -429,7 +442,7 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
         'mining': {'internal_miner': False},
         'tracing': {'use_color': False, 'filter': log_filter or os.getenv('KOGANY_LOG', 'info')},
     }
-    for k, v in cfg.items():          # live pending sections (yellowback, kogany)
+    for k, v in cfg.items():          # live pending sections (yellowback)
         base.setdefault(k, {}).update(v)
     return base, notes
 

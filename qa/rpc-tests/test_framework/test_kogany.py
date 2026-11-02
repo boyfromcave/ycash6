@@ -56,12 +56,14 @@ class TomlGeneratorTest(unittest.TestCase):
 
     def test_live_chunks_emit_pending_keys_in_order(self):
         _cfg, notes, t = self.gen(['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=0', '-pqfalconheight=0'],
-                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e', 'W3-c'))
+                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e'))
         h = t['network']['network']['params']['activation_heights']
-        self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault'])
+        self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault',
+                                   'pq_falcon_height'])
         self.assertEqual(h['Vault'], 103)
+        self.assertEqual(h['pq_falcon_height'], 0)
         self.assertEqual(t['yellowback'], {'attestor_set': SETID, 'sigma_ref': 0})
-        self.assertEqual(t['kogany'], {'pq_falcon_height': 0})
+        self.assertNotIn('kogany', t)
         self.assertEqual(notes, [])
 
     def test_env_live(self):
@@ -148,12 +150,17 @@ class TomlGeneratorTest(unittest.TestCase):
                 self.gen([bad], live=())
 
     def test_pqfalcon_shorthand(self):
-        cfg, notes, _ = self.gen(['-pqfalcon=1'], live=('W1-Y1', 'W2-b', 'W3-c'))
-        self.assertEqual(cfg['kogany']['pq_falcon_height'], 0)
+        # W3-c/F-1 resolved: a live key of the regtest activation heights, in every mode
+        heights = lambda cfg: cfg['network']['network']['params']['activation_heights']
+        cfg, notes, _ = self.gen(['-pqfalcon=1'], live=('W1-Y1', 'W2-b'))
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 0)
         cfg, notes, _ = self.gen(['-pqfalcon=1'])
-        self.assertNotIn('kogany', cfg)
-        self.assertTrue(any('-pqfalcon=1' in n for n in notes), notes)
-        cfg, notes, _ = self.gen(['-pqfalcon=0'], live=('W3-c',))
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 0)
+        self.assertFalse(any('pqfalcon' in n for n in notes), notes)
+        cfg, notes, _ = self.gen(['-pqfalconheight=130'], live=())
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 130)
+        cfg, notes, _ = self.gen(['-pqfalcon=0'], live=())
+        self.assertNotIn('pq_falcon_height', heights(cfg))
         self.assertNotIn('kogany', cfg)
         with self.assertRaises(kg.UnmappedArgument):
             self.gen(['-pqfalcon=2'])
@@ -703,7 +710,8 @@ class MixedLineHookTest(unittest.TestCase):
         saved = os.environ.pop('KOGANY_LIVE', None)
         try:
             m.on_node_start(0, START + YCASH + VAULT + ['-pqfalconheight=5'], peer)
-            self.assertEqual(f.events, [])        # pending row (W3-c): a note, not a key -> no restart
+            self.assertEqual(f.events, ['stop', 'write', 'start'])   # live row (W3-c/F-1): a key
+            f.events = []
             m.on_node_start(0, START + YCASH + VAULT + ['-yellowbackattestorset=' + SETID], peer)
             self.assertEqual(f.events, ['stop', 'write', 'start'])   # W5-f is live by default: a key
             self.assertEqual(f.config['yellowback'], {'attestor_set': SETID})
