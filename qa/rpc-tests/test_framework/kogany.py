@@ -824,7 +824,7 @@ def same_class(cxx, kog, strict=False):
 # follows Ycash regtest: the backend line below becomes the koganyd start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
-                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet')
+                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet', '-mnemonicfile')
 YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 
 
@@ -884,7 +884,7 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     coinbase = None
     nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
     if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
-        coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir), bool(yewd_kogany_bin()))
+        coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir, args), bool(yewd_kogany_bin()))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
     kogany_bin = yewd_kogany_bin()
@@ -1017,11 +1017,14 @@ def yewd_backend_indexer_port(i):
     return kogany_rpc_port(i)
 
 
-def yewd_init_wallet(yewd_bin, datadir):
+def yewd_init_wallet(yewd_bin, datadir, args=()):
     """H8: create (or open) pair i's wallet before its backend starts: (its transparent coinbase
-    address, its Sapling coinbase address or None for a yewd that prints none)."""
+    address, its Sapling coinbase address or None for a yewd that prints none).  The node's
+    -mnemonicfile / -wallet reach -initwallet too: the wallet it creates is the one the node opens
+    (a seed-only restore, F-S5-17)."""
+    wallet = [a for a in args if a.startswith(('-mnemonicfile=', '-wallet='))]
     out = json.loads(subprocess.check_output([yewd_bin, '-datadir=' + datadir, '-conf=ycash.conf', '-regtest',
-                                              '-initwallet']))
+                                              '-initwallet'] + wallet))
     return out['mineaddress'], out.get('saplingaddress')
 
 
