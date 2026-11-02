@@ -24,7 +24,9 @@ Environment
                           (default: the framework's ``kogany_peer`` attribute; ``BitcoinTestFramework``
                           says 1 when it has two nodes or more, ``YellowbackTestFramework`` says 0).
 ``KOGANY_LIVE``           comma list of chunks whose pending key-table rows are emitted as keys
-                          (e.g. ``W1-Y1,W2-b`` once kogany parses ``Ycash`` / ``Vault``); default none.
+                          (e.g. ``W1-Y1,W2-b`` once kogany parses ``Ycash`` / ``Vault``), added to
+                          ``DEFAULT_LIVE`` (``W5-f``: the ``[yellowback]`` rows); ``!<chunk>`` turns a
+                          default chunk off (``KOGANY_LIVE=!W5-f`` for a kogany without W5-f).
 ``KOGANY_STRICT``         1: a missing kogany RPC, an unmapped reject reason or an unclassified kogany
                           reject fails the run instead of being skipped with a note (default 0).
 ``KOGANY_MEMPOOL``        1: assert ``getrawmempool`` set equality at every mempool sync point and
@@ -66,8 +68,9 @@ proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)
 ``start_yewd_pair(i, datadir, ycashd, args)`` / ``yewd_pair_argv`` / ``split_yewd_args`` /
 ``yewd_backend_rpc_port(i)`` / ``YEWD_BACKENDS``  the YEWD_BIN pair (util.start_node calls it).
 
-Under ``YEWD_BIN`` util's ``fullyNotified`` wait is skipped (ycashd never reports it with
-``-disablewallet``; ``YEWD_FULLY_NOTIFIED=1`` restores it once yewd answers it), and yewd's output
+Under ``YEWD_BIN`` util's ``fullyNotified`` wait is skipped for the pair nodes only (``util.YEWD_PAIRS``:
+their backend runs ``-disablewallet`` and never reports it; a plain ycashd node of the same run keeps
+the wait, finding F-S3-1; ``YEWD_FULLY_NOTIFIED=1`` restores it once yewd answers it), and yewd's output
 goes to ``node<i>/yewd.log`` (rpc-tests.py fails a script with stderr output).
 
 Recorded limits (plan section 5): kogany does not mine (K-16; its regtest checks the solution
@@ -132,6 +135,8 @@ def kogany_v2_port(k):
 #         'pending:<chunk>' the kogany key does not exist yet; recorded as a comment in the toml
 #                          (zakurad's config is serde deny_unknown_fields, so an early key would
 #                          refuse to start).  KOGANY_LIVE=<chunk> emits it;
+#         'live:<chunk>'   emitted as a key while <chunk> is live, which it is by default
+#                          (DEFAULT_LIVE); KOGANY_LIVE=!<chunk> turns it back into a comment;
 #         'ignored'        C++-only or wallet-only; no kogany meaning for a follower.
 
 NU_BRANCH_TABLE = {
@@ -172,22 +177,40 @@ ZAKURAD_KEY_TABLE = [
      'Zakura\'s default, written out: every node is on 127.0.0.1, so the limit is what keeps a follower to '
      'its one peer (a rig that peers kogany with two ycashd nodes on one IP must raise it: the W1-Y5 trap)'),
     ('(mempool)', 'live', 'mempool.debug_enable_at_height = 0', 'regtest mempool from genesis'),
-    ('-yellowbackattestorset=<setid>', 'pending:W5-f', 'yellowback.attestor_set',
-     'node 0\'s YED attestor set (hex, display order; W5-e key). Pending until W5-f registers the module: '
-     'before it, an invalid YED verdict stops a follower configured with a set'),
-    ('-yellowbacksigmaref=<bps>', 'pending:W5-e', 'yellowback.sigma_ref', 'int (W5-e key, regtest only)'),
-    ('-yellowbacksupplycapbps=<bps>', 'pending:W5-e', 'yellowback.supply_cap_bps', 'int (W5-e)'),
-    ('-yellowbackattestarmmin=<n>', 'pending:W5-e', 'yellowback.attest_arm_min', 'int, default 3 (W5-e)'),
-    ('-yellowbackbundlecarrier=<c>', 'pending:W5-e', 'yellowback.bundle_carrier',
+    ('-yellowbackattestorset=<setid>', 'live:W5-f', 'yellowback.attestor_set',
+     'node 0\'s YED attestor set (hex, display order; W5-e key), live with W5-f\'s module registration '
+     '(KOGANY_LIVE default-on; KOGANY_LIVE=!W5-f writes it as a note again)'),
+    ('-yellowbacksigmaref=<bps>', 'live:W5-f', 'yellowback.sigma_ref', 'int (W5-e key, regtest only)'),
+    ('-yellowbacksupplycapbps=<bps>', 'live:W5-f', 'yellowback.supply_cap_bps', 'int (W5-e)'),
+    ('-yellowbackattestarmmin=<n>', 'live:W5-f', 'yellowback.attest_arm_min', 'int, default 3 (W5-e)'),
+    ('-yellowbackbundlecarrier=<c>', 'live:W5-f', 'yellowback.bundle_carrier',
      '"scriptsig" / "opreturn" / "either" (W5-e)'),
-    ('-yellowbackmintrequiresarmed=<0|1>', 'pending:W5-e', 'yellowback.mint_requires_armed', 'bool (W5-e)'),
+    ('-yellowbackmintrequiresarmed=<0|1>', 'live:W5-f', 'yellowback.mint_requires_armed', 'bool (W5-e)'),
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
     ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
      'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
     ('-datacarriersize=<n>', 'live', 'mempool.max_datacarrier_bytes', 'int (W1-Y9)'),
+    # W6-b: ycashd's fee policy and Yellowback wallet options, each in the option's integer unit
+    # (crates/zakurad/src/components/mempool/config.rs); a value finer than the unit is refused
+    ('-pqfeerate=<YEC/kB>', 'live', 'mempool.pq_fee_rate', 'zatoshis per 1,000 bytes (YEC x 1e8; W6-b)'),
+    ('-pqfeeusdperkb=<$>', 'live', 'mempool.pq_fee_usd_per_kb_micro', 'micro-USD per kB ($ x 1e6; W6-b)'),
+    ('-yellowbackfeeusdperkb=<$>', 'live', 'mempool.yellowback_fee_usd_per_kb_micro', 'micro-USD per kB ($ x 1e6; W6-b)'),
+    ('-yellowbackmaxtxfeeusd=<$>', 'live', 'mempool.yellowback_max_tx_fee_usd_micro', 'micro-USD ($ x 1e6; W6-b)'),
+    ('-yellowbackmaxtxfee=<YEC>', 'live', 'mempool.yellowback_max_tx_fee', 'zatoshis (YEC x 1e8; W6-b)'),
+    ('-maxtxfee=<YEC>', 'live', 'mempool.max_tx_fee', 'zatoshis (YEC x 1e8; W6-b)'),
+    ('-yellowbackfee=<zat>', 'live', 'mempool.yellowback_fee', 'zatoshis, as given (W6-b)'),
+    ('-yellowbackmintlag=<n>', 'live', 'mempool.yellowback_mint_lag', 'blocks (W6-b)'),
     ('-yellowbackpayoutaddress=<addr>', 'ignored', None, 'followers never mine (K-16); W8 maps the pool tag'),
+    ('-yellowbacktestfault=<spec>', 'ignored', None,
+     'gap: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: storage/crash/template/schema); '
+     'kogany\'s [yellowback] has no fault key, so a follower never injects one'),
+    ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
+    ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
+    ('-blockunpaidactionlimit=<n>', 'ignored', None, 'block template policy; followers never mine (K-16)'),
+    ('-mempoolevictionmemoryminutes=<n>', 'ignored', None, 'gap: no row for mempool.eviction_memory_time yet; '
+     'a follower keeps Zakura\'s default'),
     ('-mocktime=<t>', 'ignored', None, 'Zakura has no mock clock: followers run on the real clock'),
     ('-exportdir', 'ignored', None, 'wallet (dumpwallet)'),
     ('-keypool', 'ignored', None, 'wallet'),
@@ -208,7 +231,7 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-experimentalfeatures', '-allowdeprecated', '-paytxfee', '-minrelaytxfee',
                      '-mempooltxcostlimit', '-limitancestor', '-walletnotify', '-wallet', '-mineraddress',
                      '-equihashsolver', '-gen', '-genproclimit', '-checkmempool', '-checkblockindex',
-                     '-stopatheight', '-reindex', '-prune', '-dbcache', '-par', '-timeout', '-maxtxfee',
+                     '-stopatheight', '-reindex', '-prune', '-dbcache', '-par', '-timeout',
                      '-orchardwallet', '-nuparams',
                      # wallet, RPC transport and C++-only plumbing (no follower meaning)
                      '-developerencryptwallet', '-mnemonicfile', '-rescan', '-salvagewallet', '-sendchangeback',
@@ -216,33 +239,68 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-noonion', '-nolisten', '-rpcallowip', '-rpcbind', '-rpccookiefile', '-rpcconnect',
                      '-bdbcache', '-anchorconfirmations', '-txexpirydelta', '-preferredtxversion',
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
-                     '-yellowbackmaxtxfee', '-disablewallet')
+                     '-disablewallet', '-yellowbacktestfault', '-yellowbacksignal', '-feepolicy',
+                     '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes')
+# -yellowbacktestfault is a gap, not a no-op: ycashd injects a storage/crash/template/schema fault
+# (src/yellowback/index.cpp SetTestFault) and kogany has no fault key, so a follower of a faulted
+# peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
-# drops a rule): -nurejectoldversions, -regtestshieldcoinbase,
-# -regtestprotectcoinbase, -regtestenablezip209, -blockunpaidactionlimit,
-# -yellowbacktestfault, -reindex-yellowback, -yellowbackfeeusdperkb, -pqfeerate, -pqfeeusdperkb, and
-# the retired -yellowback / -yellowbackenforce / -yellowbackstartheight flags.
+# drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
+# -regtestenablezip209, -reindex-yellowback, and the retired -yellowback / -yellowbackenforce /
+# -yellowbackstartheight flags.
 def _bool01(v):
     if v not in ('0', '1'):
         raise UnmappedArgument('a 0/1 flag has the value %r' % v)
     return v == '1'
 
 
+def _scaled(scale, what):
+    """A decimal option value (ycashd's ParseMoney / a dollar amount) as an exact integer in units of
+    1/scale; a value finer than the unit, or negative, is refused rather than rounded."""
+    def conv(v):
+        try:
+            d = Decimal(v)
+        except Exception:
+            raise UnmappedArgument('%s: not a number: %r' % (what, v))
+        n = d * scale
+        if not d.is_finite() or n != n.to_integral_value() or n < 0:
+            raise UnmappedArgument('%s: %r is not a whole number of 1/%d' % (what, v, scale))
+        return int(n)
+    return conv
+
+
+_YEC = _scaled(100000000, 'YEC amount')
+_USD = _scaled(1000000, 'USD amount')
+
+# Rows tied to a chunk: (chunk, config path, converter).  Emitted while the chunk is live.
 _PENDING_FLAGS = {
     '-yellowbackattestorset': ('W5-f', ('yellowback', 'attestor_set'), str),
-    '-yellowbacksigmaref': ('W5-e', ('yellowback', 'sigma_ref'), int),
-    '-yellowbacksupplycapbps': ('W5-e', ('yellowback', 'supply_cap_bps'), int),
-    '-yellowbackattestarmmin': ('W5-e', ('yellowback', 'attest_arm_min'), int),
-    '-yellowbackbundlecarrier': ('W5-e', ('yellowback', 'bundle_carrier'), str),
-    '-yellowbackmintrequiresarmed': ('W5-e', ('yellowback', 'mint_requires_armed'), _bool01),
+    '-yellowbacksigmaref': ('W5-f', ('yellowback', 'sigma_ref'), int),
+    '-yellowbacksupplycapbps': ('W5-f', ('yellowback', 'supply_cap_bps'), int),
+    '-yellowbackattestarmmin': ('W5-f', ('yellowback', 'attest_arm_min'), int),
+    '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
+    '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
     '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
 }
+
+# Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
+# follower takes the YED attestor set and the [yellowback] parameters).
+DEFAULT_LIVE = frozenset({'W5-f'})
 
 # Rows live today: (config path, converter).
 _LIVE_FLAGS = {
     '-acceptnonstdtxn': (('mempool', 'accept_non_standard'), _bool01),
     '-txunpaidactionlimit': (('mempool', 'tx_unpaid_action_limit'), int),
     '-datacarriersize': (('mempool', 'max_datacarrier_bytes'), int),
+    # W6-b (crates/zakurad/src/components/mempool/config.rs): the option's integer unit
+    '-pqfeerate': (('mempool', 'pq_fee_rate'), _YEC),
+    '-pqfeeusdperkb': (('mempool', 'pq_fee_usd_per_kb_micro'), _USD),
+    '-yellowbackfeeusdperkb': (('mempool', 'yellowback_fee_usd_per_kb_micro'), _USD),
+    '-yellowbackmaxtxfeeusd': (('mempool', 'yellowback_max_tx_fee_usd_micro'), _USD),
+    '-yellowbackmaxtxfee': (('mempool', 'yellowback_max_tx_fee'), _YEC),
+    '-maxtxfee': (('mempool', 'max_tx_fee'), _YEC),
+    '-yellowbackfee': (('mempool', 'yellowback_fee'), int),
+    '-yellowbackmintlag': (('mempool', 'yellowback_mint_lag'), int),
 }
 
 
@@ -251,9 +309,13 @@ class UnmappedArgument(ValueError):
 
 
 def _live_chunks(live=None):
-    if live is None:
-        live = [c.strip() for c in os.getenv('KOGANY_LIVE', '').split(',') if c.strip()]
-    return frozenset(live)
+    """The live chunks: an explicit ``live`` list as given; otherwise ``DEFAULT_LIVE`` plus
+    ``KOGANY_LIVE``'s chunks, less any it names as ``!<chunk>``."""
+    if live is not None:
+        return frozenset(live)
+    named = [c.strip() for c in os.getenv('KOGANY_LIVE', '').split(',') if c.strip()]
+    off = {c[1:] for c in named if c.startswith('!')}
+    return frozenset((DEFAULT_LIVE | {c for c in named if not c.startswith('!')}) - off)
 
 
 def _set(cfg, path, value):
@@ -302,7 +364,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
                 notes.append('pending:%s: %s -> %s = %s' % (chunk, a, '.'.join(path), value))
             continue
         if name.startswith(_IGNORED_PREFIXES) or name.startswith('-yellowbackpayout'):
-            if name.startswith(('-mocktime', '-yellowbackpayoutaddress')):
+            if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-yellowbacktestfault',
+                                '-mempoolevictionmemoryminutes')):
                 notes.append('ignored: %s' % a)
             continue
         if name.startswith('-yellowback') or name.startswith('-vault') or name.startswith('-pq'):
@@ -719,11 +782,12 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
             YEWD_BACKENDS.pop(i, None)
             raise Exception('%s node %d exited with status %i during initialization'
                             % (util.zcashd_binary(), i, backend.returncode))
+        had_cookie = os.path.exists(cookie)
         try:
             rpc.getblockcount()
             break
         except JSONRPCException as e:
-            if e.error.get('code') != -28:
+            if not _backend_warming_up(e, had_cookie):
                 raise
         except OSError:
             pass
@@ -733,6 +797,20 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     # so yewd's own stream goes to node<i>/yewd.log unless the caller captures stderr itself
     out = stderr if stderr is not None else open(os.path.join(datadir, 'yewd.log'), 'ab')
     return subprocess.Popen(y_argv, stdout=out if stderr is None else None, stderr=out)
+
+
+def _unauthorized(e):
+    """KoganyRPC's error for an HTTP 401 (an empty, non-JSON body)."""
+    err = getattr(e, 'error', None) or {}
+    return err.get('code') == -342 and 'non-JSON response 401' in str(err.get('message', ''))
+
+
+def _backend_warming_up(e, had_cookie):
+    """A backend start error that means "not yet": -28 (warming up), or a 401 to a request sent
+    before the backend had written its cookie (it listens first; finding F-S2-9).  A 401 to a request
+    that carried the cookie is a real authentication failure."""
+    err = getattr(e, 'error', None) or {}
+    return err.get('code') == -28 or (_unauthorized(e) and not had_cookie)
 
 
 def wait_yewd_backend(i, timeout=60):
@@ -901,6 +979,7 @@ class MixedLine:
         self.unmapped = []
         self.kogany_unmapped = []
         self.offered = set()
+        self.script_invalidates = False   # the script's source calls invalidateblock/reconsiderblock
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'mempool_points': 0,
                       'verdicts': 0, 'verdict_classes': 0}
 
@@ -941,6 +1020,7 @@ class MixedLine:
     def configure(self, test):
         """Called by ``BitcoinTestFramework.main`` once the options are parsed."""
         self.tmpdir = test.options.tmpdir
+        self.script_invalidates = _calls_invalidate(type(test))
         if self.peer is None:
             self.peer = getattr(test, 'kogany_peer', None)
             if self.peer is None:
@@ -991,6 +1071,20 @@ class MixedLine:
         if self.kogany_unmapped:
             print('kogany: unmapped kogany reject texts (add KOGANY_REASON_MAP rows): %s'
                   % sorted(set(self.kogany_unmapped)))
+        hint = self.invalidate_hint()
+        if hint:
+            print('kogany: ' + hint)
+
+    INVALIDATE_HINT = ('this script calls invalidateblock/reconsiderblock and KOGANY_MIRROR_INVALIDATE is off: '
+                       'the call reaches only the ycashd node it names, so a follower keeps the invalidated '
+                       'branch (a sync point times out on it); rerun with KOGANY_MIRROR_INVALIDATE=1 to mirror it')
+
+    def invalidate_hint(self):
+        """The mixed-run summary's hint (mirroring stays opt-in): set when the script's source calls
+        ``invalidateblock``/``reconsiderblock`` and ``KOGANY_MIRROR_INVALIDATE`` is off."""
+        if self.enabled and self.script_invalidates and not self.mirror_invalidate:
+            return self.INVALIDATE_HINT
+        return None
 
     def _config_for(self, f):
         return zakurad_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
@@ -1055,8 +1149,10 @@ class MixedLine:
                 if self.mirror_invalidate and got is not None:
                     self._mirror(ref, f, got)
                 if time.time() > deadline:
-                    raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s'
-                                         % (f.k, tip, ref.getblockcount(), label, got))
+                    hint = self.invalidate_hint()
+                    raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s%s'
+                                         % (f.k, tip, ref.getblockcount(), label, got,
+                                            ('; ' + hint) if hint else ''))
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
 
@@ -1280,6 +1376,23 @@ class MixedLine:
             return
         raise AssertionError('verdict class differs (%s) %s: ycashd %s (%s), kogany %s (%s)'
                              % (path, label, cxx, detail, kog, kogany_text))
+
+
+_INVALIDATE_CALL = re.compile(r'\.(invalidateblock|reconsiderblock)\s*\(')
+
+
+def _calls_invalidate(cls):
+    """True when the source of the module defining ``cls`` (the script) calls
+    ``invalidateblock``/``reconsiderblock`` (False when the source cannot be read)."""
+    mod = sys.modules.get(getattr(cls, '__module__', ''), None)
+    path = getattr(mod, '__file__', None)
+    if not path:
+        return False
+    try:
+        with open(path, encoding='utf8') as f:
+            return bool(_INVALIDATE_CALL.search(f.read()))
+    except OSError:
+        return False
 
 
 def _field(r, key):

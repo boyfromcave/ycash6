@@ -80,22 +80,95 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertIn('ignored: -yellowbackpayoutaddress=tmXYZ', notes)
         self.assertIn('ignored: -mocktime=1700000000', notes)
 
-    def test_w5e_and_mempool_rows(self):
+    def test_w5e_rows_live_with_w5f_and_mempool_rows(self):
         yed = ['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=7', '-yellowbacksupplycapbps=500',
                '-yellowbackattestarmmin=2', '-yellowbackbundlecarrier=either', '-yellowbackmintrequiresarmed=1']
         pool = ['-acceptnonstdtxn=0', '-txunpaidactionlimit=0', '-datacarriersize=1200']
-        _cfg, notes, t = self.gen(yed + pool, live=('W5-e',))
-        self.assertEqual(t['yellowback'], {'sigma_ref': 7, 'supply_cap_bps': 500, 'attest_arm_min': 2,
-                                           'bundle_carrier': 'either', 'mint_requires_armed': True})
+        _cfg, notes, t = self.gen(yed + pool, live=('W5-f',))
+        self.assertEqual(t['yellowback'], {'attestor_set': SETID, 'sigma_ref': 7, 'supply_cap_bps': 500,
+                                           'attest_arm_min': 2, 'bundle_carrier': 'either',
+                                           'mint_requires_armed': True})
         self.assertEqual(t['mempool'], {'debug_enable_at_height': 0, 'accept_non_standard': False,
                                         'tx_unpaid_action_limit': 0, 'max_datacarrier_bytes': 1200})
-        # the attestor set stays a note until W5-f registers the module (it would stop the follower)
-        self.assertTrue(any(n.startswith('pending:W5-f: -yellowbackattestorset') for n in notes), notes)
+        self.assertFalse(any('W5' in n for n in notes), notes)
         _cfg, notes, t = self.gen(yed)
         self.assertNotIn('yellowback', t)
-        self.assertEqual(len([n for n in notes if n.startswith('pending:W5-e')]), 5)
+        self.assertEqual(len([n for n in notes if n.startswith('pending:W5-f')]), 6)
         with self.assertRaises(kg.UnmappedArgument):
             self.gen(['-acceptnonstdtxn=yes'])
+
+    def test_w5f_default_on_from_env(self):
+        args = START + VAULT + ['-yellowbackattestorset=' + SETID, '-yellowbackattestarmmin=1']
+        saved = os.environ.pop('KOGANY_LIVE', None)
+        try:
+            for env, on in ((None, True), ('W1-Y1,W2-b', True), ('!W5-f', False), ('W2-b, !W5-f', False)):
+                if env is None:
+                    os.environ.pop('KOGANY_LIVE', None)
+                else:
+                    os.environ['KOGANY_LIVE'] = env
+                cfg, notes = kg.zakurad_config(args, 0, [1], '/tmp/k')
+                if on:
+                    self.assertEqual(cfg['yellowback'], {'attestor_set': SETID, 'attest_arm_min': 1}, env)
+                else:
+                    self.assertNotIn('yellowback', cfg, env)
+                    self.assertEqual(len([n for n in notes if n.startswith('pending:W5-f')]), 2, env)
+            self.assertEqual(kg._live_chunks(()), frozenset())        # an explicit list is taken as given
+        finally:
+            os.environ.pop('KOGANY_LIVE', None)
+            if saved is not None:
+                os.environ['KOGANY_LIVE'] = saved
+
+    # W6-b: (flag value, toml key, integer) -- the option's integer unit
+    W6B_ROWS = [
+        ('-pqfeerate=0.000002', 'pq_fee_rate', 200),
+        ('-pqfeeusdperkb=0.05', 'pq_fee_usd_per_kb_micro', 50000),
+        ('-yellowbackfeeusdperkb=0.05', 'yellowback_fee_usd_per_kb_micro', 50000),
+        ('-yellowbackmaxtxfeeusd=2', 'yellowback_max_tx_fee_usd_micro', 2000000),
+        ('-yellowbackmaxtxfee=10', 'yellowback_max_tx_fee', 1000000000),
+        ('-maxtxfee=0.02', 'max_tx_fee', 2000000),
+        ('-yellowbackfee=1000', 'yellowback_fee', 1000),
+        ('-yellowbackmintlag=2', 'yellowback_mint_lag', 2),
+    ]
+
+    def test_w6b_fee_rows(self):
+        for flag, key, want in self.W6B_ROWS:
+            _cfg, notes, t = self.gen([flag], live=())
+            self.assertEqual(t['mempool'][key], want, flag)
+            self.assertIsInstance(t['mempool'][key], int, flag)
+            self.assertEqual(notes[2:], [], flag)          # the Ycash / Vault height notes only
+        _cfg, _notes, t = self.gen([f for f, _k, _w in self.W6B_ROWS], live=())
+        self.assertEqual({k: t['mempool'][k] for _f, k, _w in self.W6B_ROWS}, {k: w for _f, k, w in self.W6B_ROWS})
+        # -yellowbackmaxtxfee is not swallowed by the -yellowbackmaxtxfeeusd row, nor the reverse
+        _cfg, _notes, t = self.gen(['-yellowbackmaxtxfee=0.5', '-yellowbackmaxtxfeeusd=0.5'], live=())
+        self.assertEqual((t['mempool']['yellowback_max_tx_fee'], t['mempool']['yellowback_max_tx_fee_usd_micro']),
+                         (50000000, 500000))
+        for bad in ('-maxtxfee=0.000000001', '-pqfeeusdperkb=0.0000001', '-pqfeerate=abc', '-maxtxfee=-1',
+                    '-yellowbackfee=1.5', '-yellowbackmintlag=x'):
+            with self.assertRaises((kg.UnmappedArgument, ValueError), msg=bad):
+                self.gen([bad], live=())
+
+    def test_txunpaidactionlimit_row(self):
+        _cfg, _notes, t = self.gen(['-txunpaidactionlimit=50'], live=())
+        self.assertEqual(t['mempool']['tx_unpaid_action_limit'], 50)
+
+    def test_ignored_rows(self):
+        _cfg, notes, t = self.gen(['-yellowbacktestfault=storage:commit', '-yellowbacksignal=0', '-feepolicy=zip317',
+                                   '-blockunpaidactionlimit=0', '-mempoolevictionmemoryminutes=1'], live=())
+        self.assertNotIn('yellowback', t)
+        self.assertEqual(set(t['mempool']), {'debug_enable_at_height'})
+        self.assertIn('ignored: -yellowbacktestfault=storage:commit', notes)      # the recorded gap
+        self.assertIn('ignored: -mempoolevictionmemoryminutes=1', notes)
+        rows = {r[0].split('=')[0]: r for r in kg.ZAKURAD_KEY_TABLE}
+        self.assertIn('gap', rows['-yellowbacktestfault'][3])
+        for flag in ('-yellowbacksignal', '-feepolicy', '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes'):
+            self.assertEqual(rows[flag][1], 'ignored', flag)
+
+    def test_every_live_flag_has_a_table_row(self):
+        rows = ' '.join(r[0] for r in kg.ZAKURAD_KEY_TABLE)
+        keys = ' '.join(r[2] or '' for r in kg.ZAKURAD_KEY_TABLE)
+        for flag, (path, _conv) in kg._LIVE_FLAGS.items():
+            self.assertIn(flag, rows)
+            self.assertIn('.'.join(path), keys)
 
     def test_unmapped_arguments_refused(self):
         for bad in (['-yellowbacknewflag=1'], ['-vaultsomething=1'], ['-nuparams=deadbeef:5'], ['-frobnicate'], ['x']):
@@ -375,6 +448,124 @@ class YewdPairTest(unittest.TestCase):
         self.assertNotIn(kg.yewd_backend_rpc_port(2), {kg.kogany_rpc_port(k) for k in range(9)})
 
 
+class FakeConn:
+    """A ycashd connection whose fullyNotified stays False (a pair backend, or a lagging wallet)."""
+
+    def __init__(self, i, notified=False):
+        self.url = 'http://u:p@127.0.0.1:%d' % util.rpc_port(i)
+        self.notified = notified
+        self.calls = 0
+
+    def getbestblockhash(self):
+        return 'aa' * 32
+
+    def getrawmempool(self):
+        return []
+
+    def getblockchaininfo(self):
+        self.calls += 1
+        return {'fullyNotified': self.notified}
+
+    getmempoolinfo = getblockchaininfo
+
+
+class YewdNotifiedTest(unittest.TestCase):
+    """F-S3-1: the fullyNotified wait is skipped for pair nodes only."""
+
+    def setUp(self):
+        util.PortSeed.n = 11
+        self.saved = set(util.YEWD_PAIRS), os.environ.pop('YEWD_FULLY_NOTIFIED', None)
+        util.YEWD_PAIRS.clear()
+
+    def tearDown(self):
+        util.YEWD_PAIRS.clear()
+        util.YEWD_PAIRS.update(self.saved[0])
+        if self.saved[1] is not None:
+            os.environ['YEWD_FULLY_NOTIFIED'] = self.saved[1]
+
+    def test_pairs_only(self):
+        util.YEWD_PAIRS.add(0)
+        pair, plain = FakeConn(0), FakeConn(1, notified=True)
+        self.assertTrue(util._sync_blocks([pair, plain], wait=0.01, timeout=1))
+        self.assertTrue(util._sync_mempools([pair, plain], wait=0.01, timeout=1))
+        self.assertEqual(pair.calls, 0)
+        self.assertEqual(plain.calls, 2)
+
+    def test_plain_node_keeps_its_wait(self):
+        util.YEWD_PAIRS.add(0)
+        lagging = FakeConn(1, notified=False)          # a plain ycashd whose wallet lags
+        with self.assertRaises(AssertionError):
+            util._sync_blocks([FakeConn(0), lagging], wait=0.01, timeout=0.05)
+        self.assertGreater(lagging.calls, 0)
+
+    def test_no_pairs_no_skip(self):
+        with self.assertRaises(AssertionError):
+            util._sync_blocks([FakeConn(0)], wait=0.01, timeout=0.05)
+
+    def test_fully_notified_env_restores_the_wait(self):
+        util.YEWD_PAIRS.add(0)
+        os.environ['YEWD_FULLY_NOTIFIED'] = '1'
+        try:
+            with self.assertRaises(AssertionError):
+                util._sync_blocks([FakeConn(0)], wait=0.01, timeout=0.05)
+        finally:
+            del os.environ['YEWD_FULLY_NOTIFIED']
+
+
+class YewdWarmupTest(unittest.TestCase):
+    """F-S2-9: a 401 before the backend wrote its cookie is warm-up; with the cookie it is a failure."""
+
+    E401 = JSONRPCException({'code': -342, 'message': 'non-JSON response 401: '})
+
+    def test_classification(self):
+        self.assertTrue(kg._backend_warming_up(self.E401, had_cookie=False))
+        self.assertFalse(kg._backend_warming_up(self.E401, had_cookie=True))
+        self.assertTrue(kg._backend_warming_up(JSONRPCException({'code': -28, 'message': 'Loading'}), True))
+        self.assertFalse(kg._backend_warming_up(JSONRPCException({'code': -342, 'message': 'non-JSON response 500: x'}), False))
+        self.assertFalse(kg._backend_warming_up(JSONRPCException({'code': -1, 'message': 'x'}), False))
+
+    def test_start_retries_a_401_until_the_cookie(self):
+        import tempfile
+        from unittest import mock
+        util.PortSeed.n = 13
+        tmp = tempfile.mkdtemp()
+        datadir = os.path.join(tmp, 'node0')
+        cookie = os.path.join(datadir, 'backend', 'regtest', '.cookie')
+        calls = []
+
+        def fake_call(rpc, *args):
+            calls.append(os.path.exists(cookie))
+            if not os.path.exists(cookie):
+                if len(calls) == 2:          # the backend writes its cookie after the second 401
+                    os.makedirs(os.path.dirname(cookie), exist_ok=True)
+                    with open(cookie, 'w') as f:
+                        f.write('__cookie__:x')
+                raise self.E401
+            return 0
+
+        class Proc:
+            returncode = None
+            def poll(self):
+                return None
+
+        os.environ['YEWD_BIN'] = '/y/yewd'
+        try:
+            with mock.patch.object(kg.subprocess, 'Popen', side_effect=lambda *a, **k: Proc()), \
+                    mock.patch.object(kg.KoganyRPC, '__call__', fake_call), \
+                    mock.patch.object(kg.time, 'sleep', lambda s: None):
+                kg.start_yewd_pair(0, datadir, '/b/ycashd', [], stderr=None, timeout=5)
+                self.assertEqual(calls, [False, False, True])
+                # a 401 with the cookie in place is an authentication failure, not a warm-up
+                with mock.patch.object(kg.KoganyRPC, '__call__', side_effect=self.E401):
+                    with self.assertRaises(JSONRPCException):
+                        kg.start_yewd_pair(0, datadir, '/b/ycashd', [], stderr=None, timeout=5)
+        finally:
+            del os.environ['YEWD_BIN']
+            kg.YEWD_BACKENDS.clear()
+            import shutil
+            shutil.rmtree(tmp)
+
+
 class FakeRPC:
     """A node answering fixed vault_getinfo / yed_getstatehash results (or raising)."""
 
@@ -488,11 +679,46 @@ class MixedLineHookTest(unittest.TestCase):
         m.on_node_start(0, START + YCASH + VAULT, peer)
         self.assertEqual(f.events, ['stop', 'write', 'start'])
         f.events = []
-        m.on_node_start(0, START + YCASH + VAULT + ['-yellowbackattestorset=' + SETID], peer)
-        self.assertEqual(f.events, [])            # pending row: a note, not a key -> no restart
+        saved = os.environ.pop('KOGANY_LIVE', None)
+        try:
+            m.on_node_start(0, START + YCASH + VAULT + ['-pqfalconheight=5'], peer)
+            self.assertEqual(f.events, [])        # pending row (W3-c): a note, not a key -> no restart
+            m.on_node_start(0, START + YCASH + VAULT + ['-yellowbackattestorset=' + SETID], peer)
+            self.assertEqual(f.events, ['stop', 'write', 'start'])   # W5-f is live by default: a key
+            self.assertEqual(f.config['yellowback'], {'attestor_set': SETID})
+            f.events = []
+        finally:
+            if saved is not None:
+                os.environ['KOGANY_LIVE'] = saved
         m.on_node_start(1, START + ['-frobnicate'], peer)   # not the peer: ignored
         self.assertEqual(f.events, [])
-        self.assertEqual(peer.added, [('127.0.0.1:%d' % kg.kogany_p2p_port(0), 'onetry')] * 2)
+        self.assertEqual(peer.added, [('127.0.0.1:%d' % kg.kogany_p2p_port(0), 'onetry')] * 3)
+
+    def test_invalidate_hint(self):
+        class Script:                              # a class defined here: this file names the calls
+            pass
+        self.assertTrue(kg._calls_invalidate(Script))
+        self.assertFalse(kg._calls_invalidate(int))
+        m = kg.MixedLine(binary='/bin/z')
+        m.script_invalidates = kg._calls_invalidate(Script)
+        self.assertIn('KOGANY_MIRROR_INVALIDATE=1', m.invalidate_hint())
+        m.mirror_invalidate = True
+        self.assertIsNone(m.invalidate_hint())
+        m = kg.MixedLine(binary='/bin/z')
+        self.assertIsNone(m.invalidate_hint())  # a script without the calls: no hint
+        inert = kg.MixedLine()
+        inert.script_invalidates = True
+        self.assertIsNone(inert.invalidate_hint())
+        m = kg.MixedLine(binary='/bin/z')
+        m.script_invalidates = True
+        from io import StringIO
+        from contextlib import redirect_stdout
+        out = StringIO()
+        with redirect_stdout(out):
+            m.stop()
+        self.assertIn('KOGANY_MIRROR_INVALIDATE', out.getvalue())
+
+    # the source this file must contain for test_invalidate_hint: node.invalidateblock(h)
 
     def test_strict_note_fails(self):
         m = kg.MixedLine(binary='/bin/z', strict=True)

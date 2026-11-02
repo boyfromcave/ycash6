@@ -26,6 +26,7 @@ import tempfile
 import time
 import re
 import errno
+import urllib.parse
 
 from . import coverage
 from .authproxy import AuthServiceProxy, JSONRPCException
@@ -133,12 +134,31 @@ def str_to_b64str(string):
 # sync_mempools.  Empty unless KOGANY_BIN is set, so the plain ycash6 run is unchanged.
 MIXED_HOOKS = {}
 
+# Node indices running as a yewd pair (kogany.start_yewd_pair under YEWD_BIN): start_node adds and
+# removes them, so a run that starts some nodes without YEWD_BIN keeps those as plain ycashd nodes.
+YEWD_PAIRS = set()
+
 def _yewd_skips_notified():
-    """Under YEWD_BIN the backend runs -disablewallet, and ycashd never reports fullyNotified
+    """Under YEWD_BIN a pair's backend runs -disablewallet, and ycashd never reports fullyNotified
     without a wallet (ChainIsFullyNotified / IsFullyNotified stay false), so the notification wait
-    is skipped until yewd answers fullyNotified for its own wallet (S1; YEWD_FULLY_NOTIFIED=1
-    restores the wait)."""
-    return bool(os.getenv("YEWD_BIN")) and os.getenv("YEWD_FULLY_NOTIFIED", "0") != "1"
+    is skipped for the pair nodes -- only for them: a plain ycashd node of the same run keeps its
+    wait (finding F-S3-1).  Until yewd answers fullyNotified for its own wallet (S1);
+    YEWD_FULLY_NOTIFIED=1 restores the wait for every node."""
+    return bool(YEWD_PAIRS) and os.getenv("YEWD_FULLY_NOTIFIED", "0") != "1"
+
+def _is_yewd_pair(conn):
+    """True when ``conn`` is the RPC connection of a pair node (its URL names a pair's rpc_port)."""
+    try:
+        port = urllib.parse.urlparse(conn.url).port
+    except Exception:
+        return False
+    return port is not None and any(port == rpc_port(i) for i in YEWD_PAIRS)
+
+def _fully_notified(conns, method):
+    """``fullyNotified`` of every connection, a pair node counting as notified when the skip is on."""
+    skip = _yewd_skips_notified()
+    return [ True if skip and _is_yewd_pair(x) else getattr(x, method)()['fullyNotified']
+             for x in conns ]
 
 def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=False):
     """
@@ -168,11 +188,9 @@ def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=F
 
     # Now that the block counts are in sync, wait for the internal
     # notifications to finish
-    if _yewd_skips_notified():
-        return True
     while timeout > 0:
         assert_bitcoinds_alive()
-        notified = [ x.getblockchaininfo()['fullyNotified'] for x in rpc_connections ]
+        notified = _fully_notified(rpc_connections, 'getblockchaininfo')
         if notified == [ True ] * len(notified):
             return True
         time.sleep(wait)
@@ -206,11 +224,9 @@ def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
 
     # Now that the mempools are in sync, wait for the internal
     # notifications to finish
-    if _yewd_skips_notified():
-        return True
     while timeout > 0:
         assert_bitcoinds_alive()
-        notified = [ x.getmempoolinfo()['fullyNotified'] for x in rpc_connections ]
+        notified = _fully_notified(rpc_connections, 'getmempoolinfo')
         if notified == [ True ] * len(notified):
             return True
         time.sleep(wait)
@@ -557,7 +573,9 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
         # the parity sidecar (kogany plan section 3b): node i = a -disablewallet backend + yewd on rpc_port(i)
         from . import kogany
         bitcoind_processes[i] = kogany.start_yewd_pair(i, datadir, binary, args[1:], stderr=stderr)
+        YEWD_PAIRS.add(i)
     else:
+        YEWD_PAIRS.discard(i)
         bitcoind_processes[i] = subprocess.Popen(args, stderr=stderr)
     if os.getenv("PYTHON_DEBUG", ""):
         print("start_node: bitcoind started, waiting for RPC to come up")
