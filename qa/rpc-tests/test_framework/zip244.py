@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2021 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -17,6 +18,7 @@ from hashlib import blake2b
 
 from .mininode import ser_string, ser_uint256
 from .script import (
+    SIGHASH_ALL,
     SIGHASH_ANYONECANPAY,
     SIGHASH_NONE,
     SIGHASH_SINGLE,
@@ -221,34 +223,79 @@ def auth_digest(tx):
 
     return digest.digest()
 
-# Signatures
+# Signatures (ZIP 244 S.1-S.4, as specified; librustzcash
+# zcash_primitives/src/transaction/sighash_v5.rs)
+#
+# Ycash, 2026: the transparent signature digest below replaces the draft
+# version this file shipped with (which hashed a scriptCode per input, blanked
+# the sequence digest for SINGLE/NONE, had no amounts or scriptPubKeys digests,
+# and raised TypeError on bytes(COutPoint)). The final ZIP 244 S.2 commits, unless
+# ANYONECANPAY is set, to the amounts and scriptPubKeys of *every* spent output,
+# and per input to its prevout, value, scriptPubKey and nSequence. It is checked
+# against the upstream vectors in src/test/data/zip0244.json by test_zip244.py.
 
-def signature_digest(tx, nHashType, txin):
+class TransparentInput(object):
+    """One spent transparent output as ZIP 244 S.2 sees it: the input index,
+    the spent output's scriptPubKey (bytes) and its value (zatoshi)."""
+    def __init__(self, nIn, scriptPubKey, amount):
+        self.nIn = nIn
+        self.scriptPubKey = bytes(scriptPubKey)
+        self.amount = amount
+
+
+def signature_digest(tx, t_inputs, nHashType, txin):
+    """ZIP 244 signature digest.
+
+    t_inputs: a TransparentInput for every transparent input of tx, in order
+    (the verifier's view of all spent outputs; ignored for coinbase or a
+    transaction without transparent inputs).
+    txin: the TransparentInput being signed, or None for a shielded signature
+    (Sapling spendAuthSig / bindingSig, Orchard), which uses SIGHASH_ALL.
+    """
     digest = blake2b(
         digest_size=32,
         person=b'ZcashTxHash_' + struct.pack('<I', tx.nConsensusBranchId),
     )
 
     digest.update(header_digest(tx))
-    digest.update(transparent_sig_digest(tx, nHashType, txin))
+    digest.update(transparent_sig_digest(tx, t_inputs, nHashType, txin))
     digest.update(sapling_digest(tx.saplingBundle))
     digest.update(orchard_digest(tx.orchardBundle))
 
     return digest.digest()
 
-def transparent_sig_digest(tx, nHashType, txin):
-    # Sapling Spend or Orchard Action
-    if txin is None:
+def _is_coinbase(tx):
+    return (len(tx.vin) == 1 and tx.vin[0].prevout.hash == 0
+            and tx.vin[0].prevout.n == 0xFFFFFFFF)
+
+def transparent_sig_digest(tx, t_inputs, nHashType, txin):
+    # S.2: coinbase, or no transparent inputs: identical to T.2.
+    if len(tx.vin) == 0 or _is_coinbase(tx):
         return transparent_digest(tx)
+
+    if txin is None:
+        # A shielded signature over a transaction with transparent inputs.
+        nHashType = SIGHASH_ALL
+    if len(t_inputs) != len(tx.vin):
+        raise ValueError("ZIP 244: one TransparentInput per transparent input")
 
     digest = blake2b(digest_size=32, person=b'ZTxIdTranspaHash')
 
-    digest.update(prevouts_sig_digest(tx, nHashType))
-    digest.update(sequence_sig_digest(tx, nHashType))
-    digest.update(outputs_sig_digest(tx, nHashType, txin))
-    digest.update(txin_sig_digest(tx, txin))
+    digest.update(hash_type(nHashType))                       # S.2a
+    digest.update(prevouts_sig_digest(tx, nHashType))         # S.2b
+    digest.update(amounts_sig_digest(t_inputs, nHashType))    # S.2c
+    digest.update(scriptpubkeys_sig_digest(t_inputs, nHashType))  # S.2d
+    digest.update(sequence_sig_digest(tx, nHashType))         # S.2e
+    digest.update(outputs_sig_digest(tx, nHashType, txin))    # S.2f
+    digest.update(txin_sig_digest(tx, txin))                  # S.2g
 
     return digest.digest()
+
+def hash_type(nHashType):
+    # Defined hash types only (ycashd SignatureHash throws on any other).
+    if nHashType not in (0x01, 0x02, 0x03, 0x81, 0x82, 0x83):
+        raise ValueError("ZIP 244: undefined hash_type 0x%02x" % nHashType)
+    return struct.pack('B', nHashType)
 
 def prevouts_sig_digest(tx, nHashType):
     # If the SIGHASH_ANYONECANPAY flag is not set:
@@ -257,14 +304,23 @@ def prevouts_sig_digest(tx, nHashType):
     else:
         return blake2b(digest_size=32, person=b'ZTxIdPrevoutHash').digest()
 
+def amounts_sig_digest(t_inputs, nHashType):
+    digest = blake2b(digest_size=32, person=b'ZTxTrAmountsHash')
+    if not (nHashType & SIGHASH_ANYONECANPAY):
+        for x in t_inputs:
+            digest.update(struct.pack('<q', x.amount))
+    return digest.digest()
+
+def scriptpubkeys_sig_digest(t_inputs, nHashType):
+    digest = blake2b(digest_size=32, person=b'ZTxTrScriptsHash')
+    if not (nHashType & SIGHASH_ANYONECANPAY):
+        for x in t_inputs:
+            digest.update(ser_string(x.scriptPubKey))
+    return digest.digest()
+
 def sequence_sig_digest(tx, nHashType):
-    # if the SIGHASH_ANYONECANPAY flag is not set, and the sighash type is neither
-    # SIGHASH_SINGLE nor SIGHASH_NONE:
-    if (
-        (not (nHashType & SIGHASH_ANYONECANPAY)) and \
-        (nHashType & 0x1f) != SIGHASH_SINGLE and \
-        (nHashType & 0x1f) != SIGHASH_NONE
-    ):
+    # If the SIGHASH_ANYONECANPAY flag is not set (SINGLE and NONE keep it):
+    if not (nHashType & SIGHASH_ANYONECANPAY):
         return getHashSequence(tx, b'ZTxIdSequencHash')
     else:
         return blake2b(digest_size=32, person=b'ZTxIdSequencHash').digest()
@@ -277,9 +333,10 @@ def outputs_sig_digest(tx, nHashType, txin):
     # If the sighash type is SIGHASH_SINGLE and the signature hash is being computed for
     # the transparent input at a particular index, and a transparent output appears in the
     # transaction at that index:
-    elif (nHashType & 0x1f) == SIGHASH_SINGLE and 0 <= txin.nIn and txin.nIn < len(tx.vout):
+    elif (nHashType & 0x1f) == SIGHASH_SINGLE and txin is not None and \
+            0 <= txin.nIn and txin.nIn < len(tx.vout):
         digest = blake2b(digest_size=32, person=b'ZTxIdOutputsHash')
-        digest.update(bytes(tx.vout[txin.nIn]))
+        digest.update(bytes(tx.vout[txin.nIn].serialize()))
         return digest.digest()
 
     else:
@@ -287,8 +344,9 @@ def outputs_sig_digest(tx, nHashType, txin):
 
 def txin_sig_digest(tx, txin):
     digest = blake2b(digest_size=32, person=b'Zcash___TxInHash')
-    digest.update(bytes(tx.vin[txin.nIn].prevout))
-    digest.update(ser_string(txin.scriptCode))
-    digest.update(struct.pack('<Q', txin.amount))
-    digest.update(struct.pack('<I', tx.vin[txin.nIn].nSequence))
+    if txin is not None:
+        digest.update(tx.vin[txin.nIn].prevout.serialize())   # S.2g.i
+        digest.update(struct.pack('<q', txin.amount))         # S.2g.ii
+        digest.update(ser_string(txin.scriptPubKey))          # S.2g.iii
+        digest.update(struct.pack('<I', tx.vin[txin.nIn].nSequence))  # S.2g.iv
     return digest.digest()
