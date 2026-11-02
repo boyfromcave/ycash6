@@ -170,16 +170,21 @@ class TomlGeneratorTest(unittest.TestCase):
         _cfg, _notes, t = self.gen(['-txunpaidactionlimit=50'], live=())
         self.assertEqual(t['mempool']['tx_unpaid_action_limit'], 50)
 
+    def test_blockunpaidactionlimit_row(self):
+        _cfg, _notes, t = self.gen(['-blockunpaidactionlimit=0'], live=())
+        self.assertEqual(t['mining']['block_unpaid_action_limit'], 0)
+        self.assertFalse(t['mining']['internal_miner'])
+
     def test_ignored_rows(self):
         _cfg, notes, t = self.gen(['-yellowbacktestfault=storage:commit', '-yellowbacksignal=0', '-feepolicy=zip317',
-                                   '-blockunpaidactionlimit=0', '-mempoolevictionmemoryminutes=1'], live=())
+                                   '-mempoolevictionmemoryminutes=1'], live=())
         self.assertNotIn('yellowback', t)
         self.assertEqual(set(t['mempool']), {'debug_enable_at_height'})
         self.assertIn('ignored: -yellowbacktestfault=storage:commit', notes)      # the recorded gap
         self.assertIn('ignored: -mempoolevictionmemoryminutes=1', notes)
         rows = {r[0].split('=')[0]: r for r in kg.KOGANYD_KEY_TABLE}
         self.assertIn('gap', rows['-yellowbacktestfault'][3])
-        for flag in ('-yellowbacksignal', '-feepolicy', '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes'):
+        for flag in ('-yellowbacksignal', '-feepolicy', '-mempoolevictionmemoryminutes'):
             self.assertEqual(rows[flag][1], 'ignored', flag)
 
     def test_every_live_flag_has_a_table_row(self):

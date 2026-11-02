@@ -251,7 +251,9 @@ KOGANYD_KEY_TABLE = [
      'kogany\'s [yellowback] has no fault key, so a follower never injects one'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
-    ('-blockunpaidactionlimit=<n>', 'ignored', None, 'block template policy; followers never mine (K-16)'),
+    ('-blockunpaidactionlimit=<n>', 'live', 'mining.block_unpaid_action_limit',
+     'int: the template\'s unpaid-action limit (zakura-rpc config/mining.rs; a pair backend mines, '
+     'yellowback_fee\'s pools run 0 for the PQ owner spend); a follower never mines (K-16)'),
     ('-mempoolevictionmemoryminutes=<n>', 'ignored', None, 'gap: no row for mempool.eviction_memory_time yet; '
      'a follower keeps Zakura\'s default'),
     ('-mocktime=<t>', 'ignored', None, 'Zakura has no mock clock: followers run on the real clock'),
@@ -283,7 +285,7 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-bdbcache', '-anchorconfirmations', '-txexpirydelta', '-preferredtxversion',
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
                      '-disablewallet', '-yellowbacktestfault', '-yellowbacksignal', '-feepolicy',
-                     '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes')
+                     '-mempoolevictionmemoryminutes')
 # -yellowbacktestfault is a gap, not a no-op: ycashd injects a storage/crash/template/schema fault
 # (src/yellowback/index.cpp SetTestFault) and kogany has no fault key, so a follower of a faulted
 # peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
@@ -357,6 +359,7 @@ _LIVE_FLAGS = {
     '-maxtxfee': (('mempool', 'max_tx_fee'), _YEC),
     '-yellowbackfee': (('mempool', 'yellowback_fee'), int),
     '-yellowbackmintlag': (('mempool', 'yellowback_mint_lag'), int),
+    '-blockunpaidactionlimit': (('mining', 'block_unpaid_action_limit'), int),
 }
 
 
