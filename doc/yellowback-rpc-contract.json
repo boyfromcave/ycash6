@@ -446,10 +446,9 @@
     "vault-not-active": {
       "raisedBy": [
         "yed_redeem",
-        "yed_claim",
-        "yed_getvault"
+        "yed_claim"
       ],
-      "when": "an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by yed_redeem, L14); another wallet's vault"
+      "when": "a CLOSED or CLAIMED vault (a VOID vault is releasable by yed_redeem, L14); yed_getvault reports any status and refuses only vault-not-found"
     },
     "vault-not-found": {
       "raisedBy": [
@@ -457,15 +456,13 @@
         "yed_claim",
         "yed_getvault"
       ],
-      "when": "an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by yed_redeem, L14); another wallet's vault"
+      "when": "an unknown txid"
     },
     "vault-not-owned": {
       "raisedBy": [
-        "yed_redeem",
-        "yed_claim",
-        "yed_getvault"
+        "yed_redeem"
       ],
-      "when": "an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by yed_redeem, L14); another wallet's vault"
+      "when": "another wallet's vault (a claim is anyone's: yed_claim never checks the owner)"
     },
     "vault-spend-pending": {
       "raisedBy": [

@@ -86,7 +86,7 @@ OPTIONAL = {
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
     'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerScheme', 'ownerHash', 'feeVout', 'attestFeeVout', 'assignments',
-                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign'},
+                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign', 'opReturnIndex'},
     'yed_getnotice': {'vault', 'txid', 'height', 'refHeight', 'pEmerg', 'emergencyOpenAt', 'expiresAt'},
     'yed_gettxinfo': {'seq'},
     'yed_validaterawtransaction': {'invalidReason'},   # only when valid is false
@@ -292,6 +292,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         void_txid = user.decoderawtransaction(void_hex)['txid']
         raw = user.getrawtransaction(mint_a['txid'], 1)
         c.check('yed_decodepayload', user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:]))
+        # the raw transaction: the same payload, plus opReturnIndex and the carrier's bundle (both optional)
+        dec_tx = c.check('yed_decodepayload', user.yed_decodepayload(raw['hex']))
+        assert_equal(dec_tx['opReturnIndex'], 2)
+        assert 'bundle' in dec_tx, dec_tx
         c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(raw['hex']))
         self.sync_all()
         self.mine(POOLS[1])
