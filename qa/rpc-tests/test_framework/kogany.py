@@ -979,6 +979,8 @@ class KoganyNode:
 #                             (W2-d ran it with KOGANY_PEER=2|3|5)
 #   vault_primitive           VaultHarness.assert_connected counts node 1's getpeerinfo exactly (2):
 #                             a follower of node 1 is a third peer; node 0's count is never asserted
+KOGANY_SUBVER = re.compile(r'/(kogany|Zakura|zakura)[:/]')   # zakurad's user agent (/kogany:1.7.0/)
+
 SCRIPT_PEER = {
     'vault_activation_restart': 3,
     'vault_primitive': 0,
@@ -1073,7 +1075,12 @@ class MixedLine:
                 f.stop()
                 f.write_config(config, notes)
                 f.start()
-            self._connect(proxy, f)
+                self._connect(proxy, f)
+            else:
+                # the follower kept running: its getpeerinfo may still list the connection to the
+                # peer's previous process (a SIGKILL'd peer, vault_primitive section J), so the
+                # restarted peer is asked instead
+                self._connect(proxy, f, restart=True)
 
     def attach(self, test):
         """Called after ``setup_network``: start the followers against the peer and wait for them
@@ -1135,7 +1142,7 @@ class MixedLine:
     def _config_for(self, f):
         return zakurad_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
 
-    def _connect(self, proxy, f, settle=None):
+    def _connect(self, proxy, f, settle=None, restart=False):
         """One connection per follower: the follower dials the peer (``initial_testnet_peers``);
         only when it still has no peer after ``settle`` seconds (a peer restart, say) does the peer
         ``addnode <follower> onetry``.  Never two: a script that counts ``getpeerinfo`` sees one
@@ -1144,7 +1151,13 @@ class MixedLine:
         deadline = time.time() + (self.connect_settle if settle is None else settle)
         while True:
             try:
-                if f.rpc.getpeerinfo():
+                if restart:
+                    # the restarted peer's own view: a follower peer per follower (all followers
+                    # share the one peer)
+                    if sum(1 for p in proxy.getpeerinfo() if KOGANY_SUBVER.search(p.get('subver', ''))) \
+                            >= len(self.followers):
+                        return
+                elif f.rpc.getpeerinfo():
                     return
             except (OSError, JSONRPCException):
                 pass
