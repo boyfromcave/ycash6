@@ -304,7 +304,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: write
+      contents: read  # the branch tip (gh api .../commits/<branch>)
+      actions: write  # read the runs' artifacts, dispatch tier bin
     strategy:
       fail-fast: false
       matrix:
