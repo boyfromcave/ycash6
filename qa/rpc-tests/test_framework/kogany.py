@@ -1106,6 +1106,8 @@ class MixedLine:
                 f.start()
                 self._connect(proxy, f)
             else:
+                if self.mirror_invalidate:
+                    self._mirror_restart(proxy, f)
                 # the follower kept running: its getpeerinfo may still list the connection to the
                 # peer's previous process (a SIGKILL'd peer, vault_primitive section J), so the
                 # restarted peer is asked instead
@@ -1259,13 +1261,33 @@ class MixedLine:
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
 
-    def _mirror(self, ref, f, got):
-        """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
-        only the ycashd node it calls.  When the follower's tip is a tip the peer holds as
-        ``invalid`` (getchaintips), invalidate on the follower the first block of that branch off
-        the peer's active chain; reconsider it once the peer's active chain contains it again.
-        Opt-in: getchaintips cannot tell a script's invalidateblock from a validation reject, so
-        mirroring could hide a block kogany wrongly accepts (verdict checks still run)."""
+    def _mirror_restart(self, ref, f):
+        """KOGANY_MIRROR_INVALIDATE=1, at a restart of the peer, before the follower reconnects: a
+        restart can erase a branch the script invalidated (vault_activation_restart: "the restart is
+        clean and erases the branch"), which getchaintips no longer shows, and the follower, still
+        on it, would serve it back to the peer the script keeps isolated. Invalidate on the
+        follower the first block of its chain the restarted peer does not know; reconsider a
+        mirrored block the peer's active chain holds again."""
+        self._mirror_reconsider(ref, f)
+        try:
+            h, child = f.rpc.getbestblockhash(), None
+            while True:
+                try:
+                    ref.getblockheader(h)
+                    break                                   # the peer knows it: the common chain
+                except JSONRPCException as e:
+                    if e.error.get('code') != -5:
+                        return
+                child = h
+                h = f.rpc.getblock(h, 1)['previousblockhash']
+            if child is not None:
+                f.rpc.invalidateblock(child)
+                self.mirrored.setdefault(f.k, []).append(child)
+                print('kogany %d: mirrored the restart\'s erase: invalidateblock %s' % (f.k, child[:16]))
+        except (JSONRPCException, KeyError, OSError):
+            pass
+
+    def _mirror_reconsider(self, ref, f):
         for h in list(self.mirrored.get(f.k, [])):
             try:
                 if ref.getblock(h)['confirmations'] >= 0:
@@ -1274,6 +1296,15 @@ class MixedLine:
                     print('kogany %d: mirrored reconsiderblock %s' % (f.k, h[:16]))
             except JSONRPCException:
                 pass
+
+    def _mirror(self, ref, f, got):
+        """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
+        only the ycashd node it calls.  When the follower's tip is a tip the peer holds as
+        ``invalid`` (getchaintips), invalidate on the follower the first block of that branch off
+        the peer's active chain; reconsider it once the peer's active chain contains it again.
+        Opt-in: getchaintips cannot tell a script's invalidateblock from a validation reject, so
+        mirroring could hide a block kogany wrongly accepts (verdict checks still run)."""
+        self._mirror_reconsider(ref, f)
         try:
             if not any(t['hash'] == got and t['status'] == 'invalid' for t in ref.getchaintips()):
                 return
