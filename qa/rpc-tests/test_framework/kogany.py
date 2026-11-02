@@ -250,9 +250,9 @@ KOGANYD_KEY_TABLE = [
      'bool (F-S5-9): whether a P2PKH miner address is also the YED payout key (ycashd MINER-2); '
      'the H8 harness turns it off for a live pair that names no payout address'),
     ('-yellowbacktestfault=<spec>', 'live', 'yellowback.test_fault',
-     'str, as given: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: '
-     'storage:<check|commit|undo>[:<h>], crash:<h>, template, schema); written only when a script passes it, '
-     'so a koganyd without the key refuses the config of that restart alone'),
+     'str, as given: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault); kogany takes '
+     'storage:<check|commit>[:<h>] and crash:<h>, and refuses undo, template and schema; written only when a '
+     'script passes it'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
     ('-blockunpaidactionlimit=<n>', 'live', 'mining.block_unpaid_action_limit',
