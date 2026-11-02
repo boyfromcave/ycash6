@@ -249,9 +249,10 @@ KOGANYD_KEY_TABLE = [
     ('-yellowbackpayoutdefault=<0|1>', 'live', 'mining.yellowback_payout_default',
      'bool (F-S5-9): whether a P2PKH miner address is also the YED payout key (ycashd MINER-2); '
      'the H8 harness turns it off for a live pair that names no payout address'),
-    ('-yellowbacktestfault=<spec>', 'ignored', None,
-     'gap: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: storage/crash/template/schema); '
-     'kogany\'s [yellowback] has no fault key, so a follower never injects one'),
+    ('-yellowbacktestfault=<spec>', 'live', 'yellowback.test_fault',
+     'str, as given: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: '
+     'storage:<check|commit|undo>[:<h>], crash:<h>, template, schema); written only when a script passes it, '
+     'so a koganyd without the key refuses the config of that restart alone'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
     ('-blockunpaidactionlimit=<n>', 'live', 'mining.block_unpaid_action_limit',
@@ -287,11 +288,9 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-noonion', '-nolisten', '-rpcallowip', '-rpcbind', '-rpccookiefile', '-rpcconnect',
                      '-bdbcache', '-anchorconfirmations', '-txexpirydelta', '-preferredtxversion',
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
-                     '-disablewallet', '-yellowbacktestfault', '-yellowbacksignal', '-feepolicy',
+                     '-disablewallet', '-yellowbacksignal', '-feepolicy',
                      '-mempoolevictionmemoryminutes')
-# -yellowbacktestfault is a gap, not a no-op: ycashd injects a storage/crash/template/schema fault
-# (src/yellowback/index.cpp SetTestFault) and kogany has no fault key, so a follower of a faulted
-# peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
+# -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
 # -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
@@ -364,6 +363,7 @@ _LIVE_FLAGS = {
     '-yellowbackmintlag': (('mempool', 'yellowback_mint_lag'), int),
     '-blockunpaidactionlimit': (('mining', 'block_unpaid_action_limit'), int),
     '-yellowbackpayoutdefault': (('mining', 'yellowback_payout_default'), _bool01),
+    '-yellowbacktestfault': (('yellowback', 'test_fault'), str),
 }
 
 
@@ -437,8 +437,7 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             notes.append('ignored: %s' % a)
             continue
         if name.startswith(_IGNORED_PREFIXES) or name.startswith('-yellowbackpayout'):
-            if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-yellowbacktestfault',
-                                '-mempoolevictionmemoryminutes')):
+            if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-mempoolevictionmemoryminutes')):
                 notes.append('ignored: %s' % a)
             continue
         if name.startswith('-yellowback') or name.startswith('-vault') or name.startswith('-pq'):

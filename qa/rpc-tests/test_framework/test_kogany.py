@@ -186,15 +186,20 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args(named, 'tmA'))
         self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args([], 'tmA'))     # stock: unchanged
 
+    def test_test_fault_row(self):
+        # written only when the script passes it (a koganyd without the key refuses that config alone)
+        _cfg, _notes, t = self.gen(['-yellowbacktestfault=storage:commit'], live=())
+        self.assertEqual(t['yellowback'], {'test_fault': 'storage:commit'})
+        _cfg, _notes, t = self.gen([], live=())
+        self.assertNotIn('yellowback', t)
+
     def test_ignored_rows(self):
-        _cfg, notes, t = self.gen(['-yellowbacktestfault=storage:commit', '-yellowbacksignal=0', '-feepolicy=zip317',
+        _cfg, notes, t = self.gen(['-yellowbacksignal=0', '-feepolicy=zip317',
                                    '-mempoolevictionmemoryminutes=1'], live=())
         self.assertNotIn('yellowback', t)
         self.assertEqual(set(t['mempool']), {'debug_enable_at_height'})
-        self.assertIn('ignored: -yellowbacktestfault=storage:commit', notes)      # the recorded gap
         self.assertIn('ignored: -mempoolevictionmemoryminutes=1', notes)
         rows = {r[0].split('=')[0]: r for r in kg.KOGANYD_KEY_TABLE}
-        self.assertIn('gap', rows['-yellowbacktestfault'][3])
         for flag in ('-yellowbacksignal', '-feepolicy', '-mempoolevictionmemoryminutes'):
             self.assertEqual(rows[flag][1], 'ignored', flag)
 
