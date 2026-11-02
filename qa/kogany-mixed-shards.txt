@@ -92,5 +92,64 @@ attest   yellowback_attest_bond        report  W9
 attest   yellowback_quote              report  W9
 attest   yellowback_chainviz           report  W9   mirror
 
+# --- the ycash6 test rig (kogany plan W9-a; K-3 as amended): the same scripts again with
+#     KOGANY_SIDECAR=1, every node a kogany plus a ycashd -connect'ed to it (-listen=0), the wallet
+#     on the ycashd, consensus and relay through the koganys. The 50 wallet-needing scripts:
+#     YELLOWBACK_SCRIPTS less the eight that call no wallet RPC, directly or through a framework
+#     helper (yellowback_quote, vault_activation_restart, vault_undo_prune, stopatheight,
+#     ycash_bootstrap, testnet_ceremony, lightwalletd_only; yellowback_framework_smoke is excluded
+#     above). The plan's "48" was a rough count (surveys/e-verification-strategy.md). Each script
+#     keeps its mixed group's flags; `run sidecar --of <group>` runs one group's share (the nightly).
+sidecar  z_validateaddress_nowallet    report  W9     # node
+sidecar  vault_upgrade                 report  W9   mirror  # vault
+sidecar  vault_primitive               report  W9   mirror  # vault
+sidecar  vault_slashing                report  W9   mirror  # vault
+sidecar  vault_pq_reorg                report  W9   mirror  # vault
+sidecar  vault_dos                     report  W9   mirror  # vault
+sidecar  vault_rpc                     report  W9   mirror  # vault
+sidecar  vault_rpc_contract            report  W9     # vault
+sidecar  vault_pq_relay                report  W9     # vault
+sidecar  vault_bridge                  report  W9     # vault
+sidecar  vault_pq                      report  W9     # vault
+sidecar  vault_pq_wallet               report  W9     # vault
+sidecar  vault_pq_wallet_restore       report  W9     # vault
+sidecar  wallet_pq_address             report  W9     # vault
+sidecar  yellowback_lifecycle          report  W9     # yed
+sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
+sidecar  yellowback_reorg_restart      report  W9   mirror  # yed
+sidecar  yellowback_claim              report  W9     # yed
+sidecar  yellowback_interm             report  W9     # yed
+sidecar  yellowback_index              report  W9   mirror  # yed
+sidecar  yellowback_upgrade            report  W9   mirror  # yed
+sidecar  yellowback_rpc_contract       report  W9     # yed
+sidecar  yellowback_redeem_boundary    report  W9     # yed
+sidecar  yellowback_cancel_limit       report  W9     # yed
+sidecar  yellowback_pq                 report  W9     # yed
+sidecar  yellowback_pq_dayone          report  W9     # yed
+sidecar  yellowback_void_mint          report  W9     # yed
+sidecar  yellowback_mint_armed         report  W9     # yed
+sidecar  yellowback_wallet_restore     report  W9     # yed
+sidecar  yellowback_sapling            report  W9     # yed
+sidecar  yellowback_wallet_lifecycle   report  W9     # yed
+sidecar  yellowback_hardening          report  W9     # yed
+sidecar  yellowback_stock_node         report  W9   mirror  # yed
+sidecar  yellowback_fees               report  W9   mempool  # fees
+sidecar  yellowback_fees_reaccept      report  W9   mempool  # fees
+sidecar  yellowback_fee                report  W9   mempool  # fees
+sidecar  yellowback_mempool_limits     report  W9   mempool  # fees
+sidecar  vault_policy                  report  W9   mempool  # fees
+sidecar  vault_refee                   report  W9   mempool  # fees
+sidecar  yellowback_wr_flags           report  W9   mempool  # fees
+sidecar  yellowback_attest_evict       report  W9     # attest
+sidecar  yellowback_attest_rejoin      report  W9     # attest
+sidecar  yellowback_attest_live        report  W9     # attest
+sidecar  yellowback_pricefeed          report  W9     # attest
+sidecar  yellowback_mining             report  W9   mirror  # attest
+sidecar  yellowback_stratum            report  W9     # attest
+sidecar  yellowback_attest             report  W9     # attest
+sidecar  yellowback_attest_wallet      report  W9   mirror  # attest
+sidecar  yellowback_attest_bond        report  W9     # attest
+sidecar  yellowback_chainviz           report  W9   mirror  # attest
+
 # --- off the mixed shards (test_framework/kogany.py "Recorded limits"; plan KF-32)
 excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo count, and a follower is one more peer

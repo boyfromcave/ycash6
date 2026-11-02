@@ -726,5 +726,195 @@ class MixedLineHookTest(unittest.TestCase):
             m.note('x')
 
 
+class FakeChain:
+    """A node's active chain for the rig's feed: ``blocks`` is the list of hashes from height 0."""
+
+    def __init__(self, blocks, k=0, verdict=None):
+        self.blocks = list(blocks)
+        self.k = k
+        self.submitted = []
+        self.verdict = verdict           # submitblock's answer (None: accepted)
+        self.rpc = self
+        self.datadir = '/tmp/fake%d' % k
+
+    def getbestblockhash(self):
+        return self.blocks[-1]
+
+    def getblockcount(self):
+        return len(self.blocks) - 1
+
+    def getblockhash(self, h):
+        return self.blocks[h]
+
+    def getblock(self, h, verbosity=1):
+        return 'raw-' + h
+
+    def submitblock(self, block_hex):
+        self.submitted.append(block_hex)
+        if self.verdict is None:
+            self.blocks.append(block_hex[4:])
+        return self.verdict
+
+
+class FakeKogany(FakeFollower):
+    """A KoganyNode stand-in for start_sidecar (alive between start and stop)."""
+
+    started = []
+
+    def __init__(self, k, tmpdir, binary, extra_args=()):
+        super().__init__(k)
+        self.datadir = os.path.join(tmpdir, 'kogany%d' % k)
+        self.running = False
+        FakeKogany.started.append(k)
+
+    def alive(self):
+        return self.running
+
+    def start(self):
+        super().start()
+        self.running = True
+
+    def stop(self):
+        super().stop()
+        self.running = False
+
+
+class SidecarRigTest(unittest.TestCase):
+    """KOGANY_SIDECAR=1: the W9-a test rig (kogany i + a ycashd -connect'ed to it on node i)."""
+
+    def setUp(self):
+        util.PortSeed.n = 11
+        self.saved_env = {k: os.environ.get(k) for k in ('KOGANY_SIDECAR', 'KOGANY_BIN', 'KOGANY_ARGS')}
+        self.saved_node = kg.KoganyNode
+        kg.SIDECAR_NODES.clear()
+
+    def tearDown(self):
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        kg.KoganyNode = self.saved_node
+        kg.SIDECAR_NODES.clear()
+        kg._CURRENT[0] = kg.MixedLine()
+
+    def test_enabled_needs_both(self):
+        self.assertTrue(kg.sidecar_enabled({'KOGANY_SIDECAR': '1', 'KOGANY_BIN': '/bin/z'}))
+        self.assertFalse(kg.sidecar_enabled({'KOGANY_SIDECAR': '1'}))
+        self.assertFalse(kg.sidecar_enabled({'KOGANY_SIDECAR': '0', 'KOGANY_BIN': '/bin/z'}))
+        self.assertFalse(kg.sidecar_enabled({'KOGANY_BIN': '/bin/z'}))
+        m = kg.MixedLine.from_env({'KOGANY_SIDECAR': '1', 'KOGANY_BIN': '/bin/z', 'KOGANY_SIDECAR_PUMP_AFTER': '9'})
+        self.assertTrue(m.sidecar)
+        self.assertEqual(m.pump_after, 9.0)
+        self.assertIn('pumped_blocks', m.stats)
+        self.assertFalse(kg.MixedLine.from_env({'KOGANY_SIDECAR': '1'}).sidecar)   # no binary: inert
+        self.assertFalse(kg.MixedLine.from_env({'KOGANY_BIN': '/bin/z'}).sidecar)
+
+    def test_ycashd_args(self):
+        args = kg.sidecar_ycashd_args(3, ['-listen=1', '-debug=net'])
+        self.assertEqual(args, ['-listen=1', '-debug=net', '-connect=127.0.0.1:%d' % util.p2p_port(3), '-listen=0'])
+
+    def test_kogany_config(self):
+        cfg, _notes = kg.sidecar_kogany_config(START + YCASH + VAULT, 2, '/tmp/k2', live=('W1-Y1', 'W2-b'))
+        net = cfg['network']
+        self.assertEqual(net['listen_addr'], '127.0.0.1:%d' % util.p2p_port(2))
+        self.assertEqual(net['initial_testnet_peers'], [])
+        self.assertEqual(net['max_connections_per_ip'], kg.SIDECAR_MAX_CONNS_PER_IP)
+        self.assertGreater(kg.SIDECAR_MAX_CONNS_PER_IP, util.MAX_NODES)   # one inbound per ycashd on 127.0.0.1
+        self.assertEqual(net['p2p_stack'], 'legacy')
+        self.assertEqual(net['network']['params']['activation_heights']['Vault'], 103)
+        self.assertEqual(cfg['rpc']['listen_addr'], '127.0.0.1:%d' % kg.kogany_rpc_port(2))
+        # the rig's own -connect/-listen in the arguments are ignored rows, never refused
+        cfg2, _ = kg.sidecar_kogany_config(kg.sidecar_ycashd_args(2, START), 2, '/tmp/k2', live=())
+        self.assertEqual(cfg2['network']['listen_addr'], net['listen_addr'])
+        tomllib.loads(kg.render_toml(cfg, _notes))
+
+    def test_start_sidecar_keeps_or_restarts(self):
+        os.environ.update({'KOGANY_SIDECAR': '1', 'KOGANY_BIN': '/bin/z'})
+        os.environ.pop('KOGANY_ARGS', None)
+        kg.KoganyNode = FakeKogany
+        FakeKogany.started = []
+        m = kg.MixedLine.from_env()
+        kg._CURRENT[0] = m
+        args = kg.start_sidecar(1, '/tmp/run', START + YCASH)
+        self.assertEqual(args[-2:], ['-connect=127.0.0.1:%d' % util.p2p_port(1), '-listen=0'])
+        k = kg.SIDECAR_NODES[1]
+        self.assertEqual(k.datadir, '/tmp/run/kogany1')
+        self.assertEqual(k.events, ['stop', 'write', 'start'])
+        self.assertEqual(m.followers, [k])
+        self.assertTrue(m.active)
+        k.events = []
+        kg.start_sidecar(1, '/tmp/run', START + YCASH + ['-keypool=5'])       # a wallet option: kept running
+        self.assertEqual(k.events, [])
+        kg.start_sidecar(1, '/tmp/run', START + YCASH + VAULT + ['-acceptnonstdtxn=1'])   # a kogany key: restart
+        self.assertEqual(k.events, ['stop', 'write', 'start'])
+        self.assertEqual(k.config['mempool']['accept_non_standard'], True)
+        k.running = False                                                       # died: started again
+        k.events = []
+        kg.start_sidecar(1, '/tmp/run', START + YCASH + VAULT + ['-acceptnonstdtxn=1'])
+        self.assertEqual(k.events, ['stop', 'write', 'start'])
+        self.assertEqual(FakeKogany.started, [1])                               # one KoganyNode per node
+        self.assertEqual(m.followers, [k])
+
+    def test_on_node_start_and_pairs(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        m.on_node_start(0, ['-frobnicate'], None)        # the rig never maps a peer's arguments here
+        self.assertIsNone(m.peer_args)
+        a, b = FakeChain(['g'], 0), FakeChain(['g'], 2)
+        kg.SIDECAR_NODES.update({0: a, 2: b})
+        c0, c1, c2 = FakeConn(0), FakeConn(1), FakeConn(2)
+        self.assertEqual(m._pairs([c0, c1, c2]), [(c0, a), (c2, b)])   # node 1 has no kogany: skipped
+        self.assertEqual(m._pairs([c1]), [])
+
+    def test_pump_feeds_from_the_common_ancestor(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        ref = FakeChain(['g', 'a1', 'a2', 'a3', 'a4'])
+        kog = FakeChain(['g', 'a1', 'x2'])               # on a side branch from height 2
+        m._pump(ref, kog, kog.getbestblockhash())
+        self.assertEqual(kog.submitted, ['raw-a2', 'raw-a3', 'raw-a4'])
+        self.assertEqual((m.stats['pumped_blocks'], m.stats['pump_rounds']), (3, 1))
+        m._pump(ref, kog, ref.getbestblockhash())        # at the tip: nothing
+        ahead = FakeChain(['g', 'a1', 'a2', 'a3', 'a4', 'a5'])
+        m._pump(ref, ahead, ahead.getbestblockhash())     # kogany ahead: nothing to feed
+        self.assertEqual(ahead.submitted, [])
+        m.pump_batch = 2
+        kog = FakeChain(['g'])
+        m._pump(ref, kog, 'g')
+        self.assertEqual(kog.submitted, ['raw-a1', 'raw-a2'])
+        for verdict in ('duplicate', 'inconclusive'):
+            m._pump(ref, FakeChain(['g'], verdict=verdict), 'g')
+
+    def test_pump_refusal_is_a_divergence(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        with self.assertRaises(AssertionError) as cm:
+            m._pump(FakeChain(['g', 'a1']), FakeChain(['g'], verdict='rejected'), 'g')
+        self.assertIn('refused block 1', str(cm.exception))
+
+    def test_sync_wait_grace(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True, pump_after=5)
+        ref, kog = FakeChain(['g', 'a1']), FakeChain(['g'], 0)
+        ref.url = FakeConn(0).url
+        kg.SIDECAR_NODES[0] = kog
+        m.followers = [kog]
+        m.sync_wait([ref], 1)
+        self.assertEqual(kog.submitted, [])
+        m.sync_wait([ref], 5)
+        self.assertEqual(kog.submitted, ['raw-a1'])
+        plain = kg.MixedLine(binary='/bin/z')               # the follower mode never feeds
+        plain.followers = [kog]
+        plain.sync_wait([ref], 60)
+        self.assertEqual(kog.submitted, ['raw-a1'])
+
+    def test_register_installs_the_wait_hook(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        saved = dict(util.MIXED_HOOKS)
+        try:
+            kg._register(m)
+            self.assertEqual(util.MIXED_HOOKS['sync_wait'], m.sync_wait)
+        finally:
+            util.MIXED_HOOKS.clear()
+            util.MIXED_HOOKS.update(saved)
+
+
 if __name__ == '__main__':
     unittest.main()
