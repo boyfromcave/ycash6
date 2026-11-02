@@ -2013,10 +2013,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // https://github.com/bitpay/bitcoin/commit/c91d78b578a8700a45be936cb5bb0931df8f4b87#diff-c865a8939105e6350a50af02766291b7R1233
     int64_t nInsightExplorerDBCache = 0;
-    if (GetBoolArg("-insightexplorer", false)) {
-        if (!GetBoolArg("-txindex", false)) {
-            return InitError(_("-insightexplorer requires -txindex."));
-        }
+    if (GetBoolArg("-insightexplorer", false) && !GetBoolArg("-txindex", false)) {
+        return InitError(_("-insightexplorer requires -txindex."));
+    }
+    // The database holds the address index too, which -lightwalletd alone turns on
+    // (fAddressIndex, LoadBlockIndexDB / InitBlockIndex): open it for either flag, as
+    // upstream's address index in the block tree is there for either.
+    if (GetBoolArg("-insightexplorer", false) || GetBoolArg("-lightwalletd", false)) {
         // The insight-explorer indexes live in their own leveldb instance
         // (see CInsightExplorerDB). Carve half of the remaining cache for
         // it: bulk writes per connected block plus range-scan reads from

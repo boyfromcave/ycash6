@@ -209,6 +209,7 @@ BASE_SCRIPTS= [
     'nodehandling.py',
     'reindex.py',
     'addressindex.py',
+    'lightwalletd_only.py',
     'spentindex.py',
     'timestampindex.py',
     'decodescript.py',
