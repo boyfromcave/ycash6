@@ -30,6 +30,8 @@ Environment
 ``KOGANY_MEMPOOL``        1: assert ``getrawmempool`` set equality at every mempool sync point and
                           compare transaction verdicts (default 0, until W6 lands kogany's policy).
 ``KOGANY_SYNC_TIMEOUT``   seconds a follower may take to reach the peer's tip (default 120).
+``KOGANY_MIRROR_INVALIDATE``  1: mirror a script's ``invalidateblock``/``reconsiderblock`` on the peer
+                          to the followers at sync points (``MixedLine._mirror``; default 0).
 ``KOGANY_ARGS``           extra ``zakurad`` arguments, whitespace-separated, placed before ``start``.
 ``KOGANY_LOG``            ``tracing.filter`` for the followers (default ``info``).
 ``YEWD_BIN``              path to ``yewd`` (the parity sidecar, plan section 3b): every node becomes a
@@ -54,11 +56,22 @@ Framework API (for W2-d, W4-e, W5-f, W6 and the S track)
 ``zakurad_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
 ``render_toml(config, notes)``        the ``zakurad.toml`` text; ``ZAKURAD_KEY_TABLE`` /
                                       ``NU_BRANCH_TABLE`` are the map.
+``start_yewd_pair(i, datadir, ycashd, args)`` / ``yewd_pair_argv`` / ``split_yewd_args`` /
+``yewd_backend_rpc_port(i)`` / ``YEWD_BACKENDS``  the YEWD_BIN pair (util.start_node calls it).
+
+Under ``YEWD_BIN`` util's ``fullyNotified`` wait is skipped (ycashd never reports it with
+``-disablewallet``; ``YEWD_FULLY_NOTIFIED=1`` restores it once yewd answers it), and yewd's output
+goes to ``node<i>/yewd.log`` (rpc-tests.py fails a script with stderr output).
 
 Recorded limits (plan section 5): kogany does not mine (K-16; its regtest checks the solution
 shape only); ``split_network`` uses ``disconnectnode``, which kogany lacks, so a follower stays on
 its peer's side of a split; Zakura has no mock clock, so ``mock_clock`` scripts run the followers
-on the real clock.
+on the real clock; a follower is one extra peer of its peer node, so the six scripts that assert
+an exact ``getpeerinfo`` count (maxuploadtarget, nodehandling, p2p_ban_pool_value_out_of_range,
+p2p_nu_peer_management, signrawtransaction_offline, yellowback_framework_smoke) stay off the mixed
+shard list; a script's ``invalidateblock`` reaches only the ycashd node it calls, so the follower keeps the
+invalidated branch unless ``KOGANY_MIRROR_INVALIDATE=1`` (Zakura serves
+``invalidateblock``/``reconsiderblock``; whether a wave's shard turns it on is W2-d's choice).
 """
 
 import atexit
@@ -694,7 +707,7 @@ class MixedLine:
     instance when ``KOGANY_BIN`` is unset: every method is then a no-op."""
 
     def __init__(self, binary=None, followers=1, peer=None, strict=False, mempool=False,
-                 sync_timeout=120, extra_args=(), yewd=None):
+                 sync_timeout=120, extra_args=(), yewd=None, mirror_invalidate=False):
         self.binary = binary
         self.n_followers = followers
         self.peer = peer
@@ -704,6 +717,8 @@ class MixedLine:
         self.extra_args = list(extra_args)
         self.yewd = yewd
         self.connect_settle = 5.0
+        self.mirror_invalidate = mirror_invalidate
+        self.mirrored = {}
         self.followers = []
         self.tmpdir = None
         self.peer_args = None
@@ -725,7 +740,8 @@ class MixedLine:
                    mempool=env.get('KOGANY_MEMPOOL', '0') == '1',
                    sync_timeout=float(env.get('KOGANY_SYNC_TIMEOUT', '120')),
                    extra_args=env.get('KOGANY_ARGS', '').split(),
-                   yewd=env.get('YEWD_BIN') or None)
+                   yewd=env.get('YEWD_BIN') or None,
+                   mirror_invalidate=env.get('KOGANY_MIRROR_INVALIDATE', '0') == '1')
 
     @property
     def enabled(self):
@@ -856,11 +872,42 @@ class MixedLine:
                     got = None
                 if got == tip:
                     break
+                if self.mirror_invalidate and got is not None:
+                    self._mirror(ref, f, got)
                 if time.time() > deadline:
                     raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s'
                                          % (f.k, tip, ref.getblockcount(), label, got))
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
+
+    def _mirror(self, ref, f, got):
+        """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
+        only the ycashd node it calls.  When the follower's tip is a tip the peer holds as
+        ``invalid`` (getchaintips), invalidate on the follower the first block of that branch off
+        the peer's active chain; reconsider it once the peer's active chain contains it again.
+        Opt-in: getchaintips cannot tell a script's invalidateblock from a validation reject, so
+        mirroring could hide a block kogany wrongly accepts (verdict checks still run)."""
+        for h in list(self.mirrored.get(f.k, [])):
+            try:
+                if ref.getblock(h)['confirmations'] >= 0:
+                    f.rpc.reconsiderblock(h)
+                    self.mirrored[f.k].remove(h)
+                    print('kogany %d: mirrored reconsiderblock %s' % (f.k, h[:16]))
+            except JSONRPCException:
+                pass
+        try:
+            if not any(t['hash'] == got and t['status'] == 'invalid' for t in ref.getchaintips()):
+                return
+            h, child = got, None
+            while ref.getblock(h)['confirmations'] < 0:
+                child = h
+                h = f.rpc.getblock(h, 1)['previousblockhash']
+            if child is not None:
+                f.rpc.invalidateblock(child)
+                self.mirrored.setdefault(f.k, []).append(child)
+                print('kogany %d: mirrored invalidateblock %s' % (f.k, child[:16]))
+        except (JSONRPCException, KeyError):
+            pass
 
     def _compare_statehash(self, ref, f, label):
         for method, key, stat in (('vault_getinfo', 'statehash', 'statehash_vault'),
@@ -876,6 +923,9 @@ class MixedLine:
                     self.note('%s not served yet; %s equality skipped' % (method, stat))
                     continue
                 raise
+            if got is None and want is not None:
+                self.note('%s served without %s yet; %s equality skipped' % (method, key, stat))
+                continue
             if got != want:
                 raise AssertionError('kogany %d: %s.%s differs %s: ycashd %s, kogany %s'
                                      % (f.k, method, key, label, want, got))

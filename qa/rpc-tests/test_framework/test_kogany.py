@@ -213,6 +213,37 @@ class FakePeer:
         self.added.append((addr, how))
 
 
+class AuthProxyContentTypeTest(unittest.TestCase):
+    """authproxy accepts a media type with parameters (Zakura: application/json; charset=utf-8)."""
+
+    def response(self, content_type):
+        from test_framework.authproxy import AuthServiceProxy
+
+        class Resp:
+            status, reason = 200, 'OK'
+
+            def getheader(self, name):
+                return content_type
+
+            def read(self):
+                return b'{"result": 7, "error": null, "id": 1}'
+
+        class Conn:
+            timeout = 5
+
+            def getresponse(self):
+                return Resp()
+
+        return AuthServiceProxy('http://u:p@127.0.0.1:1', connection=Conn())._get_response()
+
+    def test_media_type_parameters(self):
+        for ct in ('application/json', 'application/json; charset=utf-8', 'Application/JSON;charset=UTF-8'):
+            self.assertEqual(self.response(ct)['result'], 7, ct)
+        for ct in ('text/html', None, 'application/jsonx'):
+            with self.assertRaises(JSONRPCException, msg=ct):
+                self.response(ct)
+
+
 class YewdPairTest(unittest.TestCase):
 
     def test_argv(self):
