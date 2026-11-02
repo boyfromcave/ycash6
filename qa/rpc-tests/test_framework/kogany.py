@@ -958,11 +958,10 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     payouts = [a.split('=', 1)[1] for a in args if a.startswith('-yellowbackpayoutaddress=')]
     if live and not payouts:
         return None
-    if kogany_backend and payouts and payouts[-1]:
-        # kogany takes its YED payout key from mining.miner_address only (no payout option; W5-f):
-        # a node that names -yellowbackpayoutaddress mines to that address, which the scripts'
-        # pool nodes own (import_pool_keys), so the tag names the payee ycashd's would (F-S5-12)
-        return payouts[-1]
+    # kogany takes its YED payout key from mining.miner_address only (no payout option, W5-f): a
+    # pair that names -yellowbackpayoutaddress still mines to its wallet (mining to the payout address
+    # instead left the wallet without the coinbase the scripts spend before importing the pool keys,
+    # yellowback_chainviz.py), so its tag names the wallet's key, not the script's payee (F-S5-12)
     return taddr
 
 
