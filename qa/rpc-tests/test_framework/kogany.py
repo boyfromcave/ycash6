@@ -103,6 +103,7 @@ if kogany's real clock accepts their time.
 
 import atexit
 import json
+import threading
 import os
 import re
 import socket
@@ -950,6 +951,62 @@ def start_sidecar(i, dirname, args):
     return sidecar_ycashd_args(i, args)
 
 
+class RigRelay(threading.Thread):
+    """The rig's background re-announcement (finding W9-a/F-3), for the waits a script does itself
+    (``wait_for_mempool`` with its own timeout, chain-viz's snapshot) and that no harness hook sees.
+    Every ``period`` seconds, per node: a transaction ycashd i has held for ``age`` seconds that
+    kogany i lacks goes to kogany i's ``sendrawtransaction``; one kogany i has held that long and
+    ycashd i lacks goes to ycashd i.  Pair-local, so a split's halves never exchange anything; kogany
+    then gossips what it took to its own peers, which is the re-announcement Zakura never makes.
+    Its own connections (one per call), never the script's.  ``KOGANY_SIDECAR_RELAY=0`` turns it off."""
+
+    def __init__(self, mixed, period=2.0, age=4.0):
+        super().__init__(name='kogany-rig-relay', daemon=True)
+        self.mixed, self.period, self.age = mixed, period, age
+        self.halt = threading.Event()
+        self.seen = {}                # (node, direction, txid) -> first time seen missing
+
+    def run(self):
+        while not self.halt.wait(self.period):
+            try:
+                self.round(time.time())
+            except Exception as e:     # never let the helper kill a run; the sync checks still judge
+                print('kogany rig relay: %r' % (e,))
+
+    def round(self, now):
+        missing = set()
+        for i, k in list(SIDECAR_NODES.items()):
+            if not k.alive() or i not in util.bitcoind_processes:
+                continue
+            y = util.get_rpc_proxy(util.rpc_url(i), i, timeout=10)
+            try:
+                have_y, have_k = set(y.getrawmempool()), set(k.rpc.getrawmempool())
+            except (OSError, JSONRPCException):
+                continue
+            for direction, txids in (('k', have_y - have_k), ('y', have_k - have_y)):
+                for txid in txids:
+                    key = (i, direction, txid)
+                    missing.add(key)
+                    first = self.seen.setdefault(key, now)
+                    if now - first < self.age:
+                        continue
+                    try:
+                        if direction == 'k':
+                            k.rpc.with_timeout(self.mixed.tx_timeout).sendrawtransaction(y.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_kogany'] = self.mixed.stats.get('relayed_txs_kogany', 0) + 1
+                        else:
+                            y.sendrawtransaction(k.rpc.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_ycashd'] = self.mixed.stats.get('relayed_txs_ycashd', 0) + 1
+                    except (OSError, JSONRPCException):
+                        pass           # refused, mined or evicted meanwhile: retried next round if still missing
+        self.seen = {key: t for key, t in self.seen.items() if key in missing}
+
+    def stop(self):
+        self.halt.set()
+        if self.is_alive():
+            self.join(10)
+
+
 def sidecar_started(i):
     """``util.start_node`` hook after ycashd i answered: kogany i must have taken the same config."""
     msg = SIDECAR_REFUSED.pop(i, None)
@@ -1105,6 +1162,7 @@ class MixedLine:
         self.tx_timeout = tx_timeout
         self.mirrored = {}
         self.followers = []
+        self.relay = None             # the rig's RigRelay thread
         self.tmpdir = None
         self.peer_args = None
         self._notes = set()
@@ -1188,6 +1246,9 @@ class MixedLine:
         if self.sidecar:
             print('kogany: test rig, %d kogany + ycashd pair(s) (%s)' % (len(SIDECAR_NODES), self.binary))
             self.sync_point(list(test.nodes), 'attach')
+            if os.getenv('KOGANY_SIDECAR_RELAY', '1') == '1':
+                self.relay = RigRelay(self)
+                self.relay.start()
             return
         assert test.nodes and self.peer < len(test.nodes), 'KOGANY_PEER %s is not a node of this run' % self.peer
         if self.peer_args is None:
@@ -1203,6 +1264,9 @@ class MixedLine:
         self.sync_point([test.nodes[self.peer]], 'attach')
 
     def stop(self):
+        if self.relay is not None:
+            self.relay.stop()
+            self.relay = None
         for f in self.followers:
             f.stop()
         SIDECAR_NODES.clear()

@@ -1009,6 +1009,45 @@ class SidecarRigTest(unittest.TestCase):
         kg.SIDECAR_NODES[5] = k5r
         m.sync_wait([y0, y5], 1)                                  # another node's block refused: not fatal
 
+    def test_rig_relay_round(self):
+        class Pool:
+            def __init__(self, txs):
+                self.txs, self.got, self.rpc = set(txs), [], self
+
+            def with_timeout(self, t):
+                return self
+
+            def alive(self):
+                return True
+
+            def getrawmempool(self):
+                return sorted(self.txs)
+
+            def getrawtransaction(self, txid):
+                return 'raw-' + txid
+
+            def sendrawtransaction(self, raw):
+                self.got.append(raw[4:])
+                self.txs.add(raw[4:])
+
+        y, k = Pool(['a']), Pool(['b'])
+        kg.SIDECAR_NODES[0] = k
+        saved = (util.get_rpc_proxy, dict(util.bitcoind_processes))
+        util.get_rpc_proxy = lambda url, i, timeout=None: y
+        util.bitcoind_processes[0] = object()
+        try:
+            r = kg.RigRelay(kg.MixedLine(binary='/bin/z', sidecar=True), age=4)
+            r.round(100)                      # first seen: not yet
+            self.assertEqual((y.got, k.got), ([], []))
+            r.round(105)                      # held 5 s: re-announced both ways
+            self.assertEqual((y.got, k.got), (['b'], ['a']))
+            r.round(107)                      # converged: nothing left to track
+            self.assertEqual(r.seen, {})
+        finally:
+            util.get_rpc_proxy = saved[0]
+            util.bitcoind_processes.clear()
+            util.bitcoind_processes.update(saved[1])
+
     def test_pump_refusal_is_a_divergence(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)
         with self.assertRaises(AssertionError) as cm:
