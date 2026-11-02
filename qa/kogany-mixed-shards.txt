@@ -25,10 +25,7 @@
 
 # --- the harness itself (W1-Y7) and node plumbing
 node     kogany_mixed_smoke            gate    W1   direct
-node     stopatheight                  report  W9
-node     ycash_bootstrap               report  W9
 node     testnet_ceremony              gate    W9
-node     lightwalletd_only             report  W9
 node     z_validateaddress_nowallet    gate    W9
 
 # --- the vault primitive (W2-d boundary, W4-e state, W7 reads)
@@ -44,9 +41,6 @@ vault    vault_rpc_contract            gate    W7
 vault    vault_pq_relay                gate    W6
 vault    vault_bridge                  gate    W9
 vault    vault_pq                      gate    W9
-vault    vault_pq_wallet               report  W9
-vault    vault_pq_wallet_restore       report  W9
-vault    wallet_pq_address             report  W9
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
 yed      yellowback_lifecycle          gate    W5
@@ -111,9 +105,6 @@ sidecar  vault_rpc_contract            report  W9     # vault
 sidecar  vault_pq_relay                report  W9     # vault
 sidecar  vault_bridge                  report  W9     # vault
 sidecar  vault_pq                      report  W9     # vault
-sidecar  vault_pq_wallet               report  W9     # vault
-sidecar  vault_pq_wallet_restore       report  W9     # vault
-sidecar  wallet_pq_address             report  W9     # vault
 sidecar  yellowback_lifecycle          report  W9     # yed
 sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
 sidecar  yellowback_reorg_restart      report  W9   mirror  # yed
@@ -153,3 +144,9 @@ sidecar  yellowback_chainviz           report  W9   mirror  # attest
 
 # --- off the mixed shards (test_framework/kogany.py "Recorded limits"; plan KF-32)
 excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo count, and a follower is one more peer
+excluded stopatheight                 no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
+excluded ycash_bootstrap              no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
+excluded lightwalletd_only            no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
+excluded vault_pq_wallet              no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
+excluded vault_pq_wallet_restore      no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
+excluded wallet_pq_address            no-ycash-upgrades: its regtest chain lacks the Ycash upgrades below Canopy (framework cache or Vault-only -nuparams); kogany follows only chains with the Ycash upgrades at 1 (cumulative upgrades, K-6; W9-b finding 1)
