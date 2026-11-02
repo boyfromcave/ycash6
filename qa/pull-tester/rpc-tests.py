@@ -209,6 +209,8 @@ BASE_SCRIPTS= [
     'nodehandling.py',
     'reindex.py',
     'addressindex.py',
+    'lightwalletd_only.py',
+    'z_validateaddress_nowallet.py',
     'spentindex.py',
     'timestampindex.py',
     'decodescript.py',

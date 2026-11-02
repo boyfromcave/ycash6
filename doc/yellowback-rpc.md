@@ -1152,7 +1152,9 @@ Type-specific fields: MINT `termClass`, `cents`, `lockHeight`, `refHeight`, `own
 `refHeight`; `equivocation` (`0x07`) nothing; `revive` (`0x08`) `attestation {seq,
 priceMicroUsd, citedHeight, sig, hex}`; `cancelcosign` (`0x09`, the cancel-limit design's CANCEL_COSIGN marker; its
 co-signatures ride the carrier) `cancelCosign` (an empty object). Fields of the other types are absent (**optional** — the
-checker decodes a MINT payload, the example). When `hex` is a **raw transaction** that has a
+checker decodes a MINT payload, the example). When `hex` is a **raw transaction** carrying a payload,
+`opReturnIndex` (number, **optional**: present only then) is the index of the output whose `OP_RETURN`
+carries it; when that transaction also has a
 carrier-shaped input (v3 §3.4), `bundle` (**optional**) is the decoded bundle — `{vin, hash,
 version, count, attestations: [{seq, priceMicroUsd, citedHeight, sig, hex}]}` — decoded only,
 never verified (`yed_validaterawtransaction` verifies).
@@ -2601,7 +2603,9 @@ what `yellowback_rpc_contract.py` uses.
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |
 | `invalid-address` | `yed_listtokens` | a string that is neither a YED, a transparent P2PKH nor a plain-YEC post-quantum address of this network |
-| `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
+| `vault-not-found` | `yed_redeem`, `yed_claim`, `yed_getvault` | an unknown txid |
+| `vault-not-active` | `yed_redeem`, `yed_claim` | a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); `yed_getvault` reports any status and refuses only `vault-not-found` |
+| `vault-not-owned` | `yed_redeem` | another wallet's vault (a claim is anyone's: `yed_claim` never checks the owner) |
 | `vault-locked` | `yed_redeem` | tip below the vault's `ownerHeight` (`refHeight + 1` since IT-1; `lockHeight` for a VOID vault and a vault minted before the in-term rule) |
 | `claim-not-yet` | `yed_claim` | tip below the vault's `appHeight` (`refHeight + 1` since IT-1; `claimHeight` for a vault minted before the in-term rule) |
 | `claim-not-underwater` | `yed_claim` | RED-4 would fail at the reference snapshot (the price did not fall) |
