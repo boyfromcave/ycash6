@@ -30,6 +30,9 @@ Environment
 ``KOGANY_MEMPOOL``        1: assert ``getrawmempool`` set equality at every mempool sync point and
                           compare transaction verdicts (default 0, until W6 lands kogany's policy).
 ``KOGANY_SYNC_TIMEOUT``   seconds a follower may take to reach the peer's tip (default 120).
+``KOGANY_TX_TIMEOUT``     seconds ``offer_tx`` waits for kogany's ``sendrawtransaction`` (default 10): Zakura
+                          waits up to six minutes for a missing input, and no answer is compared as
+                          ``reject-state`` (ycashd's "Missing inputs").
 ``KOGANY_MIRROR_INVALIDATE``  1: mirror a script's ``invalidateblock``/``reconsiderblock`` on the peer
                           to the followers at sync points (``MixedLine._mirror``; default 0).
 ``KOGANY_ARGS``           extra ``zakurad`` arguments, whitespace-separated, placed before ``start``.
@@ -45,14 +48,18 @@ Framework API (for W2-d, W4-e, W5-f, W6 and the S track)
 ``current()``                         the run's ``MixedLine`` (inert when ``KOGANY_BIN`` is unset).
 ``MixedLine.active``                  True when followers run.
 ``MixedLine.followers``               the ``KoganyNode`` list (``.rpc`` is a JSON-RPC proxy).
-``MixedLine.sync_point(conns, label)``  tip + ``vault_getinfo.statehash`` + ``yed_getstatehash``
-                                      equality (called by every ``sync_blocks``).
+``MixedLine.sync_point(conns, label)``  tip + ``vault_getinfo`` (``branchid`` always; ``statehash``,
+                                      ``dbtip`` and the counts once kogany serves a ``statehash``; the
+                                      upgrade fields as a note) + ``yed_getstatehash`` equality (called
+                                      by every ``sync_blocks``; W4-e).
 ``MixedLine.mempool_point(conns)``    ``getrawmempool`` set equality (``KOGANY_MEMPOOL=1``).
 ``MixedLine.offer_block(hex, cxx_result, label)``  submit a block to every follower, compare classes.
 ``MixedLine.offer_tx(hex, cxx_error, label)``      the same for ``sendrawtransaction``.
-``classify_cxx_block(result)`` / ``classify_cxx_tx(error)`` / ``classify_kogany_block(result)`` /
-``classify_kogany_tx(error)``         verdict classes; ``REJECT_CODE_MAP`` / ``KOGANY_REASON_MAP``
-                                      are the tables.
+``classify_cxx_block(result)`` / ``classify_cxx_tx(error)`` / ``classify_kogany_block(result,
+proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)``  verdict classes;
+                                      ``REJECT_CODE_MAP`` (ycashd) / ``KOGANY_REASON_MAP`` (kogany,
+                                      W4-e) are the tables; ``offer_block`` asks kogany's proposal mode
+                                      first for a reason behind a bare ``rejected``.
 ``zakurad_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
 ``render_toml(config, notes)``        the ``zakurad.toml`` text; ``ZAKURAD_KEY_TABLE`` /
                                       ``NU_BRANCH_TABLE`` are the map.
@@ -77,6 +84,8 @@ invalidated branch unless ``KOGANY_MIRROR_INVALIDATE=1`` (Zakura serves
 import atexit
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
 import time
@@ -159,6 +168,9 @@ ZAKURAD_KEY_TABLE = [
     ('-datadir', 'derived', 'state.cache_dir, network.cache_dir, network.identity_dir, rpc.cookie_dir',
      'tmpdir/kogany<k>'),
     ('(v2 overlay)', 'live', 'network.p2p_stack = "legacy"', 'K-11: the native Zakura stack stays off'),
+    ('(one connection)', 'live', 'network.max_connections_per_ip = 1',
+     'Zakura\'s default, written out: every node is on 127.0.0.1, so the limit is what keeps a follower to '
+     'its one peer (a rig that peers kogany with two ycashd nodes on one IP must raise it: the W1-Y5 trap)'),
     ('(mempool)', 'live', 'mempool.debug_enable_at_height = 0', 'regtest mempool from genesis'),
     ('-yellowbackattestorset=<setid>', 'pending:W5-f', 'yellowback.attestor_set',
      'node 0\'s YED attestor set; key name fixed by W5-f'),
@@ -276,6 +288,7 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
         'listen_addr': '127.0.0.1:%d' % kogany_p2p_port(slot),
         'initial_testnet_peers': ['127.0.0.1:%d' % p for p in peer_p2p_ports],
         'p2p_stack': 'legacy',
+        'max_connections_per_ip': 1,
         'cache_dir': os.path.join(root, 'network'),
         'identity_dir': os.path.join(root, 'identity'),
         'network': {'regtest': True, 'params': {'activation_heights': ordered}},
@@ -341,7 +354,7 @@ ACCEPT = 'accept'
 REJECT_CONSENSUS = 'reject-consensus'      # DoS 100 (and the byte-level DoS 10, see below)
 REJECT_STATE = 'reject-state'              # DoS 0: depends on the node's tip or set state
 REJECT_POLICY = 'reject-policy'            # relay policy (0x40-0x42, duplicates, expiry)
-REJECT_UNCLASSIFIED = 'reject-unclassified'  # kogany rejected but reports no score yet (W4-e/W7-e)
+REJECT_UNCLASSIFIED = 'reject-unclassified'  # kogany rejected with a text no KOGANY_REASON_MAP row names
 REJECT_CLASSES = (REJECT_CONSENSUS, REJECT_STATE, REJECT_POLICY)
 
 # ycashd reject codes (src/consensus/validation.h:34-41)
@@ -373,7 +386,17 @@ REJECT_CODE_MAP = [
     ('tx', 'non-final', REJECT_STATE, 0, ''),
     ('tx', 'too-long-mempool-chain', REJECT_POLICY, 0, ''),
     ('tx', 'bad-txns-vault-timelock', REJECT_STATE, 0, 'main.cpp:905 (fMempool ? 0 : 100)'),
+    ('tx', 'non-BIP68-final', REJECT_POLICY, 0, 'main.cpp:907 REJECT_NONSTANDARD (the code says policy too)'),
     ('tx', 'bad-yellowback-*', REJECT_STATE, 0, 'main.cpp:2260 (module verdict in the mempool)'),
+    ('tx', 'bad-txns-vault-*', REJECT_STATE, 0, 'main.cpp:2200 vault::CheckTx in the mempool: DoS 0 (10 for a '
+     'byte-level act failure, still not a proof against the tip)'),
+    ('tx', 'bad-vault-*', REJECT_STATE, 0, 'main.cpp:2200 vault::CheckTx act reasons (bad-vault-act-*, -bond-*)'),
+    ('tx', 'mandatory-script-verify-flag-failed (OP_CHECKSETSIG or OP_CHECKSETDORMANT failed)', REJECT_STATE, 0,
+     'main.cpp:2229 a template input failing on the set state (DoS 0)'),
+    ('tx', 'mandatory-script-verify-flag-failed*', REJECT_CONSENSUS, 100, 'main.cpp:3092 ContextualCheckInputs'),
+    ('tx', 'non-mandatory-script-verify-flag*', REJECT_POLICY, 0, 'main.cpp:3087 (REJECT_NONSTANDARD)'),
+    ('tx', 'bad-txns-premature-spend-of-coinbase', REJECT_STATE, 0, 'main.cpp:2957 state.Invalid (DoS 0)'),
+    ('tx', 'bad-txns-coinbase-spend-has-transparent-outputs', REJECT_STATE, 0, 'main.cpp:2967 state.Invalid'),
     ('tx', 'bad-txns-no-sink-of-funds', REJECT_CONSENSUS, 10, 'DoS 10'),
     ('tx', 'bad-txns-no-source-of-funds', REJECT_CONSENSUS, 10, 'DoS 10'),
     ('tx', 'bad-txns-prevout-null', REJECT_CONSENSUS, 10, 'DoS 10'),
@@ -383,15 +406,91 @@ REJECT_CODE_MAP = [
     ('tx', 'bad-vault-tx-version-group-id', REJECT_CONSENSUS, 100, 'main.cpp:1225'),
     ('tx', 'coinbase', REJECT_CONSENSUS, 100, ''),
 ]
-# A code-16 mempool reason outside the table: vault::CheckTx and the template checks score 0 in
-# the mempool (main.cpp:2202, 2231), except a byte-level act failure (10): REJECT_STATE, reported
-# as unmapped (KOGANY_STRICT fails it) so the table grows instead of guessing.
+# A code-16 mempool reason outside the table is REJECT_STATE, reported as unmapped (KOGANY_STRICT
+# fails it) so the table grows instead of guessing.
 
-# Kogany's side: Zakura's errors carry no DoS score at the RPC (plan R-21), so until W4-e / W7-e
-# map them every kogany reject is REJECT_UNCLASSIFIED.  Rows: (path, message prefix, class).
+# Kogany's side (plan R-21, W4-e): Zakura's errors carry no DoS score and say other words, so the
+# rows below map kogany's texts to a class.  Rows: (path, regex, class, source), searched in order
+# (``re.search``), first match wins; no row matches -> REJECT_UNCLASSIFIED (a note; KOGANY_STRICT
+# fails it).  ``CXX`` as the class: the text carries ycash6's own reason (kogany's rule ports keep
+# the C++ string, W3-d / W4-b / W4-d), captured as group 1 and classified by REJECT_CODE_MAP on the
+# same path, so those rows agree with ycashd by construction.
+#
+# path 'tx':       the ``sendrawtransaction`` error message (MempoolError / TransactionError /
+#                  ValidateContextError Display, behind "failed to validate tx: ..., error: ").
+# path 'block':    the ``submitblock`` result ('rejected' is all Zakura says, R-21).
+# path 'proposal': the ``getblocktemplate`` proposal-mode answer for the same block, asked first
+#                  (BlockProposalResponse::rejected: the verifier error's Debug text in kebab case);
+#                  it refines a 'rejected' when a row names it.
+#
+# Rows marked "unverified" name a kogany text no run has produced yet (W4-d ``check::vault`` is in
+# flight on kc/snapshot-hook): they are written from the source and checked when that lands.
+CXX = 'cxx'
+
 KOGANY_REASON_MAP = [
+    # --- transactions: duplicates (ycashd answers the txid of a transaction its mempool holds)
+    ('tx', r'already exists in mempool', ACCEPT,
+     'MempoolError::InMempool; ycashd rawtransaction.cpp:1341-1344 re-relays and answers the txid (W1-Y9)'),
+    ('tx', r'already queued for download', ACCEPT, 'MempoolError::AlreadyQueued: the same transaction in flight'),
+    # --- the ported Ycash rules that keep ycash6's reason string
+    ('tx', r'non-BIP68-final in the mempool', REJECT_POLICY,
+     'W3-d ValidateContextError::UnsatisfiedSequenceLock; ycashd 64: non-BIP68-final (main.cpp:907)'),
+    ('tx', r'\((bad-txns-vault-timelock)\)', CXX, 'W3-d ValidateContextError::VaultTimeLock (main.cpp:905, DoS 0 here)'),
+    ('tx', r'vault rule violation[^:]*: (bad-[a-z0-9-]+)', CXX,
+     'W4-d ValidateContextError::VaultRejected { reason: VaultReject::reason() } -- unverified'),
+    ('tx', r'(?<![a-z0-9-])(bad-(?:txns-vault|vault|yellowback)-[a-z0-9-]+)', CXX,
+     'W4-b VaultReject::reason() / a module reason anywhere in the text -- unverified'),
+    # --- relay policy (ycashd REJECT_NONSTANDARD / REJECT_INSUFFICIENTFEE / tx-expiring-soon)
+    ('tx', r'transaction is non-standard|did not pass standard validation|non-standard (transparent )?inputs|'
+           r'non-push-only scriptSig|byte scriptSig, above the', REJECT_POLICY,
+     'MempoolError::NonStandardTransaction, TransactionError::NonStandard* (W1-Y9: every storage-time rule)'),
+    ('tx', r'ZIP-317 transaction rules', REJECT_POLICY,
+     'TransactionError::Zip317: the Ycash relay fee rides it (ycashd 66: min relay fee not met)'),
+    ('tx', r'locked until after block (height|time)|lock time on best chain', REJECT_POLICY,
+     'TransactionError::LockedUntilAfter* / ValidateMempoolLockTimeError (ycashd 64: non-final)'),
+    ('tx', r'greater than its expiry|reached transaction expiry|expiring soon', REJECT_POLICY,
+     'TransactionError::ExpiredTransaction, ExactTipRejectionError::Expired (ycashd tx-expiring-soon)'),
+    ('tx', r'another transaction in the mempool has already spent', REJECT_POLICY,
+     'SameEffectsTipRejectionError::SpendConflict (ycashd 258: txn-mempool-conflict)'),
+    ('tx', r'mempool is full|evicted from the full mempool|depends on more than|dependency group', REJECT_POLICY,
+     'mempool capacity and package limits (ycashd too-long-mempool-chain, mempool full)'),
+    ('tx', r'was committed to the best chain', REJECT_POLICY,
+     'SameEffectsChainRejectionError::Mined (ycashd -27 transaction already in block chain)'),
+    # --- state: depends on this node's tip
+    ('tx', r'could not find transparent input UTXO|spends missing outputs', REJECT_STATE,
+     'TransactionError::TransparentInputNotFound, MissingOutput (ycashd -25 Missing inputs)'),
+    ('tx', r'inputs were spent, or nullifiers were revealed, in the best chain', REJECT_STATE,
+     'SameEffectsChainRejectionError::DuplicateSpend (ycashd Missing inputs / bad-txns-inputs-spent)'),
+    ('tx', r'immature transparent coinbase spend', REJECT_STATE,
+     'ImmatureTransparentCoinbaseSpend (ycashd bad-txns-premature-spend-of-coinbase, state.Invalid)'),
+    ('tx', r'unshielded transparent coinbase spend', REJECT_STATE,
+     'UnshieldedTransparentCoinbaseSpend (ycashd bad-txns-coinbase-spend-has-transparent-outputs, state.Invalid)'),
+    ('tx', r'mempool is disabled', REJECT_STATE, 'MempoolError::Disabled: kogany is not at the tip yet'),
+    # --- consensus
+    ('tx', r'could not calculate the transaction fee', REJECT_POLICY,
+     'TransactionError::IncorrectFee: outputs above inputs. ycashd\'s mempool checks the relay fee on the '
+     'negative fee first (main.cpp AcceptToMemoryPool: 66: min relay fee not met) before CheckTxInputs '
+     '(bad-txns-in-belowout), so the mempool class is policy'),
+    ('tx', r'transparent double-spend|spent twice|duplicate nullifier', REJECT_CONSENSUS,
+     'TransactionError::Duplicate* (ycashd 16: bad-txns-inputs-duplicate)'),
+    ('tx', r'could not verify a transparent script', REJECT_CONSENSUS,
+     'TransactionError::Script (ycashd mandatory-script-verify-flag-failed, DoS 100). A vault template input '
+     'failing on the set state is DoS 0 in ycashd (main.cpp:2229) and has no kogany equivalent before W6: '
+     'that pair differs by class (recorded)'),
+    ('tx', r'[Dd]eserializ|failed to fill whole buffer|io error|TX decode failed|parse|decode', REJECT_CONSENSUS,
+     'LegacyCode::Deserialization -22 (ycashd TX decode failed / 16: bad-txns-oversize)'),
+    ('tx', r'did not pass consensus validation|could not contextually validate', REJECT_CONSENSUS,
+     'any other verifier or contextual error: a consensus rule (W1-Y9)'),
+    # --- blocks: the proposal's text refines the bare 'rejected'
+    ('proposal', r'reason-(bad-[a-z0-9-]+)', CXX,
+     'W4-d VaultRejected Debug ("reason: \\"bad-...\\"") in kebab case -- unverified'),
+    ('proposal', r'vaulttimelock', REJECT_CONSENSUS, 'W3-d VaultTimeLock in a block (main.cpp:905, DoS 100)'),
+    ('proposal', r'unsatisfiedsequencelock', REJECT_CONSENSUS, 'W3-d UnsatisfiedSequenceLock (bad-txns-nonfinal)'),
+    ('proposal', r'too-?far-?in-?(the-?)?future|time-?too-?new', REJECT_STATE,
+     'the header time rule (ycashd time-too-new, clock-dependent)'),
+    ('block', r'^rejected$', REJECT_CONSENSUS,
+     'SubmitBlockErrorResponse::Rejected: an invalid block (ycashd invalid / bad-*, DoS 100)'),
 ]
-
 
 def _match(pattern, reason):
     return reason.startswith(pattern[:-1]) if pattern.endswith('*') else reason == pattern
@@ -447,26 +546,56 @@ def _lookup_tx(reason):
     return None
 
 
-def classify_kogany_block(result):
+def _cxx_class(path, reason):
+    """The class REJECT_CODE_MAP gives ycash6's ``reason`` on ``path`` (``tx`` or ``block``)."""
+    if path == 'tx':
+        hit = _lookup_tx(reason)
+        return hit if hit is not None else REJECT_STATE
+    return _lookup('block', reason)[0]
+
+
+def classify_kogany_text(path, text):
+    """``(class, row)`` for a kogany text on ``path`` ('tx', 'block' or 'proposal'); ``(None,
+    None)`` when no row names it."""
+    for p, pattern, cls, src in KOGANY_REASON_MAP:
+        if p != path:
+            continue
+        m = re.search(pattern, text)
+        if m is None:
+            continue
+        if cls == CXX:
+            return _cxx_class('block' if path == 'proposal' else path, m.group(1)), (p, pattern, src)
+        return cls, (p, pattern, src)
+    return None, None
+
+
+def classify_kogany_block(result, proposal=None):
     """Zakura ``submitblock``: null on success, else one of ``rejected``, ``duplicate``,
-    ``duplicate-inconclusive``, ``inconclusive`` (zakura-rpc SubmitBlockErrorResponse)."""
+    ``duplicate-inconclusive``, ``inconclusive`` (zakura-rpc SubmitBlockErrorResponse).
+    ``proposal`` is the ``getblocktemplate`` proposal-mode answer for the same block (a string
+    when the verifier refused it): a 'proposal' row naming it refines a ``rejected``."""
     if result is None or result in ('duplicate', 'duplicate-inconclusive', 'inconclusive'):
         return ACCEPT
-    for p, prefix, cls in KOGANY_REASON_MAP:
-        if p == 'block' and str(result).startswith(prefix):
+    if isinstance(proposal, str) and proposal:
+        cls, _row = classify_kogany_text('proposal', proposal)
+        if cls is not None:
             return cls
-    return REJECT_UNCLASSIFIED
+    cls, _row = classify_kogany_text('block', str(result))
+    return REJECT_UNCLASSIFIED if cls is None else cls
+
+
+def _message(error):
+    err = getattr(error, 'error', error)
+    return err.get('message', '') if isinstance(err, dict) else str(err)
 
 
 def classify_kogany_tx(error):
+    """Zakura ``sendrawtransaction``: ``None`` (accepted), a ``JSONRPCException`` or its
+    ``error`` dict."""
     if error is None:
         return ACCEPT
-    err = getattr(error, 'error', error)
-    message = err.get('message', '') if isinstance(err, dict) else str(err)
-    for p, prefix, cls in KOGANY_REASON_MAP:
-        if p == 'tx' and message.startswith(prefix):
-            return cls
-    return REJECT_UNCLASSIFIED
+    cls, _row = classify_kogany_text('tx', _message(error))
+    return REJECT_UNCLASSIFIED if cls is None else cls
 
 
 def same_class(cxx, kog, strict=False):
@@ -602,6 +731,10 @@ class KoganyRPC:
             raise AttributeError(name)
         return KoganyRPC(self._url, self._timeout, name, self._cookie)
 
+    def with_timeout(self, timeout):
+        """The same endpoint with another socket timeout (seconds)."""
+        return KoganyRPC(self._url, timeout, self._name, self._cookie)
+
     @property
     def url(self):
         return self._url
@@ -707,7 +840,8 @@ class MixedLine:
     instance when ``KOGANY_BIN`` is unset: every method is then a no-op."""
 
     def __init__(self, binary=None, followers=1, peer=None, strict=False, mempool=False,
-                 sync_timeout=120, extra_args=(), yewd=None, mirror_invalidate=False):
+                 sync_timeout=120, extra_args=(), yewd=None, mirror_invalidate=False,
+                 tx_timeout=10):
         self.binary = binary
         self.n_followers = followers
         self.peer = peer
@@ -718,15 +852,17 @@ class MixedLine:
         self.yewd = yewd
         self.connect_settle = 5.0
         self.mirror_invalidate = mirror_invalidate
+        self.tx_timeout = tx_timeout
         self.mirrored = {}
         self.followers = []
         self.tmpdir = None
         self.peer_args = None
         self._notes = set()
         self.unmapped = []
+        self.kogany_unmapped = []
         self.offered = set()
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'mempool_points': 0,
-                      'verdicts': 0}
+                      'verdicts': 0, 'verdict_classes': 0}
 
     @classmethod
     def from_env(cls, env=None):
@@ -741,7 +877,8 @@ class MixedLine:
                    sync_timeout=float(env.get('KOGANY_SYNC_TIMEOUT', '120')),
                    extra_args=env.get('KOGANY_ARGS', '').split(),
                    yewd=env.get('YEWD_BIN') or None,
-                   mirror_invalidate=env.get('KOGANY_MIRROR_INVALIDATE', '0') == '1')
+                   mirror_invalidate=env.get('KOGANY_MIRROR_INVALIDATE', '0') == '1',
+                   tx_timeout=float(env.get('KOGANY_TX_TIMEOUT', '10')))
 
     @property
     def enabled(self):
@@ -811,6 +948,9 @@ class MixedLine:
         if self.unmapped:
             print('kogany: unmapped ycashd reject reasons (add REJECT_CODE_MAP rows): %s'
                   % sorted(set(self.unmapped)))
+        if self.kogany_unmapped:
+            print('kogany: unmapped kogany reject texts (add KOGANY_REASON_MAP rows): %s'
+                  % sorted(set(self.kogany_unmapped)))
 
     def _config_for(self, f):
         return zakurad_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
@@ -909,27 +1049,75 @@ class MixedLine:
         except (JSONRPCException, KeyError):
             pass
 
+    # vault_getinfo fields compared once kogany serves the set state (a ``statehash``): the counts
+    # and the database tip are the statehash's coarse witnesses, so a difference names what drifted.
+    VAULT_STATE_FIELDS = ('statehash', 'dbtip', 'sets', 'vaults', 'intents', 'lockedvalue')
+    # Compared whenever kogany answers; a difference is a note (fatal under KOGANY_STRICT) until the
+    # read RPCs serve the live parameters (W7: the W7-a prototype answers -1 / false).
+    VAULT_UPGRADE_FIELDS = ('activationheight', 'active', 'height')
+
     def _compare_statehash(self, ref, f, label):
-        for method, key, stat in (('vault_getinfo', 'statehash', 'statehash_vault'),
-                                  ('yed_getstatehash', 'statehash', 'statehash_yed')):
-            try:
-                want = _field(getattr(ref, method)(), key)
-            except JSONRPCException:
-                continue                  # the peer does not serve it here (Yellowback not live)
-            try:
-                got = _field(getattr(f.rpc, method)(), key)
-            except JSONRPCException as e:
-                if _missing(e):
-                    self.note('%s not served yet; %s equality skipped' % (method, stat))
-                    continue
-                raise
-            if got is None and want is not None:
-                self.note('%s served without %s yet; %s equality skipped' % (method, key, stat))
-                continue
-            if got != want:
-                raise AssertionError('kogany %d: %s.%s differs %s: ycashd %s, kogany %s'
-                                     % (f.k, method, key, label, want, got))
-            self.stats[stat] += 1
+        self._compare_vault(ref, f, label)
+        self._compare_yed(ref, f, label)
+
+    def _compare_vault(self, ref, f, label):
+        """Rule 4 (ii) for the primitive: ``vault_getinfo`` at a sync point.  ``branchid`` always;
+        the set state (``VAULT_STATE_FIELDS``) once kogany answers a ``statehash`` (W4-d's live
+        state; skipped with a note before); the upgrade fields as a note."""
+        try:
+            want = ref.vault_getinfo()
+        except JSONRPCException:
+            return                        # the peer does not serve it here
+        try:
+            got = f.rpc.vault_getinfo()
+        except JSONRPCException as e:
+            if _missing(e):
+                self.note('vault_getinfo not served yet; statehash_vault equality skipped')
+                return
+            raise
+        if got.get('branchid') != want.get('branchid'):
+            raise AssertionError('kogany %d: vault_getinfo.branchid differs %s: ycashd %s, kogany %s'
+                                 % (f.k, label, want.get('branchid'), got.get('branchid')))
+        for key in self.VAULT_UPGRADE_FIELDS:
+            if key in got and got.get(key) != want.get(key):
+                self.note('vault_getinfo.%s differs (ycashd %s, kogany %s): the read RPC does not serve the '
+                          'live upgrade parameters yet (W7)' % (key, want.get(key), got.get(key)))
+        if got.get('statehash') is None:
+            if want.get('statehash') is not None:
+                self.note('vault_getinfo served without statehash yet (W4-d); statehash_vault equality skipped')
+            return
+        diffs = ['%s: ycashd %s, kogany %s' % (key, want.get(key), got.get(key))
+                 for key in self.VAULT_STATE_FIELDS if _norm(got.get(key)) != _norm(want.get(key))]
+        if diffs:
+            raise AssertionError('kogany %d: vault_getinfo differs %s at %s: %s'
+                                 % (f.k, label, ref.getbestblockhash(), '; '.join(diffs)))
+        self.stats['statehash_vault'] += 1
+
+    def _compare_yed(self, ref, f, label):
+        """Rule 4 (ii) for the module: ``yed_getstatehash`` (the index height, block and hash)."""
+        try:
+            want = ref.yed_getstatehash()
+        except JSONRPCException:
+            return                        # the peer does not serve it here (Yellowback not live)
+        try:
+            got = f.rpc.yed_getstatehash()
+        except JSONRPCException as e:
+            if _missing(e) or e.error.get('code') in (-1, -32603):
+                self.note('yed_getstatehash not served yet (%s); statehash_yed equality skipped'
+                          % str(e.error.get('message', ''))[:80])
+                return
+            raise
+        if _field(got, 'statehash') is None:
+            self.note('yed_getstatehash served without statehash yet; statehash_yed equality skipped')
+            return
+        diffs = ['%s: ycashd %s, kogany %s' % (key, want.get(key), got.get(key))
+                 for key in ('statehash', 'height', 'blockhash')
+                 if isinstance(got, dict) and key in got and _norm(got.get(key)) != _norm(want.get(key))]
+        if not isinstance(got, dict) and _field(got, 'statehash') != _field(want, 'statehash'):
+            diffs.append('statehash: ycashd %s, kogany %s' % (_field(want, 'statehash'), got))
+        if diffs:
+            raise AssertionError('kogany %d: yed_getstatehash differs %s: %s' % (f.k, label, '; '.join(diffs)))
+        self.stats['statehash_yed'] += 1
 
     def mempool_point(self, conns):
         """``getrawmempool`` set equality with the peer (``KOGANY_MEMPOOL=1``)."""
@@ -978,13 +1166,28 @@ class MixedLine:
             if not self._wait_parent(f, prev):
                 self.note('block offered on a parent kogany %d does not have; verdict skipped' % f.k)
                 continue
+            proposal = self._proposal(f, block_hex)
             try:
-                kog = classify_kogany_block(f.rpc.submitblock(block_hex))
+                result = f.rpc.submitblock(block_hex)
+                kog = classify_kogany_block(result, proposal)
+                text = '%s (proposal: %s)' % (result, proposal)
             except JSONRPCException as e:
-                kog = classify_kogany_tx(e)          # an RPC error is a reject without a class
-            self._assert_same(cxx, kog, 'block', label, cxx_result)
+                kog, text = REJECT_UNCLASSIFIED, _message(e)   # an RPC error is a reject without a class
+            if kog == REJECT_UNCLASSIFIED:
+                self.kogany_unmapped.append('block: ' + text)
+            self._assert_same(cxx, kog, 'block', label, cxx_result, text)
             out.append(kog)
         return cxx, out
+
+    def _proposal(self, f, block_hex):
+        """The follower's ``getblocktemplate`` proposal-mode answer for ``block_hex``: ``None``
+        (valid), the verifier's refusal text, or ``None`` when the mode is unavailable (a
+        follower not yet synced answers an error; the bare submitblock result then decides)."""
+        try:
+            r = f.rpc.getblocktemplate({'mode': 'proposal', 'data': block_hex})
+        except (OSError, JSONRPCException):
+            return None
+        return r if isinstance(r, str) else None
 
     def offer_tx(self, tx_hex, cxx_error, label=''):
         """The transaction path (``KOGANY_MEMPOOL=1``): ``cxx_error`` is None when ycashd accepted
@@ -994,12 +1197,23 @@ class MixedLine:
         cxx = classify_cxx_tx(cxx_error, self.unmapped)
         out = []
         for f in self.followers:
+            text = ''
             try:
-                f.rpc.sendrawtransaction(tx_hex)
+                f.rpc.with_timeout(self.tx_timeout).sendrawtransaction(tx_hex)
                 kog = ACCEPT
+            except socket.timeout:
+                # Zakura's verifier waits for a missing input to appear (UTXO_LOOKUP_TIMEOUT, six
+                # minutes, zakura-consensus transaction.rs:59) instead of answering ycashd's
+                # "Missing inputs" at once: no answer is that wait, a tip-dependent verdict.
+                kog = REJECT_STATE
+                text = 'no answer within %ss: kogany waits for a missing input' % self.tx_timeout
+                self.note('kogany holds a transaction waiting for a missing input (no answer within %ss); '
+                          'compared as reject-state' % self.tx_timeout)
             except JSONRPCException as e:
-                kog = classify_kogany_tx(e)
-            self._assert_same(cxx, kog, 'tx', label, cxx_error)
+                kog, text = classify_kogany_tx(e), _message(e)
+                if kog == REJECT_UNCLASSIFIED:
+                    self.kogany_unmapped.append('tx: ' + text)
+            self._assert_same(cxx, kog, 'tx', label, cxx_error, text)
             out.append(kog)
         return cxx, out
 
@@ -1015,21 +1229,34 @@ class MixedLine:
             return
         self.offer_block(block_hex, 'invalid', 'assert_rejected %s' % blockhash)
 
-    def _assert_same(self, cxx, kog, path, label, detail):
+    def _assert_same(self, cxx, kog, path, label, detail, kogany_text=''):
         self.stats['verdicts'] += 1
         if same_class(cxx, kog, self.strict):
             if kog == REJECT_UNCLASSIFIED:
-                self.note('kogany rejects carry no class yet (KOGANY_REASON_MAP is empty until W4-e); '
-                          'compared accept/reject only')
+                self.note('kogany %s reject text no KOGANY_REASON_MAP row names (%s); compared accept/reject '
+                          'only' % (path, kogany_text[:160]))
+            else:
+                self.stats['verdict_classes'] += 1
             return
-        raise AssertionError('verdict class differs (%s) %s: ycashd %s (%s), kogany %s'
-                             % (path, label, cxx, detail, kog))
+        raise AssertionError('verdict class differs (%s) %s: ycashd %s (%s), kogany %s (%s)'
+                             % (path, label, cxx, detail, kog, kogany_text))
 
 
 def _field(r, key):
     if isinstance(r, dict):
-        return r.get(key) or r.get('hash') or r.get('stateHash')
+        return r.get(key) or r.get('stateHash')
     return r
+
+
+def _norm(v):
+    """A JSON value as both nodes' answers compare: amounts as Decimal, objects field by field."""
+    if isinstance(v, dict):
+        return {k: _norm(x) for k, x in v.items()}
+    if isinstance(v, float):
+        return Decimal(str(v))
+    if isinstance(v, (int, Decimal)) and not isinstance(v, bool):
+        return Decimal(v)
+    return v
 
 
 # ---------------------------------------------------------------------------
