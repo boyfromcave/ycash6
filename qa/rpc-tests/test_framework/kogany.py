@@ -276,6 +276,9 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # -regtestenablezip209, -reindex-yellowback, and the retired -yellowback / -yellowbackenforce /
 # -yellowbackstartheight flags.
 def _bool01(v):
+    # a bare flag (-yellowbackmintrequiresarmed) is true, as ycashd's GetBoolArg reads it
+    if v == '':
+        return True
     if v not in ('0', '1'):
         raise UnmappedArgument('a 0/1 flag has the value %r' % v)
     return v == '1'
