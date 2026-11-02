@@ -16,6 +16,7 @@ import tempfile
 import traceback
 
 from .authproxy import JSONRPCException
+from . import kogany
 from .util import (
     ZCASHD_BINARY,
     initialize_chain,
@@ -134,6 +135,11 @@ class BitcoinTestFramework(object):
 
         PortSeed.n = self.options.port_seed
 
+        # The mixed-line harness (kogany plan K-18): inert unless KOGANY_BIN is set.
+        self.mixed = kogany.MixedLine.from_env()
+        if self.mixed.enabled:
+            self.mixed.configure(self)
+
         os.environ['PATH'] = self.options.srcdir+":"+os.environ['PATH']
 
         check_json_precision()
@@ -143,6 +149,7 @@ class BitcoinTestFramework(object):
             os.makedirs(self.options.tmpdir, exist_ok=False)
             self.setup_chain()
             self.setup_network()
+            self.mixed.attach(self)
             self.run_test()
             success = True
         except JSONRPCException as e:
@@ -162,6 +169,11 @@ class BitcoinTestFramework(object):
 
         if not self.options.noshutdown:
             print("Stopping nodes")
+            try:
+                self.mixed.stop()
+            except Exception as e:
+                print("kogany: stop failed: " + str(e))
+                success = False
             if self.nodes:          # None when setup_network itself failed: the real error is above
                 stop_nodes(self.nodes)
             wait_bitcoinds()

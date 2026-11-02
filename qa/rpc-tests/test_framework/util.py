@@ -127,6 +127,19 @@ def hex_str_to_bytes(hex_str):
 def str_to_b64str(string):
     return b64encode(string.encode('utf-8')).decode('ascii')
 
+# The mixed-line harness (kogany plan K-18, test_framework/kogany.py) registers its hooks here:
+# 'start' (i, args, proxy) after every start_node, 'sync_blocks' (connections) after every
+# successful sync_blocks with equal tips, 'sync_mempools' (connections) after every
+# sync_mempools.  Empty unless KOGANY_BIN is set, so the plain ycash6 run is unchanged.
+MIXED_HOOKS = {}
+
+def _yewd_skips_notified():
+    """Under YEWD_BIN the backend runs -disablewallet, and ycashd never reports fullyNotified
+    without a wallet (ChainIsFullyNotified / IsFullyNotified stay false), so the notification wait
+    is skipped until yewd answers fullyNotified for its own wallet (S1; YEWD_FULLY_NOTIFIED=1
+    restores the wait)."""
+    return bool(os.getenv("YEWD_BIN")) and os.getenv("YEWD_FULLY_NOTIFIED", "0") != "1"
+
 def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=False):
     """
     Wait until everybody has the same tip, and has notified
@@ -135,6 +148,13 @@ def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=Fa
     If allow_different_tips is True, waits until everyone has
     the same block count.
     """
+    result = _sync_blocks(rpc_connections, wait, timeout, allow_different_tips)
+    hook = MIXED_HOOKS.get('sync_blocks')
+    if hook is not None and not allow_different_tips:
+        hook(rpc_connections)
+    return result
+
+def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=False):
     while timeout > 0:
         assert_bitcoinds_alive()
         if allow_different_tips:
@@ -148,6 +168,8 @@ def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=Fa
 
     # Now that the block counts are in sync, wait for the internal
     # notifications to finish
+    if _yewd_skips_notified():
+        return True
     while timeout > 0:
         assert_bitcoinds_alive()
         notified = [ x.getblockchaininfo()['fullyNotified'] for x in rpc_connections ]
@@ -163,6 +185,13 @@ def sync_mempools(rpc_connections, wait=0.5, timeout=60):
     Wait until everybody has the same transactions in their memory
     pools, and has notified all internal listeners of them
     """
+    result = _sync_mempools(rpc_connections, wait, timeout)
+    hook = MIXED_HOOKS.get('sync_mempools')
+    if hook is not None:
+        hook(rpc_connections)
+    return result
+
+def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
     while timeout > 0:
         assert_bitcoinds_alive()
         pool = set(rpc_connections[0].getrawmempool())
@@ -177,6 +206,8 @@ def sync_mempools(rpc_connections, wait=0.5, timeout=60):
 
     # Now that the mempools are in sync, wait for the internal
     # notifications to finish
+    if _yewd_skips_notified():
+        return True
     while timeout > 0:
         assert_bitcoinds_alive()
         notified = [ x.getmempoolinfo()['fullyNotified'] for x in rpc_connections ]
@@ -522,7 +553,12 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
         '-nuparams=76b809bb:1', # Sapling
     ])
     if extra_args is not None: args.extend(extra_args)
-    bitcoind_processes[i] = subprocess.Popen(args, stderr=stderr)
+    if os.getenv("YEWD_BIN"):
+        # the parity sidecar (kogany plan section 3b): node i = a -disablewallet backend + yewd on rpc_port(i)
+        from . import kogany
+        bitcoind_processes[i] = kogany.start_yewd_pair(i, datadir, binary, args[1:], stderr=stderr)
+    else:
+        bitcoind_processes[i] = subprocess.Popen(args, stderr=stderr)
     if os.getenv("PYTHON_DEBUG", ""):
         print("start_node: bitcoind started, waiting for RPC to come up")
     url = rpc_url(i, rpchost)
@@ -533,6 +569,10 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
 
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
+
+    hook = MIXED_HOOKS.get('start')
+    if hook is not None:
+        hook(i, args[1:], proxy)
 
     return proxy
 
@@ -584,6 +624,9 @@ def stop_node(node, i):
         print("WARN: Unable to stop node: " + repr(e))
     bitcoind_processes[i].wait()
     del bitcoind_processes[i]
+    if os.getenv("YEWD_BIN"):
+        from . import kogany
+        kogany.wait_yewd_backend(i)
 
 def stop_nodes(nodes):
     for node in nodes:
@@ -602,6 +645,10 @@ def wait_bitcoinds():
     for bitcoind in list(bitcoind_processes.values()):
         bitcoind.wait()
     bitcoind_processes.clear()
+    if os.getenv("YEWD_BIN"):
+        from . import kogany
+        for i in list(kogany.YEWD_BACKENDS):
+            kogany.wait_yewd_backend(i)
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
