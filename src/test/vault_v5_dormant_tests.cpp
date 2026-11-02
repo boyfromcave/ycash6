@@ -9,7 +9,7 @@
 // qa/rpc-tests/test_framework/gen_vault_v5_vectors.py from the corrected test_framework/zip244.py,
 // through the node's own ZIP-244 path (SignatureHash -> SIGVERSION_ZIP244 -> the Rust
 // sighash_v5.rs) on hand-built transactions, so no node configuration has to schedule Vault and
-// NU5 together. The vector file is not in qa/yellowback-cross-line.manifest (ycash6 only).
+// NU5 together. The vector file is not in qa/yellowback-cross-line.manifest (this line only; the 4.5.0 line has no V5 dormancy vector).
 
 #include "vault/act.h"
 #include "vault/template.h"
