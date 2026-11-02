@@ -1399,7 +1399,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -1407,7 +1407,7 @@ jobs:
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
           # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6; do
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor; do
             test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
             grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
@@ -2012,6 +2012,17 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+      - name: The vault prune floor (extended)
+        # -prune=550 past the vault activation height (workspace docs/plans/kogany/research/pruning-assessment.md
+        # PR-2): the files below H_V - 288 deleted, every block from there kept, the vault and YED replays and
+        # -reindex-yellowback with only those blocks on disk, the start-up data check refusing a removed file.
+        # About 1.8 GB of disk and 15-30 minutes, so nightly only.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup vault_prune_floor
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from

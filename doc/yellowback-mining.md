@@ -49,7 +49,8 @@ Retired with the upgrade and **ignored** (logged at start): `-yellowbacksignal`,
 `-yellowbackenforce`, `-yellowbacktemplatepolicy`, `-yellowbackrequirehealthy`.
 `-yellowbackstartheight` and `-yellowbackenforceuntil` are init errors (finding (31)).
 
-`-prune` is refused while Yellowback is live (the index needs every block on disk). `-datacarrier`
+`-prune` keeps every block from 288 below the vault activation height (the index replays from that
+height; `doc/vault-rpc.md`, the vault prune floor). `-datacarrier`
 stays at its default (`-datacarrier=0` drops every `OP_RETURN` transaction from the mempool of a
 relaying node; the index does not care either way).
 

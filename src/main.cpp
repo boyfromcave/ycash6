@@ -6698,6 +6698,21 @@ void UnlinkPrunedFiles(std::set<int>& setFilesToPrune)
     }
 }
 
+int VaultPruneFloor(const Consensus::Params& params)
+{
+    const int activation = params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    if (activation == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) return -1;
+    return std::max(0, activation - (int)MIN_BLOCKS_TO_KEEP);
+}
+
+int LastPrunableHeight(int nTipHeight, const Consensus::Params& params)
+{
+    int last = nTipHeight - (int)MIN_BLOCKS_TO_KEEP;
+    const int floor = VaultPruneFloor(params);
+    if (floor >= 0) last = std::min(last, floor - 1);
+    return last;
+}
+
 /* Calculate the block/rev files that should be deleted to remain under target*/
 void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight)
 {
@@ -6709,7 +6724,13 @@ void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight
         return;
     }
 
-    unsigned int nLastBlockWeCanPrune = chainActive.Tip()->nHeight - MIN_BLOCKS_TO_KEEP;
+    // The vault prune floor: never delete a file holding a block at or above VaultPruneFloor (the vault and YED
+    // replays read blocks and undo data from the activation height).
+    const int nLastPrunable = LastPrunableHeight(chainActive.Tip()->nHeight, Params().GetConsensus());
+    if (nLastPrunable < 0) {
+        return;
+    }
+    unsigned int nLastBlockWeCanPrune = nLastPrunable;
     uint64_t nCurrentUsage = CalculateCurrentUsage();
     // We don't check to prune until after we've allocated new space for files
     // So we should leave a buffer under our target to account for another allocation
@@ -6738,6 +6759,12 @@ void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight
             nCurrentUsage -= nBytesToPrune;
             count++;
         }
+    }
+    static bool fFloorLogged = false;
+    if (!fFloorLogged && nCurrentUsage + nBuffer >= nPruneTarget && nLastPrunable < chainActive.Tip()->nHeight - (int)MIN_BLOCKS_TO_KEEP) {
+        LogPrintf("Prune: prune target below the vault floor: blocks from height %d are kept, so block and undo files use %dMiB (target %dMiB)\n",
+                  VaultPruneFloor(Params().GetConsensus()), nCurrentUsage/1024/1024, nPruneTarget/1024/1024);
+        fFloorLogged = true;
     }
 
     LogPrint("prune", "Prune: target=%dMiB actual=%dMiB diff=%dMiB max_prune_height=%d removed %d blk/rev pairs\n",

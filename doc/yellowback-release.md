@@ -270,10 +270,11 @@ Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5,
   database's replay on restart (the error names the cause) and a fresh node splits from it: restart
   such a chain from scratch. Mainnet has no activation height, so nothing there changes; the re-forked
   testnet starts after these rules.
-- **`-prune` is refused** wherever `UPGRADE_VAULT` has an activation height: a node that pruned
-  before its network set one must re-download the chain without `-prune` (there is no `-reindex` on a
-  pruned node). That includes a testnet-yb-slow node that prunes before the rc that sets its height;
-  testnet-legacy may prune.
+- **`-prune` keeps every block from `H_V − 288`** wherever `UPGRADE_VAULT` has an activation height
+  (the vault prune floor, which replaced audit 01/N-1's refusal; `doc/vault-rpc.md`). A node that
+  pruned before its network set a height starts normally on the release that sets it, and keeps
+  every block from the floor on; a datadir that lacks one (pruned past the floor by an earlier
+  binary) is refused at start-up and recovers with `-reindex`, which re-downloads the chain.
 
 ## Parameter changes
 

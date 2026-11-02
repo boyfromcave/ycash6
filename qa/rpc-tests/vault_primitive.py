@@ -31,13 +31,14 @@ Every transaction is built with ``test_framework/vault.py`` and stock RPCs only,
   J. restart reconciliation: clean restart, SIGKILL, and <datadir>/vaults/ deleted, with a miner's
      pre-activation I and V in the chain (S-0 refuses them as template inputs, mempool and block) and a
      pre-activation MALFORMED I-shaped output spent after activation (replay derives height 0, audit
-     01/V-1 / 01/T-6); -prune refused with an UPGRADE_VAULT height, allowed without (01/N-1)
+     01/V-1 / 01/T-6); -prune starts with an UPGRADE_VAULT height and without one (the vault prune floor replaced the
+     01/N-1 refusal; vault_prune_floor.py prunes past it)
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/vault_primitive.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
 from test_framework.authproxy import JSONRPCException
-from test_framework.util import (assert_equal, assert_start_raises_init_error, bitcoind_processes, connect_nodes_bi,
+from test_framework.util import (assert_equal, connect_nodes_bi,
                                  initialize_datadir, start_node, stop_node, sync_blocks)
 from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
 from test_framework import vault as v
@@ -720,12 +721,14 @@ class VaultPrimitiveTest(VaultTestBase):
         self.section_prune()
 
     def section_prune(self):
-        print('  -prune is refused wherever UPGRADE_VAULT has a height (audit 01/N-1), allowed where it has none')
+        print('  -prune starts with an UPGRADE_VAULT height (the vault prune floor, not the 01/N-1 refusal) and without one')
         stop_node(self.nodes[0], 0)
-        assert_start_raises_init_error(0, self.options.tmpdir, self.node_args(0) + ['-prune=550'],
-                                       'The vault upgrade is configured on this network and incompatible with -prune')
-        if 0 in bitcoind_processes:
-            del bitcoind_processes[0]
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0) + ['-prune=550'])
+        assert_equal(self.nodes[0].getblockchaininfo()['pruned'], True)
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
+        self.sync_model()
+        stop_node(self.nodes[0], 0)    # nothing was pruned (regtest prunes nothing below height 1,000): back to archive
         initialize_datadir(self.options.tmpdir, 2)
         fresh = start_node(2, self.options.tmpdir, list(YCASH_UPGRADE_ARGS) + ['-prune=550'])
         assert_equal(fresh.getblockchaininfo()['pruned'], True)

@@ -7,7 +7,7 @@
 The synchronous v2 index end to end (plan Phase 3, §7): tags from `generate` land in Tags,
 medians appear as the windows fill, activation, reorgs across a tag change and across the fast
 window's fill bound, the REG-4 judgement undone by a reorg, restart, -reindex-yellowback,
--reindex, -prune refused, crash recovery with an unflushed chainstate (and the wipe-and-rebuild
+-reindex, -prune with the vault prune floor, crash recovery with an unflushed chainstate (and the wipe-and-rebuild
 fallback beyond UNDO_KEEP), the first Python-built owner-path redemption confirmed through
 sendrawtransaction, a rejection that survives kill -9, a fresh node syncing the valid chain, the
 retired -yellowbackstartheight refused at init, the contiguous history, a loud parameter mismatch,
@@ -234,7 +234,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_equal(self.statehash(2), before)
         self.checkpoint('after restart')
 
-        print('-reindex-yellowback and -reindex rebuild to the same hash; -prune is refused')
+        print('-reindex-yellowback and -reindex rebuild to the same hash; -prune starts (the vault prune floor)')
         self.restart(3, ['-reindex-yellowback'])
         wait_yed_healthy(nodes[3], timeout=120)
         assert_equal(self.statehash(3), before)
@@ -244,10 +244,13 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_equal(self.statehash(4), before)
         stop_node(nodes[OBSERVER], OBSERVER)
         nodes[OBSERVER] = None
-        assert_start_raises_init_error(OBSERVER, tmpdir, self.node_args(OBSERVER, ['-prune=550']),
-                                       # the vault upgrade's -prune refusal (01/N-1) fires before the Yellowback one
-                                       'The vault upgrade is configured on this network and incompatible with -prune')
-        self.restart(OBSERVER)
+        # The vault prune floor replaced the 01/N-1 and Yellowback -prune refusals: a pruned node keeps every block from
+        # 288 below the activation height, which the index replays read (vault_prune_floor.py prunes past it).
+        self.restart(OBSERVER, ['-prune=550'])
+        assert_equal(nodes[OBSERVER].getblockchaininfo()['pruned'], True)
+        wait_yed_healthy(nodes[OBSERVER], timeout=120)
+        assert_equal(self.statehash(OBSERVER), before)
+        self.restart(OBSERVER)    # nothing was pruned (regtest prunes nothing below height 1,000): back to archive
         self.sync_all(blocks_only=True)
 
         print('startheight_retired and params_mismatch_fails_loudly')

@@ -145,7 +145,8 @@ regtest node the flag once the set exists — the test harness and the devnet do
 devnet's "stock" node 1, which models a node without Yellowback and must not be driven through those
 transactions (restart it with the flag first, as `yellowback_attest_rejoin.py` does).
 
-Where Yellowback is live the node refuses `-prune` (the index rebuilds from blocks on disk), and a
+With `-prune` the node keeps every block from 288 below the vault activation height (the index
+rebuilds from blocks on disk from that height; `doc/vault-rpc.md`, the vault prune floor), and a
 node whose index is unhealthy stops rather than validate blocks without it (*Rebuilding the
 index*). Options:
 
