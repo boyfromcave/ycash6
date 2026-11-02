@@ -154,6 +154,17 @@ def _is_yewd_pair(conn):
         return False
     return port is not None and any(port == rpc_port(i) for i in YEWD_PAIRS)
 
+def _is_kogany_pair(conn):
+    """True when ``conn`` is a column-3 pair node (yewd in front of kogany, YEWD_KOGANY)."""
+    if not os.getenv("YEWD_KOGANY"):
+        return False
+    from . import kogany
+    try:
+        port = urllib.parse.urlparse(conn.url).port
+    except Exception:
+        return False
+    return port is not None and any(port == rpc_port(i) for i in kogany.YEWD_KOGANY_PAIRS)
+
 def _fully_notified(conns, method):
     """``fullyNotified`` of every connection, a pair node counting as notified when the skip is on."""
     skip = _yewd_skips_notified()
@@ -609,6 +620,10 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     if os.getenv("PYTHON_DEBUG", ""):
         print("start_node: RPC successfully started for node {} with pid {}".format(i, bitcoind_processes[i].pid))
     proxy = get_rpc_proxy(url, i, timeout=timewait)
+    if os.getenv("YEWD_BIN"):
+        # column 3 (YEWD_KOGANY): a pair's generate solved by the harness when a ycash6 peer judges it
+        from . import kogany
+        proxy = kogany.yewd_wrap_proxy(i, proxy)
 
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
@@ -698,7 +713,11 @@ def wait_bitcoinds():
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
-    from_connection.addnode(ip_port, "onetry")
+    if _is_kogany_pair(from_connection):
+        # a kogany backend (column 3) knows addnode "add" only (Zakura's AddNodeCommand)
+        from_connection.addnode(ip_port, "add")
+    else:
+        from_connection.addnode(ip_port, "onetry")
     # poll until version handshake complete to avoid race conditions
     # with transaction relaying
     while any(peer['version'] == 0 for peer in from_connection.getpeerinfo()):
