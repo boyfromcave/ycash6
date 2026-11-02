@@ -11,6 +11,7 @@ every 100th block checks that all of them agree on three things: the block, the 
 YED state. One disagreement fails the qualification.
 
   yellowback-rc-crossline.py --devnet-dir DIR --dd-ycashd PATH [--dd-nodes 2] [--rounds 5] [--out FILE]
+  yellowback-rc-crossline.py --devnet-dir DIR --kogany-zakurad PATH [--kogany-nodes 1] [--rounds 5] [--out FILE]
 
 The devnet (contrib/yellowback/devnet/yellowback-devnet up --no-heartbeat) is already running in DIR.
 Each ycash-dd node gets its own datadir under DIR/crossline-dd<k>, free ports, `-connect` to node 0, and
@@ -20,6 +21,16 @@ ports, peers, notifications and wallet roles are not carried over. The driver mi
 ycash-dd ones) has the same tip, and reads on each: getbestblockhash, vault_getinfo.statehash and, on
 nodes with the attestor set, yed_getstatehash.statehash. --rounds such heights are compared; the
 evidence is written to --out. Exit 1 on any disagreement or timeout. Python 3 standard library only.
+
+--kogany-zakurad (kogany plan W9-b, section 4.2 rule 4): a kogany column, either beside the ycash-dd
+nodes or instead of them. Each kogany node (zakurad) gets DIR/crossline-kogany<k>/zakurad.toml from
+node 0's chain arguments through the mixed-line harness's map (qa/rpc-tests/test_framework/kogany.py
+zakurad_config; an argument it has no row for is recorded as a note, KOGANY_LIVE / --kogany-live name
+the live chunks, default W1-Y1,W2-b), free ports and node 0 as its one peer. kogany does not mine; it
+follows. With a kogany column the comparison is three-way: the YED state hash of every node is also
+compared with yellowback_model.py's, rebuilt from node 0's blocks at each 100th height (--model forces
+that column on without kogany). The kogany column and the model import the test framework, so they
+need the workspace venv's Python, as the devnet itself does.
 """
 import argparse
 import base64
@@ -103,15 +114,77 @@ def digests(node, has_yed):
     return out
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_KOGANY_LIVE = "W1-Y1,W2-b"
+
+
+def test_framework():
+    """qa/rpc-tests/test_framework (kogany.py's zakurad map, yellowback_model.py)."""
+    path = os.path.join(HERE, "rpc-tests")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    from test_framework import kogany, yellowback_model
+    return kogany, yellowback_model
+
+
+def kogany_toml(base_args, datadir, p2p, rpcport, v2, peer_port, live):
+    """The zakurad.toml of one kogany node: node 0's chain arguments through the harness's map, this
+    node's own ports and directories, node 0 as its one peer."""
+    kg, _ = test_framework()
+    live = frozenset(c for c in live.split(",") if c) | kg.DEFAULT_LIVE
+    kept, dropped = [], []
+    for arg in base_args:
+        try:
+            kg.zakurad_config([arg], 0, [], datadir, live=live)
+            kept.append(arg)
+        except kg.UnmappedArgument:
+            dropped.append(arg)
+    config, notes = kg.zakurad_config(kept, 0, [peer_port], datadir, live=live)
+    config["network"]["listen_addr"] = "127.0.0.1:%d" % p2p
+    config["network"]["zakura"]["listen_addr"] = "127.0.0.1:%d" % v2
+    config["rpc"]["listen_addr"] = "127.0.0.1:%d" % rpcport
+    notes = list(notes) + ["no zakurad row (not passed): %s" % a for a in dropped]
+    return kg.render_toml(config, notes), notes
+
+
+class Proxy:
+    """node.method(*params) over an Rpc, the shape yellowback_model.build_model_from_node reads."""
+    def __init__(self, rpc):
+        self._rpc = rpc
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return lambda *params: self._rpc(name, *params, timeout=300)
+
+
+def model_hash(rpc):
+    """yellowback_model.py's YED state hash, rebuilt from the node's blocks [0, tip]."""
+    _, ym = test_framework()
+    model = ym.build_model_from_node(Proxy(rpc))
+    return model.state_hash(), model.tip_height
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--devnet-dir", required=True)
-    ap.add_argument("--dd-ycashd", required=True)
+    ap.add_argument("--dd-ycashd")
     ap.add_argument("--dd-nodes", type=int, default=2)
+    ap.add_argument("--kogany-zakurad", help="zakurad (kogany): a kogany column, three-way with the model")
+    ap.add_argument("--kogany-nodes", type=int, default=1)
+    ap.add_argument("--kogany-live", default=os.environ.get("KOGANY_LIVE") or DEFAULT_KOGANY_LIVE,
+                    help="the live kogany chunks of the zakurad.toml map (default $KOGANY_LIVE or %s)" % DEFAULT_KOGANY_LIVE)
+    ap.add_argument("--model", action="store_true", help="compare the YED state hash with yellowback_model.py "
+                    "(on by default with --kogany-zakurad)")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--timeout", type=int, default=600, help="seconds to wait for a sync (default 600)")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
+    if not args.dd_ycashd and not args.kogany_zakurad:
+        ap.error("one of --dd-ycashd and --kogany-zakurad is required")
+    dd_nodes = args.dd_nodes if args.dd_ycashd else 0
+    kogany_nodes = args.kogany_nodes if args.kogany_zakurad else 0
+    with_model = args.model or bool(args.kogany_zakurad)
 
     with open(os.path.join(args.devnet_dir, "devnet.json"), encoding="utf-8") as fh:
         state = json.load(fh)
@@ -127,11 +200,13 @@ def main(argv):
         nodes.append(("y6-node%d" % n, Rpc("y6-node%d" % n, int(conf["rpcport"]), conf["rpcuser"], conf["rpcpassword"]), has_yed))
     node0_conf = read_conf(os.path.join(args.devnet_dir, "node0", "ycash.conf"))
     base_args = chain_args(node_args["0"])
-    print("ycash-dd nodes take node 0's chain arguments: %s" % " ".join(base_args))
+    has_yed0 = any(a.startswith("-yellowbackattestorset=") for a in base_args)
+    print("the other line's nodes take node 0's chain arguments: %s" % " ".join(base_args))
 
     procs = []
+    kogany_notes = []
     try:
-        for k in range(args.dd_nodes):
+        for k in range(dd_nodes):
             datadir = os.path.join(args.devnet_dir, "crossline-dd%d" % k)
             os.makedirs(datadir, exist_ok=True)
             port, rpcport = free_port(), free_port()
@@ -143,10 +218,30 @@ def main(argv):
             procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL))
             rpc = Rpc("dd-node%d" % k, rpcport, user, password)
             wait("dd-node%d answers RPC" % k, lambda r=rpc: r("getblockcount") >= 0, 300)
-            has_yed = any(a.startswith("-yellowbackattestorset=") for a in base_args)
-            nodes.append(("dd-node%d" % k, rpc, has_yed))
+            nodes.append(("dd-node%d" % k, rpc, has_yed0))
             print("dd-node%d: %s" % (k, rpc("getnetworkinfo")["subversion"]))
-        miner = nodes[0][1]
+        node0 = nodes[0][1]
+        for k in range(kogany_nodes):
+            datadir = os.path.join(args.devnet_dir, "crossline-kogany%d" % k)
+            os.makedirs(datadir, exist_ok=True)
+            p2p, rpcport, v2 = free_port(), free_port(), free_port()
+            text, notes = kogany_toml(base_args, datadir, p2p, rpcport, v2, int(node0_conf["port"]), args.kogany_live)
+            kogany_notes.extend(notes)
+            conf = os.path.join(datadir, "zakurad.toml")
+            with open(conf, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            log = open(os.path.join(datadir, "zakurad.log"), "w", encoding="utf-8")
+            procs.append(subprocess.Popen([args.kogany_zakurad, "-c", conf, "start"], stdout=log,
+                                          stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL))
+            rpc = Rpc("kogany%d" % k, rpcport, "", "")
+            wait("kogany%d answers RPC" % k, lambda r=rpc: r("getblockcount") >= 0, 300)
+            # one connection: the kogany node dials node 0; node 0 adds it only if that did not happen
+            time.sleep(5)
+            if not rpc("getpeerinfo"):
+                node0("addnode", "127.0.0.1:%d" % p2p, "onetry")
+            nodes.append(("kogany%d" % k, rpc, has_yed0))
+            print("kogany%d: %s (zakurad.toml notes: %s)" % (k, rpc("getnetworkinfo")["subversion"], "; ".join(notes) or "none"))
+        miner = node0
         rows, bad = [], []
         for _ in range(args.rounds):
             tip = miner("getblockcount")
@@ -156,15 +251,26 @@ def main(argv):
             wait("every node at height %d" % target,
                  lambda: all(rpc("getbestblockhash") == best for _, rpc, _ in nodes), args.timeout)
             row = {"height": target, "nodes": {name: digests(rpc, yed) for name, rpc, yed in nodes}}
+            if with_model and has_yed0:
+                mhash, mtip = model_hash(miner)
+                if mtip != target:
+                    bad.append("height %d: the model was rebuilt at height %d" % (target, mtip))
+                row["nodes"]["yellowback_model.py"] = {"yed": mhash}
             rows.append(row)
             for field in ("blockhash", "vault", "yed"):
                 seen = {d[field] for d in row["nodes"].values() if field in d}
                 if len(seen) != 1:
                     bad.append("height %d: %s differs: %s" % (target, field, {n: d.get(field) for n, d in row["nodes"].items()}))
-            print("height %d: %s on %d nodes" % (target, "agree" if not bad else "DISAGREE", len(nodes)))
+            print("height %d: %s on %d nodes%s" % (target, "agree" if not bad else "DISAGREE", len(nodes),
+                                                     " and yellowback_model.py" if "yellowback_model.py" in row["nodes"] else ""))
             if bad:
                 break
-        result = {"rounds": rows, "problems": bad, "dd_nodes": args.dd_nodes, "chain_args": base_args}
+        result = {"rounds": rows, "problems": bad, "dd_nodes": dd_nodes, "kogany_nodes": kogany_nodes,
+                  "model": with_model and has_yed0, "chain_args": base_args}
+        if kogany_nodes:
+            result["kogany_zakurad"] = args.kogany_zakurad
+            result["kogany_live"] = args.kogany_live
+            result["kogany_toml_notes"] = sorted(set(kogany_notes))
         if args.out:
             with open(args.out, "w", encoding="utf-8") as fh:
                 json.dump(result, fh, indent=2, sort_keys=True)
