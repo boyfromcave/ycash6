@@ -951,6 +951,19 @@ class KoganyNode:
         self.config = config
 
     def start(self, timeout=90):
+        # a port another process holds (a long-running node on this machine, another run's node) is
+        # reported as that, not as the garbage its listener answers (yellowback_chainviz once hit a
+        # mainnet node's P2P listener on 127.0.0.1:28833 as the follower's RPC port)
+        for what, port in (('p2p', kogany_p2p_port(self.k)), ('rpc', kogany_rpc_port(self.k))):
+            probe = socket.socket()
+            try:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(('127.0.0.1', port))
+            except OSError as e:
+                raise AssertionError('kogany %d: its %s port 127.0.0.1:%d is taken by another process (%s); '
+                                     'rerun with another --portseed' % (self.k, what, port, e))
+            finally:
+                probe.close()
         log = open(os.path.join(self.datadir, 'zakurad.log'), 'ab')
         argv = [self.binary, '-c', self.conf] + self.extra_args + ['start']
         self.process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
