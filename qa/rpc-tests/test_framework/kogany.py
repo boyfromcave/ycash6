@@ -968,8 +968,9 @@ def yewd_kogany_bin(env=None):
 
 
 def yewd_backend_indexer_port(i):
-    """The kogany backend's indexer gRPC port (the range yewd_rpc_port reserved)."""
-    return yewd_rpc_port(i)
+    """The kogany backend's indexer gRPC port: kogany_rpc_port's range (36000+, below the ephemeral
+    ports), which no follower binds in column 3 (MixedLine is inert there)."""
+    return kogany_rpc_port(i)
 
 
 def yewd_init_wallet(yewd_bin, datadir):
