@@ -1503,16 +1503,27 @@ class MixedLine:
                 time.sleep(0.2)
         return False
 
-    def offer_block(self, block_hex, cxx_result, label=''):
+    def _judges(self, node):
+        """The koganys whose verdict is compared with ``node``'s: every follower, or in the rig the
+        kogany of ``node`` alone (each kogany is configured from its own ycashd, so the stock node's
+        kogany, without the attestor set, accepts what the enforcing ycashds reject -- as the stock
+        ycashd does).  A rig call without ``node`` keeps every kogany."""
+        if not self.sidecar or node is None:
+            return list(self.followers)
+        i = _node_index(node)
+        return [SIDECAR_NODES[i]] if i in SIDECAR_NODES else []
+
+    def offer_block(self, block_hex, cxx_result, label='', node=None):
         """Submit ``block_hex`` to every follower and assert the verdict class equals ycashd's
-        ``cxx_result`` (its ``submitblock`` result).  Returns the classes, or None when inert."""
+        ``cxx_result`` (its ``submitblock`` result; ``node`` the ycashd that gave it, which in the rig
+        picks the kogany that judges).  Returns the classes, or None when inert."""
         if not self.active:
             return None
         raw = bytes.fromhex(block_hex)
         prev = raw[4:36][::-1].hex()
         cxx = classify_cxx_block(cxx_result)
         out = []
-        for f in self.followers:
+        for f in self._judges(node):
             if not self._wait_parent(f, prev):
                 self.note('block offered on a parent kogany %d does not have; verdict skipped' % f.k)
                 continue
@@ -1539,14 +1550,14 @@ class MixedLine:
             return None
         return r if isinstance(r, str) else None
 
-    def offer_tx(self, tx_hex, cxx_error, label=''):
+    def offer_tx(self, tx_hex, cxx_error, label='', node=None):
         """The transaction path (``KOGANY_MEMPOOL=1``): ``cxx_error`` is None when ycashd accepted
-        ``tx_hex``, else its ``JSONRPCException``."""
+        ``tx_hex``, else its ``JSONRPCException`` (``node`` as for ``offer_block``)."""
         if not (self.active and self.mempool):
             return None
         cxx = classify_cxx_tx(cxx_error, self.unmapped)
         out = []
-        for f in self.followers:
+        for f in self._judges(node):
             text = ''
             try:
                 f.rpc.with_timeout(self.tx_timeout).sendrawtransaction(tx_hex)
@@ -1569,15 +1580,16 @@ class MixedLine:
 
     def on_block_rejected(self, node, blockhash):
         """``assert_rejected`` hook: offer the block ycashd holds as invalid to the followers."""
-        if not self.active or blockhash in self.offered:
+        key = (blockhash, _node_index(node)) if self.sidecar else blockhash   # the rig: once per node's kogany
+        if not self.active or key in self.offered:
             return
-        self.offered.add(blockhash)
+        self.offered.add(key)
         try:
             block_hex = node.getblock(blockhash, 0)
         except JSONRPCException:
             self.note('a rejected block without data on the ycashd node; verdict skipped')
             return
-        self.offer_block(block_hex, 'invalid', 'assert_rejected %s' % blockhash)
+        self.offer_block(block_hex, 'invalid', 'assert_rejected %s' % blockhash, node=node)
 
     def _assert_same(self, cxx, kog, path, label, detail, kogany_text=''):
         self.stats['verdicts'] += 1

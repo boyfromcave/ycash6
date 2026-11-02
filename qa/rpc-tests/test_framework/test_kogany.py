@@ -900,6 +900,18 @@ class SidecarRigTest(unittest.TestCase):
         for verdict in ('duplicate', 'inconclusive'):
             m._pump(ref, FakeChain(['g'], verdict=verdict), 'g')
 
+    def test_judges(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        a, b = FakeChain(['g'], 0), FakeChain(['g'], 1)
+        kg.SIDECAR_NODES.update({0: a, 1: b})
+        m.followers = [a, b]
+        self.assertEqual(m._judges(FakeConn(1)), [b])          # the node's own kogany judges its verdict
+        self.assertEqual(m._judges(FakeConn(4)), [])           # a node without a kogany: nobody
+        self.assertEqual(m._judges(None), [a, b])              # no node named: every kogany
+        plain = kg.MixedLine(binary='/bin/z')
+        plain.followers = [a]
+        self.assertEqual(plain._judges(FakeConn(1)), [a])      # the follower mode ignores the node
+
     def test_pump_refusal_is_a_divergence(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)
         with self.assertRaises(AssertionError) as cm:

@@ -1420,7 +1420,7 @@ def mine_block_raw(node, txs, coinbase=None, gbt=None, n_time=None):
     block.solve()
     block_hex = bytes_to_hex_str(block.serialize())
     result = node.submitblock(block_hex)
-    kogany.current().offer_block(block_hex, result, 'mine_block_raw')   # mixed line: same verdict class
+    kogany.current().offer_block(block_hex, result, 'mine_block_raw', node=node)   # mixed line: same verdict class
     return result, '%064x' % block.sha256
 
 
