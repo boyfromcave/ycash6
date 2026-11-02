@@ -131,6 +131,8 @@ def kogany_toml(base_args, datadir, p2p, rpcport, v2, peer_port, live):
     """The zakurad.toml of one kogany node: node 0's chain arguments through the harness's map, this
     node's own ports and directories, node 0 as its one peer."""
     kg, _ = test_framework()
+    if kg.PortSeed.n is None:
+        kg.PortSeed.n = 0          # the map derives default ports from it; they are replaced below
     live = frozenset(c for c in live.split(",") if c) | kg.DEFAULT_LIVE
     kept, dropped = [], []
     for arg in base_args:
