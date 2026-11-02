@@ -253,8 +253,12 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
-# -regtestenablezip209, -reindex-yellowback, and the retired -yellowback / -yellowbackenforce /
+# -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
 # -yellowbackstartheight flags.
+# Matched by the exact name (a prefix would swallow every -yellowback* row): -yellowback, which
+# ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index (init.cpp:436;
+# yellowback_hardening h6).
+_IGNORED_NAMES = frozenset({'-yellowback'})
 def _bool01(v):
     # a bare -flag is ycashd's -flag=1 (GetBoolArg; yellowback_mint_armed passes
     # -yellowbackmintrequiresarmed alone)
@@ -373,6 +377,9 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
                 _set(cfg, path, conv(value))
             else:
                 notes.append('pending:%s: %s -> %s = %s' % (chunk, a, '.'.join(path), value))
+            continue
+        if name in _IGNORED_NAMES:
+            notes.append('ignored: %s' % a)
             continue
         if name.startswith(_IGNORED_PREFIXES) or name.startswith('-yellowbackpayout'):
             if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-yellowbacktestfault',
