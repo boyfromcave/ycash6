@@ -4,13 +4,13 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-A stand-in "zakurad" for testing the mixed-line harness itself (test_framework/kogany.py) before
-kogany can follow Ycash regtest (W1).  Point KOGANY_BIN at this file: it takes zakurad's command
-line (``-c <zakurad.toml> [args] start``), reads the generated config, and execs a ycashd
+A stand-in "koganyd" for testing the mixed-line harness itself (test_framework/kogany.py) before
+kogany can follow Ycash regtest (W1).  Point KOGANY_BIN at this file: it takes koganyd's command
+line (``-c <koganyd.toml> [args] start``), reads the generated config, and execs a ycashd
 (``$ZCASHD``) configured from it -- the follower's own P2P/RPC ports, cookie auth in the config's
 ``rpc.cookie_dir``, ``initial_testnet_peers`` as ``-addnode``, and each activation height back
 to its ``-nuparams``.  Run it with ``KOGANY_LIVE=W1-Y1,W2-b,W5-f,W5-c,W3-c`` so the pending rows
-(the Ycash and Vault heights, the attestor set) are emitted: real zakurad refuses those keys
+(the Ycash and Vault heights, the attestor set) are emitted: real koganyd refuses those keys
 until the chunks land, the stand-in needs them.
 
 It proves the harness paths -- process start/stop, the JSON-RPC client, sync points, state-hash
@@ -34,7 +34,7 @@ BRANCH_OF = {
 
 def main(argv):
     if '-c' not in argv or argv[-1] != 'start':
-        sys.exit('usage: kogany_standin.py -c <zakurad.toml> [args] start')
+        sys.exit('usage: kogany_standin.py -c <koganyd.toml> [args] start')
     conf = argv[argv.index('-c') + 1]
     with open(conf, 'rb') as f:
         cfg = tomllib.load(f)

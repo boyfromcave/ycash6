@@ -8,7 +8,7 @@ A pruned kogany follower at its retention edge (workspace pruning assessment
 docs/plans/kogany/research/pruning-assessment.md, KP-2 and section 4.3; decision 4: kogany may
 run Zakura's Pruned storage mode with Zakura's floor and no floor at the vault height).
 
-    KOGANY_BIN=<zakurad --features ycash> KOGANY_PRUNED=1 KOGANY_MIRROR_INVALIDATE=1 \\
+    KOGANY_BIN=<koganyd --features ycash> KOGANY_PRUNED=1 KOGANY_MIRROR_INVALIDATE=1 \\
       ZCASHD=$BIN/ycashd ../../../.venv/bin/python -u kogany_pruned_edge.py --srcdir=$BIN
 
 KOGANY_PRUNE_RETENTION (default 1001, Zakura's regtest floor) is the follower's retention. The

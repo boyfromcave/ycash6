@@ -73,7 +73,7 @@ name: yellowback tests
 #   `build` keeps node-bin 30 days outside pull requests (the cross-repository consumers, yew's yewd
 #     gates and yolo's regtest, pin a commit), and tier `bin` runs `build` alone; `bin-refresh`
 #     dispatches it nightly on a branch whose tip has no node-bin with 7 days left.
-#   The mixed tier: `zakurad` and `yewd` resolve the pinned kogany and yew binaries once per run
+#   The mixed tier: `koganyd` and `yewd` resolve the pinned kogany and yew binaries once per run
 #     (the producer's artifact at the pin, else a build at the pin), `mixed` runs the Yellowback
 #     scripts unchanged with kogany followers, one job per group of qa/kogany-mixed-shards.txt,
 #     `yewd-pair` runs the S-track pair shard (YEWD_BIN), and `mixed-gate` is the `mixed tier`
@@ -81,7 +81,7 @@ name: yellowback tests
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
 #   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
-#     `zakurad` and `sidecar-rig`, the 50 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     `koganyd` and `sidecar-rig`, the 50 wallet-needing scripts of qa/kogany-mixed-shards.txt's
 #     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
 #     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
 #     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
@@ -261,14 +261,15 @@ env:
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '698870c998e2534f45461f5bb98773d014e96829' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
-  # kogany: vaults/kogany-compat at W6-b; its zakurad-bin artifact (any kogany workflow) or, when
-  # that has expired or does not exist, a build at this commit (dev profile, --features ycash).
+  # kogany: vaults/kogany-compat at dd834da8b (the koganyd identity); its koganyd-bin artifact (any
+  # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
+  # profile, --features ycash). The binary is `koganyd` from that commit on (no zakurad-bin).
   KOGANY_REPO: boyfromcave/kogany
-  KOGANY_COMMIT: f299e69a4efa39331ef830a90e51185298274258
+  KOGANY_COMMIT: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
   # yew: vaults/kogany-compat at S3 (yewd); its yewd-bin artifact (ci.yml), else a build here.
   YEW_REPO: boyfromcave/yew
   YEW_COMMIT: 85aec6f5812da36e499a18b088e2e6b99f503da8
-  # The kogany chunks whose pending zakurad.toml rows the harness writes as keys (test_framework/
+  # The kogany chunks whose pending koganyd.toml rows the harness writes as keys (test_framework/
   # kogany.py KOGANY_LIVE; W5-f is on by default there). Moves with KOGANY_COMMIT.
   KOGANY_LIVE: W1-Y1,W2-b
 
@@ -621,18 +622,18 @@ jobs:
   # Why the binaries are resolved inside this run and not by workflow_run / repository_dispatch:
   # workflow_run fires only for workflows of this repository (and only from the default branch's
   # copy); repository_dispatch needs a cross-repository token on kogany's side and would chase
-  # kogany's tip instead of a pin. `zakurad` and `yewd` resolve the pinned binary once per run and
+  # kogany's tip instead of a pin. `koganyd` and `yewd` resolve the pinned binary once per run and
   # upload it as this run's artifact, so every `mixed` job and its "Re-run failed jobs" use the same
-  # three binaries (ycashd, zakurad, yewd) for 30 days, whatever the producer's retention.
-  zakurad:
+  # three binaries (ycashd, koganyd, yewd) for 30 days, whatever the producer's retention.
+  koganyd:
     if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || inputs.tier == 'sidecar' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
       contents: read
-      actions: read  # gh run list/download on the kogany repository's runs (the zakurad-bin contract)
+      actions: read  # gh run list/download on the kogany repository's runs (the koganyd-bin contract)
     steps:
-      - name: kogany's zakurad-bin at KOGANY_COMMIT (a push, schedule or dispatch run of any kogany workflow)
+      - name: kogany's koganyd-bin at KOGANY_COMMIT (a push, schedule or dispatch run of any kogany workflow)
         id: dl
         env:
           GH_TOKEN: ${{ github.token }}
@@ -645,26 +646,26 @@ jobs:
           runs=$(gh run list -R "$KOGANY_REPO" -c "$KOGANY_COMMIT" -L 50 --json databaseId,event,headSha \
             -q ".[] | select(.headSha == \"$KOGANY_COMMIT\") | $trusted | .databaseId" 2>/dev/null || true)
           for r in $runs; do
-            if gh run download "$r" -R "$KOGANY_REPO" -n zakurad-bin -D "$RUNNER_TEMP/zk-dl" 2>/dev/null \
-               && [ -f "$RUNNER_TEMP/zk-dl/zakurad-bin.tgz" ]; then
-              cp "$RUNNER_TEMP/zk-dl/zakurad-bin.tgz" "$RUNNER_TEMP/zk-out/"
+            if gh run download "$r" -R "$KOGANY_REPO" -n koganyd-bin -D "$RUNNER_TEMP/zk-dl" 2>/dev/null \
+               && [ -f "$RUNNER_TEMP/zk-dl/koganyd-bin.tgz" ]; then
+              cp "$RUNNER_TEMP/zk-dl/koganyd-bin.tgz" "$RUNNER_TEMP/zk-out/"
               echo "got=true" >> "$GITHUB_OUTPUT"
-              echo "- zakurad: \`$KOGANY_REPO\` run $r at \`$KOGANY_COMMIT\` (its zakurad-bin)" >> "$GITHUB_STEP_SUMMARY"
+              echo "- koganyd: \`$KOGANY_REPO\` run $r at \`$KOGANY_COMMIT\` (its koganyd-bin)" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
           done
           echo "got=false" >> "$GITHUB_OUTPUT"
-          echo "no zakurad-bin of $KOGANY_REPO at $KOGANY_COMMIT (none published, or expired): building at the pin"
+          echo "no koganyd-bin of $KOGANY_REPO at $KOGANY_COMMIT (none published, or expired): building at the pin"
       # The fallback: the binary cached by the pin (a hit skips the build), else a build at the pin.
       # kogany's target directory is not cached (tens of GB; it would evict this repository's
       # depends and ccache entries).
-      - name: Cache the zakurad built at the pin
+      - name: Cache the koganyd built at the pin
         if: steps.dl.outputs.got != 'true'
         id: cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zk-build
-          key: zakurad-bin-${{ env.KOGANY_COMMIT }}-ycash-dev-ubuntu-24.04
+          key: koganyd-bin-${{ env.KOGANY_COMMIT }}-ycash-dev-ubuntu-24.04
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.dl.outputs.got != 'true' && steps.cache.outputs.cache-hit != 'true'
         with:
@@ -675,36 +676,36 @@ jobs:
       - name: kogany build packages (librocksdb-dev; its setup-zakura-build script)
         if: steps.dl.outputs.got != 'true' && steps.cache.outputs.cache-hit != 'true'
         run: bash kogany/.github/actions/setup-zakura-build/install-ubuntu-packages.sh
-      - name: Build zakurad at the pin (dev profile, --features ycash)
+      - name: Build koganyd at the pin (dev profile, --features ycash)
         if: steps.dl.outputs.got != 'true' && steps.cache.outputs.cache-hit != 'true'
         working-directory: kogany
         env:
           CARGO_INCREMENTAL: '0'
         run: |
-          cargo build --locked -p zakura --bin zakurad --features ycash
+          cargo build --locked -p zakura --bin koganyd --features ycash
           rocksdb=$(dpkg-query -W -f='${Version}' librocksdb-dev)
           mkdir -p "$RUNNER_TEMP/zk-build/pack"
-          cp target/debug/zakurad "$RUNNER_TEMP/zk-build/pack/"
-          python3 - "$RUNNER_TEMP/zk-build/pack/zakurad-bin.json" "$KOGANY_REPO" "$KOGANY_COMMIT" "$rocksdb" "$(rustc --version)" <<'PY'
+          cp target/debug/koganyd "$RUNNER_TEMP/zk-build/pack/"
+          python3 - "$RUNNER_TEMP/zk-build/pack/koganyd-bin.json" "$KOGANY_REPO" "$KOGANY_COMMIT" "$rocksdb" "$(rustc --version)" <<'PY'
           import json, sys
           path, repo, commit, rocksdb, rustc = sys.argv[1:]
-          json.dump({'repository': repo, 'commit': commit, 'binary': 'zakurad', 'features': ['ycash'],
+          json.dump({'repository': repo, 'commit': commit, 'binary': 'koganyd', 'features': ['ycash'],
                      'profile': 'dev', 'runner': 'ubuntu-24.04', 'librocksdb': rocksdb, 'rustc': rustc,
-                     'producer': 'ycash6 yellowback-tests.yml zakurad (fallback build)'},
+                     'producer': 'ycash6 yellowback-tests.yml koganyd (fallback build)'},
                     open(path, 'w'), indent=1)
           PY
-          tar czf "$RUNNER_TEMP/zk-build/zakurad-bin.tgz" -C "$RUNNER_TEMP/zk-build/pack" zakurad zakurad-bin.json
+          tar czf "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk-build/pack" koganyd koganyd-bin.json
       - name: Stage the fallback build
         if: steps.dl.outputs.got != 'true'
-        run: cp "$RUNNER_TEMP/zk-build/zakurad-bin.tgz" "$RUNNER_TEMP/zk-out/"
+        run: cp "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" "$RUNNER_TEMP/zk-out/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: zakurad-bin
-          path: ${{ runner.temp }}/zk-out/zakurad-bin.tgz
+          name: koganyd-bin
+          path: ${{ runner.temp }}/zk-out/koganyd-bin.tgz
           retention-days: ${{ github.event_name == 'pull_request' && 3 || 30 }}
           if-no-files-found: error
 
-  # yewd (the parity sidecar, kogany plan §3b) at YEW_COMMIT, as `zakurad` does for kogany.
+  # yewd (the parity sidecar, kogany plan §3b) at YEW_COMMIT, as `koganyd` does for kogany.
   yewd:
     if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
     runs-on: ubuntu-24.04
@@ -782,13 +783,13 @@ jobs:
 
   # The mixed shards: one job per group of qa/kogany-mixed-shards.txt (re-run one group alone),
   # each the group's `gate` scripts (blocking, KOGANY_STRICT=1) then its `report` scripts (the step
-  # may fail, the job stays green). ubuntu-24.04 because zakurad links the runner's librocksdb
-  # (kogany's setup-zakura-build), the image the zakurad-bin contract names; ycashd from the 22.04
+  # may fail, the job stays green). ubuntu-24.04 because koganyd links the runner's librocksdb
+  # (kogany's setup-zakura-build), the image the koganyd-bin contract names; ycashd from the 22.04
   # build runs there unchanged (glibc 2.35 < 2.39). The peer-count scripts are excluded by the file.
   mixed:
     name: mixed ${{ matrix.group }}
-    needs: [build, sidecars, zakurad]
-    if: ${{ !cancelled() && inputs.tier != 'sidecar' && needs.build.result == 'success' && needs.zakurad.result == 'success' }}
+    needs: [build, sidecars, koganyd]
+    if: ${{ !cancelled() && inputs.tier != 'sidecar' && needs.build.result == 'success' && needs.koganyd.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -802,7 +803,7 @@ jobs:
       - uses: ./.github/actions/yellowback-prereqs
         with:
           apt: 'false'
-      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (zakurad)
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
@@ -812,23 +813,23 @@ jobs:
           path: ${{ runner.temp }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: zakurad-bin
+          name: koganyd-bin
           path: ${{ runner.temp }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: matrix.group == 'attest' && needs.sidecars.result == 'success'
         with:
           name: sidecars
           path: ${{ runner.temp }}
-      - name: Unpack, and check zakurad runs here
+      - name: Unpack, and check koganyd runs here
         run: |
           tar xzf "$RUNNER_TEMP/node-bin.tgz"
-          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/zakurad-bin.tgz" -C "$RUNNER_TEMP/zk"
-          cat "$RUNNER_TEMP/zk/zakurad-bin.json"
-          if ldd "$RUNNER_TEMP/zk/zakurad" | grep 'not found'; then
-            echo "::error::zakurad needs a library this runner lacks (the zakurad-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
+          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk"
+          cat "$RUNNER_TEMP/zk/koganyd-bin.json"
+          if ldd "$RUNNER_TEMP/zk/koganyd" | grep 'not found'; then
+            echo "::error::koganyd needs a library this runner lacks (the koganyd-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
           fi
-          "$RUNNER_TEMP/zk/zakurad" --version
-          echo "KOGANY_BIN=$RUNNER_TEMP/zk/zakurad" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/zk/koganyd" --version
+          echo "KOGANY_BIN=$RUNNER_TEMP/zk/koganyd" >> "$GITHUB_ENV"
           if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
             mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
             echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
@@ -859,14 +860,14 @@ jobs:
           name: mixed-logs-${{ matrix.group }}
           path: |
             ${{ runner.temp }}/mixed-tests/**/node*/regtest/debug.log
-            ${{ runner.temp }}/mixed-tests/**/kogany*/zakurad.log
-            ${{ runner.temp }}/mixed-tests/**/kogany*/zakurad.toml
+            ${{ runner.temp }}/mixed-tests/**/kogany*/koganyd.log
+            ${{ runner.temp }}/mixed-tests/**/kogany*/koganyd.toml
           retention-days: 14
           if-no-files-found: warn
 
   # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
   # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
-  # 50 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a kogany zakurad on the node's
+  # 50 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
   # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
   # so every block and transaction between nodes passes kogany's validation and ycashd's again
   # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
@@ -875,8 +876,8 @@ jobs:
   # Only on tier `sidecar` (sidecar-fanout every night, or a dispatch); never on a push.
   sidecar-rig:
     name: sidecar ${{ matrix.group }} (report-only)
-    needs: [build, sidecars, zakurad]
-    if: ${{ !cancelled() && inputs.tier == 'sidecar' && needs.build.result == 'success' && needs.zakurad.result == 'success' }}
+    needs: [build, sidecars, koganyd]
+    if: ${{ !cancelled() && inputs.tier == 'sidecar' && needs.build.result == 'success' && needs.koganyd.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     continue-on-error: true
@@ -891,7 +892,7 @@ jobs:
       - uses: ./.github/actions/yellowback-prereqs
         with:
           apt: 'false'
-      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (zakurad)
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
@@ -901,23 +902,23 @@ jobs:
           path: ${{ runner.temp }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: zakurad-bin
+          name: koganyd-bin
           path: ${{ runner.temp }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: matrix.group == 'attest' && needs.sidecars.result == 'success'
         with:
           name: sidecars
           path: ${{ runner.temp }}
-      - name: Unpack, and check zakurad runs here
+      - name: Unpack, and check koganyd runs here
         run: |
           tar xzf "$RUNNER_TEMP/node-bin.tgz"
-          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/zakurad-bin.tgz" -C "$RUNNER_TEMP/zk"
-          cat "$RUNNER_TEMP/zk/zakurad-bin.json"
-          if ldd "$RUNNER_TEMP/zk/zakurad" | grep 'not found'; then
-            echo "::error::zakurad needs a library this runner lacks (the zakurad-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
+          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk"
+          cat "$RUNNER_TEMP/zk/koganyd-bin.json"
+          if ldd "$RUNNER_TEMP/zk/koganyd" | grep 'not found'; then
+            echo "::error::koganyd needs a library this runner lacks (the koganyd-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
           fi
-          "$RUNNER_TEMP/zk/zakurad" --version
-          echo "KOGANY_BIN=$RUNNER_TEMP/zk/zakurad" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/zk/koganyd" --version
+          echo "KOGANY_BIN=$RUNNER_TEMP/zk/koganyd" >> "$GITHUB_ENV"
           if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
             mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
             echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
@@ -958,15 +959,15 @@ jobs:
           name: sidecar-logs-${{ matrix.group }}
           path: |
             ${{ runner.temp }}/sidecar-tests/**/node*/regtest/debug.log
-            ${{ runner.temp }}/sidecar-tests/**/kogany*/zakurad.log
-            ${{ runner.temp }}/sidecar-tests/**/kogany*/zakurad.toml
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/koganyd.log
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/koganyd.toml
           retention-days: 14
           if-no-files-found: warn
 
   # The S-track pair shard (kogany plan §3b; the harness's YEWD_BIN mode): every node a ycashd
   # -disablewallet backend with yewd in front of it. This is the "backend ycash6" leg of plan §5
   # (the backend-agnostic differential); column 3 of the W9 matrix, yewd in front of kogany, needs
-  # the harness's kogany-backend mode (S5) and joins this job then, with zakurad from `zakurad`.
+  # the harness's kogany-backend mode (S5) and joins this job then, with koganyd from `koganyd`.
   # The harness smoke, then the two contract suites (their n/47 count is the report). Report-only
   # until S4 (contracts) and S5 (the 48 scripts): drop continue-on-error then.
   yewd-pair:
@@ -1027,17 +1028,17 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-  # The `mixed tier` check: green when zakurad resolved and every mixed group's gated scripts
+  # The `mixed tier` check: green when koganyd resolved and every mixed group's gated scripts
   # passed. Not part of the `push tier` check; the lead architect makes it a required check of
   # vaults/kogany-compat when the first wave gate flips scripts to `gate` (W2).
   mixed-gate:
     name: mixed tier
-    needs: [zakurad, mixed]
-    if: ${{ always() && needs.zakurad.result != 'skipped' && inputs.tier != 'sidecar' }}
+    needs: [koganyd, mixed]
+    if: ${{ always() && needs.koganyd.result != 'skipped' && inputs.tier != 'sidecar' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: zakurad resolved and every mixed group's gate step passed
+      - name: koganyd resolved and every mixed group's gate step passed
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |

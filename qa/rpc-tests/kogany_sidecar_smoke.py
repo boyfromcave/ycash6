@@ -5,11 +5,11 @@
 
 """
 Smoke test of the ycash6 test rig (kogany plan W9-a; K-3 as amended): KOGANY_SIDECAR=1 with
-KOGANY_BIN makes every node a kogany zakurad plus a ycashd -connect'ed to it with -listen=0
+KOGANY_BIN makes every node a koganyd plus a ycashd -connect'ed to it with -listen=0
 (test_framework/kogany.py "The ycash6 test rig").  The scripts talk to the ycashd wallets while
 every block and transaction between nodes passes through a kogany:
 
-    KOGANY_SIDECAR=1 KOGANY_BIN=$WS/wt/.bin/kc-w9-sidecar/zakurad KOGANY_STRICT=1 \\
+    KOGANY_SIDECAR=1 KOGANY_BIN=$WS/wt/.bin/koganyd/koganyd KOGANY_STRICT=1 \\
         ZCASHD=$BIN/ycashd ../../../.venv/bin/python -u kogany_sidecar_smoke.py --srcdir=$BIN
 
 It checks the rig's topology (each ycashd's peers are koganys only, each kogany has its ycashd as
