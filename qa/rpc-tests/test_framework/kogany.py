@@ -776,11 +776,12 @@ def yewd_backend_rpc_port(i):
 
 
 def split_yewd_args(args):
-    """(backend args, yewd wallet args) from one node's arguments; -mocktime goes to both."""
+    """(backend args, yewd wallet args) from one node's arguments; -mocktime and -disablewallet go
+    to both (a -disablewallet pair is the node alone: yewd forwards and serves no wallet method)."""
     backend, wallet = [], []
     for a in args:
         name = a.split('=', 1)[0]
-        if name == '-mocktime':
+        if name in ('-mocktime', '-disablewallet'):
             backend.append(a)
             wallet.append(a)
         elif name in YEWD_WALLET_ARGS:
@@ -814,7 +815,8 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     os.makedirs(backend_dir, exist_ok=True)
     yewd_bin = os.environ['YEWD_BIN']
     coinbase = None
-    if os.getenv('YEWD_H8', '1') == '1':
+    nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
+    if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
         coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
@@ -1189,12 +1191,16 @@ class YewdColumn:
         self.stats['sync_points'] += 1
         tip = conns[0].getbestblockhash()
         hashes = [self._statehashes(c) for c in conns]
-        vaults = [h[0] for h in hashes]
-        yeds = [h[1] for h in hashes]
-        if len(set(map(str, vaults))) != 1:
+        # a node that does not serve the read (a stock node: Yellowback not live there) is skipped,
+        # as MixedLine skips a peer that does not serve it
+        vaults = [h[0] for h in hashes if h[0] is not None]
+        yeds = [h[1] for h in hashes if h[1] is not None]
+        if len(set(map(str, vaults))) > 1:
             raise AssertionError('yewd column: vault_getinfo.statehash differs between pairs at %s: %s' % (tip, vaults))
-        if len(set(map(str, yeds))) != 1:
+        if len(set(map(str, yeds))) > 1:
             raise AssertionError('yewd column: yed_getstatehash differs between pairs at %s: %s' % (tip, yeds))
+        vaults = vaults[:1] or [None]
+        yeds = yeds[:1] or [None]
         if vaults[0] is not None:
             self.stats['statehash_vault'] += 1
         if yeds[0] is not None:
@@ -1217,10 +1223,10 @@ class YewdColumn:
                                      % (tip, conns[0].getblockcount(), got, self.datadir))
             time.sleep(0.2)
         v, y = self._statehashes(self.rpc)
-        if str(v) != str(vaults[0]):
+        if v is not None and vaults[0] is not None and str(v) != str(vaults[0]):
             raise AssertionError('yewd column: vault_getinfo.statehash at %s: pairs (kogany) %s, ycash6 peer %s'
                                  % (tip, vaults[0], v))
-        if str(y) != str(yeds[0]):
+        if y is not None and yeds[0] is not None and str(y) != str(yeds[0]):
             raise AssertionError('yewd column: yed_getstatehash at %s: pairs (kogany) %s, ycash6 peer %s'
                                  % (tip, yeds[0], y))
         self.stats['peer_points'] += 1

@@ -714,8 +714,13 @@ def wait_bitcoinds():
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
     if _is_kogany_pair(from_connection):
-        # a kogany backend (column 3) knows addnode "add" only (Zakura's AddNodeCommand)
-        from_connection.addnode(ip_port, "add")
+        # a kogany backend (column 3) knows addnode "add" only (Zakura's AddNodeCommand), and
+        # refuses an address its book already holds (-23), which "onetry" never does
+        try:
+            from_connection.addnode(ip_port, "add")
+        except JSONRPCException as e:
+            if e.error.get('code') != -23:
+                raise
     else:
         from_connection.addnode(ip_port, "onetry")
     # poll until version handshake complete to avoid race conditions

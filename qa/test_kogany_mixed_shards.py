@@ -132,7 +132,7 @@ class Sidecar(unittest.TestCase):
         side = ms.select(entries, 'sidecar')
         self.assertEqual(len(side), 50)
         groups = ms.mixed_group_of(entries)
-        flags = {e.script: e.flags for e in entries if e.group != 'sidecar'}
+        flags = {e.script: e.flags for e in entries if e.group in ms.MIXED_GROUPS}
         for e in side:
             self.assertEqual(set(e.flags), set(flags[e.script]) - {'direct'}, e.script)   # the mixed group's flags
         self.assertEqual(sum(len(ms.select(entries, 'sidecar', of=g)) for g in ms.MIXED_GROUPS), 50)
@@ -140,6 +140,19 @@ class Sidecar(unittest.TestCase):
         self.assertTrue({'yellowback_lifecycle', 'yellowback_claim', 'yellowback_interm', 'yellowback_fees',
                          'yellowback_attest'} <= {e.script for e in side})
         self.assertEqual(set(groups.values()), set(ms.MIXED_GROUPS))
+
+    def test_real_pair_group(self):
+        # column 3 (S5): the sidecar group's 50 scripts, no MixedLine flags, no KOGANY_SIDECAR
+        entries, _, _ = ms.load()
+        pair = ms.select(entries, 'pair')
+        self.assertEqual({e.script for e in pair}, {e.script for e in ms.select(entries, 'sidecar')})
+        self.assertTrue(all(not e.flags for e in pair))
+        cmds = ms.commands(pair, 'report', 2, '/s', '/t')
+        self.assertEqual(len(cmds), 1)
+        self.assertEqual(cmds[0][0], {})
+        self.assertEqual(sum(len(ms.select(entries, 'pair', of=g)) for g in ms.MIXED_GROUPS), 50)
+        os.environ.pop('YEWD_KOGANY', None)
+        self.assertEqual(ms.main(['run', 'pair', '--state', 'report']), 1)
 
 
 class RealManifest(unittest.TestCase):
