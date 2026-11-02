@@ -147,6 +147,17 @@ class TomlGeneratorTest(unittest.TestCase):
             with self.assertRaises((kg.UnmappedArgument, ValueError), msg=bad):
                 self.gen([bad], live=())
 
+    def test_pqfalcon_shorthand(self):
+        cfg, notes, _ = self.gen(['-pqfalcon=1'], live=('W1-Y1', 'W2-b', 'W3-c'))
+        self.assertEqual(cfg['kogany']['pq_falcon_height'], 0)
+        cfg, notes, _ = self.gen(['-pqfalcon=1'])
+        self.assertNotIn('kogany', cfg)
+        self.assertTrue(any('-pqfalcon=1' in n for n in notes), notes)
+        cfg, notes, _ = self.gen(['-pqfalcon=0'], live=('W3-c',))
+        self.assertNotIn('kogany', cfg)
+        with self.assertRaises(kg.UnmappedArgument):
+            self.gen(['-pqfalcon=2'])
+
     def test_txunpaidactionlimit_row(self):
         _cfg, _notes, t = self.gen(['-txunpaidactionlimit=50'], live=())
         self.assertEqual(t['mempool']['tx_unpaid_action_limit'], 50)

@@ -206,6 +206,8 @@ ZAKURAD_KEY_TABLE = [
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
     ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
      'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
+    ('-pqfalcon=<0|1>', 'pending:W3-c', 'kogany.pq_falcon_height',
+     'ycashd\'s shorthand: -pqfalcon=1 is -pqfalconheight=0 (init.cpp); -pqfalcon=0 sets nothing'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
     ('-datacarriersize=<n>', 'live', 'mempool.max_datacarrier_bytes', 'int (W1-Y9)'),
@@ -298,6 +300,7 @@ _PENDING_FLAGS = {
     '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
     '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
     '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
+    '-pqfalcon': ('W3-c', ('kogany', 'pq_falcon_height'), lambda v: 0 if _bool01(v) else None),
 }
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
@@ -375,6 +378,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             continue
         if name in _PENDING_FLAGS:
             chunk, path, conv = _PENDING_FLAGS[name]
+            if conv(value) is None:
+                continue                  # an "off" form (-pqfalcon=0): nothing to carry
             if chunk in live:
                 _set(cfg, path, conv(value))
             else:
