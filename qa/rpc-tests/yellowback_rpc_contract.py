@@ -231,6 +231,18 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_setquote', nodes[POOLS[0]].yed_setquote(50_000_000, 1))
         assert_rpc_error('quote-out-of-range', nodes[POOLS[0]].yed_setquote, 1, 1)
         assert_rpc_error('no-payout-address', user.yed_setquote, 50_000_000, 1)
+        # F-S5-9: a P2PKH -mineraddress is the payout default (MINER-2); -yellowbackpayoutdefault=0
+        # leaves the node without one, as a node mining to its wallet.
+        miner = claimant.getnewaddress()
+        self.restart(5, ['-mineraddress=%s' % miner, '-yellowbackpayoutdefault=0'])
+        claimant = nodes[5]
+        assert_rpc_error('no-payout-address', claimant.yed_setquote, 50_000_000, 1)
+        self.restart(5, ['-mineraddress=%s' % miner])
+        claimant = nodes[5]
+        assert_equal(claimant.yed_setquote(50_000_000, 1)['nextTag']['payoutAddress'], miner)
+        self.restart(5)
+        claimant = nodes[5]
+        self.sync_all()
         r = user.yed_getinfo()['height'] - REF_LAG
         c.check('yed_getfeepayee', user.yed_getfeepayee(r))
         est = c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
