@@ -22,6 +22,10 @@
 #           direct   not an rpc-tests.py entry: run the file itself (rpc-tests.py drops unknown names)
 #
 #   excluded <script> <reason>     never in a mixed shard (the run without KOGANY_BIN still has it)
+#   excluded:pair <script> <reason>
+#                                  a sidecar script kept out of column 3 only (the `pair` group is
+#                                  the sidecar group less these; the script keeps its mixed group
+#                                  and its sidecar row)
 #
 #   report rows kogany cannot follow (W9-b finding 1, "no-ycash-upgrades"): stopatheight,
 #   ycash_bootstrap, lightwalletd_only, vault_pq_wallet, vault_pq_wallet_restore and
@@ -167,6 +171,9 @@ excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo 
 #     vault_getinfo.statehash and yed_getstatehash across the pairs at every sync point, and with the
 #     ycash6 peer under YEWD_YCASH6_PEER=1). No MixedLine flags: there is no follower. The wave is S5
 #     for the manifest's wave column (W9: the matrix); a row flips to gate when S5's gate is seen green.
+#     A sidecar script outside column 3 by decision is `excluded:pair` with the reason (check keeps
+#     pair + excluded:pair = sidecar).
+excluded:pair yellowback_wr_flags  F-S5-15: Sapling consolidation (-consolidation, a background wallet option with no RPC) stays outside K-25 by decision; the script also needs -deletetx and reads debug.log (F-S5-13 class)
 pair     z_validateaddress_nowallet    report  W9     # node
 pair     vault_upgrade                 report  W9     # vault
 pair     vault_primitive               report  W9     # vault
@@ -206,7 +213,6 @@ pair     yellowback_fee                report  W9     # fees
 pair     yellowback_mempool_limits     report  W9     # fees
 pair     vault_policy                  report  W9     # fees
 pair     vault_refee                   report  W9     # fees
-pair     yellowback_wr_flags           report  W9     # fees
 pair     yellowback_attest_evict       report  W9     # attest
 pair     yellowback_attest_rejoin      report  W9     # attest
 pair     yellowback_attest_live        report  W9     # attest
