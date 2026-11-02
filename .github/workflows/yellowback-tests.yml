@@ -256,7 +256,7 @@ env:
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '698870c998e2534f45461f5bb98773d014e96829' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
-  # kogany: vaults/kogany-compat at W6-b; its zakurad-bin artifact (kogany-yellowback.yml) or, when
+  # kogany: vaults/kogany-compat at W6-b; its zakurad-bin artifact (any kogany workflow) or, when
   # that has expired or does not exist, a build at this commit (dev profile, --features ycash).
   KOGANY_REPO: boyfromcave/kogany
   KOGANY_COMMIT: f299e69a4efa39331ef830a90e51185298274258
@@ -609,7 +609,7 @@ jobs:
       contents: read
       actions: read  # gh run list/download on the kogany repository's runs (the zakurad-bin contract)
     steps:
-      - name: kogany's zakurad-bin at KOGANY_COMMIT (a push, schedule or dispatch run of kogany-yellowback.yml)
+      - name: kogany's zakurad-bin at KOGANY_COMMIT (a push, schedule or dispatch run of any kogany workflow)
         id: dl
         env:
           GH_TOKEN: ${{ github.token }}
@@ -619,7 +619,7 @@ jobs:
           [ ${#KOGANY_COMMIT} -eq 40 ] || { echo "::error::KOGANY_COMMIT is not a full commit id"; exit 1; }
           mkdir -p "$RUNNER_TEMP/zk-out"
           trusted='select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
-          runs=$(gh run list -R "$KOGANY_REPO" -w kogany-yellowback.yml -c "$KOGANY_COMMIT" -L 20 --json databaseId,event,headSha \
+          runs=$(gh run list -R "$KOGANY_REPO" -c "$KOGANY_COMMIT" -L 50 --json databaseId,event,headSha \
             -q ".[] | select(.headSha == \"$KOGANY_COMMIT\") | $trusted | .databaseId" 2>/dev/null || true)
           for r in $runs; do
             if gh run download "$r" -R "$KOGANY_REPO" -n zakurad-bin -D "$RUNNER_TEMP/zk-dl" 2>/dev/null \
@@ -690,7 +690,7 @@ jobs:
       contents: read
       actions: read  # gh run list/download on the yew repository's runs (the yewd-bin contract)
     steps:
-      - name: yew's yewd-bin at YEW_COMMIT (a push, schedule or dispatch run of ci.yml)
+      - name: yew's yewd-bin at YEW_COMMIT (a push, schedule or dispatch run of any yew workflow)
         id: dl
         env:
           GH_TOKEN: ${{ github.token }}
@@ -700,7 +700,7 @@ jobs:
           [ ${#YEW_COMMIT} -eq 40 ] || { echo "::error::YEW_COMMIT is not a full commit id"; exit 1; }
           mkdir -p "$RUNNER_TEMP/yewd-out"
           trusted='select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
-          runs=$(gh run list -R "$YEW_REPO" -w ci.yml -c "$YEW_COMMIT" -L 20 --json databaseId,event,headSha \
+          runs=$(gh run list -R "$YEW_REPO" -c "$YEW_COMMIT" -L 50 --json databaseId,event,headSha \
             -q ".[] | select(.headSha == \"$YEW_COMMIT\") | $trusted | .databaseId" 2>/dev/null || true)
           for r in $runs; do
             if gh run download "$r" -R "$YEW_REPO" -n yewd-bin -D "$RUNNER_TEMP/yewd-dl" 2>/dev/null \
