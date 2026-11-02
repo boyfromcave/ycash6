@@ -207,6 +207,14 @@ class TomlGeneratorTest(unittest.TestCase):
             self.assertFalse(cxx & kog)
             self.assertEqual(len(kog), 4 * (util.MAX_NODES + 1))
             self.assertLess(max(kog), 65536)
+            # yellowback_stratum.py's stratum and status ports (21000 / 26000 + offset + index)
+            off = util.rpc_port(0) - util.PORT_MIN - util.PORT_RANGE
+            stratum = {b + off + i for b in (21000, 26000) for i in range(util.MAX_NODES + 1)}
+            rig = {kg.kogany_p2p_port(k) for k in range(util.MAX_NODES + 1)} | \
+                {kg.kogany_rpc_port(k) for k in range(util.MAX_NODES + 1)} | \
+                {kg.sidecar_dead_port(k) for k in range(util.MAX_NODES + 1)}
+            self.assertFalse(stratum & rig)
+            self.assertLess(max(rig), 65536)
 
     def test_toml_quoting(self):
         text = kg.render_toml({'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False, 'n': None}}, ['note'])

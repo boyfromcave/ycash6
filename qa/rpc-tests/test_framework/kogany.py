@@ -127,14 +127,18 @@ def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 
+# The P2P and RPC ranges sit at 7 and 8 PORT_RANGEs (46000+, 51000+): the 2 and 3 they had are
+# yellowback_stratum.py's stratum and status ports (21000 / 26000 + the seed offset + index), so
+# kogany 0's RPC took yolo's status port (finding W9-a/F-5).
+
 def kogany_p2p_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 2 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 7 * PORT_RANGE + k + _offset()
 
 
 def kogany_rpc_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 3 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
 
 
 def kogany_v2_port(k):
@@ -894,7 +898,7 @@ def sidecar_enabled(env=None):
 def sidecar_dead_port(i):
     """The port ycashd i advertises in the rig (``-port``): nothing listens on it."""
     assert 0 <= i <= MAX_NODES
-    return PORT_MIN + 7 * PORT_RANGE + i + _offset()
+    return PORT_MIN + 9 * PORT_RANGE + i + _offset()
 
 
 def sidecar_ycashd_args(i, args):
