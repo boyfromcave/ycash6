@@ -173,9 +173,20 @@ ZAKURAD_KEY_TABLE = [
      'its one peer (a rig that peers kogany with two ycashd nodes on one IP must raise it: the W1-Y5 trap)'),
     ('(mempool)', 'live', 'mempool.debug_enable_at_height = 0', 'regtest mempool from genesis'),
     ('-yellowbackattestorset=<setid>', 'pending:W5-f', 'yellowback.attestor_set',
-     'node 0\'s YED attestor set; key name fixed by W5-f'),
-    ('-yellowbacksigmaref=<bps>', 'pending:W5-c', 'yellowback.sigma_ref', 'key name fixed by the W5 math chunk'),
-    ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height', 'Falcon activation; key name fixed by W3'),
+     'node 0\'s YED attestor set (hex, display order; W5-e key). Pending until W5-f registers the module: '
+     'before it, an invalid YED verdict stops a follower configured with a set'),
+    ('-yellowbacksigmaref=<bps>', 'pending:W5-e', 'yellowback.sigma_ref', 'int (W5-e key, regtest only)'),
+    ('-yellowbacksupplycapbps=<bps>', 'pending:W5-e', 'yellowback.supply_cap_bps', 'int (W5-e)'),
+    ('-yellowbackattestarmmin=<n>', 'pending:W5-e', 'yellowback.attest_arm_min', 'int, default 3 (W5-e)'),
+    ('-yellowbackbundlecarrier=<c>', 'pending:W5-e', 'yellowback.bundle_carrier',
+     '"scriptsig" / "opreturn" / "either" (W5-e)'),
+    ('-yellowbackmintrequiresarmed=<0|1>', 'pending:W5-e', 'yellowback.mint_requires_armed', 'bool (W5-e)'),
+    ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
+    ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
+     'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
+    ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
+    ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
+    ('-datacarriersize=<n>', 'live', 'mempool.max_datacarrier_bytes', 'int (W1-Y9)'),
     ('-yellowbackpayoutaddress=<addr>', 'ignored', None, 'followers never mine (K-16); W8 maps the pool tag'),
     ('-mocktime=<t>', 'ignored', None, 'Zakura has no mock clock: followers run on the real clock'),
     ('-exportdir', 'ignored', None, 'wallet (dumpwallet)'),
@@ -207,14 +218,31 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
                      '-yellowbackmaxtxfee', '-disablewallet')
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
-# drops a rule): -acceptnonstdtxn, -nurejectoldversions, -regtestshieldcoinbase,
-# -regtestprotectcoinbase, -regtestenablezip209, -txunpaidactionlimit, -blockunpaidactionlimit,
+# drops a rule): -nurejectoldversions, -regtestshieldcoinbase,
+# -regtestprotectcoinbase, -regtestenablezip209, -blockunpaidactionlimit,
 # -yellowbacktestfault, -reindex-yellowback, -yellowbackfeeusdperkb, -pqfeerate, -pqfeeusdperkb, and
 # the retired -yellowback / -yellowbackenforce / -yellowbackstartheight flags.
+def _bool01(v):
+    if v not in ('0', '1'):
+        raise UnmappedArgument('a 0/1 flag has the value %r' % v)
+    return v == '1'
+
+
 _PENDING_FLAGS = {
     '-yellowbackattestorset': ('W5-f', ('yellowback', 'attestor_set'), str),
-    '-yellowbacksigmaref': ('W5-c', ('yellowback', 'sigma_ref'), int),
+    '-yellowbacksigmaref': ('W5-e', ('yellowback', 'sigma_ref'), int),
+    '-yellowbacksupplycapbps': ('W5-e', ('yellowback', 'supply_cap_bps'), int),
+    '-yellowbackattestarmmin': ('W5-e', ('yellowback', 'attest_arm_min'), int),
+    '-yellowbackbundlecarrier': ('W5-e', ('yellowback', 'bundle_carrier'), str),
+    '-yellowbackmintrequiresarmed': ('W5-e', ('yellowback', 'mint_requires_armed'), _bool01),
     '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
+}
+
+# Rows live today: (config path, converter).
+_LIVE_FLAGS = {
+    '-acceptnonstdtxn': (('mempool', 'accept_non_standard'), _bool01),
+    '-txunpaidactionlimit': (('mempool', 'tx_unpaid_action_limit'), int),
+    '-datacarriersize': (('mempool', 'max_datacarrier_bytes'), int),
 }
 
 
@@ -261,6 +289,10 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
                 heights[key] = int(h)
             else:
                 notes.append('%s: %s -> activation_heights.%s = %s' % (status, a, key, h))
+            continue
+        if name in _LIVE_FLAGS:
+            path, conv = _LIVE_FLAGS[name]
+            _set(cfg, path, conv(value))
             continue
         if name in _PENDING_FLAGS:
             chunk, path, conv = _PENDING_FLAGS[name]

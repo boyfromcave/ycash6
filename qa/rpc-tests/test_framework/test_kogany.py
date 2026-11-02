@@ -56,7 +56,7 @@ class TomlGeneratorTest(unittest.TestCase):
 
     def test_live_chunks_emit_pending_keys_in_order(self):
         _cfg, notes, t = self.gen(['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=0', '-pqfalconheight=0'],
-                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-c', 'W3-c'))
+                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e', 'W3-c'))
         h = t['network']['network']['params']['activation_heights']
         self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault'])
         self.assertEqual(h['Vault'], 103)
@@ -79,6 +79,23 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertIn('pending:W5-f: -yellowbackattestorset=%s -> yellowback.attestor_set = %s' % (SETID, SETID), notes)
         self.assertIn('ignored: -yellowbackpayoutaddress=tmXYZ', notes)
         self.assertIn('ignored: -mocktime=1700000000', notes)
+
+    def test_w5e_and_mempool_rows(self):
+        yed = ['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=7', '-yellowbacksupplycapbps=500',
+               '-yellowbackattestarmmin=2', '-yellowbackbundlecarrier=either', '-yellowbackmintrequiresarmed=1']
+        pool = ['-acceptnonstdtxn=0', '-txunpaidactionlimit=0', '-datacarriersize=1200']
+        _cfg, notes, t = self.gen(yed + pool, live=('W5-e',))
+        self.assertEqual(t['yellowback'], {'sigma_ref': 7, 'supply_cap_bps': 500, 'attest_arm_min': 2,
+                                           'bundle_carrier': 'either', 'mint_requires_armed': True})
+        self.assertEqual(t['mempool'], {'debug_enable_at_height': 0, 'accept_non_standard': False,
+                                        'tx_unpaid_action_limit': 0, 'max_datacarrier_bytes': 1200})
+        # the attestor set stays a note until W5-f registers the module (it would stop the follower)
+        self.assertTrue(any(n.startswith('pending:W5-f: -yellowbackattestorset') for n in notes), notes)
+        _cfg, notes, t = self.gen(yed)
+        self.assertNotIn('yellowback', t)
+        self.assertEqual(len([n for n in notes if n.startswith('pending:W5-e')]), 5)
+        with self.assertRaises(kg.UnmappedArgument):
+            self.gen(['-acceptnonstdtxn=yes'])
 
     def test_unmapped_arguments_refused(self):
         for bad in (['-yellowbacknewflag=1'], ['-vaultsomething=1'], ['-nuparams=deadbeef:5'], ['-frobnicate'], ['x']):
