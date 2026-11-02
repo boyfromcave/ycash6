@@ -210,6 +210,7 @@ BASE_SCRIPTS= [
     'reindex.py',
     'addressindex.py',
     'lightwalletd_only.py',
+    'yellowback_lightwalletd.py',
     'z_validateaddress_nowallet.py',
     'spentindex.py',
     'timestampindex.py',

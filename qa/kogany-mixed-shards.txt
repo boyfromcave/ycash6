@@ -29,6 +29,7 @@ node     stopatheight                  report  W9
 node     ycash_bootstrap               report  W9
 node     testnet_ceremony              report  W9
 node     lightwalletd_only             report  W9
+node     yellowback_lightwalletd       report  W9
 node     z_validateaddress_nowallet    report  W9
 
 # --- the vault primitive (W2-d boundary, W4-e state, W7 reads)
