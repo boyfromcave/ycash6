@@ -882,6 +882,7 @@ def kill_yewd_backend(i):
 
 SIDECAR_MAX_CONNS_PER_IP = 16
 SIDECAR_NODES = {}        # node index -> KoganyNode (KOGANY_SIDECAR=1)
+SIDECAR_REFUSED = {}      # node index -> why kogany i refused its config at the last start
 
 
 def sidecar_enabled(env=None):
@@ -928,14 +929,28 @@ def start_sidecar(i, dirname, args):
     if k is None:
         k = KoganyNode(i, dirname, os.environ['KOGANY_BIN'], mixed.extra_args or os.getenv('KOGANY_ARGS', '').split())
     config, notes = sidecar_kogany_config(args, i, k.datadir)
+    SIDECAR_REFUSED.pop(i, None)
     if not k.alive() or config != k.config:
         k.stop()
         k.write_config(config, notes)
-        k.start()
+        try:
+            k.start()
+        except AssertionError as e:
+            # kogany refused this config at start: an agreement if ycashd i refuses it too (a script's
+            # assert_start_raises_init_error), a divergence if ycashd i starts (sidecar_started)
+            SIDECAR_REFUSED[i] = str(e)
+            k.config = None
     SIDECAR_NODES[i] = k
     if k not in mixed.followers:
         mixed.followers.append(k)
     return sidecar_ycashd_args(i, args)
+
+
+def sidecar_started(i):
+    """``util.start_node`` hook after ycashd i answered: kogany i must have taken the same config."""
+    msg = SIDECAR_REFUSED.pop(i, None)
+    if msg is not None:
+        raise AssertionError('kogany %d refused a config ycashd %d accepts: %s' % (i, i, msg))
 
 
 def stop_sidecars():

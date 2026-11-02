@@ -807,6 +807,7 @@ class SidecarRigTest(unittest.TestCase):
                 os.environ[k] = v
         kg.KoganyNode = self.saved_node
         kg.SIDECAR_NODES.clear()
+        kg.SIDECAR_REFUSED.clear()
         kg._CURRENT[0] = kg.MixedLine()
 
     def test_enabled_needs_both(self):
@@ -882,6 +883,26 @@ class SidecarRigTest(unittest.TestCase):
         self.assertEqual(k.events, ['stop', 'write', 'start'])
         self.assertEqual(FakeKogany.started, [1])                               # one KoganyNode per node
         self.assertEqual(m.followers, [k])
+
+    def test_start_refusal(self):
+        os.environ.update({'KOGANY_SIDECAR': '1', 'KOGANY_BIN': '/bin/z'})
+
+        class Refusing(FakeKogany):
+            def start(self):
+                raise AssertionError('kogany %d exited with 1 during start' % self.k)
+
+        kg.KoganyNode = Refusing
+        kg._CURRENT[0] = kg.MixedLine.from_env()
+        kg.start_sidecar(0, '/tmp/run', START + YCASH)     # ycashd still starts (or refuses: agreement)
+        self.assertIn(0, kg.SIDECAR_REFUSED)
+        with self.assertRaises(AssertionError):            # ycashd took what kogany refused
+            kg.sidecar_started(0)
+        kg.sidecar_started(0)                              # reported once
+        kg.KoganyNode = FakeKogany
+        kg.SIDECAR_NODES.clear()
+        kg.start_sidecar(0, '/tmp/run', START + YCASH)
+        self.assertNotIn(0, kg.SIDECAR_REFUSED)
+        kg.sidecar_started(0)
 
     def test_on_node_start_and_pairs(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)

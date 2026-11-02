@@ -613,6 +613,9 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
 
+    if os.getenv("KOGANY_SIDECAR", "0") == "1" and os.getenv("KOGANY_BIN"):
+        from . import kogany
+        kogany.sidecar_started(i)
     hook = MIXED_HOOKS.get('start')
     if hook is not None:
         hook(i, args[1:], proxy)
