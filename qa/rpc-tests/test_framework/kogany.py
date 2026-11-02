@@ -4,7 +4,7 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-The mixed-line harness: kogany (``zakurad``) followers inside the unchanged ycash6 regtest scripts.
+The mixed-line harness: kogany (``koganyd``) followers inside the unchanged ycash6 regtest scripts.
 
 Kogany plan K-18 (a), W1-Y7 (harness part), W2-d, W4-e; plan section 4.2 rule 4 (the three-way
 cross-line invariant) and section 5 ("The mixed-line harness").  Nothing here changes a script:
@@ -16,7 +16,7 @@ regression (CI runs both, so a kogany failure never hides as a C++ failure).
 Environment
 -----------
 
-``KOGANY_BIN``            path to ``zakurad`` (kogany).  Unset: no follower, every hook a no-op.
+``KOGANY_BIN``            path to ``koganyd`` (kogany).  Unset: no follower, every hook a no-op.
 ``KOGANY_FOLLOWERS``      followers to start (default 1).  Slot k uses ``tmpdir/kogany<k>`` and the
                           ports ``kogany_p2p_port(k)`` / ``kogany_rpc_port(k)`` (a range of their own,
                           never one of ycashd's).
@@ -39,12 +39,12 @@ Environment
                           to the followers at sync points (``MixedLine._mirror``; default 0).
 ``KOGANY_PRUNED``         1: the followers run Zakura's Pruned storage mode (pruning assessment KP-2):
                           ``[state.storage_mode.pruned] tx_retention = KOGANY_PRUNE_RETENTION`` in their
-                          ``zakurad.toml``; every sync point also asserts the follower reports
+                          ``koganyd.toml``; every sync point also asserts the follower reports
                           ``getblockchaininfo.pruned`` with a ``pruneheight`` (default 0).
 ``KOGANY_PRUNE_RETENTION``  the followers' ``tx_retention`` under ``KOGANY_PRUNED=1`` (default 1001,
                           Zakura's regtest floor ``MAX_BLOCK_REORG_HEIGHT + 1``; a smaller value makes
-                          zakurad refuse to start).
-``KOGANY_ARGS``           extra ``zakurad`` arguments, whitespace-separated, placed before ``start``.
+                          koganyd refuse to start).
+``KOGANY_ARGS``           extra ``koganyd`` arguments, whitespace-separated, placed before ``start``.
 ``KOGANY_LOG``            ``tracing.filter`` for the followers (default ``info``).
 ``YEWD_BIN``              path to ``yewd`` (the parity sidecar, plan section 3b): every node becomes a
                           ycashd ``-disablewallet`` backend plus a yewd in front of it on the node's
@@ -78,8 +78,8 @@ proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)
                                       ``REJECT_CODE_MAP`` (ycashd) / ``KOGANY_REASON_MAP`` (kogany,
                                       W4-e) are the tables; ``offer_block`` asks kogany's proposal mode
                                       first for a reason behind a bare ``rejected``.
-``zakurad_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
-``render_toml(config, notes)``        the ``zakurad.toml`` text; ``ZAKURAD_KEY_TABLE`` /
+``koganyd_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
+``render_toml(config, notes)``        the ``koganyd.toml`` text; ``KOGANYD_KEY_TABLE`` /
                                       ``NU_BRANCH_TABLE`` are the map.
 ``start_sidecar(i, dirname, args)`` / ``sidecar_ycashd_args`` / ``sidecar_kogany_config`` /
 ``sidecar_enabled`` / ``SIDECAR_NODES``  the KOGANY_SIDECAR rig (util.start_node calls start_sidecar).
@@ -160,12 +160,12 @@ def kogany_v2_port(k):
 
 
 # ---------------------------------------------------------------------------
-# The ycashd-argument -> zakurad.toml map.
+# The ycashd-argument -> koganyd.toml map.
 #
 # status: 'live'           emitted as a key today;
 #         'derived'        not copied: the follower gets its own value (its own port, its own dir);
 #         'pending:<chunk>' the kogany key does not exist yet; recorded as a comment in the toml
-#                          (zakurad's config is serde deny_unknown_fields, so an early key would
+#                          (koganyd's config is serde deny_unknown_fields, so an early key would
 #                          refuse to start).  KOGANY_LIVE=<chunk> emits it;
 #         'live:<chunk>'   emitted as a key while <chunk> is live, which it is by default
 #                          (DEFAULT_LIVE); KOGANY_LIVE=!<chunk> turns it back into a comment;
@@ -190,8 +190,8 @@ NU_BRANCH_TABLE = {
     0xc8e71055: ('NU6', 'live', 'Zcash NU6 id'),
 }
 
-ZAKURAD_KEY_TABLE = [
-    # (ycashd argument or ycash.conf key, status, zakurad.toml key, note)
+KOGANYD_KEY_TABLE = [
+    # (ycashd argument or ycash.conf key, status, koganyd.toml key, note)
     ('regtest=1 (ycash.conf)', 'live', 'network.network = {regtest = true, params = {...}}',
      'the Regtest form (zakura-network config.rs:1035-1072); Ycash regtest selection is W1-Y1\'s'),
     ('-nuparams=<branch>:<h>', 'live', 'network.network.params.activation_heights.<NU>',
@@ -367,9 +367,9 @@ def _set(cfg, path, value):
     d[path[-1]] = value
 
 
-def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=None):
+def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=None):
     """Map one ycashd argument list (the peer's: ``util.start_node``'s own ``-nuparams`` for
-    Overwinter/Sapling plus the script's) to a ``zakurad`` config for follower ``slot``.
+    Overwinter/Sapling plus the script's) to a ``koganyd`` config for follower ``slot``.
 
     Returns ``(config, notes)``: ``config`` the nested dict ``render_toml`` writes, ``notes`` the
     pending and ignored arguments (comments in the toml).  ``live`` (default ``KOGANY_LIVE``) names
@@ -418,8 +418,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
                 notes.append('ignored: %s' % a)
             continue
         if name.startswith('-yellowback') or name.startswith('-vault') or name.startswith('-pq'):
-            raise UnmappedArgument('%s carries Yellowback/vault meaning and has no ZAKURAD_KEY_TABLE row' % name)
-        raise UnmappedArgument('%s has no ZAKURAD_KEY_TABLE row' % name)
+            raise UnmappedArgument('%s carries Yellowback/vault meaning and has no KOGANYD_KEY_TABLE row' % name)
+        raise UnmappedArgument('%s has no KOGANYD_KEY_TABLE row' % name)
 
     # Zakura keeps one upgrade per height, the later variant winning (testnet.rs:924-929), and
     # refuses a map out of order; ycashd's regtest puts every Ycash upgrade at 1, which is the
@@ -487,10 +487,16 @@ def _key(k):
     return k if all(c.isalnum() or c in '_-' for c in k) else json.dumps(k)
 
 
+# The names before kogany's daemon became ``koganyd`` (kogany dd834da8b), for scripts written
+# against them.
+zakurad_config = koganyd_config
+ZAKURAD_KEY_TABLE = KOGANYD_KEY_TABLE
+
+
 def render_toml(config, notes=()):
-    """The ``zakurad.toml`` text: scalar keys first, then each sub-table by its dotted header;
+    """The ``koganyd.toml`` text: scalar keys first, then each sub-table by its dotted header;
     ``notes`` become leading comments (the pending and ignored ycashd arguments)."""
-    out = ['# zakurad.toml generated by qa/rpc-tests/test_framework/kogany.py (mixed-line harness)']
+    out = ['# koganyd.toml generated by qa/rpc-tests/test_framework/kogany.py (mixed-line harness)']
     out += ['# %s' % n for n in notes]
 
     def table(path, d):
@@ -784,7 +790,7 @@ def same_class(cxx, kog, strict=False):
 # (yewd_backend_rpc_port(i)) and the node's P2P port, so connect_nodes_bi / disconnectnode work.
 # util.start_node calls start_yewd_pair; util.stop_node / wait_bitcoinds wait for the backend too.
 # The kogany backend (a yewd in front of a kogany slot, plan S1+) takes the same hook once kogany
-# follows Ycash regtest: the backend line below becomes the zakurad start.
+# follows Ycash regtest: the backend line below becomes the koganyd start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
                     '-spendzeroconfchange', '-rescan', '-wallet')
@@ -903,7 +909,7 @@ def kill_yewd_backend(i):
 # The ycash6 test rig (kogany plan W9-a; K-3 as amended: the rig, not the product).
 # KOGANY_SIDECAR=1 with KOGANY_BIN turns node i into kogany i + ycashd i:
 #
-#   kogany i   a zakurad in tmpdir/kogany<i>, configured from node i's own arguments, listening for
+#   kogany i   a koganyd in tmpdir/kogany<i>, configured from node i's own arguments, listening for
 #              P2P on p2p_port(i) (the node's address, so a script's connect_nodes(a, b) reaches
 #              kogany b) and serving its RPC on kogany_rpc_port(i);
 #   ycashd i   the unchanged ycashd with -connect=127.0.0.1:p2p_port(i) -listen=0, serving the wallet
@@ -954,10 +960,10 @@ def sidecar_ycashd_args(i, args):
 
 
 def sidecar_kogany_config(args, i, datadir, live=None):
-    """kogany i's config from node i's ycashd arguments: ``zakurad_config`` for slot i, then
+    """kogany i's config from node i's ycashd arguments: ``koganyd_config`` for slot i, then
     listening on p2p_port(i), no initial peers (the ycashds dial it), and room for one inbound
     connection per ycashd from 127.0.0.1."""
-    cfg, notes = zakurad_config(args, i, [], datadir, live=live)
+    cfg, notes = koganyd_config(args, i, [], datadir, live=live)
     net = cfg['network']
     net['listen_addr'] = '127.0.0.1:%d' % p2p_port(i)
     net['initial_testnet_peers'] = []
@@ -1125,14 +1131,14 @@ def _missing(e):
 # ---------------------------------------------------------------------------
 
 class KoganyNode:
-    """One ``zakurad`` follower process in ``tmpdir/kogany<k>``."""
+    """One ``koganyd`` follower process in ``tmpdir/kogany<k>``."""
 
     def __init__(self, k, tmpdir, binary, extra_args=()):
         self.k = k
         self.binary = binary
         self.extra_args = list(extra_args)
         self.datadir = os.path.join(tmpdir, 'kogany%d' % k)
-        self.conf = os.path.join(self.datadir, 'zakurad.toml')
+        self.conf = os.path.join(self.datadir, 'koganyd.toml')
         self.process = None
         self.config = None
         self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_rpc_port(k),
@@ -1145,7 +1151,7 @@ class KoganyNode:
         self.config = config
 
     def start(self, timeout=90):
-        log = open(os.path.join(self.datadir, 'zakurad.log'), 'ab')
+        log = open(os.path.join(self.datadir, 'koganyd.log'), 'ab')
         argv = [self.binary, '-c', self.conf] + self.extra_args + ['start']
         self.process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + timeout
@@ -1153,7 +1159,7 @@ class KoganyNode:
             if self.process.poll() is not None:
                 raise AssertionError('kogany %d (%s) exited with %s during start; see %s'
                                      % (self.k, self.binary, self.process.returncode,
-                                        os.path.join(self.datadir, 'zakurad.log')))
+                                        os.path.join(self.datadir, 'koganyd.log')))
             try:
                 self.rpc.getblockcount()
                 return
@@ -1335,7 +1341,7 @@ class MixedLine:
         return None
 
     def _config_for(self, f):
-        return zakurad_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
+        return koganyd_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
 
     def _connect(self, proxy, f, settle=None):
         """One connection per follower: the follower dials the peer (``initial_testnet_peers``);
@@ -1397,7 +1403,7 @@ class MixedLine:
         for ref, f in pairs:
             tip = ref.getbestblockhash()
             if not f.alive():
-                raise AssertionError('kogany %d exited (see %s/zakurad.log)' % (f.k, f.datadir))
+                raise AssertionError('kogany %d exited (see %s/koganyd.log)' % (f.k, f.datadir))
             if self.sidecar:
                 self._check_isolated(f)
             else:
@@ -1878,8 +1884,8 @@ def _register(mixed):
 
 def describe():
     """The key table, for ``kogany_mixed_smoke.py --describe`` and review."""
-    lines = ['ycashd argument -> zakurad.toml (status)']
-    for arg, status, key, note in ZAKURAD_KEY_TABLE:
+    lines = ['ycashd argument -> koganyd.toml (status)']
+    for arg, status, key, note in KOGANYD_KEY_TABLE:
         lines.append('  %-38s %-14s %s%s' % (arg, status, key or '-', ('  # ' + note) if note else ''))
     lines.append('branch id -> activation_heights key (status)')
     for b, (key, status, note) in sorted(NU_BRANCH_TABLE.items()):

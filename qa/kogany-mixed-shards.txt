@@ -4,7 +4,7 @@
 #
 # The mixed-line shards (kogany plan docs/plans/kogany/kogany-yellowback-plan.md §5 "mixed-regtest",
 # §4.2 rule 4; workspace docs/plans/kogany/ci-design.md): every Yellowback functional script of
-# yellowback-tests.yml's YELLOWBACK_SCRIPTS, run unchanged with kogany (zakurad) followers
+# yellowback-tests.yml's YELLOWBACK_SCRIPTS, run unchanged with kogany (koganyd) followers
 # (KOGANY_BIN, qa/rpc-tests/test_framework/kogany.py). The `mixed` job of yellowback-tests.yml runs
 # one group per job; qa/kogany_mixed_shards.py reads this file (`check` keeps it complete).
 #

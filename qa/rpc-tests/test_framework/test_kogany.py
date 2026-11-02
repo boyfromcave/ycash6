@@ -5,7 +5,7 @@
 
 """
 Unit tests for the mixed-line harness (kogany.py) that need no node: the ycashd-argument ->
-zakurad.toml generator, the verdict-class tables, the port ranges and the restart-on-change hook.
+koganyd.toml generator, the verdict-class tables, the port ranges and the restart-on-change hook.
 
     cd qa/rpc-tests && ../../../.venv/bin/python -m unittest test_framework.test_kogany -v
 
@@ -38,7 +38,7 @@ class TomlGeneratorTest(unittest.TestCase):
         util.PortSeed.n = 4242
 
     def gen(self, extra=(), live=(), slot=0, peers=(13000,)):
-        cfg, notes = kg.zakurad_config(START + YCASH + VAULT + list(extra), slot, list(peers), '/tmp/k%d' % slot, live=live)
+        cfg, notes = kg.koganyd_config(START + YCASH + VAULT + list(extra), slot, list(peers), '/tmp/k%d' % slot, live=live)
         return cfg, notes, tomllib.loads(kg.render_toml(cfg, notes))
 
     def test_round_trip(self):
@@ -70,7 +70,7 @@ class TomlGeneratorTest(unittest.TestCase):
     def test_env_live(self):
         os.environ['KOGANY_LIVE'] = 'W2-b'
         try:
-            cfg, _ = kg.zakurad_config(START + VAULT, 0, [1], '/tmp/k')
+            cfg, _ = kg.koganyd_config(START + VAULT, 0, [1], '/tmp/k')
         finally:
             del os.environ['KOGANY_LIVE']
         self.assertEqual(cfg['network']['network']['params']['activation_heights']['Vault'], 103)
@@ -109,7 +109,7 @@ class TomlGeneratorTest(unittest.TestCase):
                     os.environ.pop('KOGANY_LIVE', None)
                 else:
                     os.environ['KOGANY_LIVE'] = env
-                cfg, notes = kg.zakurad_config(args, 0, [1], '/tmp/k')
+                cfg, notes = kg.koganyd_config(args, 0, [1], '/tmp/k')
                 if on:
                     self.assertEqual(cfg['yellowback'], {'attestor_set': SETID, 'attest_arm_min': 1}, env)
                 else:
@@ -177,14 +177,14 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertEqual(set(t['mempool']), {'debug_enable_at_height'})
         self.assertIn('ignored: -yellowbacktestfault=storage:commit', notes)      # the recorded gap
         self.assertIn('ignored: -mempoolevictionmemoryminutes=1', notes)
-        rows = {r[0].split('=')[0]: r for r in kg.ZAKURAD_KEY_TABLE}
+        rows = {r[0].split('=')[0]: r for r in kg.KOGANYD_KEY_TABLE}
         self.assertIn('gap', rows['-yellowbacktestfault'][3])
         for flag in ('-yellowbacksignal', '-feepolicy', '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes'):
             self.assertEqual(rows[flag][1], 'ignored', flag)
 
     def test_every_live_flag_has_a_table_row(self):
-        rows = ' '.join(r[0] for r in kg.ZAKURAD_KEY_TABLE)
-        keys = ' '.join(r[2] or '' for r in kg.ZAKURAD_KEY_TABLE)
+        rows = ' '.join(r[0] for r in kg.KOGANYD_KEY_TABLE)
+        keys = ' '.join(r[2] or '' for r in kg.KOGANYD_KEY_TABLE)
         for flag, (path, _conv) in kg._LIVE_FLAGS.items():
             self.assertIn(flag, rows)
             self.assertIn('.'.join(path), keys)
@@ -192,7 +192,7 @@ class TomlGeneratorTest(unittest.TestCase):
     def test_unmapped_arguments_refused(self):
         for bad in (['-yellowbacknewflag=1'], ['-vaultsomething=1'], ['-nuparams=deadbeef:5'], ['-frobnicate'], ['x']):
             with self.assertRaises(kg.UnmappedArgument, msg=bad):
-                kg.zakurad_config(START + bad, 0, [1], '/tmp/k', live=())
+                kg.koganyd_config(START + bad, 0, [1], '/tmp/k', live=())
 
     def test_pruned_storage_mode(self):
         """KOGANY_PRUNED=1 (pruning assessment KP-2): Zakura's Pruned mode at the regtest floor, or
@@ -249,12 +249,20 @@ class TomlGeneratorTest(unittest.TestCase):
 
     def test_toml_quoting(self):
         text = kg.render_toml({'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False, 'n': None}}, ['note'])
-        self.assertTrue(text.startswith('# zakurad.toml'))
+        self.assertTrue(text.startswith('# koganyd.toml'))
         self.assertIn('# note', text)
         self.assertEqual(tomllib.loads(text), {'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False}})
 
+    def test_koganyd_file_names(self):
+        # kogany's daemon is koganyd (kogany dd834da8b): the follower's config and log carry its name,
+        # and the names from before the rename stay as aliases.
+        node = kg.KoganyNode(3, '/tmp/t', '/bin/koganyd')
+        self.assertEqual(node.conf, os.path.join('/tmp/t', 'kogany3', 'koganyd.toml'))
+        self.assertIs(kg.zakurad_config, kg.koganyd_config)
+        self.assertIs(kg.ZAKURAD_KEY_TABLE, kg.KOGANYD_KEY_TABLE)
+
     def test_key_table_covers_every_pending_flag(self):
-        rows = ' '.join(r[0] for r in kg.ZAKURAD_KEY_TABLE)
+        rows = ' '.join(r[0] for r in kg.KOGANYD_KEY_TABLE)
         for flag in kg._PENDING_FLAGS:
             self.assertIn(flag, rows)
         self.assertIn('ycashd argument', kg.describe())
@@ -304,7 +312,7 @@ class VerdictClassTest(unittest.TestCase):
         self.assertEqual(kg.classify_kogany_block('something-new'), kg.REJECT_UNCLASSIFIED)
         self.assertEqual(kg.classify_kogany_tx(rpc_error('anything')), kg.REJECT_UNCLASSIFIED)
 
-    # kogany's texts as zakurad answers them (W1-Y9 run of mempool_ycash_parity.py, 2026-11-01, and
+    # kogany's texts as koganyd answers them (W1-Y9 run of mempool_ycash_parity.py, 2026-11-01, and
     # the Display strings of the W3-d / W4-d errors), each with ycashd's class for the same case.
     KOGANY_TEXTS = [
         ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '

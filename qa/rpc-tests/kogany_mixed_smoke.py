@@ -7,7 +7,7 @@
 Smoke test of the mixed-line harness paths (kogany plan W1-Y7 harness part, K-18).
 
 Without KOGANY_BIN it runs on ycashd nodes alone and checks what the harness adds: the inert
-MixedLine, the zakurad.toml generated from the user node's real arguments (parsed back), the
+MixedLine, the koganyd.toml generated from the user node's real arguments (parsed back), the
 sync-point state hashes on the C++ nodes, and the verdict classes of real ycashd block and
 transaction rejections against REJECT_CODE_MAP.  With KOGANY_BIN set the same run also asserts
 the followers' tips, state hashes and verdicts at every sync point (use kogany_standin.py as
@@ -110,7 +110,7 @@ class KoganyMixedSmokeTest(YellowbackTestFramework):
 
     def check_toml(self):
         args = START_NODE_ARGS + self.node_args(USER) + self.clock_args()
-        config, notes = kogany.zakurad_config(args, 0, [12345], os.path.join(self.options.tmpdir, 'toml-check'), live=())
+        config, notes = kogany.koganyd_config(args, 0, [12345], os.path.join(self.options.tmpdir, 'toml-check'), live=())
         text = kogany.render_toml(config, notes)
         parsed = tomllib.loads(text)
         heights = parsed['network']['network']['params']['activation_heights']
@@ -122,7 +122,7 @@ class KoganyMixedSmokeTest(YellowbackTestFramework):
         assert any('-yellowbackattestorset=%s' % ATTESTOR_SET[0] in n for n in notes), notes
         assert_equal(parsed['network']['p2p_stack'], 'legacy')
         assert_equal(parsed['network']['initial_testnet_peers'], ['127.0.0.1:12345'])
-        print('zakurad.toml from node %d arguments: %d keys live, %d notes' % (USER, len(heights), len(notes)))
+        print('koganyd.toml from node %d arguments: %d keys live, %d notes' % (USER, len(heights), len(notes)))
 
     # --- sync points ------------------------------------------------------------
 
