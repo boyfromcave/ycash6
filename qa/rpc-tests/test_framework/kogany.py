@@ -883,10 +883,21 @@ def sidecar_enabled(env=None):
     return env.get('KOGANY_SIDECAR', '0') == '1' and bool(env.get('KOGANY_BIN'))
 
 
+def sidecar_dead_port(i):
+    """The port ycashd i advertises in the rig (``-port``): nothing listens on it."""
+    assert 0 <= i <= MAX_NODES
+    return PORT_MIN + 7 * PORT_RANGE + i + _offset()
+
+
 def sidecar_ycashd_args(i, args):
-    """ycashd i's arguments in the rig: the script's, then -connect to kogany i and -listen=0 (the
-    last value of a repeated option wins, so a script's own -listen is overridden)."""
-    return list(args) + ['-connect=127.0.0.1:%d' % p2p_port(i), '-listen=0']
+    """ycashd i's arguments in the rig: the script's, then -connect to kogany i, -listen=0 and a
+    -port nothing listens on (the last value of a repeated option wins, so a script's own -listen is
+    overridden).  The port matters (finding W9-a/F-2): a ycashd's version message advertises
+    127.0.0.1:<its -port>, ycash.conf's port is p2p_port(i) = kogany i's listener, and Zakura's
+    crawler dials what its peers advertise, so with the conf's port every kogany learned every
+    other kogany's address and they meshed, which a network split cannot cut (kogany has no
+    disconnectnode)."""
+    return list(args) + ['-connect=127.0.0.1:%d' % p2p_port(i), '-listen=0', '-port=%d' % sidecar_dead_port(i)]
 
 
 def sidecar_kogany_config(args, i, datadir, live=None):
@@ -1256,7 +1267,9 @@ class MixedLine:
             tip = ref.getbestblockhash()
             if not f.alive():
                 raise AssertionError('kogany %d exited (see %s/zakurad.log)' % (f.k, f.datadir))
-            if not self.sidecar:
+            if self.sidecar:
+                self._check_isolated(f)
+            else:
                 self._connect(ref, f)
             deadline = time.time() + self.sync_timeout
             while True:
@@ -1277,6 +1290,19 @@ class MixedLine:
                                             ('; ' + hint) if hint else ''))
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
+
+    def _check_isolated(self, f):
+        """The rig's topology: a kogany's only peers are ycashds that dialed it.  An outbound
+        connection is a kogany-to-kogany link the script's topology does not have (and its
+        split_network cannot cut): fail (finding W9-a/F-2)."""
+        try:
+            peers = f.rpc.getpeerinfo()
+        except (OSError, JSONRPCException):
+            return
+        out = [p.get('addr') for p in peers if p.get('inbound') is False]
+        if out:
+            raise AssertionError('kogany %d has outbound peer(s) %s: the rig leaked a kogany-to-kogany link'
+                                 % (f.k, out))
 
     def sync_wait(self, conns, waited):
         """``util._sync_blocks`` hook, called while the ycashds' tips still differ: in the rig, after

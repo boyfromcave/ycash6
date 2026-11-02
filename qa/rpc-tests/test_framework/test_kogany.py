@@ -812,7 +812,23 @@ class SidecarRigTest(unittest.TestCase):
 
     def test_ycashd_args(self):
         args = kg.sidecar_ycashd_args(3, ['-listen=1', '-debug=net'])
-        self.assertEqual(args, ['-listen=1', '-debug=net', '-connect=127.0.0.1:%d' % util.p2p_port(3), '-listen=0'])
+        self.assertEqual(args, ['-listen=1', '-debug=net', '-connect=127.0.0.1:%d' % util.p2p_port(3), '-listen=0',
+                                '-port=%d' % kg.sidecar_dead_port(3)])
+        used = ({util.p2p_port(i) for i in range(util.MAX_NODES + 1)} | {util.rpc_port(i) for i in range(util.MAX_NODES + 1)}
+                | {f(k) for f in (kg.kogany_p2p_port, kg.kogany_rpc_port, kg.kogany_v2_port, kg.yewd_rpc_port,
+                                  kg.yewd_backend_rpc_port) for k in range(util.MAX_NODES + 1)})
+        dead = {kg.sidecar_dead_port(i) for i in range(util.MAX_NODES + 1)}
+        self.assertEqual(dead & used, set())
+        self.assertLess(max(dead), 65536)
+
+    def test_isolation_check(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True)
+        k = FakeChain(['g'])
+        k.getpeerinfo = lambda: [{'addr': '127.0.0.1:1', 'inbound': True}]
+        m._check_isolated(k)
+        k.getpeerinfo = lambda: [{'addr': '127.0.0.1:1', 'inbound': True}, {'addr': '127.0.0.1:2', 'inbound': False}]
+        with self.assertRaises(AssertionError):
+            m._check_isolated(k)
 
     def test_kogany_config(self):
         cfg, _notes = kg.sidecar_kogany_config(START + YCASH + VAULT, 2, '/tmp/k2', live=('W1-Y1', 'W2-b'))
@@ -837,7 +853,7 @@ class SidecarRigTest(unittest.TestCase):
         m = kg.MixedLine.from_env()
         kg._CURRENT[0] = m
         args = kg.start_sidecar(1, '/tmp/run', START + YCASH)
-        self.assertEqual(args[-2:], ['-connect=127.0.0.1:%d' % util.p2p_port(1), '-listen=0'])
+        self.assertEqual(args[-3:], ['-connect=127.0.0.1:%d' % util.p2p_port(1), '-listen=0', '-port=%d' % kg.sidecar_dead_port(1)])
         k = kg.SIDECAR_NODES[1]
         self.assertEqual(k.datadir, '/tmp/run/kogany1')
         self.assertEqual(k.events, ['stop', 'write', 'start'])
