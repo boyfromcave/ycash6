@@ -487,6 +487,14 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 return True
         return False
 
+    if os.getenv("YEWD_BIN") and cache_behavior in ('current', 'fresh'):
+        # the pairs (kogany plan section 3b): the cached chain is a ycashd one with ycashd wallets,
+        # which neither a pair's backend datadir nor its yewd wallet reads; the same chain shape is
+        # mined by the run's own pairs instead (kogany.yewd_build_cache)
+        from . import kogany
+        initialize_chain_clean(test_dir, num_nodes)
+        kogany.yewd_build_cache(test_dir, num_nodes)
+        return
     if cache_behavior == 'current':
         if cache_rebuild_required(): rebuild_cache()
         init_from_cache()

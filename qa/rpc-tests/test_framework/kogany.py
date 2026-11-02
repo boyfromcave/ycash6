@@ -1281,6 +1281,29 @@ def yewd_wrap_proxy(i, proxy):
 YEWD_KOGANY_PAIRS = set()
 
 
+def yewd_build_cache(test_dir, num_nodes):
+    """``initialize_chain``'s 'current' cache under YEWD_BIN: the cache's 200-block chain (each of
+    the first four nodes mines 25 blocks twice in turn, so each holds 25 mature and 25 immature
+    coinbases) mined in ``test_dir`` by the run's own pairs, which are then stopped; the script
+    starts them again on that chain and those wallets.  The block times are the node's clock rather
+    than the cache's mocked past (kogany has no mock clock for its templates)."""
+    n = max(num_nodes, 4)
+    for i in range(num_nodes, n):
+        util.initialize_datadir(test_dir, i)
+    rpcs = [util.start_node(i, test_dir) for i in range(n)]
+    for i in range(1, n):
+        util.connect_nodes_bi(rpcs, 0, i)
+    for _ in range(2):
+        for peer in range(4):
+            rpcs[peer].generate(25)
+            util.sync_blocks(rpcs)
+    util.stop_nodes(rpcs)
+    util.wait_bitcoinds()
+    for i in range(num_nodes, n):
+        import shutil
+        shutil.rmtree(os.path.join(test_dir, 'node%d' % i), ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # The ycash6 test rig (kogany plan W9-a; K-3 as amended: the rig, not the product).
 # KOGANY_SIDECAR=1 with KOGANY_BIN turns node i into kogany i + ycashd i:
