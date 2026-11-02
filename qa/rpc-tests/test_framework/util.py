@@ -175,6 +175,7 @@ def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=Fa
     return result
 
 def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=False):
+    waited = 0
     while timeout > 0:
         assert_bitcoinds_alive()
         if allow_different_tips:
@@ -183,8 +184,12 @@ def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=F
             tips = [ x.getbestblockhash() for x in rpc_connections ]
         if tips == [ tips[0] ]*len(tips):
             break
+        hook = MIXED_HOOKS.get('sync_wait')     # the kogany test rig's feed (kogany.py MixedLine.sync_wait)
+        if hook is not None:
+            hook(rpc_connections, waited)
         time.sleep(wait)
         timeout -= wait
+        waited += wait
 
     # Now that the block counts are in sync, wait for the internal
     # notifications to finish
@@ -569,6 +574,10 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
         '-nuparams=76b809bb:1', # Sapling
     ])
     if extra_args is not None: args.extend(extra_args)
+    if os.getenv("KOGANY_SIDECAR", "0") == "1" and os.getenv("KOGANY_BIN"):
+        # the ycash6 test rig (kogany plan W9-a): kogany i on p2p_port(i), ycashd i -connect'ed to it
+        from . import kogany
+        args = args[:1] + kogany.start_sidecar(i, dirname, args[1:])
     if os.getenv("YEWD_BIN"):
         # the parity sidecar (kogany plan section 3b): node i = a -disablewallet backend + yewd on rpc_port(i)
         from . import kogany
