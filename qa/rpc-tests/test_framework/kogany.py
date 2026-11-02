@@ -21,8 +21,9 @@ Environment
                           ports ``kogany_p2p_port(k)`` / ``kogany_rpc_port(k)`` (a range of their own,
                           never one of ycashd's).
 ``KOGANY_PEER``           the ycashd node index each follower peers with and is compared against
-                          (default: the framework's ``kogany_peer`` attribute; ``BitcoinTestFramework``
-                          says 1 when it has two nodes or more, ``YellowbackTestFramework`` says 0).
+                          (default: the script's ``SCRIPT_PEER`` row, else the framework's ``kogany_peer``
+                          attribute; ``BitcoinTestFramework`` says 1 when it has two nodes or more,
+                          ``YellowbackTestFramework`` says 0).
 ``KOGANY_LIVE``           comma list of chunks whose pending key-table rows are emitted as keys
                           (e.g. ``W1-Y1,W2-b`` once kogany parses ``Ycash`` / ``Vault``), added to
                           ``DEFAULT_LIVE`` (``W5-f``: the ``[yellowback]`` rows); ``!<chunk>`` turns a
@@ -193,6 +194,8 @@ ZAKURAD_KEY_TABLE = [
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
     ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
      'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
+    ('-pqfalcon=<0|1>', 'pending:W3-c', 'kogany.pq_falcon_height',
+     '1 = -pqfalconheight=0 (Falcon from the vault activation); same open finding W3-c/F-1'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
     ('-datacarriersize=<n>', 'live', 'mempool.max_datacarrier_bytes', 'int (W1-Y9)'),
@@ -285,6 +288,8 @@ _PENDING_FLAGS = {
     '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
     '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
     '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
+    # -pqfalcon=1 is ycashd's -pqfalconheight=0 (Falcon from the vault activation); -pqfalcon=0, none
+    '-pqfalcon': ('W3-c', ('kogany', 'pq_falcon_height'), lambda v: 0 if v in ('', '1') else -1),
 }
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
@@ -967,6 +972,19 @@ class KoganyNode:
         self.process = None
 
 
+# The peer a script's follower takes when KOGANY_PEER is unset, for the scripts whose default
+# peer cannot carry it (W9-b; the scripts stay unchanged, the shard runner sets no per-script env):
+#   vault_activation_restart  node 1 is the Sapling case (Sapling at 10, nothing else: a chain kogany
+#                             cannot follow); node 3 is the Vault activation invalidated at its height
+#                             (W2-d ran it with KOGANY_PEER=2|3|5)
+#   vault_primitive           VaultHarness.assert_connected counts node 1's getpeerinfo exactly (2):
+#                             a follower of node 1 is a third peer; node 0's count is never asserted
+SCRIPT_PEER = {
+    'vault_activation_restart': 3,
+    'vault_primitive': 0,
+}
+
+
 class MixedLine:
     """The run's kogany followers and the cross-line assertions.  ``from_env`` returns an inert
     instance when ``KOGANY_BIN`` is unset: every method is then a no-op."""
@@ -1035,6 +1053,8 @@ class MixedLine:
         """Called by ``BitcoinTestFramework.main`` once the options are parsed."""
         self.tmpdir = test.options.tmpdir
         self.script_invalidates = _calls_invalidate(type(test))
+        if self.peer is None:
+            self.peer = SCRIPT_PEER.get(os.path.splitext(os.path.basename(sys.argv[0]))[0])
         if self.peer is None:
             self.peer = getattr(test, 'kogany_peer', None)
             if self.peer is None:
