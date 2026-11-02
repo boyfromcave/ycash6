@@ -251,7 +251,7 @@ class VaultTestBase(BitcoinTestFramework):
             txid = v.node_send(self.node, hex_)
         except JSONRPCException as e:
             raise AssertionError('%s: the node refused (%s); the model accepts' % (label, e.error['message']))
-        kogany.current().offer_tx(hex_, None, label)   # mixed line (KOGANY_MEMPOOL=1): kogany accepts too
+        kogany.current().offer_tx(hex_, None, label, node=self.node)   # mixed line (KOGANY_MEMPOOL=1): kogany accepts too
         print('    ok   %s' % label)
         return txid
 
@@ -263,7 +263,7 @@ class VaultTestBase(BitcoinTestFramework):
         except JSONRPCException as e:
             msg = e.error['message']
             assert _has_reason(msg, node_reason), '%s: expected %r in the node\'s reason %r' % (label, node_reason, msg)
-            kogany.current().offer_tx(hex_, e, label)   # mixed line (KOGANY_MEMPOOL=1): the same verdict class
+            kogany.current().offer_tx(hex_, e, label, node=self.node)   # mixed line (KOGANY_MEMPOOL=1): the same verdict class
             print('    no   %s (%s)' % (label, msg))
             return msg
         raise AssertionError('%s: the node accepted; the model predicts %r' % (label, model_reason))

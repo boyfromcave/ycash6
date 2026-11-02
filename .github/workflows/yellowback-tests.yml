@@ -80,6 +80,11 @@ name: yellowback tests
 #     check. Off unless the repository variable KOGANY_MIXED is 'true'; it runs on
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
+#   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
+#     `zakurad` and `sidecar-rig`, the 50 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
+#     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
+#     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
 on:
   push:
     # upgrade/vault-in-term (in-term claims plan §7, T6) is the in-term line, cut from upgrade/vault;
@@ -99,14 +104,14 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites), weekly (fuzz, every Yellowback* and Vault* target, about 4 hours), bin (build and node-bin only) or mixed (the kogany mixed tier only)'
+        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites), weekly (fuzz, every Yellowback* and Vault* target, about 4 hours), bin (build and node-bin only), mixed (the kogany mixed tier only) or sidecar (the kogany test-rig nightly)'
         type: choice
-        options: [all, push, nightly, weekly, bin, mixed]
+        options: [all, push, nightly, weekly, bin, mixed, sidecar]
         default: all
   workflow_call:
     inputs:
       tier:
-        description: 'all, push, nightly, weekly, bin or mixed (as the dispatch input)'
+        description: 'all, push, nightly, weekly, bin, mixed or sidecar (as the dispatch input)'
         type: string
         default: all
       release_package:
@@ -292,6 +297,23 @@ jobs:
           gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f tier="$TIER" \
             || echo "::warning::could not dispatch the $TIER tier on $BRANCH (no such branch, or its copy of this workflow has no tier input)"
 
+  # The W9-a sidecar nightly's dispatcher: tier `sidecar` on vaults/kogany-compat at 03:00 when the
+  # mixed tier is switched on (KOGANY_MIXED). Separate from schedule-fanout, whose branch list is the
+  # lead architect's (upgrade/vault only); like it, it takes effect from the default branch's copy.
+  sidecar-fanout:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *' && vars.KOGANY_MIXED == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch tier sidecar on vaults/kogany-compat
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref vaults/kogany-compat -f tier=sidecar \
+            || echo "::warning::could not dispatch the sidecar tier on vaults/kogany-compat (no such branch, or its copy of this workflow has no sidecar tier)"
+
   # The nightly node-bin producer (workspace docs/plans/kogany/ci-design.md, "Artifact contracts"):
   # yew's yewd gates and yolo's regtest take ycashd from a node-bin of a push, schedule or dispatch
   # run at a pinned commit. A branch tip that stops moving would see its node-bin expire 30 days
@@ -336,7 +358,7 @@ jobs:
   # once and hands them to `unit` and to every `functional` shard as one artifact; `sidecars` builds
   # the two Rust sidecars (yolo, chain-viz) in parallel with it. Nothing is rebuilt per shard.
   build:
-    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "bin", "mixed"]'), inputs.tier || 'push')
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "bin", "mixed", "sidecar"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
@@ -427,7 +449,7 @@ jobs:
   # old main job built them from copies under $RUNNER_TEMP (run 36444762343). --locked at the pins
   # (audit I-5); the cache is keyed on the two pins, which fix both Cargo.locks.
   sidecars:
-    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "mixed"]'), inputs.tier || 'push')
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "mixed", "sidecar"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -603,7 +625,7 @@ jobs:
   # upload it as this run's artifact, so every `mixed` job and its "Re-run failed jobs" use the same
   # three binaries (ycashd, zakurad, yewd) for 30 days, whatever the producer's retention.
   zakurad:
-    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
+    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || inputs.tier == 'sidecar' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
@@ -766,7 +788,7 @@ jobs:
   mixed:
     name: mixed ${{ matrix.group }}
     needs: [build, sidecars, zakurad]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.zakurad.result == 'success' }}
+    if: ${{ !cancelled() && inputs.tier != 'sidecar' && needs.build.result == 'success' && needs.zakurad.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -842,6 +864,105 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
+  # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
+  # 50 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a kogany zakurad on the node's
+  # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
+  # so every block and transaction between nodes passes kogany's validation and ycashd's again
+  # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
+  # script with its group's flags (mirror, mempool). Report-only: the job never fails the run and is
+  # in no check; the plan's exit gate ("nightly green 7 days") is read from this job's run history.
+  # Only on tier `sidecar` (sidecar-fanout every night, or a dispatch); never on a push.
+  sidecar-rig:
+    name: sidecar ${{ matrix.group }} (report-only)
+    needs: [build, sidecars, zakurad]
+    if: ${{ !cancelled() && inputs.tier == 'sidecar' && needs.build.result == 'success' && needs.zakurad.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [node, vault, yed, fees, attest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (zakurad)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zakurad-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.group == 'attest' && needs.sidecars.result == 'success'
+        with:
+          name: sidecars
+          path: ${{ runner.temp }}
+      - name: Unpack, and check zakurad runs here
+        run: |
+          tar xzf "$RUNNER_TEMP/node-bin.tgz"
+          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/zakurad-bin.tgz" -C "$RUNNER_TEMP/zk"
+          cat "$RUNNER_TEMP/zk/zakurad-bin.json"
+          if ldd "$RUNNER_TEMP/zk/zakurad" | grep 'not found'; then
+            echo "::error::zakurad needs a library this runner lacks (the zakurad-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
+          fi
+          "$RUNNER_TEMP/zk/zakurad" --version
+          echo "KOGANY_BIN=$RUNNER_TEMP/zk/zakurad" >> "$GITHUB_ENV"
+          if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
+            mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
+            echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
+            echo "CHAINVIZ_BIN=$RUNNER_TEMP/sidecars/chain-viz" >> "$GITHUB_ENV"
+          fi
+      - name: The test rig smoke (two ycashd wallets and a YED mint through koganys)
+        id: smoke
+        if: matrix.group == 'node'
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          KOGANY_SIDECAR: '1'
+          KOGANY_STRICT: '1'
+        run: |
+          mkdir -p "$TMPDIR"
+          ZCASHD="$PWD/src/ycashd" python3 -u qa/rpc-tests/kogany_sidecar_smoke.py --srcdir="$PWD/src" --nocleanup --tmpdir="$TMPDIR/smoke"
+      - name: The group's gated sidecar scripts (KOGANY_STRICT=1)
+        id: gate
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run sidecar --of "$GROUP" --state gate --jobs 2
+      - name: The group's report-only sidecar scripts
+        id: report
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run sidecar --of "$GROUP" --state report --jobs 2
+      - name: Upload ycashd and kogany logs when a step failed
+        if: ${{ !cancelled() && (steps.smoke.outcome == 'failure' || steps.gate.outcome == 'failure' || steps.report.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidecar-logs-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/sidecar-tests/**/node*/regtest/debug.log
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/zakurad.log
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/zakurad.toml
+          retention-days: 14
+          if-no-files-found: warn
+
   # The S-track pair shard (kogany plan §3b; the harness's YEWD_BIN mode): every node a ycashd
   # -disablewallet backend with yewd in front of it. This is the "backend ycash6" leg of plan §5
   # (the backend-agnostic differential); column 3 of the W9 matrix, yewd in front of kogany, needs
@@ -912,7 +1033,7 @@ jobs:
   mixed-gate:
     name: mixed tier
     needs: [zakurad, mixed]
-    if: ${{ always() && needs.zakurad.result != 'skipped' }}
+    if: ${{ always() && needs.zakurad.result != 'skipped' && inputs.tier != 'sidecar' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

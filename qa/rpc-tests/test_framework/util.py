@@ -175,6 +175,7 @@ def sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=Fa
     return result
 
 def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=False):
+    waited = 0
     while timeout > 0:
         assert_bitcoinds_alive()
         if allow_different_tips:
@@ -183,8 +184,12 @@ def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=F
             tips = [ x.getbestblockhash() for x in rpc_connections ]
         if tips == [ tips[0] ]*len(tips):
             break
+        hook = MIXED_HOOKS.get('sync_wait')     # the kogany test rig's feed (kogany.py MixedLine.sync_wait)
+        if hook is not None:
+            hook(rpc_connections, waited)
         time.sleep(wait)
         timeout -= wait
+        waited += wait
 
     # Now that the block counts are in sync, wait for the internal
     # notifications to finish
@@ -196,7 +201,17 @@ def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=F
         time.sleep(wait)
         timeout -= wait
 
+    _sync_failed('blocks', rpc_connections)
     raise AssertionError("Block sync failed")
+
+def _sync_failed(kind, rpc_connections):
+    """The mixed harness's diagnostics for a failed sync (the kogany rig prints each pair's state)."""
+    hook = MIXED_HOOKS.get('sync_failed')
+    if hook is not None:
+        try:
+            hook(kind, rpc_connections)
+        except Exception as e:
+            print('kogany: sync diagnostics failed: %r' % (e,))
 
 def sync_mempools(rpc_connections, wait=0.5, timeout=60):
     """
@@ -210,6 +225,7 @@ def sync_mempools(rpc_connections, wait=0.5, timeout=60):
     return result
 
 def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
+    waited = 0
     while timeout > 0:
         assert_bitcoinds_alive()
         pool = set(rpc_connections[0].getrawmempool())
@@ -219,8 +235,12 @@ def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
                 num_match = num_match+1
         if num_match == len(rpc_connections):
             break
+        hook = MIXED_HOOKS.get('mempool_wait')  # the kogany test rig's transaction feed (kogany.py)
+        if hook is not None:
+            hook(rpc_connections, waited)
         time.sleep(wait)
         timeout -= wait
+        waited += wait
 
     # Now that the mempools are in sync, wait for the internal
     # notifications to finish
@@ -232,6 +252,7 @@ def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
         time.sleep(wait)
         timeout -= wait
 
+    _sync_failed('mempool', rpc_connections)
     raise AssertionError("Mempool sync failed")
 
 bitcoind_processes = {}
@@ -569,6 +590,10 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
         '-nuparams=76b809bb:1', # Sapling
     ])
     if extra_args is not None: args.extend(extra_args)
+    if os.getenv("KOGANY_SIDECAR", "0") == "1" and os.getenv("KOGANY_BIN"):
+        # the ycash6 test rig (kogany plan W9-a): kogany i on p2p_port(i), ycashd i -connect'ed to it
+        from . import kogany
+        args = args[:1] + kogany.start_sidecar(i, dirname, args[1:])
     if os.getenv("YEWD_BIN"):
         # the parity sidecar (kogany plan section 3b): node i = a -disablewallet backend + yewd on rpc_port(i)
         from . import kogany
@@ -588,6 +613,9 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
     if COVERAGE_DIR:
         coverage.write_all_rpc_commands(COVERAGE_DIR, proxy)
 
+    if os.getenv("KOGANY_SIDECAR", "0") == "1" and os.getenv("KOGANY_BIN"):
+        from . import kogany
+        kogany.sidecar_started(i)
     hook = MIXED_HOOKS.get('start')
     if hook is not None:
         hook(i, args[1:], proxy)
