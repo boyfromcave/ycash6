@@ -102,6 +102,7 @@ from .util import (
     sync_mempools,
     wait_bitcoinds,
 )
+from . import kogany
 from . import yellowback_model as ym
 from .yellowback_model import assert_model_matches  # noqa: F401  (re-exported, section 7)
 
@@ -535,6 +536,11 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # U-22: create the YED attestor set (and restart onto it) at the end of setup_network, so
     # every yed_* RPC exists when run_test starts; False leaves it to activate()
     auto_attestor_set = True
+    # The mixed-line harness (KOGANY_BIN, kogany plan K-18): the followers peer with, and are
+    # compared against, the user's node -- an enforcing node, so a block the stock node 1 accepts
+    # and the enforcing nodes reject never splits the follower from its reference (KOGANY_PEER
+    # overrides).
+    kogany_peer = USER
 
     def __init__(self, num_nodes=6):
         super().__init__()
@@ -835,6 +841,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         p = bitcoind_processes.pop(i)
         os.kill(p.pid, signal.SIGKILL)
         p.wait()
+        kogany.kill_yewd_backend(i)       # YEWD_BIN: the backend dies with its yewd
         self.nodes[i] = None
 
     def restart_quiet(self, i, extra=None):
@@ -950,6 +957,7 @@ def assert_rejected(node, blockhash):
     """The node rejected ``blockhash`` (U-21: an invalid block, DoS 100): it sits off the active
     chain (``confirmations == -1``). ``rejectedBlocks`` left with the enforcement machinery."""
     assert_equal(node.getblock(blockhash)['confirmations'], -1)
+    kogany.current().on_block_rejected(node, blockhash)   # mixed line: the followers reject it too
 
 
 def assert_banscore_zero(nodes):
@@ -1410,7 +1418,9 @@ def mine_block_raw(node, txs, coinbase=None, gbt=None, n_time=None):
         block.vtx.append(t)
     block.hashMerkleRoot = block.calc_merkle_root()
     block.solve()
-    result = node.submitblock(bytes_to_hex_str(block.serialize()))
+    block_hex = bytes_to_hex_str(block.serialize())
+    result = node.submitblock(block_hex)
+    kogany.current().offer_block(block_hex, result, 'mine_block_raw')   # mixed line: same verdict class
     return result, '%064x' % block.sha256
 
 

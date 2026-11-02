@@ -1,5 +1,6 @@
 """
   Copyright 2011 Jeff Garzik
+  Copyright (c) 2026 The Ycash developers
 
   AuthServiceProxy has the following improvements over python-jsonrpc's
   ServiceProxy class:
@@ -153,7 +154,8 @@ class AuthServiceProxy():
                 'code': -342, 'message': 'missing HTTP response from server'})
         
         content_type = http_response.getheader('Content-Type')
-        if content_type != 'application/json':
+        # the media type alone: Zakura answers "application/json; charset=utf-8" (kogany plan K-18)
+        if (content_type or '').split(';', 1)[0].strip().lower() != 'application/json':
             raise JSONRPCException({
                 'code': -342, 'message': 'non-JSON HTTP response with \'%i %s\' from server' % (http_response.status, http_response.reason)})
 
