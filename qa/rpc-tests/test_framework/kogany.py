@@ -43,6 +43,14 @@ Environment
                           ycashd ``-disablewallet`` backend plus a yewd in front of it on the node's
                           RPC port (``start_yewd_pair``; contract: yew/yewd/README.md "Harness mode").
                           Independent of ``KOGANY_BIN``.
+``KOGANY_SIDECAR``        1 (with ``KOGANY_BIN``): the ycash6 test rig of W9-a (K-3 as amended): node i is
+                          kogany i on ``p2p_port(i)`` plus ycashd i with ``-connect`` to it and
+                          ``-listen=0`` on ``rpc_port(i)`` (``start_sidecar``; "The ycash6 test rig"
+                          below).  No peer follower is started; each kogany is compared with its own
+                          ycashd at every sync point.
+``KOGANY_SIDECAR_PUMP_AFTER``  seconds a lagging rig kogany gets before the harness feeds it its own
+                          ycashd's blocks by ``submitblock`` (default 5; ``MixedLine._pump``, finding
+                          W9-a/F-1).
 
 Framework API (for W2-d, W4-e, W5-f, W6 and the S track)
 --------------------------------------------------------
@@ -65,6 +73,9 @@ proposal)`` / ``classify_kogany_tx(error)`` / ``classify_kogany_text(path, text)
 ``zakurad_config(args, slot, peer_p2p_ports, datadir)``  ycashd arguments -> (config dict, notes);
 ``render_toml(config, notes)``        the ``zakurad.toml`` text; ``ZAKURAD_KEY_TABLE`` /
                                       ``NU_BRANCH_TABLE`` are the map.
+``start_sidecar(i, dirname, args)`` / ``sidecar_ycashd_args`` / ``sidecar_kogany_config`` /
+``sidecar_enabled`` / ``SIDECAR_NODES``  the KOGANY_SIDECAR rig (util.start_node calls start_sidecar).
+``MixedLine.sync_wait(conns, waited)``  util._sync_blocks hook: the rig's feed of a lagging kogany.
 ``start_yewd_pair(i, datadir, ycashd, args)`` / ``yewd_pair_argv`` / ``split_yewd_args`` /
 ``yewd_backend_rpc_port(i)`` / ``YEWD_BACKENDS``  the YEWD_BIN pair (util.start_node calls it).
 
@@ -82,6 +93,10 @@ p2p_nu_peer_management, signrawtransaction_offline, yellowback_framework_smoke) 
 shard list; a script's ``invalidateblock`` reaches only the ycashd node it calls, so the follower keeps the
 invalidated branch unless ``KOGANY_MIRROR_INVALIDATE=1`` (Zakura serves
 ``invalidateblock``/``reconsiderblock``; whether a wave's shard turns it on is W2-d's choice).
+In the rig (``KOGANY_SIDECAR=1``) the same limits hold per node: every ycashd has one more peer (its own
+kogany), a script's ``invalidateblock`` reaches the ycashd only (the mirror works per pair), a ``kill9``
+leaves the node's kogany running, and the blocks a ycashd mines under ``mock_clock`` reach the others only
+if kogany's real clock accepts their time.
 """
 
 import atexit
