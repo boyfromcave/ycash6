@@ -439,6 +439,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
     strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for pool fees (default: -mineraddress when that is a transparent P2PKH address)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutdefault", _("Take -mineraddress as the payout address when -yellowbackpayoutaddress is not set; with -yellowbackpayoutdefault=0 a node without -yellowbackpayoutaddress names no payout key and emits no tag (default: 1)"));
     strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
     strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays pool fees to when it is eligible"));
     strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
@@ -2405,7 +2406,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             KeyIO yellowbackKeyIO(chainparams);
             yellowback::MinerConfig cfg;
             std::string payout = GetArg("-yellowbackpayoutaddress", "");
-            if (payout.empty() && mapArgs.count("-mineraddress")) payout = mapArgs["-mineraddress"];   // MINER-2's default (K22)
+            if (payout.empty() && mapArgs.count("-mineraddress") && GetBoolArg("-yellowbackpayoutdefault", true))
+                payout = mapArgs["-mineraddress"];   // MINER-2's default (K22); -yellowbackpayoutdefault=0 opts out (F-S5-9)
             if (!payout.empty()) {
                 CTxDestination dest = yellowbackKeyIO.DecodeDestination(payout);
                 if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) cfg.payoutKey = *keyID;
