@@ -711,6 +711,15 @@ def set_node_times(nodes, t):
 
 def wait_bitcoinds():
     # Wait for all bitcoinds to cleanly exit
+    if os.getenv("YEWD_BIN"):
+        # a script that failed inside setup_network never got its nodes to stop_nodes: a pair still
+        # running is stopped here, or the wait below never ends (kogany.YEWD_KOGANY_PAIRS, F-S5-14)
+        for i, p in list(bitcoind_processes.items()):
+            if i in YEWD_PAIRS and p.poll() is None:
+                try:
+                    get_rpc_proxy(rpc_url(i), i, timeout=30).stop()
+                except Exception:
+                    p.terminate()
     for bitcoind in list(bitcoind_processes.values()):
         bitcoind.wait()
     bitcoind_processes.clear()
