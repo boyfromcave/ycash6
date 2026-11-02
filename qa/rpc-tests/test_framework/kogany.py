@@ -1341,15 +1341,21 @@ def yewd_build_cache(test_dir, num_nodes):
     n = max(num_nodes, 4)
     for i in range(num_nodes, n):
         util.initialize_datadir(test_dir, i)
-    rpcs = [util.start_node(i, test_dir) for i in range(n)]
-    for i in range(1, n):
-        util.connect_nodes_bi(rpcs, 0, i)
-    for _ in range(2):
-        for peer in range(4):
-            rpcs[peer].generate(25)
-            util.sync_blocks(rpcs)
-    util.stop_nodes(rpcs)
-    util.wait_bitcoinds()
+    rpcs = []
+    try:
+        for i in range(n):
+            rpcs.append(util.start_node(i, test_dir))
+        for i in range(1, n):
+            util.connect_nodes_bi(rpcs, 0, i)
+        for _ in range(2):
+            for peer in range(4):
+                rpcs[peer].generate(25)
+                util.sync_blocks(rpcs)
+    finally:
+        # a failure here leaves the framework without self.nodes: stop the pairs, or its
+        # wait_bitcoinds waits for them forever
+        util.stop_nodes(rpcs)
+        util.wait_bitcoinds()
     for i in range(num_nodes, n):
         import shutil
         shutil.rmtree(os.path.join(test_dir, 'node%d' % i), ignore_errors=True)
