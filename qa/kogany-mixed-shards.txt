@@ -24,73 +24,73 @@
 #   excluded <script> <reason>     never in a mixed shard (the run without KOGANY_BIN still has it)
 
 # --- the harness itself (W1-Y7) and node plumbing
-node     kogany_mixed_smoke            report  W1   direct
+node     kogany_mixed_smoke            gate    W1   direct
 node     stopatheight                  report  W9
 node     ycash_bootstrap               report  W9
-node     testnet_ceremony              report  W9
+node     testnet_ceremony              gate    W9
 node     lightwalletd_only             report  W9
-node     z_validateaddress_nowallet    report  W9
+node     z_validateaddress_nowallet    gate    W9
 
 # --- the vault primitive (W2-d boundary, W4-e state, W7 reads)
-vault    vault_activation_restart      report  W2   mirror
-vault    vault_upgrade                 report  W2   mirror
-vault    vault_primitive               report  W4   mirror
-vault    vault_slashing                report  W4   mirror
-vault    vault_undo_prune              report  W4   mirror
-vault    vault_pq_reorg                report  W4   mirror
-vault    vault_dos                     report  W4   mirror
-vault    vault_rpc                     report  W7   mirror
-vault    vault_rpc_contract            report  W7
-vault    vault_pq_relay                report  W6
-vault    vault_bridge                  report  W9
-vault    vault_pq                      report  W9
+vault    vault_activation_restart      gate    W2   mirror
+vault    vault_upgrade                 gate    W2   mirror
+vault    vault_primitive               gate    W4   mirror
+vault    vault_slashing                gate    W4   mirror
+vault    vault_undo_prune              gate    W4   mirror
+vault    vault_pq_reorg                gate    W4   mirror
+vault    vault_dos                     gate    W4   mirror
+vault    vault_rpc                     gate    W7   mirror
+vault    vault_rpc_contract            gate    W7
+vault    vault_pq_relay                gate    W6
+vault    vault_bridge                  gate    W9
+vault    vault_pq                      gate    W9
 vault    vault_pq_wallet               report  W9
 vault    vault_pq_wallet_restore       report  W9
 vault    wallet_pq_address             report  W9
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
-yed      yellowback_lifecycle          report  W5
-yed      yellowback_activation_reorg   report  W5   mirror
-yed      yellowback_reorg_restart      report  W5   mirror
-yed      yellowback_claim              report  W5
-yed      yellowback_interm             report  W5
-yed      yellowback_index              report  W5   mirror
-yed      yellowback_upgrade            report  W5   mirror
-yed      yellowback_rpc_contract       report  W7
-yed      yellowback_redeem_boundary    report  W9
-yed      yellowback_cancel_limit       report  W9
-yed      yellowback_pq                 report  W9
-yed      yellowback_pq_dayone          report  W9
-yed      yellowback_void_mint          report  W9
-yed      yellowback_mint_armed         report  W9
-yed      yellowback_wallet_restore     report  W9
-yed      yellowback_sapling            report  W9
-yed      yellowback_wallet_lifecycle   report  W9
-yed      yellowback_hardening          report  W9
-yed      yellowback_stock_node         report  W9   mirror
+yed      yellowback_lifecycle          gate    W5
+yed      yellowback_activation_reorg   gate    W5   mirror
+yed      yellowback_reorg_restart      gate    W5   mirror
+yed      yellowback_claim              gate    W5
+yed      yellowback_interm             gate    W5
+yed      yellowback_index              gate    W5   mirror
+yed      yellowback_upgrade            gate    W5   mirror
+yed      yellowback_rpc_contract       gate    W7
+yed      yellowback_redeem_boundary    gate    W9
+yed      yellowback_cancel_limit       gate    W9
+yed      yellowback_pq                 gate    W9
+yed      yellowback_pq_dayone          gate    W9
+yed      yellowback_void_mint          gate    W9
+yed      yellowback_mint_armed         gate    W9
+yed      yellowback_wallet_restore     gate    W9
+yed      yellowback_sapling            gate    W9
+yed      yellowback_wallet_lifecycle   gate    W9
+yed      yellowback_hardening          gate    W9
+yed      yellowback_stock_node         gate    W9   mirror
 
 # --- fees and mempool (W5-f fees state, W6 policy and mempool-set equality)
-fees     yellowback_fees               report  W5   mempool
-fees     yellowback_fees_reaccept      report  W5   mempool
-fees     yellowback_fee                report  W6   mempool
-fees     yellowback_mempool_limits     report  W6   mempool
-fees     vault_policy                  report  W6   mempool
-fees     vault_refee                   report  W6   mempool
+fees     yellowback_fees               gate    W5   mempool
+fees     yellowback_fees_reaccept      gate    W5   mempool
+fees     yellowback_fee                gate    W6   mempool
+fees     yellowback_mempool_limits     gate    W6   mempool
+fees     vault_policy                  gate    W6   mempool
+fees     vault_refee                   gate    W6   mempool
 fees     yellowback_wr_flags           report  W9   mempool
 
 # --- attestation, roles and mining (W5-c/f seats and liveness, W8 mining; yolo and chain-viz
 #     come from the sidecars job)
-attest   yellowback_attest_evict       report  W5
-attest   yellowback_attest_rejoin      report  W5
-attest   yellowback_attest_live        report  W5
-attest   yellowback_pricefeed          report  W5
-attest   yellowback_mining             report  W8   mirror
-attest   yellowback_stratum            report  W8
-attest   yellowback_attest             report  W9
-attest   yellowback_attest_wallet      report  W9   mirror
-attest   yellowback_attest_bond        report  W9
-attest   yellowback_quote              report  W9
-attest   yellowback_chainviz           report  W9   mirror
+attest   yellowback_attest_evict       gate    W5
+attest   yellowback_attest_rejoin      gate    W5
+attest   yellowback_attest_live        gate    W5
+attest   yellowback_pricefeed          gate    W5
+attest   yellowback_mining             gate    W8   mirror
+attest   yellowback_stratum            gate    W8
+attest   yellowback_attest             gate    W9
+attest   yellowback_attest_wallet      gate    W9   mirror
+attest   yellowback_attest_bond        gate    W9
+attest   yellowback_quote              gate    W9
+attest   yellowback_chainviz           gate    W9   mirror
 
 # --- the ycash6 test rig (kogany plan W9-a; K-3 as amended): the same scripts again with
 #     KOGANY_SIDECAR=1, every node a kogany plus a ycashd -connect'ed to it (-listen=0), the wallet

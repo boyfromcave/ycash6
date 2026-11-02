@@ -21,8 +21,9 @@ Environment
                           ports ``kogany_p2p_port(k)`` / ``kogany_rpc_port(k)`` (a range of their own,
                           never one of ycashd's).
 ``KOGANY_PEER``           the ycashd node index each follower peers with and is compared against
-                          (default: the framework's ``kogany_peer`` attribute; ``BitcoinTestFramework``
-                          says 1 when it has two nodes or more, ``YellowbackTestFramework`` says 0).
+                          (default: the script's ``SCRIPT_PEER`` row, else the framework's ``kogany_peer``
+                          attribute; ``BitcoinTestFramework`` says 1 when it has two nodes or more,
+                          ``YellowbackTestFramework`` says 0).
 ``KOGANY_LIVE``           comma list of chunks whose pending key-table rows are emitted as keys
                           (e.g. ``W1-Y1,W2-b`` once kogany parses ``Ycash`` / ``Vault``), added to
                           ``DEFAULT_LIVE`` (``W5-f``: the ``[yellowback]`` rows); ``!<chunk>`` turns a
@@ -46,6 +47,10 @@ Environment
                           koganyd refuse to start).
 ``KOGANY_ARGS``           extra ``koganyd`` arguments, whitespace-separated, placed before ``start``.
 ``KOGANY_LOG``            ``tracing.filter`` for the followers (default ``info``).
+``KOGANY_STATS_FILE``     a file the run appends one JSON line to when the followers stop: the
+                          script, the counters (sync points, statehash points, verdicts, verdict
+                          classes, mempool points) and the notes (rpc-tests.py prints a passing
+                          script's output nowhere; W9-b's results table reads this).
 ``YEWD_BIN``              path to ``yewd`` (the parity sidecar, plan section 3b): every node becomes a
                           ycashd ``-disablewallet`` backend plus a yewd in front of it on the node's
                           RPC port (``start_yewd_pair``; contract: yew/yewd/README.md "Harness mode").
@@ -130,7 +135,10 @@ from .util import MAX_NODES, PORT_MIN, PORT_RANGE, PortSeed, p2p_port, rpc_port
 
 # ---------------------------------------------------------------------------
 # Ports: kogany slot k never takes one of ycashd's (p2p_port/rpc_port cover PORT_MIN..PORT_MIN +
-# 2*PORT_RANGE); the three kogany ranges sit above them, with the same per-seed offset.
+# 2*PORT_RANGE); the three kogany ranges sit above them, with the same per-seed offset, shifted by
+# MAX_NODES + 1 inside their band: yellowback_stratum puts yolo's stratum and status ports at
+# 21000 / 26000 + the same offset + its cell index (the 2*/3*PORT_RANGE bands), so an unshifted
+# slot 0 took cell 0's stratum port ("Address already in use", W9-b).
 
 def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
@@ -281,12 +289,18 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
-# -regtestenablezip209, -reindex-yellowback, and the retired -yellowback / -yellowbackenforce /
+# -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
 # -yellowbackstartheight flags.
+# Matched by the exact name (a prefix would swallow every -yellowback* row): -yellowback, which
+# ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index (init.cpp:436;
+# yellowback_hardening h6).
+_IGNORED_NAMES = frozenset({'-yellowback'})
 def _bool01(v):
-    if v not in ('0', '1'):
+    # a bare -flag is ycashd's -flag=1 (GetBoolArg; yellowback_mint_armed passes
+    # -yellowbackmintrequiresarmed alone)
+    if v not in ('', '0', '1'):
         raise UnmappedArgument('a 0/1 flag has the value %r' % v)
-    return v == '1'
+    return v != '0'
 
 
 def _scaled(scale, what):
@@ -327,7 +341,7 @@ _FALCON_FLAGS = {
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
 # follower takes the YED attestor set and the [yellowback] parameters).
-DEFAULT_LIVE = frozenset({'W5-f'})
+DEFAULT_LIVE = frozenset({'W1-Y1', 'W2-b', 'W5-f'})
 
 # Rows live today: (config path, converter).
 _LIVE_FLAGS = {
@@ -411,6 +425,9 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
                 _set(cfg, path, conv(value))
             else:
                 notes.append('pending:%s: %s -> %s = %s' % (chunk, a, '.'.join(path), value))
+            continue
+        if name in _IGNORED_NAMES:
+            notes.append('ignored: %s' % a)
             continue
         if name.startswith(_IGNORED_PREFIXES) or name.startswith('-yellowbackpayout'):
             if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-yellowbacktestfault',
@@ -594,6 +611,7 @@ REJECT_CODE_MAP = [
 # Rows marked "unverified" name a kogany text no run has produced yet (W4-d ``check::vault`` is in
 # flight on kc/snapshot-hook): they are written from the source and checked when that lands.
 CXX = 'cxx'
+CXX_CODE = 'cxx-code'   # the row's group(1) is a whole ycashd "<code>: <reason>" (classify_cxx_tx)
 
 KOGANY_REASON_MAP = [
     # --- transactions: duplicates (ycashd answers the txid of a transaction its mempool holds)
@@ -670,6 +688,13 @@ KOGANY_REASON_MAP = [
      'the header time rule (ycashd time-too-new, clock-dependent)'),
     ('block', r'^rejected$', REJECT_CONSENSUS,
      'SubmitBlockErrorResponse::Rejected: an invalid block (ycashd invalid / bad-*, DoS 100)'),
+    # --- W7-e (kogany zakura-rpc ycash_reject.rs): kogany answers in ycashd's own words, so the last
+    #     rows hand the text to REJECT_CODE_MAP: a BIP 22 reason from submitblock, a "<code>: <reason>"
+    #     from sendrawtransaction (the code decides policy, as classify_cxx_tx does)
+    ('block', r'^(?!rejected$)([a-z][a-z0-9-]*)$', CXX,
+     'W7-e: submitblock answers ycashd\'s BIP 22 reason (bad-cb-amount, bad-txns-..., ...)'),
+    ('tx', r'^([0-9]+: [A-Za-z][A-Za-z0-9_-]*)', CXX_CODE,
+     'W7-e: sendrawtransaction answers ycashd\'s "<code>: <reason>" (-26)'),
 ]
 
 def _match(pattern, reason):
@@ -745,6 +770,8 @@ def classify_kogany_text(path, text):
             continue
         if cls == CXX:
             return _cxx_class('block' if path == 'proposal' else path, m.group(1)), (p, pattern, src)
+        if cls == CXX_CODE:
+            return classify_cxx_tx({'message': m.group(1)}), (p, pattern, src)
         return cls, (p, pattern, src)
     return None, None
 
@@ -1155,6 +1182,19 @@ class KoganyNode:
         self.config = config
 
     def start(self, timeout=90):
+        # a port another process holds (a long-running node on this machine, another run's node) is
+        # reported as that, not as the garbage its listener answers (yellowback_chainviz once hit a
+        # mainnet node's P2P listener on 127.0.0.1:28833 as the follower's RPC port)
+        for what, port in (('p2p', kogany_p2p_port(self.k)), ('rpc', kogany_rpc_port(self.k))):
+            probe = socket.socket()
+            try:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(('127.0.0.1', port))
+            except OSError as e:
+                raise AssertionError('kogany %d: its %s port 127.0.0.1:%d is taken by another process (%s); '
+                                     'rerun with another --portseed' % (self.k, what, port, e))
+            finally:
+                probe.close()
         log = open(os.path.join(self.datadir, 'koganyd.log'), 'ab')
         argv = [self.binary, '-c', self.conf] + self.extra_args + ['start']
         self.process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
@@ -1191,6 +1231,21 @@ class KoganyNode:
         self.process = None
 
 
+# The peer a script's follower takes when KOGANY_PEER is unset, for the scripts whose default
+# peer cannot carry it (W9-b; the scripts stay unchanged, the shard runner sets no per-script env):
+#   vault_activation_restart  node 1 is the Sapling case (Sapling at 10, nothing else: a chain kogany
+#                             cannot follow); node 3 is the Vault activation invalidated at its height
+#                             (W2-d ran it with KOGANY_PEER=2|3|5)
+#   vault_primitive           VaultHarness.assert_connected counts node 1's getpeerinfo exactly (2):
+#                             a follower of node 1 is a third peer; node 0's count is never asserted
+KOGANY_SUBVER = re.compile(r'/(kogany|Zakura|zakura)[:/]')   # zakurad's user agent (/kogany:1.7.0/)
+
+SCRIPT_PEER = {
+    'vault_activation_restart': 3,
+    'vault_primitive': 0,
+}
+
+
 class MixedLine:
     """The run's kogany followers and the cross-line assertions.  ``from_env`` returns an inert
     instance when ``KOGANY_BIN`` is unset: every method is then a no-op."""
@@ -1208,6 +1263,7 @@ class MixedLine:
         self.extra_args = list(extra_args)
         self.yewd = yewd
         self.connect_settle = 5.0
+        self.connect_retry = 60.0     # a restarted peer: seconds of re-dials (_connect)
         self.mirror_invalidate = mirror_invalidate
         self.tx_timeout = tx_timeout
         self.mirrored = {}
@@ -1269,6 +1325,8 @@ class MixedLine:
         self.tmpdir = test.options.tmpdir
         self.script_invalidates = _calls_invalidate(type(test))
         if self.peer is None:
+            self.peer = SCRIPT_PEER.get(os.path.splitext(os.path.basename(sys.argv[0]))[0])
+        if self.peer is None:
             self.peer = getattr(test, 'kogany_peer', None)
             if self.peer is None:
                 self.peer = 1 if getattr(test, 'num_nodes', 1) > 1 else 0
@@ -1286,12 +1344,23 @@ class MixedLine:
                 f.stop()
                 f.write_config(config, notes)
                 f.start()
-            self._connect(proxy, f)
+                self._connect(proxy, f)
+            else:
+                if self.mirror_invalidate:
+                    self._mirror_restart(proxy, f)
+                # the follower kept running: its getpeerinfo may still list the connection to the
+                # peer's previous process (a SIGKILL'd peer, vault_primitive section J), so the
+                # restarted peer is asked instead
+                self._connect(proxy, f, restart=True)
 
     def attach(self, test):
         """Called after ``setup_network``: start the followers against the peer and wait for them
         to reach its tip."""
         if not self.enabled:
+            return
+        if not test.nodes and not getattr(test, 'num_nodes', 0):
+            # a run without nodes (create_cache.py, which rpc-tests.py runs first under -j > 1):
+            # nothing to follow
             return
         if self.sidecar:
             print('kogany: test rig, %d kogany + ycashd pair(s) (%s)' % (len(SIDECAR_NODES), self.binary))
@@ -1322,6 +1391,14 @@ class MixedLine:
         SIDECAR_NODES.clear()
         if self.followers:
             print('kogany: stopped; %s' % ', '.join('%s=%d' % kv for kv in sorted(self.stats.items())))
+            path = os.getenv('KOGANY_STATS_FILE')
+            if path:
+                with open(path, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps({'script': os.path.basename(sys.argv[0]), 'pid': os.getpid(),
+                                         'stats': dict(self.stats), 'mirrored': len(self.mirrored), 'notes': sorted(self._notes),
+                                         'unmapped': sorted(set(self.unmapped)),
+                                         'kogany_unmapped': sorted(set(self.kogany_unmapped))},
+                                        sort_keys=True) + '\n')
         self.followers = []
         if self.unmapped:
             print('kogany: unmapped ycashd reject reasons (add REJECT_CODE_MAP rows): %s'
@@ -1347,7 +1424,7 @@ class MixedLine:
     def _config_for(self, f):
         return koganyd_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
 
-    def _connect(self, proxy, f, settle=None):
+    def _connect(self, proxy, f, settle=None, restart=False):
         """One connection per follower: the follower dials the peer (``initial_testnet_peers``);
         only when it still has no peer after ``settle`` seconds (a peer restart, say) does the peer
         ``addnode <follower> onetry``.  Never two: a script that counts ``getpeerinfo`` sees one
@@ -1356,7 +1433,13 @@ class MixedLine:
         deadline = time.time() + (self.connect_settle if settle is None else settle)
         while True:
             try:
-                if f.rpc.getpeerinfo():
+                if restart:
+                    # the restarted peer's own view: a follower peer per follower (all followers
+                    # share the one peer)
+                    if sum(1 for p in proxy.getpeerinfo() if KOGANY_SUBVER.search(p.get('subver', ''))) \
+                            >= len(self.followers):
+                        return
+                elif f.rpc.getpeerinfo():
                     return
             except (OSError, JSONRPCException):
                 pass
@@ -1368,6 +1451,21 @@ class MixedLine:
                 proxy.addnode(addr, 'onetry')
         except JSONRPCException:
             pass
+        if restart:
+            # the follower may still count the dead connection of the peer's previous process
+            # against max_connections_per_ip = 1 and refuse the first dial (yellowback_wallet_restore:
+            # encryptwallet restarts node 0 twice in a row): dial again until the peer sees it
+            retry = time.time() + self.connect_retry
+            while time.time() < retry:
+                time.sleep(2)
+                try:
+                    peers = proxy.getpeerinfo()
+                    if sum(1 for p in peers if KOGANY_SUBVER.search(p.get('subver', ''))) >= len(self.followers):
+                        return
+                    if not any(p.get('addr') == addr for p in peers):
+                        proxy.addnode(addr, 'onetry')
+                except (OSError, JSONRPCException):
+                    pass
 
     def _pairs(self, conns):
         """[(ycashd connection, kogany)] a sync point compares: every follower against the peer, or,
@@ -1431,6 +1529,32 @@ class MixedLine:
                                             ('; ' + hint) if hint else ''))
                 time.sleep(0.2)
             self._compare_statehash(ref, f, label)
+
+    def _mirror_restart(self, ref, f):
+        """KOGANY_MIRROR_INVALIDATE=1, at a restart of the peer, before the follower reconnects: a
+        restart can erase a branch the script invalidated (vault_activation_restart: "the restart is
+        clean and erases the branch"), which getchaintips no longer shows, and the follower, still
+        on it, would serve it back to the peer the script keeps isolated. Invalidate on the
+        follower the first block of its chain the restarted peer does not know; reconsider a
+        mirrored block the peer's active chain holds again."""
+        self._mirror_reconsider(ref, f)
+        try:
+            h, child = f.rpc.getbestblockhash(), None
+            while True:
+                try:
+                    ref.getblockheader(h)
+                    break                                   # the peer knows it: the common chain
+                except JSONRPCException as e:
+                    if e.error.get('code') != -5:
+                        return
+                child = h
+                h = f.rpc.getblock(h, 1)['previousblockhash']
+            if child is not None:
+                f.rpc.invalidateblock(child)
+                self.mirrored.setdefault(f.k, []).append(child)
+                print('kogany %d: mirrored the restart\'s erase: invalidateblock %s' % (f.k, child[:16]))
+        except (JSONRPCException, KeyError, OSError):
+            pass
 
     def _check_isolated(self, f):
         """The rig's topology: a kogany's only peers are ycashds that dialed it.  An outbound
@@ -1568,13 +1692,7 @@ class MixedLine:
             if not own:
                 self.stats['pumped_blocks_cross'] = self.stats.get('pumped_blocks_cross', 0) + 1
 
-    def _mirror(self, ref, f, got):
-        """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
-        only the ycashd node it calls.  When the follower's tip is a tip the peer holds as
-        ``invalid`` (getchaintips), invalidate on the follower the first block of that branch off
-        the peer's active chain; reconsider it once the peer's active chain contains it again.
-        Opt-in: getchaintips cannot tell a script's invalidateblock from a validation reject, so
-        mirroring could hide a block kogany wrongly accepts (verdict checks still run)."""
+    def _mirror_reconsider(self, ref, f):
         for h in list(self.mirrored.get(f.k, [])):
             try:
                 if ref.getblock(h)['confirmations'] >= 0:
@@ -1583,6 +1701,15 @@ class MixedLine:
                     print('kogany %d: mirrored reconsiderblock %s' % (f.k, h[:16]))
             except JSONRPCException:
                 pass
+
+    def _mirror(self, ref, f, got):
+        """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
+        only the ycashd node it calls.  When the follower's tip is a tip the peer holds as
+        ``invalid`` (getchaintips), invalidate on the follower the first block of that branch off
+        the peer's active chain; reconsider it once the peer's active chain contains it again.
+        Opt-in: getchaintips cannot tell a script's invalidateblock from a validation reject, so
+        mirroring could hide a block kogany wrongly accepts (verdict checks still run)."""
+        self._mirror_reconsider(ref, f)
         try:
             if not any(t['hash'] == got and t['status'] == 'invalid' for t in ref.getchaintips()):
                 return
@@ -1699,9 +1826,25 @@ class MixedLine:
                 if self.sidecar:
                     self.mempool_wait([ref], time.time() - start)   # the rig's feed, pair by pair
                 if time.time() > deadline:
-                    raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s'
-                                         % (f.k, sorted(want - got), sorted(got - want)))
+                    raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s%s'
+                                         % (f.k, sorted(want - got), sorted(got - want),
+                                            self._offer_missing(ref, f, want - got)))
                 time.sleep(0.25)
+
+    def _offer_missing(self, ref, f, txids):
+        """The diagnosis of a mempool difference: each transaction only ycashd holds, offered to
+        the follower with sendrawtransaction, and its answer (the set check has failed already)."""
+        out = []
+        for txid in sorted(txids):
+            try:
+                raw = ref.getrawtransaction(txid)
+                f.rpc.with_timeout(self.tx_timeout + 5).sendrawtransaction(raw)
+                out.append('%s: accepted when offered directly (a relay difference)' % txid[:16])
+            except JSONRPCException as e:
+                out.append('%s: %s' % (txid[:16], _message(e)))
+            except Exception as e:   # a timeout: kogany waits for a missing input
+                out.append('%s: %s' % (txid[:16], e))
+        return ('; offered to kogany: ' + '; '.join(out)) if out else ''
 
     # --- verdicts (rule 4 (iii)) ---------------------------------------------------
 
