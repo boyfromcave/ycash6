@@ -109,27 +109,33 @@ from .util import MAX_NODES, PORT_MIN, PORT_RANGE, PortSeed, p2p_port, rpc_port
 
 # ---------------------------------------------------------------------------
 # Ports: kogany slot k never takes one of ycashd's (p2p_port/rpc_port cover PORT_MIN..PORT_MIN +
-# 2*PORT_RANGE); the three kogany ranges sit above them, with the same per-seed offset.
+# 2*PORT_RANGE); the three kogany ranges sit above them, with the same per-seed offset, shifted by
+# MAX_NODES + 1 inside their band: yellowback_stratum puts yolo's stratum and status ports at
+# 21000 / 26000 + the same offset + its cell index (the 2*/3*PORT_RANGE bands), so an unshifted
+# slot 0 took cell 0's stratum port ("Address already in use", W9-b).
 
 def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 
+_BAND_SHIFT = MAX_NODES + 1
+
+
 def kogany_p2p_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 2 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 2 * PORT_RANGE + _BAND_SHIFT + k + _offset()
 
 
 def kogany_rpc_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 3 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 3 * PORT_RANGE + _BAND_SHIFT + k + _offset()
 
 
 def kogany_v2_port(k):
     """Zakura's native (QUIC) listener: off under ``p2p_stack = "legacy"`` (K-11), given a port of
     its own anyway so a default that binds it never collides with another slot."""
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 4 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 4 * PORT_RANGE + _BAND_SHIFT + k + _offset()
 
 
 # ---------------------------------------------------------------------------

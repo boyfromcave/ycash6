@@ -196,6 +196,10 @@ class TomlGeneratorTest(unittest.TestCase):
             self.assertFalse(cxx & kog)
             self.assertEqual(len(kog), 4 * (util.MAX_NODES + 1))
             self.assertLess(max(kog), 65536)
+            # yellowback_stratum: yolo's stratum / status ports, 21000 / 26000 + the offset + cell
+            stratum = {21000 + util.rpc_port(0) - util.PORT_MIN - util.PORT_RANGE + i + d
+                       for i in range(util.MAX_NODES + 1) for d in (0, 5000)}
+            self.assertFalse(stratum & kog)
 
     def test_toml_quoting(self):
         text = kg.render_toml({'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False, 'n': None}}, ['note'])
