@@ -824,7 +824,7 @@ def same_class(cxx, kog, strict=False):
 # follows Ycash regtest: the backend line below becomes the koganyd start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
-                    '-spendzeroconfchange', '-rescan', '-wallet')
+                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet')
 YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 
 
@@ -840,11 +840,12 @@ def yewd_backend_rpc_port(i):
 
 
 def split_yewd_args(args):
-    """(backend args, yewd wallet args) from one node's arguments; -mocktime goes to both."""
+    """(backend args, yewd wallet args) from one node's arguments; -mocktime, -disablewallet, -pqfeerate and -pqfalcon[height] go
+    to both (a -disablewallet pair is the node alone: yewd forwards and serves no wallet method)."""
     backend, wallet = [], []
     for a in args:
         name = a.split('=', 1)[0]
-        if name == '-mocktime':
+        if name in ('-mocktime', '-disablewallet', '-pqfeerate', '-pqfalconheight', '-pqfalcon'):
             backend.append(a)
             wallet.append(a)
         elif name in YEWD_WALLET_ARGS:
@@ -869,29 +870,57 @@ def yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args):
 
 def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     """Start backend i, wait for its RPC (raising util's "node i exited" message if it dies, so
-    ``assert_start_raises_init_error`` still works), then yewd i.  Returns yewd's Popen."""
+    ``assert_start_raises_init_error`` still works), then yewd i.  Returns yewd's Popen.
+
+    H8 (yew/yewd/README.md "Harness mode"): the pair's wallet is created first (``yewd -initwallet``)
+    and the backend mines to its coinbase address (``yewd_coinbase_address``, finding F-S4-1).  The
+    backend is a ycashd -disablewallet, or kogany under YEWD_KOGANY (column 3)."""
     backend_dir = os.path.join(datadir, 'backend')
     os.makedirs(backend_dir, exist_ok=True)
-    with open(os.path.join(backend_dir, 'ycash.conf'), 'w', encoding='utf8') as f:
-        f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nport=%d\nrpcport=%d\n'
-                % (p2p_port(i), yewd_backend_rpc_port(i)))
-    b_argv, y_argv = yewd_pair_argv(os.environ['YEWD_BIN'], ycashd_bin, datadir, i, args)
-    backend = subprocess.Popen(b_argv, stderr=stderr)
+    yewd_bin = os.environ['YEWD_BIN']
+    if not _REAPER[0]:
+        _REAPER[0] = True
+        atexit.register(_reap_pairs)
+    coinbase = None
+    nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
+    if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
+        coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir), bool(yewd_kogany_bin()))
+        args = yewd_h8_args(args, coinbase)
+    b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
+    kogany_bin = yewd_kogany_bin()
+    if kogany_bin:
+        YewdColumn.ensure(os.path.dirname(os.path.abspath(datadir)))
+        b_args, _w = split_yewd_args(args)
+        backend, cookie = _start_kogany_backend(i, datadir, b_args, coinbase, stderr)
+        y_argv = [a for a in y_argv if not a.startswith('-backendrpccookiefile=')] + [
+            '-backendrpccookiefile=' + cookie,
+            '-backendindexer=127.0.0.1:%d' % yewd_backend_indexer_port(i)]
+        YEWD_KOGANY_PAIRS.add(i)
+        what = 'zakurad'
+    else:
+        with open(os.path.join(backend_dir, 'ycash.conf'), 'w', encoding='utf8') as f:
+            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nport=%d\nrpcport=%d\n'
+                    % (p2p_port(i), yewd_backend_rpc_port(i)))
+        backend = subprocess.Popen(b_argv, stderr=stderr)
+        cookie = os.path.join(backend_dir, 'regtest', '.cookie')
+        YEWD_KOGANY_PAIRS.discard(i)
+        what = util.zcashd_binary()
     YEWD_BACKENDS[i] = backend
-    cookie = os.path.join(backend_dir, 'regtest', '.cookie')
     rpc = KoganyRPC('http://127.0.0.1:%d/' % yewd_backend_rpc_port(i), cookie=cookie)
     deadline = time.time() + timeout
     while True:
         if backend.poll() is not None:
             YEWD_BACKENDS.pop(i, None)
             raise Exception('%s node %d exited with status %i during initialization'
-                            % (util.zcashd_binary(), i, backend.returncode))
+                            % (what if kogany_bin else util.zcashd_binary(), i, backend.returncode))
         had_cookie = os.path.exists(cookie)
         try:
             rpc.getblockcount()
             break
         except JSONRPCException as e:
-            if not _backend_warming_up(e, had_cookie):
+            # kogany answers "No blocks in state" until it has committed its genesis block
+            if not (_backend_warming_up(e, had_cookie)
+                    or kogany_bin and 'No blocks in state' in str(e.error.get('message', ''))):
                 raise
         except OSError:
             pass
@@ -901,6 +930,24 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     # so yewd's own stream goes to node<i>/yewd.log unless the caller captures stderr itself
     out = stderr if stderr is not None else open(os.path.join(datadir, 'yewd.log'), 'ab')
     return subprocess.Popen(y_argv, stdout=out if stderr is None else None, stderr=out)
+
+
+_REAPER = [False]
+
+
+def _reap_pairs():
+    """At exit: a pair or backend still running (a script that crashed between its nodes' start and
+    stop_nodes, e.g. stop_nodes on a None entry) is killed, so no orphan outlives the run."""
+    for p in list(util.bitcoind_processes.values()) + list(YEWD_BACKENDS.values()):
+        try:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(20)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        except Exception:
+            pass
 
 
 def _unauthorized(e):
@@ -934,6 +981,532 @@ def kill_yewd_backend(i):
     if p is not None and p.poll() is None:
         p.kill()
         p.wait()
+
+
+# ---------------------------------------------------------------------------
+# Column 3 of the W9 matrix (plan section 3b S5): kogany + yewd.  YEWD_KOGANY=<zakurad> with
+# YEWD_BIN turns node i into kogany i + yewd i -- no ycashd behind any node:
+#
+#   kogany i   a zakurad in node<i>/backend, configured from node i's arguments (zakurad_config,
+#              slot i), P2P on p2p_port(i) (the node's address: connect_nodes and the scripts'
+#              topology carry over), RPC with cookie auth on yewd_backend_rpc_port(i), the indexer
+#              gRPC listener on yewd_backend_indexer_port(i) (yewd's wake-up streams, H3/H4), and
+#              mining.miner_address = the pair's coinbase address (H8);
+#   yewd i     on rpc_port(i) as in the ycash6-backend mode, with -backendindexer.
+#
+# YEWD_YCASH6_PEER=1 is the mixed variant: one more node, a ycashd -disablewallet that dials pair
+# YEWD_PEER (default 0) and nothing else (-connect, -listen=0), judges every block and transaction
+# that reaches it, and is compared with every pair at every sync point (vault_getinfo.statehash,
+# yed_getstatehash, the tip).  kogany never solves Equihash (K-16) and its regtest `generate` makes
+# shape-only blocks a ycashd refuses, so in the mixed variant (or with YEWD_SOLVE=1) a pair's
+# `generate` is answered by the harness: kogany's getblocktemplate (through yewd), the framework's
+# (48,5) solver (equihash.py, as kogany's W8-c kogany_mines.py), submitblock through yewd.
+# Without the peer the pairs' state hashes are still compared with each other at every sync point.
+
+YEWD_COLUMN = [None]        # the run's YewdColumn (column 3), created at the first pair start
+
+
+def yewd_kogany_bin(env=None):
+    env = os.environ if env is None else env
+    return env.get('YEWD_KOGANY') or None
+
+
+def yewd_backend_indexer_port(i):
+    """The kogany backend's indexer gRPC port: kogany_rpc_port's range (36000+, below the ephemeral
+    ports), which no follower binds in column 3 (MixedLine is inert there)."""
+    return kogany_rpc_port(i)
+
+
+def yewd_init_wallet(yewd_bin, datadir):
+    """H8: create (or open) pair i's wallet before its backend starts: (its transparent coinbase
+    address, its Sapling coinbase address or None for a yewd that prints none)."""
+    out = json.loads(subprocess.check_output([yewd_bin, '-datadir=' + datadir, '-conf=ycash.conf', '-regtest',
+                                              '-initwallet']))
+    return out['mineaddress'], out.get('saplingaddress')
+
+
+def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
+    """F-S4-1, F-S5-9: the coinbase address the pair's backend mines to (``mineaddress`` is
+    ``yewd_init_wallet``'s pair), or None.  A node's -mineraddress/-minetolocalwallet give way to the
+    wallet's own transparent address.  Both lines take a P2PKH miner address as the default YED
+    payout key (ycashd MINER-2, init.cpp; kogany W5-f, start.rs set_payout_address), which a ycashd
+    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address), so
+    a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress gets no
+    coinbase address and cannot `generate` (F-S5-9: the address that names no payout key, the
+    wallet's Sapling one that yewd -initwallet prints, is refused by kogany: "Sapling coinbase
+    construction is not supported"; a node option for a miner address without a payout default
+    would close it)."""
+    taddr = mineaddress[0] if isinstance(mineaddress, tuple) else mineaddress
+    live = any(a.startswith('-yellowbackattestorset=') for a in args)
+    payouts = [a.split('=', 1)[1] for a in args if a.startswith('-yellowbackpayoutaddress=')]
+    if live and not payouts:
+        return None
+    # kogany takes its YED payout key from mining.miner_address only (no payout option, W5-f): a
+    # pair that names -yellowbackpayoutaddress still mines to its wallet (mining to the payout address
+    # instead left the wallet without the coinbase the scripts spend before importing the pool keys,
+    # yellowback_chainviz.py), so its tag names the wallet's key, not the script's payee (F-S5-12)
+    return taddr
+
+
+def yewd_h8_args(args, coinbase):
+    """The backend's arguments with the H8 coinbase address in place of the script's."""
+    args = [a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))]
+    if coinbase is not None:
+        args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
+    return args
+
+
+def yewd_kogany_config(args, i, backend_dir, coinbase, live=None):
+    """kogany i's config as a pair backend (column 3)."""
+    cfg, notes = zakurad_config([a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))],
+                                i, [], backend_dir, live=live)
+    net = cfg['network']
+    net['listen_addr'] = '127.0.0.1:%d' % p2p_port(i)
+    net['initial_testnet_peers'] = []
+    net['max_connections_per_ip'] = SIDECAR_MAX_CONNS_PER_IP
+    rpc = cfg['rpc']
+    rpc['listen_addr'] = '127.0.0.1:%d' % yewd_backend_rpc_port(i)
+    rpc['enable_cookie_auth'] = True
+    rpc['indexer_listen_addr'] = '127.0.0.1:%d' % yewd_backend_indexer_port(i)
+    if coinbase is not None:
+        cfg['mining']['miner_address'] = coinbase
+    return cfg, notes
+
+
+def _start_kogany_backend(i, datadir, b_args, coinbase, stderr):
+    backend_dir = os.path.join(datadir, 'backend')
+    cfg, notes = yewd_kogany_config(b_args, i, backend_dir, coinbase)
+    conf = os.path.join(backend_dir, 'zakurad.toml')
+    with open(conf, 'w', encoding='utf8') as f:
+        f.write(render_toml(cfg, notes))
+    log = stderr if stderr is not None else open(os.path.join(backend_dir, 'zakurad.log'), 'ab')
+    argv = [yewd_kogany_bin(), '-c', conf] + os.getenv('KOGANY_ARGS', '').split() + ['start']
+    return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT if stderr is None else stderr), \
+        os.path.join(backend_dir, 'rpc', '.cookie')
+
+
+# --- the solved generate (mixed variant) -------------------------------------------------
+
+EQUIHASH_N, EQUIHASH_K = 48, 5       # Ycash regtest (ycash6 src/chainparams.cpp)
+
+
+def _compact_size(n):
+    if n < 0xfd:
+        return bytes([n])
+    if n <= 0xffff:
+        return b'\xfd' + n.to_bytes(2, 'little')
+    return b'\xfe' + n.to_bytes(4, 'little')
+
+
+def _sha256d(b):
+    import hashlib
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+
+def solve_template(t, max_nonces=100000):
+    """A kogany getblocktemplate answer as a solved (48,5) block, hex (kogany_mines.py's steps)."""
+    import hashlib
+    from .equihash import gbp_basic, gbp_validate, zcash_person
+    n, k = EQUIHASH_N, EQUIHASH_K
+    prefix = (int(t['version']).to_bytes(4, 'little')
+              + bytes.fromhex(t['previousblockhash'])[::-1]
+              + bytes.fromhex(t['defaultroots']['merkleroot'])[::-1]
+              + bytes.fromhex(t['blockcommitmentshash'])[::-1]
+              + int(t['curtime']).to_bytes(4, 'little')
+              + int(t['bits'], 16).to_bytes(4, 'little'))
+    target = int(t['target'], 16)
+    base = hashlib.blake2b(digest_size=(512 // n) * n // 8, person=zcash_person(n, k))
+    base.update(prefix)
+    start = int.from_bytes(os.urandom(4), 'little') << 32
+    for nonce_n in range(start, start + max_nonces):
+        nonce = nonce_n.to_bytes(32, 'little')
+        digest = base.copy()
+        digest.update(nonce)
+        for soln in gbp_basic(digest, n, k):
+            if not gbp_validate(digest, soln, n, k):
+                continue
+            header = prefix + nonce + _compact_size(len(soln)) + soln
+            if int.from_bytes(_sha256d(header), 'little') <= target:
+                txs = [t['coinbasetxn']['data']] + [tx['data'] for tx in t['transactions']]
+                return (header + _compact_size(len(txs))).hex() + ''.join(txs), _sha256d(header)[::-1].hex()
+    raise AssertionError('no (48,5) solution under the template target in %d nonces' % max_nonces)
+
+
+class SolvingProxy:
+    """A pair node's RPC proxy whose ``generate`` mines solved blocks from kogany's templates
+    (the mixed variant: a ycashd peer checks (48,5)).  Everything else is the proxy's."""
+
+    def __init__(self, inner, i):
+        self.__dict__['_inner'] = inner
+        self.__dict__['_i'] = i
+
+    def __getattr__(self, name):
+        if name == 'generate':
+            return self._generate
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._inner, name, value)
+
+    def _generate(self, n, *rest):
+        hashes = []
+        for _ in range(int(n)):
+            t = self._inner.getblocktemplate()
+            block, h = solve_template(t)
+            r = self._inner.submitblock(block)
+            if r is not None:
+                raise JSONRPCException({'code': -1, 'message': 'generate: kogany refused its own solved template: %r' % (r,)})
+            hashes.append(h)
+        col = YEWD_COLUMN[0]
+        if col is not None:
+            col.stats['solved_blocks'] += len(hashes)
+        return hashes
+
+
+# --- the column ------------------------------------------------------------------------------
+
+class YewdColumn:
+    """Column 3's cross-checks: the pairs' state hashes at every sync point, and the optional
+    ycash6 peer (YEWD_YCASH6_PEER=1)."""
+
+    def __init__(self, tmpdir, env=None):
+        env = os.environ if env is None else env
+        self.tmpdir = tmpdir
+        self.peer = int(env.get('YEWD_PEER', '0'))
+        self.with_peer = env.get('YEWD_YCASH6_PEER', '0') == '1'
+        self.solve = self.with_peer or env.get('YEWD_SOLVE', '0') == '1'
+        self.sync_timeout = float(env.get('KOGANY_SYNC_TIMEOUT', '120'))
+        self.ycashd = None
+        self.ycashd_args = None
+        self.rpc = None
+        self.k = 'ycash6-peer'
+        self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
+                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0,
+                      'peer_mirrored': 0}
+        self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
+        self._notes = set()
+        self.datadir = os.path.join(tmpdir, 'ycash6peer')
+
+    def note(self, msg):
+        if msg not in self._notes:
+            self._notes.add(msg)
+            print('yewd column: ' + msg)
+
+    @classmethod
+    def ensure(cls, tmpdir):
+        if YEWD_COLUMN[0] is None:
+            col = cls(tmpdir)
+            YEWD_COLUMN[0] = col
+            util.MIXED_HOOKS['start'] = col.on_node_start
+            util.MIXED_HOOKS['sync_blocks'] = col.sync_point
+            util.MIXED_HOOKS['sync_mempools'] = col.mempool_point
+            util.MIXED_HOOKS['sync_failed'] = col.sync_failed
+            util.MIXED_HOOKS['mempool_wait'] = col.mempool_wait
+            atexit.register(col.stop)
+            print('yewd column: kogany + yewd pairs (%s)%s' % (yewd_kogany_bin(), (
+                '; ycash6 peer dials pair %d, generate solved by the harness' % col.peer) if col.with_peer else ''))
+        return YEWD_COLUMN[0]
+
+    # the ycash6 peer
+    def on_node_start(self, i, args, proxy):
+        if not self.with_peer or i != self.peer:
+            return
+        b_args, _w = split_yewd_args(args)
+        want = [a for a in b_args if not a.startswith(('-datadir=', '-mineraddress=', '-minetolocalwallet',
+                                                       '-connect=', '-addnode=', '-listen=', '-port=',
+                                                       '-rpcport='))]
+        if self.ycashd is not None and self.ycashd.poll() is None and want == self.ycashd_args:
+            return
+        self.stop_peer()
+        self.ycashd_args = want
+        os.makedirs(self.datadir, exist_ok=True)
+        with open(os.path.join(self.datadir, 'ycash.conf'), 'w', encoding='utf8') as f:
+            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nrpcport=%d\n' % kogany_v2_port(MAX_NODES))
+        argv = [util.zcashd_binary(), '-datadir=' + self.datadir, '-disablewallet', '-listen=0',
+                '-port=%d' % sidecar_dead_port(MAX_NODES), '-connect=127.0.0.1:%d' % p2p_port(self.peer)] + want
+        log = open(os.path.join(self.datadir, 'stderr.log'), 'ab')
+        self.ycashd = subprocess.Popen(argv, stdout=log, stderr=log)
+        cookie = os.path.join(self.datadir, 'regtest', '.cookie')
+        self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_v2_port(MAX_NODES), cookie=cookie)
+        deadline = time.time() + 120
+        while True:
+            if self.ycashd.poll() is not None:
+                raise AssertionError('the ycash6 peer exited at start (%s)' % self.datadir)
+            had = os.path.exists(cookie)
+            try:
+                self.rpc.getblockcount()
+                break
+            except JSONRPCException as e:
+                if not _backend_warming_up(e, had):
+                    raise
+            except OSError:
+                pass
+            assert time.time() < deadline, 'the ycash6 peer did not come up'
+            time.sleep(0.25)
+
+    def alive(self):
+        return self.ycashd is not None and self.ycashd.poll() is None
+
+    def stop_peer(self):
+        if self.ycashd is None:
+            return
+        if self.ycashd.poll() is None:
+            try:
+                self.rpc.stop()
+            except Exception:
+                self.ycashd.terminate()
+            try:
+                self.ycashd.wait(60)
+            except subprocess.TimeoutExpired:
+                self.ycashd.kill()
+                self.ycashd.wait()
+        self.ycashd = None
+
+    def stop(self):
+        self.stop_peer()
+        print('yewd column: stopped; %s' % ', '.join('%s=%d' % kv for kv in sorted(self.stats.items())))
+        path = os.getenv('KOGANY_STATS_FILE')
+        if path:
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps({'script': os.path.basename(sys.argv[0]), 'pid': os.getpid(), 'column': 3,
+                                     'stats': dict(self.stats), 'notes': sorted(self._notes)}, sort_keys=True) + '\n')
+
+    # sync points
+    def _statehashes(self, c):
+        try:
+            v = c.vault_getinfo().get('statehash')
+        except JSONRPCException:
+            v = None
+        try:
+            y = c.yed_getstatehash()
+            y = _field(y, 'statehash') if not isinstance(y, dict) else (y.get('statehash'), y.get('height'), y.get('blockhash'))
+        except JSONRPCException:
+            y = None
+        return v, y
+
+    def sync_point(self, conns):
+        conns = list(conns)
+        if not conns:
+            return
+        self.stats['sync_points'] += 1
+        tip = conns[0].getbestblockhash()
+        hashes = [self._statehashes(c) for c in conns]
+        # a node that does not serve the read (a stock node: Yellowback not live there) is skipped,
+        # as MixedLine skips a peer that does not serve it
+        vaults = [h[0] for h in hashes if h[0] is not None]
+        yeds = [h[1] for h in hashes if h[1] is not None]
+        if len(set(map(str, vaults))) > 1:
+            raise AssertionError('yewd column: vault_getinfo.statehash differs between pairs at %s: %s' % (tip, vaults))
+        if len(set(map(str, yeds))) > 1:
+            raise AssertionError('yewd column: yed_getstatehash differs between pairs at %s: %s' % (tip, yeds))
+        vaults = vaults[:1] or [None]
+        yeds = yeds[:1] or [None]
+        if vaults[0] is not None:
+            self.stats['statehash_vault'] += 1
+        if yeds[0] is not None:
+            self.stats['statehash_yed'] += 1
+        if not self.with_peer or not any(_port_of(c) == rpc_port(self.peer) for c in conns):
+            return
+        if not self.alive():
+            raise AssertionError('the ycash6 peer exited (see %s)' % self.datadir)
+        deadline = time.time() + self.sync_timeout
+        mirror_at = time.time() + self.feed_after
+        while True:
+            try:
+                got = self.rpc.getbestblockhash()
+            except (OSError, JSONRPCException):
+                got = None
+            if got == tip:
+                break
+            if got is not None and time.time() > mirror_at:
+                self._mirror(conns[0], tip, got)
+                mirror_at = time.time() + self.feed_after
+            if time.time() > deadline:
+                raise AssertionError('the ycash6 peer did not reach the pairs\' tip %s (height %d): at %s '
+                                     '(a block kogany accepted and ycashd refused? see %s/regtest/debug.log)'
+                                     % (tip, conns[0].getblockcount(), got, self.datadir))
+            time.sleep(0.2)
+        v, y = self._statehashes(self.rpc)
+        if v is not None and vaults[0] is not None and str(v) != str(vaults[0]):
+            raise AssertionError('yewd column: vault_getinfo.statehash at %s: pairs (kogany) %s, ycash6 peer %s'
+                                 % (tip, vaults[0], v))
+        if y is not None and yeds[0] is not None and str(y) != str(yeds[0]):
+            raise AssertionError('yewd column: yed_getstatehash at %s: pairs (kogany) %s, ycash6 peer %s'
+                                 % (tip, yeds[0], y))
+        self.stats['peer_points'] += 1
+
+    def _mirror(self, pair, tip, got):
+        """A script's invalidateblock/reconsiderblock reaches only the pairs it names (the rig's and the
+        followers' limit, KOGANY_MIRROR_INVALIDATE): the peer reconsiders the pairs' tip if it holds it
+        as invalid, and invalidates its own branch above the fork with the pairs' chain."""
+        try:
+            self.rpc.getblockheader(tip)
+            self.rpc.reconsiderblock(tip)
+            self.stats['peer_mirrored'] += 1
+        except JSONRPCException:
+            pass
+        h = got
+        first = None
+        for _ in range(500):
+            try:
+                hdr = self.rpc.getblockheader(h)
+            except JSONRPCException:
+                return
+            try:
+                on_pairs = pair.getblockhash(hdr['height']) == h
+            except JSONRPCException:
+                on_pairs = False
+            if on_pairs:
+                break
+            first = h
+            h = hdr.get('previousblockhash')
+            if h is None:
+                return
+        if first is not None:
+            try:
+                self.rpc.invalidateblock(first)
+                self.stats['peer_mirrored'] += 1
+            except JSONRPCException:
+                pass
+
+    def mempool_point(self, conns):
+        """The ycash6 peer's mempool holds every pair's (each transaction a sidecar built, judged by
+        ycashd: §4.3 rule 3), within the sync timeout."""
+        if not self.with_peer or not self.alive():
+            return
+        conns = list(conns)
+        if not any(_port_of(c) == rpc_port(self.peer) for c in conns):
+            return
+        want = set(conns[0].getrawmempool())
+        deadline = time.time() + self.sync_timeout
+        feed_at = time.time() + self.feed_after
+        while True:
+            got = set(self.rpc.getrawmempool())
+            if want <= got:
+                break
+            if time.time() > feed_at:
+                # kogany's transaction gossip to the ycashd peer is not reliable (W9-a/F-3, the rig's
+                # feed): what the peer still lacks is offered to it directly, so ycashd judges every
+                # transaction a pair holds; a refusal is a cross-line divergence
+                self._feed(conns[0], sorted(want - got))
+                feed_at = deadline + 1
+            if time.time() > deadline:
+                raise AssertionError('the ycash6 peer lacks %d mempool transaction(s) of the pairs: %s '
+                                     '(see %s/regtest/debug.log)'
+                                     % (len(want - got), sorted(want - got)[:4], self.datadir))
+            time.sleep(0.2)
+        self.stats['mempool_points'] += 1
+
+    def _feed(self, pair, txids):
+        """Offer the pairs' mempool transactions the peer lacks, parents first (a refusal of one
+        that is not a missing parent fails the run)."""
+        hexes = {}
+        for t in txids:
+            try:
+                hexes[t] = pair.getrawtransaction(t)
+            except JSONRPCException:
+                continue                                # mined or evicted meanwhile
+        for _ in range(len(hexes) + 1):
+            left = {}
+            for t, h in hexes.items():
+                try:
+                    self.rpc.sendrawtransaction(h, True)
+                    self.stats['fed_txs'] += 1
+                except JSONRPCException as e:
+                    msg = str(e.error.get('message', ''))
+                    if 'already in' in msg or 'txn-already' in msg:
+                        continue
+                    if 'Missing inputs' in msg or 'missing-inputs' in msg:
+                        left[t] = h
+                        continue
+                    raise AssertionError('the ycash6 peer refuses %s, which kogany holds in its mempool: %s'
+                                         % (t, msg))
+            if not left or len(left) == len(hexes):
+                break
+            hexes = left
+
+    def mempool_wait(self, conns, waited):
+        """util._sync_mempools hook: kogany's transaction gossip between koganys is not reliable (the
+        rig's finding W9-a/F-3, F-S5-16): after ``feed_after`` x 2 seconds a pair that lacks a
+        transaction another pair holds is offered it by sendrawtransaction (through its yewd); a
+        refusal is a divergence between two koganys and fails the run.  Once per sync."""
+        if waited < 2 * self.feed_after or waited >= 2 * self.feed_after + 0.5:
+            return
+        pools = [set(c.getrawmempool()) for c in conns]
+        union = set().union(*pools)
+        for c, pool in zip(conns, pools):
+            for t in sorted(union - pool):
+                holder = next(x for x, p in zip(conns, pools) if t in p)
+                try:
+                    h = holder.getrawtransaction(t)
+                except JSONRPCException:
+                    continue
+                try:
+                    c.sendrawtransaction(h, True)
+                    self.stats['fed_pair_txs'] += 1
+                except JSONRPCException as e:
+                    msg = str(e.error.get('message', ''))
+                    if 'already' in msg or 'Missing inputs' in msg or 'missing-inputs' in msg:
+                        continue
+                    raise AssertionError('pair at port %s refuses %s, which another pair holds: %s'
+                                         % (_port_of(c), t, msg))
+
+    def sync_failed(self, kind, conns):
+        for c in conns:
+            try:
+                print('yewd column: %s failed; node at port %s: tip %s height %s mempool %d'
+                      % (kind, _port_of(c), c.getbestblockhash(), c.getblockcount(), len(c.getrawmempool())))
+            except Exception as e:
+                print('yewd column: %s failed; node at port %s: %r' % (kind, _port_of(c), e))
+        if self.alive():
+            print('yewd column: ycash6 peer tip %s height %s' % (self.rpc.getbestblockhash(), self.rpc.getblockcount()))
+
+
+def _port_of(conn):
+    try:
+        return urlparse(conn.url).port
+    except Exception:
+        return None
+
+
+def yewd_wrap_proxy(i, proxy):
+    """util.start_node hook: in column 3 with the harness's solved generate, the pair's proxy."""
+    col = YEWD_COLUMN[0]
+    if col is not None and col.solve and i in YEWD_KOGANY_PAIRS:
+        return SolvingProxy(proxy, i)
+    return proxy
+
+
+YEWD_KOGANY_PAIRS = set()
+
+
+def yewd_build_cache(test_dir, num_nodes):
+    """``initialize_chain``'s 'current' cache under YEWD_BIN: the cache's 200-block chain (each of
+    the first four nodes mines 25 blocks twice in turn, so each holds 25 mature and 25 immature
+    coinbases) mined in ``test_dir`` by the run's own pairs, which are then stopped; the script
+    starts them again on that chain and those wallets.  The block times are the node's clock rather
+    than the cache's mocked past (kogany has no mock clock for its templates)."""
+    n = max(num_nodes, 4)
+    for i in range(num_nodes, n):
+        util.initialize_datadir(test_dir, i)
+    rpcs = []
+    try:
+        for i in range(n):
+            rpcs.append(util.start_node(i, test_dir))
+        for i in range(1, n):
+            util.connect_nodes_bi(rpcs, 0, i)
+        for _ in range(2):
+            for peer in range(4):
+                rpcs[peer].generate(25)
+                util.sync_blocks(rpcs)
+    finally:
+        # a failure here leaves the framework without self.nodes: stop the pairs, or its
+        # wait_bitcoinds waits for them forever
+        util.stop_nodes(rpcs)
+        util.wait_bitcoinds()
+    for i in range(num_nodes, n):
+        import shutil
+        shutil.rmtree(os.path.join(test_dir, 'node%d' % i), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

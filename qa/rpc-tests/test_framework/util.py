@@ -102,7 +102,13 @@ def get_rpc_proxy(url, node_number, timeout=None):
     coverage_logfile = coverage.get_filename(
         COVERAGE_DIR, node_number) if COVERAGE_DIR else None
 
-    return coverage.AuthServiceProxyWrapper(proxy, coverage_logfile)
+    proxy = coverage.AuthServiceProxyWrapper(proxy, coverage_logfile)
+    if os.getenv("YEWD_BIN"):
+        # column 3 (YEWD_KOGANY): a pair's generate solved by the harness when a ycash6 peer judges it,
+        # on every proxy of the node (helpers make their own, yellowback_attest.two_step)
+        from . import kogany
+        proxy = kogany.yewd_wrap_proxy(node_number, proxy)
+    return proxy
 
 
 def p2p_port(n):
@@ -153,6 +159,17 @@ def _is_yewd_pair(conn):
     except Exception:
         return False
     return port is not None and any(port == rpc_port(i) for i in YEWD_PAIRS)
+
+def _is_kogany_pair(conn):
+    """True when ``conn`` is a column-3 pair node (yewd in front of kogany, YEWD_KOGANY)."""
+    if not os.getenv("YEWD_KOGANY"):
+        return False
+    from . import kogany
+    try:
+        port = urllib.parse.urlparse(conn.url).port
+    except Exception:
+        return False
+    return port is not None and any(port == rpc_port(i) for i in kogany.YEWD_KOGANY_PAIRS)
 
 def _fully_notified(conns, method):
     """``fullyNotified`` of every connection, a pair node counting as notified when the skip is on."""
@@ -476,6 +493,14 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 return True
         return False
 
+    if os.getenv("YEWD_BIN") and cache_behavior in ('current', 'fresh'):
+        # the pairs (kogany plan section 3b): the cached chain is a ycashd one with ycashd wallets,
+        # which neither a pair's backend datadir nor its yewd wallet reads; the same chain shape is
+        # mined by the run's own pairs instead (kogany.yewd_build_cache)
+        from . import kogany
+        initialize_chain_clean(test_dir, num_nodes)
+        kogany.yewd_build_cache(test_dir, num_nodes)
+        return
     if cache_behavior == 'current':
         if cache_rebuild_required(): rebuild_cache()
         init_from_cache()
@@ -688,6 +713,15 @@ def set_node_times(nodes, t):
 
 def wait_bitcoinds():
     # Wait for all bitcoinds to cleanly exit
+    if os.getenv("YEWD_BIN"):
+        # a script that failed inside setup_network never got its nodes to stop_nodes: a pair still
+        # running is stopped here, or the wait below never ends (kogany.YEWD_KOGANY_PAIRS, F-S5-14)
+        for i, p in list(bitcoind_processes.items()):
+            if i in YEWD_PAIRS and p.poll() is None:
+                try:
+                    get_rpc_proxy(rpc_url(i), i, timeout=30).stop()
+                except Exception:
+                    p.terminate()
     for bitcoind in list(bitcoind_processes.values()):
         bitcoind.wait()
     bitcoind_processes.clear()
@@ -698,7 +732,16 @@ def wait_bitcoinds():
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
-    from_connection.addnode(ip_port, "onetry")
+    if _is_kogany_pair(from_connection):
+        # a kogany backend (column 3) knows addnode "add" only (Zakura's AddNodeCommand), and
+        # refuses an address its book already holds (-23), which "onetry" never does
+        try:
+            from_connection.addnode(ip_port, "add")
+        except JSONRPCException as e:
+            if e.error.get('code') != -23:
+                raise
+    else:
+        from_connection.addnode(ip_port, "onetry")
     # poll until version handshake complete to avoid race conditions
     # with transaction relaying
     while any(peer['version'] == 0 for peer in from_connection.getpeerinfo()):

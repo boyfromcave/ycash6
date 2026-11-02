@@ -625,6 +625,7 @@ class YewdWarmupTest(unittest.TestCase):
         os.environ['YEWD_BIN'] = '/y/yewd'
         try:
             with mock.patch.object(kg.subprocess, 'Popen', side_effect=lambda *a, **k: Proc()), \
+                    mock.patch.object(kg, 'yewd_init_wallet', lambda *a: ('tmCoinbase', 'zregtestsapling1x')), \
                     mock.patch.object(kg.KoganyRPC, '__call__', fake_call), \
                     mock.patch.object(kg.time, 'sleep', lambda s: None):
                 kg.start_yewd_pair(0, datadir, '/b/ycashd', [], stderr=None, timeout=5)

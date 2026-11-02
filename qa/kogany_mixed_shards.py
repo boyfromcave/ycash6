@@ -28,6 +28,11 @@ kogany plus a ycashd -connect'ed to it, test_framework/kogany.py "The ycash6 tes
 script must also be in exactly one mixed group; `--of GROUP` runs the sidecar scripts of that mixed
 group only (the nightly runs one job per mixed group).
 
+The `pair` group (kogany plan S5, column 3 of the W9 matrix) is the third mode for the same
+wallet-needing scripts: every node kogany + yewd, no ycashd behind any node (YEWD_BIN with
+YEWD_KOGANY; test_framework/kogany.py YewdColumn). Its entries carry no MixedLine flags (there is no
+follower to mirror to); YEWD_YCASH6_PEER=1 in the caller's environment runs the mixed variant.
+
 Both repositories' CI call this file (ycash6 yellowback-tests.yml `mixed`; kogany's mixed-regtest
 leg from a ycash6 checkout at its pin), so the shard lists live in one place.
 """
@@ -48,7 +53,9 @@ RPC_DIR = os.path.join(HERE, 'rpc-tests')
 
 MIXED_GROUPS = ('node', 'vault', 'yed', 'fees', 'attest')
 SIDECAR = 'sidecar'
-GROUPS = MIXED_GROUPS + (SIDECAR,)
+PAIR = 'pair'
+SECOND_MODES = (SIDECAR, PAIR)
+GROUPS = MIXED_GROUPS + SECOND_MODES
 STATES = ('report', 'gate')
 FLAGS = {'mirror': 'KOGANY_MIRROR_INVALIDATE', 'mempool': 'KOGANY_MEMPOOL', 'direct': None}
 WAVE = re.compile(r'^W[0-9](-[a-z0-9]+)?$')
@@ -121,14 +128,15 @@ def check(entries, excluded, yellowback_scripts, known, exists):
     """Problems with the manifest, as a list of strings (empty: fine)."""
     problems = []
     seen = {}
-    sidecar = {}
+    second = {m: {} for m in SECOND_MODES}
     for e in entries:
-        if e.group == SIDECAR:
-            if e.script in sidecar:
-                problems.append('%s listed twice in sidecar (lines %d and %d)' % (e.script, sidecar[e.script], e.line))
-            sidecar[e.script] = e.line
+        if e.group in SECOND_MODES:
+            mode = second[e.group]
+            if e.script in mode:
+                problems.append('%s listed twice in %s (lines %d and %d)' % (e.script, e.group, mode[e.script], e.line))
+            mode[e.script] = e.line
             if e.direct:
-                problems.append('%s: a sidecar entry runs through rpc-tests.py, never direct' % e.script)
+                problems.append('%s: a %s entry runs through rpc-tests.py, never direct' % (e.script, e.group))
             elif e.script not in known:
                 problems.append('%s is not an rpc-tests.py entry: rpc-tests.py would drop it silently' % e.script)
             continue
@@ -147,17 +155,18 @@ def check(entries, excluded, yellowback_scripts, known, exists):
         if s not in seen and s not in excluded:
             problems.append('%s (YELLOWBACK_SCRIPTS) is in no mixed group and not excluded' % s)
     for s in PEER_COUNT:
-        if s in seen or s in sidecar:
+        if s in seen or any(s in m for m in second.values()):
             problems.append('%s asserts an exact peer count and must be excluded' % s)
-    for s in sidecar:
-        if s not in seen:
-            problems.append('%s is in sidecar but in no mixed group' % s)
+    for g, mode in second.items():
+        for s in mode:
+            if s not in seen:
+                problems.append('%s is in %s but in no mixed group' % (s, g))
     return problems
 
 
 def mixed_group_of(entries):
     """{script: its mixed group} (the sidecar entries left out)."""
-    return {e.script: e.group for e in entries if e.group != SIDECAR}
+    return {e.script: e.group for e in entries if e.group not in SECOND_MODES}
 
 
 def select(entries, group=None, state=None, of=None):
@@ -172,7 +181,12 @@ def partitions(selected):
     """[(env additions, direct?, [scripts])], in a stable order: one rpc-tests.py run per flag set."""
     parts = {}
     for e in selected:
-        env = tuple(sorted([FLAGS[f] for f in e.flags if FLAGS[f]] + (['KOGANY_SIDECAR'] if e.group == SIDECAR else [])))
+        if e.group == PAIR:
+            # column 3 (kogany + yewd): the MixedLine flags have no follower to act on; the run's
+            # YEWD_BIN and YEWD_KOGANY name the binaries (test_framework/kogany.py YewdColumn)
+            env = ()
+        else:
+            env = tuple(sorted([FLAGS[f] for f in e.flags if FLAGS[f]] + (['KOGANY_SIDECAR'] if e.group == SIDECAR else [])))
         if e.direct:
             parts.setdefault((env, True, e.script), []).append(e.script)
         else:
@@ -212,11 +226,11 @@ def main(argv=None):
     lp = sub.add_parser('list')
     lp.add_argument('group', nargs='?', choices=GROUPS)
     lp.add_argument('--state', choices=STATES)
-    lp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar: only the scripts of this mixed group')
+    lp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar, pair: only the scripts of this mixed group')
     rp = sub.add_parser('run')
     rp.add_argument('group', choices=GROUPS)
     rp.add_argument('--state', choices=STATES, required=True)
-    rp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar: only the scripts of this mixed group')
+    rp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar, pair: only the scripts of this mixed group')
     rp.add_argument('--jobs', type=int, default=2)
     rp.add_argument('--srcdir', default=os.path.join(REPO, 'src'))
     rp.add_argument('--dry-run', action='store_true')
@@ -244,14 +258,17 @@ def main(argv=None):
             print(e.script)
         return 0
 
-    if args.of and args.group != SIDECAR:
-        print('--of selects within the sidecar group only', file=sys.stderr)
+    if args.of and args.group not in SECOND_MODES:
+        print('--of selects within the sidecar and pair groups only', file=sys.stderr)
         return 2
     selected = select(entries, args.group, args.state, args.of)
     if not selected:
         print('mixed %s: no script in state %s' % (args.group, args.state))
         return 0
-    if not args.dry_run and not os.environ.get('KOGANY_BIN'):
+    if args.group == PAIR and not args.dry_run and not (os.environ.get('YEWD_BIN') and os.environ.get('YEWD_KOGANY')):
+        print('pair (column 3) needs YEWD_BIN and YEWD_KOGANY (yewd and zakurad)', file=sys.stderr)
+        return 1
+    if args.group != PAIR and not args.dry_run and not os.environ.get('KOGANY_BIN'):
         print('KOGANY_BIN is not set: this would be the plain ycash6 run, not a mixed one', file=sys.stderr)
         return 1
     tmpdir = os.environ.get('TMPDIR') or '/tmp'
