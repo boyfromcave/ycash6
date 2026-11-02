@@ -733,10 +733,12 @@ def wait_bitcoinds():
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:"+str(p2p_port(node_num))
     if _is_kogany_pair(from_connection):
-        # a kogany backend (column 3) knows addnode "add" only (Zakura's AddNodeCommand), and
-        # refuses an address its book already holds (-23), which "onetry" never does
+        # a kogany backend (column 3) dials at once on "onetry" (Zakura's AddNodeCommand::OneTry,
+        # F-S5-6); "add" of an address its book already holds (a peer met before, a restarted one)
+        # waited out the reconnection delay, so the halves of a split never met again (-23, "add"'s
+        # refusal of a known address, stays tolerated)
         try:
-            from_connection.addnode(ip_port, "add")
+            from_connection.addnode(ip_port, "onetry")
         except JSONRPCException as e:
             if e.error.get('code') != -23:
                 raise
