@@ -662,6 +662,10 @@ KOGANY_REASON_MAP = [
      'reason-bad-vault-act-params-height-height-204-hash-...") -- verified on vault_primitive'),
     ('proposal', r'vaulttimelock', REJECT_CONSENSUS, 'W3-d VaultTimeLock in a block (main.cpp:905, DoS 100)'),
     ('proposal', r'unsatisfiedsequencelock', REJECT_CONSENSUS, 'W3-d UnsatisfiedSequenceLock (bad-txns-nonfinal)'),
+    ('proposal', r'subsidy-invalidminerfees', REJECT_CONSENSUS,
+     'zakura-consensus block/check.rs SubsidyError::InvalidMinerFees, a coinbase paying more than the subsidy '
+     'and fees ("block-source-block-source-transaction-subsidy-invalidminerfees"); ycashd bad-cb-amount '
+     '(main.cpp:4328-4331, DoS 100)'),
     ('proposal', r'too-?far-?in-?(the-?)?future|time-?too-?new', REJECT_STATE,
      'the header time rule (ycashd time-too-new, clock-dependent)'),
     ('block', r'^rejected$', REJECT_CONSENSUS,
