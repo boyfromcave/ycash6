@@ -256,9 +256,11 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # -regtestenablezip209, -reindex-yellowback, and the retired -yellowback / -yellowbackenforce /
 # -yellowbackstartheight flags.
 def _bool01(v):
-    if v not in ('0', '1'):
+    # a bare -flag is ycashd's -flag=1 (GetBoolArg; yellowback_mint_armed passes
+    # -yellowbackmintrequiresarmed alone)
+    if v not in ('', '0', '1'):
         raise UnmappedArgument('a 0/1 flag has the value %r' % v)
-    return v == '1'
+    return v != '0'
 
 
 def _scaled(scale, what):
