@@ -1099,7 +1099,8 @@ class YewdColumn:
         self.rpc = None
         self.k = 'ycash6-peer'
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
-                      'solved_blocks': 0, 'mempool_points': 0}
+                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0}
+        self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
         self._notes = set()
         self.datadir = os.path.join(tmpdir, 'ycash6peer')
 
@@ -1256,16 +1257,51 @@ class YewdColumn:
             return
         want = set(conns[0].getrawmempool())
         deadline = time.time() + self.sync_timeout
+        feed_at = time.time() + self.feed_after
         while True:
             got = set(self.rpc.getrawmempool())
             if want <= got:
                 break
+            if time.time() > feed_at:
+                # kogany's transaction gossip to the ycashd peer is not reliable (W9-a/F-3, the rig's
+                # feed): what the peer still lacks is offered to it directly, so ycashd judges every
+                # transaction a pair holds; a refusal is a cross-line divergence
+                self._feed(conns[0], sorted(want - got))
+                feed_at = deadline + 1
             if time.time() > deadline:
                 raise AssertionError('the ycash6 peer lacks %d mempool transaction(s) of the pairs: %s '
-                                     '(refused by ycashd? see %s/regtest/debug.log)'
+                                     '(see %s/regtest/debug.log)'
                                      % (len(want - got), sorted(want - got)[:4], self.datadir))
             time.sleep(0.2)
         self.stats['mempool_points'] += 1
+
+    def _feed(self, pair, txids):
+        """Offer the pairs' mempool transactions the peer lacks, parents first (a refusal of one
+        that is not a missing parent fails the run)."""
+        hexes = {}
+        for t in txids:
+            try:
+                hexes[t] = pair.getrawtransaction(t)
+            except JSONRPCException:
+                continue                                # mined or evicted meanwhile
+        for _ in range(len(hexes) + 1):
+            left = {}
+            for t, h in hexes.items():
+                try:
+                    self.rpc.sendrawtransaction(h, True)
+                    self.stats['fed_txs'] += 1
+                except JSONRPCException as e:
+                    msg = str(e.error.get('message', ''))
+                    if 'already in' in msg or 'txn-already' in msg:
+                        continue
+                    if 'Missing inputs' in msg or 'missing-inputs' in msg:
+                        left[t] = h
+                        continue
+                    raise AssertionError('the ycash6 peer refuses %s, which kogany holds in its mempool: %s'
+                                         % (t, msg))
+            if not left or len(left) == len(hexes):
+                break
+            hexes = left
 
     def sync_failed(self, kind, conns):
         for c in conns:
