@@ -1135,6 +1135,134 @@ def solve_template(t, max_nonces=100000):
     raise AssertionError('no (48,5) solution under the template target in %d nonces' % max_nonces)
 
 
+# F-S5-18: kogany's regtest template pays no founders' reward, which ycashd's regtest requires
+# before the Ycash upgrade (main.cpp ContextualCheckBlock "cb-no-founders-reward": 20 % of the
+# subsidy to GetFoundersRewardScriptAtHeight through GetLastFoundersRewardBlockHeight); a pair's
+# cache chain (yewd_build_cache: the framework's regtest without -nuparams) is all such blocks, so
+# the mixed variant's ycash6 peer refused its block 1.  Until kogany builds (and checks) that
+# output, the harness's solved generate adds it: the amount is the peer's own getblocksubsidy
+# 'founders', the script the regtest founders' address (ycash6 src/chainparams.cpp regtest
+# vFoundersRewardAddress, one P2SH address), the miner output pays that much less, and the merkle
+# root is recomputed.  With the Ycash upgrade active (the peer's schedule, kogany_regtest_schedule)
+# the same output is ycashd's YDF payment, required below nYdfMandateEndHeight only.  Counted as
+# founders_added; a template that already pays it is left as is.
+REGTEST_FOUNDERS_ADDRESS = 't2FwcEhFdNXuFMv1tcYwaBJtYVtMj8b1uTg'
+REGTEST_YDF_MANDATE_END = 5          # ycash6 src/chainparams.cpp regtest nYdfMandateEndHeight
+
+
+def _founders_script():
+    from .yellowback_model import base58check_decode
+    payload = base58check_decode(REGTEST_FOUNDERS_ADDRESS)
+    return b'\xa9\x14' + payload[2:22] + b'\x87'
+
+
+def _read_compact(b, o):
+    n = b[o]
+    if n < 0xfd:
+        return n, o + 1
+    if n == 0xfd:
+        return int.from_bytes(b[o + 1:o + 3], 'little'), o + 3
+    if n == 0xfe:
+        return int.from_bytes(b[o + 1:o + 5], 'little'), o + 5
+    return int.from_bytes(b[o + 1:o + 9], 'little'), o + 9
+
+
+def _coinbase_with_output(raw, script, value):
+    """The coinbase ``raw`` (v1..v4) with an output (``script``, ``value``) appended and ``value``
+    taken from its first output."""
+    header = int.from_bytes(raw[0:4], 'little')
+    o = 8 if header & 0x80000000 else 4                    # fOverwintered: nVersionGroupId follows
+    n_in, o = _read_compact(raw, o)
+    for _ in range(n_in):
+        o += 36
+        ln, o = _read_compact(raw, o)
+        o += ln + 4
+    vout_at = o
+    n_out, o = _read_compact(raw, o)
+    outs = []
+    for _ in range(n_out):
+        v = int.from_bytes(raw[o:o + 8], 'little')
+        ln, p = _read_compact(raw, o + 8)
+        outs.append([v, raw[p:p + ln]])
+        o = p + ln
+    rest = raw[o:]
+    assert outs and outs[0][0] > value, 'the coinbase cannot pay the founders reward: %r' % outs
+    outs[0][0] -= value
+    outs.append([value, script])
+    body = _compact_size(len(outs)) + b''.join(
+        v.to_bytes(8, 'little') + _compact_size(len(sc)) + sc for v, sc in outs)
+    return raw[:vout_at] + body + rest
+
+
+def _merkle_root(txids):
+    """txids: internal byte order."""
+    level = list(txids)
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [_sha256d(level[k] + level[k + 1]) for k in range(0, len(level), 2)]
+    return level[0]
+
+
+def with_founders_reward(t, peer_rpc):
+    """``t`` (a kogany template) paying the founders' reward the ycash6 peer requires at its
+    height, or ``t`` itself (none due, or already paid); (template, added)."""
+    raw = bytes.fromhex(t['coinbasetxn']['data'])
+    if peer_rpc is None or int.from_bytes(raw[0:4], 'little') & 0x7fffffff >= 5:
+        return t, False                                    # a v5 coinbase also moves the auth data root
+    height = int(t['height'])
+    try:
+        ycash = peer_rpc.getblockchaininfo().get('upgrades', {}).get('374d694f', {}).get('activationheight')
+        if ycash is not None and ycash <= height and height >= REGTEST_YDF_MANDATE_END:
+            return t, False                                # past the mandate the YDF output is optional
+        due = Decimal(str(peer_rpc.getblocksubsidy(height).get('founders', 0)))
+    except JSONRPCException:
+        return t, False
+    zat = int(due * 100000000)
+    if zat <= 0:
+        return t, False
+    script = _founders_script()
+    if script in raw:
+        return t, False
+    cb = _coinbase_with_output(raw, script, zat)
+    txids = [_sha256d(cb)] + [bytes.fromhex(x['hash'])[::-1] for x in t['transactions']]
+    t = dict(t)
+    t['coinbasetxn'] = dict(t['coinbasetxn'], data=cb.hex(), hash=_sha256d(cb)[::-1].hex())
+    t['defaultroots'] = dict(t['defaultroots'], merkleroot=_merkle_root(txids)[::-1].hex())
+    return t, True
+
+
+def kogany_regtest_schedule(args):
+    """F-S5-18: ``args`` with the network upgrades kogany's regtest activates without being told.
+    Zakura's ``ConfiguredActivationHeights::for_regtest`` (zakura-chain
+    parameters/network/testnet.rs) puts an unset Blossom at the Sapling height, Heartwood at
+    Blossom's and Canopy at Heartwood's (Zakura validates no pre-Canopy rules), while ycashd's
+    regtest leaves them unset: the framework's start_node names only Overwinter and Sapling, so a
+    pair's cache chain is mined under Canopy rules (6.25 subsidy, no founders' reward,
+    blockcommitments the chain-history root) that a plain ycashd refuses at block 1.  The mixed
+    variant's ycash6 peer judges the chain kogany actually runs, so it is given the same schedule
+    (Ycash's own Blossom/Heartwood/Canopy ids; ycashd puts its Ycash upgrade with them).  What
+    ycashd's Ycash rules add on top (the YDF output below the mandate end) the solved generate adds
+    (with_founders_reward)."""
+    heights = {}
+    for a in args:
+        if a.startswith('-nuparams='):
+            b, _, h = a.split('=', 1)[1].partition(':')
+            key = NU_BRANCH_TABLE.get(int(b, 16), (None,))[0]
+            if key is not None:
+                heights[key] = int(h)
+    if 'Sapling' not in heights:
+        return list(args)
+    out = list(args)
+    prev = heights['Sapling']
+    for key, branch in (('Blossom', 0x8e471bd6), ('Heartwood', 0x66314da3), ('Canopy', 0x19bd2d2f)):
+        if key not in heights:
+            heights[key] = prev
+            out.append('-nuparams=%x:%d' % (branch, prev))
+        prev = heights[key]
+    return out
+
+
 class SolvingProxy:
     """A pair node's RPC proxy whose ``generate`` mines solved blocks from kogany's templates
     (the mixed variant: a ycashd peer checks (48,5)).  Everything else is the proxy's."""
@@ -1153,14 +1281,17 @@ class SolvingProxy:
 
     def _generate(self, n, *rest):
         hashes = []
+        col = YEWD_COLUMN[0]
+        peer = col.rpc if col is not None and col.alive() else None
         for _ in range(int(n)):
-            t = self._inner.getblocktemplate()
+            t, added = with_founders_reward(self._inner.getblocktemplate(), peer)
+            if added:
+                col.stats['founders_added'] += 1
             block, h = solve_template(t)
             r = self._inner.submitblock(block)
             if r is not None:
                 raise JSONRPCException({'code': -1, 'message': 'generate: kogany refused its own solved template: %r' % (r,)})
             hashes.append(h)
-        col = YEWD_COLUMN[0]
         if col is not None:
             col.stats['solved_blocks'] += len(hashes)
         return hashes
@@ -1185,7 +1316,7 @@ class YewdColumn:
         self.k = 'ycash6-peer'
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
                       'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0,
-                      'peer_mirrored': 0}
+                      'peer_mirrored': 0, 'founders_added': 0}
         self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
         self._notes = set()
         self.datadir = os.path.join(tmpdir, 'ycash6peer')
@@ -1218,6 +1349,7 @@ class YewdColumn:
         want = [a for a in b_args if not a.startswith(('-datadir=', '-mineraddress=', '-minetolocalwallet',
                                                        '-connect=', '-addnode=', '-listen=', '-port=',
                                                        '-rpcport='))]
+        want = kogany_regtest_schedule(want)
         if self.ycashd is not None and self.ycashd.poll() is None and want == self.ycashd_args:
             return
         self.stop_peer()
