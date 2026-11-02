@@ -887,6 +887,7 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
         coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir, args), bool(yewd_kogany_bin()))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
+    YEWD_PAIR_STOCK[i] = not any(a.startswith('-yellowbackattestorset=') for a in args)
     kogany_bin = yewd_kogany_bin()
     if kogany_bin:
         YewdColumn.ensure(os.path.dirname(os.path.abspath(datadir)))
@@ -1427,8 +1428,11 @@ class YewdColumn:
         tip = conns[0].getbestblockhash()
         hashes = [self._statehashes(c) for c in conns]
         # a node that does not serve the read (a stock node: Yellowback not live there) is skipped,
-        # as MixedLine skips a peer that does not serve it
-        vaults = [h[0] for h in hashes if h[0] is not None]
+        # as MixedLine skips a peer that does not serve it; a stock pair that serves vault_getinfo
+        # is skipped for the vault statehash too (a stock node's differs after a YED mint, on both
+        # lines: it does not run the Yellowback module's vault rows)
+        stock = [YEWD_PAIR_STOCK.get(_pair_index(c), False) for c in conns]
+        vaults = [h[0] for h, st in zip(hashes, stock) if h[0] is not None and not st]
         yeds = [h[1] for h in hashes if h[1] is not None]
         if len(set(map(str, vaults))) > 1:
             raise AssertionError('yewd column: vault_getinfo.statehash differs between pairs at %s: %s' % (tip, vaults))
@@ -1462,6 +1466,8 @@ class YewdColumn:
                                      % (tip, conns[0].getblockcount(), got, self.datadir))
             time.sleep(0.2)
         v, y = self._statehashes(self.rpc)
+        if YEWD_PAIR_STOCK.get(self.peer, False):
+            v = None                                       # the peer runs pair YEWD_PEER's (stock) rules
         if v is not None and vaults[0] is not None and str(v) != str(vaults[0]):
             raise AssertionError('yewd column: vault_getinfo.statehash at %s: pairs (kogany) %s, ycash6 peer %s'
                                  % (tip, vaults[0], v))
@@ -1597,6 +1603,15 @@ class YewdColumn:
             print('yewd column: ycash6 peer tip %s height %s' % (self.rpc.getbestblockhash(), self.rpc.getblockcount()))
 
 
+def _pair_index(conn):
+    """The node index whose rpc_port ``conn`` talks to, or None."""
+    port = _port_of(conn)
+    for i in range(MAX_NODES):
+        if port == rpc_port(i):
+            return i
+    return None
+
+
 def _port_of(conn):
     try:
         return urlparse(conn.url).port
@@ -1613,6 +1628,9 @@ def yewd_wrap_proxy(i, proxy):
 
 
 YEWD_KOGANY_PAIRS = set()
+# node index -> the pair runs Yellowback-off (a "stock" node: no -yellowbackattestorset).  Its vault
+# statehash is not the enforcing nodes' after a YED mint, on either line, so it is not compared.
+YEWD_PAIR_STOCK = {}
 
 
 def yewd_build_cache(test_dir, num_nodes):
