@@ -935,23 +935,30 @@ def yewd_backend_indexer_port(i):
 
 
 def yewd_init_wallet(yewd_bin, datadir):
-    """H8: create (or open) pair i's wallet before its backend starts; its coinbase address."""
-    out = subprocess.check_output([yewd_bin, '-datadir=' + datadir, '-conf=ycash.conf', '-regtest', '-initwallet'])
-    return json.loads(out)['mineaddress']
+    """H8: create (or open) pair i's wallet before its backend starts: (its transparent coinbase
+    address, its Sapling coinbase address or None for a yewd that prints none)."""
+    out = json.loads(subprocess.check_output([yewd_bin, '-datadir=' + datadir, '-conf=ycash.conf', '-regtest',
+                                              '-initwallet']))
+    return out['mineaddress'], out.get('saplingaddress')
 
 
 def yewd_coinbase_address(args, mineaddress):
-    """F-S4-1: the coinbase address the pair's backend mines to, or None.  A node's
-    -mineraddress/-minetolocalwallet give way to the wallet's own address, except on a
-    Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress: both
-    lines take a P2PKH miner address as the default YED payout key (ycashd MINER-2, init.cpp;
-    kogany W5-f, start.rs set_payout_address), which a ycashd wallet node mining to its keypool never
-    has (yellowback_rpc_contract.py's no-payout-address), so such a node gets none."""
+    """F-S4-1, F-S5-9: the coinbase address the pair's backend mines to (``mineaddress`` is
+    ``yewd_init_wallet``'s pair), or None.  A node's -mineraddress/-minetolocalwallet give way to the
+    wallet's own transparent address.  Both lines take a P2PKH miner address as the default YED
+    payout key (ycashd MINER-2, init.cpp; kogany W5-f, start.rs set_payout_address), which a ycashd
+    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address), so
+    a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress gets no
+    coinbase address and cannot `generate` (F-S5-9: the address that names no payout key, the
+    wallet's Sapling one that yewd -initwallet prints, is refused by kogany: "Sapling coinbase
+    construction is not supported"; a node option for a miner address without a payout default
+    would close it)."""
+    taddr = mineaddress[0] if isinstance(mineaddress, tuple) else mineaddress
     live = any(a.startswith('-yellowbackattestorset=') for a in args)
     payout = any(a.startswith('-yellowbackpayoutaddress=') for a in args)
     if live and not payout:
         return None
-    return mineaddress
+    return taddr
 
 
 def yewd_h8_args(args, coinbase):
@@ -1124,13 +1131,13 @@ class YewdColumn:
         self.ycashd_args = want
         os.makedirs(self.datadir, exist_ok=True)
         with open(os.path.join(self.datadir, 'ycash.conf'), 'w', encoding='utf8') as f:
-            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nrpcport=%d\n' % kogany_rpc_port(0))
+            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nrpcport=%d\n' % kogany_v2_port(MAX_NODES))
         argv = [util.zcashd_binary(), '-datadir=' + self.datadir, '-disablewallet', '-listen=0',
                 '-port=%d' % sidecar_dead_port(MAX_NODES), '-connect=127.0.0.1:%d' % p2p_port(self.peer)] + want
         log = open(os.path.join(self.datadir, 'stderr.log'), 'ab')
         self.ycashd = subprocess.Popen(argv, stdout=log, stderr=log)
         cookie = os.path.join(self.datadir, 'regtest', '.cookie')
-        self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_rpc_port(0), cookie=cookie)
+        self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_v2_port(MAX_NODES), cookie=cookie)
         deadline = time.time() + 120
         while True:
             if self.ycashd.poll() is not None:
