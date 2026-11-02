@@ -817,6 +817,9 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     backend_dir = os.path.join(datadir, 'backend')
     os.makedirs(backend_dir, exist_ok=True)
     yewd_bin = os.environ['YEWD_BIN']
+    if not _REAPER[0]:
+        _REAPER[0] = True
+        atexit.register(_reap_pairs)
     coinbase = None
     nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
     if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
@@ -866,6 +869,24 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     # so yewd's own stream goes to node<i>/yewd.log unless the caller captures stderr itself
     out = stderr if stderr is not None else open(os.path.join(datadir, 'yewd.log'), 'ab')
     return subprocess.Popen(y_argv, stdout=out if stderr is None else None, stderr=out)
+
+
+_REAPER = [False]
+
+
+def _reap_pairs():
+    """At exit: a pair or backend still running (a script that crashed between its nodes' start and
+    stop_nodes, e.g. stop_nodes on a None entry) is killed, so no orphan outlives the run."""
+    for p in list(util.bitcoind_processes.values()) + list(YEWD_BACKENDS.values()):
+        try:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(20)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        except Exception:
+            pass
 
 
 def _unauthorized(e):
