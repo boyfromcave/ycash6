@@ -995,6 +995,20 @@ class SidecarRigTest(unittest.TestCase):
         m.mempool_wait([y0, y2], 12)                     # a refusal is printed, not fatal
         self.assertNotIn('b', k2.txs)
 
+    def test_sync_wait_feeds_from_the_best_node(self):
+        m = kg.MixedLine(binary='/bin/z', sidecar=True, pump_after=0)
+        y0, y5 = FakeChain(['g', 'a1', 'a2']), FakeChain(['g'])
+        y0.url, y5.url = FakeConn(0).url, FakeConn(5).url
+        k0, k5 = FakeChain(['g', 'a1', 'a2'], 0), FakeChain(['g'], 5)
+        kg.SIDECAR_NODES.update({0: k0, 5: k5})
+        m.followers = [k0, k5]
+        m.sync_wait([y0, y5], 1)
+        self.assertEqual(k5.submitted, ['raw-a1', 'raw-a2'])     # node 5 and its kogany both lagged
+        self.assertEqual(m.stats['pumped_blocks_cross'], 2)
+        k5r = FakeChain(['g'], 5, verdict='rejected')
+        kg.SIDECAR_NODES[5] = k5r
+        m.sync_wait([y0, y5], 1)                                  # another node's block refused: not fatal
+
     def test_pump_refusal_is_a_divergence(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)
         with self.assertRaises(AssertionError) as cm:

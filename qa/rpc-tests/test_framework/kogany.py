@@ -1388,17 +1388,31 @@ class MixedLine:
 
     def sync_wait(self, conns, waited):
         """``util._sync_blocks`` hook, called while the ycashds' tips still differ: in the rig, after
-        ``pump_after`` seconds, feed each lagging kogany the blocks its own ycashd holds (``_pump``)."""
+        ``pump_after`` seconds, feed each lagging kogany the blocks its own ycashd holds (``_pump``),
+        then the blocks of the highest ycashd of the sync group: a ycashd and its kogany that both lag
+        (a node whose only other link is to a kogany that gossiped the blocks while the ycashd's
+        connection was not ready, and whose ycashd then never asks again) are otherwise stuck.  A
+        kogany may refuse another node's block (that node can run other rules, the stock node
+        without the attestor set), so only its own ycashd's blocks are a divergence."""
         if not (self.sidecar and self.active) or waited < self.pump_after:
             return
-        for ref, f in self._pairs(conns):
-            try:
-                got = f.rpc.getbestblockhash()
-            except (OSError, JSONRPCException):
-                continue
-            self._pump(ref, f, got)
+        pairs = self._pairs(conns)
+        best = None
+        try:
+            best = max(conns, key=lambda c: c.getblockcount())
+        except (OSError, JSONRPCException, ValueError):
+            pass
+        for ref, f in pairs:
+            for src in (ref, best):
+                if src is None:
+                    continue
+                try:
+                    got = f.rpc.getbestblockhash()
+                except (OSError, JSONRPCException):
+                    break
+                self._pump(src, f, got, own=src is ref)
 
-    def _pump(self, ref, f, got):
+    def _pump(self, ref, f, got, own=True):
         """The rig's feed (finding W9-a/F-1): kogany i is behind ycashd i on ycashd i's active chain, so
         submit the missing blocks (up to ``pump_batch``) from ycashd i to kogany i's ``submitblock``,
         which fully validates each one; kogany then relays them to the other ycashds by P2P.
@@ -1431,9 +1445,14 @@ class MixedLine:
             except JSONRPCException as e:
                 result = _message(e)
             if classify_kogany_block(result) != ACCEPT:
+                if not own:            # another node's rules may differ: its own ycashd decides
+                    print('kogany %d: the rig fed block %d of another node, refused (%s)' % (f.k, height, result))
+                    return
                 raise AssertionError('kogany %d refused block %d of ycashd %d\'s active chain: %s'
                                      % (f.k, height, f.k, result))
             self.stats['pumped_blocks'] += 1
+            if not own:
+                self.stats['pumped_blocks_cross'] = self.stats.get('pumped_blocks_cross', 0) + 1
 
     def _mirror(self, ref, f, got):
         """KOGANY_MIRROR_INVALIDATE=1: a script's ``invalidateblock`` / ``reconsiderblock`` reach
