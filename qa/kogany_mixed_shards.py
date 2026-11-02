@@ -16,11 +16,17 @@ of the KOGANY_* environment).
         every direct script exists, and the harness's peer-count scripts are excluded.
     kogany_mixed_shards.py list [GROUP] [--state report|gate]
         the scripts, one per line (all groups when GROUP is omitted).
-    kogany_mixed_shards.py run GROUP --state report|gate [--jobs N] [--srcdir DIR] [--dry-run]
+    kogany_mixed_shards.py run GROUP --state report|gate [--of MIXED_GROUP] [--jobs N] [--srcdir DIR] [--dry-run]
         runs the group's scripts in that state: rpc-tests.py --fail-on-skip --nozmq --nocleanup, one
         invocation per flag set (KOGANY_MIRROR_INVALIDATE / KOGANY_MEMPOOL), the direct scripts on
         their own; state gate adds KOGANY_STRICT=1. Exit 1 when any invocation failed. A table goes
         to $GITHUB_STEP_SUMMARY when it is set.
+
+The `sidecar` group (kogany plan W9-a) is not a sixth shard of the mixed suite but a second mode
+for scripts already in one: the wallet-needing scripts, run with KOGANY_SIDECAR=1 (every node a
+kogany plus a ycashd -connect'ed to it, test_framework/kogany.py "The ycash6 test rig"). A sidecar
+script must also be in exactly one mixed group; `--of GROUP` runs the sidecar scripts of that mixed
+group only (the nightly runs one job per mixed group).
 
 Both repositories' CI call this file (ycash6 yellowback-tests.yml `mixed`; kogany's mixed-regtest
 leg from a ycash6 checkout at its pin), so the shard lists live in one place.
@@ -40,7 +46,9 @@ WORKFLOW = os.path.join(REPO, '.github', 'workflows', 'yellowback-tests.yml')
 RPC_TESTS = os.path.join(HERE, 'pull-tester', 'rpc-tests.py')
 RPC_DIR = os.path.join(HERE, 'rpc-tests')
 
-GROUPS = ('node', 'vault', 'yed', 'fees', 'attest')
+MIXED_GROUPS = ('node', 'vault', 'yed', 'fees', 'attest')
+SIDECAR = 'sidecar'
+GROUPS = MIXED_GROUPS + (SIDECAR,)
 STATES = ('report', 'gate')
 FLAGS = {'mirror': 'KOGANY_MIRROR_INVALIDATE', 'mempool': 'KOGANY_MEMPOOL', 'direct': None}
 WAVE = re.compile(r'^W[0-9](-[a-z0-9]+)?$')
@@ -113,7 +121,17 @@ def check(entries, excluded, yellowback_scripts, known, exists):
     """Problems with the manifest, as a list of strings (empty: fine)."""
     problems = []
     seen = {}
+    sidecar = {}
     for e in entries:
+        if e.group == SIDECAR:
+            if e.script in sidecar:
+                problems.append('%s listed twice in sidecar (lines %d and %d)' % (e.script, sidecar[e.script], e.line))
+            sidecar[e.script] = e.line
+            if e.direct:
+                problems.append('%s: a sidecar entry runs through rpc-tests.py, never direct' % e.script)
+            elif e.script not in known:
+                problems.append('%s is not an rpc-tests.py entry: rpc-tests.py would drop it silently' % e.script)
+            continue
         if e.script in seen:
             problems.append('%s listed twice (lines %d and %d)' % (e.script, seen[e.script], e.line))
         seen[e.script] = e.line
@@ -129,20 +147,32 @@ def check(entries, excluded, yellowback_scripts, known, exists):
         if s not in seen and s not in excluded:
             problems.append('%s (YELLOWBACK_SCRIPTS) is in no mixed group and not excluded' % s)
     for s in PEER_COUNT:
-        if s in seen:
+        if s in seen or s in sidecar:
             problems.append('%s asserts an exact peer count and must be excluded' % s)
+    for s in sidecar:
+        if s not in seen:
+            problems.append('%s is in sidecar but in no mixed group' % s)
     return problems
 
 
-def select(entries, group=None, state=None):
-    return [e for e in entries if (group is None or e.group == group) and (state is None or e.state == state)]
+def mixed_group_of(entries):
+    """{script: its mixed group} (the sidecar entries left out)."""
+    return {e.script: e.group for e in entries if e.group != SIDECAR}
+
+
+def select(entries, group=None, state=None, of=None):
+    """The entries of ``group`` in ``state``; ``of`` (sidecar only) keeps those whose script is in that
+    mixed group."""
+    groups = mixed_group_of(entries) if of else {}
+    return [e for e in entries if (group is None or e.group == group) and (state is None or e.state == state)
+            and (of is None or groups.get(e.script) == of)]
 
 
 def partitions(selected):
     """[(env additions, direct?, [scripts])], in a stable order: one rpc-tests.py run per flag set."""
     parts = {}
     for e in selected:
-        env = tuple(sorted(FLAGS[f] for f in e.flags if FLAGS[f]))
+        env = tuple(sorted([FLAGS[f] for f in e.flags if FLAGS[f]] + (['KOGANY_SIDECAR'] if e.group == SIDECAR else [])))
         if e.direct:
             parts.setdefault((env, True, e.script), []).append(e.script)
         else:
@@ -182,9 +212,11 @@ def main(argv=None):
     lp = sub.add_parser('list')
     lp.add_argument('group', nargs='?', choices=GROUPS)
     lp.add_argument('--state', choices=STATES)
+    lp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar: only the scripts of this mixed group')
     rp = sub.add_parser('run')
     rp.add_argument('group', choices=GROUPS)
     rp.add_argument('--state', choices=STATES, required=True)
+    rp.add_argument('--of', choices=MIXED_GROUPS, help='sidecar: only the scripts of this mixed group')
     rp.add_argument('--jobs', type=int, default=2)
     rp.add_argument('--srcdir', default=os.path.join(REPO, 'src'))
     rp.add_argument('--dry-run', action='store_true')
@@ -208,11 +240,14 @@ def main(argv=None):
         return 1 if problems else 0
 
     if args.cmd == 'list':
-        for e in select(entries, args.group, args.state):
+        for e in select(entries, args.group, args.state, args.of):
             print(e.script)
         return 0
 
-    selected = select(entries, args.group, args.state)
+    if args.of and args.group != SIDECAR:
+        print('--of selects within the sidecar group only', file=sys.stderr)
+        return 2
+    selected = select(entries, args.group, args.state, args.of)
     if not selected:
         print('mixed %s: no script in state %s' % (args.group, args.state))
         return 0
