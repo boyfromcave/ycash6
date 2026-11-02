@@ -1304,6 +1304,23 @@ class MixedLine:
             raise AssertionError('kogany %d has outbound peer(s) %s: the rig leaked a kogany-to-kogany link'
                                  % (f.k, out))
 
+    def sync_failed(self, kind, conns):
+        """``util`` hook before a failed sync_blocks/sync_mempools raises: in the rig, print every
+        pair's tip, mempool and kogany peers, so a relay gap names the hop that dropped it."""
+        if not (self.sidecar and self.active):
+            return
+        print('kogany rig: %s sync failed; per node (ycashd | kogany):' % kind)
+        for ref, f in self._pairs(conns):
+            try:
+                y = (ref.getblockcount(), ref.getbestblockhash()[:12], sorted(ref.getrawmempool()))
+                k = (f.rpc.getblockcount(), f.rpc.getbestblockhash()[:12], sorted(f.rpc.getrawmempool()))
+                peers = sorted(p.get('addr') for p in f.rpc.getpeerinfo())
+            except Exception as e:
+                print('  node %d: %r' % (f.k, e))
+                continue
+            print('  node %d: ycashd %d %s mempool %s | kogany %d %s mempool %s peers %s'
+                  % (f.k, y[0], y[1], [h[:12] for h in y[2]], k[0], k[1], [h[:12] for h in k[2]], peers))
+
     def sync_wait(self, conns, waited):
         """``util._sync_blocks`` hook, called while the ycashds' tips still differ: in the rig, after
         ``pump_after`` seconds, feed each lagging kogany the blocks its own ycashd holds (``_pump``)."""
@@ -1638,6 +1655,7 @@ def _register(mixed):
     util.MIXED_HOOKS['sync_blocks'] = mixed.sync_point
     util.MIXED_HOOKS['sync_mempools'] = mixed.mempool_point
     util.MIXED_HOOKS['sync_wait'] = mixed.sync_wait
+    util.MIXED_HOOKS['sync_failed'] = mixed.sync_failed
     atexit.register(mixed.stop)
 
 

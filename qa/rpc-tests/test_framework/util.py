@@ -201,7 +201,17 @@ def _sync_blocks(rpc_connections, wait=0.125, timeout=60, allow_different_tips=F
         time.sleep(wait)
         timeout -= wait
 
+    _sync_failed('blocks', rpc_connections)
     raise AssertionError("Block sync failed")
+
+def _sync_failed(kind, rpc_connections):
+    """The mixed harness's diagnostics for a failed sync (the kogany rig prints each pair's state)."""
+    hook = MIXED_HOOKS.get('sync_failed')
+    if hook is not None:
+        try:
+            hook(kind, rpc_connections)
+        except Exception as e:
+            print('kogany: sync diagnostics failed: %r' % (e,))
 
 def sync_mempools(rpc_connections, wait=0.5, timeout=60):
     """
@@ -237,6 +247,7 @@ def _sync_mempools(rpc_connections, wait=0.5, timeout=60):
         time.sleep(wait)
         timeout -= wait
 
+    _sync_failed('mempool', rpc_connections)
     raise AssertionError("Mempool sync failed")
 
 bitcoind_processes = {}
