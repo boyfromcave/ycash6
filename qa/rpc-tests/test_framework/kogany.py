@@ -1539,12 +1539,15 @@ class MixedLine:
             return
         self.stats['mempool_points'] += 1
         for ref, f in pairs:
-            want = set(ref.getrawmempool())
-            deadline = time.time() + self.sync_timeout
+            start = time.time()
+            deadline = start + self.sync_timeout
             while True:
+                want = set(ref.getrawmempool())
                 got = set(f.rpc.getrawmempool())
                 if got == want:
                     break
+                if self.sidecar:
+                    self.mempool_wait([ref], time.time() - start)   # the rig's feed, pair by pair
                 if time.time() > deadline:
                     raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s'
                                          % (f.k, sorted(want - got), sorted(got - want)))
