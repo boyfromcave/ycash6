@@ -469,9 +469,12 @@ KOGANY_REASON_MAP = [
      'W3-d ValidateContextError::UnsatisfiedSequenceLock; ycashd 64: non-BIP68-final (main.cpp:907)'),
     ('tx', r'\((bad-txns-vault-timelock)\)', CXX, 'W3-d ValidateContextError::VaultTimeLock (main.cpp:905, DoS 0 here)'),
     ('tx', r'vault rule violation[^:]*: (bad-[a-z0-9-]+)', CXX,
-     'W4-d ValidateContextError::VaultRejected { reason: VaultReject::reason() } -- unverified'),
+     'W4-d TransactionError::VaultRejected (the mempool\'s vault::CheckTx: "vault rule violation in the mempool '
+     'at Height(h): bad-...") and ValidateContextError::VaultRejected ("... in block <hash> at Height(h): '
+     'bad-...") -- verified on vault_primitive (KOGANY_MEMPOOL=1)'),
     ('tx', r'(?<![a-z0-9-])(bad-(?:txns-vault|vault|yellowback)-[a-z0-9-]+)', CXX,
-     'W4-b VaultReject::reason() / a module reason anywhere in the text -- unverified'),
+     'W4-b VaultReject::reason() / a module reason anywhere in the text (a fallback: W4-d\'s texts match the row '
+     'above)'),
     # --- relay policy (ycashd REJECT_NONSTANDARD / REJECT_INSUFFICIENTFEE / tx-expiring-soon)
     ('tx', r'transaction is non-standard|did not pass standard validation|non-standard (transparent )?inputs|'
            r'non-push-only scriptSig|byte scriptSig, above the', REJECT_POLICY,
@@ -505,6 +508,10 @@ KOGANY_REASON_MAP = [
      '(bad-txns-in-belowout), so the mempool class is policy'),
     ('tx', r'transparent double-spend|spent twice|duplicate nullifier', REJECT_CONSENSUS,
      'TransactionError::Duplicate* (ycashd 16: bad-txns-inputs-duplicate)'),
+    ('tx', r'could not verify a transparent script: .*OP_CHECKSETSIG or OP_CHECKSETDORMANT failed', REJECT_STATE,
+     'W3-c/W4-d: a set opcode failing on the tip\'s set state (zcash_script SetSig error); ycashd re-runs the '
+     'template input and answers DoS 0 (main.cpp:2229, VaultTemplateFailsOnSetState). Text-level: kogany '
+     'scores it like any script failure until W6 (BanV5AndLater: never for the v4 vault spends)'),
     ('tx', r'could not verify a transparent script', REJECT_CONSENSUS,
      'TransactionError::Script (ycashd mandatory-script-verify-flag-failed, DoS 100). A vault template input '
      'failing on the set state is DoS 0 in ycashd (main.cpp:2229) and has no kogany equivalent before W6: '
@@ -514,8 +521,9 @@ KOGANY_REASON_MAP = [
     ('tx', r'did not pass consensus validation|could not contextually validate', REJECT_CONSENSUS,
      'any other verifier or contextual error: a consensus rule (W1-Y9)'),
     # --- blocks: the proposal's text refines the bare 'rejected'
-    ('proposal', r'reason-(bad-[a-z0-9-]+)', CXX,
-     'W4-d VaultRejected Debug ("reason: \\"bad-...\\"") in kebab case -- unverified'),
+    ('proposal', r'vaultrejected-reason-(bad-[a-z0-9-]+?)-height-', CXX,
+     'W4-d ValidateContextError::VaultRejected Debug in kebab case ("block-source-validateproposal-vaultrejected-'
+     'reason-bad-vault-act-params-height-height-204-hash-...") -- verified on vault_primitive'),
     ('proposal', r'vaulttimelock', REJECT_CONSENSUS, 'W3-d VaultTimeLock in a block (main.cpp:905, DoS 100)'),
     ('proposal', r'unsatisfiedsequencelock', REJECT_CONSENSUS, 'W3-d UnsatisfiedSequenceLock (bad-txns-nonfinal)'),
     ('proposal', r'too-?far-?in-?(the-?)?future|time-?too-?new', REJECT_STATE,
