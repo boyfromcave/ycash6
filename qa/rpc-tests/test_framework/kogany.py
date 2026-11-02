@@ -1137,7 +1137,8 @@ class YewdColumn:
         self.rpc = None
         self.k = 'ycash6-peer'
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
-                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0}
+                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0,
+                      'peer_mirrored': 0}
         self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
         self._notes = set()
         self.datadir = os.path.join(tmpdir, 'ycash6peer')
@@ -1265,6 +1266,7 @@ class YewdColumn:
         if not self.alive():
             raise AssertionError('the ycash6 peer exited (see %s)' % self.datadir)
         deadline = time.time() + self.sync_timeout
+        mirror_at = time.time() + self.feed_after
         while True:
             try:
                 got = self.rpc.getbestblockhash()
@@ -1272,6 +1274,9 @@ class YewdColumn:
                 got = None
             if got == tip:
                 break
+            if got is not None and time.time() > mirror_at:
+                self._mirror(conns[0], tip, got)
+                mirror_at = time.time() + self.feed_after
             if time.time() > deadline:
                 raise AssertionError('the ycash6 peer did not reach the pairs\' tip %s (height %d): at %s '
                                      '(a block kogany accepted and ycashd refused? see %s/regtest/debug.log)'
@@ -1285,6 +1290,40 @@ class YewdColumn:
             raise AssertionError('yewd column: yed_getstatehash at %s: pairs (kogany) %s, ycash6 peer %s'
                                  % (tip, yeds[0], y))
         self.stats['peer_points'] += 1
+
+    def _mirror(self, pair, tip, got):
+        """A script's invalidateblock/reconsiderblock reaches only the pairs it names (the rig's and the
+        followers' limit, KOGANY_MIRROR_INVALIDATE): the peer reconsiders the pairs' tip if it holds it
+        as invalid, and invalidates its own branch above the fork with the pairs' chain."""
+        try:
+            self.rpc.getblockheader(tip)
+            self.rpc.reconsiderblock(tip)
+            self.stats['peer_mirrored'] += 1
+        except JSONRPCException:
+            pass
+        h = got
+        first = None
+        for _ in range(500):
+            try:
+                hdr = self.rpc.getblockheader(h)
+            except JSONRPCException:
+                return
+            try:
+                on_pairs = pair.getblockhash(hdr['height']) == h
+            except JSONRPCException:
+                on_pairs = False
+            if on_pairs:
+                break
+            first = h
+            h = hdr.get('previousblockhash')
+            if h is None:
+                return
+        if first is not None:
+            try:
+                self.rpc.invalidateblock(first)
+                self.stats['peer_mirrored'] += 1
+            except JSONRPCException:
+                pass
 
     def mempool_point(self, conns):
         """The ycash6 peer's mempool holds every pair's (each transaction a sidecar built, judged by
