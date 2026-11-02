@@ -246,6 +246,9 @@ KOGANYD_KEY_TABLE = [
     ('-yellowbackfee=<zat>', 'live', 'mempool.yellowback_fee', 'zatoshis, as given (W6-b)'),
     ('-yellowbackmintlag=<n>', 'live', 'mempool.yellowback_mint_lag', 'blocks (W6-b)'),
     ('-yellowbackpayoutaddress=<addr>', 'ignored', None, 'followers never mine (K-16); W8 maps the pool tag'),
+    ('-yellowbackpayoutdefault=<0|1>', 'live', 'mining.yellowback_payout_default',
+     'bool (F-S5-9): whether a P2PKH miner address is also the YED payout key (ycashd MINER-2); '
+     'the H8 harness turns it off for a live pair that names no payout address'),
     ('-yellowbacktestfault=<spec>', 'ignored', None,
      'gap: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: storage/crash/template/schema); '
      'kogany\'s [yellowback] has no fault key, so a follower never injects one'),
@@ -360,6 +363,7 @@ _LIVE_FLAGS = {
     '-yellowbackfee': (('mempool', 'yellowback_fee'), int),
     '-yellowbackmintlag': (('mempool', 'yellowback_mint_lag'), int),
     '-blockunpaidactionlimit': (('mining', 'block_unpaid_action_limit'), int),
+    '-yellowbackpayoutdefault': (('mining', 'yellowback_payout_default'), _bool01),
 }
 
 
@@ -1037,17 +1041,12 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     ``yewd_init_wallet``'s pair), or None.  A node's -mineraddress/-minetolocalwallet give way to the
     wallet's own transparent address.  Both lines take a P2PKH miner address as the default YED
     payout key (ycashd MINER-2, init.cpp; kogany W5-f, start.rs set_payout_address), which a ycashd
-    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address), so
-    a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress gets no
-    coinbase address and cannot `generate` (F-S5-9: the address that names no payout key, the
-    wallet's Sapling one that yewd -initwallet prints, is refused by kogany: "Sapling coinbase
-    construction is not supported"; a node option for a miner address without a payout default
-    would close it)."""
+    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address).
+    F-S5-9: a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress
+    still mines to the wallet's transparent address, with the payout default off
+    (``yewd_h8_args``: ycashd -yellowbackpayoutdefault=0, kogany mining.yellowback_payout_default),
+    so its miner address names no YED payout key, as the script's keypool-mining node does."""
     taddr = mineaddress[0] if isinstance(mineaddress, tuple) else mineaddress
-    live = any(a.startswith('-yellowbackattestorset=') for a in args)
-    payouts = [a.split('=', 1)[1] for a in args if a.startswith('-yellowbackpayoutaddress=')]
-    if live and not payouts:
-        return None
     # kogany takes its YED payout key from mining.miner_address only (no payout option, W5-f): a
     # pair that names -yellowbackpayoutaddress still mines to its wallet (mining to the payout address
     # instead left the wallet without the coinbase the scripts spend before importing the pool keys,
@@ -1056,10 +1055,16 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
 
 
 def yewd_h8_args(args, coinbase):
-    """The backend's arguments with the H8 coinbase address in place of the script's."""
+    """The backend's arguments with the H8 coinbase address in place of the script's.  A
+    Yellowback-live node that names no payout address takes no payout default from it either
+    (F-S5-9, ``yewd_coinbase_address``)."""
     args = [a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))]
     if coinbase is not None:
         args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
+        live = any(a.startswith('-yellowbackattestorset=') for a in args)
+        named = any(a.startswith(('-yellowbackpayoutaddress=', '-yellowbackpayoutdefault')) for a in args)
+        if live and not named:
+            args += ['-yellowbackpayoutdefault=0']
     return args
 
 

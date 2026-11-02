@@ -175,6 +175,17 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertEqual(t['mining']['block_unpaid_action_limit'], 0)
         self.assertFalse(t['mining']['internal_miner'])
 
+    def test_payout_default(self):
+        _cfg, _notes, t = self.gen(['-yellowbackpayoutdefault=0'], live=())
+        self.assertIs(t['mining']['yellowback_payout_default'], False)
+        live = ['-yellowbackattestorset=ab']
+        self.assertEqual(kg.yewd_coinbase_address(live, ('tmA', 'zs1')), 'tmA')
+        self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x'], 'tmA'),
+                         live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutdefault=0'])
+        named = live + ['-yellowbackpayoutaddress=tmP']
+        self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args(named, 'tmA'))
+        self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args([], 'tmA'))     # stock: unchanged
+
     def test_ignored_rows(self):
         _cfg, notes, t = self.gen(['-yellowbacktestfault=storage:commit', '-yellowbacksignal=0', '-feepolicy=zip317',
                                    '-mempoolevictionmemoryminutes=1'], live=())
