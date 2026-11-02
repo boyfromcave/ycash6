@@ -678,6 +678,7 @@ class MixedLineHookTest(unittest.TestCase):
     def test_restart_only_on_a_changed_live_config(self):
         m = kg.MixedLine(binary='/bin/z', peer=0)
         m.connect_settle = 0
+        m.connect_retry = 0
         f = FakeFollower(0)
         m.followers = [f]
         peer = FakePeer()

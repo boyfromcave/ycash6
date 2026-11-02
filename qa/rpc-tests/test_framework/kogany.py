@@ -1005,6 +1005,7 @@ class MixedLine:
         self.extra_args = list(extra_args)
         self.yewd = yewd
         self.connect_settle = 5.0
+        self.connect_retry = 60.0     # a restarted peer: seconds of re-dials (_connect)
         self.mirror_invalidate = mirror_invalidate
         self.tx_timeout = tx_timeout
         self.mirrored = {}
@@ -1171,6 +1172,21 @@ class MixedLine:
                 proxy.addnode(addr, 'onetry')
         except JSONRPCException:
             pass
+        if restart:
+            # the follower may still count the dead connection of the peer's previous process
+            # against max_connections_per_ip = 1 and refuse the first dial (yellowback_wallet_restore:
+            # encryptwallet restarts node 0 twice in a row): dial again until the peer sees it
+            retry = time.time() + self.connect_retry
+            while time.time() < retry:
+                time.sleep(2)
+                try:
+                    peers = proxy.getpeerinfo()
+                    if sum(1 for p in peers if KOGANY_SUBVER.search(p.get('subver', ''))) >= len(self.followers):
+                        return
+                    if not any(p.get('addr') == addr for p in peers):
+                        proxy.addnode(addr, 'onetry')
+                except (OSError, JSONRPCException):
+                    pass
 
     def _peer_conn(self, conns):
         port = rpc_port(self.peer)
@@ -1332,9 +1348,25 @@ class MixedLine:
                 if got == want:
                     break
                 if time.time() > deadline:
-                    raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s'
-                                         % (f.k, sorted(want - got), sorted(got - want)))
+                    raise AssertionError('kogany %d mempool differs: only ycashd %s, only kogany %s%s'
+                                         % (f.k, sorted(want - got), sorted(got - want),
+                                            self._offer_missing(ref, f, want - got)))
                 time.sleep(0.25)
+
+    def _offer_missing(self, ref, f, txids):
+        """The diagnosis of a mempool difference: each transaction only ycashd holds, offered to
+        the follower with sendrawtransaction, and its answer (the set check has failed already)."""
+        out = []
+        for txid in sorted(txids):
+            try:
+                raw = ref.getrawtransaction(txid)
+                f.rpc.with_timeout(self.tx_timeout + 5).sendrawtransaction(raw)
+                out.append('%s: accepted when offered directly (a relay difference)' % txid[:16])
+            except JSONRPCException as e:
+                out.append('%s: %s' % (txid[:16], _message(e)))
+            except Exception as e:   # a timeout: kogany waits for a missing input
+                out.append('%s: %s' % (txid[:16], e))
+        return ('; offered to kogany: ' + '; '.join(out)) if out else ''
 
     # --- verdicts (rule 4 (iii)) ---------------------------------------------------
 
