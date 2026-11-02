@@ -1119,7 +1119,7 @@ class YewdColumn:
         self.rpc = None
         self.k = 'ycash6-peer'
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
-                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0}
+                      'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0}
         self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
         self._notes = set()
         self.datadir = os.path.join(tmpdir, 'ycash6peer')
@@ -1138,6 +1138,7 @@ class YewdColumn:
             util.MIXED_HOOKS['sync_blocks'] = col.sync_point
             util.MIXED_HOOKS['sync_mempools'] = col.mempool_point
             util.MIXED_HOOKS['sync_failed'] = col.sync_failed
+            util.MIXED_HOOKS['mempool_wait'] = col.mempool_wait
             atexit.register(col.stop)
             print('yewd column: kogany + yewd pairs (%s)%s' % (yewd_kogany_bin(), (
                 '; ycash6 peer dials pair %d, generate solved by the harness' % col.peer) if col.with_peer else ''))
@@ -1322,6 +1323,32 @@ class YewdColumn:
             if not left or len(left) == len(hexes):
                 break
             hexes = left
+
+    def mempool_wait(self, conns, waited):
+        """util._sync_mempools hook: kogany's transaction gossip between koganys is not reliable (the
+        rig's finding W9-a/F-3, F-S5-16): after ``feed_after`` x 2 seconds a pair that lacks a
+        transaction another pair holds is offered it by sendrawtransaction (through its yewd); a
+        refusal is a divergence between two koganys and fails the run.  Once per sync."""
+        if waited < 2 * self.feed_after or waited >= 2 * self.feed_after + 0.5:
+            return
+        pools = [set(c.getrawmempool()) for c in conns]
+        union = set().union(*pools)
+        for c, pool in zip(conns, pools):
+            for t in sorted(union - pool):
+                holder = next(x for x, p in zip(conns, pools) if t in p)
+                try:
+                    h = holder.getrawtransaction(t)
+                except JSONRPCException:
+                    continue
+                try:
+                    c.sendrawtransaction(h, True)
+                    self.stats['fed_pair_txs'] += 1
+                except JSONRPCException as e:
+                    msg = str(e.error.get('message', ''))
+                    if 'already' in msg or 'Missing inputs' in msg or 'missing-inputs' in msg:
+                        continue
+                    raise AssertionError('pair at port %s refuses %s, which another pair holds: %s'
+                                         % (_port_of(c), t, msg))
 
     def sync_failed(self, kind, conns):
         for c in conns:
