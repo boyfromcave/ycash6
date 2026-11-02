@@ -129,9 +129,11 @@ def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 
-# The P2P and RPC ranges sit at 7 and 8 PORT_RANGEs (46000+, 51000+): the 2 and 3 they had are
-# yellowback_stratum.py's stratum and status ports (21000 / 26000 + the seed offset + index), so
-# kogany 0's RPC took yolo's status port (finding W9-a/F-5).
+# The 2 and 3 PORT_RANGEs these had are yellowback_stratum.py's stratum and status ports (21000 / 26000
+# + the seed offset + index), so kogany 0's RPC took yolo's status port (finding W9-a/F-5).  The RPC
+# range (bound in both modes) is now 5 PORT_RANGEs (36000+, below macOS's ephemeral 49152; it was
+# the unused yewd_rpc_port reservation, which moves to 8): a first move to 51000+ lost a run to an
+# ephemeral port.  The P2P range (bound by the follower mode only; the rig listens on p2p_port) is 7.
 
 def kogany_p2p_port(k):
     assert 0 <= k <= MAX_NODES
@@ -140,7 +142,7 @@ def kogany_p2p_port(k):
 
 def kogany_rpc_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
 
 
 def kogany_v2_port(k):
@@ -755,7 +757,7 @@ YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 def yewd_rpc_port(k):
     """Reserved (a yewd that listens beside, not instead of, a node); unused by the pair mode."""
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
 
 
 def yewd_backend_rpc_port(i):

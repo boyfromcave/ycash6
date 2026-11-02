@@ -215,6 +215,8 @@ class TomlGeneratorTest(unittest.TestCase):
                 {kg.sidecar_dead_port(k) for k in range(util.MAX_NODES + 1)}
             self.assertFalse(stratum & rig)
             self.assertLess(max(rig), 65536)
+            # the RPC port is bound in both modes: keep it below macOS's ephemeral range (49152)
+            self.assertLess(max(kg.kogany_rpc_port(k) for k in range(util.MAX_NODES + 1)), 49152)
 
     def test_toml_quoting(self):
         text = kg.render_toml({'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False, 'n': None}}, ['note'])
