@@ -48,6 +48,7 @@ Environment
                           ``-listen=0`` on ``rpc_port(i)`` (``start_sidecar``; "The ycash6 test rig"
                           below).  No peer follower is started; each kogany is compared with its own
                           ycashd at every sync point.
+``KOGANY_SIDECAR_RELAY``      0 turns off the rig's background re-announcement (``RigRelay``; default on).
 ``KOGANY_SIDECAR_PUMP_AFTER``  seconds a lagging rig kogany gets before the harness feeds it its own
                           ycashd's blocks by ``submitblock`` (default 5; ``MixedLine._pump``, finding
                           W9-a/F-1).
