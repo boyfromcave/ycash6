@@ -1,0 +1,96 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The mixed-line shards (kogany plan docs/plans/kogany/kogany-yellowback-plan.md §5 "mixed-regtest",
+# §4.2 rule 4; workspace docs/plans/kogany/ci-design.md): every Yellowback functional script of
+# yellowback-tests.yml's YELLOWBACK_SCRIPTS, run unchanged with kogany (zakurad) followers
+# (KOGANY_BIN, qa/rpc-tests/test_framework/kogany.py). The `mixed` job of yellowback-tests.yml runs
+# one group per job; qa/kogany_mixed_shards.py reads this file (`check` keeps it complete).
+#
+#   <group> <script> <state> <wave> [flags...]
+#
+#   group   vault | yed | fees | attest | node: one CI job each, re-run on its own
+#   state   report  runs, failure reported (the job stays green)
+#           gate    runs with KOGANY_STRICT=1, failure fails the job (and the `mixed tier` check)
+#           The coordinator flips a script from report to gate when its wave's gate is seen green
+#           (coordination-handoff §7); one word per script, in a reviewed commit.
+#   wave    the wave whose gate names the script (plan §3: W2-d, W4-e, W5-f, W6, W7, W8; W9-b for
+#           the rest, "the whole suite in mixed mode")
+#   flags   mirror   KOGANY_MIRROR_INVALIDATE=1 (the script calls invalidateblock/reconsiderblock)
+#           mempool  KOGANY_MEMPOOL=1 (getrawmempool set equality and tx verdicts, W6)
+#           direct   not an rpc-tests.py entry: run the file itself (rpc-tests.py drops unknown names)
+#
+#   excluded <script> <reason>     never in a mixed shard (the run without KOGANY_BIN still has it)
+
+# --- the harness itself (W1-Y7) and node plumbing
+node     kogany_mixed_smoke            report  W1   direct
+node     stopatheight                  report  W9
+node     ycash_bootstrap               report  W9
+node     testnet_ceremony              report  W9
+node     lightwalletd_only             report  W9
+node     z_validateaddress_nowallet    report  W9
+
+# --- the vault primitive (W2-d boundary, W4-e state, W7 reads)
+vault    vault_activation_restart      report  W2   mirror
+vault    vault_upgrade                 report  W2   mirror
+vault    vault_primitive               report  W4   mirror
+vault    vault_slashing                report  W4   mirror
+vault    vault_undo_prune              report  W4   mirror
+vault    vault_pq_reorg                report  W4   mirror
+vault    vault_dos                     report  W4   mirror
+vault    vault_rpc                     report  W7   mirror
+vault    vault_rpc_contract            report  W7
+vault    vault_pq_relay                report  W6
+vault    vault_bridge                  report  W9
+vault    vault_pq                      report  W9
+vault    vault_pq_wallet               report  W9
+vault    vault_pq_wallet_restore       report  W9
+vault    wallet_pq_address             report  W9
+
+# --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
+yed      yellowback_lifecycle          report  W5
+yed      yellowback_activation_reorg   report  W5   mirror
+yed      yellowback_reorg_restart      report  W5   mirror
+yed      yellowback_claim              report  W5
+yed      yellowback_interm             report  W5
+yed      yellowback_index              report  W5   mirror
+yed      yellowback_upgrade            report  W5   mirror
+yed      yellowback_rpc_contract       report  W7
+yed      yellowback_redeem_boundary    report  W9
+yed      yellowback_cancel_limit       report  W9
+yed      yellowback_pq                 report  W9
+yed      yellowback_pq_dayone          report  W9
+yed      yellowback_void_mint          report  W9
+yed      yellowback_mint_armed         report  W9
+yed      yellowback_wallet_restore     report  W9
+yed      yellowback_sapling            report  W9
+yed      yellowback_wallet_lifecycle   report  W9
+yed      yellowback_hardening          report  W9
+yed      yellowback_stock_node         report  W9   mirror
+
+# --- fees and mempool (W5-f fees state, W6 policy and mempool-set equality)
+fees     yellowback_fees               report  W5   mempool
+fees     yellowback_fees_reaccept      report  W5   mempool
+fees     yellowback_fee                report  W6   mempool
+fees     yellowback_mempool_limits     report  W6   mempool
+fees     vault_policy                  report  W6   mempool
+fees     vault_refee                   report  W6   mempool
+fees     yellowback_wr_flags           report  W9   mempool
+
+# --- attestation, roles and mining (W5-c/f seats and liveness, W8 mining; yolo and chain-viz
+#     come from the sidecars job)
+attest   yellowback_attest_evict       report  W5
+attest   yellowback_attest_rejoin      report  W5
+attest   yellowback_attest_live        report  W5
+attest   yellowback_pricefeed          report  W5
+attest   yellowback_mining             report  W8   mirror
+attest   yellowback_stratum            report  W8
+attest   yellowback_attest             report  W9
+attest   yellowback_attest_wallet      report  W9   mirror
+attest   yellowback_attest_bond        report  W9
+attest   yellowback_quote              report  W9
+attest   yellowback_chainviz           report  W9   mirror
+
+# --- off the mixed shards (test_framework/kogany.py "Recorded limits"; plan KF-32)
+excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo count, and a follower is one more peer
