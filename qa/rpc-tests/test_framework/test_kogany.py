@@ -56,12 +56,14 @@ class TomlGeneratorTest(unittest.TestCase):
 
     def test_live_chunks_emit_pending_keys_in_order(self):
         _cfg, notes, t = self.gen(['-yellowbackattestorset=' + SETID, '-yellowbacksigmaref=0', '-pqfalconheight=0'],
-                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e', 'W3-c'))
+                                  live=('W1-Y1', 'W2-b', 'W5-f', 'W5-e'))
         h = t['network']['network']['params']['activation_heights']
-        self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault'])
+        self.assertEqual(list(h), ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault',
+                                   'pq_falcon_height'])
         self.assertEqual(h['Vault'], 103)
+        self.assertEqual(h['pq_falcon_height'], 0)
         self.assertEqual(t['yellowback'], {'attestor_set': SETID, 'sigma_ref': 0})
-        self.assertEqual(t['kogany'], {'pq_falcon_height': 0})
+        self.assertNotIn('kogany', t)
         self.assertEqual(notes, [])
 
     def test_env_live(self):
@@ -148,12 +150,17 @@ class TomlGeneratorTest(unittest.TestCase):
                 self.gen([bad], live=())
 
     def test_pqfalcon_shorthand(self):
-        cfg, notes, _ = self.gen(['-pqfalcon=1'], live=('W1-Y1', 'W2-b', 'W3-c'))
-        self.assertEqual(cfg['kogany']['pq_falcon_height'], 0)
+        # W3-c/F-1 resolved: a live key of the regtest activation heights, in every mode
+        heights = lambda cfg: cfg['network']['network']['params']['activation_heights']
+        cfg, notes, _ = self.gen(['-pqfalcon=1'], live=('W1-Y1', 'W2-b'))
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 0)
         cfg, notes, _ = self.gen(['-pqfalcon=1'])
-        self.assertNotIn('kogany', cfg)
-        self.assertTrue(any('-pqfalcon=1' in n for n in notes), notes)
-        cfg, notes, _ = self.gen(['-pqfalcon=0'], live=('W3-c',))
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 0)
+        self.assertFalse(any('pqfalcon' in n for n in notes), notes)
+        cfg, notes, _ = self.gen(['-pqfalconheight=130'], live=())
+        self.assertEqual(heights(cfg)['pq_falcon_height'], 130)
+        cfg, notes, _ = self.gen(['-pqfalcon=0'], live=())
+        self.assertNotIn('pq_falcon_height', heights(cfg))
         self.assertNotIn('kogany', cfg)
         with self.assertRaises(kg.UnmappedArgument):
             self.gen(['-pqfalcon=2'])
@@ -215,6 +222,8 @@ class TomlGeneratorTest(unittest.TestCase):
                 {kg.sidecar_dead_port(k) for k in range(util.MAX_NODES + 1)}
             self.assertFalse(stratum & rig)
             self.assertLess(max(rig), 65536)
+            # the RPC port is bound in both modes: keep it below macOS's ephemeral range (49152)
+            self.assertLess(max(kg.kogany_rpc_port(k) for k in range(util.MAX_NODES + 1)), 49152)
 
     def test_toml_quoting(self):
         text = kg.render_toml({'a': {'s': 'x"y\\z', 'l': ['p', 'q'], 'b': False, 'n': None}}, ['note'])
@@ -707,7 +716,8 @@ class MixedLineHookTest(unittest.TestCase):
         saved = os.environ.pop('KOGANY_LIVE', None)
         try:
             m.on_node_start(0, START + YCASH + VAULT + ['-pqfalconheight=5'], peer)
-            self.assertEqual(f.events, [])        # pending row (W3-c): a note, not a key -> no restart
+            self.assertEqual(f.events, ['stop', 'write', 'start'])   # live row (W3-c/F-1): a key
+            f.events = []
             m.on_node_start(0, START + YCASH + VAULT + ['-yellowbackattestorset=' + SETID], peer)
             self.assertEqual(f.events, ['stop', 'write', 'start'])   # W5-f is live by default: a key
             self.assertEqual(f.config['yellowback'], {'attestor_set': SETID})
@@ -1014,6 +1024,45 @@ class SidecarRigTest(unittest.TestCase):
         k5r = FakeChain(['g'], 5, verdict='rejected')
         kg.SIDECAR_NODES[5] = k5r
         m.sync_wait([y0, y5], 1)                                  # another node's block refused: not fatal
+
+    def test_rig_relay_round(self):
+        class Pool:
+            def __init__(self, txs):
+                self.txs, self.got, self.rpc = set(txs), [], self
+
+            def with_timeout(self, t):
+                return self
+
+            def alive(self):
+                return True
+
+            def getrawmempool(self):
+                return sorted(self.txs)
+
+            def getrawtransaction(self, txid):
+                return 'raw-' + txid
+
+            def sendrawtransaction(self, raw):
+                self.got.append(raw[4:])
+                self.txs.add(raw[4:])
+
+        y, k = Pool(['a']), Pool(['b'])
+        kg.SIDECAR_NODES[0] = k
+        saved = (util.get_rpc_proxy, dict(util.bitcoind_processes))
+        util.get_rpc_proxy = lambda url, i, timeout=None: y
+        util.bitcoind_processes[0] = object()
+        try:
+            r = kg.RigRelay(kg.MixedLine(binary='/bin/z', sidecar=True), age=4)
+            r.round(100)                      # first seen: not yet
+            self.assertEqual((y.got, k.got), ([], []))
+            r.round(105)                      # held 5 s: re-announced both ways
+            self.assertEqual((y.got, k.got), (['b'], ['a']))
+            r.round(107)                      # converged: nothing left to track
+            self.assertEqual(r.seen, {})
+        finally:
+            util.get_rpc_proxy = saved[0]
+            util.bitcoind_processes.clear()
+            util.bitcoind_processes.update(saved[1])
 
     def test_pump_refusal_is_a_divergence(self):
         m = kg.MixedLine(binary='/bin/z', sidecar=True)

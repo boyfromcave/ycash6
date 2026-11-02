@@ -52,6 +52,7 @@ Environment
                           ``-listen=0`` on ``rpc_port(i)`` (``start_sidecar``; "The ycash6 test rig"
                           below).  No peer follower is started; each kogany is compared with its own
                           ycashd at every sync point.
+``KOGANY_SIDECAR_RELAY``      0 turns off the rig's background re-announcement (``RigRelay``; default on).
 ``KOGANY_SIDECAR_PUMP_AFTER``  seconds a lagging rig kogany gets before the harness feeds it its own
                           ycashd's blocks by ``submitblock`` (default 5; ``MixedLine._pump``, finding
                           W9-a/F-1).
@@ -107,6 +108,7 @@ if kogany's real clock accepts their time.
 
 import atexit
 import json
+import threading
 import os
 import re
 import socket
@@ -131,9 +133,11 @@ def _offset():
     return (MAX_NODES * PortSeed.n) % (PORT_RANGE - 1 - MAX_NODES)
 
 
-# The P2P and RPC ranges sit at 7 and 8 PORT_RANGEs (46000+, 51000+): the 2 and 3 they had are
-# yellowback_stratum.py's stratum and status ports (21000 / 26000 + the seed offset + index), so
-# kogany 0's RPC took yolo's status port (finding W9-a/F-5).
+# The 2 and 3 PORT_RANGEs these had are yellowback_stratum.py's stratum and status ports (21000 / 26000
+# + the seed offset + index), so kogany 0's RPC took yolo's status port (finding W9-a/F-5).  The RPC
+# range (bound in both modes) is now 5 PORT_RANGEs (36000+, below macOS's ephemeral 49152; it was
+# the unused yewd_rpc_port reservation, which moves to 8): a first move to 51000+ lost a run to an
+# ephemeral port.  The P2P range (bound by the follower mode only; the rig listens on p2p_port) is 7.
 
 def kogany_p2p_port(k):
     assert 0 <= k <= MAX_NODES
@@ -142,7 +146,7 @@ def kogany_p2p_port(k):
 
 def kogany_rpc_port(k):
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
 
 
 def kogany_v2_port(k):
@@ -212,9 +216,10 @@ ZAKURAD_KEY_TABLE = [
      '"scriptsig" / "opreturn" / "either" (W5-e)'),
     ('-yellowbackmintrequiresarmed=<0|1>', 'live:W5-f', 'yellowback.mint_requires_armed', 'bool (W5-e)'),
     ('(the YED start height)', 'derived', None, 'always the Vault activation height on kogany (W5-e)'),
-    ('-pqfalconheight=<h>', 'pending:W3-c', 'kogany.pq_falcon_height',
-     'Falcon activation; kogany has no key yet (finding W3-c/F-1, open)'),
-    ('-pqfalcon=<0|1>', 'pending:W3-c', 'kogany.pq_falcon_height',
+    ('-pqfalconheight=<h>', 'live', 'network.network.params.activation_heights.pq_falcon_height',
+     'the regtest Falcon height (kogany ConfiguredActivationHeights::pq_falcon, finding W3-c/F-1 resolved); '
+     'not an upgrade: no branch id, 0 is valid'),
+    ('-pqfalcon=<0|1>', 'live', 'network.network.params.activation_heights.pq_falcon_height',
      'ycashd\'s shorthand: -pqfalcon=1 is -pqfalconheight=0 (init.cpp); -pqfalcon=0 sets nothing'),
     ('-acceptnonstdtxn=<0|1>', 'live', 'mempool.accept_non_standard', 'bool (W1-Y9)'),
     ('-txunpaidactionlimit=<n>', 'live', 'mempool.tx_unpaid_action_limit', 'int (W1-Y9)'),
@@ -310,8 +315,14 @@ _PENDING_FLAGS = {
     '-yellowbackattestarmmin': ('W5-f', ('yellowback', 'attest_arm_min'), int),
     '-yellowbackbundlecarrier': ('W5-f', ('yellowback', 'bundle_carrier'), str),
     '-yellowbackmintrequiresarmed': ('W5-f', ('yellowback', 'mint_requires_armed'), _bool01),
-    '-pqfalconheight': ('W3-c', ('kogany', 'pq_falcon_height'), int),
-    '-pqfalcon': ('W3-c', ('kogany', 'pq_falcon_height'), lambda v: 0 if _bool01(v) else None),
+}
+
+# The Falcon height (W3-c/F-1): a key of the regtest activation heights, though not an upgrade
+# (kogany `ConfiguredActivationHeights::pq_falcon`, toml `pq_falcon_height`).  None: nothing to carry.
+FALCON_KEY = 'pq_falcon_height'
+_FALCON_FLAGS = {
+    '-pqfalconheight': int,
+    '-pqfalcon': lambda v: 0 if _bool01(v) else None,
 }
 
 # Chunks live unless KOGANY_LIVE names them with a '!' (W5-f: the module registration landed, so a
@@ -383,6 +394,11 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             else:
                 notes.append('%s: %s -> activation_heights.%s = %s' % (status, a, key, h))
             continue
+        if name in _FALCON_FLAGS:
+            value = _FALCON_FLAGS[name](value)
+            if value is not None:
+                heights[FALCON_KEY] = value
+            continue
         if name in _LIVE_FLAGS:
             path, conv = _LIVE_FLAGS[name]
             _set(cfg, path, conv(value))
@@ -408,7 +424,8 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     # Zakura keeps one upgrade per height, the later variant winning (testnet.rs:924-929), and
     # refuses a map out of order; ycashd's regtest puts every Ycash upgrade at 1, which is the
     # same chain either way (Canopy rules from 1).  Order the keys as ConfiguredActivationHeights.
-    order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6']
+    order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6',
+             FALCON_KEY]
     ordered = {k: heights[k] for k in order if k in heights}
 
     root = os.path.abspath(datadir)
@@ -432,7 +449,7 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
         'mining': {'internal_miner': False},
         'tracing': {'use_color': False, 'filter': log_filter or os.getenv('KOGANY_LOG', 'info')},
     }
-    for k, v in cfg.items():          # live pending sections (yellowback, kogany)
+    for k, v in cfg.items():          # live pending sections (yellowback)
         base.setdefault(k, {}).update(v)
     return base, notes
 
@@ -770,7 +787,7 @@ YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 def yewd_rpc_port(k):
     """Reserved (a yewd that listens beside, not instead of, a node); unused by the pair mode."""
     assert 0 <= k <= MAX_NODES
-    return PORT_MIN + 5 * PORT_RANGE + k + _offset()
+    return PORT_MIN + 8 * PORT_RANGE + k + _offset()
 
 
 def yewd_backend_rpc_port(i):
@@ -1500,6 +1517,62 @@ def start_sidecar(i, dirname, args):
     return sidecar_ycashd_args(i, args)
 
 
+class RigRelay(threading.Thread):
+    """The rig's background re-announcement (finding W9-a/F-3), for the waits a script does itself
+    (``wait_for_mempool`` with its own timeout, chain-viz's snapshot) and that no harness hook sees.
+    Every ``period`` seconds, per node: a transaction ycashd i has held for ``age`` seconds that
+    kogany i lacks goes to kogany i's ``sendrawtransaction``; one kogany i has held that long and
+    ycashd i lacks goes to ycashd i.  Pair-local, so a split's halves never exchange anything; kogany
+    then gossips what it took to its own peers, which is the re-announcement Zakura never makes.
+    Its own connections (one per call), never the script's.  ``KOGANY_SIDECAR_RELAY=0`` turns it off."""
+
+    def __init__(self, mixed, period=2.0, age=4.0):
+        super().__init__(name='kogany-rig-relay', daemon=True)
+        self.mixed, self.period, self.age = mixed, period, age
+        self.halt = threading.Event()
+        self.seen = {}                # (node, direction, txid) -> first time seen missing
+
+    def run(self):
+        while not self.halt.wait(self.period):
+            try:
+                self.round(time.time())
+            except Exception as e:     # never let the helper kill a run; the sync checks still judge
+                print('kogany rig relay: %r' % (e,))
+
+    def round(self, now):
+        missing = set()
+        for i, k in list(SIDECAR_NODES.items()):
+            if not k.alive() or i not in util.bitcoind_processes:
+                continue
+            y = util.get_rpc_proxy(util.rpc_url(i), i, timeout=10)
+            try:
+                have_y, have_k = set(y.getrawmempool()), set(k.rpc.getrawmempool())
+            except (OSError, JSONRPCException):
+                continue
+            for direction, txids in (('k', have_y - have_k), ('y', have_k - have_y)):
+                for txid in txids:
+                    key = (i, direction, txid)
+                    missing.add(key)
+                    first = self.seen.setdefault(key, now)
+                    if now - first < self.age:
+                        continue
+                    try:
+                        if direction == 'k':
+                            k.rpc.with_timeout(self.mixed.tx_timeout).sendrawtransaction(y.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_kogany'] = self.mixed.stats.get('relayed_txs_kogany', 0) + 1
+                        else:
+                            y.sendrawtransaction(k.rpc.getrawtransaction(txid))
+                            self.mixed.stats['relayed_txs_ycashd'] = self.mixed.stats.get('relayed_txs_ycashd', 0) + 1
+                    except (OSError, JSONRPCException):
+                        pass           # refused, mined or evicted meanwhile: retried next round if still missing
+        self.seen = {key: t for key, t in self.seen.items() if key in missing}
+
+    def stop(self):
+        self.halt.set()
+        if self.is_alive():
+            self.join(10)
+
+
 def sidecar_started(i):
     """``util.start_node`` hook after ycashd i answered: kogany i must have taken the same config."""
     msg = SIDECAR_REFUSED.pop(i, None)
@@ -1655,6 +1728,7 @@ class MixedLine:
         self.tx_timeout = tx_timeout
         self.mirrored = {}
         self.followers = []
+        self.relay = None             # the rig's RigRelay thread
         self.tmpdir = None
         self.peer_args = None
         self._notes = set()
@@ -1738,6 +1812,9 @@ class MixedLine:
         if self.sidecar:
             print('kogany: test rig, %d kogany + ycashd pair(s) (%s)' % (len(SIDECAR_NODES), self.binary))
             self.sync_point(list(test.nodes), 'attach')
+            if os.getenv('KOGANY_SIDECAR_RELAY', '1') == '1':
+                self.relay = RigRelay(self)
+                self.relay.start()
             return
         if not test.nodes and not getattr(test, 'num_nodes', 0):
             # a run without nodes (create_cache.py, which rpc-tests.py runs first under -j > 1):
@@ -1757,6 +1834,9 @@ class MixedLine:
         self.sync_point([test.nodes[self.peer]], 'attach')
 
     def stop(self):
+        if self.relay is not None:
+            self.relay.stop()
+            self.relay = None
         for f in self.followers:
             f.stop()
         SIDECAR_NODES.clear()
