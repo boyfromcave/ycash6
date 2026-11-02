@@ -234,6 +234,27 @@ class VerdictClassTest(unittest.TestCase):
                 self.assertEqual(kg.classify_cxx_tx(rpc_error(cxx), unmapped), want, cxx)
                 self.assertEqual(unmapped, [], cxx)
 
+    def test_w4d_vault_rejected_texts(self):
+        # kogany's own texts, as vault_primitive (KOGANY_MEMPOOL=1) produced them
+        tx = ('failed to validate tx: transaction::Hash("private"), error: vault rule violation in the mempool '
+              'at Height(204): bad-txns-vault-noset')
+        cls, row = kg.classify_kogany_text('tx', tx)
+        self.assertEqual((cls, row[2].split()[0]), (kg.REJECT_STATE, 'W4-d'))
+        self.assertEqual(kg.classify_cxx_tx(rpc_error('16: bad-txns-vault-noset'), []), kg.REJECT_STATE)
+        block = 'vault rule violation in block 005cf604 at Height(204): bad-vault-act-params'
+        self.assertEqual(kg.classify_kogany_text('tx', block)[0], kg.REJECT_STATE)
+        proposal = ('block-source-validateproposal-vaultrejected-reason-bad-vault-act-params-height-height-204-'
+                    'hash-block-hash-005cf604fd85f58c0d02a22e46896c87d80115eef2153a294ce38d3309829130')
+        self.assertEqual(kg.classify_kogany_block('rejected', proposal), kg.REJECT_CONSENSUS)
+        m = re.search(kg.KOGANY_REASON_MAP[[r[1] for r in kg.KOGANY_REASON_MAP].index(
+            r'vaultrejected-reason-(bad-[a-z0-9-]+?)-height-')][1], proposal)
+        self.assertEqual(m.group(1), 'bad-vault-act-params')
+        # a set opcode failing on the set state: state, as ycashd's main.cpp:2229
+        script = ('failed to validate tx: transaction::Hash("private"), error: transaction did not pass consensus '
+                  'validation: could not verify a transparent script: PubKey script failed: during interpretation: '
+                  'OP_CHECKSETSIG or OP_CHECKSETDORMANT failed')
+        self.assertEqual(kg.classify_kogany_tx(rpc_error(script)), kg.REJECT_STATE)
+
     def test_cxx_rows_carry_ycash6_reason(self):
         cls, row = kg.classify_kogany_text('tx', 'x (bad-txns-vault-timelock) y')
         self.assertEqual((cls, row[2].split()[0]), (kg.REJECT_STATE, 'W3-d'))
