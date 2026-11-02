@@ -608,9 +608,20 @@ C: vault_buildcancel I' -> X ; C: set_signcancel X -> X1 ; C: vault_send X1   (a
 - `<datadir>/vaults/` commits each connected block (state, undo, tip marker) after the block's
   script checks; `-reindex` wipes it; on start it is reconciled with the active chain
   (disconnected with its own undo, replayed from the block files). Replay needs every block and
-  undo file from the activation height, so `-prune` is refused wherever the upgrade has an
-  activation height, with or without Yellowback (audit 01/N-1): a node that pruned before its
-  network set a height must re-download the chain without `-prune`. Undo records are kept for
+  undo file from the activation height, and so does the YED index's (`-reindex-yellowback`).
+  `-prune` therefore keeps them (the vault prune floor, which replaced audit 01/N-1's refusal of
+  `-prune`): wherever the upgrade has an activation height, no `blk`/`rev` file pair holding a
+  block at or above `H_V − 288` (`MIN_BLOCKS_TO_KEEP` below the activation height) is deleted,
+  the last prunable height being `min(tip − 288, H_V − 289)` (`LastPrunableHeight`,
+  `src/main.cpp`). Before activation that is the stock `tip − 288`, so a node that pruned before
+  its network set a height starts normally. After activation the floor bounds the size target:
+  once the files from the floor on exceed it, pruning stops and the log says "prune target below
+  the vault floor" once. At start-up a pruned node checks that every active-chain block from the
+  floor has its block and undo data on disk; if one is missing (pruned past the floor by an
+  earlier binary, or removed by hand) it refuses to start, naming the height, and `-reindex`
+  re-downloads the chain. Everything else stock `-prune` limits stays limited (`-txindex`,
+  `-insightexplorer`, wallet rescans and imports, serving the chain to peers); getblock below the
+  floor says "pruned data". `qa/rpc-tests/vault_prune_floor.py` (nightly). Undo records are kept for
   4,096 blocks (`UNDO_KEEP`, `src/vault/db.h`); a crash-time walk-back deeper than that is a wipe
   and replay from the activation height (minutes to hours), as a `VAULT_DB_VERSION` change is
   (audit 07/F-7, 07/F-8); a node killed during a long initial sync with a large `-dbcache` can take
