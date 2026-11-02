@@ -398,6 +398,17 @@ class VerdictClassTest(unittest.TestCase):
         self.assertEqual(kg.classify_kogany_block('rejected', 'something-else'), kg.REJECT_CONSENSUS)
         self.assertEqual(kg.classify_kogany_block(None, 'ignored-when-accepted'), kg.ACCEPT)
 
+    def test_proposal_invalid_miner_fees(self):
+        # a coinbase paying too much: kogany's proposal text, ycashd's bad-cb-amount (DoS 100)
+        proposal = 'block-source-block-source-transaction-subsidy-invalidminerfees'
+        cls, row = kg.classify_kogany_text('proposal', proposal)
+        self.assertEqual(cls, kg.REJECT_CONSENSUS)
+        self.assertIn('bad-cb-amount', row[2])
+        self.assertEqual(kg.classify_kogany_block('rejected', proposal), kg.REJECT_CONSENSUS)
+        self.assertEqual(kg.classify_cxx_block('bad-cb-amount'), kg.REJECT_CONSENSUS)
+        self.assertTrue(kg.same_class(kg.classify_cxx_block('bad-cb-amount'),
+                                      kg.classify_kogany_block('rejected', proposal), strict=True))
+
     def test_same_class(self):
         self.assertTrue(kg.same_class(kg.ACCEPT, kg.ACCEPT))
         self.assertFalse(kg.same_class(kg.ACCEPT, kg.REJECT_UNCLASSIFIED))
