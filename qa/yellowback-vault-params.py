@@ -12,14 +12,21 @@
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
 W3-P-1). The extractor reads every parameter from the constructor body of each network class (never
 the first match in the file) and fails closed (exit 2) on any shape it does not expect. The testnet
-has three compiled-in profiles (testnet plan Revision 3, T-14): each is a subclass of CTestNetParams,
-read as the base constructor's body plus its own, where every parameter is assigned exactly once.
+has three compiled-in profiles (testnet plan Revision 3, T-14). testnet-yb-fast is a subclass of
+CTestNetParams, read as the base constructor's body plus its own, where every parameter is assigned
+exactly once. testnet-yb-slow and testnet-legacy are shadow forks of mainnet
+(docs/plans/yellowback-testnet-shadow-fork-plan.md): subclasses of CTestNetShadowParams, itself a
+subclass of CMainParams, read as the three constructor bodies in construction order, where each body
+assigns a parameter at most once and a later body overrides an earlier one (C++ constructor order:
+mainnet's values, then the testnet's). Their split height H_S (TESTNET_SHADOW_SPLIT_HEIGHT) and every
+network's Vault and shadow branch IDs (NetworkUpgradeInfo, or a network's own nBranchId) are read too.
 `compare --release main` applies the release rules to A (the tag guard) for the stage the tag names
-(testnet plan §5.1, T-8): a beta needs none of them; an rc needs R3-R6 and the testnet's R7 (fast
-named, slow pending or named, legacy never), and mainnet's height and set only together if the owner
-sets them; a final release needs R1-R7. Part D, raising PROTOCOL_VERSION, is taken with rc1 (T-8):
-UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION stays at
-or below the live floor. `stage VERSION` prints the stage of a release version. This file is
+(testnet plan §5.1, T-8): a beta needs only the invariants (testnet-legacy never activates Vault;
+slow and legacy have branch IDs of their own); an rc needs R3-R6, the testnet's R7 (fast named, slow
+pending or named, legacy never) and R8 (H_S set), and mainnet's height and set only together if the
+owner sets them; a final release needs R1-R8. Part D, raising PROTOCOL_VERSION, is taken with rc1
+(T-8): UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION
+stays at or below the live floor. `stage VERSION` prints the stage of a release version. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
 """
 import argparse
@@ -29,10 +36,16 @@ import re
 import subprocess
 import sys
 
-FILES = ("src/chainparams.cpp", "src/consensus/params.h", "src/version.h", "src/yellowback/params.cpp")
+FILES = ("src/chainparams.cpp", "src/consensus/params.h", "src/version.h", "src/yellowback/params.cpp",
+         "src/consensus/upgrades.h", "src/consensus/upgrades.cpp")
 NETWORKS = (("main", "CMainParams"), ("regtest", "CRegTestParams"))
 TESTNET_BASE = "CTestNetParams"
+# The testnet shadow fork: slow and legacy are CMainParams, then CTestNetShadowParams, then their own body.
+SHADOW_CHAIN = ("CMainParams", "CTestNetShadowParams")
 TESTNET_PROFILES = (("fast", "CTestNetFastParams"), ("slow", "CTestNetSlowParams"), ("legacy", "CTestNetLegacyParams"))
+SHADOW_PROFILES = ("slow", "legacy")
+SHADOW_SPLIT_CONSTANT = "TESTNET_SHADOW_SPLIT_HEIGHT"
+PROFILE_NAMES = {"fast": "testnet-yb-fast", "slow": "testnet-yb-slow", "legacy": "testnet-legacy"}
 # The YED columns: MainParams (main), TestParams (testnet-yb-slow; testnet-legacy, inert), TestFastParams.
 YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
 VERSION_CONSTANTS = ("PROTOCOL_VERSION", "MIN_PEER_PROTO_VERSION", "MIN_TESTNET_PEER_PROTO_VERSION")
@@ -107,25 +120,78 @@ def brace_body(text, signature):
     raise ParseError("src/yellowback/params.cpp: unbalanced braces in %s" % signature)
 
 
-def network_params(chainparams, params_h, cls, name, base=None):
-    body = strip_comments(constructor_body(chainparams, cls))
-    if base is not None:
-        body = strip_comments(constructor_body(chainparams, base)) + "\n" + body
+def branch_id(token, upgrades_h, what):
+    """A branch ID token: a hex literal, or a constant defined in src/consensus/upgrades.h."""
+    token = token.strip()
+    if re.fullmatch(r"0x[0-9a-fA-F]{1,8}", token):
+        return "%08x" % int(token, 16)
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", token):
+        value = one(r"static const uint32_t %s\s*=\s*(0x[0-9a-fA-F]{1,8})\s*;" % token, upgrades_h,
+                    "src/consensus/upgrades.h " + token)
+        return "%08x" % int(value, 16)
+    raise ParseError("%s: unexpected branch ID %r" % (what, token))
+
+
+def table_branch_id(upgrades_cpp, upgrades_h, name):
+    """NetworkUpgradeInfo's branch ID for the upgrade named `name` (its .strName)."""
+    tok = one(r"\.nBranchId\s*=\s*([^,]+?)\s*,\s*\.strName\s*=\s*\"%s\"" % re.escape(name), upgrades_cpp,
+              "src/consensus/upgrades.cpp NetworkUpgradeInfo %s" % name)
+    return branch_id(tok, upgrades_h, "NetworkUpgradeInfo " + name)
+
+
+def network_params(chainparams, params_h, cls, name, base=None, chain=None, upgrades=None):
+    """One network's Vault parameters. `base`: one extra body, each parameter assigned once across both.
+    `chain`: bodies in construction order, each assigning a parameter at most once, the last one wins."""
     where = "%s (%s)" % (cls, name)
+    if chain is not None:
+        bodies = [strip_comments(constructor_body(chainparams, c)) for c in tuple(chain) + (cls,)]
+
+        def find(pattern, what, required):
+            found = None
+            for b in bodies:
+                v = optional(pattern, b, what)
+                if v is not None:
+                    found = v
+            if found is None and required:
+                raise ParseError("%s: expected a match, found none" % what)
+            return found
+    else:
+        body = strip_comments(constructor_body(chainparams, cls))
+        if base is not None:
+            body = strip_comments(constructor_body(chainparams, base)) + "\n" + body
+
+        def find(pattern, what, required):
+            return one(pattern, body, what) if required else optional(pattern, body, what)
     vault = r"vUpgrades\[Consensus::UPGRADE_VAULT\]\.%s\s*=\s*([^;]+?)\s*;"
-    falcon = optional(r"\bconsensus\.pqFalconHeight\s*=\s*([^;]+?)\s*;", body, where + " pqFalconHeight")
-    maturity = optional(r"\bconsensus\.nVaultMinSetMaturity\s*=\s*([^;]+?)\s*;", body, where + " nVaultMinSetMaturity")
+    falcon = find(r"\bconsensus\.pqFalconHeight\s*=\s*([^;]+?)\s*;", where + " pqFalconHeight", False)
+    maturity = find(r"\bconsensus\.nVaultMinSetMaturity\s*=\s*([^;]+?)\s*;", where + " nVaultMinSetMaturity", False)
     if falcon is None:
         falcon = one(r"\bint\s+pqFalconHeight\s*=\s*([^;]+?)\s*;", params_h, "src/consensus/params.h pqFalconHeight")
     if maturity is None:
         maturity = one(r"\buint32_t\s+nVaultMinSetMaturity\s*=\s*([^;]+?)\s*;", params_h,
                        "src/consensus/params.h nVaultMinSetMaturity")
-    return {
-        "vault_protocol_version": number(one(vault % "nProtocolVersion", body, where + " nProtocolVersion")),
-        "vault_activation_height": height(one(vault % "nActivationHeight", body, where + " nActivationHeight")),
+    out = {
+        "vault_protocol_version": number(find(vault % "nProtocolVersion", where + " nProtocolVersion", True)),
+        "vault_activation_height": height(find(vault % "nActivationHeight", where + " nActivationHeight", True)),
         "pq_falcon_height": height(falcon),
         "vault_min_set_maturity": number(maturity),
     }
+    if upgrades is not None:
+        upgrades_h, upgrades_cpp = upgrades
+        own = find(vault % "nBranchId", where + " Vault nBranchId", False)
+        out["vault_branch_id"] = (branch_id(own, upgrades_h, where + " Vault nBranchId") if own is not None
+                                  else table_branch_id(upgrades_cpp, upgrades_h, "Vault"))
+        if chain is not None:
+            shadow = r"vUpgrades\[Consensus::UPGRADE_SHADOW\]\.nBranchId\s*=\s*([^;]+?)\s*;"
+            own = find(shadow, where + " Shadow nBranchId", False)
+            out["shadow_branch_id"] = (branch_id(own, upgrades_h, where + " Shadow nBranchId") if own is not None
+                                       else table_branch_id(upgrades_cpp, upgrades_h, "Shadow"))
+            split = find(r"\bSetShadowSplitHeight\(\s*([^)]+?)\s*\)\s*;", where + " SetShadowSplitHeight", True)
+            if split == SHADOW_SPLIT_CONSTANT:
+                split = one(r"static const int %s\s*=\s*([^;]+?)\s*;" % SHADOW_SPLIT_CONSTANT,
+                            strip_comments(chainparams), "src/chainparams.cpp " + SHADOW_SPLIT_CONSTANT)
+            out["shadow_split_height"] = height(split)
+    return out
 
 
 def extract(read):
@@ -133,15 +199,21 @@ def extract(read):
     params_h = strip_comments(read("src/consensus/params.h"))
     version_h = strip_comments(read("src/version.h"))
     params_cpp = strip_comments(read("src/yellowback/params.cpp"))
+    upgrades = (strip_comments(read("src/consensus/upgrades.h")), strip_comments(read("src/consensus/upgrades.cpp")))
     out = {"version": {}}
     for const in VERSION_CONSTANTS:
         tok = optional(r"static const int %s\s*=\s*([^;]+?)\s*;" % const, version_h, "src/version.h " + const)
         out["version"][const] = None if tok is None else number(tok)
     for name, cls in NETWORKS:
-        out[name] = network_params(chainparams, params_h, cls, name)
+        out[name] = network_params(chainparams, params_h, cls, name, upgrades=upgrades)
     out["test"] = {}
     for profile, cls in TESTNET_PROFILES:
-        out["test"][profile] = network_params(chainparams, params_h, cls, "test " + profile, base=TESTNET_BASE)
+        if profile in SHADOW_PROFILES:
+            out["test"][profile] = network_params(chainparams, params_h, cls, "test " + profile,
+                                                  chain=SHADOW_CHAIN, upgrades=upgrades)
+        else:
+            out["test"][profile] = network_params(chainparams, params_h, cls, "test " + profile, base=TESTNET_BASE,
+                                                  upgrades=upgrades)
     yb = {}
     for fn in YB_COLUMNS:
         body = brace_body(params_cpp, "const Params& %s()" % fn)
@@ -176,15 +248,37 @@ def stage_of(version):
     return m.group("line"), m.group("pre") or "final"
 
 
+def shadow_id_problems(main, test):
+    """R8's branch-ID half (docs/plans/yellowback-testnet-shadow-fork-plan.md), an invariant at every
+    stage: slow and legacy sign after H_S under branch IDs of their own, distinct from each other and
+    from mainnet's, slow's Vault included."""
+    problems = []
+    main_vault = main.get("vault_branch_id")
+    shadow_ids = {}
+    for profile in SHADOW_PROFILES:
+        sid = test.get(profile, {}).get("shadow_branch_id")
+        if not isinstance(sid, str) or sid == main_vault:
+            problems.append("R8: %s must sign after H_S under a branch ID of its own" % PROFILE_NAMES[profile])
+        shadow_ids[profile] = sid
+    if shadow_ids.get("slow") is not None and shadow_ids.get("slow") == shadow_ids.get("legacy"):
+        problems.append("R8: testnet-yb-slow and testnet-legacy must not share a shadow branch ID")
+    slow_vault = test.get("slow", {}).get("vault_branch_id")
+    if not isinstance(slow_vault, str) or slow_vault == main_vault or slow_vault in shadow_ids.values():
+        problems.append("R8: testnet-yb-slow must activate Vault under a branch ID of its own, not mainnet's")
+    return problems
+
+
 def release_problems(doc, stage="final"):
     """The release rules for a tag of this tree at STAGE (audit W3-P-1 part C; testnet plan §5.1).
 
-    beta   only the invariant that testnet-legacy never activates Vault (parity, maturity and the
+    beta   only the invariants: testnet-legacy never activates Vault, and testnet-yb-slow and
+           testnet-legacy have branch IDs of their own (R8's ID half; parity, maturity and the
            version line are the caller's).
     rc     R3-R6; R7 for the testnet: testnet-yb-fast has its height and its set, testnet-yb-slow
            names a set only with a height (a height alone is its pending activation, T-15),
-           testnet-legacy never; mainnet's height and set stay unset unless the owner sets both.
-    final  R1-R7: mainnet's height and set, and per testnet profile both or neither.
+           testnet-legacy never; mainnet's height and set stay unset unless the owner sets both;
+           R8: the shadow-fork split height H_S is set.
+    final  R1-R8: mainnet's height and set, per testnet profile both or neither, and H_S.
     A parse failure never reaches here."""
     if stage not in STAGES:
         raise ValueError("unknown release stage %r" % (stage,))
@@ -204,6 +298,7 @@ def release_problems(doc, stage="final"):
     test = doc.get("test", {})
     if test.get("legacy", {}).get("vault_activation_height") != "NO_ACTIVATION_HEIGHT":
         problems.append("R7: testnet-legacy must never set an UPGRADE_VAULT activation height")
+    problems.extend(shadow_id_problems(main, test))
     if stage == "beta":
         return problems
     vault_v = main.get("vault_protocol_version")
@@ -231,6 +326,12 @@ def release_problems(doc, stage="final"):
             problems.append("R7 (rc): testnet-yb-fast needs its activation height and %s (its launch ceremony names the set)" % key)
         elif stage == "rc" and profile == "slow" and test_att and not test_height:
             problems.append("R7 (rc): testnet-yb-slow names %s without an activation height" % key)
+    # R8 (rc and final; docs/plans/yellowback-testnet-shadow-fork-plan.md): slow and legacy ship only
+    # with their split height H_S set. Their own branch IDs are checked above, at every stage.
+    for profile in SHADOW_PROFILES:
+        if not _height_set(test.get(profile, {}).get("shadow_split_height")):
+            problems.append("R8: %s shadow fork not ready: the split height H_S (%s) is unset"
+                            % (PROFILE_NAMES[profile], SHADOW_SPLIT_CONSTANT))
     return problems
 
 

@@ -1532,8 +1532,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             }
             // Vault activates without NU5..NU6.2 (docs/plans/yellowback-upgrade-plan.md §15.0
             // U-9): its height must not back-fill theirs, or -nuparams=6d5b7a31:<h> alone would
-            // also activate NU5, NU6, NU6.1 and NU6.2 at <h>.
-            if (i != Consensus::UPGRADE_VAULT) {
+            // also activate NU5, NU6, NU6.1 and NU6.2 at <h>. The testnet shadow upgrade follows
+            // Canopy the same way (docs/plans/yellowback-testnet-shadow-fork-plan.md).
+            if (i != Consensus::UPGRADE_VAULT && i != Consensus::UPGRADE_SHADOW) {
                 nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
             }
         }

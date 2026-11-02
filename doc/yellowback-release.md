@@ -208,7 +208,9 @@ on mainnet yet: they are set by the release that passes the launch gates. The re
 (testnet plan §2.1, §2.2) has three compiled-in profiles (`-testnet -testnetprofile=fast|slow|legacy`,
 Revision 3). testnet-yb-fast has a placeholder height (510,400) and no set: its launch ceremony fixes
 the height and creates the set, and its rc1 names it (until then R7 refuses a tag). testnet-yb-slow
-has neither until its first rc sets both. testnet-legacy never activates Vault.
+has neither until its first rc sets both. testnet-legacy never activates Vault. testnet-yb-slow and
+testnet-legacy are shadow forks of mainnet (`doc/yellowback-testnet-shadow-fork.md`): a tag needs
+their split height H_S (`TESTNET_SHADOW_SPLIT_HEIGHT`) and their own branch IDs (R8).
 
 When setting them in a release:
 - The activation height leaves time for every node to upgrade: a node that has not upgraded by
@@ -237,14 +239,15 @@ The rules (audit W3-P-1; testnet plan §5.1, T-8):
 | R5 | `MIN_PEER_PROTO_VERSION` at or below 270013 (never the Vault version: it would refuse every stock peer before activation) |
 | R6 | mainnet `pqFalconHeight` 0 |
 | R7 | per testnet profile, the height and that network's own attestor set both set or both unset; testnet-legacy never has a height |
+| R8 | the shadow forks (testnet-yb-slow, testnet-legacy): their split height H_S set, and branch IDs of their own after it, distinct from each other and from mainnet's, slow's Vault ID included |
 
 Which rules a tag needs depends on the stage its version names:
 
 | Tag | Required | Not required |
 |---|---|---|
-| `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height | heights, sets, protocol version |
-| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
-| `v6.22.N` (final) | R1–R7 | — |
+| `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs | heights (H_S included), sets, protocol version |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
+| `v6.22.N` (final) | R1–R8 | — |
 
 `qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with
 neither it applies the final rules, the strictest.
@@ -260,8 +263,13 @@ peer: a drill before mainnet.
 |---|---|---|---|
 | main | unset | unset | not yet: the release that passes the launch gates |
 | test, profile fast | 510,400 (placeholder, N1) | unset (`TestFastParams`) | its launch ceremony; its rc1 names the set (an rc refuses to tag until then) |
-| test, profile slow | unset | unset (`TestParams`) | its first rc sets the height, about a week of blocks after launch (T-15); a later rc names the set, created after the activation |
+| test, profile slow | unset (branch ID `0xe1f1cc08`, its own) | unset (`TestParams`) | its first rc sets the height, about a week of blocks after the split (T-15); a later rc names the set, created after the activation |
 | test, profile legacy | never | none | never: the control network, YED off |
+
+| Shadow fork (slow, legacy) | Value | Set in |
+|---|---|---|
+| H_S, `TESTNET_SHADOW_SPLIT_HEIGHT` (`src/chainparams.cpp`) | unset | the release that launches them, from the mainnet history harvest (`mainnet-prefix-v1`) |
+| `UPGRADE_SHADOW` branch ID | slow `0x57a24d5d`, legacy `0x35706728` | fixed (`src/consensus/upgrades.h`) |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):
 - **S-0 and V-1's APP clause are retroactive on private chains.** They apply from the activation

@@ -192,6 +192,17 @@ protected:
      *  modulo of vYcashFoundersRewardAddress.size() once exhausted. */
     std::vector<std::string> vYcashFoundersRewardAddress;
     int nYdfMandateEndHeight = 0;
+    /**
+     * The key constants vFoundersRewardAddress and vYcashFoundersRewardAddress are written in, when
+     * they are not this network's own: the testnet shadow fork keeps mainnet's founders-reward and
+     * YDF addresses (its copied mainnet blocks must still validate) while it displays testnet
+     * prefixes. Unset on every other network.
+     */
+    std::optional<CBaseKeyConstants> foundersRewardKeyConstants;
+    const KeyConstants& FoundersRewardKeyConstants() const {
+        if (foundersRewardKeyConstants) return *foundersRewardKeyConstants;
+        return *this;
+    }
 
     CAmount nSproutValuePoolCheckpointHeight = 0;
     CAmount nSproutValuePoolCheckpointBalance = 0;

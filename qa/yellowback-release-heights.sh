@@ -11,13 +11,15 @@
 #
 # Reads the tree through qa/yellowback-vault-params.py (class bodies, not a first match).
 # Enforces the release rules of the tag's stage (audit W3-P-1; testnet plan §5.1, T-8):
-#   beta   (6.22.N-betaM)  parity with the other line, the mainnet maturity, the 6.22 line; and
-#                          testnet-legacy never activates Vault.
+#   beta   (6.22.N-betaM)  parity with the other line, the mainnet maturity, the 6.22 line;
+#                          testnet-legacy never activates Vault; and testnet-yb-slow and
+#                          testnet-legacy have branch IDs of their own (R8's ID half).
 #   rc     (6.22.N-rcM)    the above, R3-R6 (the protocol-version bump, taken with rc1; the Falcon
 #                          height), R7 for the testnet (testnet-yb-fast's height and set both set;
-#                          testnet-yb-slow's set only with its height) and mainnet's height and set
-#                          both or neither (unset unless the owner sets them).
-#   final  (6.22.N)        R1-R7: mainnet's height and set, R3-R6, R7 per testnet profile.
+#                          testnet-yb-slow's set only with its height), mainnet's height and set
+#                          both or neither (unset unless the owner sets them), and R8: the
+#                          shadow-fork split height H_S is set.
+#   final  (6.22.N)        R1-R8: mainnet's height and set, R3-R6, R7 per testnet profile, R8.
 # MIN_PEER_PROTO_VERSION must stay at or below the live floor (R5).
 #
 # Usage: qa/yellowback-release-heights.sh [--warn] [--root DIR] [--other-json FILE]

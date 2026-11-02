@@ -112,7 +112,7 @@ Params: `[]`
 
 Result: `{"branchid": str, "activationheight": int, "active": bool, "height": height, "attestorsetid": hash|null, "moduleactive": bool, "dbtip": {"hash": hash, "height": height}|null, "sets"?: int, "vaults"?: int, "intents"?: int, "lockedvalue"?: yec, "statehash"?: hash}`
 
-`branchid` is `"6d5b7a31"`; `activationheight` is -1 if unscheduled; `active` is at the next
+`branchid` is this network's Vault branch ID: `"6d5b7a31"`, but testnet-yb-slow's own `"e1f1cc08"` (doc/yellowback-testnet-shadow-fork.md); `activationheight` is -1 if unscheduled; `active` is at the next
 block; `height` is the tip. `attestorsetid` is the set the registered module (YED) governs on this
 node, null when it governs none, and `moduleactive` whether it governs one: until the release that
 makes the attestor set a chain parameter (upgrade plan P8) it is the node parameter
