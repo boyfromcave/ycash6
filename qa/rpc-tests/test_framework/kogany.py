@@ -796,12 +796,12 @@ def yewd_backend_rpc_port(i):
 
 
 def split_yewd_args(args):
-    """(backend args, yewd wallet args) from one node's arguments; -mocktime, -disablewallet and -pqfeerate go
+    """(backend args, yewd wallet args) from one node's arguments; -mocktime, -disablewallet, -pqfeerate and -pqfalcon[height] go
     to both (a -disablewallet pair is the node alone: yewd forwards and serves no wallet method)."""
     backend, wallet = [], []
     for a in args:
         name = a.split('=', 1)[0]
-        if name in ('-mocktime', '-disablewallet', '-pqfeerate'):
+        if name in ('-mocktime', '-disablewallet', '-pqfeerate', '-pqfalconheight', '-pqfalcon'):
             backend.append(a)
             wallet.append(a)
         elif name in YEWD_WALLET_ARGS:
