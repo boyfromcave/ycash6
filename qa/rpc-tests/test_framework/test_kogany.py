@@ -17,6 +17,7 @@ import re
 import sys
 import tomllib
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..'))
 
@@ -192,6 +193,27 @@ class TomlGeneratorTest(unittest.TestCase):
         for bad in (['-yellowbacknewflag=1'], ['-vaultsomething=1'], ['-nuparams=deadbeef:5'], ['-frobnicate'], ['x']):
             with self.assertRaises(kg.UnmappedArgument, msg=bad):
                 kg.zakurad_config(START + bad, 0, [1], '/tmp/k', live=())
+
+    def test_pruned_storage_mode(self):
+        """KOGANY_PRUNED=1 (pruning assessment KP-2): Zakura's Pruned mode at the regtest floor, or
+        KOGANY_PRUNE_RETENTION; unset, the followers stay Archive (no storage_mode key)."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ('KOGANY_PRUNED', 'KOGANY_PRUNE_RETENTION'):
+                os.environ.pop(k, None)
+            cfg, _notes, t = self.gen()
+            self.assertNotIn('storage_mode', t['state'])
+            os.environ['KOGANY_PRUNED'] = '1'
+            cfg, _notes, t = self.gen()
+            self.assertEqual(t['state']['storage_mode'], {'pruned': {'tx_retention': kg.REGTEST_PRUNE_FLOOR}})
+            self.assertEqual(kg.REGTEST_PRUNE_FLOOR, 1001)
+            self.assertEqual(t, cfg)
+            self.assertIn('[state.storage_mode.pruned]\ntx_retention = 1001', kg.render_toml(cfg))
+            os.environ['KOGANY_PRUNE_RETENTION'] = '2500'
+            _cfg, _notes, t = self.gen()
+            self.assertEqual(t['state']['storage_mode']['pruned']['tx_retention'], 2500)
+            os.environ['KOGANY_PRUNED'] = '0'
+            _cfg, _notes, t = self.gen()
+            self.assertNotIn('storage_mode', t['state'])
 
     def test_ports_and_dirs(self):
         _cfg, _notes, t = self.gen(slot=2, peers=(13001, 13002))
