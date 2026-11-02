@@ -37,6 +37,13 @@ Environment
                           ``reject-state`` (ycashd's "Missing inputs").
 ``KOGANY_MIRROR_INVALIDATE``  1: mirror a script's ``invalidateblock``/``reconsiderblock`` on the peer
                           to the followers at sync points (``MixedLine._mirror``; default 0).
+``KOGANY_PRUNED``         1: the followers run Zakura's Pruned storage mode (pruning assessment KP-2):
+                          ``[state.storage_mode.pruned] tx_retention = KOGANY_PRUNE_RETENTION`` in their
+                          ``zakurad.toml``; every sync point also asserts the follower reports
+                          ``getblockchaininfo.pruned`` with a ``pruneheight`` (default 0).
+``KOGANY_PRUNE_RETENTION``  the followers' ``tx_retention`` under ``KOGANY_PRUNED=1`` (default 1001,
+                          Zakura's regtest floor ``MAX_BLOCK_REORG_HEIGHT + 1``; a smaller value makes
+                          zakurad refuse to start).
 ``KOGANY_ARGS``           extra ``zakurad`` arguments, whitespace-separated, placed before ``start``.
 ``KOGANY_LOG``            ``tracing.filter`` for the followers (default ``info``).
 ``YEWD_BIN``              path to ``yewd`` (the parity sidecar, plan section 3b): every node becomes a
@@ -444,7 +451,24 @@ def zakurad_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     }
     for k, v in cfg.items():          # live pending sections (yellowback)
         base.setdefault(k, {}).update(v)
+    retention = pruned_retention()
+    if retention is not None:
+        base['state']['storage_mode'] = {'pruned': {'tx_retention': retention}}
     return base, notes
+
+
+# Zakura's regtest retention floor (zakura-state constants.rs min_pruning_retention:
+# MAX_BLOCK_REORG_HEIGHT + 1).
+REGTEST_PRUNE_FLOOR = 1001
+
+
+def pruned_retention(env=None):
+    """``KOGANY_PRUNE_RETENTION`` (default ``REGTEST_PRUNE_FLOOR``) when ``KOGANY_PRUNED=1``, else
+    None (the followers run Archive, Zakura's default)."""
+    env = os.environ if env is None else env
+    if env.get('KOGANY_PRUNED', '0') != '1':
+        return None
+    return int(env.get('KOGANY_PRUNE_RETENTION', str(REGTEST_PRUNE_FLOOR)))
 
 
 def _toml_value(v):
@@ -1573,6 +1597,19 @@ class MixedLine:
     def _compare_statehash(self, ref, f, label):
         self._compare_vault(ref, f, label)
         self._compare_yed(ref, f, label)
+        self._check_pruned(f, label)
+
+    def _check_pruned(self, f, label):
+        """KOGANY_PRUNED=1: the follower is a pruned node (``getblockchaininfo.pruned``, with a
+        ``pruneheight``, as ycashd reports it); the highest ``pruneheight`` seen is in the stats."""
+        if pruned_retention() is None:
+            return
+        info = f.rpc.getblockchaininfo()
+        if info.get('pruned') is not True or 'pruneheight' not in info:
+            raise AssertionError('kogany %d: KOGANY_PRUNED=1 but getblockchaininfo says pruned=%r pruneheight=%r %s'
+                                 % (f.k, info.get('pruned'), info.get('pruneheight'), label))
+        self.stats['pruned_checks'] = self.stats.get('pruned_checks', 0) + 1
+        self.stats['pruneheight'] = max(self.stats.get('pruneheight', 0), info['pruneheight'])
 
     def _compare_vault(self, ref, f, label):
         """Rule 4 (ii) for the primitive: ``vault_getinfo`` at a sync point.  ``branchid`` always;
