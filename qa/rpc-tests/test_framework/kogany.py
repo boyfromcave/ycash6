@@ -168,6 +168,36 @@ def kogany_v2_port(k):
     return PORT_MIN + 4 * PORT_RANGE + k + _offset()
 
 
+# The ycash6 peer's RPC port (mixed variant).  It sits in kogany_v2_port's range, where kogany binds
+# nothing under p2p_stack = "legacy", but the devnet's zmq (31000+, 140 seeds) and chain-viz
+# (32680+, 88 seeds; yellowback_chainviz.py) ports fall there too: a chain-viz on the slot answered
+# the peer's first getblockcount with an HTTP 405 (r13).  Skip those bands and any port in use.
+PEER_RPC_RESERVED = ((31000, 31140), (32680, 32768))
+
+
+def _port_free(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(('127.0.0.1', port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def peer_rpc_port(free=_port_free):
+    """The first free, unreserved port from kogany_v2_port(MAX_NODES) on, in steps of MAX_NODES + 1
+    (wrapping within the range)."""
+    lo = PORT_MIN + 4 * PORT_RANGE
+    p = kogany_v2_port(MAX_NODES)
+    for _ in range(PORT_RANGE // (MAX_NODES + 1)):
+        if not any(a <= p < b for a, b in PEER_RPC_RESERVED) and free(p):
+            return p
+        p = lo + (p - lo + MAX_NODES + 1) % PORT_RANGE
+    raise AssertionError('no free port for the ycash6 peer RPC')
+
+
 # ---------------------------------------------------------------------------
 # The ycashd-argument -> koganyd.toml map.
 #
@@ -1448,7 +1478,8 @@ class YewdColumn:
         self.ycashd_args = want
         os.makedirs(self.datadir, exist_ok=True)
         with open(os.path.join(self.datadir, 'ycash.conf'), 'w', encoding='utf8') as f:
-            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nrpcport=%d\n' % kogany_v2_port(MAX_NODES))
+            port = peer_rpc_port()
+            f.write('regtest=1\nshowmetrics=0\nlistenonion=0\nrpcport=%d\n' % port)
         argv = [util.zcashd_binary(), '-datadir=' + self.datadir, '-disablewallet', '-listen=0',
                 '-port=%d' % sidecar_dead_port(MAX_NODES), '-connect=127.0.0.1:%d' % p2p_port(self.peer)] + want
         log = open(os.path.join(self.datadir, 'stderr.log'), 'ab')
@@ -1459,7 +1490,7 @@ class YewdColumn:
             os.remove(cookie)
         self._last_got = None
         self.ycashd = subprocess.Popen(argv, stdout=log, stderr=log)
-        self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_v2_port(MAX_NODES), cookie=cookie)
+        self.rpc = KoganyRPC('http://127.0.0.1:%d/' % port, cookie=cookie)
         deadline = time.time() + 120
         while True:
             if self.ycashd.poll() is not None:
