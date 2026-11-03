@@ -435,6 +435,10 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             else:
                 notes.append('%s: %s -> activation_heights.%s = %s' % (status, a, key, h))
             continue
+        if name in ('-yellowbackstartheight', '-yellowbackenforceuntil'):
+            # ycashd src/yellowback/index.cpp: refused at init
+            raise KoganyInitError('%s is retired: YED starts at the UPGRADE_VAULT activation height '
+                                  '(-nuparams=6d5b7a31:<h> on regtest)' % name)
         if name in _FALCON_FLAGS:
             value = _FALCON_FLAGS[name](value)
             if value is not None:
