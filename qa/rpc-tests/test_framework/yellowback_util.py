@@ -1536,10 +1536,14 @@ def kogany_pair(tmpdir, i):
 def debug_log_contains(tmpdir, i, needle):
     """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair: its
     backend's log, ``node<i>/backend/zakurad.log``, is read too, since yewd's own debug.log
-    carries none of the node's lines)."""
+    carries none of the node's lines; after ``restart_quiet`` the pair's output, a fatal stop's
+    reason among it, is in ``node<i>/stderr.txt``, read too)."""
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
     backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
+    stderr = os.path.join(tmpdir, 'node%d' % i, 'stderr.txt')
     paths = [p for p in (path, backend) if os.path.exists(p)]
+    if os.path.exists(backend) and os.path.exists(stderr):
+        paths.append(stderr)
     why = [r for k, r in KOGANY_NO_SUCH_LOG.items() if needle == k or (k.endswith(' ') and needle.startswith(k))]
     if os.path.exists(backend) and why:
         print('  [kogany pair] %r skipped: %s' % (needle, why[0]))
