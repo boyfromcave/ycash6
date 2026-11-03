@@ -829,6 +829,25 @@
       "reason": "Vendored PQClean fips202.c, not edited. All six hits are the shake/sha3 *_inc_ctx_release() functions, which free() a ctx that the matching *_inc_init()/*_inc_ctx_clone() obtained from malloc() (same file); the Ycash local patch for shake256incctx (inline state) removes the allocation and the free together.",
       "by": "secops triage",
       "date": "2026-10-23"
+    },
+    {
+      "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+      "paths": [
+        "qa/rpc-tests/test_framework/kogany.py",
+        "qa/kogany_mixed_shards.py"
+      ],
+      "reason": "Regtest test harnesses: argv is a list (no shell) naming the local binary the developer or CI chose via YEWD_BIN/YEWD_KOGANY/KOGANY_BIN/KOGANY_ARGS; launching that binary is the purpose, and the environment is the operator's own.",
+      "by": "kogany pr79-green",
+      "date": "2026-11-03"
+    },
+    {
+      "rule": "python.lang.security.audit.dangerous-os-exec-*",
+      "paths": [
+        "qa/rpc-tests/kogany_standin.py"
+      ],
+      "reason": "Test stand-in that execs ycashd with argv built from the harness's own koganyd.toml (os.execv, no shell); replacing itself with that local binary is its purpose.",
+      "by": "kogany pr79-green",
+      "date": "2026-11-03"
     }
   ]
 }

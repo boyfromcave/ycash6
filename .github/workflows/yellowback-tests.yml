@@ -663,7 +663,8 @@ jobs:
       - name: Cache the koganyd built at the pin
         if: steps.dl.outputs.got != 'true'
         id: cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # Restore only: the save below runs on trusted events, so no pull request writes this key.
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zk-build
           key: koganyd-bin-${{ env.KOGANY_COMMIT }}-ycash-dev-ubuntu-24.04
@@ -696,6 +697,12 @@ jobs:
                     open(path, 'w'), indent=1)
           PY
           tar czf "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk-build/pack" koganyd koganyd-bin.json
+      - name: Save the koganyd built at the pin (trusted events only)
+        if: steps.dl.outputs.got != 'true' && steps.cache.outputs.cache-hit != 'true' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/zk-build
+          key: koganyd-bin-${{ env.KOGANY_COMMIT }}-ycash-dev-ubuntu-24.04
       - name: Stage the fallback build
         if: steps.dl.outputs.got != 'true'
         run: cp "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" "$RUNNER_TEMP/zk-out/"
@@ -741,7 +748,8 @@ jobs:
       - name: Cache the yewd built at the pin
         if: steps.dl.outputs.got != 'true'
         id: cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # Restore only: the save below runs on trusted events, so no pull request writes this key.
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/yewd-build
           key: yewd-bin-${{ env.YEW_COMMIT }}-dev-ubuntu-24.04
@@ -772,6 +780,12 @@ jobs:
                     open(path, 'w'), indent=1)
           PY
           tar czf "$RUNNER_TEMP/yewd-build/yewd-bin.tgz" -C "$RUNNER_TEMP/yewd-build/pack" yewd yewd-signer yewd-bin.json
+      - name: Save the yewd built at the pin (trusted events only)
+        if: steps.dl.outputs.got != 'true' && steps.cache.outputs.cache-hit != 'true' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/yewd-build
+          key: yewd-bin-${{ env.YEW_COMMIT }}-dev-ubuntu-24.04
       - name: Stage the fallback build
         if: steps.dl.outputs.got != 'true'
         run: cp "$RUNNER_TEMP/yewd-build/yewd-bin.tgz" "$RUNNER_TEMP/yewd-out/"
