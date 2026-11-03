@@ -1403,7 +1403,8 @@ class YewdColumn:
         self.k = 'ycash6-peer'
         self.stats = {'sync_points': 0, 'statehash_vault': 0, 'statehash_yed': 0, 'peer_points': 0,
                       'solved_blocks': 0, 'mempool_points': 0, 'fed_txs': 0, 'fed_pair_txs': 0,
-                      'peer_mirrored': 0, 'founders_added': 0}
+                      'peer_mirrored': 0, 'founders_added': 0, 'peer_relinked': 0}
+        self._last_got = None
         self.feed_after = float(env.get('YEWD_PEER_FEED_AFTER', '5'))
         self._notes = set()
         self.datadir = os.path.join(tmpdir, 'ycash6peer')
@@ -1447,8 +1448,13 @@ class YewdColumn:
         argv = [util.zcashd_binary(), '-datadir=' + self.datadir, '-disablewallet', '-listen=0',
                 '-port=%d' % sidecar_dead_port(MAX_NODES), '-connect=127.0.0.1:%d' % p2p_port(self.peer)] + want
         log = open(os.path.join(self.datadir, 'stderr.log'), 'ab')
-        self.ycashd = subprocess.Popen(argv, stdout=log, stderr=log)
         cookie = os.path.join(self.datadir, 'regtest', '.cookie')
+        # a restarted peer writes a new cookie; the previous instance's (left by a kill, or not yet
+        # rewritten) would be sent and refused with a 401 that reads as a real auth failure
+        if os.path.exists(cookie):
+            os.remove(cookie)
+        self._last_got = None
+        self.ycashd = subprocess.Popen(argv, stdout=log, stderr=log)
         self.rpc = KoganyRPC('http://127.0.0.1:%d/' % kogany_v2_port(MAX_NODES), cookie=cookie)
         deadline = time.time() + 120
         while True:
@@ -1595,6 +1601,16 @@ class YewdColumn:
                 self.stats['peer_mirrored'] += 1
             except JSONRPCException:
                 pass
+        # 6.20.0 keeps the pair's pindexBestKnownBlock on the invalidated, higher-work branch and
+        # never fetches the pairs' shorter new chain (refresh_peer_views, yellowback_util): a peer
+        # whose tip has not moved since the last mirror drops its link, and -connect redials it
+        if got == getattr(self, '_last_got', None):
+            try:
+                self.rpc.disconnectnode('127.0.0.1:%d' % p2p_port(self.peer))
+                self.stats['peer_relinked'] = self.stats.get('peer_relinked', 0) + 1
+            except JSONRPCException:
+                pass
+        self._last_got = got
 
     def mempool_point(self, conns):
         """The ycash6 peer's mempool holds every pair's (each transaction a sidecar built, judged by
