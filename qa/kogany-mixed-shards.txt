@@ -33,6 +33,11 @@
 #   200-block cache, or Vault alone by -nuparams); kogany follows only chains with the Ycash
 #   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
 #   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
+#
+#   column-gated steps (a pair runs the script, one step skips with a printed reason): yellowback_mining
+#   stale_invalid_mint_never_templated (yewd plan F-S5-20): a kogany pair re-verifies its mempool at a
+#   tip reset, so the stale mint the step needs is dropped; -yellowbacktestfault=template is accepted
+#   (kogany's template filter keeps one refused candidate) but has no stale candidate to keep.
 
 # --- the harness itself (W1-Y7) and node plumbing
 node     kogany_mixed_smoke            gate    W1   direct

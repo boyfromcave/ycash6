@@ -26,6 +26,7 @@ from test_framework.util import (
 )
 from test_framework.yellowback_util import (
     debug_log_contains,
+    kogany_pair,
     unlock_all,
     POOLS,
     PRICE_MAX,
@@ -666,6 +667,17 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert stale in pool2.getrawmempool()
         pool2.invalidateblock(tip_hash)
         assert_equal(pool2.getblockcount(), tip - 1)
+        if kogany_pair(self.options.tmpdir, 2):
+            # A kogany + yewd pair re-verifies its whole mempool at a chain tip reset (Zakura's
+            # mempool reset, YED check included), so the stale mint leaves it: the state this step
+            # tests cannot arise there (yewd plan F-S5-20). Rejoin as below and stop.
+            assert stale not in gbt_hashes(pool2.getblocktemplate())
+            print('  [kogany pair] stale mint skipped: the reset re-verifies the mempool and drops it')
+            pool2.reconsiderblock(tip_hash)
+            self.restart(2)
+            self.sync_all(blocks_only=True)
+            assert_best_hash(self.nodes)
+            return
         assert stale in pool2.getrawmempool(), 'the disconnect dropped the stale mint: nothing left to test'
         assert_equal(pool2.yed_validaterawtransaction(stale_hex)['verdict'], 'bad-mint-ref-height')
         # the negative control: the faulted template keeps it, and the module's block check refuses the template
