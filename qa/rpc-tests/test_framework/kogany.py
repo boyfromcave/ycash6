@@ -298,8 +298,8 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
-# -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
-# -yellowbackstartheight flags.
+# -regtestenablezip209, -reindex-yellowback; the retired -yellowbackenforceuntil /
+# -yellowbackstartheight raise ycashd's init error instead (KoganyInitError, koganyd_config).
 # Matched by the exact name (a prefix would swallow every -yellowback* row): -yellowback, which
 # ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index (init.cpp:436;
 # yellowback_hardening h6).
@@ -435,6 +435,10 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             else:
                 notes.append('%s: %s -> activation_heights.%s = %s' % (status, a, key, h))
             continue
+        if name in ('-yellowbackstartheight', '-yellowbackenforceuntil'):
+            # ycashd src/yellowback/index.cpp: refused at init
+            raise KoganyInitError('%s is retired: YED starts at the UPGRADE_VAULT activation height '
+                                  '(-nuparams=6d5b7a31:<h> on regtest)' % name)
         if name in _FALCON_FLAGS:
             value = _FALCON_FLAGS[name](value)
             if value is not None:
@@ -495,6 +499,11 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     for k, v in cfg.items():          # live pending sections (yellowback)
         base.setdefault(k, {}).update(v)
     retention = pruned_retention()
+    if retention is None and any(a.startswith('-prune=') and a.split('=', 1)[1] not in ('', '0') for a in args):
+        # -prune=<n>: ycashd's MiB target has no kogany form; a pruned node is Zakura's
+        # storage_mode.pruned at the retention floor (KOGANY_PRUNE_RETENTION overrides)
+        retention = int(os.getenv('KOGANY_PRUNE_RETENTION', str(REGTEST_PRUNE_FLOOR)))
+        notes.append('mapped: -prune -> state.storage_mode.pruned tx_retention=%d' % retention)
     if retention is not None:
         base['state']['storage_mode'] = {'pruned': {'tx_retention': retention}}
     return base, notes
@@ -850,7 +859,7 @@ def same_class(cxx, kog, strict=False):
 # follows Ycash regtest: the backend line below becomes the koganyd start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
-                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet', '-mnemonicfile')
+                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet', '-mnemonicfile', '-sendchangeback')
 YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 
 
@@ -910,6 +919,14 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     coinbase = None
     nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
     if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
+        try:
+            check_mineraddress(args)
+        except KoganyInitError as e:
+            if stderr is not None:
+                stderr.write(('Error: %s\n' % e).encode('utf8'))
+                stderr.flush()
+            raise Exception('%s node %d exited with status 1 during initialization (pair: %s)'
+                            % (util.zcashd_binary(), i, e))
         coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir, args), bool(yewd_kogany_bin()))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
@@ -1081,16 +1098,35 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     return taddr
 
 
+# Ycash regtest post-quantum key address prefix (ycash6 src/test/pq_address_tests.cpp: "rq").
+PQ_ADDRESS_PREFIX = 'rq'
+
+
+def check_mineraddress(args):
+    """H8 replaces the script's -mineraddress, so the init refusal ycashd gives a post-quantum one
+    (init.cpp: the miner pays a P2PKH script) is raised here with ycashd's text."""
+    for a in args:
+        if a.startswith('-mineraddress=') and a.split('=', 1)[1].startswith(PQ_ADDRESS_PREFIX):
+            raise KoganyInitError("Invalid address for -mineraddress=<addr>: '%s' (a transparent address "
+                                  "must be P2PKH; P2SH and post-quantum addresses are not supported)"
+                                  % a.split('=', 1)[1])
+
+
 def yewd_h8_args(args, coinbase):
     """The backend's arguments with the H8 coinbase address in place of the script's.  A
     Yellowback-live node that names no payout address takes no payout default from it either
     (F-S5-9, ``yewd_coinbase_address``)."""
+    script_miner = [a.split('=', 1)[1] for a in args if a.startswith('-mineraddress=')]
     args = [a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))]
     if coinbase is not None:
         args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
         live = any(a.startswith('-yellowbackattestorset=') for a in args)
         named = any(a.startswith(('-yellowbackpayoutaddress=', '-yellowbackpayoutdefault')) for a in args)
-        if live and not named:
+        if live and script_miner and not named:
+            # H1: the script's P2PKH -mineraddress is its payout default (MINER-2): carry it as the
+            # payout address rather than writing yellowback_payout_default=false
+            args += ['-yellowbackpayoutaddress=%s' % script_miner[-1]]
+        elif live and not named:
             args += ['-yellowbackpayoutdefault=0']
     return args
 
