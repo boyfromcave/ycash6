@@ -495,6 +495,11 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     for k, v in cfg.items():          # live pending sections (yellowback)
         base.setdefault(k, {}).update(v)
     retention = pruned_retention()
+    if retention is None and any(a.startswith('-prune=') and a.split('=', 1)[1] not in ('', '0') for a in args):
+        # -prune=<n>: ycashd's MiB target has no kogany form; a pruned node is Zakura's
+        # storage_mode.pruned at the retention floor (KOGANY_PRUNE_RETENTION overrides)
+        retention = int(os.getenv('KOGANY_PRUNE_RETENTION', str(REGTEST_PRUNE_FLOOR)))
+        notes.append('mapped: -prune -> state.storage_mode.pruned tx_retention=%d' % retention)
     if retention is not None:
         base['state']['storage_mode'] = {'pruned': {'tx_retention': retention}}
     return base, notes
