@@ -1516,6 +1516,7 @@ def write_private(path, text):
 # ycashd log lines a kogany pair has no counterpart for (column 3), with the reason
 KOGANY_NO_SUCH_LOG = {
     'SyncToChain: undoing': "kogany's YED index commits atomically with the block batch: no undo walk after a crash",
+    'wiping index (undo record missing': "kogany's YED index commits atomically with the block batch: no undo records to outrun, no wipe-and-rebuild fallback (N35)",
     '-yellowbacksignal is retired with the vault upgrade and ignored': "kogany has no -yellowbacksignal; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
     '-yellowbackenforce is retired with the vault upgrade and ignored': "kogany has no -yellowbackenforce; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
     '-yellowbacktemplatepolicy is retired with the vault upgrade and ignored': "kogany has no -yellowbacktemplatepolicy; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
