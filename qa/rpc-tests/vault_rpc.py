@@ -47,7 +47,7 @@ from test_framework.util import (
     sync_blocks,
 )
 from test_framework.vault import tx_from_hex, tx_hex
-from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, conventional_fee
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, conventional_fee, debug_log_contains
 
 ACTIVATION = 205
 DELAY = 5
@@ -395,8 +395,7 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(self.assert_consistent(), state)
         self.restart(2, wipe_vaults=True)
         assert_equal(self.assert_consistent(), state)
-        with open(os.path.join(self.options.tmpdir, 'node2', 'regtest', 'debug.log'), encoding='utf-8', errors='replace') as f:
-            assert 'vault: replaying blocks %d..' % ACTIVATION in f.read()
+        assert debug_log_contains(self.options.tmpdir, 2, 'vault: replaying blocks %d..' % ACTIVATION)
         assert_equal(n0.vault_getinfo()['dbtip'], self.nodes[2].vault_getinfo()['dbtip'])
         # The rebuilt node keeps validating: one more act and block.
         self.nodes[2].set_heartbeat(setid)

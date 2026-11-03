@@ -1516,7 +1516,21 @@ def write_private(path, text):
 # ycashd log lines a kogany pair has no counterpart for (column 3), with the reason
 KOGANY_NO_SUCH_LOG = {
     'SyncToChain: undoing': "kogany's YED index commits atomically with the block batch: no undo walk after a crash",
+    '-yellowbacksignal is retired with the vault upgrade and ignored': "kogany has no -yellowbacksignal; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbackenforce is retired with the vault upgrade and ignored': "kogany has no -yellowbackenforce; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbacktemplatepolicy is retired with the vault upgrade and ignored': "kogany has no -yellowbacktemplatepolicy; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbackrequirehealthy is retired with the vault upgrade and ignored': "kogany has no -yellowbackrequirehealthy; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    # prefixes (the rest of the line carries a height or a set id)
+    'vault: replaying blocks ': "kogany's vault column family lives in its state DB: a wipe resyncs the chain, no replay line",
+    'Yellowback: attestor set ': "kogany logs no attestor-set line at init; vault_getinfo attestorsetid is the check",
+    'Yellowback: no attestor set; the YED module validates inertly':
+        "kogany logs no attestor-set line at init; vault_getinfo moduleactive is the check",
 }
+
+
+def kogany_pair(tmpdir, i):
+    """True iff node ``i`` is a kogany + yewd pair (it has a backend log)."""
+    return os.path.exists(os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log'))
 
 
 def debug_log_contains(tmpdir, i, needle):
@@ -1526,8 +1540,9 @@ def debug_log_contains(tmpdir, i, needle):
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
     backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
     paths = [p for p in (path, backend) if os.path.exists(p)]
-    if os.path.exists(backend) and needle in KOGANY_NO_SUCH_LOG:
-        print('  [kogany pair] %r skipped: %s' % (needle, KOGANY_NO_SUCH_LOG[needle]))
+    why = [r for k, r in KOGANY_NO_SUCH_LOG.items() if needle == k or (k.endswith(' ') and needle.startswith(k))]
+    if os.path.exists(backend) and why:
+        print('  [kogany pair] %r skipped: %s' % (needle, why[0]))
         return True
     if not paths:
         paths = [path]

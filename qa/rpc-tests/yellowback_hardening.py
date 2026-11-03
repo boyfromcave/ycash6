@@ -284,7 +284,12 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         stop_node(self.nodes[i], i)
         self.nodes[i] = None
         datadir = os.path.join(self.options.tmpdir, 'node' + str(i))
-        assert os.path.isdir(os.path.join(datadir, 'regtest', 'yellowback'))
+        # A kogany + yewd pair (node<i>/backend) has no regtest/yellowback directory: kogany's YED
+        # index lives in its state DB and is always on, so there is no -yellowback to forget and
+        # no leftover index to guard; the refusal is ycashd's alone (init.cpp) and is column-gated.
+        pair = os.path.isdir(os.path.join(datadir, 'backend'))
+        if not pair:
+            assert os.path.isdir(os.path.join(datadir, 'regtest', 'yellowback'))
 
         # the six -nuparams the framework passes, minus -yellowback: init must refuse.
         #
@@ -296,11 +301,14 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         # And it asserts *why* init refused: checking only that startup failed would pass just as
         # happily if the node had died of a port clash or a slow start under load.
         base = [a for a in self.node_args(i) if not a.startswith('-yellowback') and a != '-experimentalfeatures']
-        assert_start_raises_init_error(
-            i, self.options.tmpdir, base,
-            'This datadir holds a Yellowback index, so this wallet may hold YED')
-        if i in bitcoind_processes:
-            del bitcoind_processes[i]
+        if pair:
+            print('  [kogany pair] the leftover-index refusal is ycashd\'s: kogany always runs Yellowback')
+        else:
+            assert_start_raises_init_error(
+                i, self.options.tmpdir, base,
+                'This datadir holds a Yellowback index, so this wallet may hold YED')
+            if i in bitcoind_processes:
+                del bitcoind_processes[i]
 
 # Rule: H6
         print('h6_-yellowback=0_is_the_acknowledgement')
