@@ -80,7 +80,8 @@ class TomlGeneratorTest(unittest.TestCase):
                                    '-yellowbackpayoutaddress=tmXYZ', '-mocktime=1700000000', '-exportdir=/x'])
         self.assertNotIn('yellowback', t)
         self.assertIn('pending:W5-f: -yellowbackattestorset=%s -> yellowback.attestor_set = %s' % (SETID, SETID), notes)
-        self.assertIn('ignored: -yellowbackpayoutaddress=tmXYZ', notes)
+        self.assertNotIn('ignored: -yellowbackpayoutaddress=tmXYZ', notes)
+        self.assertEqual(t['mining']['yellowback_payout_address'], 'tmXYZ')
         self.assertIn('ignored: -mocktime=1700000000', notes)
 
     def test_w5e_rows_live_with_w5f_and_mempool_rows(self):
@@ -193,14 +194,18 @@ class TomlGeneratorTest(unittest.TestCase):
         _cfg, _notes, t = self.gen([], live=())
         self.assertNotIn('yellowback', t)
 
+    def test_mempool_cost_rows(self):
+        _cfg, _notes, t = self.gen(['-mempooltxcostlimit=4000', '-mempoolevictionmemoryminutes=1'], live=())
+        self.assertEqual(t['mempool']['tx_cost_limit'], 4000)
+        self.assertEqual(t['mempool']['eviction_memory_time'], '1m')
+
     def test_ignored_rows(self):
         _cfg, notes, t = self.gen(['-yellowbacksignal=0', '-feepolicy=zip317',
-                                   '-mempoolevictionmemoryminutes=1'], live=())
+                                   ], live=())
         self.assertNotIn('yellowback', t)
         self.assertEqual(set(t['mempool']), {'debug_enable_at_height'})
-        self.assertIn('ignored: -mempoolevictionmemoryminutes=1', notes)
         rows = {r[0].split('=')[0]: r for r in kg.KOGANYD_KEY_TABLE}
-        for flag in ('-yellowbacksignal', '-feepolicy', '-mempoolevictionmemoryminutes'):
+        for flag in ('-yellowbacksignal', '-feepolicy'):
             self.assertEqual(rows[flag][1], 'ignored', flag)
 
     def test_every_live_flag_has_a_table_row(self):

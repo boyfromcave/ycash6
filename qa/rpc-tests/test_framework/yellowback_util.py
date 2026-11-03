@@ -1514,8 +1514,12 @@ def write_private(path, text):
 
 
 def debug_log_contains(tmpdir, i, needle):
-    """True iff node ``i``'s regtest debug.log contains ``needle``."""
+    """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair writes none:
+    its backend's log, ``node<i>/backend/zakurad.log``, is read instead)."""
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
+    backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
+    if not os.path.exists(path) and os.path.exists(backend):
+        path = backend
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         return needle in f.read()
 
