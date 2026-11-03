@@ -115,6 +115,7 @@ if kogany's real clock accepts their time.
 """
 
 import atexit
+import shutil
 import json
 import threading
 import os
@@ -1092,12 +1093,27 @@ def yewd_kogany_config(args, i, backend_dir, coinbase, live=None):
     return cfg, notes
 
 
+def _kogany_vault_wipe(datadir, backend_dir):
+    """ycashd's vault state DB is ``node<i>/regtest/vaults`` (U-18); kogany's vault column family
+    lives inside its state DB, so a pair keeps an empty ``regtest/vaults`` stand-in.  A script that
+    deleted it (``wipe_vaults=True``) means "rebuild the vault state from the blocks": the backend's
+    state dir is deleted and kogany resyncs the chain from its peer."""
+    marker = os.path.join(datadir, 'regtest', 'vaults')
+    seen = os.path.join(backend_dir, '.vaults-standin')
+    state = os.path.join(backend_dir, 'state')
+    if os.path.exists(seen) and not os.path.isdir(marker) and os.path.isdir(state):
+        shutil.rmtree(state)
+    os.makedirs(marker, exist_ok=True)
+    open(seen, 'w').close()
+
+
 def _start_kogany_backend(i, datadir, b_args, coinbase, stderr):
     backend_dir = os.path.join(datadir, 'backend')
     cfg, notes = yewd_kogany_config(b_args, i, backend_dir, coinbase)
     conf = os.path.join(backend_dir, 'zakurad.toml')
     with open(conf, 'w', encoding='utf8') as f:
         f.write(render_toml(cfg, notes))
+    _kogany_vault_wipe(datadir, backend_dir)
     log = stderr if stderr is not None else open(os.path.join(backend_dir, 'zakurad.log'), 'ab')
     argv = [yewd_kogany_bin(), '-c', conf] + os.getenv('KOGANY_ARGS', '').split() + ['start']
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT if stderr is None else stderr), \
