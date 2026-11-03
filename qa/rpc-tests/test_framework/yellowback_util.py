@@ -102,6 +102,7 @@ from .util import (
     sync_mempools,
     wait_bitcoinds,
 )
+from . import kogany
 from . import yellowback_model as ym
 from .yellowback_model import assert_model_matches  # noqa: F401  (re-exported, section 7)
 
@@ -535,6 +536,11 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # U-22: create the YED attestor set (and restart onto it) at the end of setup_network, so
     # every yed_* RPC exists when run_test starts; False leaves it to activate()
     auto_attestor_set = True
+    # The mixed-line harness (KOGANY_BIN, kogany plan K-18): the followers peer with, and are
+    # compared against, the user's node -- an enforcing node, so a block the stock node 1 accepts
+    # and the enforcing nodes reject never splits the follower from its reference (KOGANY_PEER
+    # overrides).
+    kogany_peer = USER
 
     def __init__(self, num_nodes=6):
         super().__init__()
@@ -835,6 +841,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         p = bitcoind_processes.pop(i)
         os.kill(p.pid, signal.SIGKILL)
         p.wait()
+        kogany.kill_yewd_backend(i)       # YEWD_BIN: the backend dies with its yewd
         self.nodes[i] = None
 
     def restart_quiet(self, i, extra=None):
@@ -950,6 +957,7 @@ def assert_rejected(node, blockhash):
     """The node rejected ``blockhash`` (U-21: an invalid block, DoS 100): it sits off the active
     chain (``confirmations == -1``). ``rejectedBlocks`` left with the enforcement machinery."""
     assert_equal(node.getblock(blockhash)['confirmations'], -1)
+    kogany.current().on_block_rejected(node, blockhash)   # mixed line: the followers reject it too
 
 
 def assert_banscore_zero(nodes):
@@ -1410,7 +1418,9 @@ def mine_block_raw(node, txs, coinbase=None, gbt=None, n_time=None):
         block.vtx.append(t)
     block.hashMerkleRoot = block.calc_merkle_root()
     block.solve()
-    result = node.submitblock(bytes_to_hex_str(block.serialize()))
+    block_hex = bytes_to_hex_str(block.serialize())
+    result = node.submitblock(block_hex)
+    kogany.current().offer_block(block_hex, result, 'mine_block_raw', node=node)   # mixed line: same verdict class
     return result, '%064x' % block.sha256
 
 
@@ -1503,11 +1513,60 @@ def write_private(path, text):
     os.chmod(path, 0o600)
 
 
-def debug_log_contains(tmpdir, i, needle):
-    """True iff node ``i``'s regtest debug.log contains ``needle``."""
+# ycashd log lines a kogany pair has no counterpart for (column 3), with the reason
+KOGANY_NO_SUCH_LOG = {
+    'SyncToChain: undoing': "kogany's YED index commits atomically with the block batch: no undo walk after a crash",
+    'wiping index (undo record missing': "kogany's YED index commits atomically with the block batch: no undo records to outrun, no wipe-and-rebuild fallback (N35)",
+    '-yellowbacksignal is retired with the vault upgrade and ignored': "kogany has no -yellowbacksignal; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbackenforce is retired with the vault upgrade and ignored': "kogany has no -yellowbackenforce; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbacktemplatepolicy is retired with the vault upgrade and ignored': "kogany has no -yellowbacktemplatepolicy; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    '-yellowbackrequirehealthy is retired with the vault upgrade and ignored': "kogany has no -yellowbackrequirehealthy; the harness drops the retired flag (kogany.py:262; ycashd init.cpp:1598)",
+    # prefixes (the rest of the line carries a height or a set id)
+    'vault: replaying blocks ': "kogany's vault column family lives in its state DB: a wipe resyncs the chain, no replay line",
+    'Yellowback: attestor set ': "kogany logs no attestor-set line at init; vault_getinfo attestorsetid is the check",
+    'Yellowback: no attestor set; the YED module validates inertly':
+        "kogany logs no attestor-set line at init; vault_getinfo moduleactive is the check",
+}
+
+
+def kogany_pair(tmpdir, i):
+    """True iff node ``i`` is a kogany + yewd pair (it has a backend log)."""
+    return os.path.exists(os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log'))
+
+
+def debug_log_paths(tmpdir, i):
+    """The logs ``debug_log_contains`` reads for node ``i`` (see there)."""
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        return needle in f.read()
+    backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
+    stderr = os.path.join(tmpdir, 'node%d' % i, 'stderr.txt')
+    yewd = os.path.join(tmpdir, 'node%d' % i, 'yewd.log')
+    paths = [p for p in (path, backend) if os.path.exists(p)]
+    if os.path.exists(backend):
+        paths += [p for p in (stderr, yewd) if os.path.exists(p)]
+    return paths or [path]
+
+
+def debug_log_lines(tmpdir, i):
+    """Every line of node ``i``'s logs (``debug_log_paths``)."""
+    lines = []
+    for p in debug_log_paths(tmpdir, i):
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            lines += f.readlines()
+    return lines
+
+
+def debug_log_contains(tmpdir, i, needle):
+    """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair: its
+    backend's log, ``node<i>/backend/zakurad.log``, is read too, since yewd's own debug.log
+    carries none of the node's lines; after ``restart_quiet`` the pair's output, a fatal stop's
+    reason among it, is in ``node<i>/stderr.txt``, and yewd's own lines in ``node<i>/yewd.log``:
+    both read too)."""
+    backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
+    why = [r for k, r in KOGANY_NO_SUCH_LOG.items() if needle == k or (k.endswith(' ') and needle.startswith(k))]
+    if os.path.exists(backend) and why:
+        print('  [kogany pair] %r skipped: %s' % (needle, why[0]))
+        return True
+    return any(needle in l for l in debug_log_lines(tmpdir, i))
 
 
 # ---------------------------------------------------------------------------

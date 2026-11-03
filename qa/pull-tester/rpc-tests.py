@@ -209,6 +209,9 @@ BASE_SCRIPTS= [
     'nodehandling.py',
     'reindex.py',
     'addressindex.py',
+    'lightwalletd_only.py',
+    'yellowback_lightwalletd.py',
+    'z_validateaddress_nowallet.py',
     'spentindex.py',
     'timestampindex.py',
     'decodescript.py',
@@ -282,6 +285,9 @@ EXTENDED_SCRIPTS = [
     'yellowback_stockparity.py',
     # The plan section 4 demonstration of the 6.20.0 port on the vault upgrade line (~10 minutes; nightly, not a merge gate).
     'yellowback_demo_v6.py',
+    # -prune keeps every block from the vault prune floor (H_V - 288; workspace pruning assessment PR-2): two nodes,
+    # about 1.8 GB of disk and 15-30 minutes, so nightly, as pruning.py.
+    'vault_prune_floor.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',

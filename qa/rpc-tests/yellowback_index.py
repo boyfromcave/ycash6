@@ -7,7 +7,7 @@
 The synchronous v2 index end to end (plan Phase 3, §7): tags from `generate` land in Tags,
 medians appear as the windows fill, activation, reorgs across a tag change and across the fast
 window's fill bound, the REG-4 judgement undone by a reorg, restart, -reindex-yellowback,
--reindex, -prune refused, crash recovery with an unflushed chainstate (and the wipe-and-rebuild
+-reindex, -prune with the vault prune floor, crash recovery with an unflushed chainstate (and the wipe-and-rebuild
 fallback beyond UNDO_KEEP), the first Python-built owner-path redemption confirmed through
 sendrawtransaction, a rejection that survives kill -9, a fresh node syncing the valid chain, the
 retired -yellowbackstartheight refused at init, the contiguous history, a loud parameter mismatch,
@@ -58,6 +58,7 @@ from test_framework.yellowback_util import (
     assert_best_hash,
     assert_same_statehash,
     debug_log_contains,
+    debug_log_lines,
     mine_rejected_block,
     mint_vault_raw,
     redeem_vault_raw,
@@ -67,7 +68,7 @@ from test_framework.yellowback_util import (
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_attest import attestor_keys, bond_keys, build_register_tx, send_and_lock
-from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY
+from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY, kogany_pair
 
 
 def rpc_error_message(fn, *args):
@@ -234,7 +235,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_equal(self.statehash(2), before)
         self.checkpoint('after restart')
 
-        print('-reindex-yellowback and -reindex rebuild to the same hash; -prune is refused')
+        print('-reindex-yellowback and -reindex rebuild to the same hash; -prune starts (the vault prune floor)')
         self.restart(3, ['-reindex-yellowback'])
         wait_yed_healthy(nodes[3], timeout=120)
         assert_equal(self.statehash(3), before)
@@ -244,10 +245,13 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_equal(self.statehash(4), before)
         stop_node(nodes[OBSERVER], OBSERVER)
         nodes[OBSERVER] = None
-        assert_start_raises_init_error(OBSERVER, tmpdir, self.node_args(OBSERVER, ['-prune=550']),
-                                       # the vault upgrade's -prune refusal (01/N-1) fires before the Yellowback one
-                                       'The vault upgrade is configured on this network and incompatible with -prune')
-        self.restart(OBSERVER)
+        # The vault prune floor replaced the 01/N-1 and Yellowback -prune refusals: a pruned node keeps every block from
+        # 288 below the activation height, which the index replays read (vault_prune_floor.py prunes past it).
+        self.restart(OBSERVER, ['-prune=550'])
+        assert_equal(nodes[OBSERVER].getblockchaininfo()['pruned'], True)
+        wait_yed_healthy(nodes[OBSERVER], timeout=120)
+        assert_equal(self.statehash(OBSERVER), before)
+        self.restart(OBSERVER)    # nothing was pruned (regtest prunes nothing below height 1,000): back to archive
         self.sync_all(blocks_only=True)
 
         print('startheight_retired and params_mismatch_fails_loudly')
@@ -319,8 +323,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         wait_for_rejection([nodes[3]], rejected)
         assert debug_log_contains(tmpdir, 3, 'block %s at' % rejected) and debug_log_contains(tmpdir, 3, 'is invalid: vault-spend-malformed'), \
             'node 3 did not judge the stored block at restart'
-        with open(os.path.join(tmpdir, 'node3', 'regtest', 'debug.log'), errors='replace') as f:
-            n2 = [l for l in f if rejected in l and 'N2)' in l]
+        n2 = [l for l in debug_log_lines(tmpdir, 3) if rejected in l and 'N2)' in l]
         assert not n2, 'node 3 accepted the stored block under N2: %s' % n2
         wait_for_rejection(self.enforcing_nodes(), rejected)
         verdict = nodes[2].yed_getblockverdict(rejected)
@@ -505,15 +508,21 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # No v2 datadir is cached, so the mismatch is injected: -yellowbacktestfault=schema makes SyncToChain
         # take the same wipe-and-rebuild path a v2 Tip record takes (the unit test writes schemaVersion 2 directly).
         assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)
-        self.restart(4, ['-yellowbacktestfault=schema'])
-        wait_yed_healthy(nodes[4], timeout=180)
-        sync_blocks([nodes[0], nodes[4]], timeout=120)
-        info = nodes[4].yed_getinfo()
-        assert_equal((info['rebuilt'], info['height']), (True, nodes[4].getblockcount()))
-        assert debug_log_contains(tmpdir, 4, 'rebuilding from the chain'), 'expected the schema rebuild log line'
-        assert_equal(self.statehash(4), self.statehash(0))
-        assert_equal(self.attestors_of(4), self.attestors_of(0))
-        assert_equal(nodes[4].yed_getinfo()['attest']['status'], 'ARMED')
+        # A kogany + yewd pair has no v2 index to rebuild: its YED index lives in the state DB and
+        # commits atomically with the block batch, so yellowback.test_fault refuses `schema` (the
+        # node exits at init). The wipe-and-rebuild path is ycashd's alone and is column-gated.
+        if kogany_pair(tmpdir, 4):
+            print('  [kogany pair] schema rebuild skipped: no v2 index (YED index is atomic with the block batch)')
+        else:
+            self.restart(4, ['-yellowbacktestfault=schema'])
+            wait_yed_healthy(nodes[4], timeout=180)
+            sync_blocks([nodes[0], nodes[4]], timeout=120)
+            info = nodes[4].yed_getinfo()
+            assert_equal((info['rebuilt'], info['height']), (True, nodes[4].getblockcount()))
+            assert debug_log_contains(tmpdir, 4, 'rebuilding from the chain'), 'expected the schema rebuild log line'
+            assert_equal(self.statehash(4), self.statehash(0))
+            assert_equal(self.attestors_of(4), self.attestors_of(0))
+            assert_equal(nodes[4].yed_getinfo()['attest']['status'], 'ARMED')
         self.restart(4)
         wait_yed_healthy(nodes[4], timeout=120)
         assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)

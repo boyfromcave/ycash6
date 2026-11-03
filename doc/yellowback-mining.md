@@ -40,6 +40,7 @@ are configured (U-22; regtest: `-nuparams=6d5b7a31:<h> -yellowbackattestorset=<s
 | Option | Default | Meaning |
 |---|---|---|
 | `-yellowbackpayoutaddress=<s1…>` | `-mineraddress` when that is a transparent P2PKH address | the key the tag names for fees (MINER-2); without one the node emits **no tag** |
+| `-yellowbackpayoutdefault=0` | `1` | do not take `-mineraddress` as the payout default: a node that names no `-yellowbackpayoutaddress` then has no payout key and emits **no tag**, whatever its `-mineraddress` (a miner address that names no YED payout key, as a wallet node mining to its keypool; kogany's `mining.yellowback_payout_default = false`, finding F-S5-9) |
 | `-yellowbackquotemaxage=<sec>` | `1800` | a stored quote older than this is not put in the tag (the template is then untagged) |
 | `-yellowbackpreferredpayee=<s1…>` | unset | the wallet side only: where this node's own mints/redemptions pay their fee when that key is eligible |
 | `-reindex-yellowback` | off | wipe and rebuild the index from the blocks on disk |
@@ -49,7 +50,8 @@ Retired with the upgrade and **ignored** (logged at start): `-yellowbacksignal`,
 `-yellowbackenforce`, `-yellowbacktemplatepolicy`, `-yellowbackrequirehealthy`.
 `-yellowbackstartheight` and `-yellowbackenforceuntil` are init errors (finding (31)).
 
-`-prune` is refused while Yellowback is live (the index needs every block on disk). `-datacarrier`
+`-prune` keeps every block from 288 below the vault activation height (the index replays from that
+height; `doc/vault-rpc.md`, the vault prune floor). `-datacarrier`
 stays at its default (`-datacarrier=0` drops every `OP_RETURN` transaction from the mempool of a
 relaying node; the index does not care either way).
 

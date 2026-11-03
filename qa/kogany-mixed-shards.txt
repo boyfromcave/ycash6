@@ -1,0 +1,225 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+#
+# The mixed-line shards (kogany plan docs/plans/kogany/kogany-yellowback-plan.md §5 "mixed-regtest",
+# §4.2 rule 4; workspace docs/plans/kogany/ci-design.md): every Yellowback functional script of
+# yellowback-tests.yml's YELLOWBACK_SCRIPTS, run unchanged with kogany (koganyd) followers
+# (KOGANY_BIN, qa/rpc-tests/test_framework/kogany.py). The `mixed` job of yellowback-tests.yml runs
+# one group per job; qa/kogany_mixed_shards.py reads this file (`check` keeps it complete).
+#
+#   <group> <script> <state> <wave> [flags...]
+#
+#   group   vault | yed | fees | attest | node: one CI job each, re-run on its own
+#   state   report  runs, failure reported (the job stays green)
+#           gate    runs with KOGANY_STRICT=1, failure fails the job (and the `mixed tier` check)
+#           The coordinator flips a script from report to gate when its wave's gate is seen green
+#           (coordination-handoff §7); one word per script, in a reviewed commit.
+#   wave    the wave whose gate names the script (plan §3: W2-d, W4-e, W5-f, W6, W7, W8; W9-b for
+#           the rest, "the whole suite in mixed mode")
+#   flags   mirror   KOGANY_MIRROR_INVALIDATE=1 (the script calls invalidateblock/reconsiderblock)
+#           mempool  KOGANY_MEMPOOL=1 (getrawmempool set equality and tx verdicts, W6)
+#           direct   not an rpc-tests.py entry: run the file itself (rpc-tests.py drops unknown names)
+#
+#   excluded <script> <reason>     never in a mixed shard (the run without KOGANY_BIN still has it)
+#   excluded:pair <script> <reason>
+#                                  a sidecar script kept out of column 3 only (the `pair` group is
+#                                  the sidecar group less these; the script keeps its mixed group
+#                                  and its sidecar row)
+#
+#   report rows kogany cannot follow (W9-b finding 1, "no-ycash-upgrades"): stopatheight,
+#   ycash_bootstrap, lightwalletd_only, vault_pq_wallet, vault_pq_wallet_restore and
+#   wallet_pq_address run regtest chains without the Ycash upgrades below Canopy (the framework's
+#   200-block cache, or Vault alone by -nuparams); kogany follows only chains with the Ycash
+#   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
+#   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
+
+# --- the harness itself (W1-Y7) and node plumbing
+node     kogany_mixed_smoke            gate    W1   direct
+node     stopatheight                  report  W9
+node     ycash_bootstrap               report  W9
+node     testnet_ceremony              gate    W9
+node     lightwalletd_only             report  W9
+node     yellowback_lightwalletd       report  W9
+node     z_validateaddress_nowallet    gate    W9
+
+# --- the vault primitive (W2-d boundary, W4-e state, W7 reads)
+vault    vault_activation_restart      gate    W2   mirror
+vault    vault_upgrade                 gate    W2   mirror
+vault    vault_primitive               gate    W4   mirror
+vault    vault_slashing                gate    W4   mirror
+vault    vault_undo_prune              gate    W4   mirror
+vault    vault_pq_reorg                gate    W4   mirror
+vault    vault_dos                     gate    W4   mirror
+vault    vault_rpc                     gate    W7   mirror
+vault    vault_rpc_contract            gate    W7
+vault    vault_pq_relay                gate    W6
+vault    vault_bridge                  gate    W9
+vault    vault_pq                      gate    W9
+vault    vault_pq_wallet               report  W9
+vault    vault_pq_wallet_restore       report  W9
+vault    wallet_pq_address             report  W9
+
+# --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
+yed      yellowback_lifecycle          gate    W5
+yed      yellowback_activation_reorg   gate    W5   mirror
+yed      yellowback_reorg_restart      gate    W5   mirror
+yed      yellowback_claim              gate    W5
+yed      yellowback_interm             gate    W5
+yed      yellowback_index              gate    W5   mirror
+yed      yellowback_upgrade            gate    W5   mirror
+yed      yellowback_rpc_contract       gate    W7
+yed      yellowback_redeem_boundary    gate    W9
+yed      yellowback_cancel_limit       gate    W9
+yed      yellowback_pq                 gate    W9
+yed      yellowback_pq_dayone          gate    W9
+yed      yellowback_void_mint          gate    W9
+yed      yellowback_mint_armed         gate    W9
+yed      yellowback_wallet_restore     gate    W9
+yed      yellowback_sapling            gate    W9
+yed      yellowback_wallet_lifecycle   gate    W9
+yed      yellowback_hardening          gate    W9
+yed      yellowback_stock_node         gate    W9   mirror
+
+# --- fees and mempool (W5-f fees state, W6 policy and mempool-set equality)
+fees     yellowback_fees               gate    W5   mempool
+fees     yellowback_fees_reaccept      gate    W5   mempool
+fees     yellowback_fee                gate    W6   mempool
+fees     yellowback_mempool_limits     gate    W6   mempool
+fees     vault_policy                  gate    W6   mempool
+fees     vault_refee                   gate    W6   mempool
+fees     yellowback_wr_flags           report  W9   mempool
+
+# --- attestation, roles and mining (W5-c/f seats and liveness, W8 mining; yolo and chain-viz
+#     come from the sidecars job)
+attest   yellowback_attest_evict       gate    W5
+attest   yellowback_attest_rejoin      gate    W5
+attest   yellowback_attest_live        gate    W5
+attest   yellowback_pricefeed          gate    W5
+attest   yellowback_mining             gate    W8   mirror
+attest   yellowback_stratum            gate    W8
+attest   yellowback_attest             gate    W9
+attest   yellowback_attest_wallet      gate    W9   mirror
+attest   yellowback_attest_bond        gate    W9
+attest   yellowback_quote              gate    W9
+attest   yellowback_chainviz           gate    W9   mirror
+
+# --- the ycash6 test rig (kogany plan W9-a; K-3 as amended): the same scripts again with
+#     KOGANY_SIDECAR=1, every node a kogany plus a ycashd -connect'ed to it (-listen=0), the wallet
+#     on the ycashd, consensus and relay through the koganys. The 50 wallet-needing scripts:
+#     YELLOWBACK_SCRIPTS less the eight that call no wallet RPC, directly or through a framework
+#     helper (yellowback_quote, vault_activation_restart, vault_undo_prune, stopatheight,
+#     ycash_bootstrap, testnet_ceremony, lightwalletd_only; yellowback_framework_smoke is excluded
+#     above). The plan's "48" was a rough count (surveys/e-verification-strategy.md). Each script
+#     keeps its mixed group's flags; `run sidecar --of <group>` runs one group's share (the nightly).
+sidecar  z_validateaddress_nowallet    report  W9     # node
+sidecar  vault_upgrade                 report  W9   mirror  # vault
+sidecar  vault_primitive               report  W9   mirror  # vault
+sidecar  vault_slashing                report  W9   mirror  # vault
+sidecar  vault_pq_reorg                report  W9   mirror  # vault
+sidecar  vault_dos                     report  W9   mirror  # vault
+sidecar  vault_rpc                     report  W9   mirror  # vault
+sidecar  vault_rpc_contract            report  W9     # vault
+sidecar  vault_pq_relay                report  W9     # vault
+sidecar  vault_bridge                  report  W9     # vault
+sidecar  vault_pq                      report  W9     # vault
+sidecar  vault_pq_wallet               report  W9     # vault
+sidecar  vault_pq_wallet_restore       report  W9     # vault
+sidecar  wallet_pq_address             report  W9     # vault
+sidecar  yellowback_lifecycle          report  W9     # yed
+sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
+sidecar  yellowback_reorg_restart      report  W9   mirror  # yed
+sidecar  yellowback_claim              report  W9     # yed
+sidecar  yellowback_interm             report  W9     # yed
+sidecar  yellowback_index              report  W9   mirror  # yed
+sidecar  yellowback_upgrade            report  W9   mirror  # yed
+sidecar  yellowback_rpc_contract       report  W9     # yed
+sidecar  yellowback_redeem_boundary    report  W9     # yed
+sidecar  yellowback_cancel_limit       report  W9     # yed
+sidecar  yellowback_pq                 report  W9     # yed
+sidecar  yellowback_pq_dayone          report  W9     # yed
+sidecar  yellowback_void_mint          report  W9     # yed
+sidecar  yellowback_mint_armed         report  W9     # yed
+sidecar  yellowback_wallet_restore     report  W9     # yed
+sidecar  yellowback_sapling            report  W9     # yed
+sidecar  yellowback_wallet_lifecycle   report  W9     # yed
+sidecar  yellowback_hardening          report  W9     # yed
+sidecar  yellowback_stock_node         report  W9   mirror  # yed
+sidecar  yellowback_fees               report  W9   mempool  # fees
+sidecar  yellowback_fees_reaccept      report  W9   mempool  # fees
+sidecar  yellowback_fee                report  W9   mempool  # fees
+sidecar  yellowback_mempool_limits     report  W9   mempool  # fees
+sidecar  vault_policy                  report  W9   mempool  # fees
+sidecar  vault_refee                   report  W9   mempool  # fees
+sidecar  yellowback_wr_flags           report  W9   mempool  # fees
+sidecar  yellowback_attest_evict       report  W9     # attest
+sidecar  yellowback_attest_rejoin      report  W9     # attest
+sidecar  yellowback_attest_live        report  W9     # attest
+sidecar  yellowback_pricefeed          report  W9     # attest
+sidecar  yellowback_mining             report  W9   mirror  # attest
+sidecar  yellowback_stratum            report  W9     # attest
+sidecar  yellowback_attest             report  W9     # attest
+sidecar  yellowback_attest_wallet      report  W9   mirror  # attest
+sidecar  yellowback_attest_bond        report  W9     # attest
+sidecar  yellowback_chainviz           report  W9   mirror  # attest
+
+# --- off the mixed shards (test_framework/kogany.py "Recorded limits"; plan KF-32)
+excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo count, and a follower is one more peer
+
+# --- column 3 of the W9 matrix (kogany plan S5, §3b): the same 50 wallet-needing scripts with
+#     every node kogany + yewd (YEWD_BIN, YEWD_KOGANY; no ycashd behind any node; the harness compares
+#     vault_getinfo.statehash and yed_getstatehash across the pairs at every sync point, and with the
+#     ycash6 peer under YEWD_YCASH6_PEER=1). No MixedLine flags: there is no follower. The wave is S5
+#     for the manifest's wave column (W9: the matrix); a row flips to gate when S5's gate is seen green.
+#     A sidecar script outside column 3 by decision is `excluded:pair` with the reason (check keeps
+#     pair + excluded:pair = sidecar).
+excluded:pair yellowback_wr_flags  F-S5-15: Sapling consolidation (-consolidation, a background wallet option with no RPC) stays outside K-25 by decision; the script also needs -deletetx and reads debug.log (F-S5-13 class)
+pair     z_validateaddress_nowallet    report  W9     # node
+pair     vault_upgrade                 report  W9     # vault
+pair     vault_primitive               report  W9     # vault
+pair     vault_slashing                report  W9     # vault
+pair     vault_pq_reorg                report  W9     # vault
+pair     vault_dos                     report  W9     # vault
+pair     vault_rpc                     report  W9     # vault
+pair     vault_rpc_contract            report  W9     # vault
+pair     vault_pq_relay                report  W9     # vault
+pair     vault_bridge                  report  W9     # vault
+pair     vault_pq                      report  W9     # vault
+pair     vault_pq_wallet               report  W9     # vault
+pair     vault_pq_wallet_restore       report  W9     # vault
+pair     wallet_pq_address             report  W9     # vault
+pair     yellowback_lifecycle          report  W9     # yed
+pair     yellowback_activation_reorg   report  W9     # yed
+pair     yellowback_reorg_restart      report  W9     # yed
+pair     yellowback_claim              report  W9     # yed
+pair     yellowback_interm             report  W9     # yed
+pair     yellowback_index              report  W9     # yed
+pair     yellowback_upgrade            report  W9     # yed
+pair     yellowback_rpc_contract       report  W9     # yed
+pair     yellowback_redeem_boundary    report  W9     # yed
+pair     yellowback_cancel_limit       report  W9     # yed
+pair     yellowback_pq                 report  W9     # yed
+pair     yellowback_pq_dayone          report  W9     # yed
+pair     yellowback_void_mint          report  W9     # yed
+pair     yellowback_mint_armed         report  W9     # yed
+pair     yellowback_wallet_restore     report  W9     # yed
+pair     yellowback_sapling            report  W9     # yed
+pair     yellowback_wallet_lifecycle   report  W9     # yed
+pair     yellowback_hardening          report  W9     # yed
+pair     yellowback_stock_node         report  W9     # yed
+pair     yellowback_fees               report  W9     # fees
+pair     yellowback_fees_reaccept      report  W9     # fees
+pair     yellowback_fee                report  W9     # fees
+pair     yellowback_mempool_limits     report  W9     # fees
+pair     vault_policy                  report  W9     # fees
+pair     vault_refee                   report  W9     # fees
+pair     yellowback_attest_evict       report  W9     # attest
+pair     yellowback_attest_rejoin      report  W9     # attest
+pair     yellowback_attest_live        report  W9     # attest
+pair     yellowback_pricefeed          report  W9     # attest
+pair     yellowback_mining             report  W9     # attest
+pair     yellowback_stratum            report  W9     # attest
+pair     yellowback_attest             report  W9     # attest
+pair     yellowback_attest_wallet      report  W9     # attest
+pair     yellowback_attest_bond        report  W9     # attest
+pair     yellowback_chainviz           report  W9     # attest

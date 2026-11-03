@@ -28,6 +28,7 @@
 #include "crypto/pq/sign.h"
 #include "crypto/sha256.h"
 #include "key.h"
+#include "main.h"
 #include "policy/policy.h"
 #include "primitives/block.h"
 #include "script/interpreter.h"
@@ -2437,6 +2438,28 @@ BOOST_AUTO_TEST_CASE(module_displace_hook)
     yellowback::ClearModuleParams();
     // Unconfigured again: no displacement.
     BOOST_CHECK_EQUAL(*c.Try(JoinTx(c, s, MakeKey(92), {}, 100000)), "bad-vault-act-seats");
+}
+
+// The vault prune floor (pruning assessment §2.3, decision 2): -prune never deletes a file holding a block at or above
+// H_V - MIN_BLOCKS_TO_KEEP; before activation, and without an activation height, the stock tip - 288 bound applies.
+BOOST_AUTO_TEST_CASE(prune_floor)
+{
+    Consensus::Params p = Params(CBaseChainParams::REGTEST).GetConsensus();
+    const int K = MIN_BLOCKS_TO_KEEP;
+    p.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+    BOOST_CHECK_EQUAL(VaultPruneFloor(p), -1);
+    BOOST_CHECK_EQUAL(LastPrunableHeight(100000, p), 100000 - K);
+
+    p.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 5000;
+    BOOST_CHECK_EQUAL(VaultPruneFloor(p), 5000 - K);
+    BOOST_CHECK_EQUAL(LastPrunableHeight(3000, p), 3000 - K);          // tip well below H_V: stock
+    BOOST_CHECK_EQUAL(LastPrunableHeight(5000 - 1, p), 5000 - 1 - K);  // the bounds meet one block before H_V
+    BOOST_CHECK_EQUAL(LastPrunableHeight(5000, p), 5000 - 1 - K);
+    BOOST_CHECK_EQUAL(LastPrunableHeight(1000000, p), 5000 - 1 - K);   // after activation: the floor
+
+    p.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 200;      // H_V within MIN_BLOCKS_TO_KEEP of genesis
+    BOOST_CHECK_EQUAL(VaultPruneFloor(p), 0);
+    BOOST_CHECK_EQUAL(LastPrunableHeight(100000, p), -1);               // nothing is prunable
 }
 
 BOOST_AUTO_TEST_SUITE_END()

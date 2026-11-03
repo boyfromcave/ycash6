@@ -12,7 +12,6 @@ cleared quote means no tag; the template carries exactly the valid transactions 
 consensus policy are one); a failing mint is an invalid transaction the mempool refuses; an
 unhealthy index stops the node (getblocktemplate refuses before that, always)."""
 
-import os
 import time
 
 from test_framework.authproxy import JSONRPCException
@@ -26,6 +25,7 @@ from test_framework.util import (
     stop_node,
 )
 from test_framework.yellowback_util import (
+    debug_log_contains,
     unlock_all,
     POOLS,
     PRICE_MAX,
@@ -728,8 +728,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
 
 
 def debug_log_has(tmpdir, i, needle):
-    with open(os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log'), encoding='utf-8', errors='replace') as f:
-        return needle in f.read()
+    return debug_log_contains(tmpdir, i, needle)
 
 
 def _spk(node, addr):

@@ -49,6 +49,7 @@ JSON_TEST_FILES = \
   test/data/yellowback_math_cases.json \
   test/data/yellowback_attest_vectors.json \
   test/data/vault_vectors.json \
+  test/data/vault_v5_dormant_vectors.json \
   test/data/pq_acvp_slhdsa.json \
   test/data/pq_falcon_kat.json \
   test/data/pq_vectors.json \
@@ -140,6 +141,7 @@ BITCOIN_TESTS =\
   test/vault_state_tests.cpp \
   test/vault_template_tests.cpp \
   test/vault_vectors_tests.cpp \
+  test/vault_v5_dormant_tests.cpp \
   test/pq_crypto_tests.cpp \
   test/sha256compress_tests.cpp \
   test/yellowback_address_tests.cpp \

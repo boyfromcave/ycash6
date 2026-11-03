@@ -418,9 +418,10 @@ std::string HelpMessage(HelpMessageMode mode)
 #ifndef WIN32
     strUsage += HelpMessageOpt("-pid=<file>", strprintf(_("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)"), BITCOIN_PID_FILENAME));
 #endif
-    strUsage += HelpMessageOpt("-prune=<n>", strprintf(_("Reduce storage requirements by pruning (deleting) old blocks. This mode disables wallet support and is incompatible with -txindex and with the vault upgrade (on any network where it has an activation height). "
+    strUsage += HelpMessageOpt("-prune=<n>", strprintf(_("Reduce storage requirements by pruning (deleting) old blocks. This mode is incompatible with -txindex and refuses wallet rescans and key, address and wallet imports. "
+            "Where the vault upgrade has an activation height, it keeps every block from %u below that height. "
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
-            "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
+            "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_BLOCKS_TO_KEEP, MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
 #ifdef ENABLE_WALLET
     strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks (implies -rescan)"));
     strUsage += HelpMessageOpt("-reindex", _("Rebuild chain state and block index from the blk*.dat files on disk (implies -rescan)"));
@@ -433,11 +434,12 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     strUsage += HelpMessageOpt("-txexpirynotify=<cmd>", _("Execute command when transaction expires (%s in cmd is replaced by transaction id)"));
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
-    strUsage += HelpMessageOpt("-yellowback", _("Accepted and ignored: Yellowback is consensus wherever the vault upgrade and a YED attestor set are configured (incompatible with -prune there); -yellowback=0 only acknowledges a leftover index"));
+    strUsage += HelpMessageOpt("-yellowback", _("Accepted and ignored: Yellowback is consensus wherever the vault upgrade and a YED attestor set are configured; -yellowback=0 only acknowledges a leftover index"));
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
     strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for pool fees (default: -mineraddress when that is a transparent P2PKH address)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutdefault", _("Take -mineraddress as the payout address when -yellowbackpayoutaddress is not set; with -yellowbackpayoutdefault=0 a node without -yellowbackpayoutaddress names no payout key and emits no tag (default: 1)"));
     strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
     strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays pool fees to when it is eligible"));
     strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
@@ -1605,17 +1607,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                            "Start with the network's attestor set (regtest -yellowbackattestorset) to keep those outputs locked, "
                            "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
     }
-    // Audit 01/N-1: the vault set-state database is rebuilt from blocks and undo data (Reconcile: an unclean
-    // shutdown, a wiped vaults/, a VAULT_DB_VERSION bump, a reorg past the undo horizon), so -prune is refused
-    // wherever the upgrade has a height — independent of Yellowback (-yellowbackattestorset).
-    if (fPruneMode && chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
-        return InitError(_("The vault upgrade is configured on this network and incompatible with -prune: the vault database is rebuilt from blocks and undo data. "
-                           "Re-download the block chain without -prune."));
-    }
+    // Audit 01/N-1 refused -prune wherever the upgrade has a height. The vault Reconcile and the YED index replay read
+    // blocks (and the vault undo data) only from the activation height (rule S-0), so -prune keeps every block from
+    // VaultPruneFloor (MIN_BLOCKS_TO_KEEP below it) instead: FindFilesToPrune, and the data check after the block index loads.
     if (yellowback::g_yellowbackLive) {
-        if (fPruneMode) {
-            return InitError(_("Yellowback is live on this network and incompatible with -prune."));
-        }
         if (mapArgs.count("-yellowbacktestfault") && chainparams.NetworkIDString() != "regtest") {
             return InitError(_("-yellowbacktestfault is regtest-only."));
         }
@@ -2013,10 +2008,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     // https://github.com/bitpay/bitcoin/commit/c91d78b578a8700a45be936cb5bb0931df8f4b87#diff-c865a8939105e6350a50af02766291b7R1233
     int64_t nInsightExplorerDBCache = 0;
-    if (GetBoolArg("-insightexplorer", false)) {
-        if (!GetBoolArg("-txindex", false)) {
-            return InitError(_("-insightexplorer requires -txindex."));
-        }
+    if (GetBoolArg("-insightexplorer", false) && !GetBoolArg("-txindex", false)) {
+        return InitError(_("-insightexplorer requires -txindex."));
+    }
+    // The database holds the address index too, which -lightwalletd alone turns on
+    // (fAddressIndex, LoadBlockIndexDB / InitBlockIndex): open it for either flag, as
+    // upstream's address index in the block tree is there for either.
+    if (GetBoolArg("-insightexplorer", false) || GetBoolArg("-lightwalletd", false)) {
         // The insight-explorer indexes live in their own leveldb instance
         // (see CInsightExplorerDB). Carve half of the remaining cache for
         // it: bulk writes per connected block plus range-scan reads from
@@ -2165,6 +2163,31 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 if (fHavePruned && !fPruneMode) {
                     strLoadError = _("You need to rebuild the database using -reindex to go back to unpruned mode.  This will redownload the entire blockchain");
                     break;
+                }
+
+                // The vault prune floor (replaces the 01/N-1 refusal): a pruned datadir must hold the block and undo
+                // data of every active-chain block from VaultPruneFloor, which the vault and YED replays read
+                // (LoadBlockIndexDB has already checked that each blk file is present; this checks the rev files).
+                if (fHavePruned && !fReindex) {
+                    LOCK(cs_main);
+                    const int nFloor = VaultPruneFloor(chainparams.GetConsensus());
+                    int nMissing = -1;
+                    std::set<int> setFilesChecked;
+                    for (int h = std::max(1, nFloor); nFloor >= 0 && h <= chainActive.Height(); h++) {
+                        const CBlockIndex* pindex = chainActive[h];
+                        if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0 || (pindex->nStatus & BLOCK_HAVE_UNDO) == 0 ||
+                            (setFilesChecked.insert(pindex->nFile).second && !fs::exists(GetBlockPosFilename(pindex->GetUndoPos(), "rev")))) {
+                            nMissing = h;
+                            break;
+                        }
+                    }
+                    if (nMissing >= 0) {
+                        strLoadError = strprintf(_("The block or undo data of block %d is missing, but this pruned node must keep every block from height %d "
+                                                   "(%u below the vault activation height): the vault and Yellowback databases are rebuilt from them. "
+                                                   "Restart with -reindex to re-download the block chain"),
+                                                 nMissing, nFloor, MIN_BLOCKS_TO_KEEP);
+                        break;
+                    }
                 }
 
                 if (!fReindex && chainActive.Tip() != NULL) {
@@ -2383,7 +2406,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             KeyIO yellowbackKeyIO(chainparams);
             yellowback::MinerConfig cfg;
             std::string payout = GetArg("-yellowbackpayoutaddress", "");
-            if (payout.empty() && mapArgs.count("-mineraddress")) payout = mapArgs["-mineraddress"];   // MINER-2's default (K22)
+            if (payout.empty() && mapArgs.count("-mineraddress") && GetBoolArg("-yellowbackpayoutdefault", true))
+                payout = mapArgs["-mineraddress"];   // MINER-2's default (K22); -yellowbackpayoutdefault=0 opts out (F-S5-9)
             if (!payout.empty()) {
                 CTxDestination dest = yellowbackKeyIO.DecodeDestination(payout);
                 if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) cfg.payoutKey = *keyID;

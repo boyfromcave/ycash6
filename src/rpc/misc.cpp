@@ -327,7 +327,7 @@ UniValue z_validateaddress(const UniValue& params, bool fHelp)
 
 
 #ifdef ENABLE_WALLET
-    LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK2(cs_main, pwalletMain ? &pwalletMain->cs_wallet : NULL);   // null under -disablewallet
 #else
     LOCK(cs_main);
 #endif

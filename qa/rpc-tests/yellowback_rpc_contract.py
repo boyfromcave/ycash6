@@ -86,7 +86,7 @@ OPTIONAL = {
     'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
     'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerScheme', 'ownerHash', 'feeVout', 'attestFeeVout', 'assignments',
-                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign'},
+                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign', 'opReturnIndex'},
     'yed_getnotice': {'vault', 'txid', 'height', 'refHeight', 'pEmerg', 'emergencyOpenAt', 'expiresAt'},
     'yed_gettxinfo': {'seq'},
     'yed_validaterawtransaction': {'invalidReason'},   # only when valid is false
@@ -231,6 +231,18 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_setquote', nodes[POOLS[0]].yed_setquote(50_000_000, 1))
         assert_rpc_error('quote-out-of-range', nodes[POOLS[0]].yed_setquote, 1, 1)
         assert_rpc_error('no-payout-address', user.yed_setquote, 50_000_000, 1)
+        # F-S5-9: a P2PKH -mineraddress is the payout default (MINER-2); -yellowbackpayoutdefault=0
+        # leaves the node without one, as a node mining to its wallet.
+        miner = claimant.getnewaddress()
+        self.restart(5, ['-mineraddress=%s' % miner, '-yellowbackpayoutdefault=0'])
+        claimant = nodes[5]
+        assert_rpc_error('no-payout-address', claimant.yed_setquote, 50_000_000, 1)
+        self.restart(5, ['-mineraddress=%s' % miner])
+        claimant = nodes[5]
+        assert_equal(claimant.yed_setquote(50_000_000, 1)['nextTag']['payoutAddress'], miner)
+        self.restart(5)
+        claimant = nodes[5]
+        self.sync_all()
         r = user.yed_getinfo()['height'] - REF_LAG
         c.check('yed_getfeepayee', user.yed_getfeepayee(r))
         est = c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
@@ -292,6 +304,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         void_txid = user.decoderawtransaction(void_hex)['txid']
         raw = user.getrawtransaction(mint_a['txid'], 1)
         c.check('yed_decodepayload', user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:]))
+        # the raw transaction: the same payload, plus opReturnIndex and the carrier's bundle (both optional)
+        dec_tx = c.check('yed_decodepayload', user.yed_decodepayload(raw['hex']))
+        assert_equal(dec_tx['opReturnIndex'], 2)
+        assert 'bundle' in dec_tx, dec_tx
         c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(raw['hex']))
         self.sync_all()
         self.mine(POOLS[1])

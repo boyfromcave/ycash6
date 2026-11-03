@@ -354,6 +354,15 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight);
 
 /**
+ * The vault prune floor: the lowest height whose block and undo data -prune keeps, MIN_BLOCKS_TO_KEEP below the
+ * UPGRADE_VAULT activation height (the vault Reconcile and the YED index replay read blocks from the activation
+ * height). -1 where the upgrade has no activation height (no floor).
+ */
+int VaultPruneFloor(const Consensus::Params& params);
+/** The last height FindFilesToPrune may delete with the tip at nTipHeight: min(tip - MIN_BLOCKS_TO_KEEP, floor - 1). */
+int LastPrunableHeight(int nTipHeight, const Consensus::Params& params);
+
+/**
  *  Actually unlink the specified files
  */
 void UnlinkPrunedFiles(std::set<int>& setFilesToPrune);

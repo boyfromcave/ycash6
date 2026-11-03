@@ -66,6 +66,25 @@ name: yellowback tests
 # that prints a line starting with SKIP fails the run; the sidecar/agent `test -x` guards and the
 # Falcon signer probe are the early, named message. qa/yellowback-audit.sh fails a run without the flag.
 # Every job has timeout-minutes; superseded push and pull_request runs are cancelled.
+#
+# kogany, the third node line (kogany plan docs/plans/kogany/kogany-yellowback-plan.md §5, the
+# workspace's docs/plans/kogany/ci-design.md; 2026-11-01):
+#   vaults/kogany-compat joins the node-line branches: its push tier is this line's own gate there.
+#   `build` keeps node-bin 30 days outside pull requests (the cross-repository consumers, yew's yewd
+#     gates and yolo's regtest, pin a commit), and tier `bin` runs `build` alone; `bin-refresh`
+#     dispatches it nightly on a branch whose tip has no node-bin with 7 days left.
+#   The mixed tier: `koganyd` and `yewd` resolve the pinned kogany and yew binaries once per run
+#     (the producer's artifact at the pin, else a build at the pin), `mixed` runs the Yellowback
+#     scripts unchanged with kogany followers, one job per group of qa/kogany-mixed-shards.txt,
+#     `yewd-pair` runs the S-track pair shard (YEWD_BIN), and `mixed-gate` is the `mixed tier`
+#     check. Off unless the repository variable KOGANY_MIXED is 'true'; it runs on
+#     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
+#     dispatch with tier mixed. It is never part of the `push tier` check.
+#   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
+#     `koganyd` and `sidecar-rig`, the 50 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
+#     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
+#     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
 on:
   push:
     # upgrade/vault-in-term (in-term claims plan §7, T6) is the in-term line, cut from upgrade/vault;
@@ -76,6 +95,7 @@ on:
       - upgrade/vault-in-term
       - upgrade/quantum-vaults
       - feature/yellowback
+      - vaults/kogany-compat
   pull_request:
     branches: *node-line-branches
   schedule:
@@ -84,14 +104,14 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites) or weekly (fuzz, every Yellowback* and Vault* target, about 4 hours)'
+        description: 'Which tier to run: all (push + nightly), push, nightly (variants and long suites), weekly (fuzz, every Yellowback* and Vault* target, about 4 hours), bin (build and node-bin only), mixed (the kogany mixed tier only) or sidecar (the kogany test-rig nightly)'
         type: choice
-        options: [all, push, nightly, weekly]
+        options: [all, push, nightly, weekly, bin, mixed, sidecar]
         default: all
   workflow_call:
     inputs:
       tier:
-        description: 'all, push, nightly or weekly (as the dispatch input)'
+        description: 'all, push, nightly, weekly, bin, mixed or sidecar (as the dispatch input)'
         type: string
         default: all
       release_package:
@@ -155,7 +175,10 @@ env:
   # yellowback_attest_rejoin joined on 2026-10-11 (the seats review B1 probe; ported from ycash-dd 423019c40).
   # yellowback_attest_live joined on 2026-10-11 (attestations as liveness only from BUNDLE-1-verified bundles; ported from ycash-dd 8a1624527).
   # vault_dos and vault_pq_relay joined on 2026-10-12 (remedial audit 07/F-1 mempool DoS carve-out, 07/F-6 PQ orphan size).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
+  # lightwalletd_only joined on 2026-11-01 (pin finding 7 fixed: -lightwalletd alone opens the insight explorer database).
+  # yellowback_lightwalletd joined on 2026-11-02 (a -lightwalletd node generates, sends and generates across Vault; the kogany review's "generate hangs" gap).
+  # z_validateaddress_nowallet joined on 2026-11-01 (z_validateaddress on a -disablewallet node, kogany yewd finding).
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet
   SANITIZER_SCRIPTS: yellowback_index
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
@@ -238,6 +261,18 @@ env:
   # 698870c (#22) amends fees spec section 5.1: fee publication follows price trust, so HALT-2 alone keeps the
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '698870c998e2534f45461f5bb98773d014e96829' }}
+  # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
+  # kogany: vaults/kogany-compat at dd834da8b (the koganyd identity); its koganyd-bin artifact (any
+  # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
+  # profile, --features ycash). The binary is `koganyd` from that commit on (no zakurad-bin).
+  KOGANY_REPO: boyfromcave/kogany
+  KOGANY_COMMIT: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
+  # yew: vaults/kogany-compat at S3 (yewd); its yewd-bin artifact (ci.yml), else a build here.
+  YEW_REPO: boyfromcave/yew
+  YEW_COMMIT: 85aec6f5812da36e499a18b088e2e6b99f503da8
+  # The kogany chunks whose pending koganyd.toml rows the harness writes as keys (test_framework/
+  # kogany.py KOGANY_LIVE; W5-f is on by default there). Moves with KOGANY_COMMIT.
+  KOGANY_LIVE: W1-Y1,W2-b
 
 jobs:
   # The scheduled entry point: one workflow_dispatch per node-line branch (see the trigger notes at
@@ -264,12 +299,68 @@ jobs:
           gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f tier="$TIER" \
             || echo "::warning::could not dispatch the $TIER tier on $BRANCH (no such branch, or its copy of this workflow has no tier input)"
 
+  # The W9-a sidecar nightly's dispatcher: tier `sidecar` on vaults/kogany-compat at 03:00 when the
+  # mixed tier is switched on (KOGANY_MIXED). Separate from schedule-fanout, whose branch list is the
+  # lead architect's (upgrade/vault only); like it, it takes effect from the default branch's copy.
+  sidecar-fanout:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *' && vars.KOGANY_MIXED == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch tier sidecar on vaults/kogany-compat
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref vaults/kogany-compat -f tier=sidecar \
+            || echo "::warning::could not dispatch the sidecar tier on vaults/kogany-compat (no such branch, or its copy of this workflow has no sidecar tier)"
+
+  # The nightly node-bin producer (workspace docs/plans/kogany/ci-design.md, "Artifact contracts"):
+  # yew's yewd gates and yolo's regtest take ycashd from a node-bin of a push, schedule or dispatch
+  # run at a pinned commit. A branch tip that stops moving would see its node-bin expire 30 days
+  # after its push; this job dispatches tier `bin` (the `build` job alone) on each branch whose tip
+  # has no unexpired node-bin with more than 7 days left, so an unmoving tip always has one. A pin
+  # that is not a branch tip is bumped instead (the 30-day pin rule). Scheduled, so it runs from the
+  # default branch's copy of this file (upgrade/vault) once that carries it.
+  bin-refresh:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read  # the branch tip (gh api .../commits/<branch>)
+      actions: write  # read the runs' artifacts, dispatch tier bin
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [vaults/kogany-compat, upgrade/vault]
+    steps:
+      - name: Dispatch tier bin when the tip's node-bin is missing or expires within 7 days
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ matrix.branch }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" -q .sha) || { echo "::warning::no branch $BRANCH"; exit 0; }
+          horizon=$(( $(date +%s) + 7 * 86400 ))
+          trusted='select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
+          runs=$(gh run list -R "$GITHUB_REPOSITORY" -w yellowback-tests.yml -c "$sha" -L 20 --json databaseId,event -q ".[] | $trusted | .databaseId")
+          for r in $runs; do
+            exp=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$r/artifacts?name=node-bin" -q '.artifacts[] | select(.expired == false) | .expires_at' | head -n 1)
+            if [ -n "$exp" ] && [ "$(date -d "$exp" +%s)" -gt "$horizon" ]; then
+              echo "$BRANCH $sha: node-bin of run $r expires $exp; nothing to do"; exit 0
+            fi
+          done
+          echo "$BRANCH $sha: no node-bin with 7 days left; dispatching tier bin"
+          gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f tier=bin \
+            || echo "::warning::could not dispatch tier bin on $BRANCH (its copy of this workflow has no bin tier yet)"
+
   # ---------------------------------------------------------------------------------------------
   # Push tier: build once, test many. `build` compiles ycashd, ycash-cli, ycash-tx and test_bitcoin
   # once and hands them to `unit` and to every `functional` shard as one artifact; `sidecars` builds
   # the two Rust sidecars (yolo, chain-viz) in parallel with it. Nothing is rebuilt per shard.
   build:
-    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "bin", "mixed", "sidecar"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
@@ -324,10 +415,14 @@ jobs:
             qa/pull-tester/tests_config.ini
           ls -l "$RUNNER_TEMP/node-bin.tgz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        # 30 days outside pull requests: the artifact contract (workspace docs/plans/kogany/
+        # ci-design.md) that yew's yewd gates and yolo's regtest consume at a pinned commit, and the
+        # window in which "Re-run failed jobs" finds it. A pull request run's copy is never consumed
+        # across repositories (only push/schedule/dispatch runs are trusted), so it keeps 3 days.
         with:
           name: node-bin
           path: ${{ runner.temp }}/node-bin.tgz
-          retention-days: 3
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 30 }}
           if-no-files-found: error
 
   unit:
@@ -356,7 +451,7 @@ jobs:
   # old main job built them from copies under $RUNNER_TEMP (run 36444762343). --locked at the pins
   # (audit I-5); the cache is keyed on the two pins, which fix both Cargo.locks.
   sidecars:
-    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all"]'), inputs.tier || 'push')
+    if: github.event_name != 'schedule' && contains(fromJSON('["push", "all", "mixed", "sidecar"]'), inputs.tier || 'push')
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -408,7 +503,7 @@ jobs:
         with:
           name: sidecars
           path: ${{ runner.temp }}/sidecars.tgz
-          retention-days: 3
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 30 }}
           if-no-files-found: error
 
   # The merge-gate functional lists, sharded round-robin over one build artifact. yellowback shards
@@ -517,6 +612,374 @@ jobs:
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------------------------
+  # Mixed tier (kogany plan §5 "mixed-regtest", §3b S0-S5; workspace docs/plans/kogany/ci-design.md).
+  # The lead architect's switch is the repository variable KOGANY_MIXED ('true' turns it on; it
+  # needs boyfromcave/zakura-common-ycash on GitHub, which kogany's [patch.crates-io] names). Then it
+  # runs on vaults/kogany-compat and upgrade/vault (push, pull_request into them, dispatch tier all)
+  # and on a dispatch with tier mixed on any ref; never on the other node-line branches.
+  #
+  # Why the binaries are resolved inside this run and not by workflow_run / repository_dispatch:
+  # workflow_run fires only for workflows of this repository (and only from the default branch's
+  # copy); repository_dispatch needs a cross-repository token on kogany's side and would chase
+  # kogany's tip instead of a pin. `koganyd` and `yewd` resolve the pinned binary once per run and
+  # upload it as this run's artifact, so every `mixed` job and its "Re-run failed jobs" use the same
+  # three binaries (ycashd, koganyd, yewd) for 30 days, whatever the producer's retention.
+  koganyd:
+    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || inputs.tier == 'sidecar' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read  # gh run list/download on the kogany repository's runs (the koganyd-bin contract)
+    steps:
+      - name: kogany's koganyd-bin at KOGANY_COMMIT (a push, schedule or dispatch run of any kogany workflow)
+        id: dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$KOGANY_COMMIT" in *[!0-9a-f]*|'') echo "::error::KOGANY_COMMIT is not a commit id"; exit 1 ;; esac
+          [ ${#KOGANY_COMMIT} -eq 40 ] || { echo "::error::KOGANY_COMMIT is not a full commit id"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/zk-out"
+          trusted='select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
+          runs=$(gh run list -R "$KOGANY_REPO" -c "$KOGANY_COMMIT" -L 50 --json databaseId,event,headSha \
+            -q ".[] | select(.headSha == \"$KOGANY_COMMIT\") | $trusted | .databaseId" 2>/dev/null || true)
+          for r in $runs; do
+            if gh run download "$r" -R "$KOGANY_REPO" -n koganyd-bin -D "$RUNNER_TEMP/zk-dl" 2>/dev/null \
+               && [ -f "$RUNNER_TEMP/zk-dl/koganyd-bin.tgz" ]; then
+              cp "$RUNNER_TEMP/zk-dl/koganyd-bin.tgz" "$RUNNER_TEMP/zk-out/"
+              echo "got=true" >> "$GITHUB_OUTPUT"
+              echo "- koganyd: \`$KOGANY_REPO\` run $r at \`$KOGANY_COMMIT\` (its koganyd-bin)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "got=false" >> "$GITHUB_OUTPUT"
+          echo "no koganyd-bin of $KOGANY_REPO at $KOGANY_COMMIT (none published, or expired); the job fails below"
+      # No fallback build here: a step that runs code from another repository's checkout is what
+      # CodeQL's cache-poisoning rule flags, whatever the pin. The artifact comes from kogany's
+      # kogany-bin workflow at KOGANY_COMMIT (every push there publishes one).
+      - name: Require kogany's koganyd-bin
+        if: steps.dl.outputs.got != 'true'
+        run: |
+          echo "::error::no koganyd-bin for $KOGANY_REPO@$KOGANY_COMMIT: run kogany-bin.yml there (push or dispatch) at that commit, or bump KOGANY_COMMIT to a commit with one"
+          exit 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: koganyd-bin
+          path: ${{ runner.temp }}/zk-out/koganyd-bin.tgz
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 30 }}
+          if-no-files-found: error
+
+  # yewd (the parity sidecar, kogany plan §3b) at YEW_COMMIT, as `koganyd` does for kogany.
+  yewd:
+    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read  # gh run list/download on the yew repository's runs (the yewd-bin contract)
+    steps:
+      - name: yew's yewd-bin at YEW_COMMIT (a push, schedule or dispatch run of any yew workflow)
+        id: dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$YEW_COMMIT" in *[!0-9a-f]*|'') echo "::error::YEW_COMMIT is not a commit id"; exit 1 ;; esac
+          [ ${#YEW_COMMIT} -eq 40 ] || { echo "::error::YEW_COMMIT is not a full commit id"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/yewd-out"
+          trusted='select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
+          runs=$(gh run list -R "$YEW_REPO" -c "$YEW_COMMIT" -L 50 --json databaseId,event,headSha \
+            -q ".[] | select(.headSha == \"$YEW_COMMIT\") | $trusted | .databaseId" 2>/dev/null || true)
+          for r in $runs; do
+            if gh run download "$r" -R "$YEW_REPO" -n yewd-bin -D "$RUNNER_TEMP/yewd-dl" 2>/dev/null \
+               && [ -f "$RUNNER_TEMP/yewd-dl/yewd-bin.tgz" ]; then
+              cp "$RUNNER_TEMP/yewd-dl/yewd-bin.tgz" "$RUNNER_TEMP/yewd-out/"
+              echo "got=true" >> "$GITHUB_OUTPUT"
+              echo "- yewd: \`$YEW_REPO\` run $r at \`$YEW_COMMIT\` (its yewd-bin)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "got=false" >> "$GITHUB_OUTPUT"
+          echo "no yewd-bin of $YEW_REPO at $YEW_COMMIT: building at the pin"
+      # No fallback build here (see the koganyd job): the artifact comes from yew's producer at YEW_COMMIT.
+      - name: Require yew's yewd-bin
+        if: steps.dl.outputs.got != 'true'
+        run: |
+          echo "::error::no yewd-bin for $YEW_REPO@$YEW_COMMIT: run yew's producer workflow there at that commit, or bump YEW_COMMIT to a commit with one"
+          exit 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yewd-bin
+          path: ${{ runner.temp }}/yewd-out/yewd-bin.tgz
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 30 }}
+          if-no-files-found: error
+
+  # The mixed shards: one job per group of qa/kogany-mixed-shards.txt (re-run one group alone),
+  # each the group's `gate` scripts (blocking, KOGANY_STRICT=1) then its `report` scripts (the step
+  # may fail, the job stays green). ubuntu-24.04 because koganyd links the runner's librocksdb
+  # (kogany's setup-zakura-build), the image the koganyd-bin contract names; ycashd from the 22.04
+  # build runs there unchanged (glibc 2.35 < 2.39). The peer-count scripts are excluded by the file.
+  mixed:
+    name: mixed ${{ matrix.group }}
+    needs: [build, sidecars, koganyd]
+    if: ${{ !cancelled() && inputs.tier != 'sidecar' && needs.build.result == 'success' && needs.koganyd.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [node, vault, yed, fees, attest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: koganyd-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.group == 'attest' && needs.sidecars.result == 'success'
+        with:
+          name: sidecars
+          path: ${{ runner.temp }}
+      - name: Unpack, and check koganyd runs here
+        run: |
+          tar xzf "$RUNNER_TEMP/node-bin.tgz"
+          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk"
+          cat "$RUNNER_TEMP/zk/koganyd-bin.json"
+          if ldd "$RUNNER_TEMP/zk/koganyd" | grep 'not found'; then
+            echo "::error::koganyd needs a library this runner lacks (the koganyd-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
+          fi
+          "$RUNNER_TEMP/zk/koganyd" --version
+          echo "KOGANY_BIN=$RUNNER_TEMP/zk/koganyd" >> "$GITHUB_ENV"
+          if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
+            mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
+            echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
+            echo "CHAINVIZ_BIN=$RUNNER_TEMP/sidecars/chain-viz" >> "$GITHUB_ENV"
+          fi
+      - name: The group's gated scripts (blocking, KOGANY_STRICT=1)
+        id: gate
+        env:
+          TMPDIR: ${{ runner.temp }}/mixed-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run "$GROUP" --state gate --jobs 2
+      - name: The group's report-only scripts (a failure is reported, the job stays green)
+        id: report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          TMPDIR: ${{ runner.temp }}/mixed-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run "$GROUP" --state report --jobs 2
+      - name: Upload node and follower logs when a step failed
+        if: ${{ !cancelled() && (steps.gate.outcome == 'failure' || steps.report.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mixed-logs-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/mixed-tests/**/node*/regtest/debug.log
+            ${{ runner.temp }}/mixed-tests/**/kogany*/koganyd.log
+            ${{ runner.temp }}/mixed-tests/**/kogany*/koganyd.toml
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
+  # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
+  # 50 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
+  # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
+  # so every block and transaction between nodes passes kogany's validation and ycashd's again
+  # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
+  # script with its group's flags (mirror, mempool). Report-only: the job never fails the run and is
+  # in no check; the plan's exit gate ("nightly green 7 days") is read from this job's run history.
+  # Only on tier `sidecar` (sidecar-fanout every night, or a dispatch); never on a push.
+  sidecar-rig:
+    name: sidecar ${{ matrix.group }} (report-only)
+    needs: [build, sidecars, koganyd]
+    if: ${{ !cancelled() && inputs.tier == 'sidecar' && needs.build.result == 'success' && needs.koganyd.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [node, vault, yed, fees, attest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: koganyd-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: matrix.group == 'attest' && needs.sidecars.result == 'success'
+        with:
+          name: sidecars
+          path: ${{ runner.temp }}
+      - name: Unpack, and check koganyd runs here
+        run: |
+          tar xzf "$RUNNER_TEMP/node-bin.tgz"
+          mkdir -p "$RUNNER_TEMP/zk" && tar xzf "$RUNNER_TEMP/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk"
+          cat "$RUNNER_TEMP/zk/koganyd-bin.json"
+          if ldd "$RUNNER_TEMP/zk/koganyd" | grep 'not found'; then
+            echo "::error::koganyd needs a library this runner lacks (the koganyd-bin contract: ubuntu-24.04, librocksdb-dev)"; exit 1
+          fi
+          "$RUNNER_TEMP/zk/koganyd" --version
+          echo "KOGANY_BIN=$RUNNER_TEMP/zk/koganyd" >> "$GITHUB_ENV"
+          if [ -f "$RUNNER_TEMP/sidecars.tgz" ]; then
+            mkdir -p "$RUNNER_TEMP/sidecars" && tar xzf "$RUNNER_TEMP/sidecars.tgz" -C "$RUNNER_TEMP/sidecars"
+            echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
+            echo "CHAINVIZ_BIN=$RUNNER_TEMP/sidecars/chain-viz" >> "$GITHUB_ENV"
+          fi
+      - name: The test rig smoke (two ycashd wallets and a YED mint through koganys)
+        id: smoke
+        if: matrix.group == 'node'
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          KOGANY_SIDECAR: '1'
+          KOGANY_STRICT: '1'
+        run: |
+          mkdir -p "$TMPDIR"
+          ZCASHD="$PWD/src/ycashd" python3 -u qa/rpc-tests/kogany_sidecar_smoke.py --srcdir="$PWD/src" --nocleanup --tmpdir="$TMPDIR/smoke"
+      - name: The group's gated sidecar scripts (KOGANY_STRICT=1)
+        id: gate
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run sidecar --of "$GROUP" --state gate --jobs 2
+      - name: The group's report-only sidecar scripts
+        id: report
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/sidecar-tests
+          GROUP: ${{ matrix.group }}
+        run: |
+          mkdir -p "$TMPDIR"
+          python3 qa/kogany_mixed_shards.py run sidecar --of "$GROUP" --state report --jobs 2
+      - name: Upload ycashd and kogany logs when a step failed
+        if: ${{ !cancelled() && (steps.smoke.outcome == 'failure' || steps.gate.outcome == 'failure' || steps.report.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidecar-logs-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/sidecar-tests/**/node*/regtest/debug.log
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/koganyd.log
+            ${{ runner.temp }}/sidecar-tests/**/kogany*/koganyd.toml
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The S-track pair shard (kogany plan §3b; the harness's YEWD_BIN mode): every node a ycashd
+  # -disablewallet backend with yewd in front of it. This is the "backend ycash6" leg of plan §5
+  # (the backend-agnostic differential); column 3 of the W9 matrix, yewd in front of kogany, needs
+  # the harness's kogany-backend mode (S5) and joins this job then, with koganyd from `koganyd`.
+  # The harness smoke, then the two contract suites (their n/47 count is the report). Report-only
+  # until S4 (contracts) and S5 (the 48 scripts): drop continue-on-error then.
+  yewd-pair:
+    name: yewd pair (report-only)
+    needs: [build, yewd]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.yewd.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yellowback-prereqs
+        with:
+          apt: 'false'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: yewd-bin
+          path: ${{ runner.temp }}
+      - name: Unpack
+        run: |
+          tar xzf "$RUNNER_TEMP/node-bin.tgz"
+          mkdir -p "$RUNNER_TEMP/yewd"
+          tar xzf "$RUNNER_TEMP/yewd-bin.tgz" -C "$RUNNER_TEMP/yewd"
+          cat "$RUNNER_TEMP/yewd/yewd-bin.json"
+          test -x "$RUNNER_TEMP/yewd/yewd-signer"
+          echo "YEWD_BIN=$RUNNER_TEMP/yewd/yewd" >> "$GITHUB_ENV"
+      - name: Harness smoke with yewd pairs
+        id: smoke
+        env:
+          TMPDIR: ${{ runner.temp }}/pair-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          ZCASHD="$PWD/src/ycashd" python3 -u qa/rpc-tests/kogany_mixed_smoke.py --srcdir="$PWD/src" --nocleanup --tmpdir="$TMPDIR/smoke"
+      - name: The two contract suites through yewd (the n/47 count)
+        id: contracts
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/pair-tests
+        run: qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup vault_rpc_contract yellowback_rpc_contract
+      - name: Upload logs when a step failed
+        if: ${{ !cancelled() && (steps.smoke.outcome == 'failure' || steps.contracts.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yewd-pair-logs
+          path: |
+            ${{ runner.temp }}/pair-tests/**/node*/regtest/debug.log
+            ${{ runner.temp }}/pair-tests/**/node*/yewd.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The `mixed tier` check: green when koganyd resolved and every mixed group's gated scripts
+  # passed. Not part of the `push tier` check; the lead architect makes it a required check of
+  # vaults/kogany-compat when the first wave gate flips scripts to `gate` (W2).
+  mixed-gate:
+    name: mixed tier
+    needs: [koganyd, mixed]
+    if: ${{ always() && needs.koganyd.result != 'skipped' && inputs.tier != 'sidecar' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: koganyd resolved and every mixed group's gate step passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"')
+          test -z "$bad" || { echo "not green: $bad"; exit 1; }
 
   # Formatting and workflow lint (push tier). rustfmt over the node's own Rust (src/rust) with the
   # toolchain the build pins (rust-toolchain.toml); actionlint over every workflow (.github/actionlint.yaml). Clippy is not
@@ -775,7 +1238,10 @@ jobs:
           if git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then other=$REF; fi
           # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
           # with the other line's upgrade/vault; the markers only route the record branches.
-          if [ "$REF" != upgrade/vault ]; then
+          # A branch both lines carry (vaults/kogany-compat, a kc/* pair) compares with its namesake, whatever
+          # markers the tree carries; the record-branch routing applies only when the other line has no
+          # branch of that name.
+          if [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ]; then
             if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
             if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
           fi
@@ -873,7 +1339,7 @@ jobs:
             test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
             n=$(basename "$f" .py)
             grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 " in
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor " in
               *" $n "*) ;;
               *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
             esac
@@ -881,7 +1347,7 @@ jobs:
           # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
           # name a job passes it must be registered there.
           # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6; do
+          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor; do
             test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
             grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
           done
@@ -1162,6 +1628,13 @@ jobs:
         run: python3 qa/test_yellowback_rc_qualify.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
+      - name: kogany mixed-line harness unit tests (test_framework/test_kogany.py; no node)
+        if: ${{ !cancelled() }}
+        working-directory: qa/rpc-tests
+        run: python3 -m unittest test_framework.test_kogany
+      - name: kogany mixed shard manifest (every YELLOWBACK_SCRIPTS entry grouped or excluded)
+        if: ${{ !cancelled() }}
+        run: python3 qa/test_kogany_mixed_shards.py -v
       - name: Testnet tooling unit tests (testnet plan N2; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/profiles/test_ybprofile.py contrib/bootstrap/test_ycash_bootstrap.py contrib/testnet/ceremony/test_ceremony.py contrib/docker/ycashd/test_entrypoint.py contrib/yellowback/devnet/test_testnet_join.py
@@ -1479,6 +1952,17 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+      - name: The vault prune floor (extended)
+        # -prune=550 past the vault activation height (workspace docs/plans/kogany/research/pruning-assessment.md
+        # PR-2): the files below H_V - 288 deleted, every block from there kept, the vault and YED replays and
+        # -reindex-yellowback with only those blocks on disk, the start-up data check refusing a removed file.
+        # About 1.8 GB of disk and 15-30 minutes, so nightly only.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup vault_prune_floor
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from

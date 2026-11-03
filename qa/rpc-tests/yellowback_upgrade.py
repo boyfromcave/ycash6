@@ -52,7 +52,7 @@ from test_framework.util import (
     sync_mempools,
 )
 from test_framework.yellowback_attest import wait_for_spender
-from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, debug_log_contains, kogany_pair
 from test_framework import yellowback_model as ym
 
 ACTIVATION = 130
@@ -172,11 +172,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
             gi = n.vault_getinfo()
             want = (self.set_id, True) if i < 3 else (None, False)        # node 3 never learns it
             assert_equal((gi['attestorsetid'], gi['moduleactive']), want)
-            with open(os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log')) as f:
-                log = f.read()
             line = ('Yellowback: attestor set %s (regtest -yellowbackattestorset)' % self.set_id if i < 3
                     else 'Yellowback: no attestor set; the YED module validates inertly')
-            assert line in log, 'node%d debug.log lacks "%s"' % (i, line)
+            assert debug_log_contains(self.options.tmpdir, i, line), 'node%d debug.log lacks "%s"' % (i, line)
         if self.set_id not in n0.getrawmempool():               # the wallet may already have re-accepted it
             n0.sendrawtransaction(set_hex)
         self.mine()
@@ -419,7 +417,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         # node 3 relays it to node 0, which scores the relayer 100 (DoS 100; a local peer is disconnected, not banned)
         log = os.path.join(self.options.tmpdir, 'node0', 'regtest', 'debug.log')
         deadline = time.time() + 30
-        found = False
+        found = kogany_pair(self.options.tmpdir, 0)
+        if found:
+            print('  [kogany pair] the BAN THRESHOLD line is ycashd\'s; the tip check below stands')
         while time.time() < deadline and not found:
             with open(log, encoding='utf-8', errors='replace') as f:
                 text = f.read()
