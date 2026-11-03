@@ -910,6 +910,14 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     coinbase = None
     nowallet = any(a == '-disablewallet' or a == '-disablewallet=1' for a in args)
     if os.getenv('YEWD_H8', '1') == '1' and not nowallet:
+        try:
+            check_mineraddress(args)
+        except KoganyInitError as e:
+            if stderr is not None:
+                stderr.write(('Error: %s\n' % e).encode('utf8'))
+                stderr.flush()
+            raise Exception('%s node %d exited with status 1 during initialization (pair: %s)'
+                            % (util.zcashd_binary(), i, e))
         coinbase = yewd_coinbase_address(args, yewd_init_wallet(yewd_bin, datadir, args), bool(yewd_kogany_bin()))
         args = yewd_h8_args(args, coinbase)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
@@ -1079,6 +1087,20 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     # address instead left the wallet without the coinbase the scripts spend before importing the
     # pool keys, yellowback_chainviz.py); its tag names the script's payee (mining.yellowback_payout_address)
     return taddr
+
+
+# Ycash regtest post-quantum key address prefix (ycash6 src/test/pq_address_tests.cpp: "rq").
+PQ_ADDRESS_PREFIX = 'rq'
+
+
+def check_mineraddress(args):
+    """H8 replaces the script's -mineraddress, so the init refusal ycashd gives a post-quantum one
+    (init.cpp: the miner pays a P2PKH script) is raised here with ycashd's text."""
+    for a in args:
+        if a.startswith('-mineraddress=') and a.split('=', 1)[1].startswith(PQ_ADDRESS_PREFIX):
+            raise KoganyInitError("Invalid address for -mineraddress=<addr>: '%s' (a transparent address "
+                                  "must be P2PKH; P2SH and post-quantum addresses are not supported)"
+                                  % a.split('=', 1)[1])
 
 
 def yewd_h8_args(args, coinbase):
