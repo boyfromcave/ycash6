@@ -12,7 +12,6 @@ cleared quote means no tag; the template carries exactly the valid transactions 
 consensus policy are one); a failing mint is an invalid transaction the mempool refuses; an
 unhealthy index stops the node (getblocktemplate refuses before that, always)."""
 
-import os
 import time
 
 from test_framework.authproxy import JSONRPCException
