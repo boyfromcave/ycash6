@@ -196,6 +196,11 @@ NU_BRANCH_TABLE = {
     0xe9ff75a6: ('Canopy', 'live', 'Zcash Canopy id'),
     0xc2d6d0b4: ('NU5', 'live', 'Zcash NU5 id (Ycash: NO_ACTIVATION_HEIGHT)'),
     0xc8e71055: ('NU6', 'live', 'Zcash NU6 id'),
+    # Ycash's reserved NU5..NU6.2 ids (network_upgrade.rs:324-327); kogany refuses them with Vault
+    # at init with ycashd's R-A3 text (error.rs:67)
+    0xf919a198: ('NU5', 'live', 'Ycash NU5 id (K-7, reserved)'),
+    0x4dec4df0: ('NU6.1', 'live', 'NU6.1 id'),
+    0x5437f330: ('NU6.2', 'live', 'NU6.2 id'),
 }
 
 KOGANYD_KEY_TABLE = [
@@ -450,7 +455,7 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     # refuses a map out of order; ycashd's regtest puts every Ycash upgrade at 1, which is the
     # same chain either way (Canopy rules from 1).  Order the keys as ConfiguredActivationHeights.
     order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6',
-             FALCON_KEY]
+             'NU6.1', 'NU6.2', FALCON_KEY]
     ordered = {k: heights[k] for k in order if k in heights}
 
     root = os.path.abspath(datadir)
