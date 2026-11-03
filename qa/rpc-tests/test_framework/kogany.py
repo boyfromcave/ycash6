@@ -115,6 +115,7 @@ if kogany's real clock accepts their time.
 """
 
 import atexit
+import shutil
 import json
 import threading
 import os
@@ -196,6 +197,11 @@ NU_BRANCH_TABLE = {
     0xe9ff75a6: ('Canopy', 'live', 'Zcash Canopy id'),
     0xc2d6d0b4: ('NU5', 'live', 'Zcash NU5 id (Ycash: NO_ACTIVATION_HEIGHT)'),
     0xc8e71055: ('NU6', 'live', 'Zcash NU6 id'),
+    # Ycash's reserved NU5..NU6.2 ids (network_upgrade.rs:324-327); kogany refuses them with Vault
+    # at init with ycashd's R-A3 text (error.rs:67)
+    0xf919a198: ('NU5', 'live', 'Ycash NU5 id (K-7, reserved)'),
+    0x4dec4df0: ('NU6.1', 'live', 'NU6.1 id'),
+    0x5437f330: ('NU6.2', 'live', 'NU6.2 id'),
 }
 
 KOGANYD_KEY_TABLE = [
@@ -337,8 +343,20 @@ _PENDING_FLAGS = {
 # The Falcon height (W3-c/F-1): a key of the regtest activation heights, though not an upgrade
 # (kogany `ConfiguredActivationHeights::pq_falcon`, toml `pq_falcon_height`).  None: nothing to carry.
 FALCON_KEY = 'pq_falcon_height'
+class KoganyInitError(Exception):
+    """An argument ycashd refuses at init (InitError) that has no koganyd.toml form to carry
+    the bad value: the pair reports it as a backend init failure with ycashd's text."""
+
+
+def _falcon_height(v):
+    # ycashd init.cpp:1474: a decimal block height, >= 0, fitting an int
+    if not re.fullmatch(r'[0-9]+', v) or int(v) > 0x7fffffff:
+        raise KoganyInitError('-pqfalconheight must be a block height (>= 0).')
+    return int(v)
+
+
 _FALCON_FLAGS = {
-    '-pqfalconheight': int,
+    '-pqfalconheight': _falcon_height,
     '-pqfalcon': lambda v: 0 if _bool01(v) else None,
 }
 
@@ -450,7 +468,7 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
     # refuses a map out of order; ycashd's regtest puts every Ycash upgrade at 1, which is the
     # same chain either way (Canopy rules from 1).  Order the keys as ConfiguredActivationHeights.
     order = ['Overwinter', 'Sapling', 'Ycash', 'Blossom', 'Heartwood', 'Canopy', 'Vault', 'NU5', 'NU6',
-             FALCON_KEY]
+             'NU6.1', 'NU6.2', FALCON_KEY]
     ordered = {k: heights[k] for k in order if k in heights}
 
     root = os.path.abspath(datadir)
@@ -900,7 +918,14 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     if kogany_bin:
         YewdColumn.ensure(os.path.dirname(os.path.abspath(datadir)))
         b_args, _w = split_yewd_args(args)
-        backend, cookie = _start_kogany_backend(i, datadir, b_args, coinbase, stderr)
+        try:
+            backend, cookie = _start_kogany_backend(i, datadir, b_args, coinbase, stderr)
+        except KoganyInitError as e:
+            if stderr is not None:
+                stderr.write(('Error: %s\n' % e).encode('utf8'))
+                stderr.flush()
+            raise Exception('%s node %d exited with status 1 during initialization (zakurad backend: %s)'
+                            % (util.zcashd_binary(), i, e))
         y_argv = [a for a in y_argv if not a.startswith('-backendrpccookiefile=')] + [
             '-backendrpccookiefile=' + cookie,
             '-backendindexer=127.0.0.1:%d' % yewd_backend_indexer_port(i)]
@@ -920,8 +945,10 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     while True:
         if backend.poll() is not None:
             YEWD_BACKENDS.pop(i, None)
-            raise Exception('%s node %d exited with status %i during initialization'
-                            % (what if kogany_bin else util.zcashd_binary(), i, backend.returncode))
+            # util's message shape (ZCASHD path) for either backend, so assert_start_raises_init_error
+            # matches; kogany's init error went to the caller's stderr (_start_kogany_backend)
+            raise Exception('%s node %d exited with status %i during initialization (%s backend)'
+                            % (util.zcashd_binary(), i, backend.returncode, what))
         had_cookie = os.path.exists(cookie)
         try:
             rpc.getblockcount()
@@ -1085,12 +1112,27 @@ def yewd_kogany_config(args, i, backend_dir, coinbase, live=None):
     return cfg, notes
 
 
+def _kogany_vault_wipe(datadir, backend_dir):
+    """ycashd's vault state DB is ``node<i>/regtest/vaults`` (U-18); kogany's vault column family
+    lives inside its state DB, so a pair keeps an empty ``regtest/vaults`` stand-in.  A script that
+    deleted it (``wipe_vaults=True``) means "rebuild the vault state from the blocks": the backend's
+    state dir is deleted and kogany resyncs the chain from its peer."""
+    marker = os.path.join(datadir, 'regtest', 'vaults')
+    seen = os.path.join(backend_dir, '.vaults-standin')
+    state = os.path.join(backend_dir, 'state')
+    if os.path.exists(seen) and not os.path.isdir(marker) and os.path.isdir(state):
+        shutil.rmtree(state)
+    os.makedirs(marker, exist_ok=True)
+    open(seen, 'w').close()
+
+
 def _start_kogany_backend(i, datadir, b_args, coinbase, stderr):
     backend_dir = os.path.join(datadir, 'backend')
     cfg, notes = yewd_kogany_config(b_args, i, backend_dir, coinbase)
     conf = os.path.join(backend_dir, 'zakurad.toml')
     with open(conf, 'w', encoding='utf8') as f:
         f.write(render_toml(cfg, notes))
+    _kogany_vault_wipe(datadir, backend_dir)
     log = stderr if stderr is not None else open(os.path.join(backend_dir, 'zakurad.log'), 'ab')
     argv = [yewd_kogany_bin(), '-c', conf] + os.getenv('KOGANY_ARGS', '').split() + ['start']
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT if stderr is None else stderr), \

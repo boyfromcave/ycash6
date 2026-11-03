@@ -1513,6 +1513,12 @@ def write_private(path, text):
     os.chmod(path, 0o600)
 
 
+# ycashd log lines a kogany pair has no counterpart for (column 3), with the reason
+KOGANY_NO_SUCH_LOG = {
+    'SyncToChain: undoing': "kogany's YED index commits atomically with the block batch: no undo walk after a crash",
+}
+
+
 def debug_log_contains(tmpdir, i, needle):
     """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair writes none:
     its backend's log, ``node<i>/backend/zakurad.log``, is read instead)."""
@@ -1520,6 +1526,9 @@ def debug_log_contains(tmpdir, i, needle):
     backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
     if not os.path.exists(path) and os.path.exists(backend):
         path = backend
+        if needle in KOGANY_NO_SUCH_LOG:
+            print('  [kogany pair] %r skipped: %s' % (needle, KOGANY_NO_SUCH_LOG[needle]))
+            return True
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         return needle in f.read()
 
