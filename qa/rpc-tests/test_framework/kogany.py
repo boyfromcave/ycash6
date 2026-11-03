@@ -245,15 +245,21 @@ KOGANYD_KEY_TABLE = [
     ('-maxtxfee=<YEC>', 'live', 'mempool.max_tx_fee', 'zatoshis (YEC x 1e8; W6-b)'),
     ('-yellowbackfee=<zat>', 'live', 'mempool.yellowback_fee', 'zatoshis, as given (W6-b)'),
     ('-yellowbackmintlag=<n>', 'live', 'mempool.yellowback_mint_lag', 'blocks (W6-b)'),
-    ('-yellowbackpayoutaddress=<addr>', 'ignored', None, 'followers never mine (K-16); W8 maps the pool tag'),
-    ('-yellowbacktestfault=<spec>', 'ignored', None,
-     'gap: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault: storage/crash/template/schema); '
-     'kogany\'s [yellowback] has no fault key, so a follower never injects one'),
+    ('-yellowbackpayoutaddress=<addr>', 'live', 'mining.yellowback_payout_address', 'str: the YED payout key (pool tag)'),
+    ('-yellowbackpayoutdefault=<0|1>', 'live', 'mining.yellowback_payout_default',
+     'bool (F-S5-9): whether a P2PKH miner address is also the YED payout key (ycashd MINER-2); '
+     'the H8 harness turns it off for a live pair that names no payout address'),
+    ('-yellowbacktestfault=<spec>', 'live', 'yellowback.test_fault',
+     'str, as given: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault); kogany takes '
+     'storage:<check|commit>[:<h>] and crash:<h>, and refuses undo, template and schema; written only when a '
+     'script passes it'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
-    ('-blockunpaidactionlimit=<n>', 'ignored', None, 'block template policy; followers never mine (K-16)'),
-    ('-mempoolevictionmemoryminutes=<n>', 'ignored', None, 'gap: no row for mempool.eviction_memory_time yet; '
-     'a follower keeps Zakura\'s default'),
+    ('-blockunpaidactionlimit=<n>', 'live', 'mining.block_unpaid_action_limit',
+     'int: the template\'s unpaid-action limit (zakura-rpc config/mining.rs; a pair backend mines, '
+     'yellowback_fee\'s pools run 0 for the PQ owner spend); a follower never mines (K-16)'),
+    ('-mempoolevictionmemoryminutes=<n>', 'live', 'mempool.eviction_memory_time', 'minutes, as "<n>m"'),
+    ('-mempooltxcostlimit=<n>', 'live', 'mempool.tx_cost_limit', 'int'),
     ('-mocktime=<t>', 'ignored', None, 'Zakura has no mock clock: followers run on the real clock'),
     ('-exportdir', 'ignored', None, 'wallet (dumpwallet)'),
     ('-keypool', 'ignored', None, 'wallet'),
@@ -268,11 +274,11 @@ KOGANYD_KEY_TABLE = [
 # unmapped consensus flag is never silently dropped (a new -yellowback* flag needs a row).
 _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-aware', '-debug',
                      '-printtoconsole', '-showmetrics', '-listenonion', '-clockoffset', '-mocktime',
-                     '-listen', '-whitelist', '-maxconnections', '-yellowbackpayoutaddress',
+                     '-listen', '-whitelist', '-maxconnections',
                      '-addnode', '-connect', '-datadir', '-port', '-rpcport', '-rpcuser', '-rpcpassword',
                      '-regtest', '-blocknotify', '-txindex', '-insightexplorer', '-lightwalletd',
                      '-experimentalfeatures', '-allowdeprecated', '-paytxfee', '-minrelaytxfee',
-                     '-mempooltxcostlimit', '-limitancestor', '-walletnotify', '-wallet', '-mineraddress',
+                     '-limitancestor', '-walletnotify', '-wallet', '-mineraddress',
                      '-equihashsolver', '-gen', '-genproclimit', '-checkmempool', '-checkblockindex',
                      '-stopatheight', '-reindex', '-prune', '-dbcache', '-par', '-timeout',
                      '-orchardwallet', '-nuparams',
@@ -282,11 +288,8 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-noonion', '-nolisten', '-rpcallowip', '-rpcbind', '-rpccookiefile', '-rpcconnect',
                      '-bdbcache', '-anchorconfirmations', '-txexpirydelta', '-preferredtxversion',
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
-                     '-disablewallet', '-yellowbacktestfault', '-yellowbacksignal', '-feepolicy',
-                     '-blockunpaidactionlimit', '-mempoolevictionmemoryminutes')
-# -yellowbacktestfault is a gap, not a no-op: ycashd injects a storage/crash/template/schema fault
-# (src/yellowback/index.cpp SetTestFault) and kogany has no fault key, so a follower of a faulted
-# peer runs unfaulted.  -yellowbacksignal is retired (ycashd logs and ignores it).
+                     '-disablewallet', '-yellowbacksignal', '-feepolicy')
+# -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
 # -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
@@ -357,6 +360,12 @@ _LIVE_FLAGS = {
     '-maxtxfee': (('mempool', 'max_tx_fee'), _YEC),
     '-yellowbackfee': (('mempool', 'yellowback_fee'), int),
     '-yellowbackmintlag': (('mempool', 'yellowback_mint_lag'), int),
+    '-blockunpaidactionlimit': (('mining', 'block_unpaid_action_limit'), int),
+    '-yellowbackpayoutdefault': (('mining', 'yellowback_payout_default'), _bool01),
+    '-yellowbacktestfault': (('yellowback', 'test_fault'), str),
+    '-mempooltxcostlimit': (('mempool', 'tx_cost_limit'), int),
+    '-mempoolevictionmemoryminutes': (('mempool', 'eviction_memory_time'), lambda v: '%dm' % int(v)),
+    '-yellowbackpayoutaddress': (('mining', 'yellowback_payout_address'), str),
 }
 
 
@@ -430,8 +439,7 @@ def koganyd_config(args, slot, peer_p2p_ports, datadir, live=None, log_filter=No
             notes.append('ignored: %s' % a)
             continue
         if name.startswith(_IGNORED_PREFIXES) or name.startswith('-yellowbackpayout'):
-            if name.startswith(('-mocktime', '-yellowbackpayoutaddress', '-yellowbacktestfault',
-                                '-mempoolevictionmemoryminutes')):
+            if name.startswith('-mocktime'):
                 notes.append('ignored: %s' % a)
             continue
         if name.startswith('-yellowback') or name.startswith('-vault') or name.startswith('-pq'):
@@ -1034,29 +1042,29 @@ def yewd_coinbase_address(args, mineaddress, kogany_backend=False):
     ``yewd_init_wallet``'s pair), or None.  A node's -mineraddress/-minetolocalwallet give way to the
     wallet's own transparent address.  Both lines take a P2PKH miner address as the default YED
     payout key (ycashd MINER-2, init.cpp; kogany W5-f, start.rs set_payout_address), which a ycashd
-    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address), so
-    a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress gets no
-    coinbase address and cannot `generate` (F-S5-9: the address that names no payout key, the
-    wallet's Sapling one that yewd -initwallet prints, is refused by kogany: "Sapling coinbase
-    construction is not supported"; a node option for a miner address without a payout default
-    would close it)."""
+    wallet node mining to its keypool never has (yellowback_rpc_contract.py's no-payout-address).
+    F-S5-9: a Yellowback-live node (-yellowbackattestorset) that names no -yellowbackpayoutaddress
+    still mines to the wallet's transparent address, with the payout default off
+    (``yewd_h8_args``: ycashd -yellowbackpayoutdefault=0, kogany mining.yellowback_payout_default),
+    so its miner address names no YED payout key, as the script's keypool-mining node does."""
     taddr = mineaddress[0] if isinstance(mineaddress, tuple) else mineaddress
-    live = any(a.startswith('-yellowbackattestorset=') for a in args)
-    payouts = [a.split('=', 1)[1] for a in args if a.startswith('-yellowbackpayoutaddress=')]
-    if live and not payouts:
-        return None
-    # kogany takes its YED payout key from mining.miner_address only (no payout option, W5-f): a
-    # pair that names -yellowbackpayoutaddress still mines to its wallet (mining to the payout address
-    # instead left the wallet without the coinbase the scripts spend before importing the pool keys,
-    # yellowback_chainviz.py), so its tag names the wallet's key, not the script's payee (F-S5-12)
+    # a pair that names -yellowbackpayoutaddress still mines to its wallet (mining to the payout
+    # address instead left the wallet without the coinbase the scripts spend before importing the
+    # pool keys, yellowback_chainviz.py); its tag names the script's payee (mining.yellowback_payout_address)
     return taddr
 
 
 def yewd_h8_args(args, coinbase):
-    """The backend's arguments with the H8 coinbase address in place of the script's."""
+    """The backend's arguments with the H8 coinbase address in place of the script's.  A
+    Yellowback-live node that names no payout address takes no payout default from it either
+    (F-S5-9, ``yewd_coinbase_address``)."""
     args = [a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))]
     if coinbase is not None:
         args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
+        live = any(a.startswith('-yellowbackattestorset=') for a in args)
+        named = any(a.startswith(('-yellowbackpayoutaddress=', '-yellowbackpayoutdefault')) for a in args)
+        if live and not named:
+            args += ['-yellowbackpayoutdefault=0']
     return args
 
 

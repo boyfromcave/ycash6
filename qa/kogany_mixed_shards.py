@@ -31,7 +31,9 @@ group only (the nightly runs one job per mixed group).
 The `pair` group (kogany plan S5, column 3 of the W9 matrix) is the third mode for the same
 wallet-needing scripts: every node kogany + yewd, no ycashd behind any node (YEWD_BIN with
 YEWD_KOGANY; test_framework/kogany.py YewdColumn). Its entries carry no MixedLine flags (there is no
-follower to mirror to); YEWD_YCASH6_PEER=1 in the caller's environment runs the mixed variant.
+follower to mirror to); YEWD_YCASH6_PEER=1 in the caller's environment runs the mixed variant. It is
+the sidecar group less the `excluded:pair <script> <reason>` rows (scripts kept out of column 3 by
+decision; they keep their mixed group and sidecar rows), and `check` holds it to that.
 
 Both repositories' CI call this file (ycash6 yellowback-tests.yml `mixed`; kogany's mixed-regtest
 leg from a ycash6 checkout at its pin), so the shard lists live in one place.
@@ -75,13 +77,24 @@ class Entry:
 
 
 def parse(text):
-    """(entries, excluded {script: reason}, errors)."""
+    """(entries, excluded, errors): ``excluded`` maps a script to its reason (never in a mixed
+    shard) and ``(mode, script)`` to the reason of an ``excluded:<mode>`` row (kept out of that
+    second mode only; ``mode_excluded``)."""
     entries, excluded, errors = [], {}, []
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split('#', 1)[0].strip()
         if not line:
             continue
         f = line.split()
+        if f[0].startswith('excluded:'):
+            mode = f[0].split(':', 1)[1]
+            if mode != PAIR:
+                errors.append('line %d: %s: only excluded:%s is known' % (n, f[0], PAIR))
+            elif len(f) < 3:
+                errors.append('line %d: %s needs a script and a reason' % (n, f[0]))
+            else:
+                excluded[(mode, f[1])] = ' '.join(f[2:])
+            continue
         if f[0] == 'excluded':
             if len(f) < 3:
                 errors.append('line %d: excluded needs a script and a reason' % n)
@@ -103,6 +116,16 @@ def parse(text):
                 errors.append('line %d: unknown flag %r' % (n, fl))
         entries.append(Entry(group, script, state, wave, flags, n))
     return entries, excluded, errors
+
+
+def mode_excluded(excluded, mode):
+    """{script: reason} of the ``excluded:<mode>`` rows."""
+    return {k[1]: v for k, v in excluded.items() if isinstance(k, tuple) and k[0] == mode}
+
+
+def mixed_excluded(excluded):
+    """{script: reason} of the plain ``excluded`` rows."""
+    return {k: v for k, v in excluded.items() if not isinstance(k, tuple)}
 
 
 def load(path=MANIFEST):
@@ -161,6 +184,20 @@ def check(entries, excluded, yellowback_scripts, known, exists):
         for s in mode:
             if s not in seen:
                 problems.append('%s is in %s but in no mixed group' % (s, g))
+    # the pair group is the sidecar group less its excluded:pair rows
+    out = mode_excluded(excluded, PAIR)
+    for s in out:
+        if s in second[PAIR]:
+            problems.append('%s is both in %s and excluded:%s' % (s, PAIR, PAIR))
+        if s not in second[SIDECAR]:
+            problems.append('%s is excluded:%s but not in %s' % (s, PAIR, SIDECAR))
+    if second[PAIR]:
+        for s in second[SIDECAR]:
+            if s not in second[PAIR] and s not in out:
+                problems.append('%s is in %s but neither in %s nor excluded:%s' % (s, SIDECAR, PAIR, PAIR))
+        for s in second[PAIR]:
+            if s not in second[SIDECAR]:
+                problems.append('%s is in %s but not in %s' % (s, PAIR, SIDECAR))
     return problems
 
 
@@ -250,7 +287,8 @@ def main(argv=None):
         if not problems:
             counts = ', '.join('%s %d' % (g, len(select(entries, g))) for g in GROUPS)
             gated = len(select(entries, state='gate'))
-            print('kogany-mixed-shards: ok (%s; %d gated, %d excluded)' % (counts, gated, len(excluded)))
+            print('kogany-mixed-shards: ok (%s; %d gated, %d excluded, %d excluded from %s)'
+                  % (counts, gated, len(mixed_excluded(excluded)), len(mode_excluded(excluded, PAIR)), PAIR))
         return 1 if problems else 0
 
     if args.cmd == 'list':
