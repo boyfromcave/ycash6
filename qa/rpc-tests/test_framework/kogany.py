@@ -1146,6 +1146,17 @@ def check_mineraddress(args):
                                   % a.split('=', 1)[1])
 
 
+def regtest_p2pkh(addr):
+    """True iff ``addr`` is a regtest transparent P2PKH address: Ycash's 1c95 (``sm``) or the legacy
+    Zcash 1d25 (``tm``), ycash6 chainparams.cpp regtest PUBKEY_ADDRESS / LEGACY_PUBKEY_ADDRESS."""
+    from .yellowback_model import base58check_decode
+    try:
+        payload = base58check_decode(addr)
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return payload is not None and len(payload) == 22 and payload[:2] in (b'\x1c\x95', b'\x1d\x25')
+
+
 def yewd_h8_args(args, coinbase):
     """The backend's arguments with the H8 coinbase address in place of the script's.  A
     Yellowback-live node that names no payout address takes no payout default from it either
@@ -1156,9 +1167,11 @@ def yewd_h8_args(args, coinbase):
         args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
         live = any(a.startswith('-yellowbackattestorset=') for a in args)
         named = any(a.startswith(('-yellowbackpayoutaddress=', '-yellowbackpayoutdefault')) for a in args)
-        if live and script_miner and not named:
+        if live and script_miner and not named and regtest_p2pkh(script_miner[-1]):
             # H1: the script's P2PKH -mineraddress is its payout default (MINER-2): carry it as the
-            # payout address rather than writing yellowback_payout_default=false
+            # payout address rather than writing yellowback_payout_default=false; any other
+            # -mineraddress (Sapling, P2SH) names no payout key on ycashd either, and kogany refuses
+            # a non-P2PKH mining.yellowback_payout_address at startup (kogany 3291a24d3)
             args += ['-yellowbackpayoutaddress=%s' % script_miner[-1]]
         elif live and not named:
             args += ['-yellowbackpayoutdefault=0']

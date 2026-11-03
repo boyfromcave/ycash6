@@ -68,7 +68,7 @@ from test_framework.yellowback_util import (
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_attest import attestor_keys, bond_keys, build_register_tx, send_and_lock
-from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY
+from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY, kogany_pair
 
 
 def rpc_error_message(fn, *args):
@@ -508,15 +508,21 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # No v2 datadir is cached, so the mismatch is injected: -yellowbacktestfault=schema makes SyncToChain
         # take the same wipe-and-rebuild path a v2 Tip record takes (the unit test writes schemaVersion 2 directly).
         assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)
-        self.restart(4, ['-yellowbacktestfault=schema'])
-        wait_yed_healthy(nodes[4], timeout=180)
-        sync_blocks([nodes[0], nodes[4]], timeout=120)
-        info = nodes[4].yed_getinfo()
-        assert_equal((info['rebuilt'], info['height']), (True, nodes[4].getblockcount()))
-        assert debug_log_contains(tmpdir, 4, 'rebuilding from the chain'), 'expected the schema rebuild log line'
-        assert_equal(self.statehash(4), self.statehash(0))
-        assert_equal(self.attestors_of(4), self.attestors_of(0))
-        assert_equal(nodes[4].yed_getinfo()['attest']['status'], 'ARMED')
+        # A kogany + yewd pair has no v2 index to rebuild: its YED index lives in the state DB and
+        # commits atomically with the block batch, so yellowback.test_fault refuses `schema` (the
+        # node exits at init). The wipe-and-rebuild path is ycashd's alone and is column-gated.
+        if kogany_pair(tmpdir, 4):
+            print('  [kogany pair] schema rebuild skipped: no v2 index (YED index is atomic with the block batch)')
+        else:
+            self.restart(4, ['-yellowbacktestfault=schema'])
+            wait_yed_healthy(nodes[4], timeout=180)
+            sync_blocks([nodes[0], nodes[4]], timeout=120)
+            info = nodes[4].yed_getinfo()
+            assert_equal((info['rebuilt'], info['height']), (True, nodes[4].getblockcount()))
+            assert debug_log_contains(tmpdir, 4, 'rebuilding from the chain'), 'expected the schema rebuild log line'
+            assert_equal(self.statehash(4), self.statehash(0))
+            assert_equal(self.attestors_of(4), self.attestors_of(0))
+            assert_equal(nodes[4].yed_getinfo()['attest']['status'], 'ARMED')
         self.restart(4)
         wait_yed_healthy(nodes[4], timeout=120)
         assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)

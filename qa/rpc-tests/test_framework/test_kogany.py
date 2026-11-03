@@ -183,9 +183,14 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertEqual(kg.yewd_coinbase_address(live, ('tmA', 'zs1')), 'tmA')
         self.assertEqual(kg.yewd_h8_args(live, 'tmA'),
                          live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutdefault=0'])
-        # H1: the script's -mineraddress is its payout default, carried as the payout address
-        self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x'], 'tmA'),
-                         live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutaddress=x'])
+        # H1: the script's P2PKH -mineraddress is its payout default, carried as the payout address
+        for x in ('smZcPs632smfH9Z6KWB2JPsKMND5BDU6uML', 'tm9iNYCVAhLLa4rJtfqqHauR5xL1REdpiDs'):
+            self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=' + x], 'tmA'),
+                             live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutaddress=' + x])
+        # a Sapling or P2SH -mineraddress names no payout key (MINER-2): no payout default
+        for other in ('t26YqBabLj2kpZUPd3xCBhVHucMSV83GWSw', 'yregtestsapling1ryxrprpzxmrp0gj4zqv6a05hjd0wwq58x'):
+            self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=' + other], 'tmA'),
+                             live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutdefault=0'])
         self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x', '-yellowbackpayoutdefault=0'], 'tmA'),
                          live + ['-yellowbackpayoutdefault=0', '-mineraddress=tmA', '-minetolocalwallet=0'])
         with self.assertRaisesRegex(kg.KoganyInitError, 'P2SH and post-quantum addresses are not supported'):
