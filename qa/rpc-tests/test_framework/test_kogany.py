@@ -308,6 +308,20 @@ def rpc_error(message, code=-26):
     return JSONRPCException({'code': code, 'message': message})
 
 
+class PeerRpcPortTest(unittest.TestCase):
+    def test_skips_reserved_and_busy(self):
+        for seed in range(7000, 8000):
+            with mock.patch.object(util.PortSeed, 'n', seed):
+                p = kg.peer_rpc_port(free=lambda _p: True)
+                self.assertFalse(any(a <= p < b for a, b in kg.PEER_RPC_RESERVED))
+                lo = util.PORT_MIN + 4 * util.PORT_RANGE
+                self.assertTrue(lo <= p < lo + util.PORT_RANGE)
+        with mock.patch.object(util.PortSeed, 'n', 7900):
+            first = kg.peer_rpc_port(free=lambda _p: True)
+            self.assertEqual(first, kg.kogany_v2_port(util.MAX_NODES))
+            self.assertNotEqual(kg.peer_rpc_port(free=lambda p: p != first), first)
+
+
 class VerdictClassTest(unittest.TestCase):
 
     def test_blocks(self):
