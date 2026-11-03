@@ -298,8 +298,8 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
-# -regtestenablezip209, -reindex-yellowback, and the retired -yellowbackenforce /
-# -yellowbackstartheight flags.
+# -regtestenablezip209, -reindex-yellowback; the retired -yellowbackenforceuntil /
+# -yellowbackstartheight raise ycashd's init error instead (KoganyInitError, koganyd_config).
 # Matched by the exact name (a prefix would swallow every -yellowback* row): -yellowback, which
 # ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index (init.cpp:436;
 # yellowback_hardening h6).
