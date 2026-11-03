@@ -181,8 +181,18 @@ class TomlGeneratorTest(unittest.TestCase):
         self.assertIs(t['mining']['yellowback_payout_default'], False)
         live = ['-yellowbackattestorset=ab']
         self.assertEqual(kg.yewd_coinbase_address(live, ('tmA', 'zs1')), 'tmA')
-        self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x'], 'tmA'),
+        self.assertEqual(kg.yewd_h8_args(live, 'tmA'),
                          live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutdefault=0'])
+        # H1: the script's -mineraddress is its payout default, carried as the payout address
+        self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x'], 'tmA'),
+                         live + ['-mineraddress=tmA', '-minetolocalwallet=0', '-yellowbackpayoutaddress=x'])
+        self.assertEqual(kg.yewd_h8_args(live + ['-mineraddress=x', '-yellowbackpayoutdefault=0'], 'tmA'),
+                         live + ['-yellowbackpayoutdefault=0', '-mineraddress=tmA', '-minetolocalwallet=0'])
+        with self.assertRaisesRegex(kg.KoganyInitError, 'P2SH and post-quantum addresses are not supported'):
+            kg.check_mineraddress(['-mineraddress=rq1abc'])
+        kg.check_mineraddress(['-mineraddress=tmA'])
+        _cfg, _notes, t = self.gen(['-prune=550'], live=())
+        self.assertEqual(t['state']['storage_mode'], {'pruned': {'tx_retention': kg.REGTEST_PRUNE_FLOOR}})
         named = live + ['-yellowbackpayoutaddress=tmP']
         self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args(named, 'tmA'))
         self.assertNotIn('-yellowbackpayoutdefault=0', kg.yewd_h8_args([], 'tmA'))     # stock: unchanged
