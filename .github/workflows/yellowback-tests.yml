@@ -1303,7 +1303,10 @@ jobs:
           if git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then other=$REF; fi
           # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
           # with the other line's upgrade/vault; the markers only route the record branches.
-          if [ "$REF" != upgrade/vault ]; then
+          # A branch both lines carry (vaults/kogany-compat, a kc/* pair) compares with its namesake, whatever
+          # markers the tree carries; the record-branch routing applies only when the other line has no
+          # branch of that name.
+          if [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ]; then
             if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
             if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
           fi
