@@ -1443,10 +1443,10 @@ def node_spk(node, address=None):
     return bytes.fromhex(node.validateaddress(address or node.getnewaddress())['scriptPubKey'])
 
 
-def node_funding(node, needed):
-    """Confirmed P2PKH coins of ``node``, largest first, until ``needed`` zat.  Returns
-    ``([(txid, n, seq)], total)``."""
-    us = [u for u in node.listunspent(1) if is_p2pkh(bytes.fromhex(u['scriptPubKey']))]
+def node_funding(node, needed, minconf=1):
+    """Confirmed P2PKH coins of ``node`` (at least ``minconf`` confirmations), largest first,
+    until ``needed`` zat.  Returns ``([(txid, n, seq)], total)``."""
+    us = [u for u in node.listunspent(minconf) if is_p2pkh(bytes.fromhex(u['scriptPubKey']))]
     us.sort(key=lambda u: _amount_zat(u['amount']), reverse=True)
     chosen, total = [], 0
     for u in us:
@@ -1508,8 +1508,8 @@ def node_lock(node, vp, amount, fee=VAULT_FEE):
     return node_sign(node, build_lock_tx(vin, vp, amount, change))
 
 
-def node_fee_inputs(node, fee=VAULT_FEE):
-    vin, total = node_funding(node, fee)
+def node_fee_inputs(node, fee=VAULT_FEE, minconf=1):
+    vin, total = node_funding(node, fee, minconf)
     change = (total - fee, node_spk(node)) if total > fee else None
     return vin, change
 

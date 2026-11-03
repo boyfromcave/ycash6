@@ -357,11 +357,11 @@ class VaultTestBase(BitcoinTestFramework):
         txid = self.accept(self.lock_hex(vp, amount, extra_vout), label)
         return (txid, 0)
 
-    def unlock_hex(self, outpoint, vp, value, recipients, signers, relock=0, branch_id=VAULT_BRANCH_ID, change_extra=None):
+    def unlock_hex(self, outpoint, vp, value, recipients, signers, relock=0, branch_id=VAULT_BRANCH_ID, change_extra=None, fee_minconf=1):
         """UNLOCK: ``recipients`` [(spk, value)] become intents; ``relock`` re-locks; the fee
-        from a wallet coin.  ``change_extra`` (value, spk) adds an ordinary output paid from the
+        from a wallet coin with at least ``fee_minconf`` confirmations.  ``change_extra`` (value, spk) adds an ordinary output paid from the
         fee coin (``None``) -- covenant tests."""
-        fee_vin, change = v.node_fee_inputs(self.node)
+        fee_vin, change = v.node_fee_inputs(self.node, minconf=fee_minconf)
         tx = v.build_unlock_tx(outpoint, vp, value, recipients, relock, fee_vin, change, (), branch_id)
         if change_extra is not None:
             tx.vout.append(v.CTxOut(change_extra[0], change_extra[1]))
