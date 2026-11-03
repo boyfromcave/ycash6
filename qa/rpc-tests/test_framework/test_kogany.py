@@ -676,6 +676,10 @@ class YewdWarmupTest(unittest.TestCase):
             returncode = None
             def poll(self):
                 return None
+            def kill(self):
+                pass
+            def wait(self, timeout=None):
+                return None
 
         os.environ['YEWD_BIN'] = '/y/yewd'
         try:
