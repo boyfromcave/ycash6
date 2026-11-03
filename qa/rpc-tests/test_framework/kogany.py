@@ -850,7 +850,7 @@ def same_class(cxx, kog, strict=False):
 # follows Ycash regtest: the backend line below becomes the koganyd start.
 
 YEWD_WALLET_ARGS = ('-keypool', '-exportdir', '-paytxfee', '-mintxfee', '-txconfirmtarget', '-walletnotify',
-                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet', '-mnemonicfile')
+                    '-spendzeroconfchange', '-rescan', '-wallet', '-salvagewallet', '-mnemonicfile', '-sendchangeback')
 YEWD_BACKENDS = {}        # node index -> the backend's subprocess.Popen
 
 
