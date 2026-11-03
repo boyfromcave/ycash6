@@ -343,8 +343,20 @@ _PENDING_FLAGS = {
 # The Falcon height (W3-c/F-1): a key of the regtest activation heights, though not an upgrade
 # (kogany `ConfiguredActivationHeights::pq_falcon`, toml `pq_falcon_height`).  None: nothing to carry.
 FALCON_KEY = 'pq_falcon_height'
+class KoganyInitError(Exception):
+    """An argument ycashd refuses at init (InitError) that has no koganyd.toml form to carry
+    the bad value: the pair reports it as a backend init failure with ycashd's text."""
+
+
+def _falcon_height(v):
+    # ycashd init.cpp:1474: a decimal block height, >= 0, fitting an int
+    if not re.fullmatch(r'[0-9]+', v) or int(v) > 0x7fffffff:
+        raise KoganyInitError('-pqfalconheight must be a block height (>= 0).')
+    return int(v)
+
+
 _FALCON_FLAGS = {
-    '-pqfalconheight': int,
+    '-pqfalconheight': _falcon_height,
     '-pqfalcon': lambda v: 0 if _bool01(v) else None,
 }
 
@@ -906,7 +918,14 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     if kogany_bin:
         YewdColumn.ensure(os.path.dirname(os.path.abspath(datadir)))
         b_args, _w = split_yewd_args(args)
-        backend, cookie = _start_kogany_backend(i, datadir, b_args, coinbase, stderr)
+        try:
+            backend, cookie = _start_kogany_backend(i, datadir, b_args, coinbase, stderr)
+        except KoganyInitError as e:
+            if stderr is not None:
+                stderr.write(('Error: %s\n' % e).encode('utf8'))
+                stderr.flush()
+            raise Exception('%s node %d exited with status 1 during initialization (zakurad backend: %s)'
+                            % (util.zcashd_binary(), i, e))
         y_argv = [a for a in y_argv if not a.startswith('-backendrpccookiefile=')] + [
             '-backendrpccookiefile=' + cookie,
             '-backendindexer=127.0.0.1:%d' % yewd_backend_indexer_port(i)]
