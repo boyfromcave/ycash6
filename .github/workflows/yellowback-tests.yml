@@ -664,9 +664,14 @@ jobs:
         if: steps.dl.outputs.got != 'true'
         with:
           repository: ${{ env.KOGANY_REPO }}
-          ref: ${{ env.KOGANY_COMMIT }}
+          # The literal pin (CodeQL treats an expression ref as poisonable); the next step checks it
+          # against env.KOGANY_COMMIT so the two cannot drift apart.
+          ref: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
           path: kogany
           persist-credentials: false
+      - name: The kogany checkout is the pin
+        if: steps.dl.outputs.got != 'true'
+        run: test "$(git -C kogany rev-parse HEAD)" = "$KOGANY_COMMIT"
       - name: kogany build packages (librocksdb-dev; its setup-zakura-build script)
         if: steps.dl.outputs.got != 'true'
         run: bash kogany/.github/actions/setup-zakura-build/install-ubuntu-packages.sh
@@ -735,9 +740,14 @@ jobs:
         if: steps.dl.outputs.got != 'true'
         with:
           repository: ${{ env.YEW_REPO }}
-          ref: ${{ env.YEW_COMMIT }}
+          # The literal pin (CodeQL treats an expression ref as poisonable); the next step checks it
+          # against env.YEW_COMMIT so the two cannot drift apart.
+          ref: 85aec6f5812da36e499a18b088e2e6b99f503da8
           path: yew
           persist-credentials: false
+      - name: The yew checkout is the pin
+        if: steps.dl.outputs.got != 'true'
+        run: test "$(git -C yew rev-parse HEAD)" = "$YEW_COMMIT"
       - name: Build yewd and yewd-signer at the pin (dev profile)
         if: steps.dl.outputs.got != 'true'
         working-directory: yew
