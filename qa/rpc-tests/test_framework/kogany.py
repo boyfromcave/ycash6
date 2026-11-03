@@ -1085,12 +1085,17 @@ def yewd_h8_args(args, coinbase):
     """The backend's arguments with the H8 coinbase address in place of the script's.  A
     Yellowback-live node that names no payout address takes no payout default from it either
     (F-S5-9, ``yewd_coinbase_address``)."""
+    script_miner = [a.split('=', 1)[1] for a in args if a.startswith('-mineraddress=')]
     args = [a for a in args if not a.startswith(('-mineraddress=', '-minetolocalwallet'))]
     if coinbase is not None:
         args += ['-mineraddress=%s' % coinbase, '-minetolocalwallet=0']
         live = any(a.startswith('-yellowbackattestorset=') for a in args)
         named = any(a.startswith(('-yellowbackpayoutaddress=', '-yellowbackpayoutdefault')) for a in args)
-        if live and not named:
+        if live and script_miner and not named:
+            # H1: the script's P2PKH -mineraddress is its payout default (MINER-2): carry it as the
+            # payout address rather than writing yellowback_payout_default=false
+            args += ['-yellowbackpayoutaddress=%s' % script_miner[-1]]
+        elif live and not named:
             args += ['-yellowbackpayoutdefault=0']
     return args
 
