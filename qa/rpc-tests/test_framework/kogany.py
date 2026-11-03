@@ -925,8 +925,10 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
     while True:
         if backend.poll() is not None:
             YEWD_BACKENDS.pop(i, None)
-            raise Exception('%s node %d exited with status %i during initialization'
-                            % (what if kogany_bin else util.zcashd_binary(), i, backend.returncode))
+            # util's message shape (ZCASHD path) for either backend, so assert_start_raises_init_error
+            # matches; kogany's init error went to the caller's stderr (_start_kogany_backend)
+            raise Exception('%s node %d exited with status %i during initialization (%s backend)'
+                            % (util.zcashd_binary(), i, backend.returncode, what))
         had_cookie = os.path.exists(cookie)
         try:
             rpc.getblockcount()
