@@ -1520,17 +1520,22 @@ KOGANY_NO_SUCH_LOG = {
 
 
 def debug_log_contains(tmpdir, i, needle):
-    """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair writes none:
-    its backend's log, ``node<i>/backend/zakurad.log``, is read instead)."""
+    """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair: its
+    backend's log, ``node<i>/backend/zakurad.log``, is read too, since yewd's own debug.log
+    carries none of the node's lines)."""
     path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
     backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
-    if not os.path.exists(path) and os.path.exists(backend):
-        path = backend
-        if needle in KOGANY_NO_SUCH_LOG:
-            print('  [kogany pair] %r skipped: %s' % (needle, KOGANY_NO_SUCH_LOG[needle]))
-            return True
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        return needle in f.read()
+    paths = [p for p in (path, backend) if os.path.exists(p)]
+    if os.path.exists(backend) and needle in KOGANY_NO_SUCH_LOG:
+        print('  [kogany pair] %r skipped: %s' % (needle, KOGANY_NO_SUCH_LOG[needle]))
+        return True
+    if not paths:
+        paths = [path]
+    for p in paths:
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            if needle in f.read():
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
