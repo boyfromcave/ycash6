@@ -66,6 +66,7 @@ from test_framework.yellowback_util import (
     wait_yed_healthy,
     yellowback_node_args,
 )
+from test_framework import kogany
 from test_framework.authproxy import JSONRPCException
 from test_framework.yellowback_attest import attestor_keys, bond_keys, build_register_tx, send_and_lock
 from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY, kogany_pair
@@ -91,6 +92,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         p = bitcoind_processes.pop(i)
         p.wait(timeout=timeout)
         assert_equal(p.returncode, -signal.SIGKILL)
+        kogany.kill_yewd_backend(i)       # YEWD_BIN: the backend dies with its yewd (else it outlives the run)
         self.nodes[i] = None
 
     def statehash(self, i):

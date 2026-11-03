@@ -959,6 +959,9 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
             raise Exception('%s node %d exited with status 1 during initialization (pair: %s)'
                             % (util.zcashd_binary(), i, e))
         args = yewd_h8_args(args, coinbase)
+    # a backend left from node i's previous pair (its yewd reaped without it, e.g. a self-SIGKILL)
+    # would hold p2p_port(i) past the run and fail a later script whose seed maps onto it
+    kill_yewd_backend(i)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
     YEWD_PAIR_STOCK[i] = not any(a.startswith('-yellowbackattestorset=') for a in args)
     kogany_bin = yewd_kogany_bin()
