@@ -657,46 +657,14 @@ jobs:
           done
           echo "got=false" >> "$GITHUB_OUTPUT"
           echo "no koganyd-bin of $KOGANY_REPO at $KOGANY_COMMIT (none published, or expired): building at the pin"
-      # The fallback: a build at the pin. Nothing is cached in this job: a cache beside a checkout
-      # of another repository is what CodeQL's cache-poisoning rule flags (the artifact is the
-      # normal path; the fallback build is rare).
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # No fallback build here: a step that runs code from another repository's checkout is what
+      # CodeQL's cache-poisoning rule flags, whatever the pin. The artifact comes from kogany's
+      # kogany-bin workflow at KOGANY_COMMIT (every push there publishes one).
+      - name: Require kogany's koganyd-bin
         if: steps.dl.outputs.got != 'true'
-        with:
-          repository: ${{ env.KOGANY_REPO }}
-          # The literal pin (CodeQL treats an expression ref as poisonable); the next step checks it
-          # against env.KOGANY_COMMIT so the two cannot drift apart.
-          ref: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
-          path: kogany
-          persist-credentials: false
-      - name: The kogany checkout is the pin
-        if: steps.dl.outputs.got != 'true'
-        run: test "$(git -C kogany rev-parse HEAD)" = "$KOGANY_COMMIT"
-      - name: kogany build packages (librocksdb-dev; its setup-zakura-build script)
-        if: steps.dl.outputs.got != 'true'
-        run: bash kogany/.github/actions/setup-zakura-build/install-ubuntu-packages.sh
-      - name: Build koganyd at the pin (dev profile, --features ycash)
-        if: steps.dl.outputs.got != 'true'
-        working-directory: kogany
-        env:
-          CARGO_INCREMENTAL: '0'
         run: |
-          cargo build --locked -p zakura --bin koganyd --features ycash
-          rocksdb=$(dpkg-query -W -f='${Version}' librocksdb-dev)
-          mkdir -p "$RUNNER_TEMP/zk-build/pack"
-          cp target/debug/koganyd "$RUNNER_TEMP/zk-build/pack/"
-          python3 - "$RUNNER_TEMP/zk-build/pack/koganyd-bin.json" "$KOGANY_REPO" "$KOGANY_COMMIT" "$rocksdb" "$(rustc --version)" <<'PY'
-          import json, sys
-          path, repo, commit, rocksdb, rustc = sys.argv[1:]
-          json.dump({'repository': repo, 'commit': commit, 'binary': 'koganyd', 'features': ['ycash'],
-                     'profile': 'dev', 'runner': 'ubuntu-24.04', 'librocksdb': rocksdb, 'rustc': rustc,
-                     'producer': 'ycash6 yellowback-tests.yml koganyd (fallback build)'},
-                    open(path, 'w'), indent=1)
-          PY
-          tar czf "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" -C "$RUNNER_TEMP/zk-build/pack" koganyd koganyd-bin.json
-      - name: Stage the fallback build
-        if: steps.dl.outputs.got != 'true'
-        run: cp "$RUNNER_TEMP/zk-build/koganyd-bin.tgz" "$RUNNER_TEMP/zk-out/"
+          echo "::error::no koganyd-bin for $KOGANY_REPO@$KOGANY_COMMIT: run kogany-bin.yml there (push or dispatch) at that commit, or bump KOGANY_COMMIT to a commit with one"
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: koganyd-bin
@@ -736,41 +704,12 @@ jobs:
           done
           echo "got=false" >> "$GITHUB_OUTPUT"
           echo "no yewd-bin of $YEW_REPO at $YEW_COMMIT: building at the pin"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # No fallback build here (see the koganyd job): the artifact comes from yew's producer at YEW_COMMIT.
+      - name: Require yew's yewd-bin
         if: steps.dl.outputs.got != 'true'
-        with:
-          repository: ${{ env.YEW_REPO }}
-          # The literal pin (CodeQL treats an expression ref as poisonable); the next step checks it
-          # against env.YEW_COMMIT so the two cannot drift apart.
-          ref: 85aec6f5812da36e499a18b088e2e6b99f503da8
-          path: yew
-          persist-credentials: false
-      - name: The yew checkout is the pin
-        if: steps.dl.outputs.got != 'true'
-        run: test "$(git -C yew rev-parse HEAD)" = "$YEW_COMMIT"
-      - name: Build yewd and yewd-signer at the pin (dev profile)
-        if: steps.dl.outputs.got != 'true'
-        working-directory: yew
-        env:
-          CARGO_INCREMENTAL: '0'
         run: |
-          # protoc: x402-ycash-light's build.rs (yew-core, which yewd-wallet links by path).
-          sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
-          cargo build --locked --manifest-path yewd/Cargo.toml --bins
-          mkdir -p "$RUNNER_TEMP/yewd-build/pack"
-          cp yewd/target/debug/yewd yewd/target/debug/yewd-signer "$RUNNER_TEMP/yewd-build/pack/"
-          python3 - "$RUNNER_TEMP/yewd-build/pack/yewd-bin.json" "$YEW_REPO" "$YEW_COMMIT" "$(rustc --version)" <<'PY'
-          import json, sys
-          path, repo, commit, rustc = sys.argv[1:]
-          json.dump({'repository': repo, 'commit': commit, 'binaries': ['yewd', 'yewd-signer'], 'profile': 'dev',
-                     'runner': 'ubuntu-24.04', 'rustc': rustc,
-                     'producer': 'ycash6 yellowback-tests.yml yewd (fallback build)'},
-                    open(path, 'w'), indent=1)
-          PY
-          tar czf "$RUNNER_TEMP/yewd-build/yewd-bin.tgz" -C "$RUNNER_TEMP/yewd-build/pack" yewd yewd-signer yewd-bin.json
-      - name: Stage the fallback build
-        if: steps.dl.outputs.got != 'true'
-        run: cp "$RUNNER_TEMP/yewd-build/yewd-bin.tgz" "$RUNNER_TEMP/yewd-out/"
+          echo "::error::no yewd-bin for $YEW_REPO@$YEW_COMMIT: run yew's producer workflow there at that commit, or bump YEW_COMMIT to a commit with one"
+          exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yewd-bin
