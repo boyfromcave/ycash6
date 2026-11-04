@@ -85,6 +85,14 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         .strInfo = "See https://z.cash/upgrade/nu6.2/ for details.",
     },
     {
+        // The testnet shadow fork (docs/plans/yellowback-testnet-shadow-fork-plan.md). This is
+        // testnet-yb-slow's ID; testnet-legacy sets its own (LEGACY_SHADOW_BRANCH_ID) in its chain
+        // parameters. Mainnet never activates it. No Equihash override: the epoch inherits (192, 7).
+        .nBranchId = SLOW_SHADOW_BRANCH_ID,
+        .strName = "Shadow",
+        .strInfo = "Ycash testnet shadow fork of mainnet (testnet-yb-slow, testnet-legacy)",
+    },
+    {
         // No Equihash override: the epoch inherits (192, 7) from the Ycash entry,
         // the same parameters as the epoch before it (plan §15.1).
         .nBranchId = 0x6d5b7a31,
@@ -137,26 +145,32 @@ int CurrentEpoch(int nHeight, const Consensus::Params& params) {
     return Consensus::BASE_SPROUT;
 }
 
+uint32_t NetworkBranchId(Consensus::UpgradeIndex idx, const Consensus::Params& params) {
+    assert(idx >= Consensus::BASE_SPROUT && idx < Consensus::MAX_NETWORK_UPGRADES);
+    return params.vUpgrades[idx].nBranchId.value_or(NetworkUpgradeInfo[idx].nBranchId);
+}
+
 uint32_t CurrentEpochBranchId(int nHeight, const Consensus::Params& params) {
-    return NetworkUpgradeInfo[CurrentEpoch(nHeight, params)].nBranchId;
+    return NetworkBranchId(Consensus::UpgradeIndex(CurrentEpoch(nHeight, params)), params);
 }
 
 uint32_t PrevEpochBranchId(uint32_t currentBranchId, const Consensus::Params& params) {
     for (int idx = Consensus::BASE_SPROUT + 1; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
-        if (currentBranchId == NetworkUpgradeInfo[idx].nBranchId) {
+        if (currentBranchId == NetworkBranchId(Consensus::UpgradeIndex(idx), params)) {
             // Vault follows NU5..NU6.2, which Ycash never activates (NO_ACTIVATION_HEIGHT on every
             // network): its previous epoch is the highest upgrade below it that has an
             // activation height, so a signature under that epoch's branch ID is diagnosed as
-            // "old-consensus-branch-id" (plan §15.1).
-            if (idx == Consensus::UPGRADE_VAULT) {
+            // "old-consensus-branch-id" (plan §15.1). The testnet shadow upgrade sits after
+            // NU6.2 too, and Vault after it, so both walk back the same way.
+            if (idx == Consensus::UPGRADE_VAULT || idx == Consensus::UPGRADE_SHADOW) {
                 for (int prev = idx - 1; prev > Consensus::BASE_SPROUT; prev--) {
                     if (params.vUpgrades[prev].nActivationHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
-                        return NetworkUpgradeInfo[prev].nBranchId;
+                        return NetworkBranchId(Consensus::UpgradeIndex(prev), params);
                     }
                 }
                 return NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId;
             }
-            return NetworkUpgradeInfo[idx - 1].nBranchId;
+            return NetworkBranchId(Consensus::UpgradeIndex(idx - 1), params);
         }
     }
     // Base case
@@ -166,6 +180,15 @@ uint32_t PrevEpochBranchId(uint32_t currentBranchId, const Consensus::Params& pa
 bool IsConsensusBranchId(int branchId) {
     for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
         if (branchId == NetworkUpgradeInfo[idx].nBranchId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsConsensusBranchId(int branchId, const Consensus::Params& params) {
+    for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
+        if (branchId == (int)NetworkBranchId(Consensus::UpgradeIndex(idx), params)) {
             return true;
         }
     }

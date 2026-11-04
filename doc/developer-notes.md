@@ -120,6 +120,7 @@ on all categories (and give you a very large debug.log file).
 Run with the -testnet option to run with "play zcash" on the test network, if you
 are testing multi-machine code that needs to operate across the internet. -testnet needs
 -testnetprofile=fast, slow or legacy: three test networks with their own datadirs and ports.
+slow and legacy are shadow forks of Ycash mainnet (doc/yellowback-testnet-shadow-fork.md).
 
 If you are testing something that can run on one machine, run with the -regtest option.
 In regression test mode, blocks can be created on-demand; see qa/rpc-tests/ for tests

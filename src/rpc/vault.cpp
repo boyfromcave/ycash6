@@ -393,7 +393,7 @@ UniValue vault_getinfo(const UniValue& params, bool fHelp)
             "\nThe vault primitive's upgrade and set-state database (docs/vault-rpc.md).\n"
             "\nResult:\n"
             "{\n"
-            "  \"branchid\": \"6d5b7a31\",   (string) the UPGRADE_VAULT consensus branch ID\n"
+            "  \"branchid\": \"6d5b7a31\",   (string) this network's UPGRADE_VAULT consensus branch ID (testnet-yb-slow: its own)\n"
             "  \"activationheight\": n,    (numeric) -1 when not scheduled\n"
             "  \"active\": true|false,     (boolean) active at the next block\n"
             "  \"height\": n,              (numeric) the chain tip\n"
@@ -408,7 +408,7 @@ UniValue vault_getinfo(const UniValue& params, bool fHelp)
     LOCK(cs_main);
     const Consensus::Params& cp = Params().GetConsensus();
     UniValue o(UniValue::VOBJ);
-    o.pushKV("branchid", HexInt(NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId));
+    o.pushKV("branchid", HexInt(NetworkBranchId(Consensus::UPGRADE_VAULT, cp)));   // the network's own (testnet shadow fork)
     const int act = cp.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
     o.pushKV("activationheight", act == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT ? -1 : act);
     o.pushKV("active", ActiveAtNext());

@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -54,6 +55,19 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
             nHeight >= params.vUpgrades[Consensus::UPGRADE_YCASH].nActivationHeight &&
             nHeight <= params.vUpgrades[Consensus::UPGRADE_YCASH].nActivationHeight + params.nPowAveragingWindow) {
         return nProofOfWorkLimit;
+    }
+
+    // The testnet shadow fork (docs/plans/yellowback-testnet-shadow-fork-plan.md): testnet-yb-slow and
+    // testnet-legacy copy mainnet through H_S and lose mainnet's hash rate at H_S + 1. As at the testnet's
+    // Ycash fork above, the shadow upgrade's activation block and the next nPowAveragingWindow blocks
+    // are at the PoW limit, so the averaging window that follows holds only post-split blocks.
+    // Mainnet and regtest never activate UPGRADE_SHADOW.
+    {
+        const int nShadow = params.vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight;
+        if (nShadow != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+                nHeight >= nShadow && nHeight <= nShadow + params.nPowAveragingWindow) {
+            return nProofOfWorkLimit;
+        }
     }
 
     // For the Ycash mainnet fork, we'll adjust the difficulty down for the first nPowAveragingWindow blocks

@@ -51,6 +51,11 @@ enum UpgradeIndex : uint32_t {
     UPGRADE_NU6,
     UPGRADE_NU6_1,
     UPGRADE_NU6_2,
+    // The testnet shadow fork (docs/plans/yellowback-testnet-shadow-fork-plan.md): testnet-yb-slow and
+    // testnet-legacy copy mainnet through H_S and activate this at H_S + 1. It changes no rule but the
+    // branch ID (each network's own, NetworkUpgrade::nBranchId) and the one-time difficulty reset
+    // (pow.cpp). Mainnet and regtest never set a height for it.
+    UPGRADE_SHADOW,
     // Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md §15.1). Activates without NU5,
     // which Ycash never activates; CurrentEpoch() takes the highest active index.
     UPGRADE_VAULT,
@@ -64,12 +69,13 @@ struct NetworkUpgrade {
     /**
      * The first protocol version which will understand the new consensus rules
      */
-    int nProtocolVersion;
+    int nProtocolVersion = 0;
 
     /**
-     * Height of the first block for which the new consensus rules will be active
+     * Height of the first block for which the new consensus rules will be active.
+     * A network that does not assign it never activates the upgrade.
      */
-    int nActivationHeight;
+    int nActivationHeight = NO_ACTIVATION_HEIGHT;
 
     /**
      * Special value for nActivationHeight indicating that the upgrade is always active.
@@ -100,6 +106,14 @@ struct NetworkUpgrade {
      * work of this block, otherwise this detection will have false positives.
      */
     std::optional<uint256> hashActivationBlock;
+
+    /**
+     * This network's own branch ID for the upgrade, when it is not NetworkUpgradeInfo's (the
+     * testnet shadow fork: docs/plans/yellowback-testnet-shadow-fork-plan.md §2). The upgrade's
+     * rules are unchanged; only the ID that signatures commit to and that the node checks differs.
+     * Read it through NetworkBranchId() (consensus/upgrades.h), never directly.
+     */
+    std::optional<uint32_t> nBranchId;
 };
 
 enum ConsensusFeature : uint32_t {
