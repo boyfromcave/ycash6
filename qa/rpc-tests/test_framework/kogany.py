@@ -287,7 +287,8 @@ KOGANYD_KEY_TABLE = [
      'the H8 harness turns it off for a live pair that names no payout address'),
     ('-yellowbacktestfault=<spec>', 'live', 'yellowback.test_fault',
      'str, as given: ycashd\'s regtest fault injection (yellowback/index.cpp SetTestFault); kogany takes '
-     'storage:<check|commit>[:<h>] and crash:<h>, and refuses undo, template and schema; written only when a '
+     'storage:<check|commit>[:<h>], crash:<h> and template (the template filter keeps one refused candidate), '
+     'and refuses undo and schema; written only when a '
      'script passes it'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
@@ -959,6 +960,9 @@ def start_yewd_pair(i, datadir, ycashd_bin, args, stderr=None, timeout=120):
             raise Exception('%s node %d exited with status 1 during initialization (pair: %s)'
                             % (util.zcashd_binary(), i, e))
         args = yewd_h8_args(args, coinbase)
+    # a backend left from node i's previous pair (its yewd reaped without it, e.g. a self-SIGKILL)
+    # would hold p2p_port(i) past the run and fail a later script whose seed maps onto it
+    kill_yewd_backend(i)
     b_argv, y_argv = yewd_pair_argv(yewd_bin, ycashd_bin, datadir, i, args)
     YEWD_PAIR_STOCK[i] = not any(a.startswith('-yellowbackattestorset=') for a in args)
     kogany_bin = yewd_kogany_bin()

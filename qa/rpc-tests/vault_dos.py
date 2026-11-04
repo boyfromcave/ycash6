@@ -133,7 +133,10 @@ class VaultDoSTest(VaultTestBase):
         self.join(sid, m2, [member], 'JOIN D m2 (admitted by the member)')
         x = self.mine()[0]
         self.mine(3)
-        e = self.unlock_hex(vo, vp, COIN, [(self.change_spk(), COIN)], [m2])
+        # The fee coin must outlive the invalidation below: a coinbase that matured within the
+        # last four blocks would be immature again, and CheckTxInputs (coinbase maturity) runs
+        # before the scripts, on ycashd as on kogany -- the verdict would not be the set's.
+        e = self.unlock_hex(vo, vp, COIN, [(self.change_spk(), COIN)], [m2], fee_minconf=110)
         assert self.model.check_tx(v.tx_from_hex(e)) is None, 'the unlock must be valid with the JOIN'
         node.invalidateblock(x)                    # node 0 now stands where a peer without the JOIN would
         self.sync_model()
