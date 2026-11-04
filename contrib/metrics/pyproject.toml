@@ -23,6 +23,7 @@ packages = [
 python = "^3.7"
 slick-bitcoinrpc = "0.1.4"
 progressbar2 = "4.2.0"
+ujson = ">=5.13.0"  # transitive via slick-bitcoinrpc; GHSA-3j69-69wj-xqx2, GHSA-c38f-wx89-p2xg, GHSA-c8rr-9gxc-jprv, GHSA-wgvc-ghv9-3pmm
 
 [tool.poetry.scripts]
 supply-check = "supply_check:main"
