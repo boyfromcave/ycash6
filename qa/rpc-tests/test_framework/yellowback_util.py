@@ -674,15 +674,28 @@ class YellowbackTestFramework(BitcoinTestFramework):
         a, b = self.SPLIT_HALVES
         return [(x, y) for x, y in self.live_edges() if (x in a and y in b) or (x in b and y in a)]
 
+    def _cross_pairs(self):
+        """Every pair of running nodes across the halves, not only the declared crossing edges.
+        A kogany (Zakura) node on regtest dials the loopback addresses its peers advertise, so it
+        also holds connections ``EDGES`` never made (yellowback_index r20: kogany 1 -> kogany 4,
+        which left the observer on the enforcing branch through the split).  Disconnecting every
+        cross pair cuts those too; kogany keeps a disconnected address out of its book until an
+        ``addnode`` (the join) brings it back, and on ycashd a pair with no connection is a no-op."""
+        a, b = self.SPLIT_HALVES
+        n = min(len(self.nodes), getattr(self, 'setup_node_count', len(self.nodes)))
+        live = [i for i in range(n) if self.nodes[i] is not None]
+        pairs = [(x, y) for x in live for y in live if x < y and ((x in a and y in b) or (x in b and y in a))]
+        return pairs + [e for e in self._cross_edges() if e not in pairs and (e[1], e[0]) not in pairs]
+
     def split_network(self, timeout=30):
         """Disconnect {1, 5} from {0, 2, 3, 4} with ``disconnectnode`` (rpc/net.cpp:220); no
         restart.  Both directions of every crossing edge are outbound ``addnode onetry``
         connections named ``127.0.0.1:<p2p port>``, so each side disconnects its own."""
         assert not self.is_network_split
-        for x, y in self._cross_edges():
+        for x, y in self._cross_pairs():
             self._disconnect_pair(x, y)
         deadline = time.time() + timeout
-        for x, y in self._cross_edges():
+        for x, y in self._cross_pairs():
             while self._connected(x, y) or self._connected(y, x):
                 assert time.time() < deadline, 'nodes %d and %d did not disconnect' % (x, y)
                 time.sleep(0.1)
