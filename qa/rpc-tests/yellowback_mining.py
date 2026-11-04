@@ -655,6 +655,16 @@ class YellowbackMiningTest(YellowbackTestFramework):
         # -yellowbacktestfault=template, which keeps one invalid candidate: the template check refuses it.
         print('stale_invalid_mint_never_templated: a mint made invalid by a disconnect stays in the mempool, never in a template')
         user, pool2 = self.nodes[0], self.nodes[2]
+        if kogany_pair(self.options.tmpdir, 2):
+            # A kogany + yewd pair re-verifies its whole mempool at a chain tip reset (Zakura's
+            # mempool reset, YED check included), so a stale mint leaves it: the state this step
+            # tests cannot arise there (yewd plan F-S5-20). Skip before the faulted restart (a
+            # restarted pair is not re-sent the network's mempool), keep the chain in step, stop.
+            # Blocks only: the previous step's reorg join leaves the mempools disagreeing by design.
+            print('  [kogany pair] stale mint skipped: the reset re-verifies the mempool and drops it')
+            self.mine(POOLS[0], blocks_only=True)
+            assert_best_hash(self.nodes)
+            return
         self.restart(2, ['-yellowbacktestfault=template', '-debug=yellowback'])
         pool2 = self.nodes[2]
         self.mine(POOLS[0])
@@ -667,17 +677,6 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert stale in pool2.getrawmempool()
         pool2.invalidateblock(tip_hash)
         assert_equal(pool2.getblockcount(), tip - 1)
-        if kogany_pair(self.options.tmpdir, 2):
-            # A kogany + yewd pair re-verifies its whole mempool at a chain tip reset (Zakura's
-            # mempool reset, YED check included), so the stale mint leaves it: the state this step
-            # tests cannot arise there (yewd plan F-S5-20). Rejoin as below and stop.
-            assert stale not in gbt_hashes(pool2.getblocktemplate())
-            print('  [kogany pair] stale mint skipped: the reset re-verifies the mempool and drops it')
-            pool2.reconsiderblock(tip_hash)
-            self.restart(2)
-            self.sync_all(blocks_only=True)
-            assert_best_hash(self.nodes)
-            return
         assert stale in pool2.getrawmempool(), 'the disconnect dropped the stale mint: nothing left to test'
         assert_equal(pool2.yed_validaterawtransaction(stale_hex)['verdict'], 'bad-mint-ref-height')
         # the negative control: the faulted template keeps it, and the module's block check refuses the template
