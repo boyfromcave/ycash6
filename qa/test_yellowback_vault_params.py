@@ -71,6 +71,9 @@ UPGRADES_CPP = """const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_
 """
 
 
+SPLIT_HASH = "000005030be4763e433447000ef6b98c7ce310a8b0b7bb50f1a6aca3d31e4bef"
+
+
 def testnet(fast="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT", slow="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT",
             legacy="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT", base_extra="", fast_extra="",
             split="Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT", slow_extra=None, legacy_extra=None, shadow_extra=""):
@@ -274,8 +277,8 @@ class VaultParams(unittest.TestCase):
         }
         # The shadow forks are ready (R8; test_release_rule_r8_shadow_fork).
         doc["main"]["vault_branch_id"] = "6d5b7a31"
-        doc["test"]["slow"].update(vault_branch_id="e1f1cc08", shadow_branch_id="57a24d5d", shadow_split_height=3100000)
-        doc["test"]["legacy"].update(vault_branch_id="6d5b7a31", shadow_branch_id="35706728", shadow_split_height=3100000)
+        doc["test"]["slow"].update(vault_branch_id="e1f1cc08", shadow_branch_id="57a24d5d", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)
+        doc["test"]["legacy"].update(vault_branch_id="6d5b7a31", shadow_branch_id="35706728", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)
         self.assertEqual(vp.release_problems(doc), [])
         doc["main"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
         self.assertTrue(any(p.startswith("R1:") for p in vp.release_problems(doc)))
@@ -318,8 +321,8 @@ class VaultParams(unittest.TestCase):
             "main": dict(net, vault_activation_height=3300000),
             "test": {"fast": dict(net),
                      "slow": dict(net, vault_branch_id="e1f1cc08", shadow_branch_id="57a24d5d",
-                                  shadow_split_height=3100000),
-                     "legacy": dict(net, shadow_branch_id="35706728", shadow_split_height=3100000)},
+                                  shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH),
+                     "legacy": dict(net, shadow_branch_id="35706728", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)},
             "yellowback_params": {"main_attestor_set_id": att, "test_attestor_set_id": None,
                                   "testfast_attestor_set_id": None},
         }
@@ -336,6 +339,11 @@ class VaultParams(unittest.TestCase):
         self.assertEqual(vp.release_problems(doc, "beta"), [])
         self.assertEqual([p.split(":")[0] for p in vp.release_problems(doc, "rc") if p.startswith("R8")], ["R8", "R8"])
         doc["test"]["slow"]["shadow_split_height"] = doc["test"]["legacy"]["shadow_split_height"] = 3100000
+        # H_S set without the checkpoint at H_S: refused too.
+        doc["test"]["legacy"]["shadow_split_hash"] = None
+        self.assertIn("R8: testnet-legacy shadow fork not ready: the checkpoint at H_S (TESTNET_SHADOW_SPLIT_HASH) is unset",
+                      vp.release_problems(doc, "rc"))
+        doc["test"]["legacy"]["shadow_split_hash"] = SPLIT_HASH
         # slow's Vault under mainnet's ID, or slow and legacy sharing a shadow ID: refused.
         doc["test"]["slow"]["vault_branch_id"] = "6d5b7a31"
         for stage in vp.STAGES:   # the branch IDs are an invariant at every stage, a beta's too
@@ -370,9 +378,9 @@ class VaultParams(unittest.TestCase):
                 "main": dict(net, vault_activation_height=main_height),
                 "test": {"fast": dict(net, vault_activation_height=fast),
                          "slow": dict(net, vault_activation_height=slow, vault_branch_id="e1f1cc08",
-                                      shadow_branch_id="57a24d5d", shadow_split_height=3099999),
+                                      shadow_branch_id="57a24d5d", shadow_split_height=3099999, shadow_split_hash=SPLIT_HASH),
                          "legacy": dict(net, vault_activation_height=legacy, shadow_branch_id="35706728",
-                                        shadow_split_height=3099999)},
+                                        shadow_split_height=3099999, shadow_split_hash=SPLIT_HASH)},
                 "yellowback_params": {"main_attestor_set_id": main_att, "test_attestor_set_id": slow_att,
                                       "testfast_attestor_set_id": fast_att},
             }

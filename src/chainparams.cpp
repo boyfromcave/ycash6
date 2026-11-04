@@ -389,11 +389,13 @@ static CMainParams mainParams;
 /**
  * H_S, the testnet shadow fork's split height (docs/plans/yellowback-testnet-shadow-fork-plan.md §6.2):
  * the last Ycash mainnet block testnet-yb-slow and testnet-legacy copy. One value for both, fixed by the
- * mainnet history harvest (mainnet-prefix-v1) and compiled into the release that launches them.
- * PLACEHOLDER: NO_ACTIVATION_HEIGHT means "not set"; the release guard (qa/yellowback-vault-params.py,
- * R8) refuses a tag while it is.
+ * mainnet history harvest (mainnet-prefix-v1) and compiled into the release that launches them
+ * (Yellowback lead architect, 2026-11-04). TESTNET_SHADOW_SPLIT_HASH is that block's hash, the checkpoint
+ * at H_S (final Sapling root 50113dd6b7a7b3661f3070a0c7c40298f0c242cbf06b176b0f9d64e4cde946ec). The
+ * release guard (qa/yellowback-vault-params.py, R8) refuses a tag while either is unset.
  */
-static const int TESTNET_SHADOW_SPLIT_HEIGHT = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+static const int TESTNET_SHADOW_SPLIT_HEIGHT = 3079999;
+static const char* const TESTNET_SHADOW_SPLIT_HASH = "000005030be4763e433447000ef6b98c7ce310a8b0b7bb50f1a6aca3d31e4bef";
 
 /**
  * Testnet: the re-forked testnet (testnet plan §2.1), the history of testnet-yb-fast (Revision 3, T-14).
@@ -734,7 +736,8 @@ private:
      * H_S, the last copied mainnet block: UPGRADE_SHADOW activates at H_S + 1, minimum-difficulty blocks
      * are allowed from H_S + 1 (testnet rule; mainnet's blocks below it stay under mainnet's), and mainnet
      * checkpoints above H_S are dropped (a later mainnet release may add some; the blocks above H_S here
-     * are this network's own). NO_ACTIVATION_HEIGHT: not set yet, the network has no blocks of its own.
+     * are this network's own) and H_S itself is checkpointed. NO_ACTIVATION_HEIGHT: not set, the network has no
+     * blocks of its own.
      */
     void SetShadowSplitHeight(int nSplitHeight) {
         if (nSplitHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
@@ -749,6 +752,8 @@ private:
         consensus.nPowAllowMinDifficultyBlocksAfterHeight = nSplitHeight;
         auto& checkpoints = checkpointData.mapCheckpoints;
         checkpoints.erase(checkpoints.upper_bound(nSplitHeight), checkpoints.end());
+        // The checkpoint at H_S: the last copied mainnet block.
+        checkpoints[nSplitHeight] = uint256S(TESTNET_SHADOW_SPLIT_HASH);
     }
 };
 

@@ -461,7 +461,7 @@ BOOST_AUTO_TEST_CASE(shadow_profiles_are_mainnet_through_the_split)
         }
         BOOST_CHECK(c.vUpgrades[Consensus::UPGRADE_YCASH].hashActivationBlock ==
                     uint256S("0000014fbc5917ba8bcacf3336faf588d86b32443aa3a490a587af5750c77ec5"));
-        // Checkpoints: mainnet's, up to H_S (all of them while H_S is unset).
+        // Checkpoints: mainnet's, up to H_S.
         const int shadow = c.vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight;
         for (const auto& kv : main.Checkpoints().mapCheckpoints) {
             if (shadow != NONE && kv.first >= shadow) {
@@ -471,7 +471,15 @@ BOOST_AUTO_TEST_CASE(shadow_profiles_are_mainnet_through_the_split)
                 BOOST_CHECK(test.Checkpoints().mapCheckpoints.at(kv.first) == kv.second);
             }
         }
-        for (const auto& kv : test.Checkpoints().mapCheckpoints) BOOST_CHECK(main.Checkpoints().mapCheckpoints.count(kv.first) == 1);
+        // H_S (lead architect, 2026-11-04) and the checkpoint at H_S, the last copied mainnet block; every
+        // other checkpoint is mainnet's.
+        BOOST_CHECK_EQUAL(shadow, 3079999 + 1);
+        BOOST_CHECK(test.Checkpoints().mapCheckpoints.at(3079999) ==
+                    uint256S("000005030be4763e433447000ef6b98c7ce310a8b0b7bb50f1a6aca3d31e4bef"));
+        BOOST_CHECK_EQUAL(test.Checkpoints().mapCheckpoints.rbegin()->first, 3079999);
+        for (const auto& kv : test.Checkpoints().mapCheckpoints) {
+            if (kv.first != 3079999) BOOST_CHECK(main.Checkpoints().mapCheckpoints.count(kv.first) == 1);
+        }
         // The Sprout-pool checkpoint and ZIP 209.
         BOOST_CHECK_EQUAL(test.SproutValuePoolCheckpointHeight(), main.SproutValuePoolCheckpointHeight());
         BOOST_CHECK_EQUAL(test.SproutValuePoolCheckpointBalance(), main.SproutValuePoolCheckpointBalance());
@@ -496,10 +504,11 @@ BOOST_AUTO_TEST_CASE(shadow_profiles_are_mainnet_through_the_split)
 
 BOOST_AUTO_TEST_CASE(shadow_split_height)
 {
-    // H_S is one value for slow and legacy, unset (NO_ACTIVATION_HEIGHT) until the mainnet harvest
-    // fixes it; the release guard refuses a tag until then (qa/yellowback-vault-params.py, R8).
+    // H_S is one value for slow and legacy, fixed by the mainnet harvest: 3,079,999 (lead architect,
+    // 2026-11-04); the release guard refuses a tag while it is unset (qa/yellowback-vault-params.py, R8).
     const Consensus::Params& m = Params(CBaseChainParams::MAIN).GetConsensus();
     const int slow = TestNet("slow").GetConsensus().vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight;
+    BOOST_CHECK_EQUAL(slow, 3079999 + 1);
     BOOST_CHECK_EQUAL(TestNet("legacy").GetConsensus().vUpgrades[Consensus::UPGRADE_SHADOW].nActivationHeight, slow);
     for (const Profile& pr : SHADOW) {
         const Consensus::Params& c = TestNet(pr.name).GetConsensus();

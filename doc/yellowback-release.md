@@ -246,7 +246,7 @@ Which rules a tag needs depends on the stage its version names:
 | Tag | Required | Not required |
 |---|---|---|
 | `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs | heights (H_S included), sets, protocol version |
-| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
 | `v6.22.N` (final) | R1–R8 | — |
 
 `qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with
@@ -268,7 +268,7 @@ peer: a drill before mainnet.
 
 | Shadow fork (slow, legacy) | Value | Set in |
 |---|---|---|
-| H_S, `TESTNET_SHADOW_SPLIT_HEIGHT` (`src/chainparams.cpp`) | unset | the release that launches them, from the mainnet history harvest (`mainnet-prefix-v1`) |
+| H_S, `TESTNET_SHADOW_SPLIT_HEIGHT`, and the checkpoint at H_S, `TESTNET_SHADOW_SPLIT_HASH` (`src/chainparams.cpp`) | 3,079,999, `000005030be4…e4bef` (lead architect, 2026-11-04) | from the mainnet history harvest (`mainnet-prefix-v1`) |
 | `UPGRADE_SHADOW` branch ID | slow `0x57a24d5d`, legacy `0x35706728` | fixed (`src/consensus/upgrades.h`) |
 
 Release notes for the vault rules tightened on 2026-10-12 (audit 01/V-1, 01/V-5, 01/N-1, both node lines):

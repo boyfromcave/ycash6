@@ -45,6 +45,7 @@ SHADOW_CHAIN = ("CMainParams", "CTestNetShadowParams")
 TESTNET_PROFILES = (("fast", "CTestNetFastParams"), ("slow", "CTestNetSlowParams"), ("legacy", "CTestNetLegacyParams"))
 SHADOW_PROFILES = ("slow", "legacy")
 SHADOW_SPLIT_CONSTANT = "TESTNET_SHADOW_SPLIT_HEIGHT"
+SHADOW_HASH_CONSTANT = "TESTNET_SHADOW_SPLIT_HASH"
 PROFILE_NAMES = {"fast": "testnet-yb-fast", "slow": "testnet-yb-slow", "legacy": "testnet-legacy"}
 # The YED columns: MainParams (main), TestParams (testnet-yb-slow; testnet-legacy, inert), TestFastParams.
 YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
@@ -191,6 +192,10 @@ def network_params(chainparams, params_h, cls, name, base=None, chain=None, upgr
                 split = one(r"static const int %s\s*=\s*([^;]+?)\s*;" % SHADOW_SPLIT_CONSTANT,
                             strip_comments(chainparams), "src/chainparams.cpp " + SHADOW_SPLIT_CONSTANT)
             out["shadow_split_height"] = height(split)
+            # The checkpoint at H_S: the hash of the last copied mainnet block (absent or empty: unset).
+            m = re.search(r'static const char\s*\*\s*const\s+%s\s*=\s*"([^"]*)"\s*;' % SHADOW_HASH_CONSTANT,
+                          strip_comments(chainparams))
+            out["shadow_split_hash"] = m.group(1) if m and m.group(1) else None
     return out
 
 
@@ -327,11 +332,14 @@ def release_problems(doc, stage="final"):
         elif stage == "rc" and profile == "slow" and test_att and not test_height:
             problems.append("R7 (rc): testnet-yb-slow names %s without an activation height" % key)
     # R8 (rc and final; docs/plans/yellowback-testnet-shadow-fork-plan.md): slow and legacy ship only
-    # with their split height H_S set. Their own branch IDs are checked above, at every stage.
+    # with their split height H_S and the checkpoint at H_S set. Their own branch IDs are checked above, at every stage.
     for profile in SHADOW_PROFILES:
         if not _height_set(test.get(profile, {}).get("shadow_split_height")):
             problems.append("R8: %s shadow fork not ready: the split height H_S (%s) is unset"
                             % (PROFILE_NAMES[profile], SHADOW_SPLIT_CONSTANT))
+        elif not re.fullmatch(r"[0-9a-f]{64}", test.get(profile, {}).get("shadow_split_hash") or ""):
+            problems.append("R8: %s shadow fork not ready: the checkpoint at H_S (%s) is unset"
+                            % (PROFILE_NAMES[profile], SHADOW_HASH_CONSTANT))
     return problems
 
 

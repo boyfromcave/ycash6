@@ -71,11 +71,14 @@ UPGRADES_CPP = """    { .nBranchId = SLOW_SHADOW_BRANCH_ID, .strName = "Shadow",
     { .nBranchId = 0x6d5b7a31, .strName = "Vault", },
 """
 
+SPLIT_HASH = "000005030be4763e433447000ef6b98c7ce310a8b0b7bb50f1a6aca3d31e4bef"
+
 
 def testnet(fast=NO, proto=270200, slow=NO, split="3100000"):
     """CTestNetParams and testnet-yb-fast (testnet plan Revision 3); the shadow-fork base on mainnet and
     testnet-yb-slow and testnet-legacy (the shadow-fork plan), legacy's Vault unset, split height `split`."""
     out = """static const int TESTNET_SHADOW_SPLIT_HEIGHT = %s;
+static const char* const TESTNET_SHADOW_SPLIT_HASH = "%s";
 class CTestNetParams : public CChainParams {
 protected:
     CTestNetParams() {
@@ -95,7 +98,7 @@ protected:
         SetShadowSplitHeight(TESTNET_SHADOW_SPLIT_HEIGHT);
     }
 };
-""" % (split, proto, fast)
+""" % (split, "" if split == NO else SPLIT_HASH, proto, fast)
     for cls, height, extra in (("CTestNetSlowParams", slow,
                                 "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;\n"
                                 "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;\n"),
