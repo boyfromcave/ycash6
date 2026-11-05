@@ -516,8 +516,8 @@ const size_t MAX_SAPLING_SPENDS = 20;
 /** A funding source or collateral destination given as an address string (§4.6). */
 struct AddressChoice
 {
-    enum Kind { NONE, TRANSPARENT, SAPLING } kind;
-    CKeyID keyId;                                   //!< TRANSPARENT
+    enum Kind { NONE, TRANSPARENT_ADDR, SAPLING } kind;
+    CKeyID keyId;                                   //!< TRANSPARENT_ADDR
     libzcash::SaplingPaymentAddress sapling;        //!< SAPLING
     std::string text;
     AddressChoice() : kind(NONE) {}
@@ -532,7 +532,7 @@ AddressChoice ParseAddressChoice(const std::string& s, const char* what)
     KeyIO keyIO(::Params());
     CTxDestination dest = keyIO.DecodeDestination(s);
     if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
-        c.kind = AddressChoice::TRANSPARENT;
+        c.kind = AddressChoice::TRANSPARENT_ADDR;
         c.keyId = *id;
         return c;
     }
@@ -1022,7 +1022,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                                   - (payload && shape.changeCents > 0 ? TOKEN_VALUE : 0);
         // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
         const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
-                             : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold();   // 6.20.0: a fixed dust threshold
+                             : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT_ADDR ? dest.keyId : CKeyID())).GetDustThreshold();   // 6.20.0: a fixed dust threshold
         // 6.20.0: PlanPricedVaultSpend below still raises it to P-2's max(-yellowbackfee, ZIP-317 conventional), a floor
         // the clamp does not lower (relay demands it): an SLH-DSA owner spend is ~53 logical actions (~26.5k zat) and a
         // YED owner spend with its token, payload and fee outputs a few actions more (~0.0003 YEC), so on 6.20.0 a vault
@@ -1032,7 +1032,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                                                 YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme))));
     }
     const uint32_t expiry = ctx.Expiry(R);
-    if (dest.kind == AddressChoice::TRANSPARENT) {
+    if (dest.kind == AddressChoice::TRANSPARENT_ADDR) {
         shape.collateralScript = GetScriptForDestination(dest.keyId);
         out.collateralTo = dest.text;
     } else if (dest.kind != AddressChoice::SAPLING) {
@@ -1545,7 +1545,7 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
     CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
-    if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
+    if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
     do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
         mtx = ctx.NewTx(expiry);
         mtx.vout.push_back(carrierOut);
@@ -1555,7 +1555,7 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
         const CAmount change = selected - needed;
         if (change > 0) {
             // An s1... `from` keeps its change: the main transaction is funded "from this address" too.
-            if (source.kind == AddressChoice::TRANSPARENT) {
+            if (source.kind == AddressChoice::TRANSPARENT_ADDR) {
                 mtx.vout.push_back(CTxOut(change, onlyScript));
             } else {
                 CPubKey changeKey;
@@ -1667,7 +1667,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     CMutableTransaction mtx;
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
-    if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
+    if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
     do {   // P-2: rebuilt at the conventional fee until the fee covers the shape it selects
         mtx = ctx.NewTx(expiry);
         mtx.vout = vout;
@@ -1970,7 +1970,7 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
         return out;
     }
     CScript destScript;
-    if (dest.kind == AddressChoice::TRANSPARENT) {
+    if (dest.kind == AddressChoice::TRANSPARENT_ADDR) {
         destScript = GetScriptForDestination(dest.keyId);
         out.collateralTo = dest.text;
     } else {
