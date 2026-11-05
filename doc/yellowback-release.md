@@ -84,6 +84,7 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
 
 | Release | MINOR | REVISION | BUILD | Tag |
 |---|---|---|---|---|
+| 6.22.0-beta1 | 22 | 0 | 0 | `v6.22.0-beta1` |
 | 6.22.0-rc1 | 22 | 0 | 25 | `v6.22.0-rc1` |
 | 6.22.0-rc2 | 22 | 0 | 26 | `v6.22.0-rc2` |
 | 6.22.0 | 22 | 0 | 50 | `v6.22.0` |
