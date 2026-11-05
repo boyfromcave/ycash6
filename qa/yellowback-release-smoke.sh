@@ -59,8 +59,16 @@ start() {
 start
 sub=$("$cli" "${rpc[@]}" getnetworkinfo | grep '"subversion"')
 echo "getnetworkinfo $sub"
-# Past the upgrade height with a few mature coinbases to fund the set (set_create needs four).
-"$cli" "${rpc[@]}" generate $((vault_h + 1)) >/dev/null
+# Past the upgrade height with a few mature coinbases to fund the set's fee.
+"$cli" "${rpc[@]}" generate $((vault_h + 8)) >/dev/null
+# The wallet learns of blocks asynchronously (ThreadNotifyWallets), so `generate` can return before
+# it has seen the coinbases that matured: wait until it lists a spendable coin, or set_create finds
+# no confirmed transparent funds (seen on the fast Linux runners).
+for _ in $(seq 1 60); do
+  "$cli" "${rpc[@]}" listunspent 1 | grep -q '"txid"' && break
+  sleep 1
+done
+"$cli" "${rpc[@]}" listunspent 1 | grep -q '"txid"' || { echo "wallet has no spendable coin after 60 s"; exit 1; }
 setid=$("$cli" "${rpc[@]}" set_create '{"seats":1,"unlockthreshold":1,"open":true}' \
         | sed -n 's/.*"setid": *"\([0-9a-f]\{64\}\)".*/\1/p')
 [ -n "$setid" ] || { echo "set_create returned no setid"; exit 1; }
