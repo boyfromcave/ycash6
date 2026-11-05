@@ -50,7 +50,7 @@ src/yellowback/policy.cpp 71796abe703b38f8d92526f87d4ab18e3e4307162f2312a9260460
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp 98db370e0f86980e0546c56a09350317d5ef4daa52658a8e41255ed95237cecc 16b21f6c90c5d5d7cd74056d1c66b5c954c237e234b3eef471e537e863d8f3d6
+src/yellowback/txbuilder.cpp ab1e820909057c2a834a03971ec6c10f77925ff7bcfa9114c807322e804f90b0 37b167febe757f621fb310177fede1c6c49fee87182f9f28db322f0fa0f2a5e2
 src/yellowback/txbuilder.h 981c476d76940d08968bb3b446cb160fad139929660bf673ed61f63fbcf80ac8 85a326a8f00d3ec56534236ead6f956a35f84ca57ebb3d4a3eb3d309d42f67e4
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
