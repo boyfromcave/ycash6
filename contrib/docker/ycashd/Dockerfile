@@ -30,9 +30,20 @@ RUN --mount=type=cache,id=ycash6-depends-built,target=/src/depends/built \
 
 FROM ubuntu:22.04
 # python3 and minisign: ycash-bootstrap (YCASHD_BOOTSTRAP, testnet plan §4.4) frames a bundle in Python and
-# checks the owner's minisign signature on its SHA256SUMS.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libtinfo5 curl jq netcat-openbsd python3 minisign \
+# checks the owner's minisign signature on its SHA256SUMS. Ubuntu 22.04 has no minisign package
+# (it arrived in 24.04), so the runtime stage installs the upstream static binary (0.11 or later).
+ARG TARGETARCH
+ARG MINISIGN_VERSION=0.12
+ARG MINISIGN_SHA256=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libtinfo5 curl jq netcat-openbsd python3 \
  && rm -rf /var/lib/apt/lists/* \
+ && case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; esac \
+ && curl -fsSL -o /tmp/minisign.tar.gz "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/minisign-${MINISIGN_VERSION}-linux.tar.gz" \
+ && echo "${MINISIGN_SHA256}  /tmp/minisign.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/minisign.tar.gz -C /tmp \
+ && install -m 0755 "/tmp/minisign-linux/${arch}/minisign" /usr/local/bin/minisign \
+ && rm -rf /tmp/minisign.tar.gz /tmp/minisign-linux \
+ && minisign -v \
  && useradd --home-dir /srv/ycash --create-home --uid 2001 --shell /bin/sh ycash \
  && mkdir -p /var/lib/ycash && chown -R ycash:ycash /srv/ycash /var/lib/ycash
 COPY --from=builder /out/ycashd /out/ycash-cli /out/ycash-tx /usr/local/bin/
