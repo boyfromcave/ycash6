@@ -1,4 +1,4 @@
-Ycash 6.22.0-rc1 with post-quantum vaults and Ycash Yellowback (YED)
+Ycash 6.22.0-beta2 with post-quantum vaults and Ycash Yellowback (YED)
 <img align="right" width="100" height="100" src="doc/imgs/logo.png">
 ===========
 
