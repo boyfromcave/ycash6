@@ -591,6 +591,7 @@ void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)
         wallet->LockCoin(o);
         ourLocks.insert(o);
     }
+    if (!outs.empty()) wallet->MarkYedHeld();   // beta2 item 32: wallet.dat remembers it has held YED
 }
 
 void YellowbackWallet::PreLock(const CTransaction& tx)
@@ -645,6 +646,7 @@ void YellowbackWallet::Reconcile()
             if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
             ourLocks.insert(o);
         }
+        if (!tokensMine.empty()) wallet->MarkYedHeld();   // beta2 item 32
         for (COutPoint o : release) {
             wallet->UnlockCoin(o);
             ourLocks.erase(o);

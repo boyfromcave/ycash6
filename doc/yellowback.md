@@ -168,7 +168,7 @@ The mining-side options (`-yellowbackpayoutaddress`, `-yellowbackquotemaxage`) a
 `-yellowbackbundlecarrier` and `-yellowbacktestfault`; each is refused on mainnet and testnet.
 
 **Flags from earlier designs.** `-yellowback` is accepted and ignored (`-yellowback=0` only
-acknowledges a leftover index, see below), and `-experimentalfeatures` does not gate Yellowback.
+acknowledges a leftover index or a wallet that has held YED, see below), and `-experimentalfeatures` does not gate Yellowback.
 `-yellowbackenforce`, `-yellowbacksignal`, `-yellowbacktemplatepolicy` and
 `-yellowbackrequirehealthy` are logged and ignored. `-yellowbackstartheight` and
 `-yellowbackenforceuntil` stop the node at startup with an error: YED starts at the
@@ -315,7 +315,9 @@ and the YED is destroyed while the 10,000 zatoshi survive. The wallet therefore:
   Yellowback index — for example a regtest node restarted without `-yellowbackattestorset`. Start
   it with the network's attestor set to keep those outputs locked, or with `-yellowback=0` to say
   you accept that the YED outputs in this wallet are spendable as plain YEC for this run
-  (`-disablewallet` needs neither);
+  (`-disablewallet` needs neither). The same holds, with the same `-yellowback=0`, for a wallet
+  that has held YED (`getwalletinfo.yed_held`) loaded where Yellowback is not live, even with no
+  index in the datadir: a copied `wallet.dat` remembers that it held YED;
 - **re-locks after an import**: `importprivkey`, `importaddress`, `importwallet` and `z_importkey`
   reconcile once their rescan is done, so YED that has just become yours is locked at once.
 

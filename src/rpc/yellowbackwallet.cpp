@@ -749,7 +749,10 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
         const uint8_t scheme = type == "pq" && falcon ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
         CPQKeyID id;
         if (!pwalletMain->GetNewPQKey(scheme, id)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
-        if (type == "pq") pwalletMain->SetAddressBook(id, label, YED_RECEIVE_PURPOSE);
+        if (type == "pq") {
+            pwalletMain->SetAddressBook(id, label, YED_RECEIVE_PURPOSE);
+            pwalletMain->MarkYedHeld();   // beta2 item 32: a YED holder key was issued
+        }
         return EncodeAddress(id, yw.Index()->GetParams());
     }
     if (type != "p2pkh") throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqowner\"");
@@ -757,6 +760,7 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
     EnsureWalletIsUnlocked();
     CPubKey key = pwalletMain->GenerateNewKey(true);
     pwalletMain->SetAddressBook(key.GetID(), label, YED_RECEIVE_PURPOSE);
+    pwalletMain->MarkYedHeld();   // beta2 item 32: a YED holder key was issued
     return EncodeAddress(key.GetID(), yw.Index()->GetParams());
 }
 

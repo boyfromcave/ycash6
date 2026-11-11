@@ -475,6 +475,9 @@ public:
     bool WriteVaultSignRestored();
     bool ReadVaultSignRestored();
     bool EraseVaultSignRestored();
+    // beta2 item 32: the wallet has held YED or issued a YED holder key (write-once, never erased; loaded with the
+    // wallet, kept by -salvagewallet). An older binary ignores the unknown record.
+    bool WriteYedHeld();
     // Vault spends this wallet built for set signatures, keyed by the template outpoint (01/V-2, 07/N-2:
     // vault_buildunlock / vault_buildcancel return them byte-identically), and the recipient scripts of the
     // intents it built (vault_release). Loaded with the wallet ("vaultbuild", "vaultrecipient").
