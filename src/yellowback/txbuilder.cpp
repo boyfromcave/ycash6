@@ -659,12 +659,15 @@ struct Context
     }
 
     /** TOK-PQ (quantum spec F-7): from the Falcon height (judged at the next block) a YED output goes to a fresh
-     *  Falcon key of the wallet; nullopt before it (the caller's P2PKH key holds the YED, as before). */
-    std::optional<CPQKeyID> FreshPQHolder() const
+     *  Falcon key of the wallet; nullopt before it (the caller's P2PKH key holds the YED, as before). The key is filed
+     *  in the address book under `purpose`, as FreshKey files a P2PKH holder (beta2: its outputs are receipts, not
+     *  change, and the wallet lists it as its own address). */
+    std::optional<CPQKeyID> FreshPQHolder(const std::string& purpose) const
     {
         if (!params.IsPQFalconActive((int64_t)chainHeight + 1)) return std::nullopt;
         CPQKeyID id;
         if (!wallet.GetNewPQKey(pq::SCHEME_FN_DSA_512, id)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum holder key");
+        wallet.SetAddressBook(id, "", purpose);
         return id;
     }
 
@@ -672,7 +675,7 @@ struct Context
     CScript FreshHolderScript(const std::string& purpose, CPubKey& keyOut) const
     {
         keyOut = FreshKey(purpose);
-        const std::optional<CPQKeyID> pq = FreshPQHolder();
+        const std::optional<CPQKeyID> pq = FreshPQHolder(purpose);
         return pq.has_value() ? GetScriptForDestination(pq.value()) : GetScriptForDestination(keyOut.GetID());
     }
 
@@ -1598,7 +1601,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     // is no longer the holder: an SLH-DSA holder would cost an 8 KB scriptSig per transfer.
     CPQKeyID vaultOwner;
     if (!ctx.wallet.GetNewPQKey(pq::SCHEME_SLH_DSA_SHA2_128S, vaultOwner)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum owner key");
-    std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder();
+    std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder("yellowback-vault");
     CPubKey owner;                                  // the P2PKH token key, drawn only before the Falcon height (review B I-3)
     if (!pqHolder.has_value()) owner = ctx.FreshKey("yellowback-vault");
     MintShape shape;

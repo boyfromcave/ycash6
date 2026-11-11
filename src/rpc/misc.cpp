@@ -195,6 +195,8 @@ UniValue validateaddress(const UniValue& params, bool fHelp)
             "  \"pqscheme\" : n,                 (numeric) A post-quantum address (sq…/tq…/rq…) only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
             "  \"pqschemename\" : \"name\",       (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
             "  \"pqkeyhash\" : \"hex\",          (string) A post-quantum address only: SHA256(scheme || public key), as in its TX_PQPKH script\n"
+            "  \"yed_holder\" : true,           (boolean) Where Yellowback is live, present only on a YED holder key of this wallet:\n"
+            "                                  the Yellowback index holds a YED token of this wallet at this address\n"
             "  \"account\" : \"account\"         (string) DEPRECATED. The account associated with the address, \"\" is the default account\n"
             "}\n"
             "\nExamples:\n"
@@ -230,6 +232,8 @@ UniValue validateaddress(const UniValue& params, bool fHelp)
         ret.pushKVs(detail);
         if (pwalletMain && pwalletMain->mapAddressBook.count(dest))
             ret.pushKV("account", pwalletMain->mapAddressBook[dest].name);
+        if (pwalletMain && mine != ISMINE_NO && YedHolderScripts().count(scriptPubKey))
+            ret.pushKV("yed_holder", true);      // beta2: the Yellowback index holds a YED token of this wallet here
 #endif
     }
     return ret;

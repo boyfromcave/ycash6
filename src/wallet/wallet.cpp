@@ -684,8 +684,15 @@ void CWallet::NotePQKeysUsed(const CTransaction& tx)
             PQChannelParams cp;
             if (MatchPQChannel(out.scriptPubKey, cp)) id = cp.client;
         }
-        if (id.has_value() && HavePQKey(id.value()))
+        if (id.has_value() && HavePQKey(id.value())) {
             MarkPQKeyUsed(id.value());
+            // Beta2: a key of this wallet paid by a TX_PQPKH output is filed in the address book when it is not yet
+            // (a seed-only restore re-finds its keys by this rescan, with no address book), as getnewaddress files
+            // it, so its receipts are receipts on the restored wallet as on the original, never change (IsChange).
+            // A vault, intent or channel owner key stays out, as vault_getnewowner leaves it.
+            if (type == TX_PQPKH && !mapAddressBook.count(CTxDestination(id.value())))
+                SetAddressBook(id.value(), "", "receive");
+        }
     }
 }
 

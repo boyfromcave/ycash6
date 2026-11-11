@@ -194,13 +194,22 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   - `getwalletinfo ( asOfHeight )` adds `balance_ecc`, `balance_pq`, `unconfirmed_balance_ecc`,
     `unconfirmed_balance_pq` and `pq_by_scheme: [{pqscheme, pqschemename, balance_pq, unconfirmed_balance_pq}]`
     (numbers, as `balance` is). With `asOfHeight` the unconfirmed fields are left out, as `unconfirmed_balance` is.
-    One pass over the wallet computes `balance`, `unconfirmed_balance` and both splits.
+    One fresh pass over the wallet computes `balance`, `unconfirmed_balance` and both splits (never from a
+    transaction's cached credit, which ignores `asOfHeight`), so an `_ecc` field is never negative.
   - `z_getbalance <address>` takes a post-quantum address of either scheme (finding L-3: 6.22.0-beta1 refused it
     with "Invalid from address, should be a taddr or zaddr.") and returns what the address holds (watch-only coins
-    included). A transparent address the wallet does not hold, ECC or post-quantum, answers `0`, as on ycash-dd
-    (**changed on this line**: 6.22.0-beta1 refused a foreign ECC address with "From address does not belong to
-    this node."); a shielded address the wallet does not hold keeps that refusal; an unparseable address keeps
-    `Invalid from address, should be a taddr or zaddr.`
+    included). **A transparent address the wallet does not hold, ECC or post-quantum** (no key and no watch-only
+    script), **is refused** (the Yellowback lead architect, 2026-11-11; both node lines) with
+    `RPC_INVALID_ADDRESS_OR_KEY` `From address does not belong to this node, transparent or post-quantum key or
+    watch-only script not found.` (6.22.0-beta1 refused a foreign ECC address with "From address does not belong to
+    this node."; v4.5.0 answered `0`). A watch-only transparent address still answers. A shielded address the wallet
+    does not hold is refused with ycash-dd's string, `From address does not belong to this node, spending key or
+    viewing key not found.` (6.22.0-beta1: "From address does not belong to this node."); an unparseable address
+    keeps `Invalid from address, should be a taddr or zaddr.`
+  - YED token dust: a YED holder key's token outputs (`TOKEN_VALUE`, 10,000 zat each) are locked by the
+    Yellowback wallet layer. Like any locked coin they count in `getwalletinfo` (`balance_pq` for a Falcon or
+    SLH-DSA holder key, as `balance`/`balance_ecc` always counted a P2PKH holder key's) and not in the by-depth
+    calls (`transparent_pq` of `z_gettotalbalance`, `z_getbalance` of the key).
   - Listings: `listaddresses` (decision D-1 reverses quantum spec A-15) adds a `pq` array to the source that holds
     each post-quantum address, `[{address, pqscheme, pqschemename}]`: `mnemonic_seed` for a key of the wallet's
     own seed (`getnewaddress "" "pq"`/`"pqslh"`, a `yed_getnewaddress "pq"` holder's plain-YEC form, a key found
@@ -210,7 +219,14 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
     This is a 6.x-only extension (ycash-dd has no `listaddresses`). `listreceivedbyaddress 0 true` lists every
     transparent address of the address book, ECC and post-quantum, and a post-quantum entry adds `pqscheme` and
     `pqschemename`; it also lists every post-quantum key of the wallet that received coins without an address-book
-    entry (a seed-only restore, `-mnemonicfile`, finds its PQ keys by rescan but does not file them).
+    entry. Since beta2 the wallet files such a key itself (purpose `receive`, label `""`) when it first sees a
+    `TX_PQPKH` output paying it, so a wallet restored from its seed (`-mnemonicfile`), whose rescan re-finds its PQ
+    keys, classifies, lists and counts their receipts as the original wallet does (a receipt, never change); vault,
+    intent and channel owner keys stay out of the address book. A fresh YED holder key (`yed_mint`, YED change from
+    the Falcon height) is filed when it is drawn, under the purpose a P2PKH holder key gets (`yellowback-vault`,
+    `yellowback-change`). Where Yellowback is live, an entry of `listreceivedbyaddress` and of the `pq` arrays of
+    `listaddresses` (and `validateaddress` of an address of this wallet) carries `"yed_holder": true` when the
+    Yellowback index holds a YED token of this wallet at that address; the field is absent otherwise.
     `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`.
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, the same as ycash-dd's,
     now documented and pinned by `qa/rpc-tests/wallet_balance_by_type.py`). *Spendable now*

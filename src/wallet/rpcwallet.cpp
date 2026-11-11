@@ -656,8 +656,8 @@ static TransparentSplit AvailableTransparentSplit(int minDepth, bool ignoreUnspe
 //! CWallet::GetBalance(asOfHeight) and, without asOfHeight, CWallet::GetUnconfirmedTransparentBalance(), with
 //! their post-quantum parts, in one pass over mapWallet (the two functions make one pass each). Same rules:
 //! balance = the available credit of every transaction trusted at asOfHeight; unconfirmed = that of every
-//! non-final one, or of depth 0 and not trusted. Only a transaction with a nonzero available credit has its
-//! outputs looked at for TX_PQPKH (unspent, ISMINE_SPENDABLE, as CWalletTx::GetAvailableCredit counts them).
+//! non-final one, or of depth 0 and not trusted. Each transaction's credit and its TX_PQPKH part are counted in
+//! one fresh pass (unspent, ISMINE_SPENDABLE, as CWalletTx::GetAvailableCredit counts them, never from its cache).
 struct WalletBalanceSplit {
     CAmount balance = 0, unconfirmed = 0;
     PQAmounts pqBalance, pqUnconfirmed;
@@ -671,18 +671,39 @@ static WalletBalanceSplit GetWalletBalanceSplit(const std::optional<int>& asOfHe
         const bool unconfirmed = !asOfHeight.has_value() &&
             (!CheckFinalTx(wtx) || (!trusted && wtx.GetDepthInMainChain(std::nullopt) == 0));
         if (!trusted && !unconfirmed) continue;
-        const CAmount credit = wtx.GetAvailableCredit(asOfHeight);
-        if (trusted) r.balance += credit; else r.unconfirmed += credit;
-        if (credit == 0) continue;
+        // The credit and its post-quantum part in one fresh pass, as CWalletTx::GetAvailableCredit counts the credit
+        // (immature coinbase 0; unspent outputs at asOfHeight, ISMINE_SPENDABLE) but never from its cache, which
+        // ignores asOfHeight and may lag a spend: the ECC part (total less PQ) can then never go negative.
+        if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity(asOfHeight) > 0) continue;
+        CAmount credit = 0;
         PQAmounts& pq = trusted ? r.pqBalance : r.pqUnconfirmed;
         for (unsigned int i = 0; i < wtx.vout.size(); i++) {
+            if (pwalletMain->IsSpent(hash, i, asOfHeight)) continue;
             const CTxOut& txout = wtx.vout[i];
-            auto scheme = PQSchemeOfScript(txout.scriptPubKey);
-            if (!scheme || pwalletMain->IsSpent(hash, i, asOfHeight)) continue;
-            pq.Add(*scheme, pwalletMain->GetCredit(txout, ISMINE_SPENDABLE));
+            const CAmount c = pwalletMain->GetCredit(txout, ISMINE_SPENDABLE);
+            credit += c;
+            if (!MoneyRange(credit)) throw std::runtime_error("GetWalletBalanceSplit(): value out of range");
+            if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) pq.Add(*scheme, c);
         }
+        if (trusted) r.balance += credit; else r.unconfirmed += credit;
     }
     return r;
+}
+
+std::set<CScript> YedHolderScripts()
+{
+    std::set<CScript> out;
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index()) return out;
+    LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+    const std::set<COutPoint> locked = yw->Locked();
+    LOCK(yw->Index()->cs_yellowback);
+    if (!yw->Index()->IsHealthy()) return out;
+    yellowback::State st(yw->Index()->View());
+    for (const COutPoint& o : locked) {
+        if (auto token = st.GetToken(o)) out.insert(token->scriptPubKey);
+    }
+    return out;
 }
 
 //! Adds "pqscheme" (number) and "pqschemename" to an object that names a post-quantum address.
@@ -755,7 +776,9 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
             "      {\n"
             "        \"address\": \"...\",\n"
             "        \"pqscheme\": n,              (numeric) 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
-            "        \"pqschemename\": \"name\"      (string) \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "        \"pqschemename\": \"name\",     (string) \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "        \"yed_holder\": true          (boolean) Where Yellowback is live, present only on a YED holder key: the\n"
+            "                                    Yellowback index holds a YED token of this wallet at this address\n"
             "      },\n"
             "      ...\n"
             "    ],\n"
@@ -898,6 +921,7 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
     /// key from elsewhere (z_importpqkey / importwallet store it without an index) is imported, an address watched
     /// without its key (importaddress) is imported_watchonly. Each is {"address", "pqscheme", "pqschemename"}.
     UniValue pq_mnemonic(UniValue::VARR), pq_imported(UniValue::VARR), pq_watchonly(UniValue::VARR);
+    const std::set<CScript> yedHolders = YedHolderScripts();
     for (const CPQKeyID& id : pqDests) {
         UniValue* target = nullptr;
         std::vector<unsigned char> pk;
@@ -911,6 +935,8 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
         UniValue pqEntry(UniValue::VOBJ);
         pqEntry.pushKV("address", keyIO.EncodeDestination(id));
         PushPQScheme(pqEntry, id.scheme);
+        if (yedHolders.count(GetScriptForDestination(id)))
+            pqEntry.pushKV("yed_holder", true);   // beta2: a YED holder key (the Yellowback index holds a token of this wallet at it)
         target->push_back(std::move(pqEntry));
     }
     auto add_pq = [](UniValue& pqAddrs, UniValue& entry) {
@@ -2133,6 +2159,7 @@ UniValue ListReceived(const UniValue& params)
 
     // Reply
     UniValue ret(UniValue::VARR);
+    const std::set<CScript> yedHolders = YedHolderScripts();
     // The address book, plus (beta2 item 15) every post-quantum key of this wallet that received coins without an
     // address-book entry: a wallet restored from its seed (-mnemonicfile) finds its PQ keys by rescan but does not
     // file them, and they must still be listed.
@@ -2166,6 +2193,8 @@ UniValue ListReceived(const UniValue& params)
         obj.pushKV("confirmations", (nConf == std::numeric_limits<int>::max() ? 0 : nConf));
         if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest))
             PushPQScheme(obj, pq->scheme);    // beta2 item 15: a post-quantum address shows its scheme
+        if (yedHolders.count(GetScriptForDestination(dest)))
+            obj.pushKV("yed_holder", true);   // beta2: a YED holder key (the Yellowback index holds a token of this wallet at it)
         UniValue transactions(UniValue::VARR);
         if (it != mapTally.end())
         {
@@ -2211,6 +2240,9 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "    \"confirmations\" : n                (numeric) The number of confirmations of the most recent transaction included\n"
             "    \"pqscheme\" : n,                    (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
             "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "    \"yed_holder\" : true,               (boolean) Where Yellowback is live, present only on a YED holder key: the Yellowback\n"
+            "                                         index holds a YED token of this wallet at this address (its token outputs are locked;\n"
+            "                                         see yed_listunspent)\n"
             "    \"txids\" : [\"txid\", ...]            (array) The transactions that paid the address\n"
             "  }\n"
             "  ,...\n"
@@ -4741,8 +4773,9 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
             "\ndetected, and so the returned balance may be larger than the actual balance."
             "\nArguments:\n"
             "1. \"address\"        (string) The selected address. It may be a transparent address (ECC, or post-quantum of\n"
-            "                   either scheme) or a shielded address. A transparent address (ECC or post-quantum) this wallet\n"
-            "                   does not hold answers 0 (nothing of it is in the wallet); a shielded one is refused.\n"
+            "                   either scheme) or a shielded address of this wallet. An address the wallet does not hold is refused:\n"
+            "                   transparent or post-quantum (no key and no watch-only script), or shielded (no spending or viewing\n"
+            "                   key). A watch-only transparent address answers.\n"
             "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times\n"
             "                   (as z_gettotalbalance: unconfirmed own change is left out at 1 and counted at 0).\n"
             "3. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
@@ -4768,10 +4801,23 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
 
     CAmount nBalance = 0;
     // beta2 item 15 (finding L-3): a post-quantum address is a transparent address; PaymentAddress has no
-    // post-quantum alternative, so it is decoded as a destination. A transparent address, ECC or post-quantum,
-    // needs no key for a balance read: one this wallet does not hold answers 0 (only its own and watch-only coins
-    // are counted), as on ycash-dd; a shielded one keeps the ownership check.
+    // post-quantum alternative, so it is decoded as a destination. Beta2 (the lead architect, 2026-11-11): a
+    // transparent address, ECC or post-quantum, that this wallet does not hold (no key, no watch-only script) is
+    // refused, as a shielded one is; a watch-only one still answers.
     const CTxDestination pqDest = pa.has_value() ? CTxDestination(CNoDestination()) : keyIO.DecodeDestination(fromaddress);
+    std::optional<CTxDestination> tdest;
+    if (std::holds_alternative<CPQKeyID>(pqDest)) {
+        tdest = pqDest;
+    } else if (pa.has_value()) {
+        examine(pa.value(), match {
+            [&](const CKeyID& addr) { tdest = CTxDestination(addr); },
+            [&](const CScriptID& addr) { tdest = CTxDestination(addr); },
+            [](const auto&) {},
+        });
+    }
+    if (tdest.has_value() && IsMine(*pwalletMain, GetScriptForDestination(tdest.value())) == ISMINE_NO) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, transparent or post-quantum key or watch-only script not found.");
+    }
     if (std::holds_alternative<CPQKeyID>(pqDest)) {
         nBalance = getBalanceTaddr(pqDest, std::nullopt, nMinDepth, false);
     } else {
@@ -4780,7 +4826,8 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
     }
     const bool isTransparent = std::holds_alternative<CKeyID>(pa.value()) || std::holds_alternative<CScriptID>(pa.value());
     if (!isTransparent && !std::visit(PaymentAddressBelongsToWallet(pwalletMain), pa.value())) {
-         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node.");
+         // beta2: the v4.5.0 line's string (a superset of upstream's "From address does not belong to this node.")
+         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, spending key or viewing key not found.");
     }
 
     examine(pa.value(), match {
