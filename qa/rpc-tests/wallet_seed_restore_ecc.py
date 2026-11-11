@@ -12,7 +12,12 @@ chains, and a wallet restored from its recovery phrase alone must show the same 
   so the restore holds i+150 only after the payment to i+60 moved its window (the rescan's re-pass);
 - a gap of 100 unused addresses then one paid (found), and last a gap of 101 then one paid: the documented miss,
   found after getnewaddress is run past the gap and a restart with -rescan;
-- 130 coinbase outputs to 130 keypool (internal) keys, beyond the keypool, matured.
+- 130 coinbase outputs to 130 keypool (internal) keys, beyond the keypool, matured;
+- after the last block that moves the lookahead in the restore's first pass (review H-1): of three later keys
+  c150 is paid first, then c60, then c150's coin is swept to another wallet with no change, then one transaction
+  pays d60 and d150, keys the restore holds only once the re-pass has found c150: the re-pass must read the whole
+  range (the sweep and the payment lie past the last height at which the first pass grew the lookahead);
+- the chain ends with blocks that pay nothing to the wallet.
 
 Then: restarts keep the restored state; the original and the restored wallet hand out the same next address; held
 keys appear in no listing or dump before they are issued or paid; an encrypted, locked restored wallet misses a
@@ -97,7 +102,34 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         w = n0.getwalletinfo()
         return {'utxos': utxos, 'transparent': t['transparent'], 'total': t['total'],
                 'balance': w['balance'], 'unconfirmed': w['unconfirmed_balance'], 'immature': w['immature_balance'],
-                'txcount': w['txcount'], 'keypoolsize': w['keypoolsize'], 'getbalance': n0.getbalance()}
+                'txcount': w['txcount'], 'keypoolsize': w['keypoolsize'], 'getbalance': n0.getbalance(),
+                'listtransactions': len(n0.listtransactions('*', 100000))}
+
+    def sweep(self, address, dest):
+        """node 0 spends the one coin of `address` whole to `dest` (another wallet): no change, no output of its own."""
+        n0 = self.nodes[0]
+        coins = [u for u in n0.listunspent(0) if u['address'] == address]
+        assert_equal(len(coins), 1)
+        raw = n0.createrawtransaction([{'txid': coins[0]['txid'], 'vout': coins[0]['vout']}],
+                                      {dest: Decimal(coins[0]['amount']) - Decimal('0.00001')})
+        txid = n0.sendrawtransaction(n0.signrawtransaction(raw)['hex'])
+        self.sync_all()
+        self.nodes[1].generate(1)
+        self.sync_all()
+        return txid
+
+    def pay_ordered(self, outputs):
+        """node 1 pays [(address, amount), ...] in one transaction, the outputs in that order; mines it."""
+        n1 = self.nodes[1]
+        raw = n1.createrawtransaction([], {a: v for a, v in outputs})
+        funded = n1.fundrawtransaction(raw)['hex']
+        order = [o['scriptPubKey'].get('addresses', [None])[0] for o in n1.decoderawtransaction(funded)['vout']]
+        assert_equal([a for a in order if a in dict(outputs)], [a for a, _ in outputs])
+        txid = n1.sendrawtransaction(n1.signrawtransaction(funded)['hex'])
+        self.sync_all()
+        n1.generate(1)
+        self.sync_all()
+        return txid
 
     def debug_log(self):
         with open(os.path.join(self.options.tmpdir, 'node0', 'regtest', 'debug.log'), encoding='utf-8') as f:
@@ -128,14 +160,24 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
             n0.generate(1)                      # generate keeps one keypool key per call
         self.sync_all()
 
+        print('H-1: a coin found only by the re-pass is spent, and keys it brings in are paid, after the last growth')
+        c = [n0.getnewaddress() for _ in range(151)]
+        c60, c150 = c[60], c[150]
+        self.pay({c150: Decimal('0.2')})
+        self.pay({c60: Decimal('0.3')})
+        sweep_txid = self.sweep(c150, n1.getnewaddress())
+        d = [n0.getnewaddress() for _ in range(151)]
+        d_txid = self.pay_ordered([(d[60], Decimal('0.35')), (d[150], Decimal('0.25'))])
+
         print('last, a gap of %d unused addresses, then one paid (the documented miss)' % (KEYPOOL + 1))
         gap_miss = [n0.getnewaddress() for _ in range(KEYPOOL + 2)]
         miss_txid = self.pay({gap_miss[-1]: Decimal('0.5')})
         n1.generate(101)
         self.sync_all()
         before = self.snapshot()
-        assert len(before['utxos']) >= IN_ORDER + 4 + COINBASE, len(before['utxos'])
-        coinbase_keys = {u[2] for u in before['utxos']} - set(in_order) - {k60, k150, gap_ok[-1], gap_miss[-1]}
+        assert len(before['utxos']) >= IN_ORDER + 6 + COINBASE, len(before['utxos'])
+        assert c150 not in {u[2] for u in before['utxos']}
+        coinbase_keys = {u[2] for u in before['utxos']} - set(in_order) - {k60, k150, gap_ok[-1], gap_miss[-1], c60, d[60], d[150]}
         assert len(coinbase_keys) >= COINBASE, len(coinbase_keys)
         export = n0.z_exportwallet('eccseedexport')
 
@@ -150,6 +192,15 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         assert_equal([(m[0], m[2], m[3]) for m in missing], [(miss_txid, gap_miss[-1], Decimal('0.5'))])
         restored = {u[2] for u in after['utxos']}
         assert k150 in restored and k60 in restored and gap_ok[-1] in restored
+        # H-1: the swept coin is spent (not listed), the coins of d60 and d150 are found
+        assert c150 not in restored and c60 in restored and d[60] in restored and d[150] in restored
+        assert_equal(n0.gettransaction(sweep_txid)['txid'], sweep_txid)
+        assert_equal(n0.gettransaction(d_txid)['txid'], d_txid)
+        # every other figure matches the original but for the one missed payment (0.5)
+        assert_equal(Decimal(after['transparent']), Decimal(before['transparent']) - Decimal('0.5'))
+        assert_equal(after['getbalance'], before['getbalance'] - Decimal('0.5'))
+        assert_equal(after['txcount'], before['txcount'] - 1)
+        assert_equal(after['listtransactions'], before['listtransactions'] - 1)
         assert all(a in restored for a in in_order)
         log = self.debug_log()
         assert 'the key lookahead moved during the scan; re-checking heights' in log

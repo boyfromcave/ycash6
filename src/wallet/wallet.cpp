@@ -6081,11 +6081,11 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         double dProgressTip = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip(), false);
 
         // Beta2 (seed-only restore of ECC coins): a key the lookahead derives while this scan runs (an output paying a
-        // held key moved the window) may have been paid in a block the scan has passed: a restored wallet's keys are
-        // used in the order the original wallet issued them, not in chain order. Remember the last height at which
-        // the lookahead grew; after the scan, re-check the blocks up to it (see below).
+        // held key moved the window) may have been paid, or its coin spent, in a block the scan has passed: a
+        // restored wallet's keys are used in the order the original wallet issued them, not in chain order. If the
+        // lookahead grew during the scan, the scanned blocks are read again after it (the re-pass, see below).
         CBlockIndex* pindexScanStart = pindex;
-        std::optional<int> lookaheadGrewAt;
+        const uint64_t growthAtScanStart = nKeyLookaheadGrowth;
         if (pindex && LegacyTKeyLookaheadShort()) {
             LogPrintf("ScanForWalletTransactions(): the wallet is locked, so it does not hold its transparent key lookahead: "
                       "coins sent to addresses of its seed it has not issued are not found; to find them, restore the recovery "
@@ -6111,7 +6111,6 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                 batchScanner.AddTransaction(tx, txBytes, pindex->GetBlockHash(), pindex->nHeight);
             }
             batchScanner.Flush();
-            const uint64_t growthBefore = nKeyLookaheadGrowth;
             for (CTransaction& tx : block.vtx)
             {
                 if (batchScanner.AddToWalletIfInvolvingMe(consensus, tx, &block, pindex->nHeight, fUpdate)) {
@@ -6129,9 +6128,6 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                     }
                 }
             }
-
-            if (nKeyLookaheadGrowth != growthBefore)
-                lookaheadGrewAt = pindex->nHeight;
 
             MerkleFrontiers frontiers;
             // This should never fail: we should always be able to get the tree
@@ -6158,29 +6154,36 @@ std::optional<int> CWallet::ScanForWalletTransactions(
             }
         }
 
-        // Beta2: the re-pass. Keys the lookahead derived at height h were not known to the blocks before h (nor to the
-        // transactions before them in block h): re-check those blocks for transactions the wallet does not have yet
-        // that pay or spend its keys, until a pass derives no new key. Each pass only adds transparent
-        // transactions: a transaction with Sapling, Sprout or Orchard data of this wallet was found by the main pass
-        // (its notes are trial-decrypted there), and the note witnesses advanced there, so ChainTipAdded is not
-        // repeated. Correctness of the recovered coins is worth the extra block reads (a restore reads its blocks
-        // about twice; a wallet whose lookahead does not move reads them once).
+        // Beta2: the re-pass. A key the lookahead derived at height h was not known to the blocks before h (nor to the
+        // transactions before it in block h), and a coin found by a re-pass can be spent in any later block, up to the
+        // tip: so each pass reads the WHOLE scanned range again, from the scan start to the tip, for transactions the
+        // wallet does not have yet that pay or spend its keys (AddToWalletIfInvolvingMe: IsMine, or IsFromMe through
+        // the coins found so far, which records the spend in mapTxSpends). A block holds its transactions in spending
+        // order and a pass reads the blocks in chain order, so a pass sees every spend of a coin it finds. Passes go
+        // on while the previous one grew the lookahead or added a transaction, and stop after one that did neither.
+        // Termination: a pass that goes on either added a chain transaction the wallet did not have (each is added at
+        // most once, and the range is finite), or grew the lookahead, which grows only when an output in the range
+        // pays a key at or past a chain's counter (the counter then moves past it and stays there): the keys it can
+        // reach are bounded by the outputs in the range, the gap limit (-keypool) apart. Each pass only adds
+        // transparent transactions: a transaction with Sapling, Sprout or Orchard data of this wallet was found by the
+        // main pass (its notes are trial-decrypted there), and the note witnesses advanced there, so ChainTipAdded is
+        // not repeated. The cost: a restore reads its blocks about twice (the main pass and one re-pass), more when the
+        // wallet used keys far out of chain order; a scan during which the lookahead does not grow reads them once.
         int repass = 0;
-        while (lookaheadGrewAt.has_value() && pindexScanStart != nullptr && lookaheadGrewAt.value() >= pindexScanStart->nHeight) {
+        bool again = pindexScanStart != nullptr && nKeyLookaheadGrowth != growthAtScanStart;
+        while (again) {
             if (ShutdownRequested()) return std::nullopt;
-            const int until = lookaheadGrewAt.value();
-            lookaheadGrewAt = std::nullopt;
             repass++;
             LogPrintf("ScanForWalletTransactions(): the key lookahead moved during the scan; re-checking heights %d to %d (pass %d)\n",
-                      pindexScanStart->nHeight, until, repass + 1);
+                      pindexScanStart->nHeight, chainActive.Height(), repass + 1);
+            const uint64_t growthBefore = nKeyLookaheadGrowth;
             int added = 0;
-            for (CBlockIndex* p = pindexScanStart; p != nullptr && p->nHeight <= until; p = chainActive.Next(p)) {
+            for (CBlockIndex* p = pindexScanStart; p != nullptr; p = chainActive.Next(p)) {
                 CBlock block;
                 if (!ReadBlockFromDisk(block, p, consensus)) {
                     throw std::runtime_error(
                         strprintf("Can't read block %d from disk (%s)", p->nHeight, p->GetBlockHash().GetHex()));
                 }
-                const uint64_t growthBefore = nKeyLookaheadGrowth;
                 for (const CTransaction& tx : block.vtx) {
                     if (mapWallet.count(tx.GetHash()) || tx.GetOrchardBundle().IsPresent())
                         continue;
@@ -6191,12 +6194,13 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                         added++;
                     }
                 }
-                if (nKeyLookaheadGrowth != growthBefore)
-                    lookaheadGrewAt = p->nHeight;
             }
-            LogPrintf("ScanForWalletTransactions(): the re-check found %d more transaction(s)\n", added);
-            if (added > 0)
-                MarkDirty();   // cached credits and debits of transactions spending the coins just found
+            const bool grew = nKeyLookaheadGrowth != growthBefore;
+            LogPrintf("ScanForWalletTransactions(): the re-check found %d more transaction(s)%s\n", added,
+                      grew ? "; the lookahead grew again" : "");
+            if (added > 0 || grew)
+                MarkDirty();   // cached credits and debits: coins just found, and outputs of keys just held
+            again = added > 0 || grew;
         }
 
         // After rescanning, persist Sapling & Orchard note data that might have changed,
