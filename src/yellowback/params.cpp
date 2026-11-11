@@ -4,6 +4,8 @@
 
 #include "yellowback/params.h"
 
+#include "crypto/pq/scheme.h"
+
 #include <cassert>
 
 #include <stdexcept>
@@ -127,7 +129,9 @@ void SetTestnet(Params& t)
 {
     t.network = "test";
     t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
-    t.pqAddressVersion = { 0x57, 0x1E }; // renders "yt…", 53 characters (quantum spec §4)
+    t.pqAddressVersions = {               // 53 characters, the scheme in the prefix (quantum spec §4, D-9)
+        { pq::SCHEME_FN_DSA_512, { 0x57, 0x21, 0xC9 } },          // "ytf…"
+        { pq::SCHEME_SLH_DSA_SHA2_128S, { 0x57, 0x23, 0x30 } } }; // "yts…"
     // U-22: unset until a release sets the UPGRADE_VAULT height and the attestor set (YED off).
     t.startHeight = 0;
 }
@@ -175,7 +179,9 @@ const Params& MainParams()
         m.network = "main";
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xDD };   // renders "yb…", 35 characters (D10; mainnet prefix D-Q-21)
-        m.pqAddressVersion = { 0x56, 0xAB }; // renders "yb…", 53 characters (quantum spec §4; D-Q-21)
+        m.pqAddressVersions = {               // 53 characters, the scheme in the prefix (quantum spec §4; D-Q-21, D-9)
+            { pq::SCHEME_FN_DSA_512, { 0x56, 0xAE, 0xDE } },          // "ybf…"
+            { pq::SCHEME_SLH_DSA_SHA2_128S, { 0x56, 0xB0, 0x44 } } }; // "ybs…"
         // U-22: startHeight is the UPGRADE_VAULT activation height and attestorSetId the network's
         // YED set; both are unset on mainnet until the gate-passing release (P8) sets them, so YED
         // is off. (The v3 miner-enforced START_HEIGHT 3,075,000 and its sunset are retired, §6.)
@@ -286,7 +292,9 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, const u
     r.network = "regtest";
     SetCommon(r);
     r.addressVersion = { 0x20, 0x02 };       // renders "yr…" (D10)
-    r.pqAddressVersion = { 0x57, 0x10 };     // renders "yr…", 53 characters (quantum spec §4)
+    r.pqAddressVersions = {                  // 53 characters, the scheme in the prefix (quantum spec §4, D-9)
+        { pq::SCHEME_FN_DSA_512, { 0x57, 0x14, 0x44 } },          // "yrf…"
+        { pq::SCHEME_SLH_DSA_SHA2_128S, { 0x57, 0x15, 0xAA } } }; // "yrs…"
     r.pFastWindow = 8;  r.pFastMinFill = 4;
     r.pMidWindow  = 24; r.pMidMinFill  = 16;
     r.pSlowWindow = 64; r.pSlowMinFill = 43;

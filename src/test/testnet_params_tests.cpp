@@ -292,7 +292,8 @@ BOOST_AUTO_TEST_CASE(testnet_yed_columns)
     for (const Params* p : {&slow, &fast}) {
         BOOST_CHECK_EQUAL(p->network, "test");
         BOOST_CHECK(p->addressVersion == std::vector<unsigned char>({0x20, 0x07}));
-        BOOST_CHECK(p->pqAddressVersion == std::vector<unsigned char>({0x57, 0x1E}));
+        BOOST_CHECK(p->pqAddressVersions.at(2) == std::vector<unsigned char>({0x57, 0x21, 0xC9}));   // ytf… (D-9)
+        BOOST_CHECK(p->pqAddressVersions.at(1) == std::vector<unsigned char>({0x57, 0x23, 0x30}));   // yts…
         BOOST_CHECK_EQUAL(p->startHeight, 0);
         BOOST_CHECK(p->attestorSetId.IsNull());   // each Vault profile's own set, named by its rc1
     }

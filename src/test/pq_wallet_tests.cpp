@@ -7,10 +7,12 @@
 // derivation, CPQKey, the keystores (plain and encrypted), the walletdb records, GetNewPQKey,
 // TX_PQPKH signing through ProduceSignature, size estimation, and the vault owner signer.
 
+#include "base58.h"
 #include "chainparams.h"
 #include "consensus/upgrades.h"
 #include "crypto/pq/scheme.h"
 #include "crypto/pq/sign.h"
+#include "key_io.h"
 #include "keystore.h"
 #include "main.h"
 #include "mempool_limit.h"
@@ -658,6 +660,61 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     BOOST_REQUIRE(c.GetNewPQKey(1, cn));
     BOOST_CHECK(cn == WalletDerived(1, 2).GetID());        // one past the highest own index, not 0, not 501
     BOOST_CHECK_EQUAL(c.mapPQIssued[1], 3U);
+}
+
+BOOST_AUTO_TEST_CASE(pre_d9_address_book_records_rewritten_at_load)
+{
+    // D-9 (quantum spec §4.1): a wallet written before D-9 keys its post-quantum address-book records by the
+    // 2-byte-version string. The load keeps their labels, rewrites them under the current string in one
+    // transaction, and a label deleted afterwards stays deleted across a restart.
+    bitdb.MakeMock();
+    const std::string file = "pq_d9_book_test.dat";
+    const std::string net = Params().NetworkIDString();
+    const std::vector<unsigned char> oldVer = net == "main" ? std::vector<unsigned char>{0x4D, 0xD9}
+                                            : net == "test" ? std::vector<unsigned char>{0x4F, 0x61}
+                                                            : std::vector<unsigned char>{0x4C, 0x51};
+    auto oldForm = [&](const CPQKeyID& id) {   // the pre-D-9 encoder: version || scheme || keyHash
+        std::vector<unsigned char> d = oldVer;
+        d.push_back(id.scheme);
+        d.insert(d.end(), id.hash.begin(), id.hash.end());
+        return EncodeBase58Check(d);
+    };
+    KeyIO keyIO(Params());
+    const CPQKeyID a(1, uint256S("a1")), b(2, uint256S("b2")), c(1, uint256S("c3"));
+    {
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        CWalletDB db(file);
+        BOOST_REQUIRE(db.WriteName(oldForm(a), "alpha") && db.WritePurpose(oldForm(a), "receive"));
+        BOOST_REQUIRE(db.WriteName(oldForm(b), "beta") && db.WritePurpose(oldForm(b), "send"));
+        BOOST_REQUIRE(db.WriteName(oldForm(c), "stale"));                   // both forms: the current one wins
+        BOOST_REQUIRE(db.WriteName(keyIO.EncodeDestination(c), "fresh"));
+        BOOST_CHECK(!IsValidDestination(keyIO.DecodeDestination(oldForm(a))));   // no RPC takes the old form
+    }
+    {
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        BOOST_CHECK_EQUAL(w.mapAddressBook[a].name, "alpha");
+        BOOST_CHECK_EQUAL(w.mapAddressBook[a].purpose, "receive");
+        BOOST_CHECK_EQUAL(w.mapAddressBook[b].name, "beta");
+        BOOST_CHECK_EQUAL(w.mapAddressBook[c].name, "fresh");
+        BOOST_CHECK_EQUAL(w.mapAddressBook.count(CNoDestination()), 0U);
+        BOOST_REQUIRE(w.DelAddressBook(b));
+    }
+    for (int round = 0; round < 2; round++) {   // twice: the rewrite is idempotent
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        BOOST_CHECK_EQUAL(w.mapAddressBook[a].name, "alpha");
+        BOOST_CHECK_EQUAL(w.mapAddressBook[a].purpose, "receive");
+        BOOST_CHECK_EQUAL(w.mapAddressBook.count(b), 0U);                     // deleted stays deleted
+        BOOST_CHECK_EQUAL(w.mapAddressBook[c].name, "fresh");
+        BOOST_CHECK_EQUAL(w.mapAddressBook.count(CNoDestination()), 0U);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

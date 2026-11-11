@@ -5,7 +5,9 @@
 
 """
 The plain-YEC post-quantum address chain-wide (owner decision D-Q-20; quantum plan §8.1 "SQ"): rq… on regtest,
-Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ yr… names.
+Base58Check(3-byte version || keyHash), 53 characters, the version naming the scheme (D-9: rqf… FN-DSA-512, rqs…
+SLH-DSA-SHA2-128s; test_framework/pq_address.py reads the versions from the shared vectors file), the TX_PQPKH
+script a PQ yrf…/yrs… names. The pre-D-9 form (4C51 || scheme || keyHash) is refused.
 
 - getnewaddress "" "pq" / "pqslh": refused before the vault upgrade; after it an rq… address of the wallet's PQ key
   chain (SLH-DSA while Falcon is inactive), in the address book; validateaddress pqscheme / pqkeyhash;
@@ -53,6 +55,8 @@ from test_framework.util import (
     sync_blocks,
     wait_and_assert_operationid_status,
 )
+from test_framework.pq_address import (FN_DSA, SLH_DSA, decode_pq_address, encode_legacy_pq_address,
+                                       encode_pq_address, pq_prefix, pq_version)
 from test_framework.yellowback_model import base58check_decode, base58check_encode
 from test_framework.yellowback_util import MARGINAL_FEE, conventional_fee
 
@@ -60,8 +64,6 @@ ACTIVATION = 210
 DELAY = 3
 DEFAULT_FEE = 1000
 SLH_PQPKH_SCRIPTSIG = 7938       # spec §2.1
-RQ_VERSION = bytes.fromhex('4c51')
-YR_PQ_VERSION = bytes.fromhex('5710')
 
 
 def assert_raises_rpc(substr, fn, *args):
@@ -78,9 +80,10 @@ def zat(x):
 
 
 def pq_parts(addr):
-    raw = base58check_decode(addr)
-    assert raw is not None and len(raw) == 35, addr
-    return raw[:2], raw[2], raw[3:]
+    """(network, coin, scheme, keyhash) of a D-9 post-quantum address."""
+    parts = decode_pq_address(addr)
+    assert parts is not None, addr
+    return parts
 
 
 class WalletPQAddressTest(BitcoinTestFramework):
@@ -140,13 +143,13 @@ class WalletPQAddressTest(BitcoinTestFramework):
         a3 = n0.getnewaddress('', 'pqslh')
         b = n0.getnewaddress('', 'pq')
         for x in (a, a2, a3, b):
-            assert x.startswith('rq') and len(x) == 53, x
-            ver, scheme, h = pq_parts(x)
-            assert_equal((ver, scheme), (RQ_VERSION, 1))    # SLH-DSA: Falcon is not active on this chain
+            assert x.startswith(pq_prefix(SLH_DSA)) and len(x) == 53, x   # rqs…: SLH-DSA, Falcon is not active here
+            net, coin, scheme, h = pq_parts(x)
+            assert_equal((net, coin, scheme), ('regtest', 'yec', SLH_DSA))
         assert len({a, a2, a3, b}) == 4
         assert_raises_rpc('type must be', n0.getnewaddress, '', 'bogus')
         v = n0.validateaddress(a)
-        _, _, h = pq_parts(a)
+        h = pq_parts(a)[3]
         assert_equal((v['isvalid'], v['ismine'], v['isscript'], v['pqscheme'], v['pqkeyhash']), (True, True, False, 1, h.hex()))
         assert_equal(v['scriptPubKey'], pqpkh_script(1, h).hex())
         assert_equal(v['account'], '')
@@ -155,10 +158,15 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n1.validateaddress(a[:-1] + ('1' if a[-1] != '1' else '2'))['isvalid'], False)
 
         print('refusals')
-        falcon = base58check_encode(RQ_VERSION + b'\x02' + h)
-        assert_equal(n1.validateaddress(falcon)['isvalid'], True)
+        falcon = encode_pq_address(FN_DSA, h)
+        assert falcon.startswith(pq_prefix(FN_DSA)) and pq_prefix(FN_DSA) != pq_prefix(SLH_DSA), falcon
+        assert_equal((n1.validateaddress(falcon)['isvalid'], n1.validateaddress(falcon)['pqscheme']), (True, FN_DSA))
         assert_raises_rpc('FN-DSA-512', n1.sendtoaddress, falcon, 1)
-        unknown = base58check_encode(RQ_VERSION + b'\x03' + h)
+        # D-9 clean cut: the pre-D-9 form is refused for every scheme byte, as is an unregistered version.
+        for scheme in (1, 2, 3):
+            assert_equal(n1.validateaddress(encode_legacy_pq_address(scheme, h))['isvalid'], False)
+        assert_raises_rpc('Invalid', n1.sendtoaddress, encode_legacy_pq_address(SLH_DSA, h), 1)
+        unknown = base58check_encode(bytes([pq_version(FN_DSA)[0], pq_version(FN_DSA)[1], pq_version(FN_DSA)[2] + 1]) + h)
         assert_equal(n1.validateaddress(unknown)['isvalid'], False)
         assert_raises_rpc('Transaction amount too small', n1.sendtoaddress, a, Decimal('0.00001'))
         assert_raises_rpc('no WIF key', n0.dumpprivkey, a)
@@ -193,8 +201,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         cats = [(t['category'], t['address']) for t in n0.listtransactions('*', 100) if t['txid'] == tx_a]
         assert_equal(cats, [('receive', a)])
 
-        print('the insight address index: rq… and its yr… YED form')
-        yr = base58check_encode(YR_PQ_VERSION + b'\x01' + h)
+        print('the insight address index: rqs… and its yrs… YED form')
+        yr = encode_pq_address(SLH_DSA, h, coin='yed')
+        assert yr.startswith(pq_prefix(SLH_DSA, coin='yed')), yr
         for form in (a, yr):
             bal = n0.getaddressbalance({'addresses': [form]})
             assert_equal((bal['balance'], bal['received']), (zat(2), zat(2)))
@@ -252,7 +261,7 @@ class WalletPQAddressTest(BitcoinTestFramework):
             cur = [x for x in n0.vault_list({'kind': 'vault', 'setid': setid})][0]['outpoint']
         self.mine(DELAY)
         assert_raises_rpc('recipient script is unknown', n1.vault_release, intents[0])   # n1 holds no key of b
-        _, sb, hb = pq_parts(b)
+        _, _, sb, hb = pq_parts(b)
         assert_raises_rpc('pass the address or the script, not a pqkeyid', n1.vault_release, intents[0], '%02x' % sb + hb.hex())
         r1 = n1.vault_release(intents[0], b)                                                # a third party, with the address
         self.mine(1)
@@ -308,6 +317,15 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n1.z_importpqkey(dump_line, False)['address'], a2)
         assert_raises_rpc('does not match the key its seed makes', n1.z_importpqkey,
                           dump_line.replace('yecaddr=%s' % a2, 'yecaddr=%s' % a), False)
+        # a dump written before D-9 names the key in the 2-byte-version form: still accepted as the same key
+        h2 = pq_parts(a2)[3]
+        old_line = dump_line.replace('yecaddr=%s' % a2, 'yecaddr=%s' % encode_legacy_pq_address(SLH_DSA, h2))
+        old_line = old_line.replace('addr=%s' % encode_pq_address(SLH_DSA, h2, coin='yed'),
+                                    'addr=%s' % encode_legacy_pq_address(SLH_DSA, h2, coin='yed'))
+        assert old_line != dump_line and ' addr=' + encode_legacy_pq_address(SLH_DSA, h2, coin='yed') in old_line, old_line
+        assert_equal(n1.z_importpqkey(old_line, False)['address'], a2)
+        assert_raises_rpc('does not match the key its seed makes', n1.z_importpqkey,
+                          dump_line.replace('yecaddr=%s' % a2, 'yecaddr=%s' % encode_legacy_pq_address(SLH_DSA, pq_parts(a)[3])), False)
         other_scheme = '2' + dump_line[len('pqseed=1'):].replace('pqseed=', '')
         assert_raises_rpc('under scheme 2', n1.z_importpqkey, 'pqseed=' + other_scheme, False)   # same seed, Falcon key
         falcon_key = n1.z_importpqkey('2:' + seed_hex, False)   # the scheme decides the key: another address

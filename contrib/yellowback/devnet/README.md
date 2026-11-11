@@ -292,7 +292,8 @@ Nothing else changes for a person at the GUI: `yed_mint` keeps its arguments and
 (`ownerAddress`, 53 characters, `yr…` on regtest); the owner's redeem carries a ~7.9 KB SLH-DSA signature; the
 network fees are dollars per KB at the attested price, so they grow with the size (`params.fees.network`;
 `params.pq.feeRateZatPerKB` is the plain rate). The mainnet YED prefix is `yb…`, testnet `yt…`, regtest `yr…`
-(the tooling reads `params.addressVersion` / `params.pqAddressVersion`, never a hard-coded prefix).
+(the tooling reads `params.addressVersion` / `params.pqAddressVersion` (one 3-byte version per scheme, keyed by
+scheme number, D-9), never a hard-coded prefix).
 
 ### A Falcon-active devnet for client work (YecWallet, YEW, lightwalletd, chain-viz, x402, hawkeye)
 

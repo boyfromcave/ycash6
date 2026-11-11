@@ -77,13 +77,14 @@ BOOST_AUTO_TEST_CASE(pqpkh_solver_success)
         BOOST_CHECK(std::get<CPQKeyID>(dests[0]) == id);
         BOOST_CHECK_EQUAL(nRequired, 1);
 
-        // the plain-YEC PQ address (D-Q-20): "sq…" on mainnet, 53 characters, decoded back chain-wide (SQ task)
+        // the plain-YEC PQ address (D-Q-20, D-9): "sqf…"/"sqs…" on mainnet, 53 characters, decoded back chain-wide
         KeyIO keyIO(Params());
         const std::string enc = keyIO.EncodeDestination(dest);
-        std::vector<unsigned char> raw = {0x4D, 0xD9, id.scheme};
+        std::vector<unsigned char> raw = id.scheme == pq::SCHEME_FN_DSA_512 ? std::vector<unsigned char>{0x4D, 0xDD, 0x04}
+                                                                            : std::vector<unsigned char>{0x4D, 0xDE, 0x6A};
         raw.insert(raw.end(), id.hash.begin(), id.hash.end());
         BOOST_CHECK_EQUAL(enc, EncodeBase58Check(raw));
-        BOOST_CHECK_EQUAL(enc.substr(0, 2), "sq");
+        BOOST_CHECK_EQUAL(enc.substr(0, 3), id.scheme == pq::SCHEME_FN_DSA_512 ? "sqf" : "sqs");
         BOOST_CHECK_EQUAL(enc.size(), 53U);
         BOOST_CHECK(keyIO.DecodeDestination(enc) == dest);
     }
@@ -178,15 +179,16 @@ BOOST_AUTO_TEST_CASE(pq_yellowback_address)
             BOOST_CHECK_EQUAL(m.size(), 53U);
             BOOST_CHECK_EQUAL(t.size(), 53U);
             BOOST_CHECK_EQUAL(r.size(), 53U);
-            BOOST_CHECK_EQUAL(m.substr(0, 2), "yb");
-            BOOST_CHECK_EQUAL(t.substr(0, 2), "yt");
-            BOOST_CHECK_EQUAL(r.substr(0, 2), "yr");
+            const std::string f = scheme == pq::SCHEME_FN_DSA_512 ? "f" : "s";   // D-9: the scheme in the prefix
+            BOOST_CHECK_EQUAL(m.substr(0, 3), "yb" + f);
+            BOOST_CHECK_EQUAL(t.substr(0, 3), "yt" + f);
+            BOOST_CHECK_EQUAL(r.substr(0, 3), "yr" + f);
             CPQKeyID back;
             BOOST_CHECK(yellowback::DecodeAddress(m, main, back) && back == id);
             BOOST_CHECK(!yellowback::DecodeAddress(m, test, back));
             BOOST_CHECK(!yellowback::DecodeAddress(r, main, back));
             CKeyID k;
-            BOOST_CHECK(!yellowback::DecodeAddress(m, main, k)); // the 20-byte decoder refuses 33 bytes
+            BOOST_CHECK(!yellowback::DecodeAddress(m, main, k)); // the 20-byte decoder refuses 35 bytes
             CTxDestination dest;
             BOOST_CHECK(yellowback::DecodeAddress(r, regtest, dest));
             BOOST_CHECK(std::get<CPQKeyID>(dest) == id);
@@ -199,27 +201,35 @@ BOOST_AUTO_TEST_CASE(pq_yellowback_address)
     BOOST_CHECK(std::get<CKeyID>(dest) == kid);
     // an unregistered scheme neither encodes nor decodes
     BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(3, Hash32(1)), main), "");
-    std::vector<unsigned char> raw = main.pqAddressVersion;
-    raw.push_back(0x03);
-    raw.insert(raw.end(), 32, 0x01);
-    CPQKeyID back;
-    BOOST_CHECK(!yellowback::DecodeAddress(EncodeBase58Check(raw), main, back));
-    // the spec's extreme mainnet encodings (quantum spec §4)
-    std::vector<unsigned char> lo = main.pqAddressVersion, hi = main.pqAddressVersion;
-    lo.insert(lo.end(), 33, 0x00);
-    hi.insert(hi.end(), 33, 0xff);
-    BOOST_CHECK_EQUAL(EncodeBase58Check(lo).substr(0, 2), "yb");
-    BOOST_CHECK_EQUAL(EncodeBase58Check(hi).substr(0, 2), "yb");
-    BOOST_CHECK_EQUAL(EncodeBase58Check(lo).size(), 53U);
-    BOOST_CHECK_EQUAL(EncodeBase58Check(hi).size(), 53U);
-    // D-Q-21 known answers: mainnet PQ version 0x56AB renders "yb…"
-    BOOST_CHECK_EQUAL(HexStr(main.pqAddressVersion), "56ab");
-    BOOST_CHECK_EQUAL(EncodeBase58Check(lo), "yb5qxNeom9jvVt6r568NoAXzAhDR7jZ6iof6nsRuW1jFdBFSvPpBv");
-    BOOST_CHECK_EQUAL(EncodeBase58Check(hi), "ybERawpAfKtqdrcrqeCmgxi5ewecmZyNSy6ivRtFbWD1LTaaj8eCA");
+    // the pre-D-9 form (56ab || scheme || keyHash) is refused, for a registered scheme too
+    for (uint8_t scheme : {(uint8_t)0x01, (uint8_t)0x02, (uint8_t)0x03}) {
+        std::vector<unsigned char> raw = {0x56, 0xAB, scheme};
+        raw.insert(raw.end(), 32, 0x01);
+        CPQKeyID back;
+        BOOST_CHECK(!yellowback::DecodeAddress(EncodeBase58Check(raw), main, back));
+    }
+    // the spec's extreme mainnet encodings (quantum spec §4, D-9)
+    for (uint8_t scheme : {pq::SCHEME_FN_DSA_512, pq::SCHEME_SLH_DSA_SHA2_128S}) {
+        const std::string prefix = scheme == pq::SCHEME_FN_DSA_512 ? "ybf" : "ybs";
+        std::vector<unsigned char> lo = main.pqAddressVersions.at(scheme), hi = lo;
+        lo.insert(lo.end(), 32, 0x00);
+        hi.insert(hi.end(), 32, 0xff);
+        BOOST_CHECK_EQUAL(EncodeBase58Check(lo).substr(0, 3), prefix);
+        BOOST_CHECK_EQUAL(EncodeBase58Check(hi).substr(0, 3), prefix);
+        BOOST_CHECK_EQUAL(EncodeBase58Check(lo).size(), 53U);
+        BOOST_CHECK_EQUAL(EncodeBase58Check(hi).size(), 53U);
+    }
+    // D-9 known answers: mainnet PQ versions 0x56AEDE "ybf…" and 0x56B044 "ybs…"
+    BOOST_CHECK_EQUAL(HexStr(main.pqAddressVersions.at(pq::SCHEME_FN_DSA_512)), "56aede");
+    BOOST_CHECK_EQUAL(HexStr(main.pqAddressVersions.at(pq::SCHEME_SLH_DSA_SHA2_128S)), "56b044");
+    BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_FN_DSA_512, Hash32(0x00)), main),
+                      "ybf2PMJN6mP845b1PKcFGNoTjMpLnf8EygfruSxCVVqzF7o7HCZKM");
+    BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_FN_DSA_512, Hash32(0xff)), main),
+                      "ybf4L6UbYoEYjJipy2WptNknL8jTQNmwpZTVyZCMBPqeFWHgBEizo");
     BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash32(0x5a)), main),
-                      "yb5taumpu5RVtFHRjsEgzLi1T33PqEcM3Ac2MipTj3qcLeGaSRJGu");
+                      "ybs2yeQAU6HatHuTWtMW3GUy4Aa3MXFt8eXxkjSEHZqHM2zHYK76X");
     BOOST_CHECK_EQUAL(yellowback::EncodeAddress(CPQKeyID(pq::SCHEME_FN_DSA_512, Hash32(0x5a)), main),
-                      "yb5vXex4M7GvZURFKa9GcLfL3oxWSxG3t3PfRq4cQwqGM2mH4L3Kg");
+                      "ybf359F9nfDGmDdmUPoyqZ2AQvjCtSXnTAq9QC6c2dxgxCKgiEFio");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

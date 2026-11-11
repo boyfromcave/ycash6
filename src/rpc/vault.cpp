@@ -2405,7 +2405,7 @@ UniValue vault_release(const UniValue& params, bool fHelp)
             "\nRelease a matured intent to its recipient (RELEASE, selector 1, nSequence = delay; U-15: anyone may). The\n"
             "intent commits only SHA256 of the recipient script, so the recipient is the argument, or a script this node\n"
             "built the intent for, or a P2PKH / P2SH script of this wallet, or the TX_PQPKH script of a post-quantum key\n"
-            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sq…/tq…/rq…; a pqkeyid is refused\n"
+            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sqf…/sqs…, tqf…/tqs… or rqf…/rqs…; a pqkeyid is refused\n"
             "(pass the address or the script). Fee from this wallet.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_release", "\"txid:0\"") + HelpExampleRpc("vault_release", "\"txid:0\", \"address\""));

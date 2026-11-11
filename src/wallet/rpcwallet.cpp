@@ -220,7 +220,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "\nArguments:\n"
             "1. (dummy)       (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\". Passing any other string will result in an error.\n"
             "2. \"type\"        (string, optional, default \"p2pkh\") \"p2pkh\", or \"pq\": a post-quantum address\n"
-            "                  (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's seed, FN-DSA-512 once\n"
+            "                  (sqf…/sqs… mainnet, tqf…/tqs… testnet, rqf…/rqs… regtest: f = FN-DSA-512, s = SLH-DSA; 53 characters) from the wallet's seed, FN-DSA-512 once\n"
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"

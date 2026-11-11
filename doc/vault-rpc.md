@@ -28,7 +28,8 @@ checks live answers against it. Edit this document, then regenerate.
 - **Owners**: a vault's owner is a post-quantum key (docs/plans/yellowback-quantum-plan.md §4.3),
   named by its `pqkeyid` (`scheme || SHA256(scheme || pk)`, scheme 1 SLH-DSA-SHA2-128s or 2
   FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`yb…`/`yt…`/`yr…`, 53
-  characters) or its plain-YEC PQ address (`sq…`/`tq…`/`rq…`, 53 characters, D-Q-20). The node
+  characters) or its plain-YEC PQ address (`sq…`/`tq…`/`rq…`, 53 characters, D-Q-20; the third character
+  names the scheme, D-9: `sqf…`/`ybf…` FN-DSA-512, `sqs…`/`ybs…` SLH-DSA-SHA2-128s). The node
   wallet holds post-quantum keys (`vault_getnewowner`, `getnewaddress "" "pq"`, or one imported
   with `z_importpqkey`) and signs owner spends; an external owner is named explicitly.
 - **Addresses**: every `address` parameter (recipients, `vault_release`, `vault_ownerspend`) takes

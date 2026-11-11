@@ -22,12 +22,66 @@
 #include <variant>
 #include "util/match.h"
 
-std::vector<unsigned char> PlainPQAddressVersion(const std::string& networkID)
+const PQAddressVersions& PlainPQAddressVersions(const std::string& networkID)
 {
-    if (networkID == "main") return {0x4D, 0xD9};
-    if (networkID == "test") return {0x4F, 0x61};
-    if (networkID == "regtest") return {0x4C, 0x51};
-    return {};
+    // D-9 (quantum spec §4): each the lowest 3-byte version that renders its prefix for every key hash and
+    // checksum at 53 characters, proved by the workspace's scripts/pq_addr_prefix.py.
+    static const PQAddressVersions main = {
+        {pq::SCHEME_FN_DSA_512, {0x4D, 0xDD, 0x04}},          // "sqf…"
+        {pq::SCHEME_SLH_DSA_SHA2_128S, {0x4D, 0xDE, 0x6A}}};  // "sqs…"
+    static const PQAddressVersions test = {
+        {pq::SCHEME_FN_DSA_512, {0x4F, 0x65, 0x19}},          // "tqf…"
+        {pq::SCHEME_SLH_DSA_SHA2_128S, {0x4F, 0x66, 0x7F}}};  // "tqs…"
+    static const PQAddressVersions regtest = {
+        {pq::SCHEME_FN_DSA_512, {0x4C, 0x54, 0xEF}},          // "rqf…"
+        {pq::SCHEME_SLH_DSA_SHA2_128S, {0x4C, 0x56, 0x55}}};  // "rqs…"
+    static const PQAddressVersions none;
+    if (networkID == "main") return main;
+    if (networkID == "test") return test;
+    if (networkID == "regtest") return regtest;
+    return none;
+}
+
+std::string EncodePQAddress(const CPQKeyID& id, const PQAddressVersions& versions)
+{
+    if (!pq::IsKnownScheme(id.scheme)) return {};
+    const auto it = versions.find(id.scheme);
+    if (it == versions.end() || it->second.empty()) return {};
+    std::vector<unsigned char> data = it->second;
+    data.insert(data.end(), id.hash.begin(), id.hash.end());
+    return EncodeBase58Check(data);
+}
+
+bool DecodePQAddressData(const std::vector<unsigned char>& data, const PQAddressVersions& versions, CPQKeyID& id)
+{
+    for (const auto& [scheme, ver] : versions) {
+        if (ver.empty() || data.size() != ver.size() + 32 || !std::equal(ver.begin(), ver.end(), data.begin()))
+            continue;
+        if (!pq::IsKnownScheme(scheme)) return false;
+        id = CPQKeyID(scheme, uint256(std::vector<unsigned char>(data.begin() + ver.size(), data.end())));
+        return true;
+    }
+    return false;
+}
+
+bool DecodePQAddress(const std::string& str, const PQAddressVersions& versions, CPQKeyID& id)
+{
+    std::vector<unsigned char> data;
+    return DecodeBase58Check(str, data) && DecodePQAddressData(data, versions, id);
+}
+
+bool DecodeLegacyPQAddress(const std::string& str, const std::string& networkID, bool yed, CPQKeyID& id)
+{
+    std::vector<unsigned char> ver;   // the pre-D-9 2-byte versions (D-Q-20; quantum spec §4 before D-9)
+    if (networkID == "main") ver = yed ? std::vector<unsigned char>{0x56, 0xAB} : std::vector<unsigned char>{0x4D, 0xD9};
+    if (networkID == "test") ver = yed ? std::vector<unsigned char>{0x57, 0x1E} : std::vector<unsigned char>{0x4F, 0x61};
+    if (networkID == "regtest") ver = yed ? std::vector<unsigned char>{0x57, 0x10} : std::vector<unsigned char>{0x4C, 0x51};
+    std::vector<unsigned char> data;
+    if (ver.empty() || !DecodeBase58Check(str, data) || data.size() != ver.size() + 1 + 32 ||
+        !std::equal(ver.begin(), ver.end(), data.begin()) || !pq::IsKnownScheme(data[ver.size()]))
+        return false;
+    id = CPQKeyID(data[ver.size()], uint256(std::vector<unsigned char>(data.begin() + ver.size() + 1, data.end())));
+    return true;
 }
 
 namespace
@@ -54,19 +108,16 @@ public:
         return EncodeBase58Check(data);
     }
 
-    // A PQ destination renders as its plain-YEC PQ address (owner decision D-Q-20): Base58Check(version ||
-    // scheme || keyHash), versions 0x4DD9 "sq…" / 0x4F61 "tq…" / 0x4C51 "rq…", 53 characters, the same
-    // TX_PQPKH script a PQ "yb…" names. DecodeDestination takes it back (chain-wide since the SQ task), and
-    // a wallet name record of a PQ address round-trips through these two. "" for an unknown network or scheme.
+    // A PQ destination renders as its plain-YEC PQ address (D-Q-20, D-9): Base58Check(version || keyHash), the
+    // 3-byte version naming network and scheme ("sqf…"/"sqs…" main, "tqf…"/"tqs…" test, "rqf…"/"rqs…" regtest),
+    // 53 characters, the same TX_PQPKH script a PQ YED address names. DecodeDestination takes it back
+    // (chain-wide), and a wallet name record of a PQ address round-trips through these two. "" for an
+    // unknown network or scheme.
     std::string operator()(const CPQKeyID& id) const
     {
         const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
-        if (!chain || !pq::IsKnownScheme(id.scheme)) return {};
-        std::vector<unsigned char> data = PlainPQAddressVersion(chain->NetworkIDString());
-        if (data.empty()) return {};
-        data.push_back(id.scheme);
-        data.insert(data.end(), id.hash.begin(), id.hash.end());
-        return EncodeBase58Check(data);
+        if (!chain) return {};
+        return EncodePQAddress(id, PlainPQAddressVersions(chain->NetworkIDString()));
     }
 
     std::string operator()(const CNoDestination& no) const { return {}; }
@@ -321,19 +372,14 @@ CTxDestination KeyIO::DecodeDestination(const std::string& str) const
             KeyConstants::PUBKEY_ADDRESS,
             KeyConstants::SCRIPT_ADDRESS);
     if (IsValidDestination(dest)) return dest;
-    // A plain-YEC post-quantum address (D-Q-20): version (2 bytes) || scheme || keyHash (32 bytes), a
-    // registered scheme only. 35 bytes, so it never collides with the 22-byte P2PKH/P2SH forms above
-    // (founders' reward and funding stream strings decode exactly as before). Canonical prefixes only:
+    // A plain-YEC post-quantum address (D-Q-20, D-9): a 3-byte version per scheme || keyHash (32 bytes).
+    // 35 bytes, so it never collides with the 22-byte P2PKH/P2SH forms above (founders' reward and
+    // funding stream strings decode exactly as before); the pre-D-9 form is refused. Canonical prefixes only:
     // there is no legacy (Zcash-era) form, so DecodeLegacyDestination never yields one.
-    std::vector<unsigned char> data;
     const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
-    const std::vector<unsigned char> pq_prefix = chain ? PlainPQAddressVersion(chain->NetworkIDString()) : std::vector<unsigned char>();
-    if (!pq_prefix.empty() && DecodeBase58Check(str, data) && data.size() == pq_prefix.size() + 1 + 32 &&
-        std::equal(pq_prefix.begin(), pq_prefix.end(), data.begin())) {
-        const uint8_t scheme = data[pq_prefix.size()];
-        if (pq::IsKnownScheme(scheme)) {
-            return CPQKeyID(scheme, uint256(std::vector<unsigned char>(data.begin() + pq_prefix.size() + 1, data.end())));
-        }
+    CPQKeyID pq;
+    if (chain && DecodePQAddress(str, PlainPQAddressVersions(chain->NetworkIDString()), pq)) {
+        return pq;
     }
     return CNoDestination();
 }

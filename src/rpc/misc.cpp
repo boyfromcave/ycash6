@@ -190,7 +190,7 @@ UniValue validateaddress(const UniValue& params, bool fHelp)
             "  \"isscript\" : true|false,        (boolean) If the key is a script\n"
             "  \"pubkey\" : \"publickeyhex\",    (string) The hex value of the raw public key\n"
             "  \"iscompressed\" : true|false,    (boolean) If the address is compressed\n"
-            "  \"pqscheme\" : n,                 (numeric) A post-quantum address (sq…/tq…/rq…) only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "  \"pqscheme\" : n,                 (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s (sqs…/tqs…/rqs…), 2 = FN-DSA-512 (sqf…/tqf…/rqf…)\n"
             "  \"pqkeyhash\" : \"hex\",          (string) A post-quantum address only: SHA256(scheme || public key), as in its TX_PQPKH script\n"
             "  \"account\" : \"account\"         (string) DEPRECATED. The account associated with the address, \"\" is the default account\n"
             "}\n"
