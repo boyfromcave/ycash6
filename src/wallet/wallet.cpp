@@ -544,10 +544,16 @@ void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
     CHDChain& chain = mnemonicHDChain.value();
     if (index >= chain.GetLegacyTKeyCounter(external)) {
         // The wallet that used this key issued every index below it: keep the held keys up to it as issued keys.
+        // They (and this key) are keys this wallet did not issue itself but re-found (review M-1: only these are
+        // filed in the address book below, never a key this wallet handed out).
         std::vector<CKeyID> issued;
         for (const auto& [heldId, pos] : mapLegacyTKeyHeld) {
             if (pos.first == external && pos.second <= index)
                 issued.push_back(heldId);
+        }
+        if (external) {
+            setLegacyTKeyRefound.insert(issued.begin(), issued.end());
+            setLegacyTKeyRefound.insert(id);
         }
         for (const CKeyID& heldId : issued) {
             if (!PersistLegacyTKey(heldId))
@@ -583,8 +589,12 @@ void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
             if (!drawn.empty())
                 moved = true;
         }
-    } else if (!mapAddressBook.count(id)) {
-        // A re-found receiving address goes where getnewaddress put it in the wallet that issued it.
+    } else if (setLegacyTKeyRefound.count(id) && !mapAddressBook.count(id)) {
+        // A re-found, paid external address goes where getnewaddress put it in the wallet that issued it (review
+        // M-1: a key this wallet issued itself keeps the address-book state it was issued with: getnewaddress filed
+        // it; the vault RPCs' change and split keys, NewWalletKey, deliberately are not filed). The restore cannot
+        // tell which of those the original wallet made of the key, nor a Yellowback holder key
+        // (yed_getnewaddress's "yellowback-receive"): every re-found paid external key is filed as "receive".
         SetAddressBook(id, "", "receive");
     }
     if (!moved)

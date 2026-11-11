@@ -2068,6 +2068,9 @@ public:
     std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyHeld;
     //! Per chain (0 internal, 1 external): one past the highest index the lookahead has derived.
     uint32_t nLegacyTKeyHeldEnd[2] = {0, 0};
+    //! External keys this wallet re-found (a mark moved the counter past them) rather than issued itself, since
+    //! load: the only keys a payment files in the address book (review M-1).
+    std::set<CKeyID> setLegacyTKeyRefound;
     //! Set when keys were marked used while the lookahead could not be derived (locked): rescan after unlocking.
     bool fLegacyTKeyRescanAdvised = false;
     //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).

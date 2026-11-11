@@ -179,6 +179,12 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   gap is not re-found. The wallet holds `-keypool` + 1 transparent keys of each HD chain ahead of the
   last one it issued or saw paid (in memory, not in `wallet.dat`), and the restore's rescan re-checks
   earlier blocks when a payment moves that window, so addresses paid out of order are found too.
+  The restore files each re-found address it sees paid under `receive` in the address book, as
+  `getnewaddress` did: it cannot tell those from the addresses the original wallet kept out of the
+  book (the vault RPCs' funding change and split outputs), so these list as receiving addresses after
+  a restore; a Yellowback holder address (`yed_getnewaddress`, purpose `yellowback-receive`) is filed
+  as `receive` too, so `yed_listaddresses` with `includeEmpty` does not list it once it is empty. A
+  wallet never files an address it issued itself.
   Recover keys past a gap by issuing addresses past it (`getnewaddress`, `getnewaddress "" "pq"`,
   `z_getnewaddress`) and restarting with `-rescan` (this line has no `rescanblockchain`). An
   encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its

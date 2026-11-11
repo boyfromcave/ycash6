@@ -152,8 +152,10 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_CHECK(!w.HaveKey(SeedKey(true, 61 + N)));
         BOOST_CHECK(w.mapAddressBook.count(SeedKey(true, 60)) && w.mapAddressBook[SeedKey(true, 60)].purpose == "receive");
         BOOST_CHECK(!w.mapAddressBook.count(SeedKey(true, 59)));   // issued, never seen paid: not listed
-        // a key below the counter, or not of this seed, moves nothing
+        // a key below the counter, or not of this seed, moves nothing; key 10 was re-found with 60 (written by the
+        // mark, not issued by this wallet), so its payment files it (review M-1)
         w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 10))));
+        BOOST_CHECK(w.mapAddressBook.count(SeedKey(true, 10)) && w.mapAddressBook[SeedKey(true, 10)].purpose == "receive");
         const CKey other = CKey::TestOnlyRandomKey(true);
         BOOST_REQUIRE(w.AddKeyPubKey(other, other.GetPubKey()));
         w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(other.GetPubKey().GetID())));
@@ -163,6 +165,11 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_CHECK(w.GenerateNewKey(true).GetID() == SeedKey(true, 61));
         BOOST_CHECK_EQUAL(Counter(w, true), 62U);
         BOOST_CHECK(!w.IsHeldLegacyTKey(SeedKey(true, 61)) && w.IsHeldLegacyTKey(SeedKey(true, 62 + N - 1)));
+        // review M-1: a key this wallet issued itself (getnewaddress files it; the vault RPCs' change keys,
+        // NewWalletKey, are deliberately not filed) keeps its address-book state when it is paid
+        w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 61))));
+        BOOST_CHECK(!w.mapAddressBook.count(SeedKey(true, 61)));
+        BOOST_CHECK_EQUAL(Counter(w, true), 62U);
 
         // keypool marking: a P2PK output to the pool's internal key 50 takes internal 0..50 out of the pool, which
         // refills from the counter (101 + 51 = 152)
