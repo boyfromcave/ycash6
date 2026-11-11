@@ -43,6 +43,11 @@ id = "RUSTSEC-2026-0386"
 ignoreUntil = 2027-01-21T00:00:00Z
 reason = "tokio 1.52.3 (AsyncFd safe constructors new/with_interest/try_new/try_with_interest violate I/O safety; fixed by deprecation in 1.51.6 / 1.53.3): the node constructs no AsyncFd (no hit in src/rust; its one runtime is the current-thread runtime of metrics_ffi.rs that serves the Prometheus exporter), and neither metrics-exporter-prometheus 0.12.2 nor hyper 0.14.32, the only other dependents, calls those constructors. The root lock is frozen and must match ycash6-stock's crates-io set (header); the attest agent's lock is bumped to 1.53.3."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0486"
+ignoreUntil = 2027-02-09T00:00:00Z
+reason = "Triaged 2026-11-11. rustix 1.1.4 (informational unsound: the rustix::fs xattr getters/listers marked unwritten bytes initialized on a zero-length buffer; fixed 1.1.6), in Cargo.lock and the cxxbridge build tool's lock. Not in ycashd: in Cargo.lock rustix comes only through tempfile <- proptest / rusty-fork, the [dev-dependencies] of the librustzcash crate (tests), and in depends/patches/native_cxxbridge/Cargo.lock only through tempfile <- cxx's own tests, never the cxxbridge binary depends builds; tempfile calls no xattr function. The root lock is frozen and must match ycash6-stock's crates-io set (header), and the cxxbridge lock moves with the cxx depends bump (it is vendored into native_cxxbridge-1.0.194-vendored.tar.gz, which depends reuses by file name). The attest agent's lock is bumped to 1.1.6."
+
 # --- contrib/yellowback/attest/Cargo.lock (the attestation agent) ---
 
 [[IgnoredVulns]]
