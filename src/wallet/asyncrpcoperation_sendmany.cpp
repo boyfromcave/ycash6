@@ -1,4 +1,5 @@
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -48,10 +49,11 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
         unsigned int anchorDepth,
         TransactionStrategy strategy,
         std::optional<CAmount> fee,
-        UniValue contextInfo) :
+        UniValue contextInfo,
+        std::optional<CPQKeyID> pqSource) :
         builder_(std::move(builder)), ztxoSelector_(ztxoSelector), recipients_(recipients),
         mindepth_(minDepth), anchordepth_(anchorDepth), strategy_(strategy), fee_(fee),
-        contextinfo_(contextInfo)
+        contextinfo_(contextInfo), pqSource_(pqSource)
 {
     assert(!fee_.has_value() || fee_.value() >= 0);
     assert(mindepth_ >= 0);
@@ -141,17 +143,37 @@ void AsyncRPCOperation_sendmany::main() {
 // At least #4 differs from the Rust transaction builder.
 tl::expected<uint256, InputSelectionError>
 AsyncRPCOperation_sendmany::main_impl(CWallet& wallet) {
-    auto spendable = builder_.FindAllSpendableInputs(wallet, ztxoSelector_, mindepth_);
-
-    auto preparedTx = builder_.PrepareTransaction(
-            wallet,
-            ztxoSelector_,
-            spendable,
-            recipients_,
-            chainActive,
-            strategy_,
-            fee_,
-            anchordepth_);
+    // The Yellowback second check (review m2, audit L-ii): an ECC from address, ANY_TADDR or a unified account never
+    // spends a YED token, vault or carrier whose coin lock was removed; the send goes on with the other inputs and is
+    // refused, naming them, only if it needs them (the selection then reports insufficient funds).
+    std::string yedRefusal;
+    SpendableInputs spendable;
+    if (!pqSource_.has_value()) {
+        spendable = builder_.FindAllSpendableInputs(wallet, ztxoSelector_, mindepth_);
+        yedRefusal = DropYellowbackCoins(spendable.utxos, false);
+    }
+    auto preparedTx = pqSource_.has_value()
+        ? builder_.PreparePQTransaction(
+                wallet,
+                pqSource_.value(),
+                recipients_,
+                chainActive,
+                strategy_,
+                fee_,
+                mindepth_,
+                anchordepth_)
+        : builder_.PrepareTransaction(
+                wallet,
+                ztxoSelector_,
+                spendable,
+                recipients_,
+                chainActive,
+                strategy_,
+                fee_,
+                anchordepth_);
+    if (!preparedTx.has_value() && !yedRefusal.empty() && std::holds_alternative<InvalidFundsError>(preparedTx.error())) {
+        throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+    }
 
     return preparedTx
         .map([&](const TransactionEffects& effects) {
@@ -187,7 +209,10 @@ AsyncRPCOperation_sendmany::main_impl(CWallet& wallet) {
                 auto tx = buildResult.GetTxOrThrow();
                 LogPrint("zrpc", "%s, conventional fee: %s\n", getId(), FormatMoney(tx.GetConventionalFee()));
 
-                UniValue sendResult = SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode);
+                // A post-quantum send is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+                UniValue sendResult = !pqSource_.has_value()
+                    ? SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode)
+                    : SendPQTransaction(tx, payments.GetResolvedPayments(), testmode);
                 set_result(sendResult);
 
                 effects.UnlockSpendable(wallet);
