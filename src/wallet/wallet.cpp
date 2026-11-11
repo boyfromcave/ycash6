@@ -8512,6 +8512,11 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
             // until the history is imported (set_importsigned, a dump) or the call acknowledges the restore.
             if (!CWalletDB(walletFile).WriteVaultSignRestored())
                 return UIError(_("-mnemonicfile: cannot write the vault sign-once restore marker"));
+            // Review M-c: the restore's scan from genesis must complete before the wallet is whole; the marker makes
+            // every start scan from genesis until one does (below).
+            if (!CWalletDB(walletFile).WriteRestoreScan(0))
+                return UIError(_("-mnemonicfile: cannot write the restore marker"));
+            walletInstance->LoadRestoreScan(0);
             fRestoredSeed = true;
             LogPrintf("Wallet created from the recovery phrase in -mnemonicfile (fingerprint %s)\n", restored.Fingerprint().GetHex());
         }
@@ -8596,8 +8601,18 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
     // chainActive.Genesis() may return null; in this case, we want rescanning
     // to happen automatically as a consequence of the genesis block (and subsequent
     // blocks) being added to the chain.
+    // Review M-c: a wallet restored from its recovery phrase whose scan has not completed (an interrupted restore, or
+    // one made before the node had the chain) scans from the restore's start height again, whatever its best block and
+    // its keys' birthday (the time of the restore) say, as a -rescan would.
+    const bool fRestoreScan = walletInstance->RestoreInProgress();
+    if (fRestoreScan) {
+        walletInstance->nTimeFirstKey = 1;
+        if (!fRestoredSeed)
+            LogPrintf("The wallet's restore from its recovery phrase has not completed its scan: scanning again from height %d\n",
+                      walletInstance->nRestoreScanFrom);
+    }
     CBlockIndex *pindexRescan = chainActive.Genesis();
-    if (clearWitnessCaches || GetBoolArg("-rescan", false)) {
+    if (clearWitnessCaches || GetBoolArg("-rescan", false) || (fRestoreScan && !fRestoredSeed)) {
         walletInstance->ClearNoteWitnessCache();
     } else {
         CWalletDB walletdb(walletFile);
@@ -8605,6 +8620,8 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
         if (walletdb.ReadBestBlock(locator))
             pindexRescan = FindForkInGlobalIndex(chainActive, locator);
     }
+    if (fRestoreScan && chainActive.Tip())
+        pindexRescan = chainActive[std::min(walletInstance->nRestoreScanFrom, chainActive.Height())];
 
     if (chainActive.Tip() && chainActive.Tip() != pindexRescan)
     {
@@ -8640,6 +8657,21 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
         LogPrintf(" rescan      %15dms\n", GetTimeMillis() - nStart);
         walletInstance->SetBestChain(chainActive.GetLocator());
         CWalletDB::IncrementUpdateCounter();
+
+        // Review M-c: the restore's scan is complete (every re-pass included) and recorded: the marker goes, unless the
+        // node is still in initial block download, whose later blocks the wallet then sees one at a time, without the
+        // re-pass a key used out of chain order needs: the next start scans again.
+        if (fRestoreScan) {
+            if (IsInitialBlockDownload(Params().GetConsensus())) {
+                LogPrintf("The restore's scan reached height %d, but the node is in initial block download: the next start scans again\n",
+                          chainActive.Height());
+            } else if (!CWalletDB(walletFile).EraseRestoreScan()) {
+                LogPrintf("Error: the restore's scan is complete, but erasing the restore marker failed: the next start scans again\n");
+            } else {
+                walletInstance->LoadRestoreScan(-1);
+                LogPrintf("The restore's scan from height %d is complete\n", pindexRescan->nHeight);
+            }
+        }
 
         // Restore wallet transaction metadata after -zapwallettxes=1
         if (GetBoolArg("-zapwallettxes", false) && GetArg("-zapwallettxes", "1") != "2")

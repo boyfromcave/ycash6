@@ -30,6 +30,11 @@ wallet that holds its lookahead, review L-2) and in its log at walletpassphrase;
 again, locked again it still recognises (and writes) a held key that is paid; a new wallet file restored from the
 phrase, with getnewaddress past the gap and -rescan, finds every coin (this line has no rescanblockchain).
 
+Last (reviews M-a, M-c): a restore interrupted in its main pass, then (resumed) in the middle of a re-pass, stops at
+that block (-stoprescanat, regtest only) and every start scans from genesis again until a scan completes, though the
+keys' birthday (the restore's time, the node's clock 3 h ahead) is later than every block; getwalletinfo
+restore_in_progress is true for a restore made on a node with no chain until a start after the sync has scanned.
+
 Run: ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_seed_restore_ecc.py --tmpdir=<dir> --portseed=<n>
 """
 
@@ -43,6 +48,7 @@ from test_framework.util import (
     bitcoind_processes,
     wait_and_assert_operationid_status,
     connect_nodes_bi,
+    initialize_datadir,
     start_node,
     start_nodes,
     stop_node,
@@ -329,19 +335,67 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
                              (target3_txid, target3, Decimal('0.8'))]))
         assert_equal(Decimal(final['transparent']), Decimal(before['transparent']) + Decimal('2.1'))
 
-        print('review M-a: a shutdown requested in the middle of a re-pass stops the scan at that block')
-        stop_height = n1.getblockcount() - 40
+        print('review M-c: a restore interrupted in its first pass, then in a re-pass, resumes from genesis')
+        # The node's clock runs 3 h ahead, so the restored keys' birthday (the time of the restore) is later than every
+        # block: a start that went by the birthday would scan only the tip.
+        restored_utxos = after['utxos']
+        later = ['-clockoffset=10800']
         stop_node(self.nodes[0], 0)
         logpos = len(self.debug_log())
         assert_start_raises_init_error(
             0, self.options.tmpdir,
-            self.node_args(0, 'eccinterrupted.dat') + ['-mnemonicfile=%s' % export, '-stoprescanat=2:%d' % stop_height],
+            self.node_args(0, 'eccinterrupted.dat') + later + ['-mnemonicfile=%s' % export, '-stoprescanat=1:5'],
+            'rescan interrupted due to shutdown request')
+        assert 'interrupted by a shutdown request at height 5 (pass 1)' in self.debug_log()[logpos:]
+
+        print('review M-a: a shutdown requested in the middle of a re-pass stops the scan at that block')
+        stop_height = n1.getblockcount() - 40
+        logpos = len(self.debug_log())
+        assert_start_raises_init_error(
+            0, self.options.tmpdir,
+            self.node_args(0, 'eccinterrupted.dat') + later + ['-mnemonicfile=%s' % export, '-stoprescanat=2:%d' % stop_height],
             'rescan interrupted due to shutdown request')
         log = self.debug_log()[logpos:]
+        assert 'has not completed its scan: scanning again from height 0' in log
+        assert 'Actual scanning started at height 0' in log
         hook = log.index('-stoprescanat: shutdown requested at height %d (pass 2)' % stop_height)
         assert 'interrupted by a shutdown request at height %d (pass 2)' % stop_height in log[hook:]
         assert 're-check found' not in log[hook:]       # the pass did not read on to its end
+
+        print('  the next start (no -mnemonicfile) completes the scan and clears the marker')
+        logpos = len(self.debug_log())
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, 'eccinterrupted.dat') + later)
+        n0 = self.nodes[0]
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
+        log = self.debug_log()[logpos:]
+        assert 'Actual scanning started at height 0' in log
+        assert "The restore's scan from height 0 is complete" in log
+        assert_equal(n0.getwalletinfo()['restore_in_progress'], False)
+        assert_equal(self.snapshot()['utxos'], restored_utxos)
+        logpos = len(self.debug_log())
+        n0 = self.restart0('eccinterrupted.dat', later)
+        assert 'has not completed its scan' not in self.debug_log()[logpos:]
+        assert_equal(n0.getwalletinfo()['restore_in_progress'], False)
+        assert_equal(self.snapshot()['utxos'], restored_utxos)
+
+        print('  a restore on a node that has no chain yet: in progress until a start after the sync scans')
+        stop_node(self.nodes[0], 0)
         self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, 'eccrestored2.dat'))
+        connect_nodes_bi(self.nodes, 0, 1)
+        initialize_datadir(self.options.tmpdir, 2)
+        args2 = ['-keypool=%d' % KEYPOOL, '-mnemonicfile=%s' % export]
+        self.nodes.append(start_node(2, self.options.tmpdir, args2))
+        n2 = self.nodes[2]
+        assert_equal(n2.getblockcount(), 0)          # (wallet RPCs refuse during initial block download)
+        connect_nodes_bi(self.nodes, 1, 2)
+        sync_blocks(self.nodes)
+        assert_equal(n2.getwalletinfo()['restore_in_progress'], True)
+        stop_node(n2, 2)
+        self.nodes[2] = n2 = start_node(2, self.options.tmpdir, ['-keypool=%d' % KEYPOOL])
+        assert_equal(n2.getwalletinfo()['restore_in_progress'], False)
+        assert_equal(sorted((u['txid'], u['vout'], u['address'], Decimal(u['amount'])) for u in n2.listunspent(0)),
+                     restored_utxos)
 
 
 if __name__ == '__main__':

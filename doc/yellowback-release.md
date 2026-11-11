@@ -332,6 +332,16 @@ release notes:
   a restore; a Yellowback holder address (`yed_getnewaddress`, purpose `yellowback-receive`) is filed
   as `receive` too, so `yed_listaddresses` with `includeEmpty` does not list it once it is empty. A
   wallet never files an address it issued itself.
+  An interrupted restore resumes (review M-c): the restore writes a marker (`restorescan`) into the
+  new wallet file, and until a scan from genesis has completed (every re-pass included, with the node
+  out of initial block download) every start of the node scans from genesis again, whatever the
+  wallet's best block and its keys' birthday (the time of the restore); `getwalletinfo`
+  `restore_in_progress` is true meanwhile. A restore made on a node that does not have the chain yet
+  completes at the first restart after the sync. A shutdown request stops a pass at a block boundary
+  (`Still rescanning (pass n)` in the log every minute). An older binary ignores the marker: it
+  starts from the wallet's best block and the keys' birthday, so it does not resume an unfinished
+  restore (coins not found before the interruption stay unseen there), and it leaves the marker in
+  place for this binary to resume.
   Recover keys past a gap by issuing addresses past it (`getnewaddress`, `getnewaddress "" "pq"`,
   `z_getnewaddress`) and restarting with `-rescan` (this line has no `rescanblockchain`). An
   encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its

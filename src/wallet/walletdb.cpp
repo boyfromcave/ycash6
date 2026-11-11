@@ -1113,6 +1113,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> nFromHeight;
             pwallet->LoadLegacyTKeyLookaheadIncomplete(nFromHeight);
         }
+        else if (strType == "restorescan")
+        {
+            int nFromHeight;
+            ssValue >> nFromHeight;
+            pwallet->LoadRestoreScan(nFromHeight);
+        }
         else if (strType == "networkinfo")
         {
             std::pair<std::string, std::string> networkInfo;
@@ -1176,7 +1182,8 @@ static bool IsSalvagedType(const std::string& strType)
     return IsKeyType(strType) ||
            strType == "pqissued" || strType == "vaultsetsig" ||
            strType == "vaultsignrestored" || strType == "vaultbuild" ||
-           strType == "vaultpendingkey" || strType == "vaultrecipient";
+           strType == "vaultpendingkey" || strType == "vaultrecipient" ||
+           strType == "restorescan";   // review M-c: losing it makes an unfinished restore skip the history
 }
 
 DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
@@ -1653,6 +1660,18 @@ bool CWalletDB::EraseLegacyTKeyLookaheadIncomplete()
 {
     nWalletDBUpdateCounter++;
     return Erase(std::string("lookaheadincomplete"));
+}
+
+bool CWalletDB::WriteRestoreScan(int nFromHeight)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("restorescan"), nFromHeight);
+}
+
+bool CWalletDB::EraseRestoreScan()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("restorescan"));
 }
 
 void CWalletDB::IncrementUpdateCounter()

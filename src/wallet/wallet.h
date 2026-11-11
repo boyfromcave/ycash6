@@ -2095,6 +2095,17 @@ public:
     void SetLegacyTKeyLookaheadIncomplete(int nFromHeight);
     void ClearLegacyTKeyLookaheadIncomplete();
     void LoadLegacyTKeyLookaheadIncomplete(int nFromHeight) { fLegacyTKeyLookaheadIncomplete = nFromHeight >= 0; nLegacyTKeyIncompleteFrom = nFromHeight; }
+    /**
+     * Review M-c (getwalletinfo restore_in_progress): a wallet created from a recovery phrase (-mnemonicfile) must scan
+     * the chain from genesis, and its keys' birthday is the time of the restore, so after an interrupted restore the
+     * start-up scan would begin near the tip and skip the history. The "restorescan" record (the height the scan starts
+     * from) is written when the restore creates the wallet; while it is set, every start scans from that height
+     * (InitLoadWallet), and only a start-up scan that completed, every re-pass included, with the node out of initial
+     * block download, erases it. An older binary ignores the record (ReadKeyValue skips an unknown type).
+     */
+    int nRestoreScanFrom = -1;
+    void LoadRestoreScan(int nFromHeight) { nRestoreScanFrom = nFromHeight; }
+    bool RestoreInProgress() const { return nRestoreScanFrom >= 0; }
     //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
     uint64_t nKeyLookaheadGrowth = 0;
     //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).

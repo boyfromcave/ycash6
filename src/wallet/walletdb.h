@@ -537,6 +537,9 @@ public:
     //! Review L-2: the lowest height a locked wallet without its transparent lookahead may have missed a coin at.
     bool WriteLegacyTKeyLookaheadIncomplete(int nFromHeight);
     bool EraseLegacyTKeyLookaheadIncomplete();
+    //! Review M-c: the restore marker, the height a wallet restored from its recovery phrase scans from until one scan completes.
+    bool WriteRestoreScan(int nFromHeight);
+    bool EraseRestoreScan();
 
     /// Write spending key to wallet database, where key is payment address and value is spending key.
     bool WriteZKey(const libzcash::SproutPaymentAddress& addr, const libzcash::SproutSpendingKey& key, const CKeyMetadata &keyMeta);

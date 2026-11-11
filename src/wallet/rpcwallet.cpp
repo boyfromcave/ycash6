@@ -3337,6 +3337,11 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "                                    may be missing. To find it, restore the recovery phrase into a new wallet file\n"
             "                                    (-wallet=<new file> -mnemonicfile=<file>); a rescan from at or below that height with the wallet\n"
             "                                    unlocked also clears it. A wallet whose seed no other wallet uses has missed nothing.\n"
+            "  \"restore_in_progress\": true|false, (bool) true while the wallet, created from a recovery phrase (-mnemonicfile), has not\n"
+            "                                    completed its scan of the chain from genesis: its balances and transactions may be\n"
+            "                                    incomplete. Every start of the node scans from genesis again until one scan completes\n"
+            "                                    with the node synced (an interrupted restore resumes this way; a restore made before the\n"
+            "                                    node had the chain completes at the first restart after it has synced).\n"
             "}\n"
             "\nbalance counts confirmed coins and this wallet's own unconfirmed outputs (a transaction whose every input\n"
             "is this wallet's, such as change); unconfirmed_balance counts the other unconfirmed outputs (payments from\n"
@@ -3401,6 +3406,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     if (legacySeed.has_value())
         obj.pushKV("legacy_seedfp", legacySeed.value().Fingerprint().GetHex());
     obj.pushKV("lookahead_incomplete", pwalletMain->fLegacyTKeyLookaheadIncomplete);
+    obj.pushKV("restore_in_progress", pwalletMain->RestoreInProgress());   // review M-c
     if (pwalletMain->HasExternalImports()) {
         obj.pushKV("has_external_imports", true);
         obj.pushKV("external_imports_warning",
