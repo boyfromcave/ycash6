@@ -120,6 +120,44 @@ BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE(legacy_tkey_lookahead_db_tests, TestingSetup)
 
+BOOST_AUTO_TEST_CASE(held_key_write_failure)
+{
+    // Review L-a: a mark writes the held keys up to the paid one, then the counter. If a key write fails, the counter
+    // must not move past that key (after a restart it would be below the counter and not in the file: its coins
+    // unseen); the key stays held and the failure is flagged (getwalletinfo lookahead_incomplete).
+    bitdb.MakeMock();
+    const std::string file = "legacy_tkey_write_failure_test.dat";
+    {
+        CWallet w(Params(), file);
+        NewSeededWallet(w);
+        LOCK(w.cs_wallet);
+        // the file holds a record for external key 50 already: writing the key fails (no overwrite), as a full disk would
+        auto account = libzcash::transparent::AccountKey::ForAccount(LookaheadTestSeed(), Params().BIP44CoinType(), libzcash::ZCASH_LEGACY_ACCOUNT);
+        const CKey k50 = account.value().DeriveExternalSpendingKey(50).value();
+        BOOST_REQUIRE(CWalletDB(file).WriteKey(k50.GetPubKey(), k50.GetPrivKey(), CKeyMetadata(GetTime())));
+        BOOST_REQUIRE(w.IsHeldLegacyTKey(SeedKey(true, 50)));
+
+        BOOST_CHECK(!w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 60))), 7));
+        BOOST_CHECK_EQUAL(Counter(w, true), 0U);                            // not moved past key 50
+        BOOST_CHECK(w.IsHeldLegacyTKey(SeedKey(true, 50)));                 // still held: a later mark writes it
+        BOOST_CHECK(!w.IsHeldLegacyTKey(SeedKey(true, 49)) && !w.IsHeldLegacyTKey(SeedKey(true, 60)));   // written
+        BOOST_CHECK(w.fLegacyTKeyLookaheadIncomplete);
+        BOOST_CHECK_EQUAL(w.nLegacyTKeyIncompleteFrom, 7);
+    }
+    {
+        // the counter in the file is the one before the mark, the flag is kept
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        BOOST_CHECK(w.fLegacyTKeyLookaheadIncomplete);
+        BOOST_CHECK_EQUAL(w.nLegacyTKeyIncompleteFrom, 7);
+        BOOST_CHECK(w.HaveKey(SeedKey(true, 60)) && w.HaveKey(SeedKey(true, 50)));
+    }
+    bitdb.Flush(true);
+    bitdb.Reset();
+}
+
 BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
 {
     bitdb.MakeMock();

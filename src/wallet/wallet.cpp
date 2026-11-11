@@ -633,31 +633,44 @@ bool CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
         // The wallet that used this key issued every index below it: keep the held keys up to it as issued keys.
         // They (and this key) are keys this wallet did not issue itself but re-found (review M-1: only these are
         // filed in the address book below, never a key this wallet handed out).
-        std::vector<CKeyID> issued;
+        std::vector<std::pair<CKeyID, std::pair<bool, uint32_t>>> issued;
         for (const auto& [heldId, pos] : mapLegacyTKeyHeld) {
             if (pos.first == external && pos.second <= index)
-                issued.push_back(heldId);
+                issued.emplace_back(heldId, pos);
         }
         if (external) {
-            setLegacyTKeyRefound.insert(issued.begin(), issued.end());
+            for (const auto& entry : issued)
+                setLegacyTKeyRefound.insert(entry.first);
             setLegacyTKeyRefound.insert(id);
         }
         // The keys are written before the counter (review L-1): a crash between the writes leaves keys at or past
         // the counter on disk, which GenerateNewKey skips as issued (IsStoredLegacyTKeyAt); the other order would
         // leave a counter past keys the file lacks, and their coins unseen after a restart.
-        for (const CKeyID& heldId : issued) {
+        bool keysWritten = true;
+        for (const auto& [heldId, pos] : issued) {
             if (!PersistLegacyTKey(heldId)) {
                 LogPrintf("MarkLegacyTKeyUsed: error: cannot write the held key %s\n", KeyIO(Params()).EncodeDestination(heldId));
-                written = false;
+                mapLegacyTKeyHeld[heldId] = pos;   // review L-a: still held (in memory), so a later mark writes it
+                keysWritten = false;
             }
         }
-        while (chain.GetLegacyTKeyCounter(external) <= index)
-            chain.IncrementLegacyTKeyCounter(external);
-        if (fFileBacked && !CWalletDB(strWalletFile).WriteMnemonicHDChain(chain)) {
-            LogPrintf("MarkLegacyTKeyUsed: error: writing the HD chain failed\n");
+        if (!keysWritten) {
+            // Review L-a: the counter moves only once every key up to the paid one is in the file. Moved past a key the
+            // file lacks, it would leave that key below the counter after a restart, never derived again, and its
+            // coins unseen. The keys written stay (GenerateNewKey skips a stored key at the counter, review L-1); the
+            // caller flags lookahead_incomplete, since a coin can be missed until a scan writes the key.
+            LogPrintf("MarkLegacyTKeyUsed: error: the transparent counter is not moved past %s, a key the wallet file lacks\n",
+                      KeyIO(Params()).EncodeDestination(id));
             written = false;
+        } else {
+            while (chain.GetLegacyTKeyCounter(external) <= index)
+                chain.IncrementLegacyTKeyCounter(external);
+            if (fFileBacked && !CWalletDB(strWalletFile).WriteMnemonicHDChain(chain)) {
+                LogPrintf("MarkLegacyTKeyUsed: error: writing the HD chain failed\n");
+                written = false;
+            }
+            moved = true;
         }
-        moved = true;
     }
     if (!external) {
         // Bitcoin Core's MarkReserveKeysAsUsed: the internal keys at or below this one leave the keypool (the wallet
@@ -760,6 +773,13 @@ bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight)
     // and a wallet whose seed no other wallet uses set nothing. A wallet without the account's public key (encrypted
     // by an older binary and not unlocked since) cannot tell, and flags a block it had not processed before (above its
     // best block at load) with an output it cannot check while it lacks its lookahead. It is said at walletpassphrase.
+    if (!written) {
+        // Review L-a: a key or counter write failed (logged above): the mark path cannot throw to an RPC caller, so
+        // the flag tells the user; a scan with the lookahead held writes the key again and clears it.
+        LogPrintf("NoteLegacyTKeysUsed: error: a key of transaction %s could not be written: getwalletinfo lookahead_incomplete set\n",
+                  tx.GetHash().ToString());
+        SetLegacyTKeyLookaheadIncomplete(std::max(nHeight, 0));
+    }
     if (nHeight >= 0 && IsLocked()) {
         if (missed.has_value()) {
             LogPrintf("NoteLegacyTKeysUsed: a transaction at height %d pays %s, an address of this wallet's seed it cannot hold while locked: "
@@ -6417,7 +6437,7 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                         // Review M-3: a transaction the wallet already has (one of its outputs, or a Sapling note,
                         // made it ours) can also pay a key held only now: mark it, so the counter moves past it
                         // and the key is written; its output counts as ours from now on (MarkDirty below).
-                        NoteKeysUsed(tx);
+                        NoteKeysUsed(tx, p->nHeight);
                         continue;
                     }
                     // NoteLegacyTKeysUsed/NotePQKeysUsed run inside, as in the main pass.
