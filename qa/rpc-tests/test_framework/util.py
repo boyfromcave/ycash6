@@ -993,6 +993,8 @@ LONE_SAPLING_OUTPUT_ACTIONS = 2        # ZIP-317 logical actions of one Sapling 
 Z_MERGE_NOTE_DEPTH = 3                 # the depth from which z_mergetoaddress merges a Sapling note
 COINBASE_ONLY_TRANSPARENT_REFUSAL = 'coinbase outputs will not be selected'
 EMPTY_ECC_SOURCE_REFUSAL = 'Insufficient funds: have 0.00, need'   # z_sendmany from an ECC address with no coin (WalletTxBuilder)
+STOCK_FEE_OVER_MAXTXFEE = 'is greater than the maximum fee allowed by this instance'   # an ECC z_sendmany fee above -maxtxfee: refused before building (MaxFeeError)
+PQ_EXPIRING_COMMIT_REFUSAL = 'SendTransaction: Transaction commit failed:: tx-expiring-soon'   # the operation error when the mempool refuses a commit as expiring soon
 
 
 def z_sendmany_opid(node, fromaddr, amounts, minconf=1, fee=None):

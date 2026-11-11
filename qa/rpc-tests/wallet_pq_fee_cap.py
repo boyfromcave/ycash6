@@ -18,6 +18,13 @@ no more than the fee its own input adds (PQInputMarginalFee) is never merged or 
 fee above -maxtxfee keep their stock behaviour (z_sendmany's own "Fee … is greater than the sum of outputs" bound,
 the mempool's absurd-fee refusal at the commit).
 
+Review L-1: a computed fee above the cap (here -minrelaytxfee=0.05 makes a 0.9 YEC change dust, folded into the fee)
+is refused before signing with the same "Fee … is above the … cap" string, not after.
+Review M-2, the erase at the commit: with -txexpirydelta=4 and two blocks mined while a 24-input SLH-DSA send is
+signed, the mempool refuses it as expiring soon; the send fails, the transaction is erased from the wallet (no depth
+-1 entry), its coins are spendable again, it stays gone after a restart and a -rescan restart, and a second send pays
+the recipient exactly once.
+
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_pq_fee_cap.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
@@ -26,6 +33,8 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    PQ_EXPIRING_COMMIT_REFUSAL,
+    STOCK_FEE_OVER_MAXTXFEE,
     VAULT_BRANCH_ID,
     assert_equal,
     connect_nodes_bi,
@@ -60,8 +69,19 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = True
 
-    def node_args(self, i):
-        return [nuparams(VAULT_BRANCH_ID, ACTIVATION)]
+    def node_args(self, i, extra=()):
+        return [nuparams(VAULT_BRANCH_ID, ACTIVATION)] + list(extra)
+
+    def restart0(self, extra=()):
+        stop_node(self.nodes[0], 0)
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, extra))
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
+        return self.nodes[0]
+
+    @staticmethod
+    def stuck(node):
+        return [t['txid'] for t in node.listtransactions('*', 1000) if t.get('confirmations', 0) < 0]
 
     def setup_network(self, split=False):
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir,
@@ -160,7 +180,68 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
         self.mine(1)
         res = self.op_result(n0, z_sendmany_opid(n0, ecc2, [(b, Decimal('1'))], 1, Decimal('0.2')))
         assert_equal(res['status'], 'failed')
-        assert 'CommitTransaction failed' in res['error']['message'], res['error']['message']
+        assert STOCK_FEE_OVER_MAXTXFEE in res['error']['message'], res['error']['message']
+        self.computed_fee_over_cap()
+        self.refused_commit_is_erased()
+
+    def computed_fee_over_cap(self):
+        print('review L-1: a computed fee above the cap is refused before signing, with the cap string')
+        n0, n1 = self.nodes
+        slh = n0.getnewaddress('', 'pqslh')
+        n0.sendtoaddress(slh, Decimal('2'))
+        self.mine(1)
+        n0 = self.restart0(['-minrelaytxfee=0.05'])
+        before = (self.stuck(n0), n0.getrawmempool())        # the stock ECC send above stays at depth -1 (stock)
+        res = self.op_result(n0, z_sendmany_opid(n0, slh, [(n1.getnewaddress(), Decimal('1'))]))
+        assert_equal(res['status'], 'failed')
+        msg = res['error']['message']
+        assert msg.startswith('Fee ') and msg.endswith(' is above the 0.10 cap on a post-quantum spend '
+                                                       '(-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)'), msg
+        assert_equal((self.stuck(n0), n0.getrawmempool()), before)
+        assert_equal(n0.z_getbalance(slh), Decimal('2'))
+        self.restart0()
+
+    def refused_commit_is_erased(self):
+        print('review M-2: a PQ send the mempool refuses at the commit (expiring soon) is erased from the wallet')
+        ncoins = 24
+        n0 = self.restart0(['-txexpirydelta=4'])
+        n1 = self.nodes[1]
+        slh = n0.getnewaddress('', 'pqslh')
+        for _ in range(ncoins):
+            n0.sendtoaddress(slh, Decimal('0.1'))
+        self.mine(1)
+        assert_equal(len(n0.listunspent(1, 9999, [slh])), ncoins)
+        stock = set(self.stuck(n0))                          # the stock ECC send above (depth -1, refused at every start)
+        c = n1.getnewaddress()
+        amount = Decimal('0.1') * (ncoins - 1)                      # needs every coin: ~8 s of SLH-DSA signing
+        opid = z_sendmany_opid(n0, slh, [(c, amount)])
+        # the expiry height is fixed by the call; two blocks now make it "expiring soon" by the time it is committed
+        n0.generate(2)
+        res = self.op_result(n0, opid)
+        assert_equal(res['status'], 'failed')
+        assert_equal(res['error']['message'], PQ_EXPIRING_COMMIT_REFUSAL)
+        self.sync_all()
+
+        def gone(node):
+            assert_equal(set(self.stuck(node)), stock)
+            assert_equal(set(node.getrawmempool()) - stock, set())
+            assert_equal(len(node.listunspent(1, 9999, [slh])), ncoins)
+            assert_equal(node.z_getbalance(slh), Decimal('0.1') * ncoins)
+        gone(n0)
+        print('  gone after a restart, and after a -rescan restart')
+        n0 = self.restart0(['-txexpirydelta=4'])
+        gone(n0)
+        n0 = self.restart0(['-txexpirydelta=4', '-rescan'])
+        gone(n0)
+        assert_equal(n1.getreceivedbyaddress(c, 0), 0)
+        print('  a second send pays the recipient exactly once')
+        n0 = self.restart0()
+        wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, slh, [(c, amount)]), timeout=300)
+        self.mine(1)
+        n0 = self.restart0(['-rescan'])
+        self.mine(1)
+        assert_equal(n1.getreceivedbyaddress(c, 0), amount)
+        assert_equal(set(self.stuck(n0)), stock)
 
 
 if __name__ == '__main__':

@@ -15,8 +15,11 @@ then holds nothing else (so the token is the one coin every wildcard and stock p
   z_sendmany from the key and from ANY_TADDR, z_mergetoaddress of the key, of ANY_TADDR and of
   [ANY_TADDR, ANY_SAPLING], sendtoaddress and sendmany all fail as from an empty wallet (their stock errors).
 - The lock removed on purpose (yed_unlockcoin): each of those is refused by the second check, naming the outpoint
-  ("refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n> (its YED would burn; ...)").
-- yed_lockcoins locks it again; the token output stays unspent and yed_getbalance never moves.
+  ("refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n> (its YED would burn; lock it again with
+  yed_lockcoins)"), and so is vault_lock's fee funding (review L-3).
+- The hint is the one that works (review M-1): `lockunspent true` does not lock a released token again (the
+  refusal still fires); once the key also holds plain YEC, vault_lock funds its fee without the token; yed_lockcoins
+  locks it again. The token output stays unspent and yed_getbalance never moves.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_yed_ecc_token.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -43,6 +46,7 @@ from test_framework.yellowback_util import activate_yed_late, mint_to_fresh_hold
 ACTIVATION = 210        # the vault upgrade
 FALCON = 1000           # -pqfalconheight: never reached here, so YED goes to P2PKH holder keys
 YED_REFUSED = 'refusing to spend a Yellowback outpoint as plain YEC: '
+YED_REFUSED_HINT = ' (its YED would burn; lock it again with yed_lockcoins)'
 UNLOCK_ACK = 'I understand this burns YED'
 TOKEN_VALUE = Decimal('0.0001')
 
@@ -94,7 +98,7 @@ class WalletYedEccTokenTest(BitcoinTestFramework):
         n0, n1, n2 = self.nodes
         n0.generate(ACTIVATION + 10)
         self.sync_all()
-        activate_yed_late(self, [0, 2], ((0, 1), (1, 2), (0, 2)))
+        setid = activate_yed_late(self, [0, 2], ((0, 1), (1, 2), (0, 2)))
         n0, n1, n2 = self.nodes
         assert n0.getblockcount() + 1 < FALCON
         mint_to_fresh_holder(self.nodes, 0, 2)
@@ -138,6 +142,26 @@ class WalletYedEccTokenTest(BitcoinTestFramework):
         assert outpoint not in n1.listlockunspent()
         named = YED_REFUSED + '%s:%d' % op
         every_path(named, named, named, named)
+        lock = {'tag': 'TEST', 'setid': setid, 'delay': 10, 'ownerheight': n1.getblockcount() + 1000,
+                'amount': Decimal('0.5')}
+        assert_raises_rpc(named, n1.vault_lock, lock)                    # review L-3: the vault RPCs' fee funding
+
+        print('the refusal\'s hint (review M-1): lockunspent true does not lock a released token; yed_lockcoins does')
+        msg = assert_raises_rpc(named, n1.sendtoaddress, back, Decimal('0.00001'))
+        assert_equal(msg, named + YED_REFUSED_HINT)
+        lockunspent_true(n1)
+        assert outpoint not in n1.listlockunspent()
+        assert_equal(assert_raises_rpc(named, n1.sendtoaddress, back, Decimal('0.00001')), named + YED_REFUSED_HINT)
+
+        print('review L-3: with plain YEC beside it, vault_lock funds its fee without the released token')
+        n0.sendtoaddress(n1.getnewaddress(), Decimal('2'))
+        self.mine(1)
+        n1.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)                      # the block's Reconcile locked it again
+        assert outpoint not in n1.listlockunspent()
+        r = n1.vault_lock(lock)
+        assert op not in [(i['txid'], i['vout']) for i in n1.getrawtransaction(r['txid'], 1)['vin']]
+        assert outpoint not in n1.listlockunspent()
+        self.mine(1)
         n1.yed_lockcoins()
         assert outpoint in n1.listlockunspent()
         assert_equal((n0.yed_getbalance()['confirmedCents'], n1.yed_getbalance()['confirmedCents']), before)

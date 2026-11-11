@@ -208,20 +208,45 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
   `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
   Falcon keeps its `… can be paid only once …` strings.
-- **YED is never spent as plain YEC by these paths.** The Yellowback wallet layer locks every token output
-  (`listlockunspent`; `lockunspent` will not unlock one, and `lockunspent true` re-applies the locks), so a holder
-  key's token never reaches the coin selection: a send or merge from a key that holds only tokens fails as from an
-  empty address (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds
-  to merge.`). As a second check, a post-quantum source's candidate coins (`z_sendmany`) and every input of a merge
-  with a PQ coin (`z_mergetoaddress`) are looked up in the Yellowback index, the check the YED builders make: a
-  token or vault outpoint, an output of an unconfirmed transaction carrying a Yellowback payload, or a carrier of
-  this wallet, is refused (RPC_WALLET_ERROR)
-  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…]`, and where Yellowback is live
-  and its index is unhealthy every such spend is refused, since the locks are then not reconciled:
-  `refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks
-  cannot be trusted; restart with -reindex-yellowback`. This holds even after `yed_unlockcoin`: a deliberate burn
-  goes through `sendrawtransaction … allowyedburn`. `sendtoaddress`/`sendmany` and an ECC-source `z_sendmany`
-  rely on the coin lock alone, as before.
+- **YED is never spent as plain YEC by the wallet's own coin selection.** Where Yellowback is live (the network has a
+  vault height and a YED attestor set), the Yellowback wallet layer locks every token output (`listlockunspent`;
+  `lockunspent` will not unlock one: `yed-locked-outpoint`), so a holder key's token never
+  reaches the coin selection: a send or merge from a key that holds only tokens fails as from an empty address
+  (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds to merge.`).
+  As a second check, for a lock removed on purpose (`yed_unlockcoin`), every path that selects coins itself --
+  `z_sendmany` (a post-quantum or ECC source, `ANY_TADDR`), `z_mergetoaddress`, `sendtoaddress`/`sendmany`
+  (`CreateTransaction`), `vault_lock "from"` and the vault RPCs' own fee funding (the wallet P2PKH coins `vault_lock`,
+  `vault_buildunlock`, the set acts and a re-funded spend add) -- asks the Yellowback index, the check the YED builders make: a token
+  or vault outpoint, an unconfirmed output its transaction's Yellowback payload assigns YED (a `MINT`'s vault and
+  token outputs, a `TRANSFER`'s or `REDEEM`'s assignments; what the wallet layer pre-locks), or a carrier of this
+  wallet, is a Yellowback outpoint. `z_sendmany`, `z_mergetoaddress` and the vault fee funding leave such outpoints
+  out and spend the other coins; they are refused (RPC_WALLET_ERROR) only when the send cannot be made without them, and
+  `sendtoaddress`/`sendmany` are refused when the selection picked one:
+  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
+  A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
+  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked.
+  While the Yellowback index is unhealthy, every plain-YEC send or merge from a post-quantum address (and `vault_lock
+  "from"`) is refused, deliberately: the coin locks are then not reconciled and cannot be trusted (the independent
+  review of 2026-11-11 confirmed this). `refusing to spend as plain YEC while the Yellowback index is unhealthy
+  (<reason>): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback`. The ECC paths and
+  `sendtoaddress`/`sendmany` keep working then, with the payload check standing in for the index for every input.
+  F-1's locks on the plain inputs of a committed Yellowback transaction (until it is mined) are coin locks only:
+  spending such an input would conflict with that transaction, not burn YED.
+- **Post-quantum fee cap (audit H1).** `z_sendmany` from a post-quantum address and a `z_mergetoaddress` that merges a
+  post-quantum coin refuse a fee above `PQMaxTxFee()` (`-maxtxfee`, or $2 at the attested price, at most
+  `-yellowbackmaxtxfee`) before signing (RPC_INVALID_PARAMETER) `Fee <fee> is above the <cap> cap on a post-quantum
+  spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)`: an explicit fee before building, and
+  the fee the wallet computed (for instance a change below a high `-minrelaytxfee` dust threshold folded into the
+  fee) once the inputs are chosen; at the commit the fee is checked again under the node's lock, since a price
+  change in a block found while the inputs were signed can lower the cap (RPC_WALLET_ERROR) `The post-quantum fee
+  cap fell to <cap> while this transaction was signed, below its fee <fee>; nothing was sent, send it again`; and a
+  post-quantum transaction the mempool refuses at the commit is erased from the wallet again, so no restart
+  broadcasts a send the caller was told failed (the error is the stock `SendTransaction: Transaction commit failed:: <reason>`).
+  If it cannot be erased from the wallet file, the send fails with (RPC_WALLET_ERROR) `The mempool refused
+  transaction <txid>, but it could not be erased from the wallet file: the wallet still holds this unbroadcast
+  transaction and may submit it at the next start; check it with gettransaction before you send again`; a
+  transaction the mempool holds is never erased (`Transaction <txid> is in the mempool although its commit reported
+  an error; it is kept in the wallet and will be relayed: do not send it again`).
 - **Change.** The D-4 change returns to its source address, which is in the address book, so it is listed as a
   payment to that address on both lines. `IsChange` is unchanged on this line: a post-quantum key outside the
   address book is not change.
