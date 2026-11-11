@@ -176,9 +176,15 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `getnewaddress` handed out, and its change and mining keys) **as long as no more than `-keypool`
   (default 100) unused addresses in a row were handed out**, its first legacy Sapling address, and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond the
-  gap is not re-found. The wallet holds `-keypool` + 1 transparent keys of each HD chain ahead of the
-  last one it issued or saw paid (in memory, not in `wallet.dat`), and the restore's rescan re-checks
-  earlier blocks when a payment moves that window, so addresses paid out of order are found too.
+  gap is not re-found. The transparent gap limit is the **restoring** node's `-keypool`: restore with
+  the original wallet's `-keypool` or larger (a wallet that ran with a larger `-keypool` can leave
+  longer runs of unused keys on its change chain). The wallet holds `-keypool` + 1 transparent keys of
+  each HD chain ahead of the last one it issued or saw paid (in memory, not in `wallet.dat`), and the
+  restore's rescan reads the scanned blocks again, to the tip, while a pass moves that window or
+  finds a transaction, so addresses paid (and coins spent) out of order are found too. The cost: the
+  restore reads the chain from genesis about twice on mainnet for a wallet that used its addresses in
+  order, three times or more when it used them out of chain order (one more read for each level of keys
+  found only by a re-read; on the 444-block test chain of `wallet_seed_restore_ecc.py`, five reads).
   The restore files each re-found address it sees paid under `receive` in the address book, as
   `getnewaddress` did: it cannot tell those from the addresses the original wallet kept out of the
   book (the vault RPCs' funding change and split outputs), so these list as receiving addresses after
