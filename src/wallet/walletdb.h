@@ -520,6 +520,8 @@ public:
     bool WriteMinVersion(int nVersion);
 
     bool WriteRecipientMapping(const uint256& txid, const libzcash::RecipientAddress& address, const libzcash::UnifiedAddress& ua);
+    //! Review L-2: drop the record WriteRecipientMapping wrote (CWallet::EraseUnbroadcastTx).
+    bool EraseRecipientMapping(const uint256& txid, const libzcash::RecipientAddress& address);
 
     /// Write destination data key,value tuple to database
     bool WriteDestData(const std::string &address, const std::string &key, const std::string &value);

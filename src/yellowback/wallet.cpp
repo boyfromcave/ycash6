@@ -147,16 +147,10 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
 void YellowbackWallet::RemoveOrphan(const uint256& txid)
 {
     LOCK(wallet->cs_wallet);
-    std::map<uint256, CWalletTx>::iterator it = wallet->mapWallet.find(txid);
-    if (it == wallet->mapWallet.end()) return;
+    if (!wallet->mapWallet.count(txid)) return;
     LogPrint("yellowback", "removing %s: recorded by CommitTransaction, refused by the mempool\n", txid.ToString());
-    // 6.20.0: wtxOrdered holds a pointer into mapWallet (AddToWallet); drop it before the entry goes.
-    for (CWallet::TxItems::iterator o = wallet->wtxOrdered.begin(); o != wallet->wtxOrdered.end();) {
-        if (o->second == &it->second) o = wallet->wtxOrdered.erase(o);
-        else ++o;
-    }
-    wallet->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
-    wallet->mapWallet.erase(txid);   // and mapWallet when not file-backed; mapTxSpends entries are ignored once it is gone
+    // Review H-1: the shared erase, which drops the spend indexes too (a stale one recreated an empty entry later).
+    if (!wallet->EraseUnbroadcastTx(txid)) LogPrintf("yellowback: could not erase %s from the wallet file; kept\n", txid.ToString());
 }
 
 void YellowbackWallet::LockSpentYec(const CTransaction& tx)

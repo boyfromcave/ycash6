@@ -182,7 +182,85 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   are, so `PQ` is refused with that message; a type given first and again second is refused with `the address type
   is given first, so there is no second argument (getnewaddress pq, or getnewaddress "" pq)`. `getnewaddress` is in
   `DEFAULT_ALLOW_DEPRECATED`: `-allowdeprecated=none` turns it off in every shape.
-- **`z_sendmany` / `z_mergetoaddress` refuse an `sq…` recipient** on this line (their recipients are `libzcash::PaymentAddress`, which has no post-quantum alternative): pay an `sq…` address with `sendtoaddress` or `sendmany`.
+- **`z_sendmany` is the any-to-any call for plain YEC (beta2 D-2; quantum spec A-15 reversed).** From an
+  ECC (`s1…`), Sapling (`ys1…`) or post-quantum (`sq…`, either scheme) address to any mix of ECC, Sapling
+  and PQ recipients (a PQ address is a transparent output beside the `libzcash::PaymentAddress` model). A PQ
+  from address spends that address's own coins (largest first, mature only: `minconf` applies); its inputs
+  are signed after the Sapling proofs are made, under the vault script flags of the next block, with no
+  global lock held while signing (an SLH-DSA signature takes ~0.3 s); the wallet re-checks before and after
+  that the inputs are still unspent and the next block's rules unchanged. Its change returns to the same
+  `sq…` address (D-4; Sapling change stays a Sapling note, ECC change is unchanged). Its fee follows the rule
+  `sendtoaddress` uses for a PQ input: max(the `-feepolicy` default, `-pqfeerate` × size, the ZIP-317
+  conventional fee), about 27,000 zat for one SLH-DSA input and 5,500 for one FN-DSA input, +1,000 for a lone
+  Sapling output (this line's Sapling builder pads it to two); the default fee is raised to it, an explicit
+  fee below it is refused, change below the PQ dust threshold goes to the fee, and at most 100 PQ inputs
+  (`MAX_PQ_INPUTS_PER_TX`) fit one transaction, within the standard sigop limit. A PQ recipient amount below
+  the PQ dust threshold (priced on the spend size of its scheme) is refused. `ANY_TADDR` still selects ECC
+  coins only.
+- **Privacy policy (D-5):** a PQ party is a transparent party. Sapling → PQ needs `AllowRevealedRecipients`;
+  PQ → Sapling needs `AllowRevealedSenders`, or `AllowFullyTransparent` when it has D-4 change (a transparent
+  output, as an ECC source's change is); merging coins of more than one address needs the linking policies, as
+  for ECC addresses. The refusal is the existing `The specified privacy policy, …` message.
+- **`z_mergetoaddress` follows (D-6):** a named `sq…` source merges its coins (at most 100 per call, and
+  only as many inputs as keep the policy sigops, P2SH redeem scripts included, within the standard limit; the
+  rest are reported as remaining), an `sq…` destination receives the merge, with the same fee rule. PQ coins
+  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` still refuses a PQ source (D-7).
+- The error strings of these paths (the same on every line):
+  `post-quantum addresses can be spent from only once the vault upgrade is active at the next block`;
+  `an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block`;
+  `From address does not belong to this node, post-quantum key not found.`;
+  `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet);
+  `Invalid parameter, amount <x> is below the dust threshold <y> of a post-quantum output`;
+  `Fee <x> is below the <y> this post-quantum spend needs`;
+  `This send needs <n> post-quantum inputs, more than the <m> one transaction may carry; combine the address's coins first with z_mergetoaddress`;
+  `This transaction needs <n> signature operations, more than the <m> a standard transaction allows; spend fewer inputs`;
+  `A post-quantum from address cannot pay a Sprout address`;
+  `Post-quantum coins cannot be merged with Sprout notes or into a Sprout address`;
+  `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
+  `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
+  Falcon keeps its `… can be paid only once …` strings.
+- **YED is never spent as plain YEC by the wallet's own coin selection.** Where Yellowback is live (the network has a
+  vault height and a YED attestor set), the Yellowback wallet layer locks every token output (`listlockunspent`;
+  `lockunspent` will not unlock one: `yed-locked-outpoint`), so a holder key's token never
+  reaches the coin selection: a send or merge from a key that holds only tokens fails as from an empty address
+  (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds to merge.`).
+  As a second check, for a lock removed on purpose (`yed_unlockcoin`), every path that selects coins itself --
+  `z_sendmany` (a post-quantum or ECC source, `ANY_TADDR`), `z_mergetoaddress`, `sendtoaddress`/`sendmany`
+  (`CreateTransaction`), `vault_lock "from"` and the vault RPCs' own fee funding (the wallet P2PKH coins `vault_lock`,
+  `vault_buildunlock`, the set acts and a re-funded spend add) -- asks the Yellowback index, the check the YED builders make: a token
+  or vault outpoint, an unconfirmed output its transaction's Yellowback payload assigns YED (a `MINT`'s vault and
+  token outputs, a `TRANSFER`'s or `REDEEM`'s assignments; what the wallet layer pre-locks), or a carrier of this
+  wallet, is a Yellowback outpoint. `z_sendmany`, `z_mergetoaddress` and the vault fee funding leave such outpoints
+  out and spend the other coins; they are refused (RPC_WALLET_ERROR) only when the send cannot be made without them, and
+  `sendtoaddress`/`sendmany` are refused when the selection picked one:
+  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
+  A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
+  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked.
+  While the Yellowback index is unhealthy, every plain-YEC send or merge from a post-quantum address (and `vault_lock
+  "from"`) is refused, deliberately: the coin locks are then not reconciled and cannot be trusted (the independent
+  review of 2026-11-11 confirmed this). `refusing to spend as plain YEC while the Yellowback index is unhealthy
+  (<reason>): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback`. The ECC paths and
+  `sendtoaddress`/`sendmany` keep working then, with the payload check standing in for the index for every input.
+  F-1's locks on the plain inputs of a committed Yellowback transaction (until it is mined) are coin locks only:
+  spending such an input would conflict with that transaction, not burn YED.
+- **Post-quantum fee cap (audit H1).** `z_sendmany` from a post-quantum address and a `z_mergetoaddress` that merges a
+  post-quantum coin refuse a fee above `PQMaxTxFee()` (`-maxtxfee`, or $2 at the attested price, at most
+  `-yellowbackmaxtxfee`) before signing (RPC_INVALID_PARAMETER) `Fee <fee> is above the <cap> cap on a post-quantum
+  spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)`: an explicit fee before building, and
+  the fee the wallet computed (for instance a change below a high `-minrelaytxfee` dust threshold folded into the
+  fee) once the inputs are chosen; at the commit the fee is checked again under the node's lock, since a price
+  change in a block found while the inputs were signed can lower the cap (RPC_WALLET_ERROR) `The post-quantum fee
+  cap fell to <cap> while this transaction was signed, below its fee <fee>; nothing was sent, send it again`; and a
+  post-quantum transaction the mempool refuses at the commit is erased from the wallet again, so no restart
+  broadcasts a send the caller was told failed (the error is the stock `SendTransaction: Transaction commit failed:: <reason>`).
+  If it cannot be erased from the wallet file, the send fails with (RPC_WALLET_ERROR) `The mempool refused
+  transaction <txid>, but it could not be erased from the wallet file: the wallet still holds this unbroadcast
+  transaction and may submit it at the next start; check it with gettransaction before you send again`; a
+  transaction the mempool holds is never erased (`Transaction <txid> is in the mempool although its commit reported
+  an error; it is kept in the wallet and will be relayed: do not send it again`).
+- **Change.** The D-4 change returns to its source address, which is in the address book, so it is listed as a
+  payment to that address on both lines. `IsChange` is unchanged on this line: a post-quantum key outside the
+  address book is not change.
 - **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap

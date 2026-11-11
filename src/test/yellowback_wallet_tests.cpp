@@ -734,4 +734,56 @@ BOOST_AUTO_TEST_CASE(history_carrier_outcome_and_expired_type)
     BOOST_CHECK_EQUAL(ExpiredRowType((uint8_t)PayloadType::CANCEL_COSIGN, false), "cancel");
 }
 
+// F-1 and review H-1: a commit the mempool refuses (here: its input is not in the chain) is erased by RemoveOrphan
+// through CWallet::EraseUnbroadcastTx, spend entries included. Another transaction spending the same coin is then
+// recorded as itself: no empty entry is recreated for the erased txid (SyncMetaData on a stale spend entry did that,
+// and ResendWalletTransactions asserted on its missing wallet), and nothing it does not own is copied onto it.
+BOOST_AUTO_TEST_CASE(remove_orphan_drops_spend_indexes)
+{
+    LOCK(cs_main);
+    YellowbackWallet yw(wallet, index.get());
+    wallet->SetBroadcastTransactions(true);
+    const CKey key = CKey::TestOnlyRandomKey(true);
+    const CScript mine = GetScriptForDestination(key.GetPubKey().GetID());
+    BOOST_REQUIRE(wallet->AddKey(key));
+    CMutableTransaction parent;
+    parent.vin.push_back(CTxIn(COutPoint(uint256S("03"), 0)));
+    parent.vout.push_back(CTxOut(50000, mine));
+    const CTransaction parentTx(parent);
+    {
+        LOCK(wallet->cs_wallet);
+        CWalletDB walletdb(wallet->strWalletFile);
+        BOOST_REQUIRE(wallet->AddToWallet(CWalletTx(wallet, parentTx), &walletdb));
+    }
+    auto spender = [&](CAmount out) {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(COutPoint(parentTx.GetHash(), 0)));
+        m.vout.push_back(CTxOut(out, mine));
+        return CTransaction(m);
+    };
+    CWalletTx refused(wallet, spender(40000));
+    const uint256 txid = refused.GetHash();
+    size_t ordered;
+    {
+        LOCK(wallet->cs_wallet);
+        ordered = wallet->wtxOrdered.size();
+    }
+    BOOST_CHECK(!yw.Commit(refused, std::nullopt));          // AcceptToMemoryPool: missing inputs
+    LOCK(wallet->cs_wallet);
+    BOOST_CHECK(!wallet->mapWallet.count(txid));
+    BOOST_CHECK_EQUAL(wallet->wtxOrdered.size(), ordered);   // 6.x: no pointer to the erased entry is left
+
+    CWalletTx again(wallet, spender(30000));
+    again.fFromMe = true;
+    again.mapValue["comment"] = "sent again";
+    CWalletDB walletdb(wallet->strWalletFile);
+    BOOST_REQUIRE(wallet->AddToWallet(again, &walletdb));
+    BOOST_CHECK(!wallet->mapWallet.count(txid));              // no empty entry recreated
+    BOOST_CHECK(wallet->GetConflicts(again.GetHash()).empty());
+    const CWalletTx& stored = wallet->mapWallet.at(again.GetHash());
+    BOOST_CHECK(stored.fFromMe);
+    BOOST_CHECK_EQUAL(stored.mapValue.count("comment"), 1U);
+    for (const auto& item : wallet->mapWallet) BOOST_CHECK(item.second.GetHash() == item.first);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

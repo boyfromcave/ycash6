@@ -81,7 +81,7 @@ name: yellowback tests
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
 #   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
-#     `koganyd` and `sidecar-rig`, the 53 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     `koganyd` and `sidecar-rig`, the 56 wallet-needing scripts of qa/kogany-mixed-shards.txt's
 #     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
 #     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
 #     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
@@ -168,6 +168,8 @@ env:
   # vault_pq, vault_pq_wallet, yellowback_pq joined on 2026-10-10 (quantum Q3, Q5, Q4; ported from ycash-dd); yellowback_pq_dayone (D-Q-2: Falcon from the vault activation).
   # vault_pq_wallet_restore joined on 2026-10-10 (review B I-2 lookahead + quantum review F-1; ported from ycash-dd c308ea44c, 90f175ca1).
   # wallet_pq_address joined on 2026-10-10 (D-Q-20 chain-wide sq… addresses; ported from ycash-dd d16e02345..d7b2dee30).
+  # wallet_address_matrix joined on 2026-11-11 (beta2 D-2/D-6: z_sendmany and z_mergetoaddress any-to-any across ECC, Sapling and PQ; ported from ycash-dd #163).
+  # wallet_pq_fee_cap and wallet_yed_ecc_token joined on 2026-11-11 (beta2 audit H1/A-M2 and review M1/m2; ported from ycash-dd #163).
   # yellowback_fees joined on 2026-10-11 (the D-Q-23/24/25 fee structure, rpcversion 8; ported from ycash-dd 942b6beac).
   # yellowback_fees_reaccept joined on 2026-10-11 (the wallet reaccepts its own PQ/Yellowback transactions against the ceiling; ported from ycash-dd 6befc3039).
   # yellowback_attest_bond joined on 2026-10-11 (the D-Q-28 attestor bond minimum; ported from ycash-dd 3a3910f89).
@@ -181,13 +183,13 @@ env:
   # wallet_balance_by_type joined on 2026-11-11 (beta2 item 15: balances and listings by address type; ported from ycash-dd #162).
   # wallet_getnewaddress_type joined on 2026-11-11 (beta2 item 10: the address type first; ported from ycash-dd #164).
   # wallet_yed_held_guard joined on 2026-11-11 (beta2 item 32: the wallet-side has-held-YED guard beside H6; it was registered in rpc-tests.py but in no CI list).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token
   SANITIZER_SCRIPTS: yellowback_index
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
   OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
@@ -806,7 +808,7 @@ jobs:
 
   # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
   # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
-  # 53 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
+  # 56 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
   # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
   # so every block and transaction between nodes passes kogany's validation and ycashd's again
   # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
@@ -1370,8 +1372,12 @@ jobs:
           ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h || exit 1
           # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
           ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
-          # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
-          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || exit 1
+          # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22),
+          # and, for AddTransparentInputUnsigned alone, by TransactionEffects::ApproveAndBuild for the post-quantum
+          # inputs of z_sendmany / z_mergetoaddress, signed after Build() (beta2 D-2, D-6: SignPQBuilderInputs).
+          ! git grep -n "SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || exit 1
+          ! git grep -n "AddTransparentInputUnsigned" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' \
+              ':!src/wallet/wallet_tx_builder.cpp' || exit 1
 
       - name: Documents (fork-local only, P4)
         # Staleness against the plan is a workspace check (make status -> spec-check), not a fork check.
