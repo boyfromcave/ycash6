@@ -6087,6 +6087,29 @@ void CWallet::WitnessNoteCommitment(std::vector<uint256> commitments,
  * from or to us. If fUpdate is true, found transactions that already
  * exist in the wallet will be updated.
  */
+// Beta2 (review M-a), regtest only: -stoprescanat=<pass>:<height> requests a shutdown when pass <pass> of a scan (1 the
+// main pass, 2 and on the re-passes) reaches block <height>, so a test interrupts a scan, a restore's among them, at a
+// known block instead of racing a signal.
+static std::optional<std::pair<int, int>> RescanStopAt()
+{
+    if (Params().NetworkIDString() != "regtest" || !mapArgs.count("-stoprescanat"))
+        return std::nullopt;
+    const std::string value = GetArg("-stoprescanat", "");
+    const size_t colon = value.find(':');
+    int pass, height;
+    if (colon == std::string::npos || !ParseInt32(value.substr(0, colon), &pass) || !ParseInt32(value.substr(colon + 1), &height))
+        return std::nullopt;
+    return std::make_pair(pass, height);
+}
+
+static void RescanStopHook(const std::optional<std::pair<int, int>>& stopAt, int pass, int height)
+{
+    if (stopAt.has_value() && stopAt.value() == std::make_pair(pass, height) && !ShutdownRequested()) {
+        LogPrintf("ScanForWalletTransactions(): -stoprescanat: shutdown requested at height %d (pass %d)\n", height, pass);
+        StartShutdown();
+    }
+}
+
 std::optional<int> CWallet::ScanForWalletTransactions(
         CBlockIndex* pindexStart,
         bool fUpdate,
@@ -6210,10 +6233,15 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                       "coins sent to addresses of its seed it has not issued are not found; to find them, restore the recovery "
                       "phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n");
         }
+        const std::optional<std::pair<int, int>> stopAt = RescanStopAt();
         while (pindex)
         {
+            RescanStopHook(stopAt, 1, pindex->nHeight);
             // Allow the rescan to be interrupted on a block boundary.
-            if (ShutdownRequested()) return std::nullopt;
+            if (ShutdownRequested()) {
+                LogPrintf("ScanForWalletTransactions(): interrupted by a shutdown request at height %d (pass 1)\n", pindex->nHeight);
+                return std::nullopt;
+            }
 
             if (pindex->nHeight % 100 == 0 && dProgressTip - dProgressStart > 0.0)
                 ShowProgress(_("Rescanning..."), std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false) - dProgressStart) / (dProgressTip - dProgressStart) * 100))));
@@ -6293,11 +6321,30 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         while (again) {
             if (ShutdownRequested()) return std::nullopt;
             repass++;
+            const int pass = repass + 1;
             LogPrintf("ScanForWalletTransactions(): the key lookahead moved during the scan; re-checking heights %d to %d (pass %d)\n",
-                      pindexScanStart->nHeight, chainActive.Height(), repass + 1);
+                      pindexScanStart->nHeight, chainActive.Height(), pass);
+            // Review M-a: a pass reads the whole range (on mainnet, the chain from genesis), so it reports progress and
+            // stops at a block boundary on a shutdown request, as the main pass does; a restore's marker stays set, so
+            // the next start runs the restore's scan again (InitLoadWallet).
+            const std::string passLabel = strprintf("%s (%s %d)", _("Rescanning..."), _("pass"), pass);
+            ShowProgress(passLabel, 0);
+            const double dPassStart = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindexScanStart, false);
             const uint64_t growthBefore = nKeyLookaheadGrowth;
             int added = 0;
             for (CBlockIndex* p = pindexScanStart; p != nullptr; p = chainActive.Next(p)) {
+                RescanStopHook(stopAt, pass, p->nHeight);
+                if (ShutdownRequested()) {
+                    LogPrintf("ScanForWalletTransactions(): interrupted by a shutdown request at height %d (pass %d)\n", p->nHeight, pass);
+                    return std::nullopt;
+                }
+                if (p->nHeight % 100 == 0 && dProgressTip - dPassStart > 0.0)
+                    ShowProgress(passLabel, std::max(1, std::min(99, (int)((Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), p, false) - dPassStart) / (dProgressTip - dPassStart) * 100))));
+                if (GetTime() >= nNow + 60) {
+                    nNow = GetTime();
+                    LogPrintf("Still rescanning (pass %d). At block %d. Progress=%f\n", pass, p->nHeight,
+                              Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), p));
+                }
                 CBlock block;
                 if (!ReadBlockFromDisk(block, p, consensus)) {
                     throw std::runtime_error(
@@ -8300,6 +8347,7 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
         strUsage += HelpMessageOpt("-dblogsize=<n>", strprintf("Flush wallet database activity from memory to disk log every <n> megabytes (default: %u)", DEFAULT_WALLET_DBLOGSIZE));
         strUsage += HelpMessageOpt("-flushwallet", strprintf("Run a thread to flush wallet periodically (default: %u)", DEFAULT_FLUSHWALLET));
         strUsage += HelpMessageOpt("-privdb", strprintf("Sets the DB_PRIVATE flag in the wallet db environment (default: %u)", DEFAULT_WALLET_PRIVDB));
+        strUsage += HelpMessageOpt("-stoprescanat=<pass>:<height>", "Regtest only: request a shutdown when pass <pass> of a wallet scan (1 the main pass, 2 and on the re-passes of the transparent key lookahead) reaches block <height>");
         strUsage += HelpMessageOpt("-bdbcache=<n>", strprintf("Set BerkeleyDB cache size in megabytes for the wallet environment (allowed range 1..1024, default: %u). Larger values reduce page eviction on big wallets and shorten the pause introduced by online deletetx compaction.", DEFAULT_BDB_CACHE_SIZE));
     }
 

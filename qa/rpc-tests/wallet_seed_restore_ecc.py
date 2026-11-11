@@ -39,6 +39,7 @@ from decimal import Decimal
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_start_raises_init_error,
     bitcoind_processes,
     wait_and_assert_operationid_status,
     connect_nodes_bi,
@@ -327,6 +328,20 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
                      sorted([(target_txid, target, Decimal('0.6')), (target2_txid, target2, Decimal('0.7')),
                              (target3_txid, target3, Decimal('0.8'))]))
         assert_equal(Decimal(final['transparent']), Decimal(before['transparent']) + Decimal('2.1'))
+
+        print('review M-a: a shutdown requested in the middle of a re-pass stops the scan at that block')
+        stop_height = n1.getblockcount() - 40
+        stop_node(self.nodes[0], 0)
+        logpos = len(self.debug_log())
+        assert_start_raises_init_error(
+            0, self.options.tmpdir,
+            self.node_args(0, 'eccinterrupted.dat') + ['-mnemonicfile=%s' % export, '-stoprescanat=2:%d' % stop_height],
+            'rescan interrupted due to shutdown request')
+        log = self.debug_log()[logpos:]
+        hook = log.index('-stoprescanat: shutdown requested at height %d (pass 2)' % stop_height)
+        assert 'interrupted by a shutdown request at height %d (pass 2)' % stop_height in log[hook:]
+        assert 're-check found' not in log[hook:]       # the pass did not read on to its end
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, 'eccrestored2.dat'))
 
 
 if __name__ == '__main__':
