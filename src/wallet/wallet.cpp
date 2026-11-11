@@ -684,9 +684,32 @@ void CWallet::NotePQKeysUsed(const CTransaction& tx)
             PQChannelParams cp;
             if (MatchPQChannel(out.scriptPubKey, cp)) id = cp.client;
         }
-        if (id.has_value() && HavePQKey(id.value()))
+        if (id.has_value() && HavePQKey(id.value())) {
             MarkPQKeyUsed(id.value());
+            if (type != TX_PQPKH) pqOwnerKeysSeen.insert(id.value());
+            // Beta2: a key of this wallet paid by a TX_PQPKH output is filed in the address book when it is not yet
+            // (a seed-only restore re-finds its keys by this rescan, with no address book), as getnewaddress files
+            // it, so its receipts are receipts on the restored wallet as on the original, never change (IsChange).
+            // A vault, intent or channel owner key stays out, as vault_getnewowner leaves it, also when someone pays
+            // a TX_PQPKH output to it (its hash is public in the vault script; review m8): such a payment is still
+            // the wallet's, counted in the balances and listed by listreceivedbyaddress (under "") and as a receipt
+            // by listtransactions, which need no address-book entry for a payment from outside.
+            // -regtestskippqfiling (regtest only) leaves the keys unfiled, as wallets before beta2 did (the load
+            // test of FilePaidPQKeys).
+            if (type == TX_PQPKH && !pqOwnerKeysSeen.count(id.value()) && !mapAddressBook.count(CTxDestination(id.value())) &&
+                !(Params().NetworkIDString() == "regtest" && GetBoolArg("-regtestskippqfiling", false)))
+                SetAddressBook(id.value(), "", "receive");
+        }
     }
+}
+
+void CWallet::FilePaidPQKeys()
+{
+    AssertLockHeld(cs_wallet);
+    std::vector<const CWalletTx*> ordered;
+    for (const std::pair<const uint256, CWalletTx>& item : mapWallet) ordered.push_back(&item.second);
+    std::sort(ordered.begin(), ordered.end(), [](const CWalletTx* a, const CWalletTx* b) { return a->nOrderPos < b->nOrderPos; });
+    for (const CWalletTx* wtx : ordered) NotePQKeysUsed(*wtx);
 }
 
 bool CWallet::AddPQKey(const CPQKey& key)
@@ -7121,6 +7144,7 @@ DBErrors CWallet::LoadWallet(bool& fFirstRunRet)
     if (nLoadWalletRet != DB_LOAD_OK)
         return nLoadWalletRet;
     fFirstRunRet = !vchDefaultKey.IsValid();
+    FilePaidPQKeys();   // beta2 (review m7): PQ keys paid before NotePQKeysUsed filed them
 
     // Detect spending keys that predate the mnemonic seed. A pre-mnemonic
     // wallet stores transparent and Sapling spending keys with no ZIP-32
