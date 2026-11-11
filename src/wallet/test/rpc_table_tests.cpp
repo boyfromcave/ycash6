@@ -11,6 +11,10 @@
 // defect inherited from the 6.20.0 baseline). This suite fails on any such gap,
 // in either direction.
 
+#if defined(HAVE_CONFIG_H)
+#include "config/bitcoin-config.h"
+#endif
+
 #include "rpc/common.h"
 #include "rpc/register.h"
 #include "rpc/server.h"
@@ -41,6 +45,28 @@ const std::map<std::string, std::string> REGISTERED_WITHOUT_ROW = {
     {"dumpwallet", "removed upstream; tombstone handler, no row (use z_exportwallet)"},
 };
 
+// Rows whose method is registered only in some build configurations. The
+// commands tables have one conditional block outside the wallet (this suite is
+// compiled only with ENABLE_WALLET, which covers vault.cpp's wallet block):
+// src/rpc/mining.cpp registers getgenerate / setgenerate / generate only
+// under ENABLE_MINING (configure --disable-mining).
+const std::set<std::string> ROWS_NOT_REGISTERED_IN_THIS_BUILD = {
+#ifndef ENABLE_MINING
+    "getgenerate", "setgenerate", "generate",
+#endif
+};
+
+// Sets yellowback::g_yellowbackLive for one scope and restores it on every
+// exit, so a throwing registration cannot leave it set for later suites.
+class ScopedYellowbackLive {
+    const bool saved;
+public:
+    ScopedYellowbackLive() : saved(yellowback::g_yellowbackLive) { yellowback::g_yellowbackLive = true; }
+    ~ScopedYellowbackLive() { yellowback::g_yellowbackLive = saved; }
+    ScopedYellowbackLive(const ScopedYellowbackLive&) = delete;
+    ScopedYellowbackLive& operator=(const ScopedYellowbackLive&) = delete;
+};
+
 // Every method the node can register: the core and wallet sets already in
 // tableRPC, plus the Yellowback sets, which init registers only where
 // Yellowback is live (src/init.cpp) and so are absent from the test fixture.
@@ -50,11 +76,11 @@ std::set<std::string> AllRegisteredMethods()
     for (const auto& name : tableRPC.listCommands()) names.insert(name);
 
     CRPCTable yellowbackTable;
-    const bool wasLive = yellowback::g_yellowbackLive;
-    yellowback::g_yellowbackLive = true;
-    RegisterYellowbackRPCCommands(yellowbackTable);
-    RegisterYellowbackWalletRPCCommands(yellowbackTable);
-    yellowback::g_yellowbackLive = wasLive;
+    {
+        ScopedYellowbackLive live;
+        RegisterYellowbackRPCCommands(yellowbackTable);
+        RegisterYellowbackWalletRPCCommands(yellowbackTable);
+    }
     for (const auto& name : yellowbackTable.listCommands()) names.insert(name);
     return names;
 }
@@ -87,6 +113,11 @@ BOOST_AUTO_TEST_CASE(every_table_row_names_a_registered_method)
 {
     const auto registered = AllRegisteredMethods();
     for (const auto& [name, spec] : rpcCvtTable) {
+        if (ROWS_NOT_REGISTERED_IN_THIS_BUILD.count(name)) {
+            BOOST_CHECK_MESSAGE(registered.count(name) == 0,
+                name + " is listed as not registered in this build but is registered");
+            continue;
+        }
         BOOST_CHECK_MESSAGE(registered.count(name) == 1,
             name + " has a row in src/rpc/common.h but no registered method");
     }
