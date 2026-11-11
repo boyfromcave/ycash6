@@ -132,6 +132,8 @@ BASE_SCRIPTS= [
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -mnemonicfile.
     'wallet_pq_address.py',
+    # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
+    'wallet_getnewaddress_type.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

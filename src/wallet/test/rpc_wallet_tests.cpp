@@ -220,6 +220,10 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
      *          getnewaddress
      *********************************/
     BOOST_CHECK_NO_THROW(CallRPC("getnewaddress"));
+    /* The type may come first (beta2 item 10; wallet_getnewaddress_type.py), but not first and again second; any
+       other first string is still refused. */
+    BOOST_CHECK_THROW(CallRPC("getnewaddress p2pkh p2pkh"), runtime_error);
+    BOOST_CHECK_THROW(CallRPC("getnewaddress getnewaddress_demoaccount"), runtime_error);
 
     /*********************************
      *          signmessage + verifymessage
