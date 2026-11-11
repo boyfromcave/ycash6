@@ -150,6 +150,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "signmessage",                 {{s, s}, {}} },
     { "getreceivedbyaddress",        {{s}, {o, o, o}} },
     { "getbalance",                  {{}, {s, o, o, o, o}} },
+    { "getunconfirmedbalance",       {{}, {}} },
     { "sendmany",                    {{s, o}, {o, s, o}} },
     { "addmultisigaddress",          {{o, o}, {s}} },
     { "listreceivedbyaddress",       {{}, {o, o, o, s, o, o}} },

@@ -181,7 +181,10 @@ class WalletPQAddressTest(BitcoinTestFramework):
         self.sync_all()
         mem = n0.getaddressmempool({'addresses': [a]})
         assert_equal([(m['txid'], m['satoshis'], m['address']) for m in mem], [(tx_a, zat(2), a)])
+        # getunconfirmedbalance had no argument-table row on 6.22.0-beta1, so every call failed (beta2 item 12)
+        assert n0.getunconfirmedbalance() >= 0
         self.mine(1)
+        assert_equal(n0.getunconfirmedbalance(), Decimal('0'))
         utx = {u['txid']: u for u in n0.listunspent(1, 9999999, [a, a2, a3])}
         assert_equal(sorted(utx), sorted([tx_a, tx_m, tx_z]))
         assert_equal((utx[tx_a]['address'], utx[tx_a]['amount'], utx[tx_a]['spendable']), (a, Decimal('2'), True))
