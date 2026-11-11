@@ -510,9 +510,13 @@ WalletTxBuilder::PrepareTransaction(
         uint32_t anchorConfirmations) const
 {
     if (fee.has_value()) {
-        if (maxTxFee < fee.value()) {
+        if (SpendsPQCoin(spendable)) {
+            // Beta2 (audit H1): a merge with post-quantum coins is bounded by the PQ cap, not -maxtxfee.
+            EnsurePQFeeWithinCap(fee.value());
+        } else if (maxTxFee < fee.value()) {
             return tl::make_unexpected(MaxFeeError(fee.value()));
-        } else if (!MoneyRange(fee.value())) {
+        }
+        if (!MoneyRange(fee.value())) {
             // TODO: This check will be obviated by #6579.
             return tl::make_unexpected(InvalidFeeError(fee.value()));
         }
@@ -572,9 +576,9 @@ WalletTxBuilder::PreparePQTransaction(
         uint32_t anchorConfirmations) const
 {
     if (fee.has_value()) {
-        if (maxTxFee < fee.value()) {
-            return tl::make_unexpected(MaxFeeError(fee.value()));
-        } else if (!MoneyRange(fee.value())) {
+        // Beta2 (audit H1): a post-quantum spend is bounded by the PQ cap (the reference line's rule), not -maxtxfee.
+        EnsurePQFeeWithinCap(fee.value());
+        if (!MoneyRange(fee.value())) {
             return tl::make_unexpected(InvalidFeeError(fee.value()));
         }
     }

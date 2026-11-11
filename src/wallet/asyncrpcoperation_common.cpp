@@ -358,3 +358,61 @@ void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderIn
     }
     CheckPQInputsStillValid(ins, branchId, vaultFlags);
 }
+
+bool SpendsPQCoin(const SpendableInputs& spendable)
+{
+    return std::any_of(spendable.utxos.begin(), spendable.utxos.end(), [](const COutput& o) {
+        return IsPQKeyScript(o.tx->vout[o.i].scriptPubKey);
+    });
+}
+
+void EnsurePQFeeWithinCap(CAmount fee)
+{
+    const CAmount cap = PQMaxTxFee();
+    if (fee > cap) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "Fee %s is above the %s cap on a post-quantum spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)",
+            FormatMoney(fee), FormatMoney(cap)));
+    }
+}
+
+// The entry CommitTransaction recorded for a transaction the mempool then refused (YellowbackWallet::RemoveOrphan).
+static void EraseRefusedPQTransaction(const uint256& txid)
+{
+    AssertLockHeld(pwalletMain->cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = pwalletMain->mapWallet.find(txid);
+    if (it == pwalletMain->mapWallet.end()) return;
+    LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
+    // 6.x: wtxOrdered holds a pointer into mapWallet (AddToWallet); drop it before the entry goes.
+    for (CWallet::TxItems::iterator o = pwalletMain->wtxOrdered.begin(); o != pwalletMain->wtxOrdered.end();) {
+        if (o->second == &it->second) o = pwalletMain->wtxOrdered.erase(o);
+        else ++o;
+    }
+    pwalletMain->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
+    pwalletMain->mapWallet.erase(txid);   // and mapWallet when not file-backed
+}
+
+UniValue SendPQTransaction(
+        const CTransaction& tx,
+        const std::vector<ResolvedPayment>& recipients,
+        bool testmode)
+{
+    if (testmode) return SendTransaction(tx, recipients, std::nullopt, testmode);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    if (std::optional<CAmount> over = YedFeeOverCap(tx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "The post-quantum fee cap fell to %s while this transaction was signed, below its fee %s; nothing was sent, send it again",
+            FormatMoney(PQMaxTxFee()), FormatMoney(over.value())));
+    }
+    const uint256 txid = tx.GetHash();
+    const bool known = pwalletMain->mapWallet.count(txid) != 0;
+    try {
+        return SendTransaction(tx, recipients, std::nullopt, testmode);
+    } catch (...) {
+        // CommitTransaction records the transaction before the mempool judges it; a refused one must not stay at
+        // depth -1, where a restart's ReacceptWalletTransactions would submit it (by its own fee rule) after the
+        // caller was told it failed and may have sent again.
+        if (!known) EraseRefusedPQTransaction(txid);
+        throw;
+    }
+}

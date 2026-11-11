@@ -197,7 +197,10 @@ AsyncRPCOperation_sendmany::main_impl(CWallet& wallet) {
                 auto tx = buildResult.GetTxOrThrow();
                 LogPrint("zrpc", "%s, conventional fee: %s\n", getId(), FormatMoney(tx.GetConventionalFee()));
 
-                UniValue sendResult = SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode);
+                // A post-quantum send is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+                UniValue sendResult = !pqSource_.has_value()
+                    ? SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode)
+                    : SendPQTransaction(tx, payments.GetResolvedPayments(), testmode);
                 set_result(sendResult);
 
                 effects.UnlockSpendable(wallet);

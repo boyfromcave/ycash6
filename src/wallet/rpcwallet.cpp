@@ -5684,6 +5684,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     if (params.size() > 3 && !params[3].isNull()) {
         nFee = AmountFromValue( params[3] );
     }
+    // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
+    // than build, sign and fail at the commit.
+    if (pqSender.has_value() && nFee.has_value()) EnsurePQFeeWithinCap(nFee.value());
 
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
     UniValue o(UniValue::VOBJ);
@@ -6494,6 +6497,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         const size_t saplingOuts = (toSapling || saplingSpends > 0) ? 2 : 0;
         const CTransaction shape = PQFeeShape(nextBlockHeight, shapeIns, shapeOuts, saplingSpends, saplingOuts);
         EnsurePQShapeStandard(shape, prevScripts, numPQUtxos);
+        if (nFee.has_value()) EnsurePQFeeWithinCap(nFee.value());   // beta2 (audit H1): never build what the commit refuses
         const CAmount needed = PQBuilderFee(nFee.value_or(LEGACY_DEFAULT_FEE), shape);
         if (nFee.has_value() && needed > nFee.value()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
