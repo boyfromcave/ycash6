@@ -1735,4 +1735,129 @@ BOOST_AUTO_TEST_CASE(rpc_gettransaction_status_blossom)
 }
 
 
+// Beta2 (audit H1, review L-2): the erase after a refused post-quantum commit. Not in the wallet: nothing to do. In
+// the wallet and in the mempool: kept, and the caller's error names the txid. In the wallet only: erased (mapWallet;
+// the file's EraseTx succeeds; 6.x: wtxOrdered no longer points at it). A wallet file that refuses the erase is not
+// reproducible on the mock database.
+BOOST_AUTO_TEST_CASE(rpc_erase_refused_pq_send)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CMutableTransaction mtx;
+    mtx.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+    mtx.vout.push_back(CTxOut(1000, CScript() << OP_TRUE));
+    const CTransaction tx(mtx);
+    const uint256 txid = tx.GetHash();
+
+    BOOST_CHECK_EQUAL(EraseRefusedPQSend(*pwalletMain, txid), "");
+
+    const size_t ordered = pwalletMain->wtxOrdered.size();
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    BOOST_REQUIRE(pwalletMain->AddToWallet(CWalletTx(pwalletMain, tx), &walletdb));
+    TestMemPoolEntryHelper entry;
+    mempool.addUnchecked(txid, entry.FromTx(mtx));
+    const std::string kept = EraseRefusedPQSend(*pwalletMain, txid);
+    BOOST_CHECK(kept.find(txid.GetHex()) != std::string::npos);
+    BOOST_CHECK(kept.find("is in the mempool") != std::string::npos);
+    BOOST_CHECK(pwalletMain->mapWallet.count(txid));
+    mempool.clear();
+
+    BOOST_CHECK_EQUAL(EraseRefusedPQSend(*pwalletMain, txid), "");
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered);
+}
+
+// Reads wallet-file records back (CDB::Exists is protected): a transaction's "tx" record and a "recipientmapping".
+class WalletFileProbe : public CWalletDB
+{
+public:
+    explicit WalletFileProbe(const std::string& file) : CWalletDB(file) {}
+    bool HasTx(const uint256& txid) { return Exists(std::make_pair(std::string("tx"), txid)); }
+    bool HasRecipientMapping(const uint256& txid, const libzcash::RecipientAddress& address)
+    {
+        return Exists(std::make_pair(std::string("recipientmapping"), std::make_pair(txid, CSerializeRecipientAddress(address))));
+    }
+};
+
+// Review H-1: CWallet::EraseUnbroadcastTx leaves no index naming the erased transaction. A transaction spending a
+// wallet coin and a Sprout nullifier, with a note of its own (nullifier map) and two recipient mappings (review L-2),
+// one to a unified address (on disk) and one without, is recorded and erased, its wallet-file records too; then
+// another one spending the same coin and nullifiers is recorded. Before the fix the stale spend entries made
+// SyncMetaData recreate the erased txid as an empty CWalletTx with no wallet (and copy its blank metadata onto the
+// new transaction); ResendWalletTransactions then asserted on it. (6.x builds Sapling spends in a Rust bundle, so the
+// Sapling nullifier spend map is exercised by the same RemoveFromSpends call but not constructed here; ycash-dd's
+// case does.)
+BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    CMutableTransaction parent;
+    parent.vin.push_back(CTxIn(COutPoint(uint256S("02"), 0)));
+    parent.vout.push_back(CTxOut(5000, CScript() << OP_TRUE));
+    const CTransaction parentTx(parent);
+    BOOST_REQUIRE(pwalletMain->AddToWallet(CWalletTx(pwalletMain, parentTx), &walletdb));
+    const size_t ordered = pwalletMain->wtxOrdered.size();
+
+    const uint256 ownNullifier = uint256S("0b");
+    const uint256 spentSproutNullifier = uint256S("0c");
+    auto spender = [&](CAmount out) {
+        CMutableTransaction m;
+        m.fOverwintered = true;
+        m.nVersion = SAPLING_TX_VERSION;
+        m.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+        m.vin.push_back(CTxIn(COutPoint(parentTx.GetHash(), 0)));
+        JSDescription js;                                     // mapTxSproutNullifiers (GetConflicts below reads it)
+        js.proof = libzcash::GrothProof();
+        js.nullifiers = {{spentSproutNullifier, uint256S("0d")}};
+        m.vJoinSplit.push_back(js);
+        m.vout.push_back(CTxOut(out, CScript() << OP_TRUE));
+        return CTransaction(m);
+    };
+    const CTransaction refused = spender(4000);
+    const uint256 txid = refused.GetHash();
+    CWalletTx wtx(pwalletMain, refused);
+    mapSaplingNoteData_t noteData;
+    noteData.insert(std::make_pair(SaplingOutPoint(txid, 0), SaplingNoteData(libzcash::SaplingIncomingViewingKey(), ownNullifier)));
+    wtx.mapSaplingNoteData = noteData;   // not SetSaplingNoteData: this transaction has no Sapling output to check against
+    BOOST_REQUIRE(pwalletMain->AddToWallet(wtx, &walletdb));
+    const libzcash::SaplingPaymentAddress uaSapling = libzcash::SaplingSpendingKey::random().default_address();
+    libzcash::UnifiedAddress ua;
+    BOOST_REQUIRE(ua.AddReceiver(uaSapling));
+    BOOST_REQUIRE(pwalletMain->SaveRecipientMappings(txid, std::vector<RecipientMapping>{
+        RecipientMapping(ua, uaSapling), RecipientMapping(std::nullopt, CKeyID())}));
+    BOOST_REQUIRE(pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier.GetRawBytes()));
+    BOOST_REQUIRE_EQUAL(pwalletMain->sendRecipients.at(txid).size(), 2U);
+    BOOST_REQUIRE(WalletFileProbe(pwalletMain->strWalletFile).HasTx(txid));
+    BOOST_REQUIRE(WalletFileProbe(pwalletMain->strWalletFile).HasRecipientMapping(txid, uaSapling));
+    BOOST_REQUIRE_EQUAL(pwalletMain->wtxOrdered.size(), ordered + 1);
+    pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached = true;
+
+    BOOST_REQUIRE(pwalletMain->EraseUnbroadcastTx(txid));
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
+    BOOST_CHECK(!pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier.GetRawBytes()));
+    BOOST_CHECK(!pwalletMain->sendRecipients.count(txid));
+    BOOST_CHECK(!WalletFileProbe(pwalletMain->strWalletFile).HasTx(txid));                          // the file records are gone
+    BOOST_CHECK(!WalletFileProbe(pwalletMain->strWalletFile).HasRecipientMapping(txid, uaSapling));
+    BOOST_CHECK(WalletFileProbe(pwalletMain->strWalletFile).HasTx(parentTx.GetHash()));             // and only those
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered);
+    BOOST_CHECK(!pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached);   // its coin is unspent again
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(txid));                                    // not in the wallet: nothing to do
+
+    const CTransaction again = spender(3000);
+    CWalletTx wtxAgain(pwalletMain, again);
+    wtxAgain.fFromMe = true;
+    wtxAgain.mapValue["comment"] = "sent again";
+    BOOST_REQUIRE(pwalletMain->AddToWallet(wtxAgain, &walletdb));
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));                                      // no empty entry recreated
+    BOOST_CHECK(pwalletMain->GetConflicts(again.GetHash()).empty());                       // no spend entry left
+    const CWalletTx& stored = pwalletMain->mapWallet.at(again.GetHash());
+    BOOST_CHECK(stored.fFromMe);
+    BOOST_CHECK_EQUAL(stored.mapValue.count("comment"), 1U);
+    for (const auto& item : pwalletMain->mapWallet) BOOST_CHECK(item.second.GetHash() == item.first);
+
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(again.GetHash()));
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(parentTx.GetHash()));
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered - 1);
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

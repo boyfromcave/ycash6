@@ -18,7 +18,8 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
   wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size), and at the
   default rate (node 0) never below the ZIP-317 conventional fee;
-- A-15: z_sendmany (ANY_TADDR) and z_mergetoaddress never select a TX_PQPKH coin (they cannot sign it);
+- ANY_TADDR in z_sendmany and z_mergetoaddress selects ECC coins only, never a TX_PQPKH coin (a PQ coin is spent
+  when its address is named, beta2 D-2/D-6: wallet_address_matrix.py);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
   signs its owner spend;
 - an encrypted wallet: the PQ keys survive encryption, a locked wallet refuses vault_getnewowner, the
@@ -287,7 +288,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         if others:
             assert n1.lockunspent(False, others)
 
-        print('A-15: z_sendmany and z_mergetoaddress never select the TX_PQPKH coin')
+        print('ANY_TADDR: z_sendmany and z_mergetoaddress never select the TX_PQPKH coin')
         # 6.20.0 (feca428a2): FindSpendableInputs skips the coin, so the operation fails with no transparent funds
         # at all (ycash-dd's AsyncRPCOperation_sendmany says "Could not find any non-coinbase UTXOs to spend.").
         opid = n1.z_sendmany('ANY_TADDR', [{'address': n0.getnewaddress(), 'amount': 1}], 1, None, 'AllowFullyTransparent')
