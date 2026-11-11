@@ -1785,3 +1785,65 @@ def cosign_and_submit(owner_node, signer_nodes, redeem_hex):
     assert sigs, 'no signer node holds a roster key of this vault'
     tx.vin[0].scriptSig = CScript([b''] + [sigs[i] for i in sorted(sigs)] + [owner_sig, vault_script])
     return owner_node.sendrawtransaction(bytes_to_hex_str(tx.serialize()))
+
+
+# --- YED on a plain wallet script (beta2: the token-protection cases) ------------------------------------------------
+
+def activate_yed_late(test, pools, edges, quote_usd=50):
+    """U-22 for a script on the plain BitcoinTestFramework whose chain is already past its vault upgrade (the beta2
+    wallet scripts wallet_address_matrix.py and vault_lock_from.py): create the YED attestor set on node 0
+    (``set_create``), mine it, restart every node of ``test.nodes`` with ``test.node_args(i)`` plus
+    ``test.yed_args[i]`` (-yellowbackattestorset, -yellowbacksigmaref=0, and -yellowbackpayoutaddress on the
+    ``pools``; the script's own ``node_args`` should append ``yed_args`` so its later restarts keep them), connect
+    ``edges``, quote ``quote_usd`` on the pools, mine ``ACTIVATION_BLOCKS`` round-robin over them and ``REF_LAG + 1``
+    more, and assert ``yed_getactivation`` is active everywhere. Returns the set id."""
+    nodes = test.nodes
+    created = nodes[0].set_create(dict(ATTESTOR_SET_SPEC))
+    sync_mempools(nodes)
+    nodes[0].generate(1)
+    sync_blocks(nodes)
+    setid = created['setid']
+    payout = {i: nodes[i].getnewaddress() for i in pools}
+    test.yed_args = {}
+    for i in range(len(nodes)):
+        test.yed_args[i] = ['-yellowbackattestorset=%s' % setid, '-yellowbacksigmaref=0']
+        if i in pools:
+            test.yed_args[i].append('-yellowbackpayoutaddress=%s' % payout[i])
+    for i in range(len(nodes)):
+        stop_node(nodes[i], i)
+    for i in range(len(nodes)):
+        nodes[i] = start_node(i, test.options.tmpdir, list(test.node_args(i)) + test.yed_args[i])
+    for a, b in edges:
+        connect_nodes_bi(nodes, a, b)
+    sync_blocks(nodes)
+    for i in pools:
+        set_quote(nodes[i], quote_usd)
+    for i in round_robin_schedule(pools, ACTIVATION_BLOCKS + REF_LAG + 1):
+        nodes[i].generate(1)
+        sync_blocks(nodes)
+    for n in nodes:
+        assert_equal(n.yed_getactivation()['status'], 'active')
+    return setid
+
+
+def mint_to_fresh_holder(nodes, user, miner, cents=MIN_MINT, lock_blocks=48):
+    """``yed_mint`` on ``nodes[user]`` (unarmed, wait false: the carrier is mined on ``nodes[miner]``, then the MINT,
+    which the wallet commits on the next block, is mined too). The token goes to a fresh holder key of that wallet
+    (a Falcon key from the Falcon height). Returns ``(mint txid, (token txid, vout), the holder key's plain-YEC
+    address)``, the address as the transaction's own output lists it."""
+    from .yellowback_attest import wait_for_spender
+    node = nodes[user]
+    res = node.yed_mint(cents, lock_blocks, '', '', False)
+    assert_equal(res['pending'], True)
+    sync_mempools(nodes)
+    nodes[miner].generate(1)
+    sync_blocks(nodes)
+    txid = wait_for_spender(node, res['carrierTxid'])
+    sync_mempools(nodes)
+    nodes[miner].generate(1)
+    sync_blocks(nodes)
+    assigned = [a for a in node.yed_gettxinfo(txid)['assigned'] if a['cents'] > 0]
+    assert_equal([a['cents'] for a in assigned], [cents])
+    vout = assigned[0]['vout']
+    holder = node.getrawtransaction(txid, 1)['vout'][vout]['scriptPubKey']['addresses'][0]
+    return txid, (txid, vout), holder

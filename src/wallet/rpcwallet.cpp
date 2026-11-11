@@ -208,19 +208,24 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (!fEnableGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
+            "getnewaddress ( \"type\" )\n"
             "getnewaddress ( \"\" \"type\" )\n"
-            + Deprecated(fEnableGetNewAddress,
-                         "getnewaddress",
-                         "") +
+            + SupportedOnYcash(fEnableGetNewAddress,
+                               "getnewaddress",
+                               "This is the way to get a new transparent (\"p2pkh\") or\n"
+                               "post-quantum (\"pq\", \"pqslh\") address. Unified-address accounts (z_getnewaccount,\n"
+                               "z_getaddressforaccount) need NU5, which has no activation height on Ycash.") +
             "\nReturns a new transparent Ycash address.\n"
             "Payments received by this API are visible on-chain and do not otherwise\n"
             "provide privacy protections; they should only be used in circumstances \n"
             "where it is necessary to interoperate with legacy Bitcoin infrastructure.\n"
 
-            "\nArguments:\n"
-            "1. (dummy)       (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\". Passing any other string will result in an error.\n"
+            "\nArguments (the type may come first, getnewaddress pq, or second after the empty string, getnewaddress \"\" pq):\n"
+            "1. \"type\"|(dummy) (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
+            "                  argument. Or the DEPRECATED placeholder: the empty string \"\", which may be followed by the type.\n"
+            "                  Any other string is refused (\"Accounts are unsupported\"); the type names are lower case.\n"
             "2. \"type\"        (string, optional, default \"p2pkh\") \"p2pkh\", or \"pq\": a post-quantum address\n"
-            "                  (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's seed, FN-DSA-512 once\n"
+            "                  (53 characters, its prefix showing the network and the scheme) from the wallet's seed, FN-DSA-512 once\n"
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"
@@ -232,13 +237,28 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
             "\nExamples:\n"
             + HelpExampleCli("getnewaddress", "")
+            + HelpExampleCli("getnewaddress", "pq")
             + HelpExampleCli("getnewaddress", "\"\" \"pq\"")
-            + HelpExampleRpc("getnewaddress", "")
+            + HelpExampleRpc("getnewaddress", "\"pq\"")
         );
 
-    const UniValue& dummy_value = params[0];
-    if (!dummy_value.isNull() && dummy_value.get_str() != "") {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "dummy first argument must be excluded or set to \"\".");
+    // Parse the arguments first so no key is generated on an error. The first slot is the address type (beta2
+    // item 10: getnewaddress pq, as yed_getnewaddress takes its type first) or the old placeholder, which accepted
+    // only "": a type name was never valid there, so no call that worked before changes meaning. Errors as
+    // ycash-dd's (#164).
+    std::string type = "p2pkh";
+    if (params.size() > 0 && params[0].isStr() &&
+        (params[0].get_str() == "p2pkh" || params[0].get_str() == "pq" || params[0].get_str() == "pqslh")) {
+        if (params.size() > 1 && !params[1].isNull())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "the address type is given first, so there is no second argument (getnewaddress pq, or getnewaddress \"\" pq)");
+        type = params[0].get_str();
+    } else {
+        // A first string that is neither "" nor a type name, a type name in another case ("PQ") too.
+        const UniValue& dummy_value = params[0];
+        if (!dummy_value.isNull() && dummy_value.get_str() != "")
+            throw JSONRPCError(RPC_WALLET_ACCOUNTS_UNSUPPORTED, "Accounts are unsupported; the first argument is the address type, \"p2pkh\", \"pq\" or \"pqslh\" (lower case), or \"\" followed by the type");
+        if (params.size() > 1 && !params[1].isNull())
+            type = params[1].get_str();
     }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -248,7 +268,6 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     EnsureWalletIsUnlocked();
 
-    const std::string type = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "p2pkh";
     if (type == "pq" || type == "pqslh") {
         // A plain-YEC post-quantum address (D-Q-20): the TX_PQPKH key a PQ YED address names, from the PQ key
         // chain (DerivePQSeed). Scheme by the holder policy (quantum spec A-13): Falcon once active, else SLH-DSA.
@@ -316,9 +335,10 @@ UniValue getrawchangeaddress(const UniValue& params, bool fHelp)
     if (!fEnableGetRawChangeAddress || fHelp || params.size() > 1)
         throw runtime_error(
             "getrawchangeaddress\n"
-            + Deprecated(fEnableGetRawChangeAddress,
-                         "getrawchangeaddress",
-                         "") +
+            + SupportedOnYcash(fEnableGetRawChangeAddress,
+                               "getrawchangeaddress",
+                               "Its upstream replacement needs unified-address accounts, and so\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturns a new transparent Ycash address for receiving change.\n"
             "This is for use with raw transactions, NOT normal use. Additionally,\n"
             "the resulting address does not correspond to the \"change\" HD derivation\n"
@@ -594,6 +614,148 @@ static UniValue ReceiverTypesToJSON(const std::set<ReceiverType>& receiverTypes)
     return receiverTypesEntry;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Balances and listings by address type (beta2 item 15, address plan W1.5/W2; the ycash-dd reference #162):
+// helpers shared by getwalletinfo, z_gettotalbalance, listreceivedbyaddress and listaddresses. Every post-quantum
+// figure is the TX_PQPKH share of the existing transparent figure next to it, counted by the same rule; the ECC
+// figure is the rest (P2PKH, P2SH), computed as transparent minus post-quantum so the two always add up.
+// ---------------------------------------------------------------------------------------------------------------
+
+//! The schemes a balance split reports, always both and in this order (an unused scheme shows zero).
+static const uint8_t PQ_BALANCE_SCHEMES[] = {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512};
+
+std::string PQSchemeName(uint8_t scheme)
+{
+    switch (scheme) {
+        case pq::SCHEME_SLH_DSA_SHA2_128S: return "SLH-DSA-SHA2-128s";
+        case pq::SCHEME_FN_DSA_512:        return "FN-DSA-512";
+        default:                           return "unknown";
+    }
+}
+
+//! The post-quantum scheme of a TX_PQPKH output script, or nullopt for any other script. The template is checked
+//! by its bytes, as script/standard.cpp MatchPayToPQKeyHash checks it (quantum spec §2.1: 0x20 <keyHash:32>
+//! OP_1|OP_2 OP_CHECKPQSIG, 35 bytes), so the balance calls pay a byte compare per output, not a Solver call.
+static std::optional<uint8_t> PQSchemeOfScript(const CScript& s)
+{
+    if (s.size() == 35 && s[0] == 32 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG)
+        return (uint8_t)CScript::DecodeOP_N((opcodetype)s[33]);
+    return std::nullopt;
+}
+
+//! Post-quantum amounts by scheme (index = scheme byte).
+struct PQAmounts {
+    CAmount byScheme[3] = {0, 0, 0};
+    void Add(uint8_t scheme, CAmount v) { if (scheme < 3) byScheme[scheme] += v; }
+    CAmount Total() const { return byScheme[1] + byScheme[2]; }
+};
+
+//! getBalanceTaddr(std::nullopt, std::nullopt, minDepth, ignoreUnspendable) and its post-quantum part, in its one
+//! AvailableCoins pass (unspent, not locked by lockunspent, mature, depth >= minDepth; watch-only too unless
+//! ignoreUnspendable).
+struct TransparentSplit {
+    CAmount total = 0;
+    PQAmounts pq;
+};
+static TransparentSplit AvailableTransparentSplit(int minDepth, bool ignoreUnspendable)
+{
+    TransparentSplit r;
+    std::vector<COutput> vecOutputs;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    pwalletMain->AvailableCoins(vecOutputs, std::nullopt, false, NULL, true);
+    for (const COutput& out : vecOutputs) {
+        if (out.nDepth < minDepth) continue;
+        if (ignoreUnspendable && !out.fSpendable) continue;
+        const CTxOut& txout = out.tx->vout[out.i];
+        r.total += txout.nValue;
+        if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) r.pq.Add(*scheme, txout.nValue);
+    }
+    return r;
+}
+
+//! CWallet::GetBalance(asOfHeight) and, without asOfHeight, CWallet::GetUnconfirmedTransparentBalance(), with
+//! their post-quantum parts, in one pass over mapWallet (the two functions make one pass each). Same rules:
+//! balance = the available credit of every transaction trusted at asOfHeight; unconfirmed = that of every
+//! non-final one, or of depth 0 and not trusted. Each transaction's credit and its TX_PQPKH part are counted in
+//! one fresh pass (unspent, ISMINE_SPENDABLE, as CWalletTx::GetAvailableCredit counts them, never from its cache).
+struct WalletBalanceSplit {
+    CAmount balance = 0, unconfirmed = 0;
+    PQAmounts pqBalance, pqUnconfirmed;
+};
+static WalletBalanceSplit GetWalletBalanceSplit(const std::optional<int>& asOfHeight)
+{
+    WalletBalanceSplit r;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    for (const auto& [hash, wtx] : pwalletMain->mapWallet) {
+        const bool trusted = wtx.IsTrusted(asOfHeight);
+        const bool unconfirmed = !asOfHeight.has_value() &&
+            (!CheckFinalTx(wtx) || (!trusted && wtx.GetDepthInMainChain(std::nullopt) == 0));
+        if (!trusted && !unconfirmed) continue;
+        // The credit and its post-quantum part in one fresh pass, as CWalletTx::GetAvailableCredit counts the credit
+        // (immature coinbase 0; unspent outputs at asOfHeight, ISMINE_SPENDABLE) but never from its cache, which
+        // ignores asOfHeight and may lag a spend: the ECC part (total less PQ) can then never go negative.
+        if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity(asOfHeight) > 0) continue;
+        CAmount credit = 0;
+        PQAmounts& pq = trusted ? r.pqBalance : r.pqUnconfirmed;
+        for (unsigned int i = 0; i < wtx.vout.size(); i++) {
+            if (pwalletMain->IsSpent(hash, i, asOfHeight)) continue;
+            const CTxOut& txout = wtx.vout[i];
+            const CAmount c = pwalletMain->GetCredit(txout, ISMINE_SPENDABLE);
+            credit += c;
+            if (!MoneyRange(credit)) throw std::runtime_error("GetWalletBalanceSplit(): value out of range");
+            if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) pq.Add(*scheme, c);
+        }
+        if (trusted) r.balance += credit; else r.unconfirmed += credit;
+    }
+    return r;
+}
+
+std::set<CScript> YedHolderScripts()
+{
+    std::set<CScript> out;
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index()) return out;
+    // Review m3: the wallet's own Yellowback-locked outpoints, each looked up in the index, so the cost follows the
+    // wallet's tokens rather than every token on the network. A token whose lock was removed (yed_unlockcoin) is not
+    // marked until the next reconciliation locks it again.
+    const std::set<COutPoint> locked = yw->Locked();
+    LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+    LOCK(yw->Index()->cs_yellowback);
+    if (!yw->Index()->IsHealthy()) return out;
+    yellowback::State st(yw->Index()->View());
+    for (const COutPoint& o : locked) {
+        std::optional<yellowback::TokenRecord> t = st.GetToken(o);
+        if (t.has_value() && yw->IsMineScript(t->scriptPubKey)) out.insert(t->scriptPubKey);
+    }
+    return out;
+}
+
+//! Adds "pqscheme" (number) and "pqschemename" to an object that names a post-quantum address.
+static void PushPQScheme(UniValue& obj, uint8_t scheme)
+{
+    obj.pushKV("pqscheme", (int)scheme);
+    obj.pushKV("pqschemename", PQSchemeName(scheme));
+}
+
+//! The post-quantum keys of this wallet that received coins (spendable or watch-only), from its transactions: a
+//! wallet restored from its seed finds its PQ keys by rescan but does not put them in the address book.
+static std::set<CPQKeyID> PQKeysThatReceived()
+{
+    std::set<CPQKeyID> r;
+    for (const auto& [hash, wtx] : pwalletMain->mapWallet) {
+        for (const CTxOut& txout : wtx.vout) {
+            if (!PQSchemeOfScript(txout.scriptPubKey)) continue;
+            CTxDestination dest;
+            if (!ExtractDestination(txout.scriptPubKey, dest)) continue;
+            const CPQKeyID* id = std::get_if<CPQKeyID>(&dest);
+            if (id && pwalletMain->IsMine(txout) != ISMINE_NO) r.insert(*id);
+        }
+    }
+    return r;
+}
+
+// ------------------------------------------- end of the by-type helpers -------------------------------------------
+
 UniValue listaddresses(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -630,6 +792,17 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
             "          \"ys1z7rejlpsa98s2rrrfkwmaxu53e4ue0ulcrw0h4x5g8jl04tak0d3mm47vdtahatqrlknghgfflq\",\n"
             "          ...\n"
             "        ]\n"
+            "      },\n"
+            "      ...\n"
+            "    ],\n"
+            "    \"pq\": [ -- post-quantum addresses (sources mnemonic_seed, imported and imported_watchonly only): those\n"
+            "              in the address book (getnewaddress \"\" \"pq\" / \"pqslh\") and every one of this wallet that received coins\n"
+            "      {\n"
+            "        \"address\": \"...\",\n"
+            "        \"pqscheme\": n,              (numeric) 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "        \"pqschemename\": \"name\",     (string) \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "        \"yed_holder\": true          (boolean) Where Yellowback is live, present only on a YED holder key: the\n"
+            "                                    Yellowback index holds a YED token of this wallet at this address\n"
             "      },\n"
             "      ...\n"
             "    ],\n"
@@ -690,15 +863,25 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
         [&](const CNoDestination& addr) -> std::optional<PaymentAddressSource> {
             return std::nullopt;
         },
-        // Post-quantum keys are not in the transparent address book (quantum spec A-15): listaddresses omits them.
+        // Post-quantum keys are listed in their own "pq" array (beta2 item 15, decision D-1 reverses quantum spec
+        // A-15), collected below, not as transparent addresses.
         [&](const CPQKeyID&) -> std::optional<PaymentAddressSource> {
             return std::nullopt;
         },
     };
 
+    // Post-quantum addresses (beta2 item 15): those of the address book (getnewaddress "" "pq"/"pqslh", a YED
+    // holder's plain-YEC form, an imported key or watched address) and every PQ key of this wallet that received
+    // coins (a seed restore finds those by rescan but does not file them). Not the unissued lookahead keys.
+    std::set<CPQKeyID> pqDests = PQKeysThatReceived();
+
     // Get the CTxDestination values for all the entries in the transparent address book.
     // This will include any address that has been generated by this wallet.
     for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook) {
+        if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&item.first)) {
+            pqDests.insert(*pq);
+            continue;
+        }
         std::optional<PaymentAddressSource> source = std::visit(GetSourceForDestination, item.first);
         if (source.has_value()) {
             switch (source.value()) {
@@ -757,6 +940,34 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
     /// sapling addresses
     std::set<libzcash::SaplingPaymentAddress> saplingAddresses;
     pwalletMain->GetSaplingPaymentAddresses(saplingAddresses);
+
+    /// post-quantum addresses, by source: a key of this wallet's own seed (it has an HD index) is mnemonic_seed, a
+    /// key from elsewhere (z_importpqkey / importwallet store it without an index) is imported, an address watched
+    /// without its key (importaddress) is imported_watchonly. Each is {"address", "pqscheme", "pqschemename"}.
+    UniValue pq_mnemonic(UniValue::VARR), pq_imported(UniValue::VARR), pq_watchonly(UniValue::VARR);
+    const std::set<CScript> yedHolders = YedHolderScripts();
+    for (const CPQKeyID& id : pqDests) {
+        UniValue* target = nullptr;
+        std::vector<unsigned char> pk;
+        uint32_t index;
+        if (pwalletMain->GetPQKeyInfo(id, pk, index)) {
+            target = index != CPQKey::PQ_INDEX_NONE ? &pq_mnemonic : &pq_imported;
+        } else if (::IsMine(*pwalletMain, GetScriptForDestination(id)) & ISMINE_WATCH_ONLY) {
+            target = &pq_watchonly;
+        }
+        if (!target) continue;   // an address-book entry this wallet neither holds nor watches
+        UniValue pqEntry(UniValue::VOBJ);
+        pqEntry.pushKV("address", keyIO.EncodeDestination(id));
+        PushPQScheme(pqEntry, id.scheme);
+        if (yedHolders.count(GetScriptForDestination(id)))
+            pqEntry.pushKV("yed_holder", true);   // beta2: a YED holder key (the Yellowback index holds a token of this wallet at it)
+        target->push_back(std::move(pqEntry));
+    }
+    auto add_pq = [](UniValue& pqAddrs, UniValue& entry) {
+        if (pqAddrs.empty()) return false;
+        entry.pushKV("pq", std::move(pqAddrs));
+        return true;
+    };
 
     // legacy_random source
     {
@@ -910,6 +1121,7 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
         }
 
         hasData |= add_sapling(saplingAddresses, PaymentAddressSource::Imported, entry);
+        hasData |= add_pq(pq_imported, entry);
 
         if (hasData) {
             ret.push_back(std::move(entry));
@@ -953,6 +1165,7 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
         }
 
         hasData |= add_sapling(saplingAddresses, PaymentAddressSource::ImportedWatchOnly, entry);
+        hasData |= add_pq(pq_watchonly, entry);
 
         if (hasData) {
             ret.push_back(std::move(entry));
@@ -1004,6 +1217,7 @@ UniValue listaddresses(const UniValue& params, bool fHelp)
 
         // sapling
         hasData |= add_sapling(saplingAddresses, PaymentAddressSource::MnemonicHDSeed, entry);
+        hasData |= add_pq(pq_mnemonic, entry);
 
         // unified
         // here, we want to use the information in mapUfvkAddressMetadata to report all the unified addresses
@@ -1320,6 +1534,11 @@ UniValue getbalance(const UniValue& params, bool fHelp)
 // default per DEFAULT_ALLOW_DEPRECATED.
 // ---------------------------------------------------------------------------
 
+// The help note of the nine legacy account RPCs (SupportedOnYcash, src/deprecation.h).
+static const std::string LEGACY_ACCOUNTS_NOTE =
+    "A compatibility shim for integrations written against the\n"
+    "2018-era ycashd API: only the default account \"\" exists.";
+
 static void RequireDefaultAccount(const std::string& strAccount)
 {
     if (!strAccount.empty()) {
@@ -1361,7 +1580,7 @@ UniValue getaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaccount \"ycashaddress\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the label associated with the given address (legacy \"account\"\n"
             "is just the address label). Returns the label if one is set, otherwise\n"
             "an empty string. NOTE: \"\" does NOT mean the wallet owns the address --\n"
@@ -1400,7 +1619,7 @@ UniValue getaccountaddress(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaccountaddress \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaccountaddress", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaccountaddress", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the current address for receiving payments to this account. Ycash\n"
             "emulates a single default account (\"\"); other account names are rejected.\n"
             "Each call generates a fresh transparent address (no per-account memory).\n"
@@ -1428,7 +1647,7 @@ UniValue getaddressesbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaddressesbyaccount \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaddressesbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaddressesbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the list of transparent addresses in the given account. For the\n"
             "default account \"\" this returns every transparent address the wallet has\n"
             "ever generated or imported. Any non-empty account returns an empty array.\n"
@@ -1467,7 +1686,7 @@ UniValue getreceivedbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "getreceivedbyaccount \"account\" ( minconf )\n"
-            + Deprecated(fEnableLegacyAccounts, "getreceivedbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getreceivedbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the total amount received by addresses in the account. For the\n"
             "default account \"\" this sums all transparent receipts across the wallet.\n"
             "Any non-empty account returns 0.\n"
@@ -1502,7 +1721,7 @@ UniValue listaccounts(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() > 2)
         throw runtime_error(
             "listaccounts ( minconf includeWatchonly )\n"
-            + Deprecated(fEnableLegacyAccounts, "listaccounts", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "listaccounts", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns a JSON object with account names as keys and balances as values.\n"
             "Ycash emulates a single default account, so the result always has exactly\n"
             "one key: \"\".\n"
@@ -1543,7 +1762,7 @@ UniValue listreceivedbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() > 3)
         throw runtime_error(
             "listreceivedbyaccount ( minconf includeempty includeWatchonly )\n"
-            + Deprecated(fEnableLegacyAccounts, "listreceivedbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "listreceivedbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nList balances by account. Ycash emulates a single default account, so the\n"
             "result is a one-element array describing the wallet's total transparent receipts.\n"
             "\nArguments:\n"
@@ -1614,7 +1833,7 @@ UniValue setaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "setaccount \"ycashaddress\" \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "setaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "setaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nAssigns the address to the given account. Ycash emulates a single default\n"
             "account, so only \"\" is accepted; the call is then a no-op that succeeds.\n"
             "Any non-empty account name returns an error.\n"
@@ -1648,7 +1867,7 @@ UniValue sendfrom(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 3 || params.size() > 6)
         throw runtime_error(
             "sendfrom \"fromaccount\" \"toycashaddress\" amount ( minconf \"comment\" \"comment-to\" )\n"
-            + Deprecated(fEnableLegacyAccounts, "sendfrom", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "sendfrom", LEGACY_ACCOUNTS_NOTE) +
             "\nSent an amount from the default account to a transparent address. Ycash\n"
             "emulates a single default account, so the first argument must be \"\".\n"
             "Any non-empty account is rejected.\n"
@@ -1688,7 +1907,7 @@ UniValue movecmd(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 3 || params.size() > 5)
         throw runtime_error(
             "move \"fromaccount\" \"toaccount\" amount ( minconf \"comment\" )\n"
-            + Deprecated(fEnableLegacyAccounts, "move", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "move", LEGACY_ACCOUNTS_NOTE) +
             "\nMove a specified amount between accounts in the wallet. Ycash does not\n"
             "maintain separate per-account balances (the accounts API is emulated as a\n"
             "single default bucket), so this RPC has no honest implementation and\n"
@@ -1969,8 +2188,17 @@ UniValue ListReceived(const UniValue& params)
 
     // Reply
     UniValue ret(UniValue::VARR);
-    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook) {
-        const CTxDestination& dest = item.first;
+    const std::set<CScript> yedHolders = YedHolderScripts();
+    // The address book, plus (beta2 item 15) every post-quantum key of this wallet that received coins without an
+    // address-book entry: a wallet restored from its seed (-mnemonicfile) finds its PQ keys by rescan but does not
+    // file them, and they must still be listed.
+    std::vector<CTxDestination> listed;
+    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook)
+        listed.push_back(item.first);
+    for (const std::pair<CTxDestination, tallyitem>& t : mapTally)
+        if (std::get_if<CPQKeyID>(&t.first) && !pwalletMain->mapAddressBook.count(t.first))
+            listed.push_back(t.first);
+    for (const CTxDestination& dest : listed) {
         std::map<CTxDestination, tallyitem>::iterator it = mapTally.find(dest);
         if (it == mapTally.end() && !fIncludeEmpty)
             continue;
@@ -1992,6 +2220,10 @@ UniValue ListReceived(const UniValue& params)
         obj.pushKV("amount",        ValueFromAmount(nAmount));
         obj.pushKV("amountZat",     nAmount);
         obj.pushKV("confirmations", (nConf == std::numeric_limits<int>::max() ? 0 : nConf));
+        if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest))
+            PushPQScheme(obj, pq->scheme);    // beta2 item 15: a post-quantum address shows its scheme
+        if (yedHolders.count(GetScriptForDestination(dest)))
+            obj.pushKV("yed_holder", true);   // beta2: a YED holder key (the Yellowback index holds a token of this wallet at it)
         UniValue transactions(UniValue::VARR);
         if (it != mapTally.end())
         {
@@ -2035,13 +2267,24 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "    \"amount\" : x.xxx,                  (numeric) The total amount in " + CURRENCY_UNIT + " received by the address\n"
             "    \"amountZat\" : xxxx                 (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
             "    \"confirmations\" : n                (numeric) The number of confirmations of the most recent transaction included\n"
+            "    \"pqscheme\" : n,                    (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "    \"yed_holder\" : true,               (boolean) Where Yellowback is live, present only on a YED holder key: the Yellowback\n"
+            "                                         index holds a YED token of this wallet at this address (its token outputs are locked;\n"
+            "                                         see yed_listunspent)\n"
+            "    \"txids\" : [\"txid\", ...]            (array) The transactions that paid the address\n"
             "  }\n"
             "  ,...\n"
             "]\n"
+            "\nWith includeempty, this lists every transparent address of the wallet's address book, ECC and post-quantum,\n"
+            "and always every post-quantum address of the wallet that received coins (a seed restore does not file those)\n"
+            "(getnewaddress, getnewaddress \"\" \"pq\" / \"pqslh\"); listaddresses lists every address of the wallet by source. amount is\n"
+            "what an address received; z_getbalance gives what it holds now.\n"
             "\nBitcoin compatibility:\n"
             "Compatible up to five arguments, but can only use the default value for `addressFilter` and `includeImmatureCoinbase`."
             "\nExamples:\n"
             + HelpExampleCli("listreceivedbyaddress", "")
+            + HelpExampleCli("listreceivedbyaddress", "0 true")
             + HelpExampleCli("listreceivedbyaddress", "6 true")
             + HelpExampleRpc("listreceivedbyaddress", "6, true, true")
         );
@@ -2532,9 +2775,10 @@ UniValue keypoolrefill(const UniValue& params, bool fHelp)
     if (!fEnableKeyPoolRefill || fHelp || params.size() > 1)
         throw runtime_error(
             "keypoolrefill ( newsize )\n"
-            + Deprecated(fEnableKeyPoolRefill,
-                         "keypoolrefill",
-                         "It will not be needed for Zallet.") +
+            + SupportedOnYcash(fEnableKeyPoolRefill,
+                               "keypoolrefill",
+                               "The transparent keypool supplies getrawchangeaddress, the\n"
+                               "transparent change of sendtoaddress / sendmany, and the mining coinbase key.") +
             "\nFills the keypool associated with the legacy transparent value pool. This should only be\n"
             "used when interoperability with legacy Bitcoin infrastructure is required.\n"
             + HelpRequiringPassphrase() + "\n"
@@ -3055,6 +3299,22 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"unconfirmed_balance\": xxx, (numeric, optional) the total unconfirmed transparent balance of the wallet in " + CURRENCY_UNIT + ".\n"
             "                              Not included if `asOfHeight` is specified.\n"
             "  \"immature_balance\": xxxxxx, (numeric) the total immature transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
+            "  \"balance_ecc\": xxxxxxx,     (numeric) balance minus balance_pq: every coin of balance that is not post-quantum\n"
+            "                             (P2PKH, P2PK, P2SH)\n"
+            "  \"balance_pq\": xxxxxxx,      (numeric) the part of balance held by post-quantum addresses (TX_PQPKH)\n"
+            "  \"unconfirmed_balance_ecc\": xxx, (numeric, optional) unconfirmed_balance minus unconfirmed_balance_pq.\n"
+            "                              Not included if `asOfHeight` is specified.\n"
+            "  \"unconfirmed_balance_pq\": xxx,  (numeric, optional) the part of unconfirmed_balance held by post-quantum addresses.\n"
+            "                              Not included if `asOfHeight` is specified.\n"
+            "  \"pq_by_scheme\": [           (array) balance_pq and unconfirmed_balance_pq by scheme, both schemes always\n"
+            "    {\n"
+            "      \"pqscheme\": n,              (numeric) 1 or 2\n"
+            "      \"pqschemename\": \"name\",     (string) \"SLH-DSA-SHA2-128s\" (1) or \"FN-DSA-512\" (2)\n"
+            "      \"balance_pq\": xxx,          (numeric) this scheme's part of balance_pq\n"
+            "      \"unconfirmed_balance_pq\": xxx (numeric, optional) this scheme's part of unconfirmed_balance_pq;\n"
+            "                                  not included if `asOfHeight` is specified\n"
+            "    }, ...\n"
+            "  ],\n"
             "  \"shielded_balance\": xxxxxxx,  (numeric) the total confirmed shielded balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"shielded_unconfirmed_balance\": xxx, (numeric, optional) the total unconfirmed shielded balance of the wallet in " + CURRENCY_UNIT + ".\n"
             "                              Not included if `asOfHeight` is specified.\n"
@@ -3077,6 +3337,10 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "                                    a complete backup. Back up wallet.dat or run z_exportwallet to capture the imported keys.\n"
             "  \"external_imports_warning\": \"...\", (string, optional) human-readable warning, only present when has_external_imports is true.\n"
             "}\n"
+            "\nbalance counts confirmed coins and this wallet's own unconfirmed outputs (a transaction whose every input\n"
+            "is this wallet's, such as change); unconfirmed_balance counts the other unconfirmed outputs (payments from\n"
+            "others). Post-quantum coins are transparent: balance = balance_ecc + balance_pq and\n"
+            "unconfirmed_balance = unconfirmed_balance_ecc + unconfirmed_balance_pq, by the same rule.\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
             + HelpExampleRpc("getwalletinfo", "")
@@ -3088,11 +3352,34 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("walletversion", pwalletMain->GetVersion());
-    obj.pushKV("balance",       ValueFromAmount(pwalletMain->GetBalance(asOfHeight)));
+    // = GetBalance(asOfHeight) and, without asOfHeight, GetUnconfirmedTransparentBalance(), in one pass
+    const WalletBalanceSplit split = GetWalletBalanceSplit(asOfHeight);
+    obj.pushKV("balance",       ValueFromAmount(split.balance));
     if (!asOfHeight.has_value()) {
-        obj.pushKV("unconfirmed_balance", ValueFromAmount(pwalletMain->GetUnconfirmedTransparentBalance()));
+        obj.pushKV("unconfirmed_balance", ValueFromAmount(split.unconfirmed));
     }
     obj.pushKV("immature_balance",    ValueFromAmount(pwalletMain->GetImmatureBalance(asOfHeight)));
+    {
+        // The split by address type (beta2 item 15): ECC = the existing figure minus its post-quantum part.
+        const PQAmounts& pqBal = split.pqBalance;
+        const PQAmounts& pqUnc = split.pqUnconfirmed;
+        obj.pushKV("balance_ecc", ValueFromAmount(split.balance - pqBal.Total()));
+        obj.pushKV("balance_pq", ValueFromAmount(pqBal.Total()));
+        if (!asOfHeight.has_value()) {
+            obj.pushKV("unconfirmed_balance_ecc", ValueFromAmount(split.unconfirmed - pqUnc.Total()));
+            obj.pushKV("unconfirmed_balance_pq", ValueFromAmount(pqUnc.Total()));
+        }
+        UniValue byScheme(UniValue::VARR);
+        for (uint8_t scheme : PQ_BALANCE_SCHEMES) {
+            UniValue s(UniValue::VOBJ);
+            PushPQScheme(s, scheme);
+            s.pushKV("balance_pq", ValueFromAmount(pqBal.byScheme[scheme]));
+            if (!asOfHeight.has_value())
+                s.pushKV("unconfirmed_balance_pq", ValueFromAmount(pqUnc.byScheme[scheme]));
+            byScheme.push_back(s);
+        }
+        obj.pushKV("pq_by_scheme", byScheme);
+    }
     obj.pushKV("shielded_balance",    FormatMoney(getBalanceZaddr(std::nullopt, asOfHeight, 1, INT_MAX)));
     if (!asOfHeight.has_value()) {
         obj.pushKV("shielded_unconfirmed_balance", FormatMoney(getBalanceZaddr(std::nullopt, asOfHeight, 0, 0)));
@@ -3496,9 +3783,9 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
     if (!fEnableFundRawTransaction || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "fundrawtransaction \"hexstring\" includeWatching\n"
-            + Deprecated(fEnableFundRawTransaction,
-                         "fundrawtransaction",
-                         "") +
+            + SupportedOnYcash(fEnableFundRawTransaction,
+                               "fundrawtransaction",
+                               "ycashd has no other call for this raw-transaction step.") +
             "\nAdd transparent inputs to a transaction until it has enough in value to meet its out value.\n"
             "This will not modify existing inputs, and will add one change output to the outputs.\n"
             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
@@ -3739,9 +4026,11 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
     if (!fEnableZGetNewAddress || fHelp || params.size() > 1)
         throw runtime_error(
             "z_getnewaddress ( type )\n"
-            + Deprecated(fEnableZGetNewAddress,
-                         "z_getnewaddress",
-                         "") +
+            + SupportedOnYcash(fEnableZGetNewAddress,
+                               "z_getnewaddress",
+                               "This is the way to get a new Sapling address. Unified-address\n"
+                               "accounts (z_getnewaccount, z_getaddressforaccount) need NU5, which has no\n"
+                               "activation height on Ycash.") +
             "\nReturns a new shielded address for receiving payments.\n"
             "\nWith no arguments, this currently returns a Sapling address (but that\n"
             "should not be relied on).\n"
@@ -3787,6 +4076,13 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
     }
 }
 
+// The help note of the four unified-address account RPCs, which EnsureUnifiedAccountsEnabled refuses.
+static const std::string NOT_ON_YCASH_NEEDS_NU5 =
+    "\nNot available on Ycash (needs NU5): unified-address accounts need the NU5 network upgrade,\n"
+    "which has no activation height on Ycash, so this call is refused. Use getnewaddress (transparent,\n"
+    "post-quantum) and z_getnewaddress (Sapling) for addresses, and z_getbalance / z_gettotalbalance\n"
+    "for balances.\n";
+
 // Unified-address account RPCs are gated off until NU5 activates. On Ycash
 // NU5 is configured NO_ACTIVATION_HEIGHT, so UA accounts would mint
 // addresses with an unspendable Orchard receiver and Sapling keys derived
@@ -3810,6 +4106,7 @@ UniValue z_getnewaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 0)
         throw runtime_error(
             "z_getnewaccount\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nPrepares and returns a new account.\n"
             "\nAccounts are numbered starting from zero; this RPC method selects the next"
             "\navailable sequential account number within the UA-compatible HD seed phrase.\n"
@@ -3848,6 +4145,7 @@ UniValue z_getaddressforaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
             "z_getaddressforaccount account ( [\"receiver_type\", ...] diversifier_index )\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nFor the given account number, derives a Unified Address in accordance"
             "\nwith the remaining arguments:\n"
             "\n- If no list of receiver types is given (or the empty list \"[]\"), the best"
@@ -4009,6 +4307,7 @@ UniValue z_listaccounts(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw runtime_error(
             "z_listaccounts\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nReturns the list of accounts created with z_getnewaccount.\n"
             "\nResult:\n"
             "[\n"
@@ -4515,15 +4814,20 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
     if (!fEnableZGetBalance || fHelp || params.size() == 0 || params.size() > 3)
         throw runtime_error(
             "z_getbalance \"address\" ( minconf inZat )\n"
-            + Deprecated(fEnableZGetBalance,
-                         "z_getbalance",
-                         "") +
+            + SupportedOnYcash(fEnableZGetBalance,
+                               "z_getbalance",
+                               "Its upstream replacement, z_getbalanceforaccount, needs\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturns the balance of a taddr or zaddr belonging to the node's wallet.\n"
             "\nCAUTION: If the wallet has only an incoming viewing key for this address, then spends cannot be"
             "\ndetected, and so the returned balance may be larger than the actual balance."
             "\nArguments:\n"
-            "1. \"address\"        (string) The selected address. It may be a transparent or shielded address.\n"
-            "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times.\n"
+            "1. \"address\"        (string) The selected address. It may be a transparent address (ECC, or post-quantum of\n"
+            "                   either scheme) or a shielded address of this wallet. An address the wallet does not hold is refused:\n"
+            "                   transparent or post-quantum (no key and no watch-only script), or shielded (no spending or viewing\n"
+            "                   key). A watch-only transparent address answers.\n"
+            "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times\n"
+            "                   (as z_gettotalbalance: unconfirmed own change is left out at 1 and counted at 0).\n"
             "3. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
             "\nResult:\n"
             "amount              (numeric) The total amount in " + CURRENCY_UNIT + "(or " + MINOR_CURRENCY_UNIT + " if inZat is true) received at this address.\n"
@@ -4545,14 +4849,37 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
     auto fromaddress = params[0].get_str();
     auto pa = keyIO.DecodePaymentAddress(fromaddress);
 
+    CAmount nBalance = 0;
+    // beta2 item 15 (finding L-3): a post-quantum address is a transparent address; PaymentAddress has no
+    // post-quantum alternative, so it is decoded as a destination. Beta2 (the lead architect, 2026-11-11): a
+    // transparent address, ECC or post-quantum, that this wallet does not hold (no key, no watch-only script) is
+    // refused, as a shielded one is; a watch-only one still answers.
+    const CTxDestination pqDest = pa.has_value() ? CTxDestination(CNoDestination()) : keyIO.DecodeDestination(fromaddress);
+    std::optional<CTxDestination> tdest;
+    if (std::holds_alternative<CPQKeyID>(pqDest)) {
+        tdest = pqDest;
+    } else if (pa.has_value()) {
+        examine(pa.value(), match {
+            [&](const CKeyID& addr) { tdest = CTxDestination(addr); },
+            [&](const CScriptID& addr) { tdest = CTxDestination(addr); },
+            [](const auto&) {},
+        });
+    }
+    if (tdest.has_value() && IsMine(*pwalletMain, GetScriptForDestination(tdest.value())) == ISMINE_NO) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, transparent or post-quantum key or watch-only script not found.");
+    }
+    if (std::holds_alternative<CPQKeyID>(pqDest)) {
+        nBalance = getBalanceTaddr(pqDest, std::nullopt, nMinDepth, false);
+    } else {
     if (!pa.has_value()) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address, should be a taddr or zaddr.");
     }
-    if (!std::visit(PaymentAddressBelongsToWallet(pwalletMain), pa.value())) {
-         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node.");
+    const bool isTransparent = std::holds_alternative<CKeyID>(pa.value()) || std::holds_alternative<CScriptID>(pa.value());
+    if (!isTransparent && !std::visit(PaymentAddressBelongsToWallet(pwalletMain), pa.value())) {
+         // beta2: the v4.5.0 line's string (a superset of upstream's "From address does not belong to this node.")
+         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, spending key or viewing key not found.");
     }
 
-    CAmount nBalance = 0;
     examine(pa.value(), match {
         [&](const CKeyID& addr) {
             nBalance = getBalanceTaddr(addr, std::nullopt, nMinDepth, false);
@@ -4590,6 +4917,7 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
             }
         },
     });
+    }   // not a post-quantum address
 
     // inZat
     if (params.size() > 2 && params[2].get_bool()) {
@@ -4716,6 +5044,7 @@ UniValue z_getbalanceforaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
             "z_getbalanceforaccount account ( minconf asOfHeight )\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nReturns the account's spendable balance for each value pool (\"transparent\", \"sapling\", and \"orchard\")."
             "\nArguments:\n"
             "1. account      (numeric) The account number.\n"
@@ -4813,9 +5142,10 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     if (!fEnableZGetTotalBalance || fHelp || params.size() > 2)
         throw runtime_error(
             "z_gettotalbalance ( minconf includeWatchonly )\n"
-            + Deprecated(fEnableZGetTotalBalance,
-                         "z_gettotalbalance",
-                         "") +
+            + SupportedOnYcash(fEnableZGetTotalBalance,
+                               "z_gettotalbalance",
+                               "Its upstream replacement, z_getbalanceforaccount, needs\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturn the total value of funds stored in the node's wallet.\n"
             "\nCAUTION: If the wallet contains any addresses for which it only has incoming viewing keys,"
             "\nthe returned private balance may be larger than the actual balance, because spends cannot"
@@ -4828,7 +5158,23 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
             "  \"transparent\": xxxxx,     (numeric) the total balance of transparent funds\n"
             "  \"private\": xxxxx,         (numeric) the total balance of shielded funds (in all shielded addresses)\n"
             "  \"total\": xxxxx,           (numeric) the total balance of both transparent and shielded funds\n"
+            "  \"transparent_ecc\": xxxxx, (numeric) transparent minus transparent_pq: every output of transparent that is not\n"
+            "                             post-quantum (P2PKH, P2PK, P2SH; with includeWatchonly any other watched script)\n"
+            "  \"transparent_pq\": xxxxx,  (numeric) the part of transparent held by post-quantum addresses (TX_PQPKH)\n"
+            "  \"pq_by_scheme\": [         (array) transparent_pq by scheme, both schemes always\n"
+            "    {\n"
+            "      \"pqscheme\": n,            (numeric) 1 or 2\n"
+            "      \"pqschemename\": \"name\",   (string) \"SLH-DSA-SHA2-128s\" (1) or \"FN-DSA-512\" (2)\n"
+            "      \"transparent_pq\": xxxxx   (numeric) this scheme's part of transparent_pq\n"
+            "    }, ...\n"
+            "  ]\n"
             "}\n"
+            "\nEvery figure counts an output by its confirmations alone: at minconf 1 (the default) an unconfirmed output\n"
+            "is left out even when it is this wallet's own change (getwalletinfo's balance counts that); minconf 0 counts\n"
+            "every unconfirmed output. Coins locked with lockunspent and immature coinbase are left out; includeWatchonly\n"
+            "adds watch-only coins (getwalletinfo counts locked coins and never watch-only ones). Post-quantum coins are\n"
+            "transparent: transparent = transparent_ecc + transparent_pq, each split counted by the same rule.\n"
+            "The amounts are strings, as transparent, private and total are.\n"
             "\nExamples:\n"
             "\nThe total amount in the wallet\n"
             + HelpExampleCli("z_gettotalbalance", "") +
@@ -4851,13 +5197,26 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     // but they don't because wtx.GetAmounts() does not handle tx where there are no outputs
     // pwalletMain->GetBalance() does not accept min depth parameter
     // so we use our own method to get balance of utxos.
-    CAmount nBalance = getBalanceTaddr(std::nullopt, std::nullopt, nMinDepth, !fIncludeWatchonly);
+    const TransparentSplit tsplit = AvailableTransparentSplit(nMinDepth, !fIncludeWatchonly);   // = getBalanceTaddr
+    CAmount nBalance = tsplit.total;
     CAmount nPrivateBalance = getBalanceZaddr(std::nullopt, std::nullopt, nMinDepth, INT_MAX, !fIncludeWatchonly);
     CAmount nTotalBalance = nBalance + nPrivateBalance;
     UniValue result(UniValue::VOBJ);
     result.pushKV("transparent", FormatMoney(nBalance));
     result.pushKV("private", FormatMoney(nPrivateBalance));
     result.pushKV("total", FormatMoney(nTotalBalance));
+    // The split by address type (beta2 item 15), by the rule transparent follows: ECC = transparent minus its PQ part.
+    const PQAmounts& pqBal = tsplit.pq;
+    result.pushKV("transparent_ecc", FormatMoney(nBalance - pqBal.Total()));
+    result.pushKV("transparent_pq", FormatMoney(pqBal.Total()));
+    UniValue byScheme(UniValue::VARR);
+    for (uint8_t scheme : PQ_BALANCE_SCHEMES) {
+        UniValue s(UniValue::VOBJ);
+        PushPQScheme(s, scheme);
+        s.pushKV("transparent_pq", FormatMoney(pqBal.byScheme[scheme]));
+        byScheme.push_back(s);
+    }
+    result.pushKV("pq_by_scheme", byScheme);
     return result;
 }
 
