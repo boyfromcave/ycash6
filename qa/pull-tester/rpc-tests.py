@@ -135,6 +135,8 @@ BASE_SCRIPTS= [
     # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
     # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
     'wallet_balance_by_type.py',
+    # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
+    'wallet_getnewaddress_type.py',
     # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.
     'wallet_address_matrix.py',
     # beta2 audit H1 / A-M2: a PQ send's fee cap at the RPC and the commit, no rebroadcast of a refused send; uneconomic PQ coins.

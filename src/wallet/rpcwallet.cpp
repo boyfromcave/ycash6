@@ -224,6 +224,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (!fEnableGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
+            "getnewaddress ( \"type\" )\n"
             "getnewaddress ( \"\" \"type\" )\n"
             + SupportedOnYcash(fEnableGetNewAddress,
                                "getnewaddress",
@@ -235,10 +236,12 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "provide privacy protections; they should only be used in circumstances \n"
             "where it is necessary to interoperate with legacy Bitcoin infrastructure.\n"
 
-            "\nArguments:\n"
-            "1. (dummy)       (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\". Passing any other string will result in an error.\n"
+            "\nArguments (the type may come first, getnewaddress pq, or second after the empty string, getnewaddress \"\" pq):\n"
+            "1. \"type\"|(dummy) (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
+            "                  argument. Or the DEPRECATED placeholder: the empty string \"\", which may be followed by the type.\n"
+            "                  Any other string is refused (\"Accounts are unsupported\"); the type names are lower case.\n"
             "2. \"type\"        (string, optional, default \"p2pkh\") \"p2pkh\", or \"pq\": a post-quantum address\n"
-            "                  (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's seed, FN-DSA-512 once\n"
+            "                  (53 characters, its prefix showing the network and the scheme) from the wallet's seed, FN-DSA-512 once\n"
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"
@@ -250,13 +253,28 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
             "\nExamples:\n"
             + HelpExampleCli("getnewaddress", "")
+            + HelpExampleCli("getnewaddress", "pq")
             + HelpExampleCli("getnewaddress", "\"\" \"pq\"")
-            + HelpExampleRpc("getnewaddress", "")
+            + HelpExampleRpc("getnewaddress", "\"pq\"")
         );
 
-    const UniValue& dummy_value = params[0];
-    if (!dummy_value.isNull() && dummy_value.get_str() != "") {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "dummy first argument must be excluded or set to \"\".");
+    // Parse the arguments first so no key is generated on an error. The first slot is the address type (beta2
+    // item 10: getnewaddress pq, as yed_getnewaddress takes its type first) or the old placeholder, which accepted
+    // only "": a type name was never valid there, so no call that worked before changes meaning. Errors as
+    // ycash-dd's (#164).
+    std::string type = "p2pkh";
+    if (params.size() > 0 && params[0].isStr() &&
+        (params[0].get_str() == "p2pkh" || params[0].get_str() == "pq" || params[0].get_str() == "pqslh")) {
+        if (params.size() > 1 && !params[1].isNull())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "the address type is given first, so there is no second argument (getnewaddress pq, or getnewaddress \"\" pq)");
+        type = params[0].get_str();
+    } else {
+        // A first string that is neither "" nor a type name, a type name in another case ("PQ") too.
+        const UniValue& dummy_value = params[0];
+        if (!dummy_value.isNull() && dummy_value.get_str() != "")
+            throw JSONRPCError(RPC_WALLET_ACCOUNTS_UNSUPPORTED, "Accounts are unsupported; the first argument is the address type, \"p2pkh\", \"pq\" or \"pqslh\" (lower case), or \"\" followed by the type");
+        if (params.size() > 1 && !params[1].isNull())
+            type = params[1].get_str();
     }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -266,7 +284,6 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     EnsureWalletIsUnlocked();
 
-    const std::string type = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "p2pkh";
     if (type == "pq" || type == "pqslh") {
         // A plain-YEC post-quantum address (D-Q-20): the TX_PQPKH key a PQ YED address names, from the PQ key
         // chain (DerivePQSeed). Scheme by the holder policy (quantum spec A-13): Falcon once active, else SLH-DSA.
