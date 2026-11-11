@@ -695,13 +695,17 @@ std::set<CScript> YedHolderScripts()
     std::set<CScript> out;
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
     if (!yw || !yw->Index()) return out;
-    LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+    // Review m3: the wallet's own Yellowback-locked outpoints, each looked up in the index, so the cost follows the
+    // wallet's tokens rather than every token on the network. A token whose lock was removed (yed_unlockcoin) is not
+    // marked until the next reconciliation locks it again.
     const std::set<COutPoint> locked = yw->Locked();
+    LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
     LOCK(yw->Index()->cs_yellowback);
     if (!yw->Index()->IsHealthy()) return out;
     yellowback::State st(yw->Index()->View());
     for (const COutPoint& o : locked) {
-        if (auto token = st.GetToken(o)) out.insert(token->scriptPubKey);
+        std::optional<yellowback::TokenRecord> t = st.GetToken(o);
+        if (t.has_value() && yw->IsMineScript(t->scriptPubKey)) out.insert(t->scriptPubKey);
     }
     return out;
 }

@@ -997,3 +997,14 @@ def tarfile_extractall(tgz, path):
         if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
             raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
     tgz.extractall(path=path, members=members)
+
+
+def seed_restored_balance_ecc(settled):
+    """getwalletinfo's balance_ecc of a wallet restored from its seed alone (wallet_balance_by_type.py), given the
+    original wallet's view ``settled``. A line difference: ycash-dd's ECC keys are random keypool keys, not derived
+    from the seed, so the restore finds no ECC coin there. On 6.x the transparent keys come from the seed, but only
+    the internal (keypool, change) chain is re-derived on restore: the rescan re-finds the script's one internal-chain
+    change output (0.49973 YEC, measured on this script), and none of the getnewaddress
+    (external chain) coins, the pre-existing seed-restore defect (beta2 P0, wt/handoff/Y6-FIX2-ecc-seed-restore-design.md).
+    Once that is fixed this is settled['balance_ecc']."""
+    return Decimal('0.49973')

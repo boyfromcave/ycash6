@@ -667,7 +667,10 @@ struct Context
         if (!params.IsPQFalconActive((int64_t)chainHeight + 1)) return std::nullopt;
         CPQKeyID id;
         if (!wallet.GetNewPQKey(pq::SCHEME_FN_DSA_512, id)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum holder key");
-        wallet.SetAddressBook(id, "", purpose);
+        // Review m9: a holder key whose address-book entry cannot be written is not handed out (a seed restore would
+        // otherwise file its receipts as change); an in-memory wallet (unit tests) has nothing to write.
+        if (!wallet.SetAddressBook(id, "", purpose) && wallet.fFileBacked)
+            throw std::runtime_error("wallet-write: cannot record the post-quantum holder key in the address book");
         return id;
     }
 

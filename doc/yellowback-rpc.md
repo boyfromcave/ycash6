@@ -222,11 +222,15 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
     entry. Since beta2 the wallet files such a key itself (purpose `receive`, label `""`) when it first sees a
     `TX_PQPKH` output paying it, so a wallet restored from its seed (`-mnemonicfile`), whose rescan re-finds its PQ
     keys, classifies, lists and counts their receipts as the original wallet does (a receipt, never change); vault,
-    intent and channel owner keys stay out of the address book. A fresh YED holder key (`yed_mint`, YED change from
+    intent and channel owner keys stay out of the address book, also when someone pays a `TX_PQPKH` output to one
+    (the payment is still counted, listed under `""` and shown as a receipt). A wallet made before beta2 has its paid
+    PQ keys filed once at load. A fresh YED holder key (`yed_mint`, YED change from
     the Falcon height) is filed when it is drawn, under the purpose a P2PKH holder key gets (`yellowback-vault`,
     `yellowback-change`). Where Yellowback is live, an entry of `listreceivedbyaddress` and of the `pq` arrays of
     `listaddresses` (and `validateaddress` of an address of this wallet) carries `"yed_holder": true` when the
-    Yellowback index holds a YED token of this wallet at that address; the field is absent otherwise.
+    Yellowback index holds a YED token of this wallet at that address (read from the wallet's own Yellowback-locked
+    outpoints: a token whose lock was removed with `yed_unlockcoin` is not marked until it is locked again); the
+    field is absent otherwise.
     `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`.
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, the same as ycash-dd's,
     now documented and pinned by `qa/rpc-tests/wallet_balance_by_type.py`). *Spendable now*

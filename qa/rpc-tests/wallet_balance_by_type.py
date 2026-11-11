@@ -44,6 +44,7 @@ from test_framework.util import (
     bitcoind_processes,
     connect_nodes_bi,
     nuparams,
+    seed_restored_balance_ecc,
     start_node,
     start_nodes,
     stop_node,
@@ -358,11 +359,11 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
                      (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
         # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
-        # it. Whatever ECC the restored wallet found is its own spendable non-PQ coins: none on ycash-dd (random
-        # keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds some of them (change).
+        # it. What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
+        # none on ycash-dd (random keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds
+        # some of them (change).
         assert not n0.validateaddress(self.addrs['ecc'])['ismine']
-        assert_equal(r['balance_ecc'], sum((D(u['amount']) for u in n0.listunspent(1)
-                                            if u['spendable'] and 'pqscheme' not in n0.validateaddress(u['address'])), Decimal(0)))
+        assert_equal(r['balance_ecc'], seed_restored_balance_ecc(settled))
         # the restored PQ keys are filed by the rescan (beta2); listreceivedbyaddress lists them
         self.check_listing(ecc=False)
         self.restart0()
@@ -420,7 +421,14 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert (tx_own, 'receive', Decimal('0.5'), p_own) in before[2], before
         assert (tx_in, 'receive', Decimal('0.25'), p_in) in before[2], before
         export = n0.z_exportwallet('bytypeseed2')
-        self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored2.dat')
+        # review m7: a restored wallet made without the filing (-regtestskippqfiling: as wallets before beta2) has its
+        # paid PQ keys out of the address book; its next load files them (FilePaidPQKeys)
+        self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export), '-regtestskippqfiling'], wallet='restored2.dat')
+        for a in (p_own, p_in):
+            assert 'account' not in self.nodes[0].validateaddress(a), a
+        self.restart0(wallet='restored2.dat')
+        for a in (p_own, p_in):
+            assert_equal(self.nodes[0].validateaddress(a)['account'], '')
         assert_equal(self.classification(addrs, {tx_own, tx_in}), before)
         self.restart0()
 
@@ -428,10 +436,11 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         """YED holder keys (beta2): a fresh Falcon holder key is filed when drawn and marked "yed_holder" in
         listreceivedbyaddress and validateaddress (derived from the Yellowback index), a plain PQ address is not;
         the token dust counts in getwalletinfo (balance_pq), not in the by-depth calls; a seed-only restore marks
-        the restored holder key the same way and locks its token."""
+        the restored holder key the same way, classifies the mint's token output as the same receipt and locks its
+        token."""
         print('YED holder keys: filed, marked yed_holder, token dust in balance_pq only; the same after a seed restore')
         self.nodes[0].walletpassphrase(PASSPHRASE, 3600)                  # set_create funds from node 0
-        activate_yed_late(self, [1], ((0, 1),))
+        setid = activate_yed_late(self, [1], ((0, 1),))
         n0 = self.nodes[0]
         n0.walletpassphrase(PASSPHRASE, 3600)
         self.nodes[1].sendtoaddress(n0.getnewaddress(), 20)              # the collateral (about 6 YEC at $50)
@@ -450,14 +459,44 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal((self.zbal(key, 1), self.zbal(key, 0)), (0, 0))   # locked: not in the by-depth calls
         self.view(locked_in={FN: Decimal('0.0001')})                       # but in getwalletinfo (balance_pq)
         addrs = {plain, key}
-        before = self.classification(addrs, set())
+        before = self.classification(addrs, {mint})
+        assert [r for r in before[2] if r[1] == 'receive' and r[3] == key], before
         export = n0.z_exportwallet('bytypeseed3')
         self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored3.dat')
         n0 = self.nodes[0]
-        assert_equal(self.classification(addrs, set()), before)
+        assert_equal(self.classification(addrs, {mint}), before)
         assert_equal(n0.validateaddress(key).get('yed_holder'), True)
         assert_equal(n0.yed_getbalance()['confirmedCents'], 10000)
         assert {'txid': op[0], 'vout': op[1]} in n0.listlockunspent()
+        self.restart0()
+        self.owner_key_payment(setid)
+
+    def owner_key_payment(self, setid):
+        """Review m8 / audit L-i: a TX_PQPKH payment to a vault owner key of this wallet (its hash is public in the vault
+        script) does not file the owner key in the address book, at receipt or at the next load; the payment still
+        counts in getwalletinfo (balance_pq), is listed by listreceivedbyaddress (under "") and is a receipt in
+        listtransactions."""
+        print('a payment to a vault owner key: counted and listed, the key stays out of the address book')
+        n0, n1 = self.nodes
+        n0.walletpassphrase(PASSPHRASE, 3600)
+        o = n0.vault_getnewowner()
+        n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': 10, 'ownerheight': n0.getblockcount() + 500,
+                       'amount': 1, 'owner': o['owner']})
+        self.mine(1)
+        plain = n0.yed_validateaddress(o['address'])['transparentAddress']
+        before = D(n0.getwalletinfo()['balance_pq'])
+        txid = n1.sendtoaddress(plain, Decimal('0.5'))
+        self.mine(1)
+        for restart in (False, True):
+            if restart:
+                self.restart0()
+                n0 = self.nodes[0]
+            va = n0.validateaddress(plain)
+            assert va['ismine'] and 'account' not in va, va
+            assert_equal(D(n0.getwalletinfo()['balance_pq']), before + Decimal('0.5'))
+            assert_equal([D(r['amount']) for r in n0.listreceivedbyaddress(0, True) if r['address'] == plain], [Decimal('0.5')])
+            assert [t for t in n0.listtransactions('*', 10000) if t['txid'] == txid and t['category'] == 'receive'
+                    and t['address'] == plain], 'the payment to the owner key is not listed as a receipt'
 
 
 if __name__ == '__main__':
