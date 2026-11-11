@@ -2345,8 +2345,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                                    "Start with the network's attestor set (regtest -yellowbackattestorset) to keep those outputs locked, "
                                    "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
             }
-            InitWarning(_("This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are not locked, "
-                          "and any send that spends one destroys the YED it carries."));
+            const std::string heldWarning = _("This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are not locked, "
+                                              "and any send that spends one destroys the YED it carries.");
+            InitWarning(heldWarning);
+            // The acknowledgement may sit in the config file, so the warning also stays visible for the life of the
+            // process: getinfo "errors" (the misc warning) and getwalletinfo "yed_unlocked".
+            SetMiscWarning(heldWarning, GetTime());
         }
     }
 #else // ENABLE_WALLET

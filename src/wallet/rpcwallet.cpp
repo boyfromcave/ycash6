@@ -3063,6 +3063,9 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"keypoolsize\": xxxx,        (numeric) how many new keys are pre-generated\n"
             "  \"yed_held\": true|false,     (boolean) this wallet has held YED or issued a YED holder key (a write-once\n"
             "                             wallet.dat marker): start-up refuses it where Yellowback is not live, unless -yellowback=0\n"
+            "  \"yed_unlocked\": true|false, (boolean) true exactly when yed_held is true and Yellowback is not live (the node was started\n"
+            "                             with -yellowback=0, on the command line or in the config file): this wallet's YED outputs are\n"
+            "                             not locked, and a send that spends one destroys the YED it carries\n"
             "  \"unlocked_until\": ttt,      (numeric) the timestamp in seconds since epoch (midnight Jan 1 1970 GMT) that the wallet is unlocked for transfers, or 0 if the wallet is locked\n"
             "  \"paytxfee\": x.xxxx,         (numeric) the preferred transaction fee rate used for transactions created by legacy APIs, set in " + CURRENCY_UNIT + " per 1000 bytes\n"
             "  \"mnemonic_seedfp\": \"uint256\", (string) the BLAKE2b-256 hash of the HD seed derived from the wallet's emergency recovery phrase\n"
@@ -3098,6 +3101,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     obj.pushKV("keypoololdest", pwalletMain->GetOldestKeyPoolTime());
     obj.pushKV("keypoolsize",   (int)pwalletMain->GetKeyPoolSize());
     obj.pushKV("yed_held",      pwalletMain->IsYedHeld());
+    obj.pushKV("yed_unlocked",  pwalletMain->IsYedHeld() && !yellowback::g_yellowbackLive);
     if (pwalletMain->IsCrypted())
         obj.pushKV("unlocked_until", nWalletUnlockTime);
     obj.pushKV("paytxfee",      ValueFromAmount(payTxFee.GetFeePerK()));

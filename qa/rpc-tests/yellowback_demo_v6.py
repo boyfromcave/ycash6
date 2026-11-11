@@ -973,9 +973,9 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
             restart_with_yellowback(self, [OBSERVER], extra=['-yellowback=0'], yellowback_indices=[], stderr=err)
             err.seek(0)
             warned = err.read().decode('utf-8').strip()
-        held = nodes[OBSERVER].getwalletinfo()['yed_held']
+        assert_equal(nodes[OBSERVER].getwalletinfo()['yed_held'], True)   # node 5 holds YED from item 4
         assert_equal(warned, 'Warning: This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are '
-                             'not locked, and any send that spends one destroys the YED it carries.' if held else '')
+                             'not locked, and any send that spends one destroys the YED it carries.')
         fork = nodes[OBSERVER]
         self.say(item, 'node 5 restarted as the fork binary without the attestor set, -yellowback=0 (a plain start refuses: the datadir holds an index): %s'
                  % overlay_off(fork))

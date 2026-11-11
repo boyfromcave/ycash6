@@ -591,7 +591,10 @@ void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)
         wallet->LockCoin(o);
         ourLocks.insert(o);
     }
-    if (!outs.empty()) wallet->MarkYedHeld();   // beta2 item 32: wallet.dat remembers it has held YED
+    // beta2 item 32: wallet.dat remembers it has held YED. A lock cannot be refused, so a failed write is logged
+    // (and retried at the next YED output).
+    if (!outs.empty() && !wallet->MarkYedHeld())
+        LogPrintf("yellowback: ERROR: LockOwn could not record in the wallet that it has held YED\n");
 }
 
 void YellowbackWallet::PreLock(const CTransaction& tx)
@@ -646,7 +649,8 @@ void YellowbackWallet::Reconcile()
             if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
             ourLocks.insert(o);
         }
-        if (!tokensMine.empty()) wallet->MarkYedHeld();   // beta2 item 32
+        if (!tokensMine.empty() && !wallet->MarkYedHeld())   // beta2 item 32; logged, as in LockOwn
+            LogPrintf("yellowback: ERROR: Reconcile could not record in the wallet that it has held YED\n");
         for (COutPoint o : release) {
             wallet->UnlockCoin(o);
             ourLocks.erase(o);

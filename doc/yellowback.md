@@ -321,6 +321,17 @@ and the YED is destroyed while the 10,000 zatoshi survive. The wallet therefore:
 - **re-locks after an import**: `importprivkey`, `importaddress`, `importwallet` and `z_importkey`
   reconcile once their rescan is done, so YED that has just become yours is locked at once.
 
+**What the has-held-YED marker does not cover.** The marker is written only by this release, on a
+node where Yellowback is live. It is absent, so start-up does not refuse, for: a wallet restored
+from its seed, or rebuilt by `-rescan`, on a node where Yellowback is not live; a new wallet filled
+by a `dumpwallet`/`importwallet` or `z_exportwallet`/`z_importwallet` round trip on such a node (the
+marker is not in the dump); and a wallet from an earlier release that holds YED and has not yet
+been started by this release where Yellowback is live. On a network with no Yellowback activation
+height set, a wallet cannot become marked. **Restore, rescan and import only on a node where
+Yellowback is live:** there, the start-up reconcile and the import hook set the marker. A marked
+wallet started with `-yellowback=0` (on the command line or in the config file) keeps the warning in
+`getinfo` `errors` for the life of the process, and `getwalletinfo` reports `"yed_unlocked": true`.
+
 **What is not protected (documented, not enforced).** These are real ways to lose YED and no
 software here can prevent them:
 

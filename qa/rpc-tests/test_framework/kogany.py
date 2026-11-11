@@ -332,8 +332,8 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
 # -regtestenablezip209, -reindex-yellowback; the retired -yellowbackenforceuntil /
 # -yellowbackstartheight raise ycashd's init error instead (KoganyInitError, koganyd_config).
 # Matched by the exact name (a prefix would swallow every -yellowback* row): -yellowback, which
-# ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index (init.cpp:436;
-# yellowback_hardening h6).
+# ycashd accepts and ignores, -yellowback=0 only acknowledging a leftover index or a wallet that has
+# held YED (init.cpp:436; yellowback_hardening h6, wallet_yed_held_guard).
 _IGNORED_NAMES = frozenset({'-yellowback'})
 def _bool01(v):
     # a bare -flag is ycashd's -flag=1 (GetBoolArg; yellowback_mint_armed passes
