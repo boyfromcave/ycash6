@@ -2056,6 +2056,8 @@ public:
     void TopUpLegacyTKeys();
     void MarkLegacyTKeyUsed(const CKeyID& id);
     void NoteLegacyTKeysUsed(const CTransaction& tx);
+    //! NotePQKeysUsed and NoteLegacyTKeysUsed, repeated while a mark grows a lookahead (review M-3).
+    void NoteKeysUsed(const CTransaction& tx);
     //! True for a key the lookahead holds that the wallet has not issued (never written to the wallet file).
     bool IsHeldLegacyTKey(const CKeyID& id) const;
     //! True when an unlocked wallet would hold more of the lookahead than it does now (a locked wallet's state).

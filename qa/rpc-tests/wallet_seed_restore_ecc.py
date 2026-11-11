@@ -17,6 +17,10 @@ chains, and a wallet restored from its recovery phrase alone must show the same 
   c150 is paid first, then c60, then c150's coin is swept to another wallet with no change, then one transaction
   pays d60 and d150, keys the restore holds only once the re-pass has found c150: the re-pass must read the whole
   range (the sweep and the payment lie past the last height at which the first pass grew the lookahead);
+- one transaction pays [e150, e60] in that output order (review M-3): e150 is held only once e60 is marked, so
+  the outputs are read again within the transaction; and a transaction found for its Sapling note also pays f150,
+  held only once a later payment to f60 is found: the re-pass marks keys on transactions the wallet already has.
+  After the restore getnewaddress hands out no address any wallet transaction pays;
 - the chain ends with blocks that pay nothing to the wallet.
 
 Then: restarts keep the restored state; the original and the restored wallet hand out the same next address; held
@@ -35,6 +39,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     bitcoind_processes,
+    wait_and_assert_operationid_status,
     connect_nodes_bi,
     start_node,
     start_nodes,
@@ -118,6 +123,15 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         self.sync_all()
         return txid
 
+    def paid_addresses(self):
+        """Every transparent address an output of a node 0 wallet transaction pays."""
+        n0 = self.nodes[0]
+        out = set()
+        for txid in {t['txid'] for t in n0.listtransactions('*', 100000)}:
+            for o in n0.decoderawtransaction(n0.gettransaction(txid)['hex'])['vout']:
+                out.update(o['scriptPubKey'].get('addresses', []))
+        return out
+
     def pay_ordered(self, outputs):
         """node 1 pays [(address, amount), ...] in one transaction, the outputs in that order; mines it."""
         n1 = self.nodes[1]
@@ -169,15 +183,33 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         d = [n0.getnewaddress() for _ in range(151)]
         d_txid = self.pay_ordered([(d[60], Decimal('0.35')), (d[150], Decimal('0.25'))])
 
+        print('M-3: one transaction pays [e150, e60]; a transaction with a Sapling note pays f150, f60 is paid later')
+        e = [n0.getnewaddress() for _ in range(151)]
+        e_txid = self.pay_ordered([(e[150], Decimal('0.15')), (e[60], Decimal('0.16'))])
+        zaddr = n0.z_getnewaddress('sapling')        # the first Sapling address: -mnemonicfile restores it
+        f = [n0.getnewaddress() for _ in range(151)]
+        t1 = n1.getnewaddress()
+        n1.sendtoaddress(t1, 2)
+        self.sync_all()
+        n1.generate(1)
+        self.sync_all()
+        op = n1.z_sendmany(t1, [{'address': zaddr, 'amount': Decimal('0.4')}, {'address': f[150], 'amount': Decimal('0.17')}],
+                           1, None, 'AllowFullyTransparent')
+        s_txid = wait_and_assert_operationid_status(n1, op)
+        self.sync_all()
+        n1.generate(1)
+        self.sync_all()
+        self.pay({f[60]: Decimal('0.18')})
+
         print('last, a gap of %d unused addresses, then one paid (the documented miss)' % (KEYPOOL + 1))
         gap_miss = [n0.getnewaddress() for _ in range(KEYPOOL + 2)]
         miss_txid = self.pay({gap_miss[-1]: Decimal('0.5')})
         n1.generate(101)
         self.sync_all()
         before = self.snapshot()
-        assert len(before['utxos']) >= IN_ORDER + 6 + COINBASE, len(before['utxos'])
+        assert len(before['utxos']) >= IN_ORDER + 10 + COINBASE, len(before['utxos'])
         assert c150 not in {u[2] for u in before['utxos']}
-        coinbase_keys = {u[2] for u in before['utxos']} - set(in_order) - {k60, k150, gap_ok[-1], gap_miss[-1], c60, d[60], d[150]}
+        coinbase_keys = {u[2] for u in before['utxos']} - set(in_order) - {k60, k150, gap_ok[-1], gap_miss[-1], c60, d[60], d[150], e[60], e[150], f[60], f[150]}
         assert len(coinbase_keys) >= COINBASE, len(coinbase_keys)
         export = n0.z_exportwallet('eccseedexport')
 
@@ -196,6 +228,9 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         assert c150 not in restored and c60 in restored and d[60] in restored and d[150] in restored
         assert_equal(n0.gettransaction(sweep_txid)['txid'], sweep_txid)
         assert_equal(n0.gettransaction(d_txid)['txid'], d_txid)
+        # M-3: both outputs of [e150, e60], and f150 of the transaction found for its Sapling note
+        assert e[150] in restored and e[60] in restored and f[150] in restored and f[60] in restored
+        assert_equal(Decimal(after['total']) - Decimal(after['transparent']), Decimal('0.4'))
         # every other figure matches the original but for the one missed payment (0.5)
         assert_equal(Decimal(after['transparent']), Decimal(before['transparent']) - Decimal('0.5'))
         assert_equal(after['getbalance'], before['getbalance'] - Decimal('0.5'))
@@ -216,7 +251,10 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         assert in_order[0] in n0.getaddressesbyaccount('')
 
         print('the documented recovery: getnewaddress past the gap, then a restart with -rescan')
+        paid = self.paid_addresses()
+        assert e[150] in paid and f[150] in paid
         issued = [n0.getnewaddress() for _ in range(len(gap_miss))]
+        assert_equal(sorted(set(issued) & paid), [])   # M-3: no address a wallet transaction pays is handed out
         assert_equal(issued, gap_miss)          # the same addresses, in the same order, as the original issued
         n0 = self.restart0('eccrestored.dat', ['-rescan'])
         assert_equal(self.snapshot(), before)

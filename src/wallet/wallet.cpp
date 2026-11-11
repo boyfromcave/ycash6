@@ -601,6 +601,21 @@ void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
     TopUpLegacyTKeys();
 }
 
+void CWallet::NoteKeysUsed(const CTransaction& tx)
+{
+    AssertLockHeld(cs_wallet);
+    // Beta2 (review M-3): a mark can bring in a key paid by an output read before it in the same transaction (one
+    // transaction paying [far, near]: far is held only once near moved the window), so the outputs are read again
+    // while a mark grows a lookahead. It ends: an output whose key moved a counter or drew the keypool moves
+    // nothing the next time, and the outputs are finite.
+    uint64_t growth;
+    do {
+        growth = nKeyLookaheadGrowth;
+        NotePQKeysUsed(tx);
+        NoteLegacyTKeysUsed(tx);
+    } while (nKeyLookaheadGrowth != growth);
+}
+
 void CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
 {
     AssertLockHeld(cs_wallet);
@@ -4755,10 +4770,9 @@ bool CWallet::AddToWalletIfInvolvingMe(
         // 6.20.0 (review B I-2): an output paying (or owned by) a PQ key the wallet holds ahead of its next index
         // marks that key used, so the lookahead moves past it and GetNewPQKey never hands it out again. Rescans
         // see every block's transactions here, so a wallet restored from its seed re-finds its PQ keys.
-        NotePQKeysUsed(tx);
         // Beta2: likewise an output paying a transparent key of the seed's legacy account the wallet holds ahead of
         // its counter, or one in its keypool (seed-only restore of ECC coins; TopUpLegacyTKeys).
-        NoteLegacyTKeysUsed(tx);
+        NoteKeysUsed(tx);
 
         // Check whether the transaction is already known by the wallet.
         bool fExisted = mapWallet.count(tx.GetHash()) != 0;
@@ -6185,8 +6199,15 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                         strprintf("Can't read block %d from disk (%s)", p->nHeight, p->GetBlockHash().GetHex()));
                 }
                 for (const CTransaction& tx : block.vtx) {
-                    if (mapWallet.count(tx.GetHash()) || tx.GetOrchardBundle().IsPresent())
+                    if (tx.GetOrchardBundle().IsPresent())
                         continue;
+                    if (mapWallet.count(tx.GetHash())) {
+                        // Review M-3: a transaction the wallet already has (one of its outputs, or a Sapling note,
+                        // made it ours) can also pay a key held only now: mark it, so the counter moves past it
+                        // and the key is written; its output counts as ours from now on (MarkDirty below).
+                        NoteKeysUsed(tx);
+                        continue;
+                    }
                     // NoteLegacyTKeysUsed/NotePQKeysUsed run inside, as in the main pass.
                     if (AddToWalletIfInvolvingMe(consensus, tx, &block, p->nHeight, WalletDecryptedNotes(), false)) {
                         myTxHashes.push_back(tx.GetHash());
