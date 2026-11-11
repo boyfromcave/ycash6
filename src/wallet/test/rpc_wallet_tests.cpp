@@ -383,8 +383,10 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_getbalance)
 
     BOOST_CHECK_THROW(CallRPC("z_getbalance too many args"), runtime_error);
     BOOST_CHECK_THROW(CallRPC("z_getbalance invalidaddress"), runtime_error);
-    // address does not belong to wallet
+    // address does not belong to wallet: refused, transparent as shielded (beta2, the lead architect, 2026-11-11)
     BOOST_CHECK_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7"), runtime_error);
+    CheckRPCThrows("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7",
+        "From address does not belong to this node, transparent or post-quantum key or watch-only script not found.");
     BOOST_CHECK_NO_THROW(CallRPC(std::string("z_getbalance ") + taddr1));
     // negative minconf not allowed
     BOOST_CHECK_THROW(CallRPC(std::string("z_getbalance ") + taddr1 + " -1"), runtime_error);

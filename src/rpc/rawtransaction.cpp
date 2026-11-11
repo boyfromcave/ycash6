@@ -690,9 +690,9 @@ UniValue createrawtransaction(const UniValue& params, bool fHelp)
     if (!fEnableCreateRawTransaction || fHelp || params.size() < 2 || params.size() > 4)
         throw runtime_error(
             "createrawtransaction [{\"txid\":\"id\",\"vout\":n},...] {\"address\":amount,...} ( locktime ) ( expiryheight )\n"
-            + Deprecated(fEnableCreateRawTransaction,
-                         "createrawtransaction",
-                         "") +
+            + SupportedOnYcash(fEnableCreateRawTransaction,
+                               "createrawtransaction",
+                               "ycashd has no other call for this raw-transaction step.") +
             "\nCreate a transaction spending the given inputs and sending to the given addresses.\n"
             "Returns hex-encoded raw transaction.\n"
             "Note that the transaction's inputs are not signed, and\n"
@@ -972,9 +972,9 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
     if (!fEnableSignRawTransaction || fHelp || params.size() < 1 || params.size() > 5)
         throw runtime_error(
             "signrawtransaction \"hexstring\" ( [{\"txid\":\"id\",\"vout\":n,\"scriptPubKey\":\"hex\",\"redeemScript\":\"hex\"},...] [\"privatekey1\",...] sighashtype )\n"
-            + Deprecated(fEnableSignRawTransaction,
-                         "signrawtransaction",
-                         "") +
+            + SupportedOnYcash(fEnableSignRawTransaction,
+                               "signrawtransaction",
+                               "ycashd has no other call for this raw-transaction step.") +
             "\nSign inputs for raw transaction (serialized, hex-encoded).\n"
             "The second optional argument (may be null) is an array of previous transaction outputs that\n"
             "this transaction depends on but may not yet be in the block chain.\n"

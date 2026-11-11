@@ -132,6 +132,9 @@ BASE_SCRIPTS= [
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -mnemonicfile.
     'wallet_pq_address.py',
+    # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
+    # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
+    'wallet_balance_by_type.py',
     # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.
     'wallet_address_matrix.py',
     # beta2 audit H1 / A-M2: a PQ send's fee cap at the RPC and the commit, no rebroadcast of a refused send; uneconomic PQ coins.
