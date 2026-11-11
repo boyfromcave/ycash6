@@ -218,4 +218,58 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
     bitdb.Reset();
 }
 
+BOOST_AUTO_TEST_CASE(stale_counter_after_crash)
+{
+    // Review L-1: a mark writes the keys up to a paid one, then the counter. A crash (or a failed write) between
+    // the two leaves keys at and past the counter on disk; getnewaddress and the keypool must skip them as issued
+    // (one of them was paid), not hand them out again nor try to write them again (the database refuses it).
+    bitdb.MakeMock();
+    const std::string file = "legacy_tkey_stale_counter_test.dat";
+    const uint32_t N = LegacyTKeyLookahead(DEFAULT_KEYPOOL_SIZE);   // 101
+    uint32_t internalCounter;
+    {
+        CWallet w(Params(), file);
+        NewSeededWallet(w);
+        LOCK(w.cs_wallet);
+        BOOST_CHECK(w.MarkLegacyTKeyUsed(SeedKey(true, 70)));        // writes external 0..70, the counter 71
+        BOOST_CHECK_EQUAL(Counter(w, true), 71U);
+        internalCounter = Counter(w, false);
+        // the crash: the counter on disk is the one before the mark
+        CHDChain stale(LookaheadTestSeed().Fingerprint(), 1);
+        for (uint32_t i = 0; i < internalCounter; i++)
+            stale.IncrementLegacyTKeyCounter(false);
+        BOOST_REQUIRE(CWalletDB(file).WriteMnemonicHDChain(stale));
+    }
+    {
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        w.TopUpLegacyTKeys();
+        BOOST_CHECK_EQUAL(Counter(w, true), 0U);
+        BOOST_CHECK(w.HaveKey(SeedKey(true, 70)) && !w.IsHeldLegacyTKey(SeedKey(true, 70)));
+        // the first getnewaddress skips the 71 stored keys and issues index 71, without throwing
+        CPubKey k;
+        BOOST_CHECK_NO_THROW(k = w.GenerateNewKey(true));
+        BOOST_CHECK(k.GetID() == SeedKey(true, 71));
+        BOOST_CHECK_EQUAL(Counter(w, true), 72U);
+        BOOST_CHECK(w.GenerateNewKey(true).GetID() == SeedKey(true, 72));
+        BOOST_CHECK(w.IsHeldLegacyTKey(SeedKey(true, 73 + N - 1)));
+        // the keypool still tops up (the internal chain was not affected)
+        BOOST_CHECK_EQUAL(Counter(w, false), internalCounter);
+        BOOST_CHECK_NO_THROW(w.TopUpKeyPool(N + 3));
+        BOOST_CHECK(w.setKeyPool.size() >= (size_t)N + 3);
+    }
+    {
+        // and the counter it wrote holds after a reload
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        BOOST_CHECK_EQUAL(Counter(w, true), 73U);
+    }
+    bitdb.Flush(true);
+    bitdb.Reset();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

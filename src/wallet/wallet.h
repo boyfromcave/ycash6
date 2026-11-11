@@ -2054,10 +2054,13 @@ public:
      * logs, and tops up at walletpassphrase (then rescan to find coins beyond the keys it held).
      */
     void TopUpLegacyTKeys();
-    void MarkLegacyTKeyUsed(const CKeyID& id);
-    void NoteLegacyTKeysUsed(const CTransaction& tx);
+    //! False when a write (a held key, the HD chain counter) failed (review L-1); the in-memory state is updated.
+    bool MarkLegacyTKeyUsed(const CKeyID& id);
+    bool NoteLegacyTKeysUsed(const CTransaction& tx);
     //! NotePQKeysUsed and NoteLegacyTKeysUsed, repeated while a mark grows a lookahead (review M-3).
-    void NoteKeysUsed(const CTransaction& tx);
+    bool NoteKeysUsed(const CTransaction& tx);
+    //! A key the file holds already (not held) with the legacy key path (external, index) of this seed (review L-1).
+    bool IsStoredLegacyTKeyAt(const CKeyID& id, bool external, uint32_t index) const;
     //! True for a key the lookahead holds that the wallet has not issued (never written to the wallet file).
     bool IsHeldLegacyTKey(const CKeyID& id) const;
     //! True when an unlocked wallet would hold more of the lookahead than it does now (a locked wallet's state).

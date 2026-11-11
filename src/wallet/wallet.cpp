@@ -369,6 +369,15 @@ CPubKey CWallet::GenerateNewKey(bool external)
         hdChain.IncrementLegacyTKeyCounter(external);
         if (key.has_value()) {
             const CPubKey held = key.value().GetPubKey();
+            if (IsStoredLegacyTKeyAt(held.GetID(), external, index)) {
+                // Review L-1: the file holds this index's key already, with its key path, though the counter is
+                // at it: a mark wrote the keys up to a paid one and the counter write did not follow (a crash
+                // between the writes, or a failed write). The key may have been paid: treat it as issued, i.e.
+                // skip it (never hand it out, never write it again: the database refuses a second "key"/"ckey").
+                LogPrintf("CWallet::GenerateNewKey(): the key at %s is stored already; skipping it\n",
+                          transparent::AccountKey::KeyPath(BIP44CoinType(), ZCASH_LEGACY_ACCOUNT, external, index));
+                continue;
+            }
             if (IsHeldLegacyTKey(held.GetID())) {
                 // Beta2: the lookahead holds this index already (the same key): issue it, i.e. write it now.
                 if (!PersistLegacyTKey(held.GetID()))
@@ -428,6 +437,17 @@ std::optional<std::pair<bool, uint32_t>> ParseLegacyTKeyPath(const std::string& 
     if (value > 0x7FFFFFFFULL)
         return std::nullopt;
     return std::make_pair(chain == '0', (uint32_t)value);
+}
+
+bool CWallet::IsStoredLegacyTKeyAt(const CKeyID& id, bool external, uint32_t index) const
+{
+    AssertLockHeld(cs_wallet);
+    if (IsHeldLegacyTKey(id) || !HaveKey(id) || !mnemonicHDChain.has_value())
+        return false;
+    auto meta = mapKeyMetadata.find(id);
+    return meta != mapKeyMetadata.end() &&
+        meta->second.seedFp == mnemonicHDChain.value().GetSeedFingerprint() &&
+        meta->second.hdKeypath == transparent::AccountKey::KeyPath(BIP44CoinType(), ZCASH_LEGACY_ACCOUNT, external, index);
 }
 
 bool CWallet::IsHeldLegacyTKey(const CKeyID& id) const
@@ -524,22 +544,23 @@ void CWallet::ForgetKeyPoolEntry(int64_t nIndex)
     mapKeyPoolKeyId.erase(it);
 }
 
-void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
+bool CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
 {
     AssertLockHeld(cs_wallet);
     if (!mnemonicHDChain.has_value())
-        return;
+        return true;
     auto meta = mapKeyMetadata.find(id);
     if (meta == mapKeyMetadata.end() || meta->second.seedFp != mnemonicHDChain.value().GetSeedFingerprint())
-        return;   // not a key of this wallet's seed (an imported or a pre-mnemonic key)
+        return true;   // not a key of this wallet's seed (an imported or a pre-mnemonic key)
     const auto position = ParseLegacyTKeyPath(meta->second.hdKeypath, BIP44CoinType());
     if (!position.has_value())
-        return;
+        return true;
     const bool external = position.value().first;
     const uint32_t index = position.value().second;
     if (index >= 0x7FFFFFFF)
-        return;   // index + 1 must stay a non-hardened index
+        return true;   // index + 1 must stay a non-hardened index
     bool moved = false;
+    bool written = true;
 
     CHDChain& chain = mnemonicHDChain.value();
     if (index >= chain.GetLegacyTKeyCounter(external)) {
@@ -555,14 +576,21 @@ void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
             setLegacyTKeyRefound.insert(issued.begin(), issued.end());
             setLegacyTKeyRefound.insert(id);
         }
+        // The keys are written before the counter (review L-1): a crash between the writes leaves keys at or past
+        // the counter on disk, which GenerateNewKey skips as issued (IsStoredLegacyTKeyAt); the other order would
+        // leave a counter past keys the file lacks, and their coins unseen after a restart.
         for (const CKeyID& heldId : issued) {
-            if (!PersistLegacyTKey(heldId))
-                LogPrintf("MarkLegacyTKeyUsed: cannot write the held key %s\n", KeyIO(Params()).EncodeDestination(heldId));
+            if (!PersistLegacyTKey(heldId)) {
+                LogPrintf("MarkLegacyTKeyUsed: error: cannot write the held key %s\n", KeyIO(Params()).EncodeDestination(heldId));
+                written = false;
+            }
         }
         while (chain.GetLegacyTKeyCounter(external) <= index)
             chain.IncrementLegacyTKeyCounter(external);
-        if (fFileBacked && !CWalletDB(strWalletFile).WriteMnemonicHDChain(chain))
-            LogPrintf("MarkLegacyTKeyUsed: writing the HD chain failed\n");
+        if (fFileBacked && !CWalletDB(strWalletFile).WriteMnemonicHDChain(chain)) {
+            LogPrintf("MarkLegacyTKeyUsed: error: writing the HD chain failed\n");
+            written = false;
+        }
         moved = true;
     }
     if (!external) {
@@ -598,20 +626,21 @@ void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
         SetAddressBook(id, "", "receive");
     }
     if (!moved)
-        return;
+        return written;
     if (IsLocked()) {
         LogPrintf("MarkLegacyTKeyUsed: the wallet is locked, so it cannot hold the transparent keys after %s; "
                   "unlock it (walletpassphrase); to find coins sent to them, restore the recovery phrase into a new wallet file "
                   "(-wallet=<new file> -mnemonicfile=<file>)\n",
                   KeyIO(Params()).EncodeDestination(id));
         fLegacyTKeyRescanAdvised = true;
-        return;
+        return written;
     }
     TopUpKeyPool();
     TopUpLegacyTKeys();
+    return written;
 }
 
-void CWallet::NoteKeysUsed(const CTransaction& tx)
+bool CWallet::NoteKeysUsed(const CTransaction& tx)
 {
     AssertLockHeld(cs_wallet);
     // Beta2 (review M-3): a mark can bring in a key paid by an output read before it in the same transaction (one
@@ -619,22 +648,25 @@ void CWallet::NoteKeysUsed(const CTransaction& tx)
     // while a mark grows a lookahead. It ends: an output whose key moved a counter or drew the keypool moves
     // nothing the next time, and the outputs are finite.
     uint64_t growth;
+    bool written = true;
     do {
         growth = nKeyLookaheadGrowth;
         NotePQKeysUsed(tx);
-        NoteLegacyTKeysUsed(tx);
+        written = NoteLegacyTKeysUsed(tx) && written;
     } while (nKeyLookaheadGrowth != growth);
+    return written;
 }
 
-void CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
+bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
 {
     AssertLockHeld(cs_wallet);
     if (!mnemonicHDChain.has_value())
-        return;
+        return true;
     // A locked wallet without its lookahead cannot recognise a payment to an address of its seed it has not issued:
     // remember to say so at walletpassphrase (TopUpLegacyTKeys).
     if (!fLegacyTKeyRescanAdvised && IsLocked() && LegacyTKeyLookaheadShort())
         fLegacyTKeyRescanAdvised = true;
+    bool written = true;
     for (const CTxOut& out : tx.vout) {
         txnouttype type;
         std::vector<std::vector<unsigned char>> sol;
@@ -646,9 +678,10 @@ void CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
         } else if (type == TX_PUBKEY) {
             id = CPubKey(sol[0]).GetID();
         }
-        if (id.has_value() && HaveKey(id.value()))
-            MarkLegacyTKeyUsed(id.value());
+        if (id.has_value() && HaveKey(id.value()) && !MarkLegacyTKeyUsed(id.value()))
+            written = false;
     }
+    return written;
 }
 
 CPubKey CWallet::AddTransparentSecretKey(
@@ -4782,7 +4815,12 @@ bool CWallet::AddToWalletIfInvolvingMe(
         // see every block's transactions here, so a wallet restored from its seed re-finds its PQ keys.
         // Beta2: likewise an output paying a transparent key of the seed's legacy account the wallet holds ahead of
         // its counter, or one in its keypool (seed-only restore of ECC coins; TopUpLegacyTKeys).
-        NoteKeysUsed(tx);
+        if (!NoteKeysUsed(tx)) {
+            // Review L-1: a key or the HD chain counter could not be written. The in-memory state is right, and a
+            // key written past a counter left behind is skipped as issued (GenerateNewKey), so the wallet goes on.
+            LogPrintf("AddToWalletIfInvolvingMe: error: writing the keys %s marks used failed (see above)\n",
+                      tx.GetHash().ToString());
+        }
 
         // Check whether the transaction is already known by the wallet.
         bool fExisted = mapWallet.count(tx.GetHash()) != 0;
