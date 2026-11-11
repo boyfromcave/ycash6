@@ -39,6 +39,8 @@ from test_framework.util import (
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
+    ONE_NOTE_SAPLING_OUTPUTS,
+    SHIELDING_SEND_FEE,
     lockunspent_true,
     nuparams,
     start_node,
@@ -180,7 +182,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendtoaddress(pq1, 10)
         n0.sendtoaddress(shield_from, Decimal('10.0001'))
         self.mine(1)
-        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, None)
+        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, SHIELDING_SEND_FEE)
         wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zaddr), Decimal('10'))
@@ -234,7 +236,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_equal(len(tx_z['vout']), 1)
         assert_equal(tx_z['vout'][0]['scriptPubKey']['hex'], r_z['script'])
         assert_equal(len(tx_z['vShieldedSpend']), 1)
-        assert_equal(len(tx_z['vShieldedOutput']), 2)                # the change note
+        assert_equal(len(tx_z['vShieldedOutput']), ONE_NOTE_SAPLING_OUTPUTS)                # the change note
         fee_z = self.fee_of(tx_z)
         assert_equal(fee_z, max(VAULT_RPC_FEE, conventional_fee(tx_z)))
         assert_equal(zat(tx_z['valueBalance']), zat(4) + fee_z)
@@ -342,7 +344,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendmany('', {a: Decimal('0.1001') for a in feeders})
         self.mine(1)
         for a in feeders:
-            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, None)
+            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, SHIELDING_SEND_FEE)
             wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zmulti), Decimal('2.1'))
@@ -410,8 +412,11 @@ class VaultLockFromTest(BitcoinTestFramework):
         r = n0.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)
         assert_equal((r['wasYellowbackLocked'], r['cents']), (True, before))
         assert outpoint not in n0.listlockunspent()
-        assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
-                          n0.vault_lock, self.params(1, key))
+        msg = assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
+                                n0.vault_lock, self.params(1, key))
+        # review M-1: the hint names the call that locks it again (`lockunspent true` would not)
+        assert_equal(msg, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op +
+                     ' (its YED would burn; lock it again with yed_lockcoins)')
         # audit L-ii: the key also holds plain YEC; with its token unlocked the lock is funded from the plain coins
         # alone (signed once, with no lock held: audit A-M1), and the token is left alone
         n0.sendtoaddress(key, Decimal('2'))
