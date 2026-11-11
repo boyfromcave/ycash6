@@ -1,4 +1,5 @@
 // Copyright (c) 2017-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -132,8 +133,18 @@ std::optional<std::string> LoadAllowedDeprecatedFeatures();
 std::string GetAllowableDeprecatedFeatures();
 
 /**
- * Returns a string to be included in the help text of a deprecated RPC method.
+ * Returns a string to be included in the help text of a deprecated RPC method that has a
+ * replacement on Ycash (`instead` names it).
  */
 std::string Deprecated(bool enabled, std::string method, std::string instead);
+
+/**
+ * Returns a string to be included in the help text of an RPC method that upstream Zcash
+ * deprecated but that is a supported call on Ycash, usually because its replacement needs
+ * NU5 (unified-address accounts), which has no activation height on Ycash. `note` says why.
+ * The method stays behind its -allowdeprecated feature flag, so -allowdeprecated=none still
+ * turns it off and `enabled` false gives the DISABLED message.
+ */
+std::string SupportedOnYcash(bool enabled, std::string method, std::string note);
 
 #endif // ZCASH_DEPRECATION_H
