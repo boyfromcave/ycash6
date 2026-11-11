@@ -81,7 +81,7 @@ name: yellowback tests
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
 #   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
-#     `koganyd` and `sidecar-rig`, the 50 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     `koganyd` and `sidecar-rig`, the 51 wallet-needing scripts of qa/kogany-mixed-shards.txt's
 #     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
 #     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
 #     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
