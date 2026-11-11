@@ -135,6 +135,8 @@ BASE_SCRIPTS= [
     # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
     # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
     'wallet_balance_by_type.py',
+    # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
+    'wallet_getnewaddress_type.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

@@ -171,6 +171,17 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   the YEC their token outputs carry is not taken for change); holder keys issued by an earlier build
   are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
   out).
+- **`getnewaddress` takes the type first** (beta2 item 10, ported from ycash-dd #164): `getnewaddress pq`,
+  `getnewaddress pqslh` and `getnewaddress p2pkh`, as `yed_getnewaddress` takes its type; the old shape
+  `getnewaddress "" "pq"` keeps working, and `getnewaddress` with no argument is still a P2PKH address. A type name
+  was never a valid first argument (the placeholder accepted only `""`), so no call that worked before changes
+  meaning; any other first string is still refused, now with ycash-dd's error `Accounts are unsupported; the first
+  argument is the address type, "p2pkh", "pq" or "pqslh" (lower case), or "" followed by the type` (code
+  `RPC_WALLET_ACCOUNTS_UNSUPPORTED`; 6.22.0-beta1 said `dummy first argument must be excluded or set to "".` with
+  `RPC_INVALID_PARAMETER`). The type names are case-sensitive, as `yed_getnewaddress`'s and `z_getnewaddress`'s
+  are, so `PQ` is refused with that message; a type given first and again second is refused with `the address type
+  is given first, so there is no second argument (getnewaddress pq, or getnewaddress "" pq)`. `getnewaddress` is in
+  `DEFAULT_ALLOW_DEPRECATED`: `-allowdeprecated=none` turns it off in every shape.
 - **`z_sendmany` / `z_mergetoaddress` refuse an `sq…` recipient** on this line (their recipients are `libzcash::PaymentAddress`, which has no post-quantum alternative): pay an `sq…` address with `sendtoaddress` or `sendmany`.
 - **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
