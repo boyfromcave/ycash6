@@ -143,6 +143,15 @@ void AsyncRPCOperation_sendmany::main() {
 // At least #4 differs from the Rust transaction builder.
 tl::expected<uint256, InputSelectionError>
 AsyncRPCOperation_sendmany::main_impl(CWallet& wallet) {
+    // The Yellowback second check (review m2, audit L-ii): an ECC from address, ANY_TADDR or a unified account never
+    // spends a YED token, vault or carrier whose coin lock was removed; the send goes on with the other inputs and is
+    // refused, naming them, only if it needs them (the selection then reports insufficient funds).
+    std::string yedRefusal;
+    SpendableInputs spendable;
+    if (!pqSource_.has_value()) {
+        spendable = builder_.FindAllSpendableInputs(wallet, ztxoSelector_, mindepth_);
+        yedRefusal = DropYellowbackCoins(spendable.utxos, false);
+    }
     auto preparedTx = pqSource_.has_value()
         ? builder_.PreparePQTransaction(
                 wallet,
@@ -156,12 +165,15 @@ AsyncRPCOperation_sendmany::main_impl(CWallet& wallet) {
         : builder_.PrepareTransaction(
                 wallet,
                 ztxoSelector_,
-                builder_.FindAllSpendableInputs(wallet, ztxoSelector_, mindepth_),
+                spendable,
                 recipients_,
                 chainActive,
                 strategy_,
                 fee_,
                 anchordepth_);
+    if (!preparedTx.has_value() && !yedRefusal.empty() && std::holds_alternative<InvalidFundsError>(preparedTx.error())) {
+        throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+    }
 
     return preparedTx
         .map([&](const TransactionEffects& effects) {

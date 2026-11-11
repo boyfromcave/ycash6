@@ -2788,16 +2788,20 @@ bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& r
 bool MarkVaultKeyImported(CWallet& wallet, const CPubKey& key);
 
 /**
- * Defence in depth for a plain-YEC spend whose inputs this wallet selected itself from one address (beta2:
- * z_sendmany and z_mergetoaddress from a post-quantum address, vault_lock "from"). The Yellowback wallet layer keeps
- * every YED-bearing output locked, so AvailableCoins never offers one; this is the second check, the one the YED
- * builders make (yellowback/txbuilder.cpp SelectYec): an input the Yellowback index knows as a token or a vault, or
- * that the wallet layer holds as a carrier, is refused, since consensus would accept the spend and burn its YED; so is
- * an output of an unconfirmed transaction that carries a Yellowback payload (the tip index does not know it yet).
- * Where Yellowback is live and its index is unhealthy every spend is refused: the coin locks are then not reconciled
- * and cannot be trusted. Where Yellowback is not live there is nothing to check. Returns "" when the inputs may be
- * spent, else the refusal (RPC_WALLET_ERROR at the callers). Takes cs_main, cs_wallet, then cs_yellowback (N25).
+ * Defence in depth for a plain-YEC spend whose inputs this wallet selected itself (beta2: z_sendmany, z_mergetoaddress,
+ * sendtoaddress/sendmany through CreateTransaction, vault_lock "from"). The Yellowback wallet layer keeps every
+ * YED-bearing output locked, so AvailableCoins never offers one; this is the second check, the one the YED builders
+ * make (yellowback/txbuilder.cpp SelectYec), for an outpoint whose lock was removed (yed_unlockcoin): an input the
+ * Yellowback index knows as a token or a vault, an output of a transaction the index has not judged yet (unconfirmed)
+ * that its Yellowback payload assigns YED (what the wallet layer pre-locks), or a carrier the wallet layer holds is a
+ * Yellowback outpoint, since consensus would accept its plain spend and burn its YED. Where Yellowback is live and
+ * the index is unhealthy, a `strict` caller (the post-quantum source paths, vault_lock "from") is refused outright --
+ * the coin locks are then not reconciled and cannot be trusted --, while the stock paths (strict false) fall back to
+ * the payload check for every input. Where Yellowback is not live there is nothing to check. Returns "" when no input
+ * is a Yellowback outpoint, else the refusal (RPC_WALLET_ERROR at the callers); `refusedOut`, when given, receives
+ * the Yellowback outpoints (empty for the unhealthy-index refusal). Takes cs_main, cs_wallet, then cs_yellowback
+ * (lock order N25; 6.x takes cs_main first).
  */
-std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs);
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict = true, std::vector<COutPoint>* refusedOut = nullptr);
 
 #endif // BITCOIN_WALLET_WALLET_H

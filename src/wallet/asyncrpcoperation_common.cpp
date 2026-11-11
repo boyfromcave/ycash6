@@ -376,20 +376,34 @@ void EnsurePQFeeWithinCap(CAmount fee)
     }
 }
 
-// The entry CommitTransaction recorded for a transaction the mempool then refused (YellowbackWallet::RemoveOrphan).
-static void EraseRefusedPQTransaction(const uint256& txid)
+std::string EraseRefusedPQSend(CWallet& wallet, const uint256& txid)
 {
-    AssertLockHeld(pwalletMain->cs_wallet);
-    std::map<uint256, CWalletTx>::iterator it = pwalletMain->mapWallet.find(txid);
-    if (it == pwalletMain->mapWallet.end()) return;
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = wallet.mapWallet.find(txid);
+    if (it == wallet.mapWallet.end()) return "";
+    if (mempool.exists(txid)) {
+        // Accepted after all (relay follows acceptance): never erase a transaction that may already be relayed.
+        LogPrintf("SendPQTransaction: %s is in the mempool although its commit reported an error; kept\n", txid.ToString());
+        return strprintf("Transaction %s is in the mempool although its commit reported an error; it is kept in the "
+                         "wallet and will be relayed: do not send it again", txid.GetHex());
+    }
     LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
-    // 6.x: wtxOrdered holds a pointer into mapWallet (AddToWallet); drop it before the entry goes.
-    for (CWallet::TxItems::iterator o = pwalletMain->wtxOrdered.begin(); o != pwalletMain->wtxOrdered.end();) {
-        if (o->second == &it->second) o = pwalletMain->wtxOrdered.erase(o);
+    if (wallet.fFileBacked && !CWalletDB(wallet.strWalletFile).EraseTx(txid)) {
+        // Kept in mapWallet too, so the wallet shows what its file holds (and a restart would submit).
+        LogPrintf("ERROR: SendPQTransaction: could not erase %s from the wallet file\n", txid.ToString());
+        return strprintf("The mempool refused transaction %s, but it could not be erased from the wallet file: the "
+                         "wallet still holds this unbroadcast transaction and may submit it at the next start; check "
+                         "it with gettransaction before you send again", txid.GetHex());
+    }
+    // 6.x: wtxOrdered holds a pointer into mapWallet (AddToWallet); drop it before the entry goes
+    // (YellowbackWallet::RemoveOrphan does the same).
+    for (CWallet::TxItems::iterator o = wallet.wtxOrdered.begin(); o != wallet.wtxOrdered.end();) {
+        if (o->second == &it->second) o = wallet.wtxOrdered.erase(o);
         else ++o;
     }
-    pwalletMain->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
-    pwalletMain->mapWallet.erase(txid);   // and mapWallet when not file-backed
+    wallet.mapWallet.erase(it);   // mapTxSpends entries are ignored once it is gone (IsSpent looks it up)
+    return "";
 }
 
 UniValue SendPQTransaction(
@@ -412,7 +426,30 @@ UniValue SendPQTransaction(
         // CommitTransaction records the transaction before the mempool judges it; a refused one must not stay at
         // depth -1, where a restart's ReacceptWalletTransactions would submit it (by its own fee rule) after the
         // caller was told it failed and may have sent again.
-        if (!known) EraseRefusedPQTransaction(txid);
+        if (!known) {
+            const std::string kept = EraseRefusedPQSend(*pwalletMain, txid);
+            if (!kept.empty()) throw JSONRPCError(RPC_WALLET_ERROR, kept);
+        }
         throw;
     }
+}
+
+std::string DropYellowbackCoins(std::vector<COutput>& coins, bool strict)
+{
+    std::vector<COutPoint> candidates;
+    for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
+    std::vector<COutPoint> refused;
+    const std::string refusal = YellowbackInputRefusal(candidates, strict, &refused);
+    if (refusal.empty()) return "";
+    if (refused.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);     // the unhealthy-index refusal
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& c) {
+        return std::find(refused.begin(), refused.end(), COutPoint(c.tx->GetHash(), c.i)) != refused.end();
+    }), coins.end());
+    return refusal;
+}
+
+CAmount PQInputMarginalFee(uint8_t scheme)
+{
+    const size_t n = PQSpendInputSize(scheme);
+    return std::max(PlainPQFeeRate().GetFee(n), MARGINAL_FEE * (CAmount)((n + P2PKH_STANDARD_INPUT_SIZE - 1) / P2PKH_STANDARD_INPUT_SIZE));
 }

@@ -1728,4 +1728,36 @@ BOOST_AUTO_TEST_CASE(rpc_gettransaction_status_blossom)
 }
 
 
+// Beta2 (audit H1, review L-2): the erase after a refused post-quantum commit. Not in the wallet: nothing to do. In
+// the wallet and in the mempool: kept, and the caller's error names the txid. In the wallet only: erased (mapWallet;
+// the file's EraseTx succeeds; 6.x: wtxOrdered no longer points at it). A wallet file that refuses the erase is not
+// reproducible on the mock database.
+BOOST_AUTO_TEST_CASE(rpc_erase_refused_pq_send)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CMutableTransaction mtx;
+    mtx.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+    mtx.vout.push_back(CTxOut(1000, CScript() << OP_TRUE));
+    const CTransaction tx(mtx);
+    const uint256 txid = tx.GetHash();
+
+    BOOST_CHECK_EQUAL(EraseRefusedPQSend(*pwalletMain, txid), "");
+
+    const size_t ordered = pwalletMain->wtxOrdered.size();
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    BOOST_REQUIRE(pwalletMain->AddToWallet(CWalletTx(pwalletMain, tx), &walletdb));
+    TestMemPoolEntryHelper entry;
+    mempool.addUnchecked(txid, entry.FromTx(mtx));
+    const std::string kept = EraseRefusedPQSend(*pwalletMain, txid);
+    BOOST_CHECK(kept.find(txid.GetHex()) != std::string::npos);
+    BOOST_CHECK(kept.find("is in the mempool") != std::string::npos);
+    BOOST_CHECK(pwalletMain->mapWallet.count(txid));
+    mempool.clear();
+
+    BOOST_CHECK_EQUAL(EraseRefusedPQSend(*pwalletMain, txid), "");
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered);
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

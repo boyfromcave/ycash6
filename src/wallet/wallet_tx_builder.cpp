@@ -631,16 +631,17 @@ WalletTxBuilder::PreparePQTransaction(
     coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
         return !IsPQKeyScript(o.tx->vout[o.i].scriptPubKey);
     }), coins.end());
+    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
+    // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
+    // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
+    const std::string yedRefusal = DropYellowbackCoins(coins, true);
+    // Audit A-M2: a coin worth no more than the fee its own input adds is never selected (PQInputMarginalFee). After
+    // the Yellowback drop: at an attested price a Falcon token is such a coin, and its refusal must name it.
+    const CAmount marginal = PQInputMarginalFee(source.scheme);
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& o) { return o.Value() <= marginal; }), coins.end());
     if (coins.empty()) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
-    }
-    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the send when any
-    // candidate coin is one the Yellowback index knows as a token or vault, or the wallet layer as a carrier.
-    {
-        std::vector<COutPoint> candidates;
-        for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
-        const std::string refusal = YellowbackInputRefusal(candidates);
-        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
     }
     // Largest first: each post-quantum input costs its full signature in size and fee.
     std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
@@ -682,6 +683,7 @@ WalletTxBuilder::PreparePQTransaction(
             sum += c.Value();
         }
         if (sum < target) {
+            if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                                strprintf("Insufficient transparent funds, have %s, need %s",
                                          FormatMoney(sum), FormatMoney(target)));
@@ -726,6 +728,8 @@ WalletTxBuilder::PreparePQTransaction(
         }
         curFee = needed;
     }
+    // Beta2 (review L-1): the fee this send pays, computed or given, within the PQ cap before anything is signed.
+    EnsurePQFeeWithinCap(curFee);
 
     SpendableInputs spendable;
     spendable.utxos = selected;

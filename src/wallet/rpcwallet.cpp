@@ -6278,10 +6278,24 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numPQUtxos = 0;
     unsigned int selectedSigOps = 1;
 
+    std::string yedRefusal;
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
         vector<COutput> vecOutputs;
         pwalletMain->AvailableCoins(vecOutputs, std::nullopt, true, NULL, false, false);
+        // The Yellowback second check (review m2, audit L-ii): a YED token, vault or carrier whose coin lock was removed
+        // is never merged as plain YEC; the merge goes on with the other coins and is refused, naming them, only if
+        // nothing else is left to merge. A merge naming a post-quantum address is refused outright while the
+        // Yellowback index is unhealthy (as z_sendmany from one).
+        bool namesPQ = false;
+        for (const CTxDestination& d : taddrs) namesPQ = namesPQ || IsPQKeyDestination(d);
+        // only the coins this merge could take are judged (a PQ coin only from its named address)
+        vecOutputs.erase(std::remove_if(vecOutputs.begin(), vecOutputs.end(), [&](const COutput& out) {
+            CTxDestination a;
+            if (!out.fSpendable || !ExtractDestination(out.tx->vout[out.i].scriptPubKey, a)) return true;
+            return (IsPQKeyDestination(a) || taddrs.size() > 0) && !taddrs.count(a);
+        }), vecOutputs.end());
+        yedRefusal = DropYellowbackCoins(vecOutputs, namesPQ);
 
         // Find unspent utxos and update estimated size
         for (const COutput& out : vecOutputs) {
@@ -6299,6 +6313,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             // merges ECC (P2PKH, P2SH) coins only.
             const bool isPQ = IsPQKeyDestination(address);
             if (isPQ && (!taddrs.count(address) || !IsPQKeyScript(scriptPubKey))) {
+                continue;
+            }
+            // Audit A-M2: a post-quantum coin worth no more than the fee its own input adds is not merged.
+            if (isPQ && out.tx->vout[out.i].nValue <= PQInputMarginalFee(std::get<CPQKeyID>(address).scheme)) {
                 continue;
             }
             // If taddr is not wildcard "*", filter utxos
@@ -6435,6 +6453,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numNotes = allInputs.sproutNoteEntries.size() + allInputs.saplingNoteEntries.size();
 
     if (numUtxos == 0 && numNotes == 0) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge.");
     }
 
@@ -6457,12 +6476,6 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         if (!allInputs.sproutNoteEntries.empty() || isToSprout) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
         }
-        // Defence in depth (the coin locks already keep every YED output out of the selection): no input of a merge
-        // with a post-quantum coin may be a Yellowback token, vault or carrier.
-        std::vector<COutPoint> ins;
-        for (const COutput& out : allInputs.utxos) ins.emplace_back(out.tx->GetHash(), out.i);
-        const std::string refusal = YellowbackInputRefusal(ins);
-        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
         std::vector<std::pair<CScript, CAmount>> shapeIns;
         std::vector<CScript> prevScripts;
         for (const COutput& out : allInputs.utxos) {
@@ -6504,6 +6517,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                 "Fee %s is below the %s this post-quantum spend needs", FormatMoney(nFee.value()), FormatMoney(needed)));
         }
         nFee = needed;
+        EnsurePQFeeWithinCap(needed);   // beta2 (review L-1): a computed fee too, before anything is signed
     }
     if (pqDestKey && nFee.has_value()) {
         // With the fee known here (given, or priced for PQ inputs) the dust check runs before building; with the

@@ -33,7 +33,10 @@ prefix is hard-coded (the prefixes change under D-9).
   the key to Sapling, ECC and both PQ schemes, z_mergetoaddress of the key and the wildcard merges all fail as from an
   empty address, the token stays in listlockunspent, also after `lockunspent true`, and yed_getbalance never moves;
   with the coin lock removed on purpose (yed_unlockcoin) the wallet's second check refuses the outpoint by name
-  ("refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>").
+  ("refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>") on every path that can select a Falcon coin
+  (z_sendmany and z_mergetoaddress from the key, sendtoaddress, sendmany), also for an unconfirmed token at minconf 0,
+  and spends a holder key's plain coins without its token. (An ECC-key token, which only a mint before Falcon makes,
+  and the ECC and ANY_TADDR paths: wallet_yed_ecc_token.py.)
 
 Node profile P0 (no index) for the matrix: every check uses the wallet calls only. The line differences (ycash-dd
 v4.5.0, ycash6 6.x) sit behind the test_framework/util.py line helpers, so this file is byte-identical on both lines.
@@ -55,6 +58,7 @@ from test_framework.util import (
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
+    lockunspent_true,
     get_coinbase_address,
     nuparams,
     start_node,
@@ -66,7 +70,8 @@ from test_framework.util import (
     z_mergetoaddress_call,
     z_sendmany_opid,
 )
-from test_framework.yellowback_util import activate_yed_late, mint_to_fresh_holder
+from test_framework.yellowback_attest import wait_for_spender
+from test_framework.yellowback_util import MIN_MINT, activate_yed_late, mint_to_fresh_holder
 
 ACTIVATION = 210        # the vault upgrade (UPGRADE_VAULT)
 FALCON = 220            # -pqfalconheight: FN-DSA-512 admitted from here
@@ -442,37 +447,53 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         self.token_protection(back)
 
     def token_protection(self, back):
-        """A YED token at a post-quantum holder key is never spent as plain YEC by z_sendmany or z_mergetoaddress.
+        """A YED token is never spent as plain YEC by the wallet's own coin selection.
 
         The Yellowback wallet layer locks every token output; consensus would accept a plain spend of one and burn its
-        YED. Node 0 mints (the token on a fresh Falcon holder key) and sends a second token to a fresh holder key of
-        node 1, whose wallet then holds nothing else transparent (so the wildcard merges have nothing else to take).
-        Every spend from those keys fails as from an empty address, with the locks in place and after `lockunspent
-        true`; with a lock removed on purpose (yed_unlockcoin) the second check refuses the outpoint by name."""
+        YED. Node 0 mints (each token on a fresh Falcon holder key) and sends node 1 a token on a fresh Falcon holder
+        key; node 1's wallet then holds nothing else transparent. (From the Falcon height every YED output is at a
+        Falcon key, so no ECC-key token exists here; ANY_TADDR, which selects ECC coins only, is checked against an
+        ECC-key token in wallet_yed_ecc_token.py. The wildcard merges here show only that they never take a
+        post-quantum coin.)
+
+        - Locks in place, and again after `lockunspent true` (which re-applies them): z_sendmany from either key, the
+          merges of either key and the wildcard merges all fail as from an empty address.
+        - A lock removed on purpose (yed_unlockcoin): the wallet's second check refuses the outpoint by name on every
+          path that can select a Falcon coin: z_sendmany from the key, z_mergetoaddress of the key (with and without
+          ANY_SAPLING), sendtoaddress and sendmany (CreateTransaction); ANY_TADDR still finds nothing.
+        - An unconfirmed token (a MINT in the mempool), its lock removed: z_sendmany ... minconf 0 from its holder key
+          is refused by the payload check.
+        - A holder key that also holds plain YEC, its token unlocked: z_sendmany and z_mergetoaddress spend the plain
+          coins and leave the token alone.
+        The token outputs stay unspent and yed_getbalance never moves."""
         n0, n1, n2, n3 = self.nodes
-        print('token protection: YED on nodes 0-2 (node 3 stops), a mint to a fresh Falcon holder key')
+        print('token protection: YED on nodes 0-2 (node 3 stops), mints to fresh Falcon holder keys')
         # empty node 1 (the dust case paid it a coin, the Sapling -> PQ case a note) so the wildcards find nothing else
         wait_and_assert_operationid_status(n1, z_mergetoaddress_call(n1, ['ANY_TADDR', 'ANY_SAPLING'], back)['opid'])
         self.mine(1)
+        # and of coinbase (z_mergetoaddress never merges it; 6.x leaves node 1 the cached chain's mature coinbase)
+        while [u for u in n1.listunspent(1) if u.get('generated')]:
+            wait_and_assert_operationid_status(n1, n1.z_shieldcoinbase('*', n0.z_getnewaddress('sapling'))['opid'])
+            self.mine(1)
         stop_node(n3, 3)
         self.nodes = self.nodes[:3]
         self.num_nodes = 3
         activate_yed_late(self, [0, 2], ((0, 1), (1, 2), (0, 2)))
         n0, n1, n2 = self.nodes
         mints = [mint_to_fresh_holder(self.nodes, 0, 2) for _ in range(2)]
-        n0.yed_send(n1.yed_getnewaddress(), 10000)
+        n0.yed_send(n1.yed_getnewaddress(), 10000)               # a Falcon holder key (the default from Falcon)
         self.mine(1)
         assert_equal(n1.yed_getbalance()['confirmedCents'], 10000)
         mine0 = [(c['txid'], c['vout']) for c in n0.yed_listunspent()]
         assert_equal(len(mine0), 1)
         held = {0: [m for m in mints if m[1] == mine0[0]][0][1:]}
-        ys = [c for c in n1.yed_listunspent()]
+        tok_value = Decimal('0.0001')                            # TOKEN_VALUE, 10,000 zat
+        ys = n1.yed_listunspent()
         assert_equal(len(ys), 1)
         out1 = (ys[0]['txid'], ys[0]['vout'])
         held[1] = (out1, n1.getrawtransaction(out1[0], 1)['vout'][out1[1]]['scriptPubKey']['addresses'][0])
         assert_equal(n1.listunspent(0), [])                     # node 1: nothing transparent but the (locked) token
         assert_equal(n1.z_listunspent(0), [])
-        tok_value = Decimal('0.0001')                            # TOKEN_VALUE, 10,000 zat
 
         def yed_balances():
             return (n0.yed_getbalance()['confirmedCents'], n1.yed_getbalance()['confirmedCents'])
@@ -480,7 +501,6 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         before = yed_balances()
 
         def assert_all_refused(node, key, outpoint, sub_send, sub_merge, wildcards):
-            assert_equal(self.kind_of(node, key), FN)
             assert_equal(node.getreceivedbyaddress(key, 0), tok_value)      # the key never received anything else
             for d in (node.z_getnewaddress('sapling'), node.getnewaddress(), node.getnewaddress('', 'pq'),
                       node.getnewaddress('', 'pqslh')):
@@ -499,8 +519,9 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                   ('after lockunspent true' if unlock_all else 'locks in place'))
             for i, node in ((0, n0), (1, n1)):
                 if unlock_all:
-                    assert node.lockunspent(True)
+                    lockunspent_true(node)
                 assert locked(node, held[i][0]), (i, held[i][0], node.listlockunspent())
+                assert_equal(self.kind_of(node, held[i][1]), FN)
                 assert_all_refused(node, held[i][1], held[i][0], NO_PQ_UTXOS, NO_MERGE_FUNDS, wild if i == 1 else [])
                 assert locked(node, held[i][0])
 
@@ -515,10 +536,52 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         assert_raises_rpc(named, z_mergetoaddress_call, n1, [key], back)
         assert_raises_rpc(named, z_mergetoaddress_call, n1, [key, 'ANY_SAPLING'], back)
         assert_raises_rpc(NO_MERGE_FUNDS, z_mergetoaddress_call, n1, ['ANY_TADDR'], back)   # ECC coins only
+        pay = n0.getnewaddress()
+        assert_raises_rpc(named, n1.sendtoaddress, pay, Decimal('0.00001'))
+        assert_raises_rpc(named, n1.sendmany, '', {pay: Decimal('0.00001')})
         n1.yed_lockcoins()
         assert locked(n1, op)
         assert_equal(yed_balances(), before)
         assert_equal(n1.gettxout(op[0], op[1])['value'], tok_value)          # the token output is unspent
+
+        print('  an unconfirmed token, its lock removed: z_sendmany minconf 0 is refused by the payload check')
+        res = n0.yed_mint(MIN_MINT, 48, '', '', False)
+        sync_mempools(self.nodes)
+        n2.generate(1)                                                        # the carrier only
+        sync_blocks(self.nodes)
+        mint_txid = wait_for_spender(n0, res['carrierTxid'])
+        mtx = n0.getrawtransaction(mint_txid, 1)
+        assert 'confirmations' not in mtx or mtx['confirmations'] == 0
+        pending_key = mtx['vout'][1]['scriptPubKey']['addresses'][0]
+        assert locked(n0, (mint_txid, 1))
+        n0.yed_unlockcoin(mint_txid, 1, UNLOCK_ACK)
+        assert not locked(n0, (mint_txid, 1))
+        opid = z_sendmany_opid(n0, pending_key, [(n0.z_getnewaddress('sapling'), Decimal('0.00001'))], 0)
+        r = None
+        for _ in range(300):
+            r = n0.z_getoperationresult([opid])
+            if r:
+                break
+            time.sleep(1)
+        assert_equal(r[0]['status'], 'failed')
+        assert YED_REFUSED + '%s:1' % mint_txid in r[0]['error']['message'], r[0]['error']['message']
+        n0.yed_lockcoins()
+        self.mine(1)
+
+        print('  a holder key that also holds plain YEC, its token unlocked: the plain coins are spent, the token is not')
+        n0.sendtoaddress(key, Decimal('0.01'))
+        self.mine(1)
+        n1.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)
+        txid = self.zsend_ok(n1, key, [(n1.z_getnewaddress('sapling'), Decimal('0.001'))])
+        assert op not in [(i['txid'], i['vout']) for i in n1.getrawtransaction(txid, 1)['vin']]
+        self.mine(1)
+        r = z_mergetoaddress_call(n1, [key], back)
+        txid = wait_and_assert_operationid_status(n1, r['opid'])
+        assert op not in [(i['txid'], i['vout']) for i in n1.getrawtransaction(txid, 1)['vin']]
+        self.mine(1)
+        n1.yed_lockcoins()
+        assert_equal(n1.gettxout(op[0], op[1])['value'], tok_value)
+        assert_equal(yed_balances()[1], before[1])
 
     def check_privacy_policy(self, n0, n1):
         """PRIVACY_POLICY lines only (6.x, D-5; ycash-dd has none): a PQ party is a transparent party. PQ -> Sapling without
@@ -579,7 +642,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         """The fixed fee of a one-input send from a source of kind s (None: no PQ input, the line's default)."""
         if s not in (FN, SLH):
             return None
-        return (FEE_SLH if s == SLH else FEE_FN) + (FEE_SAPLING_OUT if sapling_out else 0)
+        return (FEE_SLH if s == SLH else FEE_FN) + (FEE_SAPLING_OUT * LONE_SAPLING_OUTPUT_ACTIONS if sapling_out else 0)
 
 
 if __name__ == '__main__':

@@ -745,8 +745,10 @@ enum class FundMode { LARGEST_FIRST, SMALL_CHANGE };
 
 /** This wallet's confirmed, spendable, unlocked P2PKH coins outside `used`, largest first -- each also unspent in the
  *  node's UTXO view (pcoinsTip + mempool, GetCoin): the wallet learns of a block's spends on its own notification
- *  thread, so right after a block it can still count a coin the block spent as unspent (refee-utxo). */
-std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used)
+ *  thread, so right after a block it can still count a coin the block spent as unspent (refee-utxo). A Yellowback
+ *  outpoint whose coin lock was removed (YellowbackInputRefusal, beta2 review L-3) is left out; `yedRefusal`, when
+ *  given, receives the refusal naming it ("" when there was none). */
+std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used, std::string* yedRefusal = nullptr)
 {
     AssertLockHeld(cs_main);
     std::vector<COutput> coins;
@@ -766,6 +768,16 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
         if (!GetCoin(op, utxo, height) || height < 0 || utxo != c.tx->vout[c.i]) continue;   // spent, or not confirmed
         eligible.emplace_back(op, c.Value());
     }
+    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a token, an unconfirmed
+    // output a Yellowback payload assigns YED, or a carrier is never a fee coin (not strict: ECC coins, as the stock
+    // paths; with the index unhealthy the payload check stands in for it).
+    std::vector<COutPoint> candidates, refused;
+    for (const auto& e : eligible) candidates.push_back(e.first);
+    const std::string refusal = YellowbackInputRefusal(candidates, false, &refused);
+    if (yedRefusal) *yedRefusal = refusal;
+    eligible.erase(std::remove_if(eligible.begin(), eligible.end(), [&](const std::pair<COutPoint, CAmount>& e) {
+        return std::find(refused.begin(), refused.end(), e.first) != refused.end();
+    }), eligible.end());
     return eligible;
 }
 
@@ -779,7 +791,8 @@ void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode
     CAmount needed = out + VAULT_RPC_FEE - inputValue;
     std::set<COutPoint> used;
     for (const CTxIn& in : mtx.vin) used.insert(in.prevout);
-    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used);
+    std::string yedRefusal;
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used, &yedRefusal);
     CAmount got = 0;
     std::vector<COutPoint> chosen;
     if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
@@ -795,6 +808,7 @@ void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode
             got += e.second;
         }
     }
+    if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
     if (got < needed)
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more", FormatMoney(needed - got)));
     for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));

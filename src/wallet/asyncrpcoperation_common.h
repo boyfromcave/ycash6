@@ -145,16 +145,44 @@ void EnsurePQShapeStandard(const CTransaction& shape, const std::vector<CScript>
 void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderInput>& ins,
                          const std::vector<CTxOut>& spentOutputs, int nHeight);
 
+/**
+ * Beta2 (the Yellowback second check, review m2, audit L-ii): removes from `coins` every Yellowback outpoint
+ * (YellowbackInputRefusal: a token, vault or carrier whose coin lock was removed) and returns the refusal naming them
+ * ("" when there were none); the caller spends the remaining plain coins and throws the refusal (RPC_WALLET_ERROR) only
+ * when they do not cover the send. A `strict` caller (a post-quantum source) is refused outright while the index is
+ * unhealthy (thrown here). cs_main and cs_wallet may be held.
+ */
+std::string DropYellowbackCoins(std::vector<COutput>& coins, bool strict);
+
+/**
+ * Beta2 (audit A-M2): what one more post-quantum input of `scheme` adds to a plain spend's fee at the current rule:
+ * max(PlainPQFeeRate() x its spend size, the ZIP-317 marginal fee of its logical actions) (SLH-DSA 27,000 zat, FN-DSA
+ * 5,500 zat with no attested price). A coin worth no more than this is never selected by z_sendmany or merged by
+ * z_mergetoaddress from a post-quantum address: spending it costs at least what it holds (outsiders can place such
+ * outputs on a known address at the relay dust price, far below this).
+ */
+CAmount PQInputMarginalFee(uint8_t scheme);
+
 /** True when `spendable` holds a post-quantum (TX_PQPKH) coin: the transaction is committed by SendPQTransaction. */
 bool SpendsPQCoin(const SpendableInputs& spendable);
 
 /**
- * Beta2 (audit H1): refuse an explicit fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee …
- * is above the … cap on a post-quantum spend"): the commit submits a PQ transaction without the absurd-fee check
- * only within that cap, so a larger fee would be built, signed and then refused at the commit. On 6.x this replaces
+ * Beta2 (audit H1, review L-1): refuse a fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee
+ * … is above the … cap on a post-quantum spend"), an explicit one before building and a computed one before signing:
+ * the commit submits a PQ transaction without the absurd-fee check only within that cap, so a larger fee would be
+ * built, signed and then refused at the commit. On 6.x this replaces
  * WalletTxBuilder's -maxtxfee bound (MaxFeeError) for a spend with a post-quantum coin, as on the reference line.
  */
 void EnsurePQFeeWithinCap(CAmount fee);
+
+/**
+ * Beta2 (audit H1, review L-2): the erase SendPQTransaction makes when the commit of a transaction the wallet did not
+ * hold before fails. cs_main and wallet.cs_wallet held. Returns "" when `txid` is not in the wallet or was erased
+ * (wallet file and mapWallet; 6.x: its wtxOrdered entry first); otherwise the error for the caller, naming the txid:
+ * the transaction is in the mempool (never erased: it may already be relayed), or the wallet file refused the erase
+ * (the wallet still holds the unbroadcast transaction, which a restart may submit).
+ */
+std::string EraseRefusedPQSend(CWallet& wallet, const uint256& txid);
 
 /**
  * Beta2 (audit H1): SendTransaction for a transaction with post-quantum inputs signed outside the wallet's locks
