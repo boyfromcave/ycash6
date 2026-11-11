@@ -328,7 +328,9 @@ caps), so the lock stays under 100 kB and the sigop limit; its coins are locked 
 once the lock is in the mempool, so a refused lock leaves them free. A Sapling-funded lock is one
 transaction with Sapling spends, the V and the change note: the spend proofs are made with no
 wallet lock held, as for `yed_mint`, the selected notes are locked in the wallet (`LockNote`, as
-the `z_*` operations do) from selection until the lock is broadcast or refused, and it carries
+the `z_*` operations do) from selection until the lock is refused, or, once it is accepted, until
+the node restarts (the wallet learns of the spend only asynchronously, and another builder must not
+select the notes meanwhile; a lock on a spent note is harmless), and it carries
 the default expiry (next block + 20). On 6.20.0 the Sapling builder pads the bundle to two outputs
 (the change note and a dummy), and the ZIP-317 conventional fee counts both.
 The vault rules (V-1) read only the transparent outputs and inputs, so the shielded parts change
@@ -349,6 +351,8 @@ testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
 | -4 | `from: the lock would be <n> bytes with <m> sigops (limits 100000, 4000); consolidate the address's coins first` (a backstop behind the caps) |
 | -4 | `from: the funding fee did not settle`, `from: the Sapling funding fee did not settle` (the fee loop did not converge; never underpaid) |
 | -6 | `too-many-notes: the transaction would spend <n> Sapling notes (limit 20); consolidate with z_mergetoaddress first` |
+| -4 | `from: refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…]` (where Yellowback is live: a coin of a transparent or PQ `from` that the Yellowback index knows as a YED token or vault, an output of an unconfirmed transaction carrying a Yellowback payload, or a carrier of this wallet; the wallet's coin lock already keeps every token out, so this is reached only when that lock was removed, e.g. by `yed_unlockcoin`) |
+| -4 | `from: refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback` (where Yellowback is live, a transparent or PQ `from`) |
 | -13 | `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet, any `vault_lock`) |
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...] ( rebuild )`

@@ -1794,6 +1794,15 @@ void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& 
         if (c.fIsCoinbase && shieldCoinbase) { coinbaseValue += c.Value(); continue; }
         eligible.emplace_back(op, c.Value());
     }
+    {
+        // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the lock when
+        // any coin of the address is one the Yellowback index knows as a token or vault, or the wallet layer as a
+        // carrier.
+        std::vector<COutPoint> candidates;
+        for (const auto& e : eligible) candidates.push_back(e.first);
+        const std::string refusal = YellowbackInputRefusal(candidates);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, "from: " + refusal);
+    }
     std::sort(eligible.begin(), eligible.end(), [](const std::pair<COutPoint, CAmount>& a, const std::pair<COutPoint, CAmount>& b) { return a.second > b.second; });
     const size_t inputBytes = yellowback::YecInputBytes(only);
     const size_t nOut = mtx.vout.size();
@@ -1843,9 +1852,10 @@ void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& 
     }
 }
 
-/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection until
- *  the lock is broadcast or refused: the proving step runs with no wallet lock held, and another builder must not pick
- *  the same notes meanwhile. Released on every path. */
+/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection: the
+ *  proving step runs with no wallet lock held, and another builder must not pick the same notes meanwhile. Released on
+ *  every failure path; kept once the lock is accepted (the caller clears ops), since the wallet learns of the spend
+ *  only asynchronously. */
 struct LockedNotes
 {
     std::vector<SaplingOutPoint> ops;
@@ -1930,7 +1940,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     VaultParams vp;
     CScript spk;
     std::unique_ptr<TransactionBuilder> sapling;   // a Sapling "from": proved below with no lock held
-    LockedNotes lockedNotes;                       // its notes, locked until the lock is broadcast or refused
+    LockedNotes lockedNotes;                       // its notes, locked until the lock is refused (kept once accepted)
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureVaultActive();
@@ -1994,7 +2004,12 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, e.what());
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
-    return LockResult(Broadcast(CTransaction(mtx)), spk, vp.owner);
+    const uint256 txid = Broadcast(CTransaction(mtx));
+    // Accepted: the notes stay locked (as a transparent "from"'s coins are locked once accepted). The wallet learns of
+    // the spend only when the notification thread delivers the transaction, and until then another builder could
+    // select the same notes; a lock on a spent note is harmless and ends with the process.
+    lockedNotes.ops.clear();
+    return LockResult(txid, spk, vp.owner);
 }
 
 UniValue vault_getnewowner(const UniValue& params, bool fHelp)

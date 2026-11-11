@@ -47,7 +47,7 @@ from test_framework.util import (
     sync_mempools,
     wait_and_assert_operationid_status,
 )
-from test_framework.yellowback_util import conventional_fee
+from test_framework.yellowback_util import activate_yed_late, conventional_fee, mint_to_fresh_holder, unlock_all as yb_unlock_all
 
 ACTIVATION = 205
 FALCON = 225
@@ -55,6 +55,7 @@ DELAY = 5
 VAULT_RPC_FEE = 10000
 SLH_PQPKH_SCRIPTSIG = 7938       # quantum spec §2.1
 PASS = 'lock-from-pass'
+UNLOCK_ACK = 'I understand this burns YED'
 
 
 def assert_raises_rpc(code, substr, fn, *args):
@@ -79,7 +80,8 @@ class VaultLockFromTest(BitcoinTestFramework):
         self.setup_clean_chain = False
 
     def node_args(self, i):
-        return [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-pqfalconheight=%d' % FALCON, '-debug=vault']
+        return [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-pqfalconheight=%d' % FALCON, '-debug=vault'] + \
+            getattr(self, 'yed_args', {}).get(i, [])
 
     def setup_network(self, split=False):
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir,
@@ -353,6 +355,8 @@ class VaultLockFromTest(BitcoinTestFramework):
         self.mine(1)
         assert_equal(n0.z_getbalance(zmulti), Decimal('2.1') - Decimal('0.25') - Decimal(self.fee_of(tx_multi)) / 100000000)
 
+        self.token_protection()
+
         print('a coinbase-only address where coinbase must be shielded')
         mature = [u for u in n0.listunspent() if u['generated'] and u['confirmations'] > 100]
         by_addr = {}
@@ -377,6 +381,39 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_raises_rpc(-13, 'walletpassphrase', n2.vault_lock, self.params(1, own2))
         assert_raises_rpc(-13, 'walletpassphrase', n2.vault_lock, self.params(1, own2z))
         print('ok')
+
+    def token_protection(self):
+        """A YED token at a post-quantum holder key never funds a lock as plain YEC. The Yellowback wallet layer locks
+        every token output (consensus would accept a plain spend of one and burn its YED): vault_lock "from" the
+        holder key of a fresh mint (a Falcon key; it holds nothing but the token) finds no coins, with the locks in
+        place and after `lockunspent true`; with the lock removed on purpose (yed_unlockcoin) the second check
+        refuses the outpoint by name."""
+        print('token protection: YED live on every node, a mint to a fresh Falcon holder key')
+        activate_yed_late(self, [0, 1], ((0, 1), (1, 2), (0, 2)))
+        n0 = self.nodes[0]
+        assert n0.getblockcount() + 1 >= FALCON
+        _, op, key = mint_to_fresh_holder(self.nodes, 0, 1)
+        assert_equal(n0.validateaddress(key)['pqscheme'], 2)
+        assert_equal(n0.getreceivedbyaddress(key, 0), Decimal('0.0001'))      # the token only (10,000 zat)
+        before = n0.yed_getbalance()['confirmedCents']
+        outpoint = {'txid': op[0], 'vout': op[1]}
+        for unlock_all in (False, True):
+            if unlock_all:
+                yb_unlock_all(n0)        # 6.x: v4.5.0's lockunspent true (the argument table needs both arguments here)
+            assert outpoint in n0.listlockunspent()
+            for amount in (Decimal('0.5'), 1):
+                assert_raises_rpc(-6, 'insufficient confirmed funds at %s' % key, n0.vault_lock, self.params(amount, key))
+            assert outpoint in n0.listlockunspent()
+            assert_equal(n0.yed_getbalance()['confirmedCents'], before)
+        r = n0.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)
+        assert_equal((r['wasYellowbackLocked'], r['cents']), (True, before))
+        assert outpoint not in n0.listlockunspent()
+        assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
+                          n0.vault_lock, self.params(1, key))
+        n0.yed_lockcoins()
+        assert outpoint in n0.listlockunspent()
+        assert_equal(n0.yed_getbalance()['confirmedCents'], before)
+        assert_equal(n0.gettxout(op[0], op[1])['value'], Decimal('0.0001'))
 
 
 if __name__ == '__main__':
