@@ -132,6 +132,9 @@ BASE_SCRIPTS= [
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -mnemonicfile.
     'wallet_pq_address.py',
+    # Beta2 P0: a -mnemonicfile restore re-finds every ECC (P2PKH) coin of the seed: the legacy transparent HD
+    # lookahead, keypool marking, the rescan's re-pass for keys used out of chain order, the gap limit (-keypool).
+    'wallet_seed_restore_ecc.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

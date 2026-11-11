@@ -368,11 +368,19 @@ CPubKey CWallet::GenerateNewKey(bool external)
 
         hdChain.IncrementLegacyTKeyCounter(external);
         if (key.has_value()) {
-            pubkey = AddTransparentSecretKey(
-                hdChain.GetSeedFingerprint(),
-                key.value(),
-                transparent::AccountKey::KeyPath(BIP44CoinType(), ZCASH_LEGACY_ACCOUNT, external, index)
-            );
+            const CPubKey held = key.value().GetPubKey();
+            if (IsHeldLegacyTKey(held.GetID())) {
+                // Beta2: the lookahead holds this index already (the same key): issue it, i.e. write it now.
+                if (!PersistLegacyTKey(held.GetID()))
+                    throw std::runtime_error("CWallet::GenerateNewKey(): writing a held key failed");
+                pubkey = held;
+            } else {
+                pubkey = AddTransparentSecretKey(
+                    hdChain.GetSeedFingerprint(),
+                    key.value(),
+                    transparent::AccountKey::KeyPath(BIP44CoinType(), ZCASH_LEGACY_ACCOUNT, external, index)
+                );
+            }
         }
         // if we did not successfully generate a key, try again.
     } while (!pubkey.has_value());
@@ -382,7 +390,240 @@ CPubKey CWallet::GenerateNewKey(bool external)
         throw std::runtime_error("CWallet::GenerateNewKey(): Writing HD chain model failed");
     }
 
+    TopUpLegacyTKeys();   // beta2: the lookahead moves with the counter
     return pubkey.value();
+}
+
+// ---- beta2: the legacy transparent HD lookahead (seed-only restore of ECC coins) ----
+
+uint32_t LegacyTKeyLookahead(int64_t keypool)
+{
+    const int64_t n = std::min<int64_t>(std::max<int64_t>(keypool, 0), 0x7FFFFFFE);
+    return (uint32_t)n + 1;
+}
+
+uint32_t LegacyTKeyLookaheadEnd(uint32_t counter, uint32_t lookahead)
+{
+    const uint64_t end = (uint64_t)counter + lookahead;
+    return (uint32_t)std::min<uint64_t>(end, 0x80000000ULL);   // non-hardened child indices only
+}
+
+std::optional<std::pair<bool, uint32_t>> ParseLegacyTKeyPath(const std::string& path, uint32_t coinType)
+{
+    const std::string prefix = transparent::AccountKey::KeyPath(coinType, ZCASH_LEGACY_ACCOUNT) + "/";
+    if (path.size() < prefix.size() + 3 || path.compare(0, prefix.size(), prefix) != 0)
+        return std::nullopt;
+    const char chain = path[prefix.size()];
+    if ((chain != '0' && chain != '1') || path[prefix.size() + 1] != '/')
+        return std::nullopt;
+    const std::string digits = path.substr(prefix.size() + 2);
+    if (digits.empty() || digits.size() > 10 || (digits.size() > 1 && digits[0] == '0'))
+        return std::nullopt;
+    uint64_t value = 0;
+    for (char c : digits) {
+        if (c < '0' || c > '9')
+            return std::nullopt;
+        value = value * 10 + (uint64_t)(c - '0');
+    }
+    if (value > 0x7FFFFFFFULL)
+        return std::nullopt;
+    return std::make_pair(chain == '0', (uint32_t)value);
+}
+
+bool CWallet::IsHeldLegacyTKey(const CKeyID& id) const
+{
+    AssertLockHeld(cs_wallet);
+    return mapLegacyTKeyHeld.count(id) > 0;
+}
+
+bool CWallet::LegacyTKeyLookaheadShort() const
+{
+    AssertLockHeld(cs_wallet);
+    if (!mnemonicHDChain.has_value())
+        return false;
+    const uint32_t n = LegacyTKeyLookahead(GetArg("-keypool", DEFAULT_KEYPOOL_SIZE));
+    CHDChain chain = mnemonicHDChain.value();
+    for (bool external : {false, true}) {
+        if (nLegacyTKeyHeldEnd[external] < LegacyTKeyLookaheadEnd(chain.GetLegacyTKeyCounter(external), n))
+            return true;
+    }
+    return false;
+}
+
+bool CWallet::PersistLegacyTKey(const CKeyID& id)
+{
+    AssertLockHeld(cs_wallet);
+    if (mapLegacyTKeyHeld.erase(id) == 0)
+        return true;   // issued already
+    if (!fFileBacked)
+        return true;
+    CPubKey pubkey;
+    if (!GetPubKey(id, pubkey))
+        return false;
+    if (!IsCrypted()) {
+        CKey secret;
+        if (!GetKey(id, secret))
+            return false;
+        return CWalletDB(strWalletFile).WriteKey(pubkey, secret.GetPrivKey(), mapKeyMetadata[id]);
+    }
+    // An encrypted wallet writes the encrypted secret it holds: no unlock needed (a rescan of a locked wallet).
+    std::vector<unsigned char> crypted;
+    if (!GetCryptedKey(id, crypted))
+        return false;
+    return CWalletDB(strWalletFile).WriteCryptedKey(pubkey, crypted, mapKeyMetadata[id]);
+}
+
+void CWallet::TopUpLegacyTKeys()
+{
+    LOCK(cs_wallet);
+    if (!mnemonicHDChain.has_value() || IsLocked() || !GetMnemonicSeed().has_value())
+        return;
+    CHDChain chain = mnemonicHDChain.value();
+    const uint32_t n = LegacyTKeyLookahead(GetArg("-keypool", DEFAULT_KEYPOOL_SIZE));
+    std::optional<transparent::AccountKey> accountKey;
+    for (bool external : {false, true}) {
+        const uint32_t counter = chain.GetLegacyTKeyCounter(external);
+        const uint32_t end = LegacyTKeyLookaheadEnd(counter, n);
+        uint32_t& heldEnd = nLegacyTKeyHeldEnd[external];
+        for (uint32_t index = std::max(counter, heldEnd); index < end; index++) {
+            if (!accountKey.has_value())
+                accountKey = GetLegacyAccountKey();
+            const std::optional<CKey> key = external ?
+                accountKey.value().DeriveExternalSpendingKey(index) :
+                accountKey.value().DeriveInternalSpendingKey(index);
+            if (!key.has_value())
+                continue;   // GenerateNewKey skips such an index too
+            const CKeyID id = key.value().GetPubKey().GetID();
+            if (HaveKey(id))
+                continue;   // stored already (written by another build, or imported)
+            mapLegacyTKeyHeld[id] = std::make_pair(external, index);   // before the add: AddKeyPubKey must not write it
+            AddTransparentSecretKey(
+                chain.GetSeedFingerprint(),
+                key.value(),
+                transparent::AccountKey::KeyPath(BIP44CoinType(), ZCASH_LEGACY_ACCOUNT, external, index));
+            nKeyLookaheadGrowth++;
+        }
+        heldEnd = std::max(heldEnd, end);
+    }
+    if (fLegacyTKeyRescanAdvised) {
+        LogPrintf("TopUpLegacyTKeys: while the wallet was locked it examined transactions without holding the transparent "
+                  "addresses of its seed it has not issued; it holds them now, but an earlier coin sent to one is found only by "
+                  "a rescan with them held, and an encrypted wallet's startup rescan (-rescan) runs locked: to find such coins, "
+                  "restore the recovery phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n");
+        fLegacyTKeyRescanAdvised = false;
+    }
+}
+
+void CWallet::ForgetKeyPoolEntry(int64_t nIndex)
+{
+    AssertLockHeld(cs_wallet);
+    auto it = mapKeyPoolKeyId.find(nIndex);
+    if (it == mapKeyPoolKeyId.end())
+        return;
+    mapKeyPoolIndex.erase(it->second);
+    mapKeyPoolKeyId.erase(it);
+}
+
+void CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
+{
+    AssertLockHeld(cs_wallet);
+    if (!mnemonicHDChain.has_value())
+        return;
+    auto meta = mapKeyMetadata.find(id);
+    if (meta == mapKeyMetadata.end() || meta->second.seedFp != mnemonicHDChain.value().GetSeedFingerprint())
+        return;   // not a key of this wallet's seed (an imported or a pre-mnemonic key)
+    const auto position = ParseLegacyTKeyPath(meta->second.hdKeypath, BIP44CoinType());
+    if (!position.has_value())
+        return;
+    const bool external = position.value().first;
+    const uint32_t index = position.value().second;
+    if (index >= 0x7FFFFFFF)
+        return;   // index + 1 must stay a non-hardened index
+    bool moved = false;
+
+    CHDChain& chain = mnemonicHDChain.value();
+    if (index >= chain.GetLegacyTKeyCounter(external)) {
+        // The wallet that used this key issued every index below it: keep the held keys up to it as issued keys.
+        std::vector<CKeyID> issued;
+        for (const auto& [heldId, pos] : mapLegacyTKeyHeld) {
+            if (pos.first == external && pos.second <= index)
+                issued.push_back(heldId);
+        }
+        for (const CKeyID& heldId : issued) {
+            if (!PersistLegacyTKey(heldId))
+                LogPrintf("MarkLegacyTKeyUsed: cannot write the held key %s\n", KeyIO(Params()).EncodeDestination(heldId));
+        }
+        while (chain.GetLegacyTKeyCounter(external) <= index)
+            chain.IncrementLegacyTKeyCounter(external);
+        if (fFileBacked && !CWalletDB(strWalletFile).WriteMnemonicHDChain(chain))
+            LogPrintf("MarkLegacyTKeyUsed: writing the HD chain failed\n");
+        moved = true;
+    }
+    if (!external) {
+        // Bitcoin Core's MarkReserveKeysAsUsed: the internal keys at or below this one leave the keypool (the wallet
+        // that used it drew them first), so TopUpKeyPool refills it from past the key.
+        const bool inPool = mapKeyPoolIndex.count(id) && setKeyPool.count(mapKeyPoolIndex[id]);
+        if (moved || inPool) {
+            std::vector<int64_t> drawn;
+            for (int64_t nIndex : setKeyPool) {
+                auto kit = mapKeyPoolKeyId.find(nIndex);
+                if (kit == mapKeyPoolKeyId.end())
+                    continue;
+                auto kmeta = mapKeyMetadata.find(kit->second);
+                if (kmeta == mapKeyMetadata.end())
+                    continue;
+                const auto kpos = ParseLegacyTKeyPath(kmeta->second.hdKeypath, BIP44CoinType());
+                if (kpos.has_value() && !kpos.value().first && kpos.value().second <= index)
+                    drawn.push_back(nIndex);
+            }
+            for (int64_t nIndex : drawn) {
+                setKeyPool.erase(nIndex);
+                KeepKey(nIndex);
+            }
+            if (!drawn.empty())
+                moved = true;
+        }
+    } else if (!mapAddressBook.count(id)) {
+        // A re-found receiving address goes where getnewaddress put it in the wallet that issued it.
+        SetAddressBook(id, "", "receive");
+    }
+    if (!moved)
+        return;
+    if (IsLocked()) {
+        LogPrintf("MarkLegacyTKeyUsed: the wallet is locked, so it cannot hold the transparent keys after %s; "
+                  "unlock it (walletpassphrase); to find coins sent to them, restore the recovery phrase into a new wallet file "
+                  "(-wallet=<new file> -mnemonicfile=<file>)\n",
+                  KeyIO(Params()).EncodeDestination(id));
+        fLegacyTKeyRescanAdvised = true;
+        return;
+    }
+    TopUpKeyPool();
+    TopUpLegacyTKeys();
+}
+
+void CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
+{
+    AssertLockHeld(cs_wallet);
+    if (!mnemonicHDChain.has_value())
+        return;
+    // A locked wallet without its lookahead cannot recognise a payment to an address of its seed it has not issued:
+    // remember to say so at walletpassphrase (TopUpLegacyTKeys).
+    if (!fLegacyTKeyRescanAdvised && IsLocked() && LegacyTKeyLookaheadShort())
+        fLegacyTKeyRescanAdvised = true;
+    for (const CTxOut& out : tx.vout) {
+        txnouttype type;
+        std::vector<std::vector<unsigned char>> sol;
+        if (!Solver(out.scriptPubKey, type, sol))
+            continue;
+        std::optional<CKeyID> id;
+        if (type == TX_PUBKEYHASH) {
+            id = CKeyID(uint160(sol[0]));
+        } else if (type == TX_PUBKEY) {
+            id = CPubKey(sol[0]).GetID();
+        }
+        if (id.has_value() && HaveKey(id.value()))
+            MarkLegacyTKeyUsed(id.value());
+    }
 }
 
 CPubKey CWallet::AddTransparentSecretKey(
@@ -424,7 +665,7 @@ bool CWallet::AddKeyPubKey(
     if (HaveWatchOnly(script))
         RemoveWatchOnly(script);
 
-    if (!fFileBacked)
+    if (!fFileBacked || IsHeldLegacyTKey(pubkey.GetID()))   // beta2: a held lookahead key stays in memory
         return true;
 
     if (!IsCrypted()) {
@@ -446,6 +687,8 @@ bool CWallet::AddCryptedKey(const CPubKey &vchPubKey,
         return true;
     {
         LOCK(cs_wallet);
+        if (IsHeldLegacyTKey(vchPubKey.GetID()))   // beta2: a held lookahead key stays in memory (also through EncryptWallet)
+            return true;
         if (pwalletdbEncryption)
             return pwalletdbEncryption->WriteCryptedKey(vchPubKey,
                                                         vchCryptedSecret,
@@ -634,6 +877,7 @@ void CWallet::TopUpPQKeys(std::optional<uint8_t> only)
                 LogPrintf("TopUpPQKeys: cannot derive post-quantum key %d:%u\n", (int)scheme, index);
                 return;
             }
+            nKeyLookaheadGrowth++;   // beta2: ScanForWalletTransactions re-checks earlier blocks for the new key
         }
     }
 }
@@ -1606,6 +1850,7 @@ bool CWallet::Unlock(const SecureString& strWalletPassphrase)
                     this->GenerateNewSeed();
                 }
                 TopUpPQKeys();   // 6.20.0 (review B I-2): the lookahead a locked wallet could not derive
+                TopUpLegacyTKeys();   // beta2: and the transparent one
                 return true;
             }
         }
@@ -4511,6 +4756,9 @@ bool CWallet::AddToWalletIfInvolvingMe(
         // marks that key used, so the lookahead moves past it and GetNewPQKey never hands it out again. Rescans
         // see every block's transactions here, so a wallet restored from its seed re-finds its PQ keys.
         NotePQKeysUsed(tx);
+        // Beta2: likewise an output paying a transparent key of the seed's legacy account the wallet holds ahead of
+        // its counter, or one in its keypool (seed-only restore of ECC coins; TopUpLegacyTKeys).
+        NoteLegacyTKeysUsed(tx);
 
         // Check whether the transaction is already known by the wallet.
         bool fExisted = mapWallet.count(tx.GetHash()) != 0;
@@ -5831,6 +6079,18 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         ShowProgress(_("Rescanning..."), 0); // show rescan progress in GUI as dialog or on splashscreen, if -rescan on startup
         double dProgressStart = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex, false);
         double dProgressTip = Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), chainActive.Tip(), false);
+
+        // Beta2 (seed-only restore of ECC coins): a key the lookahead derives while this scan runs (an output paying a
+        // held key moved the window) may have been paid in a block the scan has passed: a restored wallet's keys are
+        // used in the order the original wallet issued them, not in chain order. Remember the last height at which
+        // the lookahead grew; after the scan, re-check the blocks up to it (see below).
+        CBlockIndex* pindexScanStart = pindex;
+        std::optional<int> lookaheadGrewAt;
+        if (pindex && LegacyTKeyLookaheadShort()) {
+            LogPrintf("ScanForWalletTransactions(): the wallet is locked, so it does not hold its transparent key lookahead: "
+                      "coins sent to addresses of its seed it has not issued are not found; to find them, restore the recovery "
+                      "phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n");
+        }
         while (pindex)
         {
             // Allow the rescan to be interrupted on a block boundary.
@@ -5851,6 +6111,7 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                 batchScanner.AddTransaction(tx, txBytes, pindex->GetBlockHash(), pindex->nHeight);
             }
             batchScanner.Flush();
+            const uint64_t growthBefore = nKeyLookaheadGrowth;
             for (CTransaction& tx : block.vtx)
             {
                 if (batchScanner.AddToWalletIfInvolvingMe(consensus, tx, &block, pindex->nHeight, fUpdate)) {
@@ -5868,6 +6129,9 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                     }
                 }
             }
+
+            if (nKeyLookaheadGrowth != growthBefore)
+                lookaheadGrewAt = pindex->nHeight;
 
             MerkleFrontiers frontiers;
             // This should never fail: we should always be able to get the tree
@@ -5892,6 +6156,47 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                         pindex->nHeight,
                         Checkpoints::GuessVerificationProgress(chainParams.Checkpoints(), pindex));
             }
+        }
+
+        // Beta2: the re-pass. Keys the lookahead derived at height h were not known to the blocks before h (nor to the
+        // transactions before them in block h): re-check those blocks for transactions the wallet does not have yet
+        // that pay or spend its keys, until a pass derives no new key. Each pass only adds transparent
+        // transactions: a transaction with Sapling, Sprout or Orchard data of this wallet was found by the main pass
+        // (its notes are trial-decrypted there), and the note witnesses advanced there, so ChainTipAdded is not
+        // repeated. Correctness of the recovered coins is worth the extra block reads (a restore reads its blocks
+        // about twice; a wallet whose lookahead does not move reads them once).
+        int repass = 0;
+        while (lookaheadGrewAt.has_value() && pindexScanStart != nullptr && lookaheadGrewAt.value() >= pindexScanStart->nHeight) {
+            if (ShutdownRequested()) return std::nullopt;
+            const int until = lookaheadGrewAt.value();
+            lookaheadGrewAt = std::nullopt;
+            repass++;
+            LogPrintf("ScanForWalletTransactions(): the key lookahead moved during the scan; re-checking heights %d to %d (pass %d)\n",
+                      pindexScanStart->nHeight, until, repass + 1);
+            int added = 0;
+            for (CBlockIndex* p = pindexScanStart; p != nullptr && p->nHeight <= until; p = chainActive.Next(p)) {
+                CBlock block;
+                if (!ReadBlockFromDisk(block, p, consensus)) {
+                    throw std::runtime_error(
+                        strprintf("Can't read block %d from disk (%s)", p->nHeight, p->GetBlockHash().GetHex()));
+                }
+                const uint64_t growthBefore = nKeyLookaheadGrowth;
+                for (const CTransaction& tx : block.vtx) {
+                    if (mapWallet.count(tx.GetHash()) || tx.GetOrchardBundle().IsPresent())
+                        continue;
+                    // NoteLegacyTKeysUsed/NotePQKeysUsed run inside, as in the main pass.
+                    if (AddToWalletIfInvolvingMe(consensus, tx, &block, p->nHeight, WalletDecryptedNotes(), false)) {
+                        myTxHashes.push_back(tx.GetHash());
+                        myTransactionsFound++;
+                        added++;
+                    }
+                }
+                if (nKeyLookaheadGrowth != growthBefore)
+                    lookaheadGrewAt = p->nHeight;
+            }
+            LogPrintf("ScanForWalletTransactions(): the re-check found %d more transaction(s)\n", added);
+            if (added > 0)
+                MarkDirty();   // cached credits and debits of transactions spending the coins just found
         }
 
         // After rescanning, persist Sapling & Orchard note data that might have changed,
@@ -7112,6 +7417,8 @@ DBErrors CWallet::LoadWallet(bool& fFirstRunRet)
         if (CDB::Rewrite(strWalletFile, "\x04pool"))
         {
             setKeyPool.clear();
+            mapKeyPoolKeyId.clear();
+            mapKeyPoolIndex.clear();
             // Note: can't top-up keypool here, because wallet is locked.
             // User will be prompted to unlock wallet the next operation
             // that requires a new key.
@@ -7176,6 +7483,8 @@ DBErrors CWallet::ZapWalletTx(std::vector<CWalletTx>& vWtx)
         {
             LOCK(cs_wallet);
             setKeyPool.clear();
+            mapKeyPoolKeyId.clear();
+            mapKeyPoolIndex.clear();
             // Note: can't top-up keypool here, because wallet is locked.
             // User will be prompted to unlock wallet the next operation
             // that requires a new key.
@@ -7260,6 +7569,8 @@ bool CWallet::NewKeyPool()
         for (int64_t nIndex : setKeyPool)
             walletdb.ErasePool(nIndex);
         setKeyPool.clear();
+        mapKeyPoolKeyId.clear();
+        mapKeyPoolIndex.clear();
 
         if (IsLocked())
             return false;
@@ -7268,8 +7579,10 @@ bool CWallet::NewKeyPool()
         for (int i = 0; i < nKeys; i++)
         {
             int64_t nIndex = i+1;
-            walletdb.WritePool(nIndex, CKeyPool(GenerateNewKey(false)));
+            const CPubKey key = GenerateNewKey(false);
+            walletdb.WritePool(nIndex, CKeyPool(key));
             setKeyPool.insert(nIndex);
+            NoteKeyPoolEntry(nIndex, key.GetID());
         }
         LogPrintf("CWallet::NewKeyPool wrote %d new keys\n", nKeys);
     }
@@ -7298,9 +7611,11 @@ bool CWallet::TopUpKeyPool(unsigned int kpSize)
             int64_t nEnd = 1;
             if (!setKeyPool.empty())
                 nEnd = *(--setKeyPool.end()) + 1;
-            if (!walletdb.WritePool(nEnd, CKeyPool(GenerateNewKey(false))))
+            const CPubKey key = GenerateNewKey(false);
+            if (!walletdb.WritePool(nEnd, CKeyPool(key)))
                 throw runtime_error("TopUpKeyPool(): writing generated key failed");
             setKeyPool.insert(nEnd);
+            NoteKeyPoolEntry(nEnd, key.GetID());
             LogPrintf("keypool added key %d, size=%u\n", nEnd, setKeyPool.size());
         }
     }
@@ -7341,6 +7656,10 @@ void CWallet::KeepKey(int64_t nIndex)
     {
         CWalletDB walletdb(strWalletFile);
         walletdb.ErasePool(nIndex);
+    }
+    {
+        LOCK(cs_wallet);
+        ForgetKeyPoolEntry(nIndex);
     }
     LogPrintf("keypool keep %d\n", nIndex);
 }
@@ -7727,14 +8046,14 @@ void CWallet::GetKeyBirthTimes(std::map<CKeyID, int64_t> &mapKeyBirth) const {
 
     // get birth times for keys with metadata
     for (std::map<CKeyID, CKeyMetadata>::const_iterator it = mapKeyMetadata.begin(); it != mapKeyMetadata.end(); it++)
-        if (it->second.nCreateTime)
+        if (it->second.nCreateTime && !mapLegacyTKeyHeld.count(it->first))   // beta2: held keys are not issued yet
             mapKeyBirth[it->first] = it->second.nCreateTime;
 
     // map in which we'll infer heights of other keys
     CBlockIndex *pindexMax = chainActive[std::max(0, chainActive.Height() - 144)]; // the tip can be reorganised; use a 144-block safety margin
     std::map<CKeyID, CBlockIndex*> mapKeyFirstBlock;
     for (const CKeyID &keyid : GetKeys()) {
-        if (mapKeyBirth.count(keyid) == 0)
+        if (mapKeyBirth.count(keyid) == 0 && !mapLegacyTKeyHeld.count(keyid))
             mapKeyFirstBlock[keyid] = pindexMax;
     }
 
@@ -7830,7 +8149,7 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     strUsage += HelpMessageOpt("-upgradewallet", _("Upgrade wallet to latest format on startup"));
     strUsage += HelpMessageOpt("-wallet=<file>", _("Specify wallet file absolute path or a path relative to the data directory") + " " + strprintf(_("(default: %s)"), DEFAULT_WALLET_DAT));
     strUsage += HelpMessageOpt("-walletbroadcast", _("Make the wallet broadcast transactions") + " " + strprintf(_("(default: %u)"), DEFAULT_WALLETBROADCAST));
-    strUsage += HelpMessageOpt("-mnemonicfile=<file>", strprintf(_("When creating a new wallet, take its seed from the recovery phrase in <file> (the phrase on one line, or a z_exportwallet file's recovery_phrase= and language= lines) instead of a random one, and rescan from genesis. Restores the first legacy Sapling address and the post-quantum keys up to a gap of %u unused keys per scheme; re-derive further Sapling addresses with z_getnewaddress, and PQ keys past the gap with getnewaddress \"\" \"pq\", then rescanblockchain. Keys imported into the backed-up wallet are not restored. Ignored for an existing wallet with this seed, refused for one with another"), (unsigned)PQ_KEY_LOOKAHEAD));
+    strUsage += HelpMessageOpt("-mnemonicfile=<file>", strprintf(_("When creating a new wallet, take its seed from the recovery phrase in <file> (the phrase on one line, or a z_exportwallet file's recovery_phrase= and language= lines) instead of a random one, and rescan from genesis. Restores the transparent addresses of the seed (getnewaddress, change and mining keys) as long as no more than -keypool (default: %u) unused ones in a row were handed out, the first legacy Sapling address, and the post-quantum keys up to a gap of %u unused keys per scheme; re-derive further transparent addresses with getnewaddress, Sapling addresses with z_getnewaddress, and PQ keys past the gap with getnewaddress \"\" \"pq\", then restart with -rescan. An encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its -rescan runs locked: restore into a new wallet file instead. Keys imported into the backed-up wallet are not restored. Ignored for an existing wallet with this seed, refused for one with another"), DEFAULT_KEYPOOL_SIZE, (unsigned)PQ_KEY_LOOKAHEAD));
     strUsage += HelpMessageOpt("-walletnotify=<cmd>", _("Execute command when a wallet transaction changes (%s in cmd is replaced by TxID)"));
     strUsage += HelpMessageOpt("-zapwallettxes=<mode>", _("Delete all wallet transactions and only recover those parts of the blockchain through -rescan on startup") +
                                " " + _("(1 = keep tx meta data e.g. account owner and payment request information, 2 = drop tx meta data)"));
@@ -8022,6 +8341,8 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
     }
     // 6.20.0 (review B I-2): the post-quantum key lookahead (an encrypted wallet derives it at walletpassphrase).
     walletInstance->TopUpPQKeys();
+    // Beta2: the legacy transparent lookahead (held in memory; an encrypted wallet derives it at walletpassphrase).
+    walletInstance->TopUpLegacyTKeys();
 
     // Set sapling migration status
     walletInstance->fSaplingMigrationEnabled = GetBoolArg("-migration", false);

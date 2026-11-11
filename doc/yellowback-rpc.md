@@ -172,12 +172,20 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
   out).
 - **`z_sendmany` / `z_mergetoaddress` refuse an `sq…` recipient** on this line (their recipients are `libzcash::PaymentAddress`, which has no post-quantum alternative): pay an `sq…` address with `sendtoaddress` or `sendmany`.
-- **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
-  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
-  unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap
-  (`getnewaddress "" "pq"`) and running `rescanblockchain`; further Sapling addresses likewise with
-  `z_getnewaddress` before `rescanblockchain`. On an existing wallet the option is ignored when the
-  seed matches (checked by fingerprint, so a locked wallet starts too) and refused when it does not.
+- **Seed-only restore (`-mnemonicfile`)** restores the seed's transparent addresses (those
+  `getnewaddress` handed out, and its change and mining keys) **as long as no more than `-keypool`
+  (default 100) unused addresses in a row were handed out**, its first legacy Sapling address, and its
+  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond the
+  gap is not re-found. The wallet holds `-keypool` + 1 transparent keys of each HD chain ahead of the
+  last one it issued or saw paid (in memory, not in `wallet.dat`), and the restore's rescan re-checks
+  earlier blocks when a payment moves that window, so addresses paid out of order are found too.
+  Recover keys past a gap by issuing addresses past it (`getnewaddress`, `getnewaddress "" "pq"`,
+  `z_getnewaddress`) and restarting with `-rescan` (this line has no `rescanblockchain`). An
+  encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its
+  `-rescan` runs locked: to find coins sent to such addresses (another wallet of the same seed issued
+  them), restore the recovery phrase into a new wallet file (`-wallet=<new file> -mnemonicfile=<file>`).
+  On an existing wallet the option is ignored when the seed matches (checked by fingerprint, so a
+  locked wallet starts too) and refused when it does not.
 - **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check
   uses the PQ spend size (`GetPQDustThreshold`), as relay policy does.
 - **`z_importpqkey`** takes a dump's whole `pqseed=` line and refuses it when its `owner=`/`addr=`/

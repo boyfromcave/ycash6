@@ -948,6 +948,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CKeyPool keypool;
             ssValue >> keypool;
             pwallet->setKeyPool.insert(nIndex);
+            pwallet->NoteKeyPoolEntry(nIndex, keypool.vchPubKey.GetID());   // beta2: the mark-used path
 
             // If no metadata exists yet, create a default with the pool key's
             // creation time. Note that this may be overwritten by actually

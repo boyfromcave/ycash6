@@ -1451,6 +1451,17 @@ enum class AccountChangeAddressFailure {
 static const uint32_t PQ_KEY_LOOKAHEAD = 20;
 
 /**
+ * Beta2: the legacy transparent HD lookahead (CWallet::TopUpLegacyTKeys). The number of keys held per chain from
+ * the chain's counter on: the keypool size (-keypool, default DEFAULT_KEYPOOL_SIZE) plus one, as many as the
+ * keypool holds, so a restore re-finds a used key after up to -keypool unused ones in a row.
+ */
+uint32_t LegacyTKeyLookahead(int64_t keypool);
+//! One past the last index held from counter: counter + lookahead, capped at the first hardened index.
+uint32_t LegacyTKeyLookaheadEnd(uint32_t counter, uint32_t lookahead);
+//! (external, index) of a legacy-account transparent key path m/44'/coin'/2147483647'/{0,1}/index, else nullopt.
+std::optional<std::pair<bool, uint32_t>> ParseLegacyTKeyPath(const std::string& path, uint32_t coinType);
+
+/**
  * A CWallet is an extension of a keystore, which also maintains a set of transactions and balances,
  * and provides the ability to create new transactions.
  */
@@ -2028,6 +2039,42 @@ public:
     bool IsOwnPQKey(const CPQKey& key) const;
     //! Writes the "pqissued" record a wallet without one starts from: one past its highest own-seed index.
     void SeedPQIssued(uint8_t scheme);
+    /**
+     * Beta2 (seed-only restore of ECC coins): the legacy transparent HD lookahead, the counterpart of the PQ one.
+     * Beside the keys it has issued (GenerateNewKey: getnewaddress, the keypool, Yellowback's fresh keys), the
+     * wallet holds the keys of indices [counter, counter + LegacyTKeyLookahead()) of the external and the
+     * internal chain of its mnemonic seed (m/44'/coin'/0x7FFFFFFF'/{0,1}/i) without moving the chain's counter,
+     * so a wallet restored from its recovery phrase recognises the addresses the original wallet handed out.
+     * The held keys live in memory only (re-derived at load and at walletpassphrase): the file keeps exactly
+     * the keys the wallet issued, so an older binary opening it derives and writes the same keys as before
+     * (an encrypted wallet's "ckey" records cannot be overwritten). An output paying a held or pooled key marks
+     * it used (NoteLegacyTKeysUsed, from AddToWalletIfInvolvingMe): the counter moves past it, the held keys
+     * below it are kept as issued keys, the keypool entries at or below it leave the pool (Bitcoin Core's
+     * MarkReserveKeysAsUsed) and the lookahead is topped up. A locked encrypted wallet cannot derive: it marks,
+     * logs, and tops up at walletpassphrase (then rescan to find coins beyond the keys it held).
+     */
+    void TopUpLegacyTKeys();
+    void MarkLegacyTKeyUsed(const CKeyID& id);
+    void NoteLegacyTKeysUsed(const CTransaction& tx);
+    //! True for a key the lookahead holds that the wallet has not issued (never written to the wallet file).
+    bool IsHeldLegacyTKey(const CKeyID& id) const;
+    //! True when an unlocked wallet would hold more of the lookahead than it does now (a locked wallet's state).
+    bool LegacyTKeyLookaheadShort() const;
+    //! Issues a held key: takes it out of the held set and writes it to the wallet file.
+    bool PersistLegacyTKey(const CKeyID& id);
+    //! The held, unissued keys: id -> (external, index).
+    std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyHeld;
+    //! Per chain (0 internal, 1 external): one past the highest index the lookahead has derived.
+    uint32_t nLegacyTKeyHeldEnd[2] = {0, 0};
+    //! Set when keys were marked used while the lookahead could not be derived (locked): rescan after unlocking.
+    bool fLegacyTKeyRescanAdvised = false;
+    //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
+    uint64_t nKeyLookaheadGrowth = 0;
+    //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).
+    std::map<int64_t, CKeyID> mapKeyPoolKeyId;
+    std::map<CKeyID, int64_t> mapKeyPoolIndex;
+    void NoteKeyPoolEntry(int64_t nIndex, const CKeyID& id) { mapKeyPoolKeyId[nIndex] = id; mapKeyPoolIndex[id] = nIndex; }
+    void ForgetKeyPoolEntry(int64_t nIndex);
     bool SetPQIssued(uint8_t scheme, uint32_t next);
     bool LoadPQIssued(uint8_t scheme, uint32_t next);
     //! Adds a PQ key to the store and saves it to disk.
