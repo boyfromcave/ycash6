@@ -74,8 +74,9 @@ class WalletDeprecationTest(BitcoinTestFramework):
             getattr(self.nodes[0], function)()
         except JSONRPCException as e:
             errorString = e.error['message']
+        # Ycash: the one way to turn a deprecated method off is -allowdeprecated=none (beta2 item 9)
         assert_true(
-            "DISABLED" in errorString,
+            "DISABLED" in errorString and "-allowdeprecated=none" in errorString,
             "'%s' not disabled (%s)" % (
                 function,
                 "failed with '%s'" % errorString if len(errorString) > 0 else "succeeded",
