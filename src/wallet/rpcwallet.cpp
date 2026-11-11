@@ -209,9 +209,11 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
     if (!fEnableGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
             "getnewaddress ( \"\" \"type\" )\n"
-            + Deprecated(fEnableGetNewAddress,
-                         "getnewaddress",
-                         "") +
+            + SupportedOnYcash(fEnableGetNewAddress,
+                               "getnewaddress",
+                               "This is the way to get a new transparent (\"p2pkh\") or\n"
+                               "post-quantum (\"pq\", \"pqslh\") address. Unified-address accounts (z_getnewaccount,\n"
+                               "z_getaddressforaccount) need NU5, which has no activation height on Ycash.") +
             "\nReturns a new transparent Ycash address.\n"
             "Payments received by this API are visible on-chain and do not otherwise\n"
             "provide privacy protections; they should only be used in circumstances \n"
@@ -316,9 +318,10 @@ UniValue getrawchangeaddress(const UniValue& params, bool fHelp)
     if (!fEnableGetRawChangeAddress || fHelp || params.size() > 1)
         throw runtime_error(
             "getrawchangeaddress\n"
-            + Deprecated(fEnableGetRawChangeAddress,
-                         "getrawchangeaddress",
-                         "") +
+            + SupportedOnYcash(fEnableGetRawChangeAddress,
+                               "getrawchangeaddress",
+                               "Its upstream replacement needs unified-address accounts, and so\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturns a new transparent Ycash address for receiving change.\n"
             "This is for use with raw transactions, NOT normal use. Additionally,\n"
             "the resulting address does not correspond to the \"change\" HD derivation\n"
@@ -1320,6 +1323,11 @@ UniValue getbalance(const UniValue& params, bool fHelp)
 // default per DEFAULT_ALLOW_DEPRECATED.
 // ---------------------------------------------------------------------------
 
+// The help note of the nine legacy account RPCs (SupportedOnYcash, src/deprecation.h).
+static const std::string LEGACY_ACCOUNTS_NOTE =
+    "A compatibility shim for integrations written against the\n"
+    "2018-era ycashd API: only the default account \"\" exists.";
+
 static void RequireDefaultAccount(const std::string& strAccount)
 {
     if (!strAccount.empty()) {
@@ -1361,7 +1369,7 @@ UniValue getaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaccount \"ycashaddress\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the label associated with the given address (legacy \"account\"\n"
             "is just the address label). Returns the label if one is set, otherwise\n"
             "an empty string. NOTE: \"\" does NOT mean the wallet owns the address --\n"
@@ -1400,7 +1408,7 @@ UniValue getaccountaddress(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaccountaddress \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaccountaddress", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaccountaddress", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the current address for receiving payments to this account. Ycash\n"
             "emulates a single default account (\"\"); other account names are rejected.\n"
             "Each call generates a fresh transparent address (no per-account memory).\n"
@@ -1428,7 +1436,7 @@ UniValue getaddressesbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() != 1)
         throw runtime_error(
             "getaddressesbyaccount \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "getaddressesbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getaddressesbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the list of transparent addresses in the given account. For the\n"
             "default account \"\" this returns every transparent address the wallet has\n"
             "ever generated or imported. Any non-empty account returns an empty array.\n"
@@ -1467,7 +1475,7 @@ UniValue getreceivedbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "getreceivedbyaccount \"account\" ( minconf )\n"
-            + Deprecated(fEnableLegacyAccounts, "getreceivedbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "getreceivedbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns the total amount received by addresses in the account. For the\n"
             "default account \"\" this sums all transparent receipts across the wallet.\n"
             "Any non-empty account returns 0.\n"
@@ -1502,7 +1510,7 @@ UniValue listaccounts(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() > 2)
         throw runtime_error(
             "listaccounts ( minconf includeWatchonly )\n"
-            + Deprecated(fEnableLegacyAccounts, "listaccounts", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "listaccounts", LEGACY_ACCOUNTS_NOTE) +
             "\nReturns a JSON object with account names as keys and balances as values.\n"
             "Ycash emulates a single default account, so the result always has exactly\n"
             "one key: \"\".\n"
@@ -1543,7 +1551,7 @@ UniValue listreceivedbyaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() > 3)
         throw runtime_error(
             "listreceivedbyaccount ( minconf includeempty includeWatchonly )\n"
-            + Deprecated(fEnableLegacyAccounts, "listreceivedbyaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "listreceivedbyaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nList balances by account. Ycash emulates a single default account, so the\n"
             "result is a one-element array describing the wallet's total transparent receipts.\n"
             "\nArguments:\n"
@@ -1614,7 +1622,7 @@ UniValue setaccount(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "setaccount \"ycashaddress\" \"account\"\n"
-            + Deprecated(fEnableLegacyAccounts, "setaccount", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "setaccount", LEGACY_ACCOUNTS_NOTE) +
             "\nAssigns the address to the given account. Ycash emulates a single default\n"
             "account, so only \"\" is accepted; the call is then a no-op that succeeds.\n"
             "Any non-empty account name returns an error.\n"
@@ -1648,7 +1656,7 @@ UniValue sendfrom(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 3 || params.size() > 6)
         throw runtime_error(
             "sendfrom \"fromaccount\" \"toycashaddress\" amount ( minconf \"comment\" \"comment-to\" )\n"
-            + Deprecated(fEnableLegacyAccounts, "sendfrom", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "sendfrom", LEGACY_ACCOUNTS_NOTE) +
             "\nSent an amount from the default account to a transparent address. Ycash\n"
             "emulates a single default account, so the first argument must be \"\".\n"
             "Any non-empty account is rejected.\n"
@@ -1688,7 +1696,7 @@ UniValue movecmd(const UniValue& params, bool fHelp)
     if (!fEnableLegacyAccounts || fHelp || params.size() < 3 || params.size() > 5)
         throw runtime_error(
             "move \"fromaccount\" \"toaccount\" amount ( minconf \"comment\" )\n"
-            + Deprecated(fEnableLegacyAccounts, "move", "") +
+            + SupportedOnYcash(fEnableLegacyAccounts, "move", LEGACY_ACCOUNTS_NOTE) +
             "\nMove a specified amount between accounts in the wallet. Ycash does not\n"
             "maintain separate per-account balances (the accounts API is emulated as a\n"
             "single default bucket), so this RPC has no honest implementation and\n"
@@ -2532,9 +2540,10 @@ UniValue keypoolrefill(const UniValue& params, bool fHelp)
     if (!fEnableKeyPoolRefill || fHelp || params.size() > 1)
         throw runtime_error(
             "keypoolrefill ( newsize )\n"
-            + Deprecated(fEnableKeyPoolRefill,
-                         "keypoolrefill",
-                         "It will not be needed for Zallet.") +
+            + SupportedOnYcash(fEnableKeyPoolRefill,
+                               "keypoolrefill",
+                               "The transparent keypool supplies getrawchangeaddress, the\n"
+                               "transparent change of sendtoaddress / sendmany, and the mining coinbase key.") +
             "\nFills the keypool associated with the legacy transparent value pool. This should only be\n"
             "used when interoperability with legacy Bitcoin infrastructure is required.\n"
             + HelpRequiringPassphrase() + "\n"
@@ -3489,9 +3498,9 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
     if (!fEnableFundRawTransaction || fHelp || params.size() < 1 || params.size() > 2)
         throw runtime_error(
             "fundrawtransaction \"hexstring\" includeWatching\n"
-            + Deprecated(fEnableFundRawTransaction,
-                         "fundrawtransaction",
-                         "") +
+            + SupportedOnYcash(fEnableFundRawTransaction,
+                               "fundrawtransaction",
+                               "ycashd has no other call for this raw-transaction step.") +
             "\nAdd transparent inputs to a transaction until it has enough in value to meet its out value.\n"
             "This will not modify existing inputs, and will add one change output to the outputs.\n"
             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
@@ -3732,9 +3741,11 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
     if (!fEnableZGetNewAddress || fHelp || params.size() > 1)
         throw runtime_error(
             "z_getnewaddress ( type )\n"
-            + Deprecated(fEnableZGetNewAddress,
-                         "z_getnewaddress",
-                         "") +
+            + SupportedOnYcash(fEnableZGetNewAddress,
+                               "z_getnewaddress",
+                               "This is the way to get a new Sapling address. Unified-address\n"
+                               "accounts (z_getnewaccount, z_getaddressforaccount) need NU5, which has no\n"
+                               "activation height on Ycash.") +
             "\nReturns a new shielded address for receiving payments.\n"
             "\nWith no arguments, this currently returns a Sapling address (but that\n"
             "should not be relied on).\n"
@@ -3780,6 +3791,13 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
     }
 }
 
+// The help note of the four unified-address account RPCs, which EnsureUnifiedAccountsEnabled refuses.
+static const std::string NOT_ON_YCASH_NEEDS_NU5 =
+    "\nNot available on Ycash (needs NU5): unified-address accounts need the NU5 network upgrade,\n"
+    "which has no activation height on Ycash, so this call is refused. Use getnewaddress (transparent,\n"
+    "post-quantum) and z_getnewaddress (Sapling) for addresses, and z_getbalance / z_gettotalbalance\n"
+    "for balances.\n";
+
 // Unified-address account RPCs are gated off until NU5 activates. On Ycash
 // NU5 is configured NO_ACTIVATION_HEIGHT, so UA accounts would mint
 // addresses with an unspendable Orchard receiver and Sapling keys derived
@@ -3803,6 +3821,7 @@ UniValue z_getnewaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 0)
         throw runtime_error(
             "z_getnewaccount\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nPrepares and returns a new account.\n"
             "\nAccounts are numbered starting from zero; this RPC method selects the next"
             "\navailable sequential account number within the UA-compatible HD seed phrase.\n"
@@ -3841,6 +3860,7 @@ UniValue z_getaddressforaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
             "z_getaddressforaccount account ( [\"receiver_type\", ...] diversifier_index )\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nFor the given account number, derives a Unified Address in accordance"
             "\nwith the remaining arguments:\n"
             "\n- If no list of receiver types is given (or the empty list \"[]\"), the best"
@@ -4002,6 +4022,7 @@ UniValue z_listaccounts(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw runtime_error(
             "z_listaccounts\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nReturns the list of accounts created with z_getnewaccount.\n"
             "\nResult:\n"
             "[\n"
@@ -4508,9 +4529,10 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
     if (!fEnableZGetBalance || fHelp || params.size() == 0 || params.size() > 3)
         throw runtime_error(
             "z_getbalance \"address\" ( minconf inZat )\n"
-            + Deprecated(fEnableZGetBalance,
-                         "z_getbalance",
-                         "") +
+            + SupportedOnYcash(fEnableZGetBalance,
+                               "z_getbalance",
+                               "Its upstream replacement, z_getbalanceforaccount, needs\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturns the balance of a taddr or zaddr belonging to the node's wallet.\n"
             "\nCAUTION: If the wallet has only an incoming viewing key for this address, then spends cannot be"
             "\ndetected, and so the returned balance may be larger than the actual balance."
@@ -4709,6 +4731,7 @@ UniValue z_getbalanceforaccount(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw runtime_error(
             "z_getbalanceforaccount account ( minconf asOfHeight )\n"
+            + NOT_ON_YCASH_NEEDS_NU5 +
             "\nReturns the account's spendable balance for each value pool (\"transparent\", \"sapling\", and \"orchard\")."
             "\nArguments:\n"
             "1. account      (numeric) The account number.\n"
@@ -4806,9 +4829,10 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     if (!fEnableZGetTotalBalance || fHelp || params.size() > 2)
         throw runtime_error(
             "z_gettotalbalance ( minconf includeWatchonly )\n"
-            + Deprecated(fEnableZGetTotalBalance,
-                         "z_gettotalbalance",
-                         "") +
+            + SupportedOnYcash(fEnableZGetTotalBalance,
+                               "z_gettotalbalance",
+                               "Its upstream replacement, z_getbalanceforaccount, needs\n"
+                               "NU5, which has no activation height on Ycash.") +
             "\nReturn the total value of funds stored in the node's wallet.\n"
             "\nCAUTION: If the wallet contains any addresses for which it only has incoming viewing keys,"
             "\nthe returned private balance may be larger than the actual balance, because spends cannot"
