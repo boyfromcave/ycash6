@@ -2056,9 +2056,10 @@ public:
     void TopUpLegacyTKeys();
     //! False when a write (a held key, the HD chain counter) failed (review L-1); the in-memory state is updated.
     bool MarkLegacyTKeyUsed(const CKeyID& id);
-    bool NoteLegacyTKeysUsed(const CTransaction& tx);
+    //! nHeight: the block height of a mined transaction, -1 for one not in a block (review L-2's flag).
+    bool NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight = -1);
     //! NotePQKeysUsed and NoteLegacyTKeysUsed, repeated while a mark grows a lookahead (review M-3).
-    bool NoteKeysUsed(const CTransaction& tx);
+    bool NoteKeysUsed(const CTransaction& tx, int nHeight = -1);
     //! A key the file holds already (not held) with the legacy key path (external, index) of this seed (review L-1).
     bool IsStoredLegacyTKeyAt(const CKeyID& id, bool external, uint32_t index) const;
     //! True for a key the lookahead holds that the wallet has not issued (never written to the wallet file).
@@ -2074,8 +2075,17 @@ public:
     //! External keys this wallet re-found (a mark moved the counter past them) rather than issued itself, since
     //! load: the only keys a payment files in the address book (review M-1).
     std::set<CKeyID> setLegacyTKeyRefound;
-    //! Set when keys were marked used while the lookahead could not be derived (locked): rescan after unlocking.
-    bool fLegacyTKeyRescanAdvised = false;
+    /**
+     * Review L-2 (getwalletinfo lookahead_incomplete): set when the wallet, locked and without its full transparent
+     * lookahead, saw a mined transaction with an output paying a transparent key it does not hold, which may be an
+     * address of its seed it has not issued: such a coin is missed. Persisted ("lookaheadincomplete", the lowest
+     * such height); cleared by a scan from at or below that height with the lookahead held (unlocked).
+     */
+    bool fLegacyTKeyLookaheadIncomplete = false;
+    int nLegacyTKeyIncompleteFrom = -1;
+    void SetLegacyTKeyLookaheadIncomplete(int nFromHeight);
+    void ClearLegacyTKeyLookaheadIncomplete();
+    void LoadLegacyTKeyLookaheadIncomplete(int nFromHeight) { fLegacyTKeyLookaheadIncomplete = nFromHeight >= 0; nLegacyTKeyIncompleteFrom = nFromHeight; }
     //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
     uint64_t nKeyLookaheadGrowth = 0;
     //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).

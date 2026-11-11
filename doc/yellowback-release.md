@@ -331,6 +331,12 @@ release notes:
   encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its
   `-rescan` runs locked: to find coins sent to such addresses (another wallet of the same seed issued
   them), restore the recovery phrase into a new wallet file (`-wallet=<new file> -mnemonicfile=<file>`).
+  `getwalletinfo` says when that may have happened: `lookahead_incomplete` is true once such a
+  wallet, locked without that lookahead, has seen a block transaction paying an address it could not
+  check; it is kept in `wallet.dat` and cleared by a rescan from at or below that height run while
+  unlocked. An encrypted wallet started locked is flagged by the first block it reads (its startup
+  rescan included); one unlocked once since it started holds the lookahead and is not. A wallet whose
+  seed no other wallet uses has missed nothing.
   On an existing wallet the option is ignored when the seed matches (checked by fingerprint, so a
   locked wallet starts too) and refused when it does not.
 - **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check

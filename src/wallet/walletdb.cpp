@@ -1107,6 +1107,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> value;
             pwallet->LoadHasExternalImports(value);
         }
+        else if (strType == "lookaheadincomplete")
+        {
+            int nFromHeight;
+            ssValue >> nFromHeight;
+            pwallet->LoadLegacyTKeyLookaheadIncomplete(nFromHeight);
+        }
         else if (strType == "networkinfo")
         {
             std::pair<std::string, std::string> networkInfo;
@@ -1635,6 +1641,18 @@ bool CWalletDB::WriteHasExternalImports(bool value)
 {
     nWalletDBUpdateCounter++;
     return Write(std::string("hasexternalimports"), value);
+}
+
+bool CWalletDB::WriteLegacyTKeyLookaheadIncomplete(int nFromHeight)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("lookaheadincomplete"), nFromHeight);
+}
+
+bool CWalletDB::EraseLegacyTKeyLookaheadIncomplete()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("lookaheadincomplete"));
 }
 
 void CWalletDB::IncrementUpdateCounter()

@@ -525,13 +525,37 @@ void CWallet::TopUpLegacyTKeys()
         }
         heldEnd = std::max(heldEnd, end);
     }
-    if (fLegacyTKeyRescanAdvised) {
-        LogPrintf("TopUpLegacyTKeys: while the wallet was locked it examined transactions without holding the transparent "
-                  "addresses of its seed it has not issued; it holds them now, but an earlier coin sent to one is found only by "
-                  "a rescan with them held, and an encrypted wallet's startup rescan (-rescan) runs locked: to find such coins, "
-                  "restore the recovery phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n");
-        fLegacyTKeyRescanAdvised = false;
+    if (fLegacyTKeyLookaheadIncomplete) {
+        // Review L-2: said once per unlock; the flag stays (getwalletinfo lookahead_incomplete) until a scan with the
+        // lookahead held has read the blocks again (ScanForWalletTransactions).
+        LogPrintf("TopUpLegacyTKeys: while the wallet was locked it examined transactions from height %d on without holding the "
+                  "transparent addresses of its seed it has not issued; it holds them now, but an earlier coin sent to one is "
+                  "found only by a rescan with them held, and an encrypted wallet's startup rescan (-rescan) runs locked: to find "
+                  "such coins, restore the recovery phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n",
+                  nLegacyTKeyIncompleteFrom);
     }
+}
+
+void CWallet::SetLegacyTKeyLookaheadIncomplete(int nFromHeight)
+{
+    AssertLockHeld(cs_wallet);
+    if (fLegacyTKeyLookaheadIncomplete && nLegacyTKeyIncompleteFrom <= nFromHeight)
+        return;
+    fLegacyTKeyLookaheadIncomplete = true;
+    nLegacyTKeyIncompleteFrom = nFromHeight;
+    if (fFileBacked && !CWalletDB(strWalletFile).WriteLegacyTKeyLookaheadIncomplete(nFromHeight))
+        LogPrintf("SetLegacyTKeyLookaheadIncomplete: error: writing the flag failed\n");
+}
+
+void CWallet::ClearLegacyTKeyLookaheadIncomplete()
+{
+    AssertLockHeld(cs_wallet);
+    if (!fLegacyTKeyLookaheadIncomplete)
+        return;
+    fLegacyTKeyLookaheadIncomplete = false;
+    nLegacyTKeyIncompleteFrom = -1;
+    if (fFileBacked && !CWalletDB(strWalletFile).EraseLegacyTKeyLookaheadIncomplete())
+        LogPrintf("ClearLegacyTKeyLookaheadIncomplete: error: erasing the flag failed\n");
 }
 
 void CWallet::ForgetKeyPoolEntry(int64_t nIndex)
@@ -632,15 +656,14 @@ bool CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
                   "unlock it (walletpassphrase); to find coins sent to them, restore the recovery phrase into a new wallet file "
                   "(-wallet=<new file> -mnemonicfile=<file>)\n",
                   KeyIO(Params()).EncodeDestination(id));
-        fLegacyTKeyRescanAdvised = true;
-        return written;
+        return written;   // NoteLegacyTKeysUsed flags what this may have missed (review L-2)
     }
     TopUpKeyPool();
     TopUpLegacyTKeys();
     return written;
 }
 
-bool CWallet::NoteKeysUsed(const CTransaction& tx)
+bool CWallet::NoteKeysUsed(const CTransaction& tx, int nHeight)
 {
     AssertLockHeld(cs_wallet);
     // Beta2 (review M-3): a mark can bring in a key paid by an output read before it in the same transaction (one
@@ -652,21 +675,18 @@ bool CWallet::NoteKeysUsed(const CTransaction& tx)
     do {
         growth = nKeyLookaheadGrowth;
         NotePQKeysUsed(tx);
-        written = NoteLegacyTKeysUsed(tx) && written;
+        written = NoteLegacyTKeysUsed(tx, nHeight) && written;
     } while (nKeyLookaheadGrowth != growth);
     return written;
 }
 
-bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
+bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight)
 {
     AssertLockHeld(cs_wallet);
     if (!mnemonicHDChain.has_value())
         return true;
-    // A locked wallet without its lookahead cannot recognise a payment to an address of its seed it has not issued:
-    // remember to say so at walletpassphrase (TopUpLegacyTKeys).
-    if (!fLegacyTKeyRescanAdvised && IsLocked() && LegacyTKeyLookaheadShort())
-        fLegacyTKeyRescanAdvised = true;
     bool written = true;
+    bool unknown = false;   // an output paying a transparent key the wallet does not hold
     for (const CTxOut& out : tx.vout) {
         txnouttype type;
         std::vector<std::vector<unsigned char>> sol;
@@ -678,9 +698,19 @@ bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx)
         } else if (type == TX_PUBKEY) {
             id = CPubKey(sol[0]).GetID();
         }
-        if (id.has_value() && HaveKey(id.value()) && !MarkLegacyTKeyUsed(id.value()))
+        if (!id.has_value())
+            continue;
+        if (!HaveKey(id.value()))
+            unknown = true;
+        else if (!MarkLegacyTKeyUsed(id.value()))
             written = false;
     }
+    // Review L-2: a locked wallet without its full lookahead (started locked, or a mark moved a counter while
+    // locked) cannot recognise a payment to an address of its seed it has not issued. Only then, and only for a
+    // mined transaction with an output it could not check, may it have missed one: flag it (getwalletinfo
+    // lookahead_incomplete, persisted) from this height on, and say so at walletpassphrase (TopUpLegacyTKeys).
+    if (unknown && nHeight >= 0 && IsLocked() && LegacyTKeyLookaheadShort())
+        SetLegacyTKeyLookaheadIncomplete(nHeight);
     return written;
 }
 
@@ -4815,7 +4845,7 @@ bool CWallet::AddToWalletIfInvolvingMe(
         // see every block's transactions here, so a wallet restored from its seed re-finds its PQ keys.
         // Beta2: likewise an output paying a transparent key of the seed's legacy account the wallet holds ahead of
         // its counter, or one in its keypool (seed-only restore of ECC coins; TopUpLegacyTKeys).
-        if (!NoteKeysUsed(tx)) {
+        if (!NoteKeysUsed(tx, pblock ? nHeight : -1)) {
             // Review L-1: a key or the HD chain counter could not be written. The in-memory state is right, and a
             // key written past a counter left behind is skipped as issued (GenerateNewKey), so the wallet goes on.
             LogPrintf("AddToWalletIfInvolvingMe: error: writing the keys %s marks used failed (see above)\n",
@@ -6148,6 +6178,10 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         // lookahead grew during the scan, the scanned blocks are read again after it (the re-pass, see below).
         CBlockIndex* pindexScanStart = pindex;
         const uint64_t growthAtScanStart = nKeyLookaheadGrowth;
+        // Review L-2: a scan with the full lookahead held, from at or below the height the flag dates from, reads
+        // every block a locked wallet may have missed a payment in: it clears the flag (cs_wallet is held
+        // throughout, so the wallet cannot be locked during the scan).
+        const bool lookaheadFull = mnemonicHDChain.has_value() && !IsLocked() && !LegacyTKeyLookaheadShort();
         if (pindex && LegacyTKeyLookaheadShort()) {
             LogPrintf("ScanForWalletTransactions(): the wallet is locked, so it does not hold its transparent key lookahead: "
                       "coins sent to addresses of its seed it has not issued are not found; to find them, restore the recovery "
@@ -6270,6 +6304,13 @@ std::optional<int> CWallet::ScanForWalletTransactions(
             if (added > 0 || grew)
                 MarkDirty();   // cached credits and debits: coins just found, and outputs of keys just held
             again = added > 0 || grew;
+        }
+
+        if (fLegacyTKeyLookaheadIncomplete && lookaheadFull && pindexScanStart != nullptr &&
+            pindexScanStart->nHeight <= nLegacyTKeyIncompleteFrom) {
+            LogPrintf("ScanForWalletTransactions(): the scan from height %d held the full transparent key lookahead: "
+                      "lookahead_incomplete cleared\n", pindexScanStart->nHeight);
+            ClearLegacyTKeyLookaheadIncomplete();
         }
 
         // After rescanning, persist Sapling & Orchard note data that might have changed,

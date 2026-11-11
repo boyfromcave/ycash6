@@ -3071,6 +3071,12 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "                                    derivation tree (importprivkey, z_importkey, importwallet). When set, the recovery phrase alone is NOT\n"
             "                                    a complete backup. Back up wallet.dat or run z_exportwallet to capture the imported keys.\n"
             "  \"external_imports_warning\": \"...\", (string, optional) human-readable warning, only present when has_external_imports is true.\n"
+            "  \"lookahead_incomplete\": true|false, (bool) true when the wallet, encrypted and locked without the transparent addresses of its\n"
+            "                                    seed it has not issued (it holds them only after walletpassphrase), saw a block transaction paying\n"
+            "                                    an address it could not check: a coin sent there by another wallet of the same recovery phrase\n"
+            "                                    may be missing. To find it, restore the recovery phrase into a new wallet file\n"
+            "                                    (-wallet=<new file> -mnemonicfile=<file>); a rescan from at or below that height with the wallet\n"
+            "                                    unlocked also clears it. A wallet whose seed no other wallet uses has missed nothing.\n"
             "}\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
@@ -3107,6 +3113,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     auto legacySeed = pwalletMain->GetLegacyHDSeed();
     if (legacySeed.has_value())
         obj.pushKV("legacy_seedfp", legacySeed.value().Fingerprint().GetHex());
+    obj.pushKV("lookahead_incomplete", pwalletMain->fLegacyTKeyLookaheadIncomplete);
     if (pwalletMain->HasExternalImports()) {
         obj.pushKV("has_external_imports", true);
         obj.pushKV("external_imports_warning",
