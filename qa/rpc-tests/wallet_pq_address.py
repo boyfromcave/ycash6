@@ -134,6 +134,15 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('vault upgrade', n0.getnewaddress, '', 'pq')
         self.mine(ACTIVATION - n0.getblockcount())
 
+        print('help: the address RPCs are supported on Ycash; the unified-account RPCs need NU5 (beta2 item 9)')
+        for m in ('getnewaddress', 'z_getnewaddress', 'z_getbalance', 'z_gettotalbalance', 'getrawchangeaddress'):
+            text = n0.help(m)
+            assert 'Supported on Ycash.' in text and (m + ' is DEPRECATED') not in text and 'will be removed' not in text, (m, text)
+        for m in ('z_getnewaccount', 'z_getaddressforaccount', 'z_listaccounts', 'z_getbalanceforaccount'):
+            assert 'Not available on Ycash (needs NU5)' in n0.help(m), m
+        assert_raises_rpc('require the NU5 network upgrade', n0.z_getnewaccount)
+        assert_raises_rpc('require the NU5 network upgrade', n0.z_listaccounts)
+
         print('getnewaddress "" "pq": an rq… address of the PQ key chain, in the address book')
         a = n0.getnewaddress('', 'pq')
         a2 = n0.getnewaddress('', 'pq')
