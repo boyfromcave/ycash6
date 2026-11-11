@@ -29,7 +29,7 @@
 #
 #   report rows kogany cannot follow (W9-b finding 1, "no-ycash-upgrades"): stopatheight,
 #   ycash_bootstrap, lightwalletd_only, vault_pq_wallet, vault_pq_wallet_restore,
-#   wallet_pq_address and wallet_getnewaddress_type run regtest chains without the Ycash upgrades below Canopy (the framework's
+#   wallet_pq_address, wallet_balance_by_type and wallet_getnewaddress_type run regtest chains without the Ycash upgrades below Canopy (the framework's
 #   200-block cache, or Vault alone by -nuparams); kogany follows only chains with the Ycash
 #   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
 #   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
@@ -64,6 +64,7 @@ vault    vault_pq                      gate    W9
 vault    vault_pq_wallet               report  W9
 vault    vault_pq_wallet_restore       report  W9
 vault    wallet_pq_address             report  W9
+vault    wallet_balance_by_type        report  W9
 vault    wallet_getnewaddress_type     report  W9
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
@@ -132,6 +133,7 @@ sidecar  vault_pq                      report  W9     # vault
 sidecar  vault_pq_wallet               report  W9     # vault
 sidecar  vault_pq_wallet_restore       report  W9     # vault
 sidecar  wallet_pq_address             report  W9     # vault
+sidecar  wallet_balance_by_type        report  W9     # vault
 sidecar  wallet_getnewaddress_type     report  W9     # vault
 sidecar  yellowback_lifecycle          report  W9     # yed
 sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
@@ -195,6 +197,7 @@ pair     vault_pq                      report  W9     # vault
 pair     vault_pq_wallet               report  W9     # vault
 pair     vault_pq_wallet_restore       report  W9     # vault
 pair     wallet_pq_address             report  W9     # vault
+pair     wallet_balance_by_type        report  W9     # vault
 pair     wallet_getnewaddress_type     report  W9     # vault
 pair     yellowback_lifecycle          report  W9     # yed
 pair     yellowback_activation_reorg   report  W9     # yed
