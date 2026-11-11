@@ -50,8 +50,8 @@ src/yellowback/policy.cpp 71796abe703b38f8d92526f87d4ab18e3e4307162f2312a9260460
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp ab1e820909057c2a834a03971ec6c10f77925ff7bcfa9114c807322e804f90b0 37b167febe757f621fb310177fede1c6c49fee87182f9f28db322f0fa0f2a5e2
-src/yellowback/txbuilder.h 981c476d76940d08968bb3b446cb160fad139929660bf673ed61f63fbcf80ac8 85a326a8f00d3ec56534236ead6f956a35f84ca57ebb3d4a3eb3d309d42f67e4
+src/yellowback/txbuilder.cpp e03005e5cd084a944e90174d2ad4fbe59905de07db4d625dcf8f7b73280e0dcd 5f3093786314617a8821dc4aacbe8a499737ccebded05da60b7a24aaac036988
+src/yellowback/txbuilder.h d79a3f2d14359b4015f6dfaf3e894d73155ac6cfbe3badcc5a00693677bcdba4 286ddf4962109d0198705eadae1fcf35f00ae71bc62b7e125391c39695bd0956
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan drops wtxOrdered before erasing mapWallet.

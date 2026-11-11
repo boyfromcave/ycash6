@@ -35,6 +35,7 @@
 #include "vault/template.h"
 #include "yellowback/address.h"
 #include "yellowback/txbuilder.h"
+#include "zip317.h"
 
 #ifdef ENABLE_WALLET
 #include "script/ismine.h"
@@ -1719,6 +1720,195 @@ UniValue set_equivocation(const UniValue& params, bool fHelp)
 
 // ---- vault RPCs -------------------------------------------------------------------------------
 
+// ---- vault_lock's funding address ("from", beta2 decision D-3) ----------------------------------
+// vault_lock is funded, by default, from the wallet's confirmed transparent P2PKH coins (Fund). With "from" it is
+// funded from one address of this wallet only: a transparent P2PKH address (its coins), a plain-YEC post-quantum
+// address (its TX_PQPKH coins, signed under the next block's vault flags, the fee priced by size as sendtoaddress
+// prices a PQ input) or a Sapling address (its notes, through the Sapling machinery yed_mint uses:
+// yellowback::ParseAddressChoice / SelectSaplingNotes / ProveSapling). Change returns to the same address (D-4).
+// 6.20.0: built by hand like every vault RPC (no WalletTxBuilder, no privacy policy: a vault lock always reveals its
+// V output, the same on both node lines); the ZIP-317 conventional fee is CTransaction::GetConventionalFee().
+
+/** The parsed "from" of vault_lock (kind NONE: absent or "", the default funding). */
+yellowback::AddressChoice ParseLockFrom(const UniValue& v)
+{
+    if (v.isNull()) return yellowback::AddressChoice();
+    if (!v.isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "from must be an address string");
+    try {
+        return yellowback::ParseAddressChoice(v.get_str(), "from", true);
+    } catch (const std::runtime_error& e) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, e.what());
+    }
+}
+
+/** The output script of a transparent or post-quantum "from". */
+CScript LockFromScript(const yellowback::AddressChoice& from)
+{
+    return from.kind == yellowback::AddressChoice::PQ_ADDR ? GetScriptForDestination(from.pqKeyId) : GetScriptForDestination(from.keyId);
+}
+
+/** Refuse a "from" this wallet cannot spend at the next block: a scheme-2 address before Falcon, an address of
+ *  another wallet, a watch-only one. cs_main and cs_wallet held. */
+void CheckLockFrom(const yellowback::AddressChoice& from)
+{
+    if (from.kind == yellowback::AddressChoice::SAPLING) {
+        if (pwalletMain->HaveSaplingSpendingKeyForAddress(from.sapling)) return;
+        if (pwalletMain->HaveSaplingIncomingViewingKey(from.sapling))
+            throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
+        throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+    }
+    if (from.kind == yellowback::AddressChoice::PQ_ADDR && from.pqKeyId.scheme == pq::SCHEME_FN_DSA_512 &&
+        !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block");
+    const isminetype mine = IsMine(*pwalletMain, LockFromScript(from));
+    if (mine == ISMINE_SPENDABLE) return;
+    if (mine != ISMINE_NO) throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
+    throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+}
+
+/** Fund `mtx` (its outputs set, no inputs) from the coins of one transparent or post-quantum address of this wallet:
+ *  confirmed, unlocked, unspent in the node's view (as EligibleCoins), largest first, never a coinbase output where
+ *  coinbase must be shielded, at most MAX_YEC_INPUTS coins and MAX_YEC_INPUT_BYTES of estimated inputs (the YED
+ *  builders' caps: the transaction stays under 100 kB and the sigop limit). Change goes back to the same address (D-4)
+ *  when it is above dust (a PQ output's dust priced at its real spend size, GetPQDustThreshold), else it joins the fee.
+ *  The fee is priced from the signed size: P2PKH coins max(VAULT_RPC_FEE, the relay fee, the ZIP-317 conventional
+ *  fee); PQ coins max(VAULT_RPC_FEE, the plain PQ rate x size) capped at PQMaxTxFee(), never below the ZIP-317
+ *  conventional fee (as CWallet::CreateTransaction prices a PQ input). Signed. Nothing is locked here: the caller
+ *  locks the inputs once the transaction is in the mempool, so a refusal leaves the address's coins free. */
+void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& from)
+{
+    AssertLockHeld(cs_main);
+    const bool pq = from.kind == yellowback::AddressChoice::PQ_ADDR;
+    const CScript only = LockFromScript(from);
+    const bool shieldCoinbase = Params().GetConsensus().fCoinbaseMustBeShielded;
+    std::vector<COutput> coins;
+    pwalletMain->AvailableCoins(coins, std::nullopt, true, NULL, false, true);
+    std::vector<std::pair<COutPoint, CAmount>> eligible;
+    CAmount coinbaseValue = 0;
+    for (const COutput& c : coins) {
+        if (!c.fSpendable || c.nDepth < 1 || c.tx->vout[c.i].scriptPubKey != only) continue;
+        COutPoint op(c.tx->GetHash(), c.i);
+        CTxOut utxo;
+        int height;
+        if (!GetCoin(op, utxo, height) || height < 0 || utxo != c.tx->vout[c.i]) continue;   // spent, or not confirmed
+        if (c.fIsCoinbase && shieldCoinbase) { coinbaseValue += c.Value(); continue; }
+        eligible.emplace_back(op, c.Value());
+    }
+    std::sort(eligible.begin(), eligible.end(), [](const std::pair<COutPoint, CAmount>& a, const std::pair<COutPoint, CAmount>& b) { return a.second > b.second; });
+    const size_t inputBytes = yellowback::YecInputBytes(only);
+    const size_t nOut = mtx.vout.size();
+    CAmount out = 0;
+    for (const CTxOut& o : mtx.vout) out += o.nValue;
+    CAmount fee = VAULT_RPC_FEE;
+    for (int pass = 0; ; pass++) {
+        if (pass == 8) throw JSONRPCError(RPC_WALLET_ERROR, "from: the funding fee did not settle");
+        mtx.vin.clear();
+        mtx.vout.resize(nOut);
+        const CAmount needed = out + fee;
+        CAmount got = 0;
+        for (const auto& e : eligible) {
+            if (got >= needed) break;
+            if (mtx.vin.size() + 1 > yellowback::MAX_YEC_INPUTS || (mtx.vin.size() + 1) * inputBytes > yellowback::MAX_YEC_INPUT_BYTES)
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("from: too-many-coins: covering %s at %s would take more than %u coins or %u bytes of inputs; "
+                                                               "consolidate the address's coins first, then retry",
+                                                               FormatMoney(needed), from.text, (unsigned)yellowback::MAX_YEC_INPUTS, (unsigned)yellowback::MAX_YEC_INPUT_BYTES));
+            mtx.vin.push_back(CTxIn(e.first, CScript(), CTxIn::SEQUENCE_FINAL));
+            got += e.second;
+        }
+        if (got < needed) {
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed funds at %s: need %s more%s", from.text, FormatMoney(needed - got),
+                coinbaseValue > 0 ? strprintf(" (its %s of coinbase outputs must be shielded first: z_shieldcoinbase)", FormatMoney(coinbaseValue)) : std::string()));
+        }
+        const CAmount change = got - needed;
+        const CTxOut changeOut(change, only);
+        if (pq ? (change > 0 && change >= GetPQDustThreshold(changeOut, ::minRelayTxFee)) : change >= VAULT_RPC_MIN_CHANGE)
+            mtx.vout.push_back(changeOut);
+        SignWalletInputs(mtx);
+        const CTransaction signedTx(mtx);
+        const size_t size = ::GetSerializeSize(signedTx, SER_NETWORK, PROTOCOL_VERSION);
+        unsigned int sigops = GetLegacySigOpCount(signedTx);
+        for (const CTxIn& in : signedTx.vin) {
+            CTxOut prev;
+            int ph;
+            if (GetCoin(in.prevout, prev, ph)) sigops += GetPQSigOpCount(prev.scriptPubKey);
+        }
+        if (size > MAX_TX_SIZE_BEFORE_SAPLING || sigops > MAX_STANDARD_TX_SIGOPS)
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("from: the lock would be %u bytes with %u sigops (limits %u, %u); consolidate the address's coins first",
+                                                           (unsigned)size, sigops, (unsigned)MAX_TX_SIZE_BEFORE_SAPLING, MAX_STANDARD_TX_SIGOPS));
+        const CAmount conventional = signedTx.GetConventionalFee();   // 6.20.0: ZIP-317 (zip317.h)
+        const CAmount required = pq ? std::max(std::min(PQSizeFee(VAULT_RPC_FEE, size), PQMaxTxFee()), conventional)
+                                    : std::max({VAULT_RPC_FEE, ::minRelayTxFee.GetFee(size), conventional});
+        if (got - signedTx.GetValueOut() >= required) break;
+        fee = std::max(required, fee + 1);
+    }
+}
+
+/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection until
+ *  the lock is broadcast or refused: the proving step runs with no wallet lock held, and another builder must not pick
+ *  the same notes meanwhile. Released on every path. */
+struct LockedNotes
+{
+    std::vector<SaplingOutPoint> ops;
+    ~LockedNotes()
+    {
+        if (ops.empty()) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : ops) pwalletMain->UnlockNote(op);
+    }
+};
+
+/** A TransactionBuilder paying `vout` (the V) from the notes of a Sapling "from", change back to it as a note. The fee
+ *  is max(VAULT_RPC_FEE, the ZIP-317 conventional fee of the shape), the selection repeated until it covers that fee
+ *  (or refused: never underpaid). The selected notes are locked into `locked`. cs_main and cs_wallet held; the caller
+ *  proves it (ProveSapling) with NO lock held, as yed_mint does. 6.20.0: the builder takes the notes' anchor in its
+ *  constructor and is held through a unique_ptr (its move constructor drops firstSaplingSpendAddr, audit B-5), and
+ *  sapling-crypto pads the bundle to two outputs, so the conventional fee counts max(spends, 2) Sapling actions. */
+std::unique_ptr<TransactionBuilder> SaplingLockBuilder(const yellowback::AddressChoice& from, const CTxOut& vout, LockedNotes& locked)
+{
+    AssertLockHeld(cs_main);
+    CAmount fee = VAULT_RPC_FEE;
+    for (int pass = 0; ; pass++) {
+        if (pass == 25) throw JSONRPCError(RPC_WALLET_ERROR, "from: the Sapling funding fee did not settle");
+        libzcash::SaplingExtendedSpendingKey extsk;
+        std::vector<SaplingNoteEntry> notes;
+        std::vector<SaplingWitness> witnesses;
+        uint256 anchor;
+        try {
+            yellowback::SelectSaplingNotes(*pwalletMain, from, vout.nValue + fee, extsk, notes, witnesses, anchor);
+        } catch (const std::runtime_error& e) {
+            const std::string what = e.what();
+            if (what.rfind("insufficient-yec", 0) == 0 || what.rfind("too-many-notes", 0) == 0)
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, what);
+            throw JSONRPCError(RPC_WALLET_ERROR, what);
+        }
+        // the change note and the builder's padding make two Sapling outputs: count max(spends, 2) actions
+        const size_t actions = CalculateLogicalActionCount({}, {vout}, 0, notes.size(), 2, 0);
+        const CAmount conventional = CalculateConventionalFee(actions);
+        if (conventional > fee) { fee = conventional; continue; }
+        auto b = std::make_unique<TransactionBuilder>(Params(), NextHeight(), std::nullopt, anchor);
+        b->SetFee(fee);
+        for (size_t i = 0; i < notes.size(); i++) b->AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
+        b->AddTransparentOutput(vout.scriptPubKey, vout.nValue);
+        b->SendChangeTo(from.sapling, extsk.expsk.full_viewing_key().ovk);
+        for (const SaplingNoteEntry& e : notes) {
+            pwalletMain->LockNote(e.op);
+            locked.ops.push_back(e.op);
+        }
+        return b;
+    }
+}
+
+UniValue LockResult(const uint256& txid, const CScript& spk, const CPQKeyID& owner)
+{
+    UniValue r(UniValue::VOBJ);
+    r.pushKV("txid", txid.GetHex());
+    r.pushKV("vout", 0);
+    r.pushKV("outpoint", OutPointStr(COutPoint(txid, 0)));
+    r.pushKV("script", HexStr(spk.begin(), spk.end()));
+    r.pushKV("owner", PQKeyIdHex(owner));
+    return r;
+}
+
 UniValue vault_lock(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
@@ -1729,56 +1919,82 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
             "1. params (object, required) {\"tag\": \"4 chars or 8 hex\", \"setid\", \"cancelsetid\" (default setid),\n"
             "        \"delay\": 1..65535, \"ownerheight\": n, \"appheight\": n (default 0 = no APP branch; only on a tag a module governs), \"amount\",\n"
             "        \"owner\": pqkeyid (66 hex, scheme || keyhash), a PQ address or {\"scheme\": n, \"keyhash\": \"64 hex\"}\n"
-            "        (default: a new SLH-DSA key of this wallet, as vault_getnewowner)}\n"
+            "        (default: a new SLH-DSA key of this wallet, as vault_getnewowner),\n"
+            "        \"from\": the funding address (default: the wallet's confirmed transparent P2PKH coins): a transparent\n"
+            "        P2PKH address, a plain-YEC post-quantum address (its TX_PQPKH coins; FN-DSA-512 only once Falcon is active;\n"
+            "        fee priced by size) or a Sapling address (its confirmed notes) of this wallet; change goes back to it}\n"
             "\nResult: {\"txid\", \"vout\", \"outpoint\", \"script\", \"owner\"}\n"
             + HelpExampleCli("vault_lock", "'{\"tag\":\"TEST\",\"setid\":\"..\",\"delay\":10,\"ownerheight\":1000,\"amount\":5}'")
             + HelpExampleRpc("vault_lock", "{...}"));
     EnsureWallet(fHelp);
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    EnsureVaultActive();
-    auto snap = Snapshot();
-    const UniValue& o = params[0].get_obj();
     VaultParams vp;
-    vp.tag = ParseTag(find_value(o, "tag"));
-    vp.setId = ParseSetId(find_value(o, "setid"), "setid");
-    vp.cancelSetId = find_value(o, "cancelsetid").isNull() ? vp.setId : ParseSetId(find_value(o, "cancelsetid"), "cancelsetid");
-    vp.delay = find_value(o, "delay").get_int64();
-    vp.ownerHeight = find_value(o, "ownerheight").get_int64();
-    vp.appHeight = find_value(o, "appheight").isNull() ? 0 : find_value(o, "appheight").get_int64();
-    // V-1 (audit 01/V-5): the APP branch has no signer; only a tag a module governs may carry one. Consensus admits
-    // any registered tag (V-1); the wallet also requires the module to govern a set on this node (YED\0 without its
-    // attestor set is registered but governs nothing: its rules are unconfigured and the branch would be open to all).
-    if (vp.appHeight != 0) {
-        const vault::Module* mod = vault::FindModule(vp.tag);
-        if (!mod || !mod->GovernedSet())
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "appheight on a tag no module governs: the APP branch has no signer and only a module with its set may govern it (V-1, bad-txns-vault-app)");
+    CScript spk;
+    std::unique_ptr<TransactionBuilder> sapling;   // a Sapling "from": proved below with no lock held
+    LockedNotes lockedNotes;                       // its notes, locked until the lock is broadcast or refused
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureVaultActive();
+        auto snap = Snapshot();
+        const UniValue& o = params[0].get_obj();
+        vp.tag = ParseTag(find_value(o, "tag"));
+        vp.setId = ParseSetId(find_value(o, "setid"), "setid");
+        vp.cancelSetId = find_value(o, "cancelsetid").isNull() ? vp.setId : ParseSetId(find_value(o, "cancelsetid"), "cancelsetid");
+        vp.delay = find_value(o, "delay").get_int64();
+        vp.ownerHeight = find_value(o, "ownerheight").get_int64();
+        vp.appHeight = find_value(o, "appheight").isNull() ? 0 : find_value(o, "appheight").get_int64();
+        // V-1 (audit 01/V-5): the APP branch has no signer; only a tag a module governs may carry one. Consensus admits
+        // any registered tag (V-1); the wallet also requires the module to govern a set on this node (YED\0 without its
+        // attestor set is registered but governs nothing: its rules are unconfigured and the branch would be open to all).
+        if (vp.appHeight != 0) {
+            const vault::Module* mod = vault::FindModule(vp.tag);
+            if (!mod || !mod->GovernedSet())
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "appheight on a tag no module governs: the APP branch has no signer and only a module with its set may govern it (V-1, bad-txns-vault-app)");
+        }
+        if (!find_value(o, "ownerkey").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "ownerkey-removed: use owner (pqkeyid)");
+        // Every vault owner is a post-quantum key (quantum plan §4.3): the named one, or a new SLH-DSA
+        // key of this wallet (quantum spec §6.2).
+        const bool newOwner = find_value(o, "owner").isNull();
+        vp.owner = newOwner ? CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256()) : ParsePQOwner(find_value(o, "owner"), "owner");
+        // As relay policy (IsStandardTx): no scheme-2 (FN-DSA-512) owner before Falcon is active at the
+        // next block; the owner could not spend it (review A F3).
+        if (vp.owner.scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "a scheme-2 (FN-DSA-512) owner before Falcon is active");
+        const CAmount amount = AmountFromValue(find_value(o, "amount"));
+        if (!VaultParamsValid(vp)) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault parameters out of range (plan §15.3)");
+        if (!snap->GetSet(vp.setId) || !snap->GetSet(vp.cancelSetId)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "setid and cancelsetid must be confirmed sets");
+        const yellowback::AddressChoice from = ParseLockFrom(find_value(o, "from"));
+        if (from.kind != yellowback::AddressChoice::NONE) CheckLockFrom(from);
+        if (newOwner) vp.owner = NewWalletPQKey(pq::SCHEME_SLH_DSA_SHA2_128S);   // drawn once the rest is valid
+        spk = BuildVault(vp);
+        if (from.kind == yellowback::AddressChoice::SAPLING) {
+            sapling = SaplingLockBuilder(from, CTxOut(amount, spk), lockedNotes);
+        } else {
+            CMutableTransaction mtx = NewTx();
+            mtx.vout.push_back(CTxOut(amount, spk));
+            if (from.kind == yellowback::AddressChoice::NONE) {
+                Fund(mtx, 0);
+                SignWalletInputs(mtx);
+                return LockResult(Broadcast(CTransaction(mtx)), spk, vp.owner);
+            }
+            FundFromAddress(mtx, from);
+            const uint256 txid = Broadcast(CTransaction(mtx));
+            for (const CTxIn& in : mtx.vin) {   // locked only once accepted: a refusal leaves the coins free
+                COutPoint op = in.prevout;
+                pwalletMain->LockCoin(op);
+            }
+            return LockResult(txid, spk, vp.owner);
+        }
     }
-    if (!find_value(o, "ownerkey").isNull()) throw JSONRPCError(RPC_INVALID_PARAMETER, "ownerkey-removed: use owner (pqkeyid)");
-    // Every vault owner is a post-quantum key (quantum plan §4.3): the named one, or a new SLH-DSA
-    // key of this wallet (quantum spec §6.2).
-    const bool newOwner = find_value(o, "owner").isNull();
-    vp.owner = newOwner ? CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256()) : ParsePQOwner(find_value(o, "owner"), "owner");
-    // As relay policy (IsStandardTx): no scheme-2 (FN-DSA-512) owner before Falcon is active at the
-    // next block; the owner could not spend it (review A F3).
-    if (vp.owner.scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "a scheme-2 (FN-DSA-512) owner before Falcon is active");
-    const CAmount amount = AmountFromValue(find_value(o, "amount"));
-    if (!VaultParamsValid(vp)) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault parameters out of range (plan §15.3)");
-    if (!snap->GetSet(vp.setId) || !snap->GetSet(vp.cancelSetId)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "setid and cancelsetid must be confirmed sets");
-    if (newOwner) vp.owner = NewWalletPQKey(pq::SCHEME_SLH_DSA_SHA2_128S);   // drawn once the rest is valid
-    CScript spk = BuildVault(vp);
-    CMutableTransaction mtx = NewTx();
-    mtx.vout.push_back(CTxOut(amount, spk));
-    Fund(mtx, 0);
-    SignWalletInputs(mtx);
-    const uint256 txid = Broadcast(CTransaction(mtx));
-    UniValue r(UniValue::VOBJ);
-    r.pushKV("txid", txid.GetHex());
-    r.pushKV("vout", 0);
-    r.pushKV("outpoint", OutPointStr(COutPoint(txid, 0)));
-    r.pushKV("script", HexStr(spk.begin(), spk.end()));
-    r.pushKV("owner", PQKeyIdHex(vp.owner));
-    return r;
+    // Sapling "from": one spend proof per note (seconds each), made with no lock held (as yed_mint, FinishSapling);
+    // the spends and the binding signature need no wallet lock, the V output is not signed.
+    CMutableTransaction mtx;
+    try {
+        mtx = yellowback::ProveSapling(*sapling);
+    } catch (const std::runtime_error& e) {
+        throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+    }
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    return LockResult(Broadcast(CTransaction(mtx)), spk, vp.owner);
 }
 
 UniValue vault_getnewowner(const UniValue& params, bool fHelp)

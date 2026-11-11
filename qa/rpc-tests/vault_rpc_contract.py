@@ -135,6 +135,21 @@ class VaultRpcContractTest(BitcoinTestFramework):
                 {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5, 'owner': '02' + '11' * 32})
         c.error('unregistered post-quantum scheme', n, 'vault_lock',
                 {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5, 'owner': '03' + '11' * 32})
+        # vault_lock's funding address "from" (beta2 D-3): the refusals; vault_lock_from.py funds a lock from each source
+        def lock_from(addr):
+            return {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 1, 'owner': OWNER_ID, 'from': addr}
+        c.error('bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network', n, 'vault_lock', lock_from('nonsense'))
+        c.error('from: not an address of this wallet', n, 'vault_lock', lock_from(self.nodes[1].getnewaddress()))
+        watch = self.nodes[1].getnewaddress()
+        n.importaddress(watch, '', False)
+        c.error('from: a watch-only address of this wallet', n, 'vault_lock', lock_from(watch))
+        falcon = n.z_importpqkey('2:' + '5a' * 48, False)['address']        # Falcon is not active on this chain
+        c.error('from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active', n, 'vault_lock', lock_from(falcon))
+        c.error('insufficient confirmed funds at', n, 'vault_lock', lock_from(n.getnewaddress()))
+        empty_pq = n.getnewaddress('', 'pqslh')                              # scheme 1: spendable before Falcon
+        assert_equal(n.validateaddress(empty_pq)['pqscheme'], 1)
+        c.error('insufficient confirmed funds at', n, 'vault_lock', lock_from(empty_pq))
+        c.error('in confirmed Sapling notes at', n, 'vault_lock', lock_from(n.z_getnewaddress('sapling')))
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,
                                       'owner': OWNER_ID})
         app_height = h + 12
