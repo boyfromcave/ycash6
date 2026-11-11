@@ -904,6 +904,37 @@ def wait_and_assert_operationid_status(node, myopid, in_status='success', in_err
     else:
         return None
 
+# Line helpers for functional scripts kept byte-identical on both C++ node lines (beta2; first user
+# wallet_balance_by_type.py). ycash-dd's util.py defines the same names for v4.5.0: SEED_RESTORE_OPTION =
+# '-hdseedfile' (a 32-byte HD seed file), and z_sendmany_wait passes an explicit fee of 0.0001 and no privacy policy.
+SEED_RESTORE_OPTION = '-mnemonicfile'   # 6.x: a new wallet from z_exportwallet's recovery phrase
+
+def z_sendmany_wait(node, fromaddr, amounts, minconf=1):
+    """z_sendmany and wait for success; returns the txid (read the fee from gettransaction). 6.x: the wallet's
+    ZIP-317 fee (an explicit 0.0001 is refused as above 4x the conventional fee) and the privacy policy
+    AllowFullyTransparent, which a transparent sender or recipient needs."""
+    opid = node.z_sendmany(fromaddr, amounts, minconf, None, 'AllowFullyTransparent')
+    return wait_and_assert_operationid_status(node, opid)
+
+def assert_listaddresses_pq(node, expected, exact=('mnemonic_seed',)):
+    """6.x: listaddresses lists each post-quantum address of ``expected`` ({address: (source, pqscheme,
+    pqschemename)}) once, in the "pq" array of that source and never as a transparent address; for each source in
+    ``exact`` the expected addresses are all its "pq" array holds (no unissued lookahead key). ycash-dd has no
+    listaddresses: its version of this helper returns at once."""
+    listed = {}
+    for entry in node.listaddresses():
+        for a in entry.get('pq', []):
+            assert a['address'] not in listed, a
+            listed[a['address']] = (entry['source'], a['pqscheme'], a['pqschemename'])
+        t = entry.get('transparent', {})
+        for a in t.get('addresses', []) + t.get('changeAddresses', []):
+            assert a not in expected, a
+    for addr, want in expected.items():
+        assert_equal(listed.get(addr), want)
+    for source in exact:
+        assert_equal(sorted(a for a, w in listed.items() if w[0] == source),
+                     sorted(a for a, w in expected.items() if w[0] == source))
+
 # Find a coinbase address on the node, filtering by the number of UTXOs it has.
 # If no filter is provided, returns the coinbase address on the node containing
 # the greatest number of spendable UTXOs.

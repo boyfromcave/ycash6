@@ -21,4 +21,7 @@ void RegisterWalletRPCCommands(CRPCTable &tableRPC);
  */
 void EnsurePQRecipientPayable(const CTxDestination& dest);
 
+/** The name RPC results print beside a post-quantum scheme number: 1 "SLH-DSA-SHA2-128s", 2 "FN-DSA-512". */
+std::string PQSchemeName(uint8_t scheme);
+
 #endif //BITCOIN_WALLET_RPCWALLET_H

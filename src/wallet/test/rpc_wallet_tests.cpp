@@ -382,8 +382,10 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_getbalance)
 
     BOOST_CHECK_THROW(CallRPC("z_getbalance too many args"), runtime_error);
     BOOST_CHECK_THROW(CallRPC("z_getbalance invalidaddress"), runtime_error);
-    // address does not belong to wallet
-    BOOST_CHECK_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7"), runtime_error);
+    // a transparent address that does not belong to the wallet answers 0 (beta2 item 15, as on ycash-dd: a balance
+    // read needs no key); a shielded one is still refused (below)
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7"));
+    BOOST_CHECK_EQUAL(retValue.get_real(), 0.0);
     BOOST_CHECK_NO_THROW(CallRPC(std::string("z_getbalance ") + taddr1));
     // negative minconf not allowed
     BOOST_CHECK_THROW(CallRPC(std::string("z_getbalance ") + taddr1 + " -1"), runtime_error);
