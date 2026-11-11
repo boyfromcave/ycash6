@@ -947,6 +947,13 @@ def lockunspent_true(node):
                 raise
 
 
+# Line constants of vault_lock_from.py (shared byte-identical with ycash-dd, whose values are Decimal('0.0001') and 1):
+# 6.x's shielding z_sendmany takes the -feepolicy fee (an explicit 0.0001 exceeds 4 times its ZIP-317 conventional
+# fee), and the Sapling builder pads a bundle with one real output to two.
+SHIELDING_SEND_FEE = None
+ONE_NOTE_SAPLING_OUTPUTS = 2
+
+
 def nustr(branch_id):
     return '%08x' % branch_id
 
