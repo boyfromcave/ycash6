@@ -178,10 +178,16 @@ class WalletPQAddressTest(BitcoinTestFramework):
         tx_z = n1.sendtoaddress(a3, Decimal('0.75'))
         tx_a = n1.sendtoaddress(a, 2)
         tx_m = n1.sendmany('', {a2: 1, n1.getnewaddress(): Decimal('0.5')})
+        # getunconfirmedbalance had no argument-table row on 6.22.0-beta1, so every call failed (beta2 item 12).
+        # A payment from another wallet is untrusted until mined: node 2 (whose wallet is replaced below) sees it.
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0'))
+        n1.sendtoaddress(n2.getnewaddress(), Decimal('0.25'))
         self.sync_all()
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0.25'))
         mem = n0.getaddressmempool({'addresses': [a]})
         assert_equal([(m['txid'], m['satoshis'], m['address']) for m in mem], [(tx_a, zat(2), a)])
         self.mine(1)
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0'))
         utx = {u['txid']: u for u in n0.listunspent(1, 9999999, [a, a2, a3])}
         assert_equal(sorted(utx), sorted([tx_a, tx_m, tx_z]))
         assert_equal((utx[tx_a]['address'], utx[tx_a]['amount'], utx[tx_a]['spendable']), (a, Decimal('2'), True))
