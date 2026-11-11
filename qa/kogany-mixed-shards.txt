@@ -112,7 +112,7 @@ attest   yellowback_chainviz           gate    W9   mirror
 
 # --- the ycash6 test rig (kogany plan W9-a; K-3 as amended): the same scripts again with
 #     KOGANY_SIDECAR=1, every node a kogany plus a ycashd -connect'ed to it (-listen=0), the wallet
-#     on the ycashd, consensus and relay through the koganys. The 50 wallet-needing scripts:
+#     on the ycashd, consensus and relay through the koganys. The 51 wallet-needing scripts:
 #     YELLOWBACK_SCRIPTS less the eight that call no wallet RPC, directly or through a framework
 #     helper (yellowback_quote, vault_activation_restart, vault_undo_prune, stopatheight,
 #     ycash_bootstrap, testnet_ceremony, lightwalletd_only; yellowback_framework_smoke is excluded
@@ -173,7 +173,7 @@ sidecar  yellowback_chainviz           report  W9   mirror  # attest
 # --- off the mixed shards (test_framework/kogany.py "Recorded limits"; plan KF-32)
 excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo count, and a follower is one more peer
 
-# --- column 3 of the W9 matrix (kogany plan S5, §3b): the same 50 wallet-needing scripts with
+# --- column 3 of the W9 matrix (kogany plan S5, §3b): the same 51 wallet-needing scripts with
 #     every node kogany + yewd (YEWD_BIN, YEWD_KOGANY; no ycashd behind any node; the harness compares
 #     vault_getinfo.statehash and yed_getstatehash across the pairs at every sync point, and with the
 #     ycash6 peer under YEWD_YCASH6_PEER=1). No MixedLine flags: there is no follower. The wave is S5
