@@ -138,6 +138,8 @@ BASE_SCRIPTS= [
     # Beta2 P0: a -mnemonicfile restore re-finds every ECC (P2PKH) coin of the seed: the legacy transparent HD
     # lookahead, keypool marking, the rescan's re-pass for keys used out of chain order, the gap limit (-keypool).
     'wallet_seed_restore_ecc.py',
+    # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
+    'wallet_getnewaddress_type.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',
