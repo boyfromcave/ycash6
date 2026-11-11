@@ -1,4 +1,5 @@
 // Copyright (c) 2022-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -40,7 +41,9 @@ public:
  */
 class Payment {
 private:
-    PaymentAddress address;
+    // Ycash (beta2 D-2; reverses quantum spec A-15): a post-quantum (TX_PQPKH) address is a transparent
+    // output outside the libzcash address model, so a payment holds either kind.
+    std::variant<PaymentAddress, CPQKeyID> address;
     CAmount amount;
     std::optional<Memo> memo;
 public:
@@ -52,8 +55,19 @@ public:
         assert(MoneyRange(amount));
     }
 
+    Payment(const CPQKeyID& pq, CAmount amount) :
+        address(pq), amount(amount), memo(std::nullopt) {
+        assert(MoneyRange(amount));
+    }
+
+    //! Not for a post-quantum payment (GetPQAddress() first).
     const PaymentAddress& GetAddress() const {
-        return address;
+        return std::get<PaymentAddress>(address);
+    }
+
+    //! The post-quantum address of this payment, or nullptr.
+    const CPQKeyID* GetPQAddress() const {
+        return std::get_if<CPQKeyID>(&address);
     }
 
     CAmount GetAmount() const {
@@ -67,13 +81,25 @@ public:
 
 typedef std::pair<libzcash::PaymentAddress, std::optional<Memo>> NetAmountRecipient;
 
+/** z_mergetoaddress into a post-quantum address (beta2 D-6): the net amount as one TX_PQPKH output. */
+typedef CPQKeyID NetAmountPQRecipient;
+
 typedef std::variant<
     std::vector<Payment>,
-    NetAmountRecipient> Recipients;
+    NetAmountRecipient,
+    NetAmountPQRecipient> Recipients;
+
+/** A resolved post-quantum payment: a TX_PQPKH output (beta2 D-2, D-4; isInternal for change). */
+struct PQPayment {
+    CPQKeyID address;
+    CAmount amount;
+    bool isInternal;
+};
 
 class Payments {
 private:
     std::vector<ResolvedPayment> payments;
+    std::vector<PQPayment> pqPayments;
     std::set<OutputPool> recipientPools;
     CAmount t_outputs_total{0};
     CAmount sapling_outputs_total{0};
@@ -105,6 +131,17 @@ public:
             }
         });
         payments.push_back(payment);
+    }
+
+    //! A post-quantum output: transparent for the totals, the recipient pools and the privacy policy (D-5).
+    void AddPQPayment(const PQPayment& payment) {
+        t_outputs_total += payment.amount;
+        recipientPools.insert(OutputPool::Transparent);
+        pqPayments.push_back(payment);
+    }
+
+    const std::vector<PQPayment>& GetPQPayments() const {
+        return pqPayments;
     }
 
     std::set<OutputPool> GetRecipientPools() const {
@@ -219,6 +256,11 @@ public:
 
     bool InvolvesOrchard() const;
 
+    /**
+     * Builds the transaction. A post-quantum (TX_PQPKH) input is added unsigned and signed after Build() under the
+     * vault flags of the next block, with no global lock held (SignPQBuilderInputs; beta2 D-2, D-6): the caller
+     * must hold neither cs_main nor the wallet lock when the effects spend one.
+     */
     TransactionBuilderResult ApproveAndBuild(
             const CChainParams& params,
             const CWallet& wallet,
@@ -437,6 +479,24 @@ public:
             const CWallet& wallet,
             const ZTXOSelector& selector,
             int32_t minDepth) const;
+
+    /**
+     * z_sendmany from a post-quantum address (beta2 D-2, D-4; reverses quantum spec A-15): the fewest of that
+     * address's own TX_PQPKH coins (largest first, never coinbase, minDepth applies) that pay the payments and the
+     * fee of a PQ spend (PQBuilderFee) on the transaction's real size; change back to the same address, change
+     * below its PQ dust threshold to the fee. A default fee is raised to the PQ fee; an explicit one below it is
+     * refused. Throws JSONRPCError with the reference's strings (insufficient funds, too many inputs, sigops).
+     */
+    tl::expected<TransactionEffects, InputSelectionError>
+    PreparePQTransaction(
+            CWallet& wallet,
+            const CPQKeyID& source,
+            const std::vector<Payment>& payments,
+            const CChain& chain,
+            const TransactionStrategy& strategy,
+            const std::optional<CAmount>& fee,
+            int32_t minDepth,
+            uint32_t anchorConfirmations) const;
 
     tl::expected<TransactionEffects, InputSelectionError>
     PrepareTransaction(

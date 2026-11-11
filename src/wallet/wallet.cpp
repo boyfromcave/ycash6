@@ -2624,8 +2624,9 @@ SpendableInputs CWallet::FindSpendableInputs(
                 // check to see if the coin conforms to the payment source
                 CTxDestination address;
                 bool hasDestination = ExtractDestination(output.scriptPubKey, address);
-                // A TX_PQPKH coin is spent only by the YED/vault builders, never by WalletTxBuilder
-                // (z_sendmany, z_shieldcoinbase): its signature needs the vault flags (quantum spec A-15).
+                // A TX_PQPKH coin is never selected here (ANY_TADDR and the ECC selectors spend ECC coins only;
+                // z_shieldcoinbase refuses a PQ source, D-7): a post-quantum from address of z_sendmany is spent through
+                // WalletTxBuilder::PreparePQTransaction, z_mergetoaddress names its coins (beta2 D-2, D-6).
                 bool isSelectable =
                     hasDestination && !IsPQKeyDestination(address) && this->SelectorMatchesAddress(selector, address);
                 if (isSelectable) {
@@ -5135,6 +5136,10 @@ bool CWallet::IsChange(const CTxOut& txout) const
                 // make our determination
                 IsInternalKeyPath(44, BIP44CoinType(), keyMetaIt->second.hdKeypath);
         },
+        // A post-quantum key of this wallet that is not in the address book is change, as on the v4.5.0 line
+        // (beta2 D-4; quantum spec A-15 recorded that 6.x never recognised PQ change). The z_* operations return
+        // PQ change to its source address, which is in the address book, so that output is not change on either line.
+        [&](const CPQKeyID&) { return true; },
         [&](const auto& other) { return false; }
     });
 }

@@ -1,10 +1,16 @@
 // Copyright (c) 2022 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "wallet/wallet_tx_builder.h"
 
+#include "consensus/upgrades.h"
+#include "main.h"
 #include "policy/policy.h"
+#include "rpc/protocol.h"
+#include "rpc/server.h"
+#include "wallet/asyncrpcoperation_common.h"
 #include "script/sign.h"
 #include "util/moneystr.h"
 #include "zip317.h"
@@ -28,10 +34,14 @@ CalcZIP317Fee(
         const std::optional<SpendableInputs>& inputs,
         const std::vector<ResolvedPayment>& payments,
         const std::optional<ChangeAddress>& changeAddr,
-        uint32_t consensusBranchId)
+        uint32_t consensusBranchId,
+        const std::vector<PQPayment>& pqPayments = {})
 {
     std::vector<CTxOut> vout{};
     size_t sproutOutputCount{}, saplingOutputCount{}, orchardOutputCount{};
+    for (const PQPayment& pq : pqPayments) {
+        vout.emplace_back(pq.amount, GetScriptForDestination(pq.address));
+    }
     for (const auto& payment : payments) {
         std::visit(match {
             [&](const CKeyID& addr) {
@@ -296,6 +306,36 @@ ResolveNetPayment(
         });
 }
 
+// z_mergetoaddress into a post-quantum address (beta2 D-6): the net amount as one TX_PQPKH output, a transparent
+// recipient for the privacy policy (D-5).
+static tl::expected<InputSelection, InputSelectionError>
+ResolveNetPQPayment(
+        const CWallet& wallet,
+        const SpendableInputs& spendable,
+        const NetAmountPQRecipient& pq,
+        const std::optional<CAmount>& fee,
+        const TransactionStrategy& strategy,
+        uint32_t consensusBranchId)
+{
+    if (!strategy.AllowRevealedRecipients()) {
+        return tl::make_unexpected(AddressResolutionError::TransparentRecipientNotAllowed);
+    }
+    auto initialFee = fee.value_or(MINIMUM_FEE);
+    auto valid = ValidateAmount(spendable, initialFee);
+    if (!valid.has_value()) {
+        return tl::make_unexpected(valid.error());
+    }
+    auto finalFee = fee.value_or(CalcZIP317Fee(
+            wallet, spendable, {}, std::nullopt, consensusBranchId, {{pq, spendable.Total() - initialFee, false}}));
+    auto validFinal = ValidateAmount(spendable, finalFee);
+    if (!validFinal.has_value()) {
+        return tl::make_unexpected(validFinal.error());
+    }
+    Payments payments({});
+    payments.AddPQPayment({pq, spendable.Total() - finalFee, false});
+    return InputSelection(spendable, payments, finalFee, std::nullopt);
+}
+
 tl::expected<ChangeAddress, AddressResolutionError>
 WalletTxBuilder::GetChangeAddress(
         CWallet& wallet,
@@ -498,6 +538,9 @@ WalletTxBuilder::PrepareTransaction(
                         return InputSelection(spendable, {{payment}}, finalFee, std::nullopt);
                     });
             },
+            [&](const NetAmountPQRecipient& pq) {
+                return ResolveNetPQPayment(wallet, spendable, pq, fee, strategy, consensusBranchId);
+            },
         });
     return selected.map([&](const InputSelection& resolvedSelection) {
         auto ovks = SelectOVKs(wallet, selector, spendable);
@@ -512,6 +555,183 @@ WalletTxBuilder::PrepareTransaction(
                 ovks.second,
                 anchorHeight);
     });
+}
+
+tl::expected<TransactionEffects, InputSelectionError>
+WalletTxBuilder::PreparePQTransaction(
+        CWallet& wallet,
+        const CPQKeyID& source,
+        const std::vector<Payment>& payments,
+        const CChain& chain,
+        const TransactionStrategy& strategy,
+        const std::optional<CAmount>& fee,
+        int32_t minDepth,
+        uint32_t anchorConfirmations) const
+{
+    if (fee.has_value()) {
+        if (maxTxFee < fee.value()) {
+            return tl::make_unexpected(MaxFeeError(fee.value()));
+        } else if (!MoneyRange(fee.value())) {
+            return tl::make_unexpected(InvalidFeeError(fee.value()));
+        }
+    }
+
+    LOCK2(cs_main, wallet.cs_wallet);
+    const auto& consensus = params.GetConsensus();
+    const int nHeight = chain.Height() + 1;
+    const int anchorHeight = GetAnchorHeight(chain, anchorConfirmations);
+    const bool afterNU5 = consensus.NetworkUpgradeActive(anchorHeight, Consensus::UPGRADE_NU5);
+    const uint32_t consensusBranchId = CurrentEpochBranchId(nHeight, consensus);
+
+    // The payments: a PQ source has no shielded funds, so a shielded recipient reveals the amount (D-5).
+    CAmount maxSaplingAvailable = 0;
+    CAmount maxOrchardAvailable = 0;
+    uint32_t orchardOutputs{0};
+    std::vector<ResolvedPayment> resolvedPayments;
+    std::vector<PQPayment> pqPayments;
+    CAmount sendAmount = 0;
+    for (const auto& payment : payments) {
+        sendAmount += payment.GetAmount();
+        if (const CPQKeyID* pq = payment.GetPQAddress()) {
+            if (!strategy.AllowRevealedRecipients()) {
+                return tl::make_unexpected(AddressResolutionError::TransparentRecipientNotAllowed);
+            }
+            pqPayments.push_back({*pq, payment.GetAmount(), false});
+            continue;
+        }
+        auto res = ResolvePayment(payment, afterNU5, strategy, maxSaplingAvailable, maxOrchardAvailable, orchardOutputs);
+        if (!res.has_value()) {
+            return tl::make_unexpected(res.error());
+        }
+        resolvedPayments.push_back(res.value());
+    }
+    if (orchardOutputs > this->maxOrchardActions) {
+        return tl::make_unexpected(ExcessOrchardActionsError(ActionSide::Output, orchardOutputs, this->maxOrchardActions));
+    }
+
+    // The source's own coins (never coinbase: a post-quantum address is never mined to).
+    std::vector<COutput> coins;
+    wallet.AvailableCoins(
+            coins,
+            std::nullopt,       // asOfHeight
+            false,              // fOnlyConfirmed
+            nullptr,            // coinControl
+            true,               // fIncludeZeroValue
+            false,              // fIncludeCoinBase
+            true,               // fOnlySpendable
+            minDepth,           // nMinDepth
+            {CTxDestination(source)});
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
+        return !IsPQKeyScript(o.tx->vout[o.i].scriptPubKey);
+    }), coins.end());
+    if (coins.empty()) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
+    }
+    // Largest first: each post-quantum input costs its full signature in size and fee.
+    std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
+        return i.Value() > j.Value();
+    });
+
+    std::vector<CTxOut> tOuts;
+    size_t saplingOutputs = 0;
+    for (const ResolvedPayment& r : resolvedPayments) {
+        examine(r.address, match {
+            [&](const CKeyID& addr) { tOuts.emplace_back(r.amount, GetScriptForDestination(addr)); },
+            [&](const CScriptID& addr) { tOuts.emplace_back(r.amount, GetScriptForDestination(addr)); },
+            [&](const libzcash::SaplingPaymentAddress&) { ++saplingOutputs; },
+            [&](const libzcash::OrchardRawAddress&) {},
+        });
+    }
+    for (const PQPayment& pq : pqPayments) {
+        tOuts.emplace_back(pq.amount, GetScriptForDestination(pq.address));
+    }
+    const CScript changeScript = GetScriptForDestination(source);
+
+    // The fee depends on the inputs and the change output, and the selection on the fee: repeat until the fee
+    // covers the transaction it pays for (it only grows, so this settles in a few rounds).
+    CAmount curFee = fee.value_or(LEGACY_DEFAULT_FEE);
+    std::vector<COutput> selected;
+    CAmount change = 0;
+    for (int round = 0; ; round++) {
+        if (round >= 16) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Could not settle the fee of this post-quantum spend");
+        }
+        // The fewest coins (largest first) that cover the target. Change below the dust threshold is folded into the
+        // fee below rather than avoided by adding a coin: another PQ input costs more than the dust it would save.
+        const CAmount target = sendAmount + curFee;
+        selected.clear();
+        CAmount sum = 0;
+        for (const COutput& c : coins) {
+            if (sum >= target) break;
+            selected.push_back(c);
+            sum += c.Value();
+        }
+        if (sum < target) {
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+                               strprintf("Insufficient transparent funds, have %s, need %s",
+                                         FormatMoney(sum), FormatMoney(target)));
+        }
+        change = sum - target;
+        // Change below the post-quantum dust threshold (priced on the real spend size) goes to the fee, as
+        // sendtoaddress does: no dust output is made.
+        CAmount dustToFee = 0;
+        if (change > 0 && change < GetPQDustThreshold(CTxOut(change, changeScript), ::minRelayTxFee)) {
+            dustToFee = change;
+            change = 0;
+        }
+
+        std::vector<std::pair<CScript, CAmount>> ins;
+        std::vector<CScript> prevScripts;
+        SpendableInputs selectedInputs;
+        for (const COutput& c : selected) {
+            ins.emplace_back(c.tx->vout[c.i].scriptPubKey, c.Value());
+            prevScripts.push_back(c.tx->vout[c.i].scriptPubKey);
+            selectedInputs.utxos.push_back(c);
+        }
+        std::vector<CTxOut> outs = tOuts;
+        std::vector<PQPayment> pqOuts = pqPayments;
+        if (change > 0) {
+            outs.emplace_back(change, changeScript);
+            pqOuts.push_back({source, change, true});
+        }
+        // 6.x: the Sapling builder pads a lone output to two (as CalcZIP317Fee counts them).
+        const CTransaction shape = PQFeeShape(nHeight, ins, outs, 0, PadCount(saplingOutputs));
+        EnsurePQShapeStandard(shape, prevScripts, selected.size());
+        // The fee this shape pays without a PQ input (the -feepolicy default) is the base of the PQ rule.
+        const CAmount base = fee.has_value() ? fee.value() :
+            CalcZIP317Fee(wallet, selectedInputs, resolvedPayments, std::nullopt, consensusBranchId, pqOuts);
+        const CAmount needed = PQBuilderFee(base, shape);
+        if (needed <= curFee) {
+            curFee += dustToFee;
+            break;
+        }
+        if (fee.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "Fee %s is below the %s this post-quantum spend needs", FormatMoney(fee.value()), FormatMoney(needed)));
+        }
+        curFee = needed;
+    }
+
+    SpendableInputs spendable;
+    spendable.utxos = selected;
+    Payments resolved(resolvedPayments);
+    for (const PQPayment& pq : pqPayments) {
+        resolved.AddPQPayment(pq);
+    }
+    if (change > 0) {
+        // beta2 D-4: change from a post-quantum address returns to that address (same scheme, no new key).
+        resolved.AddPQPayment({source, change, true});
+    }
+    const auto ovks = wallet.GetLegacyAccountKey().ToAccountPubKey().GetOVKsForShielding();
+    return TransactionEffects(
+            anchorConfirmations,
+            spendable,
+            resolved,
+            std::nullopt,
+            curFee,
+            ovks.first,
+            ovks.second,
+            anchorHeight);
 }
 
 const SpendableInputs& InputSelection::GetInputs() const {
@@ -551,7 +771,8 @@ CAmount GetConstrainedFee(
         const std::optional<SpendableInputs>& inputs,
         const std::vector<ResolvedPayment>& payments,
         const std::optional<ChangeAddress>& changeAddr,
-        uint32_t consensusBranchId)
+        uint32_t consensusBranchId,
+        const std::vector<PQPayment>& pqPayments = {})
 {
     // We know that minRelayFee <= MINIMUM_FEE <= conventional_fee, so we can use an arbitrary
     // transaction size when constraining the fee, because we are guaranteed to already satisfy the
@@ -559,7 +780,7 @@ CAmount GetConstrainedFee(
     constexpr unsigned int DUMMY_TX_SIZE = 1;
 
     return CWallet::ConstrainFee(
-            CalcZIP317Fee(wallet, inputs, payments, changeAddr, consensusBranchId),
+            CalcZIP317Fee(wallet, inputs, payments, changeAddr, consensusBranchId, pqPayments),
             DUMMY_TX_SIZE);
 }
 
@@ -617,7 +838,7 @@ WalletTxBuilder::IterateLimit(
     SpendableInputs spendableMut;
 
     auto previousFee = MINIMUM_FEE;
-    auto updatedFee = GetConstrainedFee(wallet, std::nullopt, resolved.GetResolvedPayments(), std::nullopt, consensusBranchId);
+    auto updatedFee = GetConstrainedFee(wallet, std::nullopt, resolved.GetResolvedPayments(), std::nullopt, consensusBranchId, resolved.GetPQPayments());
     // This is used to increase the target amount just enough (generally by 0 or 1) to force
     // selection of additional notes.
     CAmount bumpTargetAmount{0};
@@ -665,7 +886,8 @@ WalletTxBuilder::IterateLimit(
                     spendableMut,
                     resolved.GetResolvedPayments(),
                     changeAmount > 0 ? changeAddr : std::nullopt,
-                    consensusBranchId);
+                    consensusBranchId,
+                    resolved.GetPQPayments());
         } else {
             return tl::make_unexpected(
                     ReportInvalidFunds(
@@ -725,8 +947,17 @@ WalletTxBuilder::ResolveInputsAndPayments(
     // version where both Sprout and Orchard are valid.
     bool canResolveOrchard = afterNU5 && !selector.SelectsSprout();
     std::vector<ResolvedPayment> resolvedPayments;
+    std::vector<PQPayment> pqPayments;
     std::optional<AddressResolutionError> resolutionError;
     for (const auto& payment : payments) {
+        if (const CPQKeyID* pq = payment.GetPQAddress()) {
+            // A post-quantum recipient is a transparent recipient (beta2 D-5).
+            if (!strategy.AllowRevealedRecipients()) {
+                return tl::make_unexpected(AddressResolutionError::TransparentRecipientNotAllowed);
+            }
+            pqPayments.push_back({*pq, payment.GetAmount(), false});
+            continue;
+        }
         auto res = ResolvePayment(payment, canResolveOrchard, strategy, maxSaplingAvailable, maxOrchardAvailable, orchardOutputs);
         (void)res.map([&](const ResolvedPayment& rpayment) { resolvedPayments.emplace_back(rpayment); });
         if (!res.has_value()) {
@@ -734,6 +965,9 @@ WalletTxBuilder::ResolveInputsAndPayments(
         }
     }
     auto resolved = Payments(resolvedPayments);
+    for (const PQPayment& pq : pqPayments) {
+        resolved.AddPQPayment(pq);
+    }
 
     if (orchardOutputs > this->maxOrchardActions) {
         return tl::make_unexpected(
@@ -799,7 +1033,7 @@ WalletTxBuilder::ResolveInputsAndPayments(
             //       adding the change payment. We can remove this check and make the later one
             //       unconditional once that’s fixed.
             auto conventionalFee =
-                CalcZIP317Fee(wallet, spendableMut, resolved.GetResolvedPayments(), changeAddr, consensusBranchId);
+                CalcZIP317Fee(wallet, spendableMut, resolved.GetResolvedPayments(), changeAddr, consensusBranchId, resolved.GetPQPayments());
             if (finalFee > WEIGHT_RATIO_CAP * conventionalFee) {
                 return tl::make_unexpected(AbsurdFeeError(conventionalFee, finalFee));
             }
@@ -810,7 +1044,7 @@ WalletTxBuilder::ResolveInputsAndPayments(
             }
         } else {
             auto conventionalFee =
-                CalcZIP317Fee(wallet, spendableMut, resolved.GetResolvedPayments(), std::nullopt, consensusBranchId);
+                CalcZIP317Fee(wallet, spendableMut, resolved.GetResolvedPayments(), std::nullopt, consensusBranchId, resolved.GetPQPayments());
             if (finalFee > WEIGHT_RATIO_CAP * conventionalFee) {
                 return tl::make_unexpected(AbsurdFeeError(resolved.Total(), finalFee));
             }
@@ -1099,11 +1333,25 @@ TransactionBuilderResult TransactionEffects::ApproveAndBuild(
             return result.value();
         }
     }
+    // Post-quantum (TX_PQPKH) outputs, change included (beta2 D-2, D-4).
+    for (const PQPayment& pq : payments.GetPQPayments()) {
+        builder.AddTransparentOutput(GetScriptForDestination(pq.address), pq.amount);
+    }
 
-    // Add transparent utxos
+    // Add transparent utxos. A post-quantum coin is added unsigned and signed after Build() under the vault
+    // flags (beta2 D-2, D-6; SignPQBuilderInputs); every other one is signed by Build().
+    std::vector<PQBuilderInput> pqInputs;
+    std::vector<CTxOut> spentOutputs;
     for (const auto& out : spendable.utxos) {
         const CTxOut& txOut = out.tx->vout[out.i];
-        builder.AddTransparentInput(COutPoint(out.tx->GetHash(), out.i), txOut.scriptPubKey, txOut.nValue);
+        const COutPoint outPoint(out.tx->GetHash(), out.i);
+        if (IsPQKeyScript(txOut.scriptPubKey)) {
+            pqInputs.push_back(PQBuilderInput{spentOutputs.size(), outPoint, txOut.scriptPubKey, txOut.nValue});
+            builder.AddTransparentInputUnsigned(outPoint, txOut.scriptPubKey, txOut.nValue);
+        } else {
+            builder.AddTransparentInput(outPoint, txOut.scriptPubKey, txOut.nValue);
+        }
+        spentOutputs.push_back(txOut);
 
         totalSpend += txOut.nValue;
     }
@@ -1160,8 +1408,27 @@ TransactionBuilderResult TransactionEffects::ApproveAndBuild(
         });
     }
 
-    // Build the transaction
+    if (!pqInputs.empty() && totalSpend != payments.Total() + fee) {
+        return TransactionBuilderResult("Post-quantum input does not match the built transaction");
+    }
+
+    // Build the transaction (Sapling proofs are made here, with no lock held)
     auto result = builder.Build();
+
+    if (result.IsTx() && !pqInputs.empty()) {
+        // The post-quantum inputs, signed under the vault flags of the builder's height (beta2 D-2), and the
+        // signed transaction re-priced: the estimate must cover it.
+        CMutableTransaction mtx(result.GetTxOrThrow());
+        SignPQBuilderInputs(mtx, pqInputs, spentOutputs, nextBlockHeight);
+        const CTransaction signedTx(mtx);
+        const CAmount needed = PQBuilderFee(fee, signedTx);
+        if (needed > fee) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "Post-quantum fee estimate %s fell short of the %s the signed transaction needs",
+                FormatMoney(fee), FormatMoney(needed)));
+        }
+        result = TransactionBuilderResult(signedTx);
+    }
 
     if (result.IsTx()) {
         auto minRelayFee =

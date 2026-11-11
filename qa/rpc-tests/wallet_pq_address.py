@@ -9,9 +9,9 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
 
 - getnewaddress "" "pq" / "pqslh": refused before the vault upgrade; after it an rq… address of the wallet's PQ key
   chain (SLH-DSA while Falcon is inactive), in the address book; validateaddress pqscheme / pqkeyhash;
-- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_sendmany /
-  z_shieldcoinbase / z_mergetoaddress from an rq… (A-15), -mineraddress=rq…;
-- pay to rq… with sendtoaddress and sendmany (z_sendmany refuses it, below); receive (listunspent,
+- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_shieldcoinbase
+  from an rq… (D-7; z_sendmany and z_mergetoaddress spend one since beta2 D-2/D-6), -mineraddress=rq…;
+- pay to rq… with sendtoaddress, sendmany and z_sendmany; receive (listunspent,
   getreceivedbyaddress, listreceivedbyaddress); spend through coin selection (sendtoaddress) at
   max(the wallet's fee, LEGACY_DEFAULT_FEE, -pqfeerate x size, the ZIP-317 conventional fee);
 - the insight address index: getaddressbalance / utxos / txids / deltas / mempool by rq… and by the yr… YED form;
@@ -25,9 +25,9 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
   the PQ spend size (B-4), and vault_release names a pqkeyid passed as the recipient. (yed_validateaddress / yed_listtokens transparentAddress = the rq… form is
   checked in yellowback_pq.py, where the YED module is live.)
 
-6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): the z_* RPCs take a libzcash::PaymentAddress, which has no
-post-quantum alternative, so z_sendmany and z_mergetoaddress refuse an rq… recipient by name (v4.5.0 pays it from
-z_sendmany) and z_getbalance does not take one (getreceivedbyaddress stands in); the seed-only restore is
+6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): z_getbalance does not take an rq… address (getreceivedbyaddress
+stands in); z_sendmany and z_mergetoaddress pay and spend one since beta2 D-2/D-6 (quantum spec A-15 reversed,
+wallet_address_matrix.py); the seed-only restore is
 -mnemonicfile, the wallet's recovery phrase (z_exportwallet's recovery_phrase= line), where ycash-dd's -hdseedfile
 takes a 32-byte HD seed (two names, two file formats).
 
@@ -165,17 +165,16 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('does not refer to key', n0.signmessage, a, 'hello')
         assert_equal(n0.z_listaddresses(), [])
         zaddr = n0.z_getnewaddress('sapling')   # node 0's first Sapling key (m/32'/coin'/0'): restored by B-1
-        assert_raises_rpc('z_sendmany cannot spend from a post-quantum address', n0.z_sendmany, a, [{'address': zaddr, 'amount': 1}])
+        # z_sendmany and z_mergetoaddress spend from a PQ address (beta2 D-2, D-6: wallet_address_matrix.py);
+        # z_shieldcoinbase still refuses one (D-7).
         assert_raises_rpc('z_shieldcoinbase cannot spend from a post-quantum address', n0.z_shieldcoinbase, a, zaddr)
-        assert_raises_rpc('z_mergetoaddress cannot spend from a post-quantum address', n0.z_mergetoaddress, [a], zaddr)
 
-        print('pay to rq…: sendtoaddress, sendmany (z_sendmany refuses it on 6.20.0)')
+        print('pay to rq…: sendtoaddress, sendmany, z_sendmany')
         t1 = n1.getnewaddress()
         n1.sendtoaddress(t1, 5)
         self.mine(1)
-        assert_raises_rpc('z_sendmany cannot pay a post-quantum address', n1.z_sendmany, t1, [{'address': a3, 'amount': Decimal('0.75')}], 1, None)
-        assert_raises_rpc('z_mergetoaddress cannot pay a post-quantum address', n1.z_mergetoaddress, [t1], a3)
-        tx_z = n1.sendtoaddress(a3, Decimal('0.75'))
+        op = n1.z_sendmany(t1, [{'address': a3, 'amount': Decimal('0.75')}], 1, None, 'AllowFullyTransparent')
+        tx_z = wait_and_assert_operationid_status(n1, op)
         tx_a = n1.sendtoaddress(a, 2)
         tx_m = n1.sendmany('', {a2: 1, n1.getnewaddress(): Decimal('0.5')})
         # getunconfirmedbalance had no argument-table row on 6.22.0-beta1, so every call failed (beta2 item 12).
