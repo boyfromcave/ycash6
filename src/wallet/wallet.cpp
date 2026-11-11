@@ -16,6 +16,8 @@
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
+#include "yellowback/payload.h"
+#include "yellowback/wallet.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "consensus/consensus.h"
@@ -5136,10 +5138,6 @@ bool CWallet::IsChange(const CTxOut& txout) const
                 // make our determination
                 IsInternalKeyPath(44, BIP44CoinType(), keyMetaIt->second.hdKeypath);
         },
-        // A post-quantum key of this wallet that is not in the address book is change, as on the v4.5.0 line
-        // (beta2 D-4; quantum spec A-15 recorded that 6.x never recognised PQ change). The z_* operations return
-        // PQ change to its source address, which is in the address book, so that output is not change on either line.
-        [&](const CPQKeyID&) { return true; },
         [&](const auto& other) { return false; }
     });
 }
@@ -9563,4 +9561,44 @@ void SpendableInputs::LogInputs(const AsyncRPCOperationId& id) const {
             FormatMoney(entry.GetNoteValue()),
             HexStr(Memo::ToBytes(entry.GetMemo())).substr(0, 10));
     }
+}
+
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs)
+{
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index()) return "";
+    yellowback::YellowbackIndex& index = *yw->Index();
+    CWallet& wallet = *yw->Wallet();
+    std::vector<COutPoint> refused;
+    {
+        LOCK2(cs_main, wallet.cs_wallet);      // lock order (N25): cs_main, cs_wallet, then cs_yellowback
+        {
+            LOCK(index.cs_yellowback);
+            if (!index.IsHealthy()) {
+                return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
+                       "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
+            }
+            yellowback::State st(index.View());
+            for (const COutPoint& o : inputs) {
+                if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) refused.push_back(o);
+            }
+        }
+        // An output of an unconfirmed transaction is not in the tip index yet (minconf 0 reaches it): refuse every
+        // output of an unconfirmed transaction that carries a Yellowback payload.
+        for (const COutPoint& o : inputs) {
+            if (std::find(refused.begin(), refused.end(), o) != refused.end()) continue;
+            auto it = wallet.mapWallet.find(o.hash);
+            if (it != wallet.mapWallet.end() && it->second.GetDepthInMainChain(std::nullopt) <= 0 &&
+                yellowback::FindPayload(it->second).has_value()) {
+                refused.push_back(o);
+            }
+        }
+    }
+    for (const COutPoint& o : inputs) {
+        if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
+    }
+    if (refused.empty()) return "";
+    std::string list;
+    for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+    return "refusing to spend a Yellowback outpoint as plain YEC: " + list;
 }

@@ -5603,6 +5603,12 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&fromDest)) {
         EnsurePQSourceSpendable(fromDest);
         pqSender = *pq;
+        // The PQ inputs are signed after Build(); a Sprout output is not built that way (refused up front).
+        for (const PaymentAddress& r : recipientAddrs) {
+            if (std::holds_alternative<libzcash::SproutPaymentAddress>(r)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "A post-quantum from address cannot pay a Sprout address");
+            }
+        }
     } else if (fromaddress != "ANY_TADDR") {
         auto decoded = keyIO.DecodePaymentAddress(fromaddress);
         if (decoded.has_value()) {
@@ -6448,6 +6454,12 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         if (!allInputs.sproutNoteEntries.empty() || isToSprout) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
         }
+        // Defence in depth (the coin locks already keep every YED output out of the selection): no input of a merge
+        // with a post-quantum coin may be a Yellowback token, vault or carrier.
+        std::vector<COutPoint> ins;
+        for (const COutput& out : allInputs.utxos) ins.emplace_back(out.tx->GetHash(), out.i);
+        const std::string refusal = YellowbackInputRefusal(ins);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
         std::vector<std::pair<CScript, CAmount>> shapeIns;
         std::vector<CScript> prevScripts;
         for (const COutput& out : allInputs.utxos) {
@@ -6463,6 +6475,17 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                 [&](const CKeyID& addr) { shapeOuts.emplace_back(mergedValue, GetScriptForDestination(addr)); },
                 [&](const CScriptID& addr) { shapeOuts.emplace_back(mergedValue, GetScriptForDestination(addr)); },
                 [&](const libzcash::SaplingPaymentAddress&) { toSapling = true; },
+                [&](const libzcash::UnifiedAddress& ua) {
+                    // The receiver the builder pays (its preferred one at the next block): count its output.
+                    const auto r = ua.GetPreferredRecipientAddress(chainparams.GetConsensus(), nextBlockHeight);
+                    if (!r.has_value()) return;
+                    examine(r.value(), match {
+                        [&](const CKeyID& addr) { shapeOuts.emplace_back(mergedValue, GetScriptForDestination(addr)); },
+                        [&](const CScriptID& addr) { shapeOuts.emplace_back(mergedValue, GetScriptForDestination(addr)); },
+                        [&](const libzcash::SaplingPaymentAddress&) { toSapling = true; },
+                        [](const auto&) {},
+                    });
+                },
                 [](const auto&) {},
             });
         }
@@ -6478,8 +6501,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         }
         nFee = needed;
     }
-    if (pqDestKey) {
-        EnsurePQAmountNotDust(pqDest, mergedValue - nFee.value_or(LEGACY_DEFAULT_FEE));
+    if (pqDestKey && nFee.has_value()) {
+        // With the fee known here (given, or priced for PQ inputs) the dust check runs before building; with the
+        // -feepolicy default the builder checks the net amount on the fee it computes (ResolveNetPQPayment).
+        EnsurePQAmountNotDust(pqDest, mergedValue - nFee.value());
     }
 
     // Keep record of parameters in context object

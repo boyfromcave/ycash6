@@ -26,9 +26,17 @@ prefix is hard-coded (the prefixes change under D-9).
 - change below the PQ dust threshold goes to the fee; a send that needs more than 100 PQ inputs is refused;
 - refusals: before the vault upgrade, an FN-DSA address before Falcon, an amount below the PQ dust threshold, an
   explicit fee below what a PQ spend needs, a PQ address of another wallet, insufficient PQ funds, a locked wallet,
-  and an ECC source holding only coinbase paying a PQ address (coinbase is never selected for a transparent recipient).
+  and an ECC source holding only coinbase paying a PQ address (coinbase is never selected for a transparent recipient);
+- on 6.x (PRIVACY_POLICY) the privacy policy each PQ shape needs (D-5);
+- YED token protection, last: Yellowback goes live on nodes 0-2 (node 3 stops); a YED token on a fresh Falcon holder
+  key (a mint) and on a fresh holder key of a wallet that holds nothing else transparent (a transfer): z_sendmany from
+  the key to Sapling, ECC and both PQ schemes, z_mergetoaddress of the key and the wildcard merges all fail as from an
+  empty address, the token stays in listlockunspent, also after `lockunspent true`, and yed_getbalance never moves;
+  with the coin lock removed on purpose (yed_unlockcoin) the wallet's second check refuses the outpoint by name
+  ("refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>").
 
-Node profile P0 (no index): every check uses the wallet calls only.
+Node profile P0 (no index) for the matrix: every check uses the wallet calls only. The line differences (ycash-dd
+v4.5.0, ycash6 6.x) sit behind the test_framework/util.py line helpers, so this file is byte-identical on both lines.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_address_matrix.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -39,7 +47,11 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    COINBASE_ONLY_TRANSPARENT_REFUSAL,
+    LONE_SAPLING_OUTPUT_ACTIONS,
+    PRIVACY_POLICY,
     VAULT_BRANCH_ID,
+    Z_MERGE_NOTE_DEPTH,
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
@@ -47,10 +59,14 @@ from test_framework.util import (
     nuparams,
     start_node,
     start_nodes,
+    stop_node,
     sync_blocks,
     sync_mempools,
     wait_and_assert_operationid_status,
+    z_mergetoaddress_call,
+    z_sendmany_opid,
 )
+from test_framework.yellowback_util import activate_yed_late, mint_to_fresh_holder
 
 ACTIVATION = 210        # the vault upgrade (UPGRADE_VAULT)
 FALCON = 220            # -pqfalconheight: FN-DSA-512 admitted from here
@@ -66,6 +82,10 @@ ECC, SAP, FN, SLH = 'ECC', 'Sapling', 'PQ-FN-DSA', 'PQ-SLH-DSA'
 KINDS = (ECC, SAP, FN, SLH)
 
 LOCKED = 'Please enter the wallet passphrase with walletpassphrase first'
+NO_PQ_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
+NO_MERGE_FUNDS = 'Could not find any funds to merge.'
+YED_REFUSED = 'refusing to spend a Yellowback outpoint as plain YEC: '
+UNLOCK_ACK = 'I understand this burns YED'
 
 
 def zat(x):
@@ -96,7 +116,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         a = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-pqfalconheight=%d' % FALCON]
         if i == 3:
             a += ['-experimentalfeatures', '-developerencryptwallet']
-        return a
+        return a + getattr(self, 'yed_args', {}).get(i, [])
 
     def setup_network(self, split=False):
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir,
@@ -106,21 +126,13 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         self.is_network_split = False
         self.sync_all()
 
-    # --- line differences (ycash-dd v4.5.0 / ycash6 6.x), guarded so the file is byte-identical on both lines ---
-
-    def is_v6(self):
-        if not hasattr(self, '_v6'):
-            self._v6 = self.nodes[0].getnetworkinfo()['version'] >= 6000000
-        return self._v6
+    # --- line differences (ycash-dd v4.5.0 / ycash6 6.x): behind the test_framework/util.py line helpers, so this file
+    # is byte-identical on both lines (z_sendmany_opid, z_mergetoaddress_call, PRIVACY_POLICY,
+    # LONE_SAPLING_OUTPUT_ACTIONS, Z_MERGE_NOTE_DEPTH, COINBASE_ONLY_TRANSPARENT_REFUSAL) ---
 
     def zsend(self, node, src, recipients, fee=None):
-        """z_sendmany with the documented arguments; the 6.x privacy policy (D-5) where the line has one."""
-        args = [src, [{'address': a, 'amount': v} for a, v in recipients], 1]
-        if fee is not None or self.is_v6():
-            args.append(fee if fee is not None else (None if self.is_v6() else DEFAULT_FEE))
-        if self.is_v6():
-            args.append('AllowFullyTransparent')
-        return node.z_sendmany(*args)
+        """z_sendmany with the documented arguments (on 6.x the privacy policy a transparent party needs, D-5)."""
+        return z_sendmany_opid(node, src, recipients, 1, fee)
 
     def zsend_ok(self, node, src, recipients, fee=None):
         return wait_and_assert_operationid_status(node, self.zsend(node, src, recipients, fee))
@@ -137,27 +149,6 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         assert res is not None, 'timeout'
         assert_equal(res['status'], 'failed')
         assert substr in res['error']['message'], (substr, res['error']['message'])
-
-    def default_fee(self, raw):
-        return DEFAULT_FEE      # both lines: v4.5.0 DEFAULT_FEE, 6.x the -feepolicy=peroutput default (one Sapling output or none)
-
-    def sapling_out_actions(self):
-        """Logical actions of one Sapling output and no Sapling spend: 6.x's Sapling builder pads it to two outputs."""
-        return 2 if self.is_v6() else 1
-
-    def zmerge(self, node, srcs, dst, fee=None, limit=None):
-        """z_mergetoaddress with the documented arguments; on 6.x the privacy policy (D-5) the shape needs: merging
-        coins of more than one address links them, so these merges pass NoPrivacy there."""
-        args = [srcs, dst]
-        if fee is not None or limit is not None or self.is_v6():
-            args += [fee, limit]
-        if self.is_v6():
-            args += [None, None, 'NoPrivacy']
-        return node.z_mergetoaddress(*args)
-
-    def coinbase_only_refusal(self):
-        """The existing refusal of an ECC source holding only coinbase paying a transparent recipient, per line."""
-        return 'coinbase outputs will not be selected' if self.is_v6() else 'Could not find any non-coinbase UTXOs to spend'
 
     # --- helpers ---
 
@@ -203,7 +194,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         fee, raw = self.fee_of(node, txid)
         pq = self.has_pq_input(node, raw)
         assert_equal(pq, expected is not None)
-        assert_equal(fee, expected if pq else self.default_fee(raw))
+        assert_equal(fee, expected if pq else DEFAULT_FEE)      # both lines: v4.5.0 DEFAULT_FEE, 6.x -feepolicy=peroutput
         if src is not None and self.kind_of(node, src) in (FN, SLH):
             assert pq, txid
             src_spk = self.spk(node, src)
@@ -242,7 +233,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                           self.zsend, n0, src[ECC], [(dst[SLH], 1)])
         assert_raises_rpc('post-quantum addresses can be spent from only once the vault upgrade is active',
                           self.zsend, n0, src[SLH], [(dst[ECC], 1)])
-        assert_raises_rpc('can be spent from only once the vault upgrade is active', self.zmerge, n0, [src[SLH]], dst[ECC])
+        assert_raises_rpc('can be spent from only once the vault upgrade is active', z_mergetoaddress_call, n0, [src[SLH]], dst[ECC])
         n0.reconsiderblock(h_vault)
         sync_blocks(self.nodes)
 
@@ -261,7 +252,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                           self.zsend, n0, src[ECC], [(dst[FN], 1)])
         assert_raises_rpc('FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active',
                           self.zsend, n0, src[FN], [(dst[ECC], 1)])
-        assert_raises_rpc('can be spent from only once Falcon is active', self.zmerge, n0, [src[FN]], dst[ECC])
+        assert_raises_rpc('can be spent from only once Falcon is active', z_mergetoaddress_call, n0, [src[FN]], dst[ECC])
         n0.reconsiderblock(h_falcon)
         sync_blocks(self.nodes)
 
@@ -285,15 +276,15 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         assert_raises_rpc('From address does not belong to this node, post-quantum key not found.',
                           self.zsend, n0, dst[SLH], [(src[ECC], Decimal('0.1'))])
         assert_raises_rpc('From address does not belong to this node, post-quantum key not found.',
-                          self.zmerge, n0, [dst[FN]], src[ECC])
+                          z_mergetoaddress_call, n0, [dst[FN]], src[ECC])
         cb = get_coinbase_address(n0)
-        self.zsend_fails(n0, cb, [(dst[SLH], 1)], self.coinbase_only_refusal())
+        self.zsend_fails(n0, cb, [(dst[SLH], 1)], COINBASE_ONLY_TRANSPARENT_REFUSAL)
         n3.encryptwallet('matrix-pass')
         bitcoind_processes[3].wait()
         self.nodes[3] = n3 = start_node(3, self.options.tmpdir, self.node_args(3))
         connect_nodes_bi(self.nodes, 2, 3)
         assert_raises_rpc(LOCKED, self.zsend, n3, locked_pq, [(dst[ECC], 1)])
-        assert_raises_rpc(LOCKED, self.zmerge, n3, [locked_pq], dst[ECC])
+        assert_raises_rpc(LOCKED, z_mergetoaddress_call, n3, [locked_pq], dst[ECC])
 
         print('the matrix: 16 cells and two mixed sends, all with the documented call (z_sendmany)')
         expect_in = {k: Decimal(0) for k in KINDS}        # receiver totals per destination
@@ -353,14 +344,14 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         check_balances('after the reorg')
 
         print('every output node 1 received is spent: each receiving address emptied with z_mergetoaddress')
-        if self.is_v6():
-            self.mine(2)      # 6.x's z_mergetoaddress takes notes only at nAnchorConfirmations (3) deep
         back = n0.getnewaddress()
+        if Z_MERGE_NOTE_DEPTH > 1:
+            self.mine(Z_MERGE_NOTE_DEPTH - 1)      # 6.x merges a note only at nAnchorConfirmations deep
         # six outputs at each address (four cells + two mixed sends): the fees of six inputs of each kind
         merge_fee = {ECC: None, SAP: None, FN: 500 * -(-6 * 1620 // 150), SLH: 500 * -(-6 * 7981 // 150)}
         total_back = Decimal(0)
         for d in KINDS:
-            r = self.zmerge(n1, [dst[d]] if d != SAP else ['ANY_SAPLING'], back)
+            r = z_mergetoaddress_call(n1, [dst[d]] if d != SAP else ['ANY_SAPLING'], back)
             assert_equal(r['mergingUTXOs'] + r['mergingNotes'], 6)
             txid = wait_and_assert_operationid_status(n1, r['opid'])
             fee = self.check_sent(n1, txid, None, merge_fee[d])
@@ -372,28 +363,28 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
 
         print('z_mergetoaddress: PQ -> PQ, PQ + ECC -> Sapling, Sapling -> PQ')
         merged_pq = n0.getnewaddress('', 'pqslh')
-        r = self.zmerge(n0, [src[FN]], merged_pq)
+        r = z_mergetoaddress_call(n0, [src[FN]], merged_pq)
         assert_equal(r['mergingUTXOs'], 5)                # one unspent original and four D-4 change outputs
         txid = wait_and_assert_operationid_status(n0, r['opid'])
         fee = self.check_sent(n0, txid, None, 500 * -(-5 * 1620 // 150))
         assert_equal(coins(fee), Decimal(r['mergingTransparentValue']) - n0.getrawtransaction(txid, 1)['vout'][0]['value'])
         self.mine(1)
         assert_equal(self.unspent(n0, src[FN]), 0)
-        assert_raises_rpc('Fee 0.0001 is below the', self.zmerge, n0, [merged_pq], dst[ECC], Decimal('0.0001'))
-        r = self.zmerge(n0, [src[SLH], src[ECC]], src[SAP])
+        assert_raises_rpc('Fee 0.0001 is below the', z_mergetoaddress_call, n0, [merged_pq], dst[ECC], Decimal('0.0001'))
+        r = z_mergetoaddress_call(n0, [src[SLH], src[ECC]], src[SAP])
         assert_equal(r['mergingUTXOs'], 6)                # five SLH-DSA change outputs and one ECC coin
         txid = wait_and_assert_operationid_status(n0, r['opid'])
-        self.check_sent(n0, txid, None, 500 * (-(-(5 * 7981 + 148) // 150) + self.sapling_out_actions()))
+        self.check_sent(n0, txid, None, 500 * (-(-(5 * 7981 + 148) // 150) + LONE_SAPLING_OUTPUT_ACTIONS))
         self.mine(1)
         assert_equal(self.unspent(n0, src[SLH]), 0)
         merged_fn = n0.getnewaddress('', 'pq')
-        r = self.zmerge(n0, ['ANY_SAPLING'], merged_fn)
+        r = z_mergetoaddress_call(n0, ['ANY_SAPLING'], merged_fn)
         txid = wait_and_assert_operationid_status(n0, r['opid'])
         fee = self.check_sent(n0, txid, None)
         self.mine(1)
         assert_equal(self.unspent(n0, merged_fn), Decimal(r['mergingShieldedValue']) - coins(fee))
         txid = self.zsend_ok(n0, merged_fn, [(dst[SAP], Decimal('0.5'))])
-        self.check_sent(n0, txid, merged_fn, FEE_FN + FEE_SAPLING_OUT * self.sapling_out_actions())
+        self.check_sent(n0, txid, merged_fn, FEE_FN + FEE_SAPLING_OUT * LONE_SAPLING_OUTPUT_ACTIONS)
         self.mine(1)
 
         print('z_mergetoaddress: a P2SH multisig coin and a PQ coin in one merge (the policy sigops of both)')
@@ -403,7 +394,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         n0.sendtoaddress(msig, 1)
         n0.sendtoaddress(pq_one, 1)
         self.mine(1)
-        r = self.zmerge(n0, [msig, pq_one], back)
+        r = z_mergetoaddress_call(n0, [msig, pq_one], back)
         assert_equal(r['mergingUTXOs'], 2)
         txid = wait_and_assert_operationid_status(n0, r['opid'])
         # vin: 7,981 (SLH-DSA) + ~260 (2-of-2 P2SH: OP_0, two signatures, the 71-byte redeem script) = 55 actions
@@ -439,18 +430,98 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         self.zsend_fails(n0, small, [(back, Decimal('0.1'))],
                          'This send needs %d post-quantum inputs, more than the %d one transaction may carry' % (PQ_CAP + 1, PQ_CAP))
         cap_fee = 500 * -(-PQ_CAP * 1620 // 150)       # 1,080 actions: 0.0054 YEC, given explicitly (limit 0 needs a fee)
-        r = self.zmerge(n0, [small], merged_fn, coins(cap_fee), 0)
+        r = z_mergetoaddress_call(n0, [small], merged_fn, coins(cap_fee), 0)
         assert_equal((r['mergingUTXOs'], r['remainingUTXOs']), (PQ_CAP, 10))
         txid = wait_and_assert_operationid_status(n0, r['opid'])
         self.check_sent(n0, txid, None, cap_fee)
         self.mine(1)
         assert_equal(len(n0.listunspent(1, 9999999, [small])), 10)
 
-        if self.is_v6():
-            self.check_privacy_policy_v6(n0, n1)
+        if PRIVACY_POLICY:
+            self.check_privacy_policy(n0, n1)
+        self.token_protection(back)
 
-    def check_privacy_policy_v6(self, n0, n1):
-        """6.x only (D-5; ycash-dd has no privacy policy): a PQ party is a transparent party. PQ -> Sapling without
+    def token_protection(self, back):
+        """A YED token at a post-quantum holder key is never spent as plain YEC by z_sendmany or z_mergetoaddress.
+
+        The Yellowback wallet layer locks every token output; consensus would accept a plain spend of one and burn its
+        YED. Node 0 mints (the token on a fresh Falcon holder key) and sends a second token to a fresh holder key of
+        node 1, whose wallet then holds nothing else transparent (so the wildcard merges have nothing else to take).
+        Every spend from those keys fails as from an empty address, with the locks in place and after `lockunspent
+        true`; with a lock removed on purpose (yed_unlockcoin) the second check refuses the outpoint by name."""
+        n0, n1, n2, n3 = self.nodes
+        print('token protection: YED on nodes 0-2 (node 3 stops), a mint to a fresh Falcon holder key')
+        # empty node 1 (the dust case paid it a coin, the Sapling -> PQ case a note) so the wildcards find nothing else
+        wait_and_assert_operationid_status(n1, z_mergetoaddress_call(n1, ['ANY_TADDR', 'ANY_SAPLING'], back)['opid'])
+        self.mine(1)
+        stop_node(n3, 3)
+        self.nodes = self.nodes[:3]
+        self.num_nodes = 3
+        activate_yed_late(self, [0, 2], ((0, 1), (1, 2), (0, 2)))
+        n0, n1, n2 = self.nodes
+        mints = [mint_to_fresh_holder(self.nodes, 0, 2) for _ in range(2)]
+        n0.yed_send(n1.yed_getnewaddress(), 10000)
+        self.mine(1)
+        assert_equal(n1.yed_getbalance()['confirmedCents'], 10000)
+        mine0 = [(c['txid'], c['vout']) for c in n0.yed_listunspent()]
+        assert_equal(len(mine0), 1)
+        held = {0: [m for m in mints if m[1] == mine0[0]][0][1:]}
+        ys = [c for c in n1.yed_listunspent()]
+        assert_equal(len(ys), 1)
+        out1 = (ys[0]['txid'], ys[0]['vout'])
+        held[1] = (out1, n1.getrawtransaction(out1[0], 1)['vout'][out1[1]]['scriptPubKey']['addresses'][0])
+        assert_equal(n1.listunspent(0), [])                     # node 1: nothing transparent but the (locked) token
+        assert_equal(n1.z_listunspent(0), [])
+        tok_value = Decimal('0.0001')                            # TOKEN_VALUE, 10,000 zat
+
+        def yed_balances():
+            return (n0.yed_getbalance()['confirmedCents'], n1.yed_getbalance()['confirmedCents'])
+
+        before = yed_balances()
+
+        def assert_all_refused(node, key, outpoint, sub_send, sub_merge, wildcards):
+            assert_equal(self.kind_of(node, key), FN)
+            assert_equal(node.getreceivedbyaddress(key, 0), tok_value)      # the key never received anything else
+            for d in (node.z_getnewaddress('sapling'), node.getnewaddress(), node.getnewaddress('', 'pq'),
+                      node.getnewaddress('', 'pqslh')):
+                self.zsend_fails(node, key, [(d, Decimal('0.001'))], sub_send)
+            assert_raises_rpc(sub_merge, z_mergetoaddress_call, node, [key], back)
+            for w in wildcards:
+                assert_raises_rpc(NO_MERGE_FUNDS, z_mergetoaddress_call, node, w, back)
+            assert_equal(yed_balances(), before)
+
+        def locked(node, outpoint):
+            return {'txid': outpoint[0], 'vout': outpoint[1]} in node.listlockunspent()
+
+        wild = [['ANY_TADDR'], ['ANY_TADDR', 'ANY_SAPLING'], [held[1][1], 'ANY_SAPLING']]
+        for unlock_all in (False, True):
+            print('  token keys: every spend refused as from an empty address (%s)' %
+                  ('after lockunspent true' if unlock_all else 'locks in place'))
+            for i, node in ((0, n0), (1, n1)):
+                if unlock_all:
+                    assert node.lockunspent(True)
+                assert locked(node, held[i][0]), (i, held[i][0], node.listlockunspent())
+                assert_all_refused(node, held[i][1], held[i][0], NO_PQ_UTXOS, NO_MERGE_FUNDS, wild if i == 1 else [])
+                assert locked(node, held[i][0])
+
+        print('  the lock removed on purpose (yed_unlockcoin): the second check refuses the outpoint by name')
+        op, key = held[1]
+        r = n1.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)
+        assert_equal((r['wasYellowbackLocked'], r['cents']), (True, 10000))
+        assert not locked(n1, op)
+        named = YED_REFUSED + '%s:%d' % op
+        for d in (n1.z_getnewaddress('sapling'), n1.getnewaddress(), n1.getnewaddress('', 'pq')):
+            self.zsend_fails(n1, key, [(d, Decimal('0.001'))], named)
+        assert_raises_rpc(named, z_mergetoaddress_call, n1, [key], back)
+        assert_raises_rpc(named, z_mergetoaddress_call, n1, [key, 'ANY_SAPLING'], back)
+        assert_raises_rpc(NO_MERGE_FUNDS, z_mergetoaddress_call, n1, ['ANY_TADDR'], back)   # ECC coins only
+        n1.yed_lockcoins()
+        assert locked(n1, op)
+        assert_equal(yed_balances(), before)
+        assert_equal(n1.gettxout(op[0], op[1])['value'], tok_value)          # the token output is unspent
+
+    def check_privacy_policy(self, n0, n1):
+        """PRIVACY_POLICY lines only (6.x, D-5; ycash-dd has none): a PQ party is a transparent party. PQ -> Sapling without
         change needs AllowRevealedSenders; with the D-4 change (a transparent output) the policy an ECC source with
         transparent change needs, AllowFullyTransparent; Sapling -> PQ needs AllowRevealedRecipients. Also the
         sender's listing of a PQ-source send: the payment is a send of its amount, the D-4 change nets to zero."""
@@ -476,7 +547,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         pq5 = n0.getnewaddress('', 'pq')
         n0.sendtoaddress(pq5, 1)
         self.mine(1)
-        fee = FEE_FN + FEE_SAPLING_OUT * self.sapling_out_actions()
+        fee = FEE_FN + FEE_SAPLING_OUT * LONE_SAPLING_OUTPUT_ACTIONS
         exact = Decimal(1) - coins(fee)       # no change
         fails(pq5, [(zq, exact)], 'AllowRevealedRecipients', 'Select AllowRevealedSenders or weaker')
         txid = ok(pq5, [(zq, exact)], 'AllowRevealedSenders')
@@ -508,7 +579,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         """The fixed fee of a one-input send from a source of kind s (None: no PQ input, the line's default)."""
         if s not in (FN, SLH):
             return None
-        return (FEE_SLH if s == SLH else FEE_FN) + (FEE_SAPLING_OUT * self.sapling_out_actions() if sapling_out else 0)
+        return (FEE_SLH if s == SLH else FEE_FN) + (FEE_SAPLING_OUT if sapling_out else 0)
 
 
 if __name__ == '__main__':

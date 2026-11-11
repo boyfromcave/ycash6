@@ -35,6 +35,7 @@ takes a 32-byte HD seed (two names, two file formats).
 """
 
 import os
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -71,6 +72,23 @@ def assert_raises_rpc(substr, fn, *args):
         assert substr in e.error['message'], 'expected %r in %r' % (substr, e.error['message'])
         return e.error['message']
     raise AssertionError('expected an RPC error containing %r' % substr)
+
+
+def merge_fails(node, srcs, dst, policy, substr):
+    """z_mergetoaddress under ``policy`` fails with ``substr``: refused by the RPC itself, or by its operation."""
+    try:
+        opid = node.z_mergetoaddress(srcs, dst, None, None, None, None, policy)['opid']
+    except JSONRPCException as e:
+        assert substr in e.error['message'], 'expected %r in %r' % (substr, e.error['message'])
+        return
+    for _ in range(300):
+        res = node.z_getoperationresult([opid])
+        if res:
+            assert_equal(res[0]['status'], 'failed')
+            assert substr in res[0]['error']['message'], 'expected %r in %r' % (substr, res[0]['error']['message'])
+            return
+        time.sleep(1)
+    raise AssertionError('timeout waiting for %s' % opid)
 
 
 def zat(x):
@@ -211,6 +229,22 @@ class WalletPQAddressTest(BitcoinTestFramework):
             assert_equal([(x['txid'], x['satoshis'], x['address']) for x in d], [(tx_a, zat(2), form)])
         both = n0.getaddressbalance({'addresses': [a, a2]})
         assert_equal(both['balance'], zat(3))
+
+        print('z_mergetoaddress of a PQ address: the 6.x privacy policy (D-5) refuses a weaker shape than it allows')
+        # A PQ coin is a transparent coin: merging one address's coins into Sapling reveals the sender
+        # (AllowRevealedSenders), into a transparent or PQ address it is fully transparent (AllowFullyTransparent),
+        # and merging two addresses links them (AllowLinkingAccountAddresses; NoPrivacy to a transparent address).
+        locks = n0.listlockunspent()
+        for srcs, dst, policy, substr in (
+                ([a], zaddr, 'FullPrivacy', 'set to `AllowRevealedAmounts` or weaker'),
+                ([a], zaddr, 'AllowRevealedRecipients', 'Select AllowRevealedSenders or weaker'),
+                ([a], n0.getnewaddress(), 'AllowRevealedSenders', 'transparent recipient'),
+                ([a], a3, 'AllowRevealedSenders', 'transparent recipient'),
+                ([a, a2], zaddr, 'AllowRevealedSenders', 'Select AllowLinkingAccountAddresses or weaker'),
+                ([a, a2], n0.getnewaddress(), 'AllowFullyTransparent', 'Select NoPrivacy')):
+            merge_fails(n0, srcs, dst, policy, substr)
+        assert_equal(n0.listlockunspent(), locks)            # a refused merge leaves no coin locked
+        assert_equal(n0.getaddressbalance({'addresses': [a, a2]})['balance'], zat(3))
 
         print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]

@@ -966,3 +966,29 @@ def tarfile_extractall(tgz, path):
         if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
             raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
     tgz.extractall(path=path, members=members)
+
+
+# Line helpers for wallet_address_matrix.py, which is byte-identical on both C++ node lines (beta2 D-2, D-6). ycash-dd's
+# util.py defines the same names for v4.5.0 (no privacy policy, DEFAULT_FEE, no Sapling output padding, merges at depth
+# 1, "Could not find any non-coinbase UTXOs to spend"). On 6.x: z_sendmany takes the privacy policy (D-5), z_mergetoaddress
+# links the coins of more than one address (NoPrivacy), the Sapling builder pads a lone output to two (2 logical
+# actions), z_mergetoaddress takes notes only at nAnchorConfirmations (3) deep, and an ECC source holding only coinbase
+# that pays a transparent recipient is refused by the ZTXO selector.
+PRIVACY_POLICY = True                  # 6.x: z_sendmany and z_mergetoaddress take a privacy policy (D-5)
+LONE_SAPLING_OUTPUT_ACTIONS = 2        # ZIP-317 logical actions of one Sapling output with no Sapling spend (padded)
+Z_MERGE_NOTE_DEPTH = 3                 # the depth from which z_mergetoaddress merges a Sapling note
+COINBASE_ONLY_TRANSPARENT_REFUSAL = 'coinbase outputs will not be selected'
+
+
+def z_sendmany_opid(node, fromaddr, amounts, minconf=1, fee=None):
+    """z_sendmany with the documented arguments; returns the operation id. ``amounts`` is [(address, amount)]. A fee
+    of None leaves the wallet's default (6.x: the -feepolicy fee, raised to what a post-quantum input needs); the
+    privacy policy is AllowFullyTransparent, which every shape with a transparent or post-quantum party needs."""
+    args = [fromaddr, [{'address': a, 'amount': v} for a, v in amounts], minconf, fee, 'AllowFullyTransparent']
+    return node.z_sendmany(*args)
+
+
+def z_mergetoaddress_call(node, fromaddrs, toaddr, fee=None, limit=None):
+    """z_mergetoaddress with the documented arguments; on 6.x the privacy policy NoPrivacy (merging the coins of more
+    than one address links them). Returns the RPC's result."""
+    return node.z_mergetoaddress(fromaddrs, toaddr, fee, limit, None, None, 'NoPrivacy')

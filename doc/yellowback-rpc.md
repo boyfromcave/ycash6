@@ -203,14 +203,28 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `Fee <x> is below the <y> this post-quantum spend needs`;
   `This send needs <n> post-quantum inputs, more than the <m> one transaction may carry; combine the address's coins first with z_mergetoaddress`;
   `This transaction needs <n> signature operations, more than the <m> a standard transaction allows; spend fewer inputs`;
+  `A post-quantum from address cannot pay a Sprout address`;
   `Post-quantum coins cannot be merged with Sprout notes or into a Sprout address`;
   `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
   `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
-  Falcon keeps its `… can be paid only once …` strings. (`A post-quantum from address cannot pay a Sprout address` does
-  not arise here: this line refuses every Sprout recipient.)
-- **`IsChange`** sees a post-quantum key of the wallet that is not in the address book as change, as on the
-  v4.5.0 line (A-15 had recorded that this line never did); the D-4 change returns to an address in the book, so
-  it is listed as a payment to that address on both lines.
+  Falcon keeps its `… can be paid only once …` strings.
+- **YED is never spent as plain YEC by these paths.** The Yellowback wallet layer locks every token output
+  (`listlockunspent`; `lockunspent` will not unlock one, and `lockunspent true` re-applies the locks), so a holder
+  key's token never reaches the coin selection: a send or merge from a key that holds only tokens fails as from an
+  empty address (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds
+  to merge.`). As a second check, a post-quantum source's candidate coins (`z_sendmany`) and every input of a merge
+  with a PQ coin (`z_mergetoaddress`) are looked up in the Yellowback index, the check the YED builders make: a
+  token or vault outpoint, an output of an unconfirmed transaction carrying a Yellowback payload, or a carrier of
+  this wallet, is refused (RPC_WALLET_ERROR)
+  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…]`, and where Yellowback is live
+  and its index is unhealthy every such spend is refused, since the locks are then not reconciled:
+  `refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks
+  cannot be trusted; restart with -reindex-yellowback`. This holds even after `yed_unlockcoin`: a deliberate burn
+  goes through `sendrawtransaction … allowyedburn`. `sendtoaddress`/`sendmany` and an ECC-source `z_sendmany`
+  rely on the coin lock alone, as before.
+- **Change.** The D-4 change returns to its source address, which is in the address book, so it is listed as a
+  payment to that address on both lines. `IsChange` is unchanged on this line: a post-quantum key outside the
+  address book is not change.
 - **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap

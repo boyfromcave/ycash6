@@ -11,6 +11,7 @@
 #include "rpc/protocol.h"
 #include "rpc/server.h"
 #include "wallet/asyncrpcoperation_common.h"
+#include "wallet/rpcwallet.h"
 #include "script/sign.h"
 #include "util/moneystr.h"
 #include "zip317.h"
@@ -331,6 +332,8 @@ ResolveNetPQPayment(
     if (!validFinal.has_value()) {
         return tl::make_unexpected(validFinal.error());
     }
+    // The net amount against the dust threshold of a PQ output, on the fee this merge really pays.
+    EnsurePQAmountNotDust(CTxDestination(pq), spendable.Total() - finalFee);
     Payments payments({});
     payments.AddPQPayment({pq, spendable.Total() - finalFee, false});
     return InputSelection(spendable, payments, finalFee, std::nullopt);
@@ -627,6 +630,14 @@ WalletTxBuilder::PreparePQTransaction(
     if (coins.empty()) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
     }
+    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the send when any
+    // candidate coin is one the Yellowback index knows as a token or vault, or the wallet layer as a carrier.
+    {
+        std::vector<COutPoint> candidates;
+        for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
+        const std::string refusal = YellowbackInputRefusal(candidates);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
+    }
     // Largest first: each post-quantum input costs its full signature in size and fee.
     std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
         return i.Value() > j.Value();
@@ -723,6 +734,14 @@ WalletTxBuilder::PreparePQTransaction(
         resolved.AddPQPayment({source, change, true});
     }
     const auto ovks = wallet.GetLegacyAccountKey().ToAccountPubKey().GetOVKsForShielding();
+    // Lock the selected coins before cs_wallet is released: the operation signs them for up to ~33 s (100 SLH-DSA
+    // inputs) after this returns, and a concurrent send from the same address would otherwise select the same coins
+    // and fail only after its own signing. The operation's LockSpendable re-locks them (a no-op) and its
+    // UnlockSpendable releases them after the broadcast or on any failure, as for every other send.
+    for (const COutput& c : selected) {
+        COutPoint outpt(c.tx->GetHash(), c.i);
+        wallet.LockCoin(outpt);
+    }
     return TransactionEffects(
             anchorConfirmations,
             spendable,

@@ -2787,4 +2787,17 @@ bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& r
  *  reindex, a join not yet mined) sets the marker then. False when the wallet database cannot be written. */
 bool MarkVaultKeyImported(CWallet& wallet, const CPubKey& key);
 
+/**
+ * Defence in depth for a plain-YEC spend whose inputs this wallet selected itself from one address (beta2:
+ * z_sendmany and z_mergetoaddress from a post-quantum address, vault_lock "from"). The Yellowback wallet layer keeps
+ * every YED-bearing output locked, so AvailableCoins never offers one; this is the second check, the one the YED
+ * builders make (yellowback/txbuilder.cpp SelectYec): an input the Yellowback index knows as a token or a vault, or
+ * that the wallet layer holds as a carrier, is refused, since consensus would accept the spend and burn its YED; so is
+ * an output of an unconfirmed transaction that carries a Yellowback payload (the tip index does not know it yet).
+ * Where Yellowback is live and its index is unhealthy every spend is refused: the coin locks are then not reconciled
+ * and cannot be trusted. Where Yellowback is not live there is nothing to check. Returns "" when the inputs may be
+ * spent, else the refusal (RPC_WALLET_ERROR at the callers). Takes cs_main, cs_wallet, then cs_yellowback (N25).
+ */
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs);
+
 #endif // BITCOIN_WALLET_WALLET_H
