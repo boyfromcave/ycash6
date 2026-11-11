@@ -27,7 +27,7 @@ vault_lock's funding address "from" (beta2 address-interop plan, decision D-3; d
 
 No address string or prefix is written here: every address comes from the node (the PQ encoding may change).
 
-    ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_lock_from.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
+    BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_lock_from.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
 from decimal import Decimal
@@ -39,6 +39,7 @@ from test_framework.util import (
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
+    lockunspent_true,
     nuparams,
     start_node,
     start_nodes,
@@ -47,7 +48,7 @@ from test_framework.util import (
     sync_mempools,
     wait_and_assert_operationid_status,
 )
-from test_framework.yellowback_util import activate_yed_late, conventional_fee, mint_to_fresh_holder, unlock_all as yb_unlock_all
+from test_framework.yellowback_util import activate_yed_late, conventional_fee, mint_to_fresh_holder
 
 ACTIVATION = 205
 FALCON = 225
@@ -179,7 +180,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendtoaddress(pq1, 10)
         n0.sendtoaddress(shield_from, Decimal('10.0001'))
         self.mine(1)
-        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, None)   # 6.20.0: the per-output fee policy picks the fee (an explicit 0.0001 exceeds 4x its conventional fee)
+        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, None)
         wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zaddr), Decimal('10'))
@@ -233,7 +234,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_equal(len(tx_z['vout']), 1)
         assert_equal(tx_z['vout'][0]['scriptPubKey']['hex'], r_z['script'])
         assert_equal(len(tx_z['vShieldedSpend']), 1)
-        assert_equal(len(tx_z['vShieldedOutput']), 2)                # the change note (6.20.0: the Sapling builder pads a bundle to two outputs, one dummy)
+        assert_equal(len(tx_z['vShieldedOutput']), 2)                # the change note
         fee_z = self.fee_of(tx_z)
         assert_equal(fee_z, max(VAULT_RPC_FEE, conventional_fee(tx_z)))
         assert_equal(zat(tx_z['valueBalance']), zat(4) + fee_z)
@@ -341,7 +342,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendmany('', {a: Decimal('0.1001') for a in feeders})
         self.mine(1)
         for a in feeders:
-            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, None)   # 6.20.0: as above
+            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, None)
             wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zmulti), Decimal('2.1'))
@@ -387,7 +388,8 @@ class VaultLockFromTest(BitcoinTestFramework):
         every token output (consensus would accept a plain spend of one and burn its YED): vault_lock "from" the
         holder key of a fresh mint (a Falcon key; it holds nothing but the token) finds no coins, with the locks in
         place and after `lockunspent true`; with the lock removed on purpose (yed_unlockcoin) the second check
-        refuses the outpoint by name."""
+        refuses the outpoint by name while the key holds nothing else, and once the key also holds plain YEC the lock
+        is funded from those coins without the token."""
         print('token protection: YED live on every node, a mint to a fresh Falcon holder key')
         activate_yed_late(self, [0, 1], ((0, 1), (1, 2), (0, 2)))
         n0 = self.nodes[0]
@@ -399,7 +401,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         outpoint = {'txid': op[0], 'vout': op[1]}
         for unlock_all in (False, True):
             if unlock_all:
-                yb_unlock_all(n0)        # 6.x: v4.5.0's lockunspent true (the argument table needs both arguments here)
+                lockunspent_true(n0)
             assert outpoint in n0.listlockunspent()
             for amount in (Decimal('0.5'), 1):
                 assert_raises_rpc(-6, 'insufficient confirmed funds at %s' % key, n0.vault_lock, self.params(amount, key))
@@ -410,6 +412,13 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert outpoint not in n0.listlockunspent()
         assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
                           n0.vault_lock, self.params(1, key))
+        # audit L-ii: the key also holds plain YEC; with its token unlocked the lock is funded from the plain coins
+        # alone (signed once, with no lock held: audit A-M1), and the token is left alone
+        n0.sendtoaddress(key, Decimal('2'))
+        self.mine(1)
+        r = n0.vault_lock(self.params(1, key))
+        assert op not in [(i['txid'], i['vout']) for i in n0.getrawtransaction(r['txid'], 1)['vin']]
+        self.mine(1)
         n0.yed_lockcoins()
         assert outpoint in n0.listlockunspent()
         assert_equal(n0.yed_getbalance()['confirmedCents'], before)

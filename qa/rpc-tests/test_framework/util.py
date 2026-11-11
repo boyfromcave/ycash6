@@ -933,6 +933,20 @@ def check_node_log(self, node_number, line_to_check, stop_node = True):
             return n
     raise AssertionError(repr(line_to_check) + " not found")
 
+def lockunspent_true(node):
+    """`lockunspent true`: unlock every locked coin (the Yellowback layer keeps its own locks). Line helper of the
+    scripts shared byte-identical with ycash-dd (wallet_address_matrix.py, vault_lock_from.py, wallet_yed_ecc_token.py),
+    where it is ``assert node.lockunspent(True)``. 6.x's argument table needs both lockunspent arguments, so each
+    listed outpoint is unlocked here, the overlay's own (yed-locked-outpoint) left locked: the same end state."""
+    from .authproxy import JSONRPCException
+    for o in node.listlockunspent():
+        try:
+            assert node.lockunspent(True, [{'txid': o['txid'], 'vout': o['vout']}])
+        except JSONRPCException as e:
+            if 'yed-locked-outpoint' not in e.error['message']:
+                raise
+
+
 def nustr(branch_id):
     return '%08x' % branch_id
 

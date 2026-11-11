@@ -9562,42 +9562,57 @@ void SpendableInputs::LogInputs(const AsyncRPCOperationId& id) const {
     }
 }
 
-std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs)
+// Does the payload of `tx` give output n YED (a MINT's vault and token outputs, a TRANSFER's or REDEEM's assignments)?
+// What stage (ii) of the Yellowback wallet layer pre-locks (YellowbackWallet::PreLock), for a transaction the index has
+// not judged yet: unconfirmed, or any transaction while the index is unhealthy.
+static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
 {
+    std::optional<yellowback::FoundPayload> fp = yellowback::FindPayload(tx);
+    if (!fp.has_value()) return false;
+    if (fp->payload.type == yellowback::PayloadType::MINT) return n == 0 || n == 1;
+    if (fp->payload.type == yellowback::PayloadType::TRANSFER || fp->payload.type == yellowback::PayloadType::REDEEM) {
+        for (const yellowback::Assignment& a : fp->payload.assignments) {
+            if (a.vout == n) return true;
+        }
+    }
+    return false;
+}
+
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict, std::vector<COutPoint>* refusedOut)
+{
+    if (refusedOut) refusedOut->clear();
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
-    if (!yw || !yw->Index()) return "";
+    if (!yw || !yw->Index() || inputs.empty()) return "";
     yellowback::YellowbackIndex& index = *yw->Index();
     CWallet& wallet = *yw->Wallet();
     std::vector<COutPoint> refused;
     {
-        LOCK2(cs_main, wallet.cs_wallet);      // lock order (N25): cs_main, cs_wallet, then cs_yellowback
-        {
-            LOCK(index.cs_yellowback);
-            if (!index.IsHealthy()) {
-                return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
-                       "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
-            }
-            yellowback::State st(index.View());
-            for (const COutPoint& o : inputs) {
-                if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) refused.push_back(o);
-            }
+        LOCK2(cs_main, wallet.cs_wallet);      // lock order (N25; 6.x): cs_main, cs_wallet, then cs_yellowback
+        LOCK(index.cs_yellowback);
+        const bool healthy = index.IsHealthy();
+        if (!healthy && strict) {
+            return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
+                   "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
         }
-        // An output of an unconfirmed transaction is not in the tip index yet (minconf 0 reaches it): refuse every
-        // output of an unconfirmed transaction that carries a Yellowback payload.
+        yellowback::State st(index.View());
         for (const COutPoint& o : inputs) {
-            if (std::find(refused.begin(), refused.end(), o) != refused.end()) continue;
-            auto it = wallet.mapWallet.find(o.hash);
-            if (it != wallet.mapWallet.end() && it->second.GetDepthInMainChain(std::nullopt) <= 0 &&
-                yellowback::FindPayload(it->second).has_value()) {
-                refused.push_back(o);
+            bool yed = false;
+            if (healthy) yed = st.GetToken(o).has_value() || st.GetVault(o).has_value();
+            if (!yed && (!healthy || !st.GetTxLog(o.hash).has_value())) {
+                // not judged by the index (unconfirmed, or the index unhealthy): what its payload assigns
+                std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
+                yed = it != wallet.mapWallet.end() && AssignedByYellowbackPayload(it->second, o.n);
             }
+            if (yed) refused.push_back(o);
         }
     }
     for (const COutPoint& o : inputs) {
         if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
     }
     if (refused.empty()) return "";
+    if (refusedOut) *refusedOut = refused;
     std::string list;
     for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
-    return "refusing to spend a Yellowback outpoint as plain YEC: " + list;
+    return "refusing to spend a Yellowback outpoint as plain YEC: " + list +
+           " (its YED would burn; lock it again with yed_lockcoins)";
 }
