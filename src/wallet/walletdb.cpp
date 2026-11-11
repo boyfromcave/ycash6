@@ -1113,6 +1113,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> nFromHeight;
             pwallet->LoadLegacyTKeyLookaheadIncomplete(nFromHeight);
         }
+        else if (strType == "legacytaccountpub")
+        {
+            uint256 seedFp;
+            ssValue >> seedFp;
+            pwallet->LoadLegacyTAccountPub(seedFp, libzcash::transparent::AccountPubKey(CChainablePubKey::Read(ssValue)));
+        }
         else if (strType == "restorescan")
         {
             int nFromHeight;
@@ -1660,6 +1666,12 @@ bool CWalletDB::EraseLegacyTKeyLookaheadIncomplete()
 {
     nWalletDBUpdateCounter++;
     return Erase(std::string("lookaheadincomplete"));
+}
+
+bool CWalletDB::WriteLegacyTAccountPub(const uint256& seedFp, const libzcash::transparent::AccountPubKey& pub)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("legacytaccountpub"), std::make_pair(seedFp, pub.GetChainablePubKey()));
 }
 
 bool CWalletDB::WriteRestoreScan(int nFromHeight)

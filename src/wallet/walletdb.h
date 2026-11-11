@@ -537,6 +537,8 @@ public:
     //! Review L-2: the lowest height a locked wallet without its transparent lookahead may have missed a coin at.
     bool WriteLegacyTKeyLookaheadIncomplete(int nFromHeight);
     bool EraseLegacyTKeyLookaheadIncomplete();
+    //! Review M-b: the legacy transparent account's public key, in clear, so a locked wallet derives its lookahead's public keys.
+    bool WriteLegacyTAccountPub(const uint256& seedFp, const libzcash::transparent::AccountPubKey& pub);
     //! Review M-c: the restore marker, the height a wallet restored from its recovery phrase scans from until one scan completes.
     bool WriteRestoreScan(int nFromHeight);
     bool EraseRestoreScan();

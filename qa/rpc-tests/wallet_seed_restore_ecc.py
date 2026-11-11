@@ -25,8 +25,9 @@ chains, and a wallet restored from its recovery phrase alone must show the same 
 
 Then: restarts keep the restored state; the original and the restored wallet hand out the same next address; held
 keys appear in no listing or dump before they are issued or paid; an encrypted, locked restored wallet misses a
-payment to an address it has not issued, says so in getwalletinfo (lookahead_incomplete, persisted; never for a locked
-wallet that holds its lookahead, review L-2) and in its log at walletpassphrase; unlocked it holds the lookahead
+payment to an address it has not issued, says so in getwalletinfo (lookahead_incomplete, persisted; review M-b: set only
+by a payment to an address of its seed it watches by its public key, never by its start-up rescan or an ordinary block;
+cleared by an import with rescan while unlocked) and in its log at walletpassphrase; unlocked it holds the lookahead
 again, locked again it still recognises (and writes) a held key that is paid; a new wallet file restored from the
 phrase, with getnewaddress past the gap and -rescan, finds every coin (this line has no rescanblockchain).
 
@@ -293,15 +294,19 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         n0.walletlock()
         self.pay({n1.getnewaddress(): Decimal('0.1')})
         assert_equal(n0.getwalletinfo()['lookahead_incomplete'], False)
-        print('  started locked (no lookahead), it flags the blocks with an output it cannot check (its startup rescan too)')
+        print('  review M-b: started locked (no lookahead held), its start-up rescan and an ordinary block flag nothing')
         n0 = self.restart0('eccrestored.dat')
+        assert_equal(n0.getwalletinfo()['lookahead_incomplete'], False)
+        self.pay({n1.getnewaddress(): Decimal('0.1')})
+        assert_equal(n0.getwalletinfo()['lookahead_incomplete'], False)
+        print('  a payment to an address of its seed it has not issued (watched by its public key) is flagged')
         target_txid = self.pay({target: Decimal('0.6')})
         assert target not in {u['address'] for u in n0.listunspent(0)}
         assert_equal(n0.getwalletinfo()['lookahead_incomplete'], True)
         print('  unlocked: the log says how to find it, and the lookahead is held again (a later payment is found)')
         logpos = len(self.debug_log())
         n0.walletpassphrase(PASSPHRASE, 600)
-        assert 'it holds them now' in self.debug_log()[logpos:]
+        assert 'it holds the address now' in self.debug_log()[logpos:]
         assert_equal(n0.getwalletinfo()['lookahead_incomplete'], True)   # unlocking holds the keys, finds nothing earlier
         target2_txid = self.pay({target2: Decimal('0.7')})
         assert_equal([(u['txid'], Decimal(u['amount'])) for u in n0.listunspent(0) if u['address'] in (target, target2)],
@@ -316,6 +321,13 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         n0 = self.restart0('eccrestored.dat', ['-rescan'])
         assert_equal(n0.getwalletinfo()['unlocked_until'], 0)
         assert_equal(n0.getwalletinfo()['lookahead_incomplete'], True)   # persisted; a locked rescan does not clear it
+        print('  an import with rescan while unlocked scans with the lookahead held: it finds nothing new here and clears')
+        n0.walletpassphrase(PASSPHRASE, 600)
+        n0.importaddress(n1.getnewaddress(), '', True)
+        assert_equal(n0.getwalletinfo()['lookahead_incomplete'], False)
+        n0.walletlock()
+        n0 = self.restart0('eccrestored.dat')
+        assert_equal(n0.getwalletinfo()['lookahead_incomplete'], False)
         assert_equal(sorted(u['txid'] for u in n0.listunspent(0) if u['address'] in (target, target2, target3)),
                      sorted([target_txid, target2_txid, target3_txid]))
 

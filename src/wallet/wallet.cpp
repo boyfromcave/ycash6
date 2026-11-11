@@ -493,13 +493,55 @@ bool CWallet::PersistLegacyTKey(const CKeyID& id)
     return CWalletDB(strWalletFile).WriteCryptedKey(pubkey, crypted, mapKeyMetadata[id]);
 }
 
+std::optional<libzcash::transparent::AccountPubKey> CWallet::GetLegacyTAccountPub() const
+{
+    AssertLockHeld(cs_wallet);
+    if (!legacyTAccountPub.has_value() || !mnemonicHDChain.has_value() ||
+        legacyTAccountPub.value().first != mnemonicHDChain.value().GetSeedFingerprint())
+        return std::nullopt;
+    return legacyTAccountPub.value().second;
+}
+
 void CWallet::TopUpLegacyTKeys()
 {
     LOCK(cs_wallet);
-    if (!mnemonicHDChain.has_value() || IsLocked() || !GetMnemonicSeed().has_value())
+    if (!mnemonicHDChain.has_value())
         return;
     CHDChain chain = mnemonicHDChain.value();
     const uint32_t n = LegacyTKeyLookahead(GetArg("-keypool", DEFAULT_KEYPOOL_SIZE));
+    if (IsLocked() || !GetMnemonicSeed().has_value()) {
+        // Review M-b: locked, the wallet cannot derive the lookahead's secrets, but with the account's public key it
+        // derives their public keys: a payment to one is a coin it misses (NoteLegacyTKeysUsed flags it).
+        const std::optional<transparent::AccountPubKey> pub = GetLegacyTAccountPub();
+        if (!pub.has_value())
+            return;
+        for (bool external : {false, true}) {
+            const uint32_t counter = chain.GetLegacyTKeyCounter(external);
+            const uint32_t end = LegacyTKeyLookaheadEnd(counter, n);
+            uint32_t& watchedEnd = nLegacyTKeyWatchedEnd[external];
+            for (uint32_t index = std::max({counter, nLegacyTKeyHeldEnd[external], watchedEnd}); index < end; index++) {
+                const std::optional<CPubKey> key = external ? pub.value().DeriveExternal(index) : pub.value().DeriveInternal(index);
+                if (!key.has_value() || HaveKey(key.value().GetID()))
+                    continue;
+                mapLegacyTKeyWatched[key.value().GetID()] = std::make_pair(external, index);
+                nKeyLookaheadGrowth++;   // a scan reads its blocks again for payments to the new public keys
+            }
+            watchedEnd = std::max(watchedEnd, end);
+        }
+        return;
+    }
+    if (!GetLegacyTAccountPub().has_value()) {
+        // Review M-b: kept in clear from the first unlocked (or unencrypted) load on, so the wallet, once encrypted
+        // and locked, still knows the addresses of its lookahead. It reveals the wallet's transparent addresses, not
+        // its keys (the file holds the public keys of the issued ones in clear already).
+        const transparent::AccountPubKey pub = GetLegacyAccountKey().ToAccountPubKey();
+        LoadLegacyTAccountPub(chain.GetSeedFingerprint(), pub);
+        if (fFileBacked && !CWalletDB(strWalletFile).WriteLegacyTAccountPub(chain.GetSeedFingerprint(), pub))
+            LogPrintf("TopUpLegacyTKeys: error: writing the transparent account's public key failed\n");
+    }
+    // Unlocked: the lookahead's secrets are held below; the public-only window of a locked wallet is not needed.
+    mapLegacyTKeyWatched.clear();
+    nLegacyTKeyWatchedEnd[0] = nLegacyTKeyWatchedEnd[1] = 0;
     std::optional<transparent::AccountKey> accountKey;
     for (bool external : {false, true}) {
         const uint32_t counter = chain.GetLegacyTKeyCounter(external);
@@ -526,12 +568,12 @@ void CWallet::TopUpLegacyTKeys()
         heldEnd = std::max(heldEnd, end);
     }
     if (fLegacyTKeyLookaheadIncomplete) {
-        // Review L-2: said once per unlock; the flag stays (getwalletinfo lookahead_incomplete) until a scan with the
+        // Review L-2/M-b: said once per unlock; the flag stays (getwalletinfo lookahead_incomplete) until a scan with the
         // lookahead held has read the blocks again (ScanForWalletTransactions).
-        LogPrintf("TopUpLegacyTKeys: while the wallet was locked it examined transactions from height %d on without holding the "
-                  "transparent addresses of its seed it has not issued; it holds them now, but an earlier coin sent to one is "
-                  "found only by a rescan with them held, and an encrypted wallet's startup rescan (-rescan) runs locked: to find "
-                  "such coins, restore the recovery phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n",
+        LogPrintf("TopUpLegacyTKeys: while the wallet was locked, a transaction at height %d paid an address of its seed it could not "
+                  "hold locked; it holds the address now, but the coin is found only by a scan from that height with the wallet "
+                  "unlocked: an import with rescan run while unlocked, or the recovery phrase restored into a new wallet file "
+                  "(-wallet=<new file> -mnemonicfile=<file>); an encrypted wallet's startup rescan (-rescan) runs locked\n",
                   nLegacyTKeyIncompleteFrom);
     }
 }
@@ -652,11 +694,11 @@ bool CWallet::MarkLegacyTKeyUsed(const CKeyID& id)
     if (!moved)
         return written;
     if (IsLocked()) {
-        LogPrintf("MarkLegacyTKeyUsed: the wallet is locked, so it cannot hold the transparent keys after %s; "
-                  "unlock it (walletpassphrase); to find coins sent to them, restore the recovery phrase into a new wallet file "
-                  "(-wallet=<new file> -mnemonicfile=<file>)\n",
+        LogPrintf("MarkLegacyTKeyUsed: the wallet is locked, so it cannot hold the transparent keys after %s until it is unlocked "
+                  "(walletpassphrase); it watches their addresses, and getwalletinfo lookahead_incomplete says if one is paid\n",
                   KeyIO(Params()).EncodeDestination(id));
-        return written;   // NoteLegacyTKeysUsed flags what this may have missed (review L-2)
+        TopUpLegacyTKeys();   // review M-b: the public keys past the moved counter (NoteLegacyTKeysUsed flags a payment)
+        return written;
     }
     TopUpKeyPool();
     TopUpLegacyTKeys();
@@ -687,6 +729,7 @@ bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight)
         return true;
     bool written = true;
     bool unknown = false;   // an output paying a transparent key the wallet does not hold
+    std::optional<CKeyID> missed;   // review M-b: one paying a lookahead key the locked wallet watches but cannot hold
     for (const CTxOut& out : tx.vout) {
         txnouttype type;
         std::vector<std::vector<unsigned char>> sol;
@@ -700,17 +743,33 @@ bool CWallet::NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight)
         }
         if (!id.has_value())
             continue;
-        if (!HaveKey(id.value()))
+        if (HaveKey(id.value())) {
+            if (!MarkLegacyTKeyUsed(id.value()))
+                written = false;
+        } else if (mapLegacyTKeyWatched.count(id.value())) {
+            missed = id;
+        } else {
             unknown = true;
-        else if (!MarkLegacyTKeyUsed(id.value()))
-            written = false;
+        }
     }
-    // Review L-2: a locked wallet without its full lookahead (started locked, or a mark moved a counter while
-    // locked) cannot recognise a payment to an address of its seed it has not issued. Only then, and only for a
-    // mined transaction with an output it could not check, may it have missed one: flag it (getwalletinfo
-    // lookahead_incomplete, persisted) from this height on, and say so at walletpassphrase (TopUpLegacyTKeys).
-    if (unknown && nHeight >= 0 && IsLocked() && LegacyTKeyLookaheadShort())
-        SetLegacyTKeyLookaheadIncomplete(nHeight);
+    // Review M-b (getwalletinfo lookahead_incomplete, persisted, from the lowest such height): set only when the wallet
+    // may really have missed a coin, for a mined transaction. A locked wallet holds the secrets of its lookahead only if
+    // it was unlocked since it started; it watches the rest by their public keys (TopUpLegacyTKeys) and flags a
+    // payment to one: a coin of its seed it cannot add while locked. An output paying a key outside the lookahead is
+    // not this wallet's within the gap limit, so it flags nothing: an ordinary block, the wallet's own start-up rescan
+    // and a wallet whose seed no other wallet uses set nothing. A wallet without the account's public key (encrypted
+    // by an older binary and not unlocked since) cannot tell, and flags a block it had not processed before (above its
+    // best block at load) with an output it cannot check while it lacks its lookahead. It is said at walletpassphrase.
+    if (nHeight >= 0 && IsLocked()) {
+        if (missed.has_value()) {
+            LogPrintf("NoteLegacyTKeysUsed: a transaction at height %d pays %s, an address of this wallet's seed it cannot hold while locked: "
+                      "the coin is missed (getwalletinfo lookahead_incomplete)\n", nHeight, KeyIO(Params()).EncodeDestination(missed.value()));
+            SetLegacyTKeyLookaheadIncomplete(nHeight);
+        } else if (unknown && !GetLegacyTAccountPub().has_value() && LegacyTKeyLookaheadShort() &&
+                   nHeight > nLegacyTKeyProcessedHeight) {
+            SetLegacyTKeyLookaheadIncomplete(nHeight);
+        }
+    }
     return written;
 }
 
@@ -6230,8 +6289,9 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         const bool lookaheadFull = mnemonicHDChain.has_value() && !IsLocked() && !LegacyTKeyLookaheadShort();
         if (pindex && LegacyTKeyLookaheadShort()) {
             LogPrintf("ScanForWalletTransactions(): the wallet is locked, so it does not hold its transparent key lookahead: "
-                      "coins sent to addresses of its seed it has not issued are not found; to find them, restore the recovery "
-                      "phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>)\n");
+                      "a coin sent to an address of its seed it has not issued is not found (%s)\n",
+                      GetLegacyTAccountPub().has_value() ? "it watches those addresses: getwalletinfo lookahead_incomplete says if one is paid"
+                                                         : "it cannot tell whether one is paid until it is unlocked once");
         }
         const std::optional<std::pair<int, int>> stopAt = RescanStopAt();
         while (pindex)
@@ -8610,6 +8670,15 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
         if (!fRestoredSeed)
             LogPrintf("The wallet's restore from its recovery phrase has not completed its scan: scanning again from height %d\n",
                       walletInstance->nRestoreScanFrom);
+    }
+    {
+        // Review M-b: the blocks an earlier run of this wallet processed (lookahead_incomplete's fallback rule).
+        CBlockLocator locator;
+        if (CWalletDB(walletFile).ReadBestBlock(locator)) {
+            const CBlockIndex* pindexBest = FindForkInGlobalIndex(chainActive, locator);
+            if (pindexBest)
+                walletInstance->nLegacyTKeyProcessedHeight = pindexBest->nHeight;
+        }
     }
     CBlockIndex *pindexRescan = chainActive.Genesis();
     if (clearWitnessCaches || GetBoolArg("-rescan", false) || (fRestoreScan && !fRestoredSeed)) {

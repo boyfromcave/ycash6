@@ -143,6 +143,15 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_CHECK(!w.IsHeldLegacyTKey(SeedKey(false, 0)) && w.HaveKey(SeedKey(false, 0)));   // pool keys are issued
         BOOST_CHECK(w.IsHeldLegacyTKey(SeedKey(false, 2 * N - 1)) && !w.HaveKey(SeedKey(false, 2 * N)));
         BOOST_CHECK(IsMine(w, GetScriptForDestination(SeedKey(true, 60))) == ISMINE_SPENDABLE);
+        // review M-b: the account's public key (kept in clear) derives the same keys as the seed: the chain and index
+        // levels under the hardened account are non-hardened, so a locked wallet can watch its lookahead's addresses
+        const std::optional<libzcash::transparent::AccountPubKey> pub = w.GetLegacyTAccountPub();
+        BOOST_REQUIRE(pub.has_value());
+        for (uint32_t i : {0U, 60U, 2 * N}) {
+            BOOST_CHECK(pub.value().DeriveExternal(i).value().GetID() == SeedKey(true, i));
+            BOOST_CHECK(pub.value().DeriveInternal(i).value().GetID() == SeedKey(false, i));
+        }
+        BOOST_CHECK(w.mapLegacyTKeyWatched.empty());   // unlocked: the secrets are held, nothing is only watched
 
         // an output paying external key 60: the counter moves to 61, keys 0..60 become issued, the window 61..161
         w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 60))));
@@ -197,6 +206,7 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
         LOCK(w.cs_wallet);
         BOOST_CHECK_EQUAL(Counter(w, true), 62U);
+        BOOST_CHECK(w.GetLegacyTAccountPub().has_value());   // review M-b: the public key is in the file
         BOOST_CHECK(w.HaveKey(SeedKey(true, 61)) && w.HaveKey(SeedKey(true, 10)));
         BOOST_CHECK(!w.HaveKey(SeedKey(true, 62)));
         BOOST_CHECK(w.HaveKey(SeedKey(false, 160)));

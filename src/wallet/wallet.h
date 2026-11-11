@@ -2092,6 +2092,22 @@ public:
      */
     bool fLegacyTKeyLookaheadIncomplete = false;
     int nLegacyTKeyIncompleteFrom = -1;
+    /**
+     * Review M-b: the legacy account's public key (m/44'/coin'/0x7FFFFFFF', the parent of both chains; the chain and
+     * index levels are non-hardened, so their public keys derive from it), kept in clear ("legacytaccountpub", with the
+     * seed fingerprint; written once the wallet is unlocked or unencrypted). A locked wallet derives the PUBLIC keys of
+     * its transparent lookahead from it (mapLegacyTKeyWatched): it cannot hold their secrets, so it cannot find a coin
+     * sent to one, but it recognises the payment and sets lookahead_incomplete for exactly that case.
+     */
+    std::optional<std::pair<uint256, libzcash::transparent::AccountPubKey>> legacyTAccountPub;
+    void LoadLegacyTAccountPub(const uint256& seedFp, const libzcash::transparent::AccountPubKey& pub) { legacyTAccountPub.emplace(seedFp, pub); }
+    //! The stored account public key, if it is this wallet's seed's.
+    std::optional<libzcash::transparent::AccountPubKey> GetLegacyTAccountPub() const;
+    //! Public-only lookahead keys of a locked wallet: id -> (external, index); never in the key store.
+    std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyWatched;
+    uint32_t nLegacyTKeyWatchedEnd[2] = {0, 0};
+    //! The wallet's best block height at load (-1 none): blocks at or below it were processed by an earlier run.
+    int nLegacyTKeyProcessedHeight = -1;
     void SetLegacyTKeyLookaheadIncomplete(int nFromHeight);
     void ClearLegacyTKeyLookaheadIncomplete();
     void LoadLegacyTKeyLookaheadIncomplete(int nFromHeight) { fLegacyTKeyLookaheadIncomplete = nFromHeight >= 0; nLegacyTKeyIncompleteFrom = nFromHeight; }
