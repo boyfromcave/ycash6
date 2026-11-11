@@ -36,8 +36,8 @@ const std::map<std::string, std::string> REGISTERED_WITHOUT_ROW = {
     // method" (cli) or the internal "Parameters ... not found" error (server)
     // instead of the tombstone's message. Ycash keeps the method removed and
     // documents z_exportwallet; the qa framework notes "6.20.0: no dumpwallet".
-    // Behaviour is kept as shipped; recorded in docs/plans/ycash6/ (upstream
-    // defect report).
+    // Behaviour is kept as shipped; recorded in the 6.20.0 upstream defect
+    // report (section 3.9).
     {"dumpwallet", "removed upstream; tombstone handler, no row (use z_exportwallet)"},
 };
 
