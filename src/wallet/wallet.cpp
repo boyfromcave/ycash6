@@ -4801,8 +4801,12 @@ bool CWallet::EraseUnbroadcastTx(const uint256& txid)
     AssertLockHeld(cs_wallet);
     std::map<uint256, CWalletTx>::iterator it = mapWallet.find(txid);
     if (it == mapWallet.end()) return true;
+    // One wallet-database handle for every erase below, opened before anything changes (review L-1): if opening
+    // throws, nothing has changed.
+    std::optional<CWalletDB> walletdb;
+    if (fFileBacked) walletdb.emplace(strWalletFile);
     // The wallet file first: if its record stays, everything stays, so memory shows what a restart would load.
-    if (fFileBacked && !CWalletDB(strWalletFile).EraseTx(txid)) return false;
+    if (walletdb && !walletdb->EraseTx(txid)) return false;
     const CWalletTx& wtx = it->second;
     // Cached balances: the outputs this transaction spent become spendable again (reads the nullifier maps below
     // before they change; the spent notes belong to other transactions).
@@ -4830,7 +4834,7 @@ bool CWallet::EraseUnbroadcastTx(const uint256& txid)
     std::map<uint256, std::vector<RecipientMapping>>::iterator r = sendRecipients.find(txid);
     if (r != sendRecipients.end()) {
         for (const RecipientMapping& m : r->second) {
-            if (fFileBacked && m.ua.has_value() && !CWalletDB(strWalletFile).EraseRecipientMapping(txid, m.address)) {
+            if (walletdb && m.ua.has_value() && !walletdb->EraseRecipientMapping(txid, m.address)) {
                 LogPrintf("EraseUnbroadcastTx: could not erase a recipient mapping of %s (display only)\n", txid.ToString());
             }
         }
