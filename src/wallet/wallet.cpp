@@ -6387,11 +6387,10 @@ std::optional<int> CWallet::ScanForWalletTransactions(
         // wallet does not have yet that pay or spend its keys (AddToWalletIfInvolvingMe: IsMine, or IsFromMe through
         // the coins found so far, which records the spend in mapTxSpends). A block holds its transactions in spending
         // order and a pass reads the blocks in chain order, so a pass sees every spend of a coin it finds. Passes go
-        // on while the previous one grew the lookahead or added a transaction, and stop after one that did neither.
-        // Termination: a pass that goes on either added a chain transaction the wallet did not have (each is added at
-        // most once, and the range is finite), or grew the lookahead, which grows only when an output in the range
-        // pays a key at or past a chain's counter (the counter then moves past it and stays there): the keys it can
-        // reach are bounded by the outputs in the range, the gap limit (-keypool) apart. Each pass only adds
+        // on while the previous one grew the lookahead, and stop after one that did not (review L-b, below).
+        // Termination: the lookahead grows only when an output in the range pays a key at or past a chain's counter
+        // (the counter then moves past it and stays there): the keys it can reach are bounded by the outputs in the
+        // range, the gap limit (-keypool) apart. Each pass only adds
         // transparent transactions: a transaction with Sapling, Sprout or Orchard data of this wallet was found by the
         // main pass (its notes are trial-decrypted there), and the note witnesses advanced there, so ChainTipAdded is
         // not repeated. The cost: a restore reads its blocks about twice (the main pass and one re-pass), more when the
@@ -6453,7 +6452,19 @@ std::optional<int> CWallet::ScanForWalletTransactions(
                       grew ? "; the lookahead grew again" : "");
             if (added > 0 || grew)
                 MarkDirty();   // cached credits and debits: coins just found, and outputs of keys just held
-            again = added > 0 || grew;
+            // Review L-b: a pass that added transactions but did not grow the lookahead is the last. Proof: the next
+            // pass would read the same blocks with the same keys, so it could add only a transaction this pass skipped
+            // that is ours through a coin this pass found (IsFromMe). This pass found every coin it added before it
+            // reached any spend of it: a spend lies in a later block, or later in the same block (a block holds its
+            // transactions in spending order), and the pass reads in that order, so it added the spend too, then the
+            // spends of that spend, and so on. A key enters the lookahead only with a growth (TopUpLegacyTKeys,
+            // TopUpPQKeys, the public-only window of a locked wallet; GenerateNewKey issues a key the lookahead holds
+            // already), and a transaction this pass had already passed when a key was added is read again only after
+            // a growth. The case of an added transaction whose inputs spend a re-found coin and whose other outputs pay
+            // a key inside the window that this pass skipped earlier cannot arise: a key inside the window at the
+            // start of the pass is recognised wherever the pass meets it, and one that entered the window during the
+            // pass came with a growth. (Orchard transactions are skipped by every pass; Ycash has no Orchard.)
+            again = grew;
         }
 
         if (fLegacyTKeyLookaheadIncomplete && lookaheadFull && pindexScanStart != nullptr &&

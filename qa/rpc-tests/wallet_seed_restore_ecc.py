@@ -35,6 +35,7 @@ Last (reviews M-a, M-c): a restore interrupted in its main pass, then (resumed) 
 that block (-stoprescanat, regtest only) and every start scans from genesis again until a scan completes, though the
 keys' birthday (the restore's time, the node's clock 3 h ahead) is later than every block; getwalletinfo
 restore_in_progress is true for a restore made on a node with no chain until a start after the sync has scanned.
+Review L-b: a re-pass that adds a transaction without growing the lookahead is the last (no wasted chain read).
 
 Run: ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_seed_restore_ecc.py --tmpdir=<dir> --portseed=<n>
 """
@@ -408,6 +409,28 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         assert_equal(n2.getwalletinfo()['restore_in_progress'], False)
         assert_equal(sorted((u['txid'], u['vout'], u['address'], Decimal(u['amount'])) for u in n2.listunspent(0)),
                      restored_utxos)
+        stop_node(n2, 2)
+        self.nodes.pop()
+
+        print('review L-b: a re-pass that adds transactions without growing the lookahead is the last')
+        # A new wallet: h150 is paid, then h60, then h150 again. The main pass holds h150 once h60 is marked, so it
+        # finds the second payment and moves the counter past h150; the re-pass finds the first payment (no growth:
+        # h150 is below the counter now). Nothing a third pass could find: it would read the same blocks with the
+        # same keys, and every spend of a coin the re-pass found lies after it in the order the re-pass reads.
+        n0 = self.restart0('lb.dat')
+        h = [n0.getnewaddress() for _ in range(151)]
+        first = self.pay({h[150]: Decimal('0.21')})
+        self.pay({h[60]: Decimal('0.22')})
+        self.pay({h[150]: Decimal('0.23')})
+        lb_export = n0.z_exportwallet('lbexport')
+        logpos = len(self.debug_log())
+        n0 = self.restart0('lbrestored.dat', ['-mnemonicfile=%s' % lb_export])
+        log = self.debug_log()[logpos:]
+        assert_equal(log.count('re-checking heights'), 1)
+        assert 'the re-check found 1 more transaction(s)\n' in log
+        assert_equal(sorted((u['address'], Decimal(u['amount'])) for u in n0.listunspent(0)),
+                     sorted([(h[150], Decimal('0.21')), (h[60], Decimal('0.22')), (h[150], Decimal('0.23'))]))
+        assert first in {u['txid'] for u in n0.listunspent(0)}
 
 
 if __name__ == '__main__':
