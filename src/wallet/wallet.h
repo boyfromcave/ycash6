@@ -2262,6 +2262,14 @@ public:
             bool fUpdate
             );
     void EraseFromWallet(const uint256 &hash);
+    /**
+     * Erase a wallet transaction that was recorded by CommitTransaction but never reached the mempool or a block
+     * (Yellowback: the refused post-quantum send, YellowbackWallet::RemoveOrphan), together with every index that
+     * names it, so that no later lookup recreates it as an empty entry (review H-1). The caller has established
+     * that the transaction is neither in the mempool nor in a block. Returns false, changing nothing, only when
+     * the wallet file record could not be erased. Requires cs_wallet.
+     */
+    bool EraseUnbroadcastTx(const uint256& txid);
 
     // deletetx machinery (gated by -deletetx; see wallet.cpp for details).
     void ReorderWalletTransactions(std::map<std::pair<int,int>, const uint256>& mapSorted, int64_t& maxOrderPos);

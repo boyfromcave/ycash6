@@ -22,8 +22,10 @@ Review L-1: a computed fee above the cap (here -minrelaytxfee=0.05 makes a 0.9 Y
 is refused before signing with the same "Fee … is above the … cap" string, not after.
 Review M-2, the erase at the commit: with -txexpirydelta=4 and two blocks mined while a 24-input SLH-DSA send is
 signed, the mempool refuses it as expiring soon; the send fails, the transaction is erased from the wallet (no depth
--1 entry), its coins are spendable again, it stays gone after a restart and a -rescan restart, and a second send pays
-the recipient exactly once.
+-1 entry) and its coins are spendable again. Review H-1: sent again in the same process from the same coins, followed
+by resendwallettransactions, the node stays up (a stale spend index used to recreate the erased txid as an empty
+entry, on which the relay asserted), the recipient is paid exactly once, the new send shows its own metadata, and a
+restart and a -rescan restart load the same view, with the refused transaction still gone.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_pq_fee_cap.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -228,20 +230,40 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
             assert_equal(len(node.listunspent(1, 9999, [slh])), ncoins)
             assert_equal(node.z_getbalance(slh), Decimal('0.1') * ncoins)
         gone(n0)
-        print('  gone after a restart, and after a -rescan restart')
-        n0 = self.restart0(['-txexpirydelta=4'])
-        gone(n0)
-        n0 = self.restart0(['-txexpirydelta=4', '-rescan'])
-        gone(n0)
+        erased = self.erased_txids()
+        assert_equal(len(erased), 1)
+        assert_raises_rpc('Invalid or non-wallet transaction id', n0.gettransaction, erased[0])
         assert_equal(n1.getreceivedbyaddress(c, 0), 0)
-        print('  a second send pays the recipient exactly once')
-        n0 = self.restart0()
-        wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, slh, [(c, amount)]), timeout=300)
+        print('  review H-1: sent again in the same process from the same coins, then resendwallettransactions')
+        txid = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, slh, [(c, amount)]), timeout=300)
+        assert_equal(n0.resendwallettransactions(), [txid])     # an empty entry recreated for the erased txid crashed here
+        assert_equal(n0.getblockcount(), self.nodes[1].getblockcount())
+        assert_raises_rpc('Invalid or non-wallet transaction id', n0.gettransaction, erased[0])
         self.mine(1)
+        assert_equal(n1.getreceivedbyaddress(c, 0), amount)       # paid exactly once
+
+        def view(node):
+            t = node.gettransaction(txid)
+            assert t['time'] > 0 and t['timereceived'] > 0, t
+            assert 'fee' in t and t['fee'] < 0, t                # from me: the wallet paid the inputs
+            assert ('send', c, -amount) in [(d['category'], d.get('address'), d['amount']) for d in t['details']], t
+            assert_raises_rpc('Invalid or non-wallet transaction id', node.gettransaction, erased[0])
+            assert_equal(set(self.stuck(node)), stock)
+            return ({k: t[k] for k in ('amount', 'fee', 'time', 'timereceived', 'blockhash', 'details', 'hex')},
+                    node.z_getbalance(slh), len(node.listunspent(1, 9999, [slh])))
+        before = view(n0)
+        print('  the same view after a restart, and after a -rescan restart')
+        n0 = self.restart0()
+        assert_equal(view(n0), before)
         n0 = self.restart0(['-rescan'])
+        assert_equal(view(n0), before)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(c, 0), amount)
-        assert_equal(set(self.stuck(n0)), stock)
+
+    def erased_txids(self):
+        import re
+        with open(self.options.tmpdir + '/node0/regtest/debug.log', encoding='utf-8', errors='replace') as f:
+            return re.findall(r'SendPQTransaction: erasing ([0-9a-f]{64})', f.read())
 
 
 if __name__ == '__main__':

@@ -1759,5 +1759,67 @@ BOOST_AUTO_TEST_CASE(rpc_erase_refused_pq_send)
     BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered);
 }
 
+// Review H-1: CWallet::EraseUnbroadcastTx leaves no index naming the erased transaction. A transaction spending a
+// wallet coin, with a note of its own (nullifier map) and a recipient mapping (review L-2), is recorded and erased;
+// then another one spending the same coin is recorded. Before the fix the stale spend entry made SyncMetaData
+// recreate the erased txid as an empty CWalletTx with no wallet (and copy its blank metadata onto the new
+// transaction); ResendWalletTransactions then asserted on it. (6.x builds Sapling spends in a Rust bundle, so the
+// nullifier spend map is exercised by the same RemoveFromSpends call but not constructed here; ycash-dd's case does.)
+BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    CMutableTransaction parent;
+    parent.vin.push_back(CTxIn(COutPoint(uint256S("02"), 0)));
+    parent.vout.push_back(CTxOut(5000, CScript() << OP_TRUE));
+    const CTransaction parentTx(parent);
+    BOOST_REQUIRE(pwalletMain->AddToWallet(CWalletTx(pwalletMain, parentTx), &walletdb));
+    const size_t ordered = pwalletMain->wtxOrdered.size();
+
+    const uint256 ownNullifier = uint256S("0b");
+    auto spender = [&](CAmount out) {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(COutPoint(parentTx.GetHash(), 0)));
+        m.vout.push_back(CTxOut(out, CScript() << OP_TRUE));
+        return CTransaction(m);
+    };
+    const CTransaction refused = spender(4000);
+    const uint256 txid = refused.GetHash();
+    CWalletTx wtx(pwalletMain, refused);
+    mapSaplingNoteData_t noteData;
+    noteData.insert(std::make_pair(SaplingOutPoint(txid, 0), SaplingNoteData(libzcash::SaplingIncomingViewingKey(), ownNullifier)));
+    wtx.mapSaplingNoteData = noteData;   // not SetSaplingNoteData: this transaction has no Sapling output to check against
+    BOOST_REQUIRE(pwalletMain->AddToWallet(wtx, &walletdb));
+    pwalletMain->LoadRecipientMapping(txid, RecipientMapping(std::nullopt, CKeyID()));
+    BOOST_REQUIRE(pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier.GetRawBytes()));
+    BOOST_REQUIRE(pwalletMain->sendRecipients.count(txid));
+    BOOST_REQUIRE_EQUAL(pwalletMain->wtxOrdered.size(), ordered + 1);
+    pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached = true;
+
+    BOOST_REQUIRE(pwalletMain->EraseUnbroadcastTx(txid));
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
+    BOOST_CHECK(!pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier.GetRawBytes()));
+    BOOST_CHECK(!pwalletMain->sendRecipients.count(txid));
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered);
+    BOOST_CHECK(!pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached);   // its coin is unspent again
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(txid));                                    // not in the wallet: nothing to do
+
+    const CTransaction again = spender(3000);
+    CWalletTx wtxAgain(pwalletMain, again);
+    wtxAgain.fFromMe = true;
+    wtxAgain.mapValue["comment"] = "sent again";
+    BOOST_REQUIRE(pwalletMain->AddToWallet(wtxAgain, &walletdb));
+    BOOST_CHECK(!pwalletMain->mapWallet.count(txid));                                      // no empty entry recreated
+    BOOST_CHECK(pwalletMain->GetConflicts(again.GetHash()).empty());                       // no spend entry left
+    const CWalletTx& stored = pwalletMain->mapWallet.at(again.GetHash());
+    BOOST_CHECK(stored.fFromMe);
+    BOOST_CHECK_EQUAL(stored.mapValue.count("comment"), 1U);
+    for (const auto& item : pwalletMain->mapWallet) BOOST_CHECK(item.second.GetHash() == item.first);
+
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(again.GetHash()));
+    BOOST_CHECK(pwalletMain->EraseUnbroadcastTx(parentTx.GetHash()));
+    BOOST_CHECK_EQUAL(pwalletMain->wtxOrdered.size(), ordered - 1);
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -4773,6 +4773,54 @@ void CWallet::EraseFromWallet(const uint256 &hash)
     return;
 }
 
+bool CWallet::EraseUnbroadcastTx(const uint256& txid)
+{
+    AssertLockHeld(cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = mapWallet.find(txid);
+    if (it == mapWallet.end()) return true;
+    // The wallet file first: if its record stays, everything stays, so memory shows what a restart would load.
+    if (fFileBacked && !CWalletDB(strWalletFile).EraseTx(txid)) return false;
+    const CWalletTx& wtx = it->second;
+    // Cached balances: the outputs this transaction spent become spendable again (reads the nullifier maps below
+    // before they change; the spent notes belong to other transactions).
+    MarkAffectedTransactionsDirty(wtx);
+    // mapTxSpends, mapTxSproutNullifiers, mapTxSaplingNullifiers: every entry whose value is this txid. A stale one
+    // makes the next transaction spending the same coin run SyncMetaData, whose mapWallet[] would recreate this
+    // txid as an empty CWalletTx with no wallet bound (review H-1: RelayWalletTransaction asserts on it).
+    RemoveFromSpends(txid);
+    // mapSproutNullifiersToNotes, mapSaplingNullifiersToNotes: entries naming this transaction's own notes (set only
+    // once a note's position is known, so normally none for an unmined transaction).
+    for (auto n = mapSproutNullifiersToNotes.begin(); n != mapSproutNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSproutNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    for (auto n = mapSaplingNullifiersToNotes.begin(); n != mapSaplingNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSaplingNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    // wtxOrdered: AddToWallet keeps a pointer into mapWallet there.
+    for (TxItems::iterator o = wtxOrdered.begin(); o != wtxOrdered.end();) {
+        if (o->second == &it->second) o = wtxOrdered.erase(o);
+        else ++o;
+    }
+    // sendRecipients and its "recipientmapping" records (review L-2: SendTransaction saves them before the commit).
+    std::map<uint256, std::vector<RecipientMapping>>::iterator r = sendRecipients.find(txid);
+    if (r != sendRecipients.end()) {
+        for (const RecipientMapping& m : r->second) {
+            if (fFileBacked && m.ua.has_value() && !CWalletDB(strWalletFile).EraseRecipientMapping(txid, m.address)) {
+                LogPrintf("EraseUnbroadcastTx: could not erase a recipient mapping of %s (display only)\n", txid.ToString());
+            }
+        }
+        sendRecipients.erase(r);
+    }
+    // Nothing else names it: the Orchard wallet records notes only from AddToWalletIfInvolvingMe, which a commit does
+    // not call (and a Vault-era transaction is v4, with no Orchard actions); there is no mapRequestCount; setExWallet
+    // holds only deleted transactions; locked coins and notes name the inputs' outpoints and belong to the operation
+    // that built the transaction, which releases them; Yellowback's yecLocks are taken only after an accepted commit.
+    mapWallet.erase(it);
+    return true;
+}
+
 
 /**
  * Returns a nullifier if the SpendingKey is available

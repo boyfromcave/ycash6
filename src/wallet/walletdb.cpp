@@ -495,6 +495,12 @@ bool CWalletDB::WriteRecipientMapping(const uint256& txid, const libzcash::Recip
     return Write(std::make_pair(std::string("recipientmapping"), key), uaString);
 }
 
+bool CWalletDB::EraseRecipientMapping(const uint256& txid, const libzcash::RecipientAddress& address)
+{
+    std::pair<uint256, CSerializeRecipientAddress> key = std::make_pair(txid, CSerializeRecipientAddress(address));
+    return Erase(std::make_pair(std::string("recipientmapping"), key));
+}
+
 class CWalletScanState {
 public:
     unsigned int nKeys;

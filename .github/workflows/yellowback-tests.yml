@@ -81,7 +81,7 @@ name: yellowback tests
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
 #   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
-#     `koganyd` and `sidecar-rig`, the 51 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     `koganyd` and `sidecar-rig`, the 53 wallet-needing scripts of qa/kogany-mixed-shards.txt's
 #     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
 #     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
 #     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
@@ -186,7 +186,7 @@ env:
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
   OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
@@ -805,7 +805,7 @@ jobs:
 
   # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
   # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
-  # 51 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
+  # 53 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
   # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
   # so every block and transaction between nodes passes kogany's validation and ycashd's again
   # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
