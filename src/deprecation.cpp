@@ -147,7 +147,8 @@ std::string GetAllowableDeprecatedFeatures() {
 // The message an RPC method gives when -allowdeprecated turned it off. On Ycash every deprecated
 // feature is allowed by default and an explicit -allowdeprecated=<feature> only adds to that
 // default (LoadAllowedDeprecatedFeatures), so the one way to turn a method off is
-// -allowdeprecated=none, which takes no other value.
+// -allowdeprecated=none, which takes no other value. Only the methods whose flag that function
+// sets can be turned off at all (the list is in deprecation.h, above SupportedOnYcash).
 static std::string DisabledByAllowDeprecated(const std::string& method) {
     return std::string("\n")
            + method + " is DISABLED on this node, which was started with -allowdeprecated=none.\n"
@@ -160,7 +161,7 @@ std::string Deprecated(bool enabled, std::string method, std::string instead) {
         return DisabledByAllowDeprecated(method) + (instead.empty() ? "" : instead + "\n");
     }
     return std::string("\n")
-           + method + " is DEPRECATED. Ycash keeps it for existing integrations, but a better call exists.\n"
+           + method + " is DEPRECATED. Ycash keeps it for existing integrations; prefer the alternative below.\n"
            + instead + "\n";
 }
 

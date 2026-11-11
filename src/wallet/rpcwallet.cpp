@@ -2542,8 +2542,8 @@ UniValue keypoolrefill(const UniValue& params, bool fHelp)
             "keypoolrefill ( newsize )\n"
             + SupportedOnYcash(fEnableKeyPoolRefill,
                                "keypoolrefill",
-                               "The transparent keypool backs getnewaddress and\n"
-                               "getrawchangeaddress.") +
+                               "The transparent keypool supplies getrawchangeaddress, the\n"
+                               "transparent change of sendtoaddress / sendmany, and the mining coinbase key.") +
             "\nFills the keypool associated with the legacy transparent value pool. This should only be\n"
             "used when interoperability with legacy Bitcoin infrastructure is required.\n"
             + HelpRequiringPassphrase() + "\n"

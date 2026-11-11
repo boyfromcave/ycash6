@@ -134,7 +134,7 @@ std::string GetAllowableDeprecatedFeatures();
 
 /**
  * Returns a string to be included in the help text of a deprecated RPC method that has a
- * replacement on Ycash (`instead` names it).
+ * better alternative on Ycash (`instead` says what to use).
  */
 std::string Deprecated(bool enabled, std::string method, std::string instead);
 
@@ -142,8 +142,15 @@ std::string Deprecated(bool enabled, std::string method, std::string instead);
  * Returns a string to be included in the help text of an RPC method that upstream Zcash
  * deprecated but that is a supported call on Ycash, usually because its replacement needs
  * NU5 (unified-address accounts), which has no activation height on Ycash. `note` says why.
- * The method stays behind its -allowdeprecated feature flag, so -allowdeprecated=none still
- * turns it off and `enabled` false gives the DISABLED message.
+ *
+ * `enabled` false gives the DISABLED message. Which methods -allowdeprecated=none can turn off
+ * is fixed by LoadAllowedDeprecatedFeatures, not by these helpers, and is unchanged here:
+ *   - turned off by -allowdeprecated=none: getnewaddress, getrawchangeaddress, z_getnewaddress,
+ *     z_getbalance, z_gettotalbalance, z_listaddresses and the nine legacy account RPCs
+ *     ("accounts");
+ *   - never turned off (their flags are always true; the feature names are accepted and have no
+ *     effect): createrawtransaction, signrawtransaction, fundrawtransaction, keypoolrefill,
+ *     settxfee and getnetworkhashps.
  */
 std::string SupportedOnYcash(bool enabled, std::string method, std::string note);
 
