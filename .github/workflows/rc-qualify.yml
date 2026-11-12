@@ -12,8 +12,9 @@
 # release workflow's `qualify` job does once the draft exists; by hand for a rerun. Inputs: the
 # workspace ref holding releases/v<version>.yaml (default upgrade/vault) and one switch per step.
 #
-# Proving run (before any tag): dispatched on a BRANCH with input proving_run = the id of a green
-# workflow_dispatch run of yellowback-release.yml on that same branch at that same commit. The
+# Proving run (before any tag): dispatched on upgrade/vault (or a release/* branch) with input
+# proving_run = the id of a green, strict workflow_dispatch run of yellowback-release.yml (its
+# `release-dry-run` job green) on that same branch at that same commit. The
 # candidate is then that run's `release-signed` artifact instead of a release (the same checks:
 # SHA256SUMS, the cosign signature, whose identity is the workflow at the branch, and the build
 # provenance), the train's ycash6 tag must be v<version> (it need not exist yet) and its ycash6
@@ -41,7 +42,7 @@
 #   record      rc-qualify.json (every job's result, the pins, the package sha256) as a workflow
 #               artifact and, on the release, an asset `rc-qualify-<run id>.json`.
 #
-# After a green record (doc/yellowback-release.md, "Release candidates"): the owner signs SHA256SUMS
+# After a green record (doc/yellowback-release.md, "Release candidates"): the Yellowback lead architect signs SHA256SUMS
 # (ycash-ops sign-release), deploys the rc image to testnet-yb-fast, then testnet-yb-slow (and runs it
 # on testnet-legacy with Vault off) from ycash-ops, and publishes the pre-release. A red record means a
 # new rc number, never a moved tag. Step 5 (the 24 h canary from rc2 on) needs the live testnet and
@@ -119,6 +120,8 @@ jobs:
           else
             [ -n "$PROVING_RUN" ] || { echo "rc-qualify runs on a tag (gh workflow run rc-qualify.yml --ref v<version>), or on a branch with proving_run, not ${GITHUB_REF}"; exit 1; }
             [[ $PROVING_RUN =~ ^[0-9]{1,20}$ ]] || { echo "proving_run is not a run id"; exit 1; }
+            # Only the line that is tagged proves anything: upgrade/vault, or a release branch.
+            [[ $GITHUB_REF_NAME == upgrade/vault || $GITHUB_REF_NAME == release/* ]] || { echo "a proving run is dispatched on upgrade/vault or release/*, not ${GITHUB_REF_NAME}"; exit 1; }
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROVING_RUN" \
               --jq '[.path, .event, .head_branch, .head_sha, .status, .conclusion] | @tsv' > "$RUNNER_TEMP/run.tsv"
             IFS=$'\t' read -r rpath revent rbranch rsha rstatus rconcl < "$RUNNER_TEMP/run.tsv"
@@ -128,6 +131,11 @@ jobs:
             [ "$rbranch" = "$GITHUB_REF_NAME" ] || { echo "run $PROVING_RUN ran on $rbranch, not $GITHUB_REF_NAME"; exit 1; }
             [ "$rsha" = "$commit" ] || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit: prove again at the head"; exit 1; }
             [ "$rstatus/$rconcl" = completed/success ] || { echo "run $PROVING_RUN is $rstatus/$rconcl, not completed/success"; exit 1; }
+            # A strict run only: release-dry-run runs only when strict, so its success proves the
+            # guards refused nothing (a strict=false run is green while they only warn).
+            dr=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROVING_RUN/jobs" --paginate \
+              --jq '.jobs[] | select(.name == "Draft release (dry run, no release)") | .conclusion')
+            [ "$dr" = success ] || { echo "run $PROVING_RUN is not a strict proving run (dry-run job: ${dr:-absent})"; exit 1; }
             mkdir -p cand
             gh run download "$PROVING_RUN" -R "$GITHUB_REPOSITORY" -n release-signed -D cand
             pkg=$(cd cand && ls ycashd_v*_linux_x86_64.tar.gz)
@@ -166,8 +174,12 @@ jobs:
             --certificate-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/yellowback-release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
           pkg="ycashd_v${VERSION}_linux_x86_64.tar.gz"
-          gh attestation verify "$pkg" -R "$GITHUB_REPOSITORY"
-          gh attestation verify SHA256SUMS -R "$GITHUB_REPOSITORY"
+          # Bound to the release workflow at this ref (the tag, or a proving run's branch): an
+          # attestation made at any other ref does not pass.
+          for f in "$pkg" SHA256SUMS; do
+            gh attestation verify "$f" -R "$GITHUB_REPOSITORY" --source-ref "$GITHUB_REF" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/yellowback-release.yml"
+          done
           mkdir -p ../rc-package
           cp "$pkg" SHA256SUMS ../rc-package/
           {

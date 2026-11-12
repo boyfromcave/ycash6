@@ -47,7 +47,14 @@ In plain words: anyone can check that a download is the file this repository's r
 built, and that the Yellowback lead architect vouched for it, without trusting the download site.
 
 - **Build provenance.** Every package, every SBOM and `SHA256SUMS` carries a GitHub build
-  provenance attestation (SLSA build level 2): `gh attestation verify <file> -R boyfromcave/ycash6`.
+  provenance attestation (SLSA build level 2), checked against the release workflow at the tag:
+
+  ```
+  gh attestation verify <file> -R boyfromcave/ycash6 --source-ref refs/tags/v<V> \
+    --signer-workflow boyfromcave/ycash6/.github/workflows/yellowback-release.yml
+  ```
+
+  Without `--source-ref` the check also accepts a proving run's files (attested at a branch).
 - **Keyless cosign.** `SHA256SUMS.cosign.bundle` signs `SHA256SUMS`; its certificate names this
   workflow at the tag:
 
@@ -105,10 +112,12 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    `gh workflow run yellowback-release.yml -R boyfromcave/ycash6 --ref upgrade/vault` (input
    `strict`, default true). A strict dispatch refuses exactly what the tag would (the version and
    line, the stage rules, Vault parity with ycash-dd's pairing tag, or with ycash-dd `upgrade/vault`
-   while that tag does not exist), builds and smoke-tests every package, signs `SHA256SUMS`
+   while that tag does not exist), builds depends from source as the tag does (no cache; only
+   `strict=false` restores one), builds and smoke-tests every package, signs `SHA256SUMS`
    (identity: the branch), and its `release-dry-run` job checks the signed set and the notes file
    and prints the release the tag would create. It never creates a release and never starts
-   rc-qualify: those two jobs run on a pushed tag only. Download and spot-check at least one
+   rc-qualify: those two jobs run on a pushed tag only, and a dispatch on a tag ref is refused (it
+   would sign with the tag's identity). `release-dry-run` runs only when strict. Download and spot-check at least one
    package. Then prove the qualification on the same artifacts (rc-qualify, "Proving run" below).
 4. **Release train.** Add `releases/v<V>.yaml` to the workspace (`boyfromcave/yellowback`,
    its `releases/README.md`) by pull request: every component at the commit this release is
@@ -154,8 +163,10 @@ reads the train from the workspace, and runs:
 never meets it for the first time: once the release train (step 4) names the `upgrade/vault` head as
 `ycash6.commit` and `v<V>` as its tag (on a workspace branch is enough, input `train_ref`), dispatch
 `gh workflow run rc-qualify.yml -R boyfromcave/ycash6 --ref upgrade/vault -f proving_run=<run id>
--f train_ref=<workspace branch>`, where `<run id>` is the green dry run of step 3 at that same
-commit (the job refuses any other run, and refuses again once `upgrade/vault` moves). The candidate
+-f train_ref=<workspace branch>`, where `<run id>` is the green, strict dry run of step 3 at that
+same commit (its `release-dry-run` job green; the job refuses any other run, a branch other than
+`upgrade/vault` or `release/*`, and refuses again once `upgrade/vault` moves). A failing proving run
+opens no issue (the node suites' issue steps skip it). The candidate
 is that run's `release-signed` artifact, checked the same way (its cosign identity is the workflow
 at the branch); the record (`proving_run: true`) stays a workflow artifact and nothing is written
 to any release.

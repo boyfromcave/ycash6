@@ -49,7 +49,9 @@
 #
 # Signing and provenance (testnet plan §5.2, T-6):
 #   - build provenance (actions/attest-build-provenance, SLSA build level 2, GitHub OIDC) for every
-#     package, every SBOM and SHA256SUMS: `gh attestation verify <file> -R boyfromcave/ycash6`;
+#     package, every SBOM and SHA256SUMS: `gh attestation verify <file> -R boyfromcave/ycash6
+#     --source-ref refs/tags/v<version> --signer-workflow boyfromcave/ycash6/.github/workflows/yellowback-release.yml`
+#     (without --source-ref a proving run's attestation, made at a branch, would pass too);
 #   - SHA256SUMS.cosign.bundle: a keyless `cosign sign-blob` of SHA256SUMS whose certificate
 #     identity is this workflow at the tag (…/yellowback-release.yml@refs/tags/v<version>);
 #   - ycashd_v<version>_<platform>.spdx.json: an SPDX SBOM of each package (syft); listed in
@@ -114,6 +116,11 @@ jobs:
         # The same rendering as configure.ac's _CLIENT_VERSION_SUFFIX: BUILD < 25 is -beta<BUILD+1>,
         # 25..49 is -rc<BUILD-24>, 50 is the release, above 50 is -<BUILD-50>.
         run: |
+          # A tag releases by being pushed: a dispatch on a tag ref would sign and attest with the
+          # tag's identity (and share its concurrency group), so only a branch is dispatched.
+          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ] && [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "a proving run is dispatched on a branch, not ${GITHUB_REF}; a tag releases by being pushed"; exit 1
+          fi
           get() { sed -n "s/^define(_CLIENT_VERSION_$1, \([0-9]*\))$/\1/p" configure.ac; }
           maj=$(get MAJOR); min=$(get MINOR); rev=$(get REVISION); build=$(get BUILD)
           if   [ "$build" -lt 25 ]; then sfx="-beta$((build + 1))"
@@ -281,13 +288,14 @@ jobs:
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Cache depends
-        # Proving runs (workflow_dispatch) only: a tag builds depends from source, so a release
-        # never links anything a cache entry put there (zizmor cache-poisoning). The key covers
+        # Non-strict proving runs (workflow_dispatch, strict=false) only: a tag builds depends from
+        # source, so a release never links anything a cache entry put there (zizmor cache-poisoning),
+        # and a strict proving run builds them from source too, so it proves what the tag does. The key covers
         # Cargo.lock/Cargo.toml because depends vendors the Rust crates into depends/<host>
         # (see .github/actions/yellowback-depends).
         id: depends
-        if: matrix.kind != 'legacy' && github.ref_type != 'tag'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 # zizmor: ignore[cache-poisoning] -- never runs on a tag (the if above)
+        if: matrix.kind != 'legacy' && github.ref_type != 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.strict)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 # zizmor: ignore[cache-poisoning] -- never runs on a tag or a strict proving run (the if above)
         with:
           path: |
             depends/built
@@ -482,7 +490,9 @@ jobs:
   release-dry-run:
     name: Draft release (dry run, no release)
     needs: [version, sign]
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type != 'tag' && !cancelled() && needs.sign.result == 'success' }}
+    # Strict proving runs only: rc-qualify's proving_run requires this job green, so a warn-only
+    # (strict=false) run can never stand as a proof.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type != 'tag' && inputs.strict && !cancelled() && needs.sign.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -522,6 +532,8 @@ jobs:
             echo "Assets:"
             echo
             sed 's/^/    /' dist/SHA256SUMS
+            echo
+            echo "depends: built from source, no cache restored (strict proving run, as the tag)"
             echo
             echo "Notes ($notes), first lines:"
             echo
@@ -572,7 +584,9 @@ jobs:
           it, a minisign signature (\`SHA256SUMS.minisig\`, key \`02C923A6C593AF18\`):
 
               sha256sum -c --ignore-missing SHA256SUMS
-              gh attestation verify ycashd_v${VERSION}_linux_x86_64.tar.gz -R ${GITHUB_REPOSITORY}
+              gh attestation verify ycashd_v${VERSION}_linux_x86_64.tar.gz -R ${GITHUB_REPOSITORY} \\
+                --source-ref refs/tags/${GITHUB_REF_NAME} \\
+                --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/yellowback-release.yml
               cosign verify-blob --bundle SHA256SUMS.cosign.bundle \\
                 --certificate-identity ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/yellowback-release.yml@refs/tags/${GITHUB_REF_NAME} \\
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
