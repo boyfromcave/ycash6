@@ -22,9 +22,11 @@ Falcon is active, no Yellowback outpoint); when every one is a Yellowback outpoi
 them is given instead. A coinbase shortfall is added to the message (`; its coinbase funds can only be spent
 after they have been sent to a zaddr`) instead of hiding it (review LOW-2, LOW-3).
 
-A wallet that has held YED, started with `-yellowback=0`, no longer spends an output its Yellowback payload
-gives YED in any coin-selecting send (`sendtoaddress`, `sendmany`, `z_sendmany`, `z_mergetoaddress`, the vault
-fee funding): `refusing to spend an output that carries YED as plain YEC while Yellowback is not live:
+Where Yellowback is not live (`-yellowback=0`, or no attestor set), no coin-selecting send spends an output its
+Yellowback payload gives YED (`sendtoaddress`, `sendmany`, the coins `fundrawtransaction` adds, `z_sendmany`,
+`z_mergetoaddress`, the vault fee funding), whether or not the wallet carries the "has held YED" mark: a wallet
+restored from its seed phrase where Yellowback is not live has no mark and was not protected before. The stock
+sends leave such an output out; the others refuse with `refusing to spend an output that carries YED as plain YEC while Yellowback is not live:
 <txid>:<n>[, …] (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)` (beta2
 item 9).
 

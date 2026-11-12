@@ -101,6 +101,7 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
         taddr = nodes[RECEIVER].getnewaddress()
         assert_equal(held(nodes[RECEIVER]), False)
         unmarked_receiver = self.wallet_copy(RECEIVER, 'walletnode%dunmarked' % RECEIVER)
+        self.receiver_taddr, self.unmarked_receiver = taddr, unmarked_receiver
         nodes[USER].yed_send(yed_form(nodes[USER], taddr), 1000)
         self.sync_all()
         self.mine(POOLS[1])
@@ -120,6 +121,7 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
         self.copied_wallets()
         self.more_marker_paths(unmarked_receiver)
         self.checkpoint('has-held-YED guard')
+        self.unmarked_guard()
         self.burn_guard()
 
     def wallet_copy(self, i, name=None):
@@ -215,6 +217,99 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
         self.restart(RECEIVER, ['-rescan'])
         assert_equal(self.nodes[RECEIVER].yed_getbalance()['confirmedCents'], 1000)
         assert_equal(held(self.nodes[RECEIVER]), True)
+
+    def unmarked_guard(self):
+        """Where Yellowback is not live, no coin-selecting send spends an output whose own payload gives it YED,
+        whether or not the wallet carries the "yedheld" mark. The unmarked case is the seed restore where Yellowback
+        is not live (no attestor set): the restored wallet holds the YED output and has no mark. Built here without a
+        restore: the receiver's wallet copy taken before its YED arrived, rescanned on a copy of the chain with no
+        Yellowback index and no attestor set (no -yellowback=0 needed: the wallet is unmarked)."""
+        user = self.nodes[USER]
+        taddr = self.receiver_taddr
+        print('not live, unmarked wallet holding YED: no coin-selecting send spends its YED output')
+        user.sendtoaddress(taddr, 1)                  # a plain coin beside the token at the same address
+        self.sync_all()
+        self.mine(POOLS[0])
+        stop_node(user, USER)
+        self.nodes[USER] = None
+        datadir = os.path.join(self.options.tmpdir, 'node%d' % FRESH)
+        if os.path.isdir(datadir):
+            shutil.rmtree(datadir)
+        shutil.copytree(os.path.join(self.options.tmpdir, 'node%d' % USER), datadir)
+        shutil.rmtree(os.path.join(datadir, 'regtest', 'yellowback'))
+        shutil.copyfile(self.unmarked_receiver, os.path.join(datadir, 'regtest', 'wallet.dat'))
+        initialize_datadir(self.options.tmpdir, FRESH)     # this slot's own ports, not the copied node's
+        self.restart(USER)
+        base = [a for a in self.node_args(UNTOUCHED) if not a.startswith('-yellowback') and a != '-experimentalfeatures']
+        node = start_node(FRESH, self.options.tmpdir, base + ['-rescan'])
+        try:
+            assert_equal(held(node), False)                # the state a seed restore leaves (SEED-BASE step 6, B)
+            assert_equal(unlocked(node), False)
+            here = node.listunspent(1, 9999999, [taddr])
+            token = [c for c in here if c['amount'] == Decimal('0.0001')]
+            plain = [c for c in here if c['amount'] == Decimal('1')]
+            assert_equal((len(here), len(token), len(plain)), (2, 1, 1))
+            token, plain = token[0], plain[0]
+            outpoint = {'txid': token['txid'], 'vout': token['vout']}
+            # only the token and the plain coin beside it stay selectable: 1 YEC and its 0.0001 fee need both
+            others = [{'txid': c['txid'], 'vout': c['vout']} for c in node.listunspent(0, 9999999)
+                      if (c['txid'], c['vout']) not in ((token['txid'], token['vout']), (plain['txid'], plain['vout']))]
+            if others:
+                assert node.lockunspent(False, others)
+            to = node.getnewaddress()
+
+            def token_unspent():
+                assert_equal([c for c in node.listunspent(0, 9999999, [taddr])
+                              if (c['txid'], c['vout']) == (token['txid'], token['vout'])], [token])
+                assert_equal(node.getrawmempool(), [])
+
+            for name, call in (('sendtoaddress', lambda: node.sendtoaddress(to, 1)),
+                               ('sendmany', lambda: node.sendmany('', {to: 1})),
+                               ('fundrawtransaction', lambda: node.fundrawtransaction(node.createrawtransaction([], {to: 1})))):
+                print('  %s: insufficient funds without the token (before: it spent the token)' % name)
+                try:
+                    call()
+                    raise AssertionError('%s spent the YED output as plain YEC' % name)
+                except JSONRPCException as e:
+                    assert 'Insufficient funds' in e.error['message'], e.error['message']
+                token_unspent()
+
+            print('  z_sendmany from the address: refused, naming the token')
+            refusal = ('refusing to spend an output that carries YED as plain YEC while Yellowback is not live: %s:%d '
+                       '(its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)'
+                       % (token['txid'], token['vout']))
+            try:
+                wait_and_assert_operationid_status(node, z_sendmany_opid(node, taddr, [(to, Decimal('1'))]), 'failed', refusal)
+            except JSONRPCException as e:
+                assert_equal(e.error['message'], refusal)
+            token_unspent()
+
+            print('  vault funding (set_create) with only the token selectable: insufficient funds')
+            assert node.lockunspent(False, [{'txid': plain['txid'], 'vout': plain['vout']}])
+            try:
+                node.set_create({'seats': 1, 'unlockthreshold': 1, 'maturity': 2})
+                raise AssertionError('set_create funded its fee from the YED output')
+            except JSONRPCException as e:
+                assert 'insufficient confirmed transparent funds' in e.error['message'], e.error['message']
+            token_unspent()
+            assert node.lockunspent(True, [{'txid': plain['txid'], 'vout': plain['vout']}])
+
+            print('  fundrawtransaction that names the token: the deliberate act stays possible')
+            funded = node.fundrawtransaction(node.createrawtransaction([outpoint], {to: Decimal('0.5')}))
+            assert outpoint in [{'txid': i['txid'], 'vout': i['vout']} for i in node.decoderawtransaction(funded['hex'])['vin']]
+
+            print('  z_mergetoaddress from the address: merges the plain coin, leaves the token')
+            try:
+                merge = node.z_mergetoaddress([taddr], node.z_getnewaddress('sapling'))
+            except JSONRPCException as e:
+                merge = None
+                print('  (z_mergetoaddress not available on this node: %s)' % e.error['message'])
+            if merge is not None:
+                assert_equal(merge['mergingUTXOs'], 1)
+                wait_and_assert_operationid_status(node, merge['opid'])
+                assert_equal([c for c in node.listunspent(0, 9999999, [taddr])], [token])
+        finally:
+            stop_node(node, FRESH)
 
     def burn_guard(self):
         """beta2 item 9: with -yellowback=0 a marked wallet has no YED coin locks, yet no coin-selecting send spends

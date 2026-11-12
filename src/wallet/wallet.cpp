@@ -6686,6 +6686,23 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
         vCoinsNoCoinbase.erase(std::remove_if(vCoinsNoCoinbase.begin(), vCoinsNoCoinbase.end(), pqNotNamed), vCoinsNoCoinbase.end());
         vCoinsWithCoinbase.erase(std::remove_if(vCoinsWithCoinbase.begin(), vCoinsWithCoinbase.end(), pqNotNamed), vCoinsWithCoinbase.end());
     }
+    // Beta2 item 9: where Yellowback is not live there is no YED coin lock to keep a YED output out of AvailableCoins,
+    // so an output whose own Yellowback payload gives it YED is left out here instead (YellowbackInputRefusal), with or
+    // without the wallet's "yedheld" mark; the send uses the other coins. An input the caller names stays.
+    if (!yellowback::g_yellowbackWallet) {
+        std::vector<COutPoint> candidates, refused;
+        for (const COutput& o : vCoinsWithCoinbase) {
+            if (!(coinControl && coinControl->IsSelected(o.tx->GetHash(), o.i))) candidates.emplace_back(o.tx->GetHash(), o.i);
+        }
+        YellowbackInputRefusal(candidates, false, &refused);
+        if (!refused.empty()) {
+            auto yed = [&refused](const COutput& o) {
+                return std::find(refused.begin(), refused.end(), COutPoint(o.tx->GetHash(), o.i)) != refused.end();
+            };
+            vCoinsNoCoinbase.erase(std::remove_if(vCoinsNoCoinbase.begin(), vCoinsNoCoinbase.end(), yed), vCoinsNoCoinbase.end());
+            vCoinsWithCoinbase.erase(std::remove_if(vCoinsWithCoinbase.begin(), vCoinsWithCoinbase.end(), yed), vCoinsWithCoinbase.end());
+        }
+    }
     fOnlyCoinbaseCoinsRet = vCoinsNoCoinbase.size() == 0 && vCoinsWithCoinbase.size() > 0;
 
     // If coinbase utxos can only be sent to zaddrs, exclude any coinbase utxos from coin selection.
@@ -9757,10 +9774,12 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
 {
     if (refusedOut) refusedOut->clear();
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
-    if (!yw && !yellowback::g_yellowbackLive && pwalletMain && pwalletMain->IsYedHeld() && !inputs.empty()) {
-        // beta2 item 9: a wallet that has held YED, started where Yellowback is not live (-yellowback=0), has no index
-        // and no YED coin locks; what each input's own payload assigns (no index needed) still keeps it out of every
-        // coin-selecting send. Burning it takes a second, explicit act: a raw transaction that names the outpoint.
+    if (!yw && pwalletMain && !inputs.empty()) {
+        // beta2 item 9: where Yellowback is not live (-yellowback=0, no attestor set) there is no index and no YED coin
+        // lock; what each input's own payload assigns (no index needed) still keeps it out of every coin-selecting
+        // send. This rests on the outputs, not on the wallet's "yedheld" mark, which a seed restore, an imported key
+        // or a wallet that never saw Yellowback live does not carry. Burning it takes a second, explicit act: a raw
+        // transaction that names the outpoint.
         std::vector<COutPoint> refused;
         {
             LOCK2(cs_main, pwalletMain->cs_wallet);
