@@ -214,7 +214,7 @@ void EnsurePQAmountNotDust(const CTxDestination& dest, CAmount amount)
 static void RefusePQSource(const KeyIO& keyIO, const std::string& str, const std::string& method)
 {
     if (IsPQKeyDestination(keyIO.DecodeDestination(str)))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, method + " cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, method + " cannot spend from a post-quantum address; use z_sendmany");
 }
 
 UniValue getnewaddress(const UniValue& params, bool fHelp)
@@ -224,8 +224,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (!fEnableGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
-            "getnewaddress ( \"type\" )\n"
-            "getnewaddress ( \"\" \"type\" )\n"
+            "getnewaddress ( \"type\"|\"\" ( \"type\" ) )\n"
             + SupportedOnYcash(fEnableGetNewAddress,
                                "getnewaddress",
                                "This is the way to get a new transparent (\"p2pkh\") or\n"
@@ -245,8 +244,8 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"
-            "                  A post-quantum address receives plain YEC; sendtoaddress/sendmany spend it (fee by size),\n"
-            "                  the z_* operations never pay or spend it.\n"
+            "                  A post-quantum address receives plain YEC; z_sendmany and z_mergetoaddress spend it (fee by\n"
+            "                  size, change back to it); sendtoaddress, sendmany and z_shieldcoinbase never do.\n"
 
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new transparent Ycash address\n"
@@ -518,6 +517,8 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
             "pool, and all the details of the transaction, including sender, recipient, and amount will be\n"
             "permanently visible on the public chain. THIS API PROVIDES NO PRIVACY, and should only be\n"
             "used when interoperability with legacy Bitcoin infrastructure is required.\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() +
             "\nArguments:\n"
             "1. \"zcashaddress\"  (string, required) The transparent Ycash address to send to.\n"
@@ -1494,6 +1495,8 @@ UniValue getbalance(const UniValue& params, bool fHelp)
             "3. includeWatchonly (bool, optional, default=false) Also include balance in watchonly addresses (see 'importaddress')\n"
             "4. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
             "5. " + asOfHeightMessage(true) +
+            "\nWith asOfHeight each transaction's credit is counted afresh at that height (no cached value is read or\n"
+            "written), as getwalletinfo asOfHeight counts it.\n"
             "\nResult:\n"
             "amount              (numeric) The total amount in " + CURRENCY_UNIT + "(or " + MINOR_CURRENCY_UNIT + " if inZat is true) received.\n"
             "\nBitcoin compatibility:\n"
@@ -1966,6 +1969,8 @@ UniValue sendmany(const UniValue& params, bool fHelp)
             "provide privacy protections; it should only be used in circumstances \n"
             "where it is necessary to interoperate with legacy Bitcoin infrastructure.\n"
             "Prefer to use `z_sendmany` instead.\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"dummy\"               (string, required) Must be set to \"\" for backwards compatibility.\n"
@@ -3308,6 +3313,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "Returns wallet state information.\n"
             "\nArguments:\n"
             "1. " + asOfHeightMessage(false) +
+            "\nWith asOfHeight the balance fields are counted afresh at that height, as getbalance asOfHeight counts them.\n"
             "\nResult:\n"
             "{\n"
             "  \"walletversion\": xxxxx,     (numeric) the wallet version\n"
@@ -3827,6 +3833,8 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                                "ycashd has no other call for this raw-transaction step.") +
             "\nAdd transparent inputs to a transaction until it has enough in value to meet its out value.\n"
             "This will not modify existing inputs, and will add one change output to the outputs.\n"
+            "The inputs added are ordinary (ECC) coins only: a post-quantum coin is added only when the transaction already names\n"
+            "it; with too few ECC coins the call is refused, naming the post-quantum value (spend it with z_sendmany).\n"
             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
             "The inputs added will not be signed, use signrawtransaction for that.\n"
             "Note that all existing inputs must have their previous output transaction be in the wallet.\n"
@@ -3920,7 +3928,10 @@ UniValue zc_benchmark(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() < 2) {
         throw runtime_error(
-            "zcbenchmark benchmarktype samplecount\n"
+            "zcbenchmark benchmarktype samplecount ( arg )\n"
+            "\n"
+            "arg (optional): the thread count for createjoinsplit and solveequihash, the JoinSplit hex for\n"
+            "verifyjoinsplit.\n"
             "\n"
             "Runs a benchmark of the selected benchmark type samplecount times,\n"
             "returning the running times of each sample.\n"
@@ -7001,7 +7012,7 @@ UniValue z_listoperationids(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "z_listoperationids\n"
+            "z_listoperationids ( \"status\" )\n"
             "\nReturns the list of operation ids currently known to the wallet.\n"
             "\nArguments:\n"
             "1. \"status\"         (string, optional) Filter result by the operation's state e.g. \"success\".\n"

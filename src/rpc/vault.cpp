@@ -54,7 +54,7 @@ bool EnsureWalletIsAvailable(bool avoidException);
 
 namespace {
 
-/** The flat fee every vault RPC pays (zatoshi), as the conventional transparent fee. */
+/** The least fee a vault RPC pays (zatoshi), as the conventional transparent fee; Fund prices a larger transaction by size. */
 // VAULT_RPC_FEE (10,000 zat) is policy.h's: the floor of the vault/Yellowback fee cap too
 /** Change below this goes to the fee. */
 static const CAmount VAULT_RPC_MIN_CHANGE = 1000;
@@ -748,10 +748,14 @@ enum class FundMode { LARGEST_FIRST, SMALL_CHANGE };
  *  node's UTXO view (pcoinsTip + mempool, GetCoin): the wallet learns of a block's spends on its own notification
  *  thread, so right after a block it can still count a coin the block spent as unspent (refee-utxo). A Yellowback
  *  outpoint whose coin lock was removed (YellowbackInputRefusal, beta2 review L-3) is left out; `yedRefusal`, when
- *  given, receives the refusal naming it ("" when there was none). */
-std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used, std::string* yedRefusal = nullptr)
+ *  given, receives the refusal naming it ("" when there was none). An immature coinbase output is never one
+ *  (AvailableCoins), nor any coinbase output where coinbase must be shielded (the stock wallet's SelectCoins rule;
+ *  beta2 item 21b): `coinbaseValue`, when given, receives the value of those left out for that reason. */
+std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used, std::string* yedRefusal = nullptr, CAmount* coinbaseValue = nullptr)
 {
     AssertLockHeld(cs_main);
+    const bool shieldCoinbase = Params().GetConsensus().fCoinbaseMustBeShielded;
+    if (coinbaseValue) *coinbaseValue = 0;
     std::vector<COutput> coins;
     pwalletMain->AvailableCoins(coins, std::nullopt, true, NULL, false, true);
     std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() > b.Value(); });
@@ -767,6 +771,10 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
         CTxOut utxo;
         int height;
         if (!GetCoin(op, utxo, height) || height < 0 || utxo != c.tx->vout[c.i]) continue;   // spent, or not confirmed
+        if (c.fIsCoinbase && shieldCoinbase) {
+            if (coinbaseValue) *coinbaseValue += c.Value();
+            continue;
+        }
         eligible.emplace_back(op, c.Value());
     }
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a token, an unconfirmed
@@ -782,43 +790,110 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
     return eligible;
 }
 
-/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + VAULT_RPC_FEE, given
- *  `inputValue` already provided by the transaction's existing inputs. Inputs are locked in the
- *  wallet so a following build does not pick them before this one confirms. */
+/** Beta2 item 21b, review LOW-4: the coins Fund locked during one vault RPC call. Every vault RPC that writes runs
+ *  inside one (FundScoped, the command table; BuildYedIntentCancel for yed_buildcancel). A build the wallet remembers
+ *  (RememberBuild) takes its inputs off; when the call ends, by any return or throw, the coins still listed are
+ *  unlocked, including the inputs of a transaction the mempool accepted, which Broadcast has recorded in the wallet
+ *  as spent by it (audit L-1). So a refused broadcast, an unknown setid after the
+ *  funding, a signing failure or a conflicting build leaves them free instead of locked until restart. Only coins
+ *  Fund locked in this call are listed: Fund picks unlocked coins only, so a coin locked with lockunspent is never
+ *  released here. cs_wallet is taken for the release. */
+class FundScope
+{
+public:
+    FundScope() : prev(current) { current = this; }
+    ~FundScope()
+    {
+        current = prev;
+        if (locked.empty() || !pwalletMain) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (COutPoint op : locked) pwalletMain->UnlockCoin(op);
+    }
+    FundScope(const FundScope&) = delete;
+    FundScope& operator=(const FundScope&) = delete;
+    static void Locked(const COutPoint& op) { if (current) current->locked.insert(op); }
+    static void Kept(const CTransaction& tx) { if (current) for (const CTxIn& in : tx.vin) current->locked.erase(in.prevout); }
+    /** Review WALLET-FOLLOW-REVIEW-2 LOW-1: a coin the caller locked again for its own reason (Refee re-locks a replaced
+     *  fee input of a remembered build) is no longer this scope's to release. */
+    static void Forget(const COutPoint& op) { if (current) current->locked.erase(op); }
+private:
+    static thread_local FundScope* current;
+    FundScope* prev;
+    std::set<COutPoint> locked;
+};
+thread_local FundScope* FundScope::current = nullptr;
+
+template <rpcfn_type F>
+UniValue FundScoped(const UniValue& params, bool fHelp)
+{
+    FundScope scope;
+    return F(params, fHelp);
+}
+
+/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + the fee, given `inputValue` already
+ *  provided by the transaction's existing inputs. The fee is priced from the size (beta2 item 21b): max(VAULT_RPC_FEE,
+ *  the relay fee, the ZIP-317 conventional fee) of the transaction as built, each added input counted at its signed
+ *  size (YecInputBytes); 10,000 zatoshi for a small transaction, as before. Inputs are locked in the wallet for the
+ *  rest of the call (FundScope), so nothing else picks them while this one is signed and broadcast; once accepted the
+ *  wallet counts them spent (Broadcast, audit L-1). */
 void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode::LARGEST_FIRST)
 {
     CAmount out = 0;
     for (const CTxOut& o : mtx.vout) out += o.nValue;
-    CAmount needed = out + VAULT_RPC_FEE - inputValue;
     std::set<COutPoint> used;
     for (const CTxIn& in : mtx.vin) used.insert(in.prevout);
     std::string yedRefusal;
-    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used, &yedRefusal);
-    CAmount got = 0;
+    CAmount coinbaseValue = 0;
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used, &yedRefusal, &coinbaseValue);
+    const size_t nIn = mtx.vin.size(), nOut = mtx.vout.size();
+    const size_t inputBytes = yellowback::YecInputBytes(GetScriptForDestination(CKeyID()));   // a P2PKH input, signed
+    std::optional<CScript> changeScript;
     std::vector<COutPoint> chosen;
-    if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
-        // the smallest single coin that covers the need (eligible is sorted largest first)
-        for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
-            if (it->second >= needed) { chosen.push_back(it->first); got = it->second; break; }
+    CAmount fee = VAULT_RPC_FEE;
+    for (int pass = 0; ; pass++) {
+        if (pass == 8) throw JSONRPCError(RPC_WALLET_ERROR, "the funding fee did not settle");
+        mtx.vin.resize(nIn);
+        mtx.vout.resize(nOut);
+        const CAmount needed = out + fee - inputValue;
+        CAmount got = 0;
+        chosen.clear();
+        if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
+            // the smallest single coin that covers the need (eligible is sorted largest first)
+            for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
+                if (it->second >= needed) { chosen.push_back(it->first); got = it->second; break; }
+            }
         }
-    }
-    if (chosen.empty()) {
-        for (const auto& e : eligible) {
-            if (needed <= 0 || got >= needed) break;
-            chosen.push_back(e.first);
-            got += e.second;
+        if (chosen.empty()) {
+            for (const auto& e : eligible) {
+                if (needed <= 0 || got >= needed) break;
+                chosen.push_back(e.first);
+                got += e.second;
+            }
         }
+        if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
+        if (got < needed)
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more%s", FormatMoney(needed - got),
+                coinbaseValue > 0 ? strprintf(" (%s of coinbase outputs must be shielded first: z_shieldcoinbase, then z_sendmany to a transparent address, or vault_lock \"from\" the shielded address)", FormatMoney(coinbaseValue)) : std::string()));
+        for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
+        const CAmount change = got - needed;
+        if (change >= VAULT_RPC_MIN_CHANGE) {
+            if (!changeScript) changeScript = GetScriptForDestination(NewWalletKey().GetID());
+            mtx.vout.push_back(CTxOut(change, changeScript.value()));
+        }
+        // sized as signed: each added input with a dummy scriptSig of its signed size (outpoint 36, length 1, sequence 4)
+        CMutableTransaction sized(mtx);
+        const std::vector<unsigned char> dummy(inputBytes > 41 ? inputBytes - 41 : 0, 0x00);
+        for (size_t i = nIn; i < sized.vin.size(); i++) sized.vin[i].scriptSig = CScript(dummy.begin(), dummy.end());
+        const CTransaction sizedTx(sized);
+        const size_t size = ::GetSerializeSize(sizedTx, SER_NETWORK, PROTOCOL_VERSION);
+        const CAmount required = std::max({VAULT_RPC_FEE, ::minRelayTxFee.GetFee(size), sizedTx.GetConventionalFee()});
+        if (inputValue + got - sizedTx.GetValueOut() >= required) break;
+        fee = std::max(required, fee + 1);
     }
-    if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
-    if (got < needed)
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more", FormatMoney(needed - got)));
-    for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
-    const CAmount change = got - needed;
-    if (change >= VAULT_RPC_MIN_CHANGE) {
-        CPubKey ck = NewWalletKey();
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(ck.GetID())));
+    for (COutPoint& op : chosen) {
+        pwalletMain->LockCoin(op);
+        FundScope::Locked(op);
     }
-    for (COutPoint& op : chosen) pwalletMain->LockCoin(op);
 }
 
 void RememberRecipient(const uint256& recipientHash, const CScript& dest)
@@ -899,6 +974,7 @@ void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
     for (CTxIn& in : mtx.vin)
         if (in.prevout == templ) in.scriptSig = CScript();
     pwalletMain->mapVaultBuilds[templ] = mtx;
+    FundScope::Kept(CTransaction(mtx));   // the build's registry holds its fee inputs now
     if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultBuild(templ, mtx))
         throw JSONRPCError(RPC_WALLET_ERROR, "cannot record the vault build in the wallet");
 }
@@ -957,7 +1033,10 @@ std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut&
         if (needed > 0)
             mtx.vin.push_back(CTxIn(ExactCoin(needed, {templ.prevout}, std::set<COutPoint>(old.begin(), old.end())), CScript(), CTxIn::SEQUENCE_FINAL));
     } catch (...) {
-        for (COutPoint op : released) pwalletMain->LockCoin(op);
+        for (COutPoint op : released) {
+            pwalletMain->LockCoin(op);
+            FundScope::Forget(op);      // a failed split may have locked it in this scope: it stays the build's (LOW-1)
+        }
         throw;
     }
     if (SetSighash(mtx, 0, coin) != before)
@@ -1093,6 +1172,7 @@ UniValue HandoffSend(CMutableTransaction& mtx, const COutPoint& buildKey, const 
 
     UniValue sign(UniValue::VARR), foreign(UniValue::VARR);
     CAmount signedIn = 0;
+    std::vector<COutPoint> named;   // the wallet coins signed only because allowinputs names them
     std::string refuse;
     for (unsigned int i = 0; i < mtx.vin.size(); i++) {
         CTxOut prev;
@@ -1116,8 +1196,13 @@ UniValue HandoffSend(CMutableTransaction& mtx, const COutPoint& buildKey, const 
         if (chosen || opt.allowinputs.count(mtx.vin[i].prevout)) {
             sign.push_back(row);
             signedIn += prev.nValue;
+            if (!chosen) named.push_back(mtx.vin[i].prevout);
         }
     }
+    // Beta2 audit L-3: a coin `allowinputs` names is the caller's choice, but never a Yellowback outpoint (a YED token,
+    // vault or carrier of this wallet, as the wallet's own fee coins are checked); its YED would burn. A deliberate burn
+    // goes through sendrawtransaction ... allowyedburn.
+    if (refuse.empty()) refuse = YellowbackInputRefusal(named, true);
 
     std::set<unsigned int> own;
     UniValue actField(UniValue::VNULL);
@@ -1180,7 +1265,37 @@ void RememberActBuild(const CMutableTransaction& mtx)
     RememberBuild(mtx.vin[0].prevout, mtx);
 }
 
+uint256 BroadcastOrRefuse(const CTransaction& tx);
+
+/** Beta2 audit L-1: an accepted transaction that spends this wallet's coins or notes is recorded in the wallet at once,
+ *  as CommitTransaction records a send, instead of when the notification thread delivers it. From then on the wallet's
+ *  own rule keeps its inputs out of every selection while it is in the mempool or the chain (IsSpent and
+ *  IsSaplingSpent count a spender at depth >= 0) and hands them back when it leaves the mempool unmined (expiry,
+ *  eviction, a conflict), so no coin or note lock is kept for it: such a lock outlived the transaction until a restart.
+ *  The notification thread's later delivery merges into this record (the change note's data, the block). cs_wallet. */
+void RecordInWallet(const CTransaction& tx)
+{
+    LOCK(pwalletMain->cs_wallet);
+    if (!pwalletMain->IsFromMe(tx)) return;
+    CWalletTx wtx(pwalletMain, tx);
+    wtx.fFromMe = true;
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    if (!pwalletMain->AddToWallet(wtx, &walletdb))
+        LogPrintf("vault: could not write %s to the wallet file; the notification thread records it\n", tx.GetHash().ToString());
+}
+
+/** Submit `tx` to the mempool and relay it; a refusal throws. An accepted transaction is recorded in the wallet
+ *  (RecordInWallet), so the coin locks Fund took for its inputs end with the call's FundScope on every path: a refused
+ *  one leaves its coins free (beta2 item 21b), an accepted one leaves them spent by an unconfirmed transaction (audit
+ *  L-1). */
 uint256 Broadcast(const CTransaction& tx)
+{
+    const uint256 txid = BroadcastOrRefuse(tx);
+    RecordInWallet(tx);
+    return txid;
+}
+
+uint256 BroadcastOrRefuse(const CTransaction& tx)
 {
     // review M-1: submitted below with the absurd-fee check off, so the vault/Yellowback cap is enforced here
     if (std::optional<CAmount> over = YedFeeOverCap(tx))
@@ -1737,7 +1852,7 @@ UniValue set_equivocation(const UniValue& params, bool fHelp)
 // ---- vault_lock's funding address ("from", beta2 decision D-3) ----------------------------------
 // vault_lock is funded, by default, from the wallet's confirmed transparent P2PKH coins (Fund). With "from" it is
 // funded from one address of this wallet only: a transparent P2PKH address (its coins), a plain-YEC post-quantum
-// address (its TX_PQPKH coins, signed under the next block's vault flags, the fee priced by size as sendtoaddress
+// address (its TX_PQPKH coins, signed under the next block's vault flags, the fee priced by size as z_sendmany
 // prices a PQ input) or a Sapling address (its notes, through the Sapling machinery yed_mint uses:
 // yellowback::ParseAddressChoice / SelectSaplingNotes / ProveSapling). Change returns to the same address (D-4).
 // 6.20.0: built by hand like every vault RPC (no WalletTxBuilder, no privacy policy: a vault lock always reveals its
@@ -1762,22 +1877,23 @@ CScript LockFromScript(const yellowback::AddressChoice& from)
 }
 
 /** Refuse a "from" this wallet cannot spend at the next block: a scheme-2 address before Falcon, an address of
- *  another wallet, a watch-only one. cs_main and cs_wallet held. */
+ *  another wallet, a watch-only one. cs_main and cs_wallet held. The first two answer RPC_INVALID_ADDRESS_OR_KEY, the
+ *  code z_sendmany gives the same conditions (beta2 audit L-5). */
 void CheckLockFrom(const yellowback::AddressChoice& from)
 {
     if (from.kind == yellowback::AddressChoice::SAPLING) {
         if (pwalletMain->HaveSaplingSpendingKeyForAddress(from.sapling)) return;
         if (pwalletMain->HaveSaplingIncomingViewingKey(from.sapling))
             throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
-        throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: not an address of this wallet");
     }
     if (from.kind == yellowback::AddressChoice::PQ_ADDR && from.pqKeyId.scheme == pq::SCHEME_FN_DSA_512 &&
         !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block");
     const isminetype mine = IsMine(*pwalletMain, LockFromScript(from));
     if (mine == ISMINE_SPENDABLE) return;
     if (mine != ISMINE_NO) throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
-    throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: not an address of this wallet");
 }
 
 CMutableTransaction DummySignedLockFrom(const CMutableTransaction& mtx, size_t inputBytes);
@@ -1952,10 +2068,10 @@ void CheckLockFromSigned(const CMutableTransaction& mtx, const std::vector<CTxOu
                                                        (unsigned)size, FormatMoney(required), FormatMoney(in - signedTx.GetValueOut())));
 }
 
-/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection: the
- *  proving step runs with no wallet lock held, and another builder must not pick the same notes meanwhile. Released on
- *  every failure path; kept once the lock is accepted (the caller clears ops), since the wallet learns of the spend
- *  only asynchronously. */
+/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection until
+ *  the lock is broadcast or refused: the proving step runs with no wallet lock held, and another builder must not pick
+ *  the same notes meanwhile. Released on every path: an accepted lock is recorded in the wallet first (Broadcast,
+ *  RecordInWallet), whose nullifiers then keep the notes spent while it is in the mempool or the chain (audit L-1). */
 struct LockedNotes
 {
     std::vector<SaplingOutPoint> ops;
@@ -2041,7 +2157,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     VaultParams vp;
     CScript spk;
     std::unique_ptr<TransactionBuilder> sapling;   // a Sapling "from": proved below with no lock held
-    LockedNotes lockedNotes;                       // its notes, locked until the lock is refused (kept once accepted)
+    LockedNotes lockedNotes;                       // its notes, locked until the lock is broadcast or refused
     std::optional<CMutableTransaction> fromTx;     // a transparent or PQ "from": priced under the locks, signed without
     std::vector<CTxOut> fromPrevOuts;
     int fromHeight = 0;
@@ -2103,11 +2219,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         SignLockFromInputs(fromTx.value(), fromPrevOuts, fromHeight);
         LOCK2(cs_main, pwalletMain->cs_wallet);
         CheckLockFromSigned(fromTx.value(), fromPrevOuts, fromHeight, fromPQ);
+        // Not locked (audit L-1): Broadcast records the accepted lock in the wallet, which then counts its inputs as
+        // spent for as long as the lock is in the mempool or the chain.
         const uint256 txid = Broadcast(CTransaction(fromTx.value()));
-        for (const CTxIn& in : fromTx->vin) {   // locked only once accepted: a refusal leaves the coins free
-            COutPoint op = in.prevout;
-            pwalletMain->LockCoin(op);
-        }
         return LockResult(txid, spk, vp.owner);
     }
     // Sapling "from": one spend proof per note (seconds each), made with no lock held (as yed_mint, FinishSapling);
@@ -2119,11 +2233,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, e.what());
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    // Accepted: Broadcast has recorded the lock in the wallet, whose nullifiers keep the notes spent while it is in the
+    // mempool or the chain; the note locks end here, as on a refusal (audit L-1: they outlived an expired lock).
     const uint256 txid = Broadcast(CTransaction(mtx));
-    // Accepted: the notes stay locked (as a transparent "from"'s coins are locked once accepted). The wallet learns of
-    // the spend only when the notification thread delivers the transaction, and until then another builder could
-    // select the same notes; a lock on a spent note is harmless and ends with the process.
-    lockedNotes.ops.clear();
     return LockResult(txid, spk, vp.owner);
 }
 
@@ -2384,7 +2496,10 @@ UniValue vault_buildunlock(const UniValue& params, bool fHelp)
         }
     }
     if (build == "new") Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
+    // review LOW-2: a build rebuilt after this wallet signed is not remembered, yet its fee coins stay reserved as every
+    // build's do (locked until they are spent, lockunspent releases them, or the node restarts)
     if (!keepSigned) RememberBuild(op, mtx);
+    else FundScope::Kept(CTransaction(mtx));
     auto k = Snapshot()->Threshold(vp.setId, ROLE_UNLOCK);
     const uint256 sighash = SetSighash(mtx, 0, coin);
     UniValue o(UniValue::VOBJ);
@@ -2500,7 +2615,10 @@ UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra
         for (const CTxOut& o : extra) mtx.vout.push_back(o);
         Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
     }
+    // review LOW-2: a build rebuilt after this wallet signed is not remembered, yet its fee coins stay reserved as every
+    // build's do (locked until they are spent, lockunspent releases them, or the node restarts)
     if (!keepSigned) RememberBuild(op, mtx);
+    else FundScope::Kept(CTransaction(mtx));
     const uint256 sighash = SetSighash(mtx, 0, coin);
     auto k = Snapshot()->Threshold(ip.cancelSetId, ROLE_CANCEL);
     UniValue o(UniValue::VOBJ);
@@ -2943,6 +3061,7 @@ UniValue vault_app(const UniValue& params, bool fHelp)
  *  since CAN-2, the CANCEL_COSIGN marker (`extra` follows vout[0] in order). */
 UniValue BuildYedIntentCancel(const COutPoint& intent, const std::vector<CTxOut>& extra)
 {
+    FundScope scope;
     return BuildIntentCancel(intent, extra, true, false, false);
 }
 #endif
@@ -2956,28 +3075,28 @@ static const CRPCCommand commands[] =
     { "vault",   "vault_list",          &vault_list,           true  },
     { "vault",   "vault_decodescript",  &vault_decodescript,   true  },
 #ifdef ENABLE_WALLET
-    { "vault",   "set_create",          &set_create,           false },
-    { "vault",   "set_join",            &set_join,             false },
-    { "vault",   "set_heartbeat",       &set_heartbeat,        false },
-    { "vault",   "set_leave",           &set_leave,            false },
-    { "vault",   "set_buildact",        &set_buildact,         false },
-    { "vault",   "set_signact",         &set_signact,          false },
-    { "vault",   "set_sendact",         &set_sendact,          false },
-    { "vault",   "set_equivocation",    &set_equivocation,     false },
-    { "vault",   "vault_lock",          &vault_lock,           false },
-    { "vault",   "vault_getnewowner",   &vault_getnewowner,    false },
-    { "vault",   "vault_buildunlock",   &vault_buildunlock,    false },
-    { "vault",   "set_signunlock",      &set_signunlock,       false },
-    { "vault",   "vault_buildcancel",   &vault_buildcancel,    false },
-    { "vault",   "set_signcancel",      &set_signcancel,       false },
-    { "vault",   "vault_refee",         &vault_refee,          false },
-    { "vault",   "set_listsigned",      &set_listsigned,       false },
-    { "vault",   "set_importsigned",    &set_importsigned,     false },
-    { "vault",   "set_acknowledgerestore", &set_acknowledgerestore, false },
-    { "vault",   "vault_send",          &vault_send,           false },
-    { "vault",   "vault_release",       &vault_release,        false },
-    { "vault",   "vault_ownerspend",    &vault_ownerspend,     false },
-    { "vault",   "vault_app",           &vault_app,            false },
+    { "vault",   "set_create",          &FundScoped<set_create>, false },
+    { "vault",   "set_join",            &FundScoped<set_join>, false },
+    { "vault",   "set_heartbeat",       &FundScoped<set_heartbeat>, false },
+    { "vault",   "set_leave",           &FundScoped<set_leave>, false },
+    { "vault",   "set_buildact",        &FundScoped<set_buildact>, false },
+    { "vault",   "set_signact",         &FundScoped<set_signact>, false },
+    { "vault",   "set_sendact",         &FundScoped<set_sendact>, false },
+    { "vault",   "set_equivocation",    &FundScoped<set_equivocation>, false },
+    { "vault",   "vault_lock",          &FundScoped<vault_lock>, false },
+    { "vault",   "vault_getnewowner",   &FundScoped<vault_getnewowner>, false },
+    { "vault",   "vault_buildunlock",   &FundScoped<vault_buildunlock>, false },
+    { "vault",   "set_signunlock",      &FundScoped<set_signunlock>, false },
+    { "vault",   "vault_buildcancel",   &FundScoped<vault_buildcancel>, false },
+    { "vault",   "set_signcancel",      &FundScoped<set_signcancel>, false },
+    { "vault",   "vault_refee",         &FundScoped<vault_refee>, false },
+    { "vault",   "set_listsigned",      &FundScoped<set_listsigned>, false },
+    { "vault",   "set_importsigned",    &FundScoped<set_importsigned>, false },
+    { "vault",   "set_acknowledgerestore", &FundScoped<set_acknowledgerestore>, false },
+    { "vault",   "vault_send",          &FundScoped<vault_send>, false },
+    { "vault",   "vault_release",       &FundScoped<vault_release>, false },
+    { "vault",   "vault_ownerspend",    &FundScoped<vault_ownerspend>, false },
+    { "vault",   "vault_app",           &FundScoped<vault_app>, false },
 #endif
 };
 

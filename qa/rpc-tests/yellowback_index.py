@@ -314,12 +314,20 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # rule-breaking block stored, flushed and not yet judged. 6.20.0's ThreadImport holds
         # fImporting across its final ActivateBestChain on every start; since the vault upgrade
         # (U-21) the verdict has no IBD / import conjunct, so that ActivateBestChain judges it.
-        self.restart(3, ['-yellowbacktestfault=crash:%d' % (nodes[STOCK].getblockcount() + 1)])
+        armed = nodes[STOCK].getblockcount() + 1
+        self.restart(3, ['-yellowbacktestfault=crash:%d' % armed])
         wait_yed_healthy(nodes[3])
         rejected, bad_txid = mine_rejected_block(self, user, vault_b)
         self.wait_crashed(3)
+        assert_equal(nodes[STOCK].getblock(rejected)['height'], armed)       # the fault's height is the rejected block's
         wait_for_rejection([nodes[i] for i in ENFORCING if i != 3], rejected)
-        assert debug_log_contains(tmpdir, 3, 'crash before judging block %s' % rejected), 'node 3 did not crash at the block'
+        # The SIGKILL exit (wait_crashed) is the fault firing at the armed height, the rejected block's. Its log line is
+        # written through the non-blocking log writer, whose last lines a SIGKILL can drop (seen on CI): when it is
+        # there it must name this block; when it is lost, the restart below still has to judge the stored block.
+        if debug_log_contains(tmpdir, 3, 'crash before judging block '):
+            assert debug_log_contains(tmpdir, 3, 'crash before judging block %s' % rejected), 'node 3 did not crash at the block'
+        else:
+            print('  (node 3\'s last log lines were lost to the SIGKILL; the crash is its exit status)')
         self.restart(3)
         wait_yed_healthy(nodes[3], timeout=120)
         wait_for_rejection([nodes[3]], rejected)

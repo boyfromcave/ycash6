@@ -55,6 +55,7 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
     wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 from test_framework.pq_address import (FN_DSA, SLH_DSA, decode_pq_address, encode_legacy_pq_address,
                                        encode_pq_address, pq_prefix, pq_version)
@@ -264,11 +265,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n0.listlockunspent(), locks)            # a refused merge leaves no coin locked
         assert_equal(n0.getaddressbalance({'addresses': [a, a2]})['balance'], zat(3))
 
-        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]
-        n0.lockunspent(False, others)
+        print('spend an rq… coin with z_sendmany from its address, fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         dest = n1.getnewaddress()
-        spend = n0.sendtoaddress(dest, Decimal('1.5'))
+        spend = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, a, [(dest, Decimal('1.5'))]))
         tx = n0.getrawtransaction(spend, 1)
         pq_in = [i for i in tx['vin'] if len(i['scriptSig']['hex']) // 2 == SLH_PQPKH_SCRIPTSIG]
         assert len(pq_in) >= 1, [len(i['scriptSig']['hex']) // 2 for i in tx['vin']]
@@ -281,12 +280,12 @@ class WalletPQAddressTest(BitcoinTestFramework):
         conv = conventional_fee(tx)
         assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000, conv), (fee, size, conv)
         assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000, conv + 2 * MARGINAL_FEE), (fee, size, conv)
-        n0.lockunspent(True, others)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))
+        # the 2 YEC coin of a is spent and the change returns to a (D-4)
         spent = {(i['txid'], i['vout']) for i in tx['vin']}
-        assert_equal(n0.getaddressbalance({'addresses': [a]})['balance'],
-                     0 if (tx_a, utx[tx_a]['vout']) in spent else zat(2))
+        assert (tx_a, utx[tx_a]['vout']) in spent
+        assert_equal(n0.getaddressbalance({'addresses': [a]})['balance'], zat(2) - zat(Decimal('1.5')) - zat(fee))
 
         print('vault_release of an intent paying the wallet PQ key: by a third party, then by the owner after a restart')
         setid = n0.set_create({'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
@@ -331,17 +330,29 @@ class WalletPQAddressTest(BitcoinTestFramework):
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not (u['txid'] == r2 and u['address'] == b)]
         n0.lockunspent(False, others)
         dest = n1.getnewaddress()
-        # subtractfeefromamount: the change is exactly 1,000 zat, above the P2PKH dust threshold but below the
-        # TX_PQPKH one (an SLH-DSA spend is ~8 kB); the wallet raises it to the PQ threshold, from the recipient.
-        cb = n0.sendtoaddress(dest, v - Decimal('0.00001'), '', '', True)
+        # sendtoaddress selects ECC coins only since beta2 audit M-1, so the PQ coin is no longer its to pick; the B-4
+        # change pricing is reached through fundrawtransaction with the PQ coin named as an input
+        assert_raises_rpc('Insufficient funds in ordinary transparent addresses; this wallet also holds',
+                          n0.sendtoaddress, dest, v - Decimal('0.00001'), '', '', True)
+        named = [{'txid': r2, 'vout': pq_coin[0]['vout']}]
+        pq_change = pqpkh_script(1, hb).hex()
+        funded = n0.fundrawtransaction(n0.createrawtransaction(named, {dest: v - Decimal('0.5')}))
+        ftx = n0.decoderawtransaction(funded['hex'])
+        assert_equal([(i['txid'], i['vout']) for i in ftx['vin']], [(r2, pq_coin[0]['vout'])])
+        change = [o for o in ftx['vout'] if o['scriptPubKey']['hex'] == pq_change]
+        assert_equal(len(change), 1)                            # -sendchangeback: the change goes back to b
+        fee = funded['fee']
+        assert_equal(change[0]['value'], Decimal('0.5') - fee)
+        # an amount that leaves 1,000 zat of change: above the P2PKH dust threshold, below the TX_PQPKH one (an
+        # SLH-DSA spend is ~8 kB), so the wallet adds it to the fee instead of creating a PQ dust output
+        amount = v - fee - Decimal('0.00001')
+        funded = n0.fundrawtransaction(n0.createrawtransaction(named, {dest: amount}))
+        ftx = n0.decoderawtransaction(funded['hex'])
+        assert_equal([(i['txid'], i['vout']) for i in ftx['vin']], [(r2, pq_coin[0]['vout'])])
+        assert_equal([o['scriptPubKey']['hex'] == pq_change for o in ftx['vout']], [False])
+        assert_equal(funded['changepos'], -1)
+        assert_equal(funded['fee'], v - amount)
         n0.lockunspent(True, others)
-        cbtx = n0.getrawtransaction(cb, 1)
-        change = [o for o in cbtx['vout'] if o['scriptPubKey']['hex'] == pqpkh_script(1, hb).hex()]
-        assert_equal(len(change), 1)
-        assert zat(change[0]['value']) > 1000, change
-        self.mine(1)
-        assert_equal(n0.gettransaction(cb)['confirmations'], 1)
-        assert_equal(n1.getreceivedbyaddress(dest), v - change[0]['value'] - (-n0.gettransaction(cb)['fee']))
 
         print('z_importpqkey')
         export = n0.z_exportwallet('pqexport')

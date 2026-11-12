@@ -26,7 +26,7 @@
 
 from decimal import Decimal
 
-from test_framework.util import assert_equal, assert_greater_than
+from test_framework.util import assert_equal, assert_greater_than, wait_and_assert_operationid_status, z_sendmany_opid
 from test_framework.yellowback_util import (
     BPS,
     CLAIM_DELAY,
@@ -365,11 +365,9 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(net['priceSource'], 'tip')
         cap = net['yellowback']['maxTxFeeZat']
         assert_greater_than(cap, MAX_TX_FEE)
-        locked = [{'txid': u['txid'], 'vout': u['vout']} for u in user.listunspent(0) if u.get('address') != pq_addr]
         assert_equal(len([u for u in user.listunspent(0) if u.get('address') == pq_addr]), 1)
-        user.lockunspent(False, locked)
-        txid = user.sendtoaddress(user.getnewaddress(), 1)
-        user.lockunspent(True, locked)
+        # sendtoaddress spends ECC coins only (the beta2 decision, audit M-1): the plain post-quantum send is z_sendmany
+        txid = wait_and_assert_operationid_status(user, z_sendmany_opid(user, pq_addr, [(user.getnewaddress(), Decimal('1'))]))
         fee = -int(round(user.gettransaction(txid)['fee'] * COIN))
         rate = net['plain']['zatPerKB']
         assert_equal(rate, rate_zat_per_kb(50 * 10 ** 6, usd_to_micro(DOWN)))

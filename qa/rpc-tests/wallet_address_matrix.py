@@ -90,6 +90,8 @@ LOCKED = 'Please enter the wallet passphrase with walletpassphrase first'
 NO_PQ_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
 NO_MERGE_FUNDS = 'Could not find any funds to merge.'
 YED_REFUSED = 'refusing to spend a Yellowback outpoint as plain YEC: '
+# an output read from its payload while the index has not judged its transaction (review 3 MEDIUM-1)
+YED_PENDING = 'refusing to spend an output that may carry YED as plain YEC before the Yellowback index judges its transaction: '
 UNLOCK_ACK = 'I understand this burns YED'
 
 
@@ -537,6 +539,8 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         assert_raises_rpc(named, z_mergetoaddress_call, n1, [key, 'ANY_SAPLING'], back)
         assert_raises_rpc(NO_MERGE_FUNDS, z_mergetoaddress_call, n1, ['ANY_TADDR'], back)   # ECC coins only
         pay = n0.getnewaddress()
+        # sendtoaddress / sendmany select ECC coins only (beta2, audit M-1): the Falcon token is never theirs to pick, and
+        # with no other post-quantum coin the refusal names it, as z_sendmany's does (review LOW-2)
         assert_raises_rpc(named, n1.sendtoaddress, pay, Decimal('0.00001'))
         assert_raises_rpc(named, n1.sendmany, '', {pay: Decimal('0.00001')})
         n1.yed_lockcoins()
@@ -564,7 +568,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                 break
             time.sleep(1)
         assert_equal(r[0]['status'], 'failed')
-        assert YED_REFUSED + '%s:1' % mint_txid in r[0]['error']['message'], r[0]['error']['message']
+        assert YED_PENDING + '%s:1' % mint_txid in r[0]['error']['message'], r[0]['error']['message']
         n0.yed_lockcoins()
         self.mine(1)
 

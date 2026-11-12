@@ -76,6 +76,7 @@ struct BuiltTx
     // Held by pointer (audit B-5): the 6.20.0 builder is move-only and its move constructor drops
     // firstSaplingSpendAddr (F-2), so the object itself is never moved -- a BuiltTx moves the pointer.
     std::unique_ptr<TransactionBuilder> builder;
+    std::vector<SaplingOutPoint> saplingNotes; //!< Sapling shape: the notes it spends; the RPC locks them until it commits or fails
     std::string fundedFrom;                 //!< MINT: "transparent" | "sapling"
     std::string collateralTo;               //!< vault spends: the destination address as given or drawn
 

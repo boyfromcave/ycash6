@@ -16,8 +16,9 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
   node 0 runs -txunpaidactionlimit=0 (q/fees review) and mines every block, so nothing with an unpaid action
   confirms; a vault the conventional fee would leave a dust output is refused;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
-  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size), and at the
-  default rate (node 0) never below the ZIP-317 conventional fee;
+  wallet spends it with z_sendmany from its address (the stock sends select ECC coins only, beta2 audit M-1) at
+  max(DEFAULT_FEE, -pqfeerate x size), and, pricing it itself when fundrawtransaction funds a raw transaction
+  naming it, at the default rate (node 0) never below the ZIP-317 conventional fee;
 - ANY_TADDR in z_sendmany and z_mergetoaddress selects ECC coins only, never a TX_PQPKH coin (a PQ coin is spent
   when its address is named, beta2 D-2/D-6: wallet_address_matrix.py);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
@@ -48,6 +49,8 @@ from test_framework.util import (
     start_nodes,
     stop_node,
     sync_blocks,
+    wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 
 ACTIVATION = 205
@@ -282,7 +285,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         self.mine(1)
         assert self.tx_of(r['txid'])['confirmations'] >= 1
 
-        print('node 1 spends the PQPKH coin through sendtoaddress: max(DEFAULT_FEE, -pqfeerate x size)')
+        print('node 1 spends the PQPKH coin with z_sendmany from its address: max(DEFAULT_FEE, -pqfeerate x size)')
         n1 = self.nodes[1]
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n1.listunspent() if not (u['txid'] == pq_txid and u['vout'] == pq_vout)]
         if others:
@@ -302,7 +305,8 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert res[0]['error']['message'].startswith('Insufficient funds: have 0.00, need 1.00001;'), res[0]['error']['message']
         assert_raises_rpc('Could not find any funds to merge', n1.z_mergetoaddress, ['ANY_TADDR'], n0.getnewaddress())
         assert_equal(len(pq_unspent(n1)), 1)                           # still unspent, still the wallet's
-        txid = n1.sendtoaddress(n0.getnewaddress(), 1)
+        pq_addr = pq_unspent(n1)[0]['address']        # sendtoaddress spends ECC coins only (beta2 audit M-1)
+        txid = wait_and_assert_operationid_status(n1, z_sendmany_opid(n1, pq_addr, [(n0.getnewaddress(), 1)]))
         tx = self.tx_of(txid, 1)
         assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(pq_txid, pq_vout)])
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
@@ -310,7 +314,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         fee = -zat(n1.gettransaction(txid)['fee'])
         assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000), (fee, size)
         self.mine(1)
-        assert_equal(pq_unspent(n1), [])
+        assert (pq_txid, pq_vout) not in [(u['txid'], u['vout']) for u in pq_unspent(n1)]   # spent; the change returns to pq_addr
         if others:
             n1.lockunspent(True, others)
 
@@ -323,11 +327,20 @@ class VaultPQWalletTest(BitcoinTestFramework):
         self.mine(1)
         locked0 = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u.get('address') != pq0]
         assert n0.lockunspent(False, locked0)
-        txid = n0.sendtoaddress(n1.getnewaddress(), 1)
+        # the wallet's own pricing of a PQ input (CreateTransaction): sendtoaddress selects ECC coins only (beta2 audit
+        # M-1), so the PQ coin is named in a raw transaction that fundrawtransaction prices
+        coin0 = [u for u in n0.listunspent(1, 9999999, [pq0])]
+        assert_equal(len(coin0), 1)
+        funded = n0.fundrawtransaction(n0.createrawtransaction([{'txid': coin0[0]['txid'], 'vout': coin0[0]['vout']}],
+                                                               {n1.getnewaddress(): 1}))
+        signed = n0.signrawtransaction(funded['hex'])
+        assert_equal(signed['complete'], True)
+        txid = n0.sendrawtransaction(signed['hex'])
         assert n0.lockunspent(True, locked0)
         tx = self.tx_of(txid)
+        assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(coin0[0]['txid'], coin0[0]['vout'])])
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
-        fee = -zat(n0.gettransaction(txid)['fee'])
+        fee = zat(funded['fee'])
         assert fee >= conventional_fee(tx), (fee, conventional_fee(tx))      # ~27,000, where the size rate gives ~8,100
         self.mine(1)
         assert self.tx_of(txid)['confirmations'] >= 1

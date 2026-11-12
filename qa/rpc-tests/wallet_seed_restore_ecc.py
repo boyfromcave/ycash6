@@ -44,6 +44,7 @@ Run: ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_seed_restore_ecc.py
 """
 
 import os
+import time
 from decimal import Decimal
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -162,6 +163,16 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
     def debug_log(self):
         with open(os.path.join(self.options.tmpdir, 'node0', 'regtest', 'debug.log'), encoding='utf-8') as f:
             return f.read()
+
+    def wait_log(self, logpos, *needles, timeout=30):
+        """node 0's debug.log from `logpos` once it holds every needle: the node logs through a non-blocking writer, so
+        a line written during an RPC can reach the file after the RPC has returned."""
+        deadline = time.time() + timeout
+        while True:
+            log = self.debug_log()[logpos:]
+            if all(n in log for n in needles) or time.time() > deadline:
+                return log
+            time.sleep(0.2)
 
     def run_test(self):
         n0, n1 = self.nodes
@@ -317,7 +328,8 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         print('  unlocked: it derives the key, the coin is spendable, the log says how to find a later one')
         logpos = len(self.debug_log())
         n0.walletpassphrase(PASSPHRASE, 600)
-        log = self.debug_log()[logpos:]
+        log = self.wait_log(logpos, 'paid addresses the wallet watched while locked; it holds their keys now',
+                            'a later payment past them may be missed')
         assert 'paid addresses the wallet watched while locked; it holds their keys now' in log
         assert 'a later payment past them may be missed' in log
         assert_equal([(u['txid'], u['spendable']) for u in n0.listunspent(0) if u['address'] == target], [(target_txid, True)])
@@ -330,7 +342,7 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         n0.walletlock()
         target3_txid = self.pay({target3: Decimal('0.8')})
         assert_equal([u['txid'] for u in n0.listunspent(0) if u['address'] == target3], [target3_txid])
-        assert 'MarkLegacyTKeyUsed: the wallet is locked' in self.debug_log()[logpos:]
+        assert 'MarkLegacyTKeyUsed: the wallet is locked' in self.wait_log(logpos, 'MarkLegacyTKeyUsed: the wallet is locked')
         # target's and target2's keys are issued keys now (marked at the unlock and by the unlocked payment), so even a
         # locked -rescan finds their coins
         n0 = self.restart0('eccrestored.dat', ['-rescan'])

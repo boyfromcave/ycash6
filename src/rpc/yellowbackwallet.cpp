@@ -427,12 +427,36 @@ void CommitCarrier(YellowbackWallet& yw, const BuiltTx& built, CReserveKey& rese
     }
 }
 
+/** Beta2 list item 21c: the Sapling notes a Sapling-shaped build spends (BuiltTx::saplingNotes), locked in the wallet
+ *  (CWallet::LockNote, as the z_* operations and vault_lock "from" do) from selection until this call commits or fails:
+ *  the proofs run with no lock held, and a concurrent yed_mint or z_sendmany must not select the same notes meanwhile.
+ *  Released on every path. */
+struct HeldNotes
+{
+    std::vector<SaplingOutPoint> ops;
+    void Hold(const BuiltTx& built)
+    {
+        AssertLockHeld(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : built.saplingNotes) {
+            pwalletMain->LockNote(op);
+            ops.push_back(op);
+        }
+    }
+    ~HeldNotes()
+    {
+        if (ops.empty()) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : ops) pwalletMain->UnlockNote(op);
+    }
+};
+
 /** The carrier step: build, (prove,) persist the carrier record, then commit; returns its record. */
 CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>& bundle, int refHeight,
                           const std::vector<unsigned char>& selector, const std::string& from)
 {
     YellowbackIndex& index = *yw.Index();
     CReserveKey reservekey(pwalletMain);
+    HeldNotes held;
     BuiltTx built;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -442,6 +466,7 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
         EnsureHealthy(index);
         try {
             built = BuildCarrier(yw, bundle, refHeight, selector, reservekey, from);
+            held.Hold(built);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
@@ -539,6 +564,7 @@ void PushPendingCommon(UniValue& o, const CarrierRecord& c, bool pending)
 UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::string& from, const CarrierRecord& carrier, CAmount maxCollateralZat)
 {
     YellowbackIndex& index = *yw.Index();
+    HeldNotes held;
     BuiltTx built;
     CReserveKey reservekey(pwalletMain);
     uint256 txid;
@@ -551,6 +577,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
             EnsureHealthy(index);
             try {
                 built = BuildMint(yw, cents, lockBlocks, reservekey, from, carrier, maxCollateralZat);
+                held.Hold(built);
             } catch (const std::runtime_error& e) {
                 ThrowBuildError(e);
             }
@@ -807,9 +834,10 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
-            "yed_getbalance\n\nConfirmed YED (from the index) and unconfirmed YED (mempool transactions that would assign YED to this wallet).\n"
+            "yed_getbalance ( \"dummy\" )\n\nConfirmed YED (from the index) and unconfirmed YED (mempool transactions that would assign YED to this wallet).\n"
             "spendableCents is confirmedCents less the YED this wallet's own unconfirmed transactions already spend: what\n"
             "yed_send, yed_redeem and yed_claim can use now (their change returns in unconfirmedCents).\n"
+            "Argument: \"dummy\" (string, optional) ignored; accepted for compatibility.\n"
             "Result: { \"confirmedCents\": n, \"spendableCents\": n, \"unconfirmedCents\": n, \"height\": n }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -842,7 +870,8 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
 UniValue yed_listunspent(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
-        throw std::runtime_error("yed_listunspent\n\nYED outputs that are mine, with whether each is spent by an unconfirmed transaction and whether it is locked.\n");
+        throw std::runtime_error("yed_listunspent ( \"dummy\" )\n\nYED outputs that are mine, with whether each is spent by an unconfirmed transaction and whether it is locked.\n"
+                                 "Argument: \"dummy\" (string, optional) ignored; accepted for compatibility.\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -877,7 +906,8 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             "wallet key (quantum plan §4.3), the YED goes to a fresh holder key (P2PKH; a Falcon key from the Falcon height).\n"
             "v3 (W7): two transactions — the carrier funding transaction first (carrierTxid; its redeem script commits to the\n"
             "attestation bundle), then the MINT after one confirmation, spending the carrier as its last input. Before commit the\n"
-            "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule.\n"
+            "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule. Before the carrier is broadcast the wallet\n"
+            "checks that the source covers the whole mint (collateral, fees and the carrier; insufficient-yec otherwise).\n"
             "\nArguments:\n"
             "1. cents       (numeric, required) amount of YED to mint, in cents\n"
             "2. lockBlocks  (numeric, required) lock length in blocks (class A, B or C by range)\n"

@@ -50,6 +50,8 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
     z_sendmany_wait,
+    wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 from test_framework.yellowback_util import activate_yed_late, mint_to_fresh_holder
 
@@ -236,16 +238,13 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
 
         print('own spends, unconfirmed (L-6): balance counts own change, z_gettotalbalance at minconf 1 does not')
         out = n1.getnewaddress()
-        # SLH-DSA: the only coin left unlocked, so the wallet must spend it; its change goes to a new ECC key
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0, 9999999, [self.addrs['ecc'], self.addrs['fn']])]
-        assert_equal(len(others), 2)
-        assert n0.lockunspent(False, others)
-        tx_s = n0.sendtoaddress(out, 1)
-        assert n0.lockunspent(True, others)
+        # SLH-DSA: z_sendmany from the SLH address spends its coin; its change returns to that address (sendtoaddress
+        # spends ECC coins only since beta2 audit M-1)
+        tx_s = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, self.addrs['slh'], [(out, 1)]))
         fee_s = -D(n0.gettransaction(tx_s)['fee'])
         assert_equal(len(n0.getrawtransaction(tx_s, 1)['vin']), 1)
-        assert_equal(n0.listunspent(0, 9999999, [self.addrs['slh']]), [])    # the SLH coin is spent
         change_s = Decimal('1.5') - 1 - fee_s
+        assert_equal([D(u['amount']) for u in n0.listunspent(0, 9999999, [self.addrs['slh']])], [change_s])   # the change
         # ECC: z_sendmany spends every coin of the ECC address; its change goes to a new ECC key of the wallet
         tx_e = z_sendmany_wait(n0, self.addrs['ecc'], [{'address': out, 'amount': 1}])
         fee_e = -D(n0.gettransaction(tx_e)['fee'])
@@ -253,13 +252,13 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         v = self.view()
         assert_equal(v['unconfirmed'], 0)                               # nothing from others
         assert_equal(v['balance'], Decimal('6.5') - 2 - fee_e - fee_s)
-        assert_equal(v['balance_pq'], 2)                                # the FN coin; the SLH one is spent
-        assert_equal((v['balance_pq_1'], v['balance_pq_2']), (0, 2))
-        assert_equal(v['balance_ecc'], 3 - 1 - fee_e + change_s)         # own unconfirmed change counted
+        assert_equal(v['balance_pq'], 2 + change_s)                     # the FN coin and the SLH change
+        assert_equal((v['balance_pq_1'], v['balance_pq_2']), (change_s, 2))   # own unconfirmed change counted
+        assert_equal(v['balance_ecc'], 3 - 1 - fee_e)
         assert_equal(v['z1_transparent_ecc'], 0)                        # depth only: the change is unconfirmed,
         assert_equal(v['z1_transparent_pq'], 2)                         # the spent coins are gone
         assert_equal(v['z0_transparent'], v['balance'])
-        assert_equal((v['ecc@1'], v['ecc@0'], v['slh@1'], v['slh@0'], v['fn@1']), (0, 0, 0, 0, 2))
+        assert_equal((v['ecc@1'], v['ecc@0'], v['slh@1'], v['slh@0'], v['fn@1']), (0, 0, 0, change_s, 2))
         self.check_listing()
         unconfirmed_spends = v
 
@@ -270,8 +269,8 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal(v['balance'], unconfirmed_spends['balance'])
         assert_equal(v['z1_transparent'], v['balance'])
         assert_equal((v['z1_transparent_ecc'], v['z1_transparent_pq'], v['z1_pq_1'], v['z1_pq_2']),
-                     (v['balance_ecc'], 2, 0, 2))
-        assert_equal((v['ecc@1'], v['slh@1'], v['fn@1'], v['z@1']), (0, 0, 2, 1))
+                     (v['balance_ecc'], 2 + change_s, change_s, 2))
+        assert_equal((v['ecc@1'], v['slh@1'], v['fn@1'], v['z@1']), (0, change_s, 2, 1))
         spent_confirmed = v
 
         print('reorg: the spends\' block disconnected, the spends back in the mempool, then reconnected')
@@ -305,8 +304,8 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         fn_coin = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(1, 9999999, [self.addrs['fn']])]
         assert n0.lockunspent(False, fn_coin)
         v = self.view(locked_in={FN: Decimal(2)})
-        assert_equal((v['balance_pq'], v['balance_pq_2'], v['balance']), (2, 2, spent_confirmed['balance']))
-        assert_equal((v['z1_transparent_pq'], v['z1_pq_2'], v['fn@1'], v['fn@0']), (0, 0, 0, 0))
+        assert_equal((v['balance_pq'], v['balance_pq_2'], v['balance']), (2 + change_s, 2, spent_confirmed['balance']))
+        assert_equal((v['z1_transparent_pq'], v['z1_pq_2'], v['fn@1'], v['fn@0']), (change_s, 0, 0, 0))
         assert_equal(v['z1_transparent'], spent_confirmed['z1_transparent'] - 2)
         assert n0.lockunspent(True, fn_coin)
         assert_equal(self.view(), spent_confirmed)
@@ -351,13 +350,16 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         settled = v
 
         print('restore from the seed alone: the PQ coins, their addresses with the scheme, the first Sapling address')
+        # the ECC coins of the original wallet (P2PKH, confirmed, spendable: not the watch-only one), to judge what the restore re-finds below
+        ecc_coins = [(c['address'], c['amount']) for c in n0.listunspent(1, 9999999) if c['spendable'] and c['scriptPubKey'].startswith('76a914')]
+        assert_equal(sum(a for _, a in ecc_coins), settled['balance_ecc'])
         export = n0.z_exportwallet('bytypeseed')
         self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored.dat')
         n0 = self.nodes[0]
         r = self.view()
-        assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], 0, settled['balance_pq_2']))
+        assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], change_s, settled['balance_pq_2']))
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
-                     (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
+                     (settled['z1_transparent_pq'], settled['z1_private'], 2, change_s, 1))
         # What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
         # none on ycash-dd (random keypool keys: only a wallet.dat backup restores the getnewaddress key); on 6.x the
         # transparent keys come from the seed and the restore re-finds every ECC coin (beta2 P0), the getnewaddress
@@ -408,11 +410,9 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         n0, n1 = self.nodes
         print('seed-only restore: receipts at restored PQ addresses are classified, listed and counted as on the original')
         n0.walletpassphrase(PASSPHRASE, 3600)
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u['address'] != self.addrs['fn']]
-        assert n0.lockunspent(False, others)
         p_own = n0.getnewaddress('', 'pqslh')
-        tx_own = n0.sendtoaddress(p_own, Decimal('0.5'))              # spends a coin of the FN-DSA address
-        assert n0.lockunspent(True, others)
+        # spends a coin of the FN-DSA address (z_sendmany from it: the stock sends select ECC coins only, audit M-1)
+        tx_own = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, self.addrs['fn'], [(p_own, Decimal('0.5'))]))
         p_in = n0.getnewaddress('', 'pq')
         tx_in = n1.sendtoaddress(p_in, Decimal('0.25'))
         self.mine(1)

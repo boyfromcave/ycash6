@@ -455,6 +455,13 @@ void YellowbackWallet::CompletionLoop()
             wake = false;
         }
         if (Stopping()) break;
+        // Beta2 audit L-1: the YEC inputs LockSpentYec holds for a YED transaction (F-1) are handed back once that
+        // transaction settles, mined or gone from the mempool unmined (expired, evicted), within about a second; they
+        // used to wait for the next YED build's SelectYec, so an expired carrier's coins stayed locked for every send.
+        if (PendingYecLocks() > 0) {
+            LOCK2(cs_main, wallet->cs_wallet);
+            SettleYecLocks();
+        }
         // Snapshot the pending set, run each completion outside pendingMutex (a completion takes
         // cs_main, cs_wallet and cs_yellowback itself), then drop the finished ones.
         std::vector<std::pair<COutPoint, std::function<bool()>>> work;
@@ -480,6 +487,14 @@ void YellowbackWallet::CompletionLoop()
             // Shutdown is checked between completions too: a completion takes cs_main and the
             // wallet, which Shutdown() is about to tear down (cf. DigiByte v9.26.7 c9d6abdf26).
             if (Stopping()) return;
+        }
+        if (Stopping()) return;
+        if (releaseCheck.exchange(false)) {
+            try {
+                ReleaseJudgedUntouched();
+            } catch (const std::exception& e) {
+                LogPrintf("yellowback: releasing judged pre-locks failed: %s\n", e.what());
+            }
         }
         if (Stopping()) return;
         if (onIdle) {
@@ -591,22 +606,88 @@ void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)
         LogPrintf("yellowback: ERROR: LockOwn could not record in the wallet that it has held YED\n");
 }
 
+std::set<uint32_t> PayloadYedOutputs(const CTransaction& tx)
+{
+    std::set<uint32_t> out;
+    if (tx.IsCoinBase()) return out;            // TX-0: a coinbase registers nothing, whatever its outputs carry
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    if (!fp.has_value()) return out;
+    switch (fp->payload.type) {
+    case PayloadType::MINT:
+        for (uint32_t n : { 0u, 1u }) {
+            if (n < tx.vout.size() && n != fp->opReturnIndex) out.insert(n);
+        }
+        break;
+    case PayloadType::TRANSFER:
+    case PayloadType::REDEEM:
+        for (const Assignment& a : fp->payload.assignments) out.insert(a.vout);
+        break;
+    case PayloadType::CANCEL_COSIGN: {
+        if (!tx.vout.empty() && fp->opReturnIndex != 0) out.insert(0u);
+        std::set<CScript> paid;
+        for (uint32_t n = 1; n < tx.vout.size(); n++) {
+            if (n == fp->opReturnIndex || tx.vout[n].nValue <= 0) continue;
+            if (paid.insert(tx.vout[n].scriptPubKey).second) out.insert(n);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return out;
+}
+
 void YellowbackWallet::PreLock(const CTransaction& tx)
 {
-    std::optional<FoundPayload> fp = FindPayload(tx);
-    if (!fp.has_value()) return;
+    // every output the payload may give YED (PayloadYedOutputs: the claim cancel's refund included, review
+    // WALLET-FOLLOW-REVIEW-2 CRITICAL-1) that pays this wallet
     std::vector<COutPoint> mine;
     const uint256 txid = tx.GetHash();
-    if (fp->payload.type == PayloadType::MINT) {
-        if (tx.vout.size() > 1 && IsMineScript(tx.vout[1].scriptPubKey)) mine.push_back(COutPoint(txid, 1));
-    } else if (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM) {
-        for (const Assignment& a : fp->payload.assignments) {
-            if (IsMineScript(tx.vout[a.vout].scriptPubKey)) mine.push_back(COutPoint(txid, a.vout));
-        }
+    for (uint32_t n : PayloadYedOutputs(tx)) {
+        if (IsMineScript(tx.vout[n].scriptPubKey)) mine.push_back(COutPoint(txid, n));
     }
     if (!mine.empty()) {
         LogPrint("yellowback", "pre-locking %u output(s) of %s\n", mine.size(), txid.ToString());
         LockOwn(mine);
+    }
+}
+
+bool IndexJudged(const State& st, const Params& params, const CWalletTx& wtx)
+{
+    AssertLockHeld(cs_main);
+    if (st.GetTxLog(wtx.GetHash()).has_value()) return true;
+    if (wtx.hashBlock.IsNull()) return false;
+    BlockMap::const_iterator mi = mapBlockIndex.find(wtx.hashBlock);
+    if (mi == mapBlockIndex.end() || !mi->second || !chainActive.Contains(mi->second)) return false;
+    const int h = mi->second->nHeight;
+    // Below the start height the index never evaluates a block (EvaluateBlock returns first, its ConnectBlock checks
+    // and the startup replay skip it, and a changed start height wipes the index), so no output there is YED: a block
+    // of the active chain below it is judged, with nothing in it (review WALLET-STACK LOW-1).
+    if (h < params.startHeight) return true;
+    std::optional<TipRecord> tip = st.GetTip();
+    if (!tip.has_value() || h < 0 || h > tip->height) return false;
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)h);
+    return snap.has_value() && snap->blockHash == wtx.hashBlock;
+}
+
+void YellowbackWallet::ReleaseJudgedUntouched()
+{
+    std::vector<COutPoint> release;
+    LOCK2(cs_main, wallet->cs_wallet);       // lock order (N25): cs_main, cs_wallet, then cs_yellowback
+    {
+        LOCK(index->cs_yellowback);
+        if (!index->IsHealthy()) return;
+        State st(index->View());
+        for (const COutPoint& o : ourLocks) {
+            if (st.GetToken(o).has_value() || st.GetVault(o).has_value() || st.GetTxLog(o.hash).has_value()) continue;   // Reconcile's
+            std::map<uint256, CWalletTx>::const_iterator it = wallet->mapWallet.find(o.hash);
+            if (it != wallet->mapWallet.end() && IndexJudged(st, index->GetParams(), it->second)) release.push_back(o);
+        }
+    }
+    for (COutPoint o : release) {
+        LogPrint("yellowback", "releasing the pre-lock of %s: its transaction is judged and touched no Yellowback state\n", o.ToString());
+        wallet->UnlockCoin(o);
+        ourLocks.erase(o);
     }
 }
 
@@ -637,6 +718,9 @@ void YellowbackWallet::Reconcile()
             if (st.GetTxLog(o.hash).has_value()) release.insert(o);
         }
     }
+    // A judged transaction with no TxLog (a payload that touched no Yellowback state, review 3 MEDIUM-1) needs cs_main to
+    // find its block: the completion thread releases it (ReleaseJudgedUntouched), woken with this layer's other work.
+    releaseCheck = true;
     {
         LOCK(wallet->cs_wallet);
         for (COutPoint o : tokensMine) {
@@ -711,21 +795,53 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
     }
 
     int64_t cents = 0;
-    std::string outpoints;
+    std::string outpoints, unknown;
     {
-        LOCK(yw.Wallet()->cs_wallet);           // lock order (N25): cs_wallet before cs_yellowback
+        LOCK2(cs_main, yw.Wallet()->cs_wallet);   // lock order (N25): cs_main, cs_wallet, then cs_yellowback
         LOCK(index->cs_yellowback);
-        if (!index->IsHealthy()) return false;
+        const bool healthy = index->IsHealthy();
         State st(index->View());
         for (const CTxIn& in : tx.vin) {
-            if (fp.has_value() && fp->payload.type == PayloadType::REDEEM && st.GetVault(in.prevout).has_value()) return false;   // a vault spend: MP-1's
-            std::optional<TokenRecord> t = st.GetToken(in.prevout);
-            if (!t.has_value()) continue;
-            if (!yw.IsMineScript(t->scriptPubKey)) continue;
-            cents += t->cents;
-            if (!outpoints.empty()) outpoints += ", ";
-            outpoints += in.prevout.ToString();
+            if (healthy) {
+                if (fp.has_value() && fp->payload.type == PayloadType::REDEEM && st.GetVault(in.prevout).has_value()) return false;   // a vault spend: MP-1's
+                std::optional<TokenRecord> t = st.GetToken(in.prevout);
+                if (t.has_value()) {
+                    if (!yw.IsMineScript(t->scriptPubKey)) continue;
+                    cents += t->cents;
+                    if (!outpoints.empty()) outpoints += ", ";
+                    outpoints += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n));
+                    continue;
+                }
+            }
+            // review 3 MEDIUM-2: an output of this wallet the index has not judged (or any, while it is unhealthy) is read
+            // by its transaction's payload, as YellowbackInputRefusal reads it
+            std::map<uint256, CWalletTx>::const_iterator it = yw.Wallet()->mapWallet.find(in.prevout.hash);
+            if (it == yw.Wallet()->mapWallet.end() || in.prevout.n >= it->second.vout.size()) continue;
+            const CWalletTx& prev = it->second;
+            if (healthy && IndexJudged(st, index->GetParams(), prev)) continue;
+            if (!PayloadYedOutputs(prev).count(in.prevout.n) || !yw.IsMineScript(prev.vout[in.prevout.n].scriptPubKey)) continue;
+            std::optional<int64_t> stated;
+            std::optional<FoundPayload> pp = FindPayload(prev);
+            if (pp.has_value() && pp->payload.type == PayloadType::MINT && in.prevout.n == 1) stated = (int64_t)pp->payload.cents;
+            if (pp.has_value() && (pp->payload.type == PayloadType::TRANSFER || pp->payload.type == PayloadType::REDEEM)) {
+                for (const Assignment& a : pp->payload.assignments) {
+                    if (a.vout == in.prevout.n) stated = (int64_t)a.cents;
+                }
+            }
+            if (stated.has_value()) {
+                cents += stated.value();
+                if (!outpoints.empty()) outpoints += ", ";
+                outpoints += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n)) + " (not judged yet)";
+            } else {
+                if (!unknown.empty()) unknown += ", ";
+                unknown += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n));
+            }
         }
+    }
+    if (!unknown.empty()) {
+        reason = strprintf("this transaction spends output(s) of this wallet whose transaction the Yellowback index has not judged yet and"
+                           " whose payload may give them YED (%s); whatever YED they carry would be destroyed.", unknown);
+        return true;
     }
     if (cents <= 0 || assigned >= cents) return false;
     reason = strprintf("this transaction spends %d cents of this wallet's YED (%s) and its payload reassigns %d of them,"

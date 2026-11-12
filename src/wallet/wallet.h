@@ -2441,6 +2441,13 @@ public:
      */
     bool FundTransaction(CMutableTransaction& tx, CAmount& nFeeRet, int& nChangePosRet, std::string& strFailReason, bool includeWatching);
 
+    /** Beta2 (audit M-1, review LOW-2): the value of the post-quantum coins SelectCoins leaves out when it may add coins,
+     *  as far as z_sendmany would spend them; when that is 0 because each is a Yellowback outpoint, *yedRefusal names them. */
+    CAmount PQSelectableValue(std::string* yedRefusal = nullptr) const;
+    /** Review WALLET-FOLLOW-REVIEW-2 LOW-4: where Yellowback is not live, the coins SelectCoins leaves out (when it may
+     *  add coins) because their own Yellowback payload gives them YED; "" where none is, or where Yellowback is live
+     *  (there the YED coin locks keep them out). Otherwise the sentence the stock sends append to "Insufficient funds". */
+    std::string YedLeftOutOfSelection(const CCoinControl* coinControl) const;
     /**
      * Create a new transaction paying the recipients with a set of coins
      * selected by SelectCoins(); Also create the change output, when needed
