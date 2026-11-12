@@ -292,7 +292,8 @@ Nothing else changes for a person at the GUI: `yed_mint` keeps its arguments and
 (`ownerAddress`, 53 characters, `yr…` on regtest); the owner's redeem carries a ~7.9 KB SLH-DSA signature; the
 network fees are dollars per KB at the attested price, so they grow with the size (`params.fees.network`;
 `params.pq.feeRateZatPerKB` is the plain rate). The mainnet YED prefix is `yb…`, testnet `yt…`, regtest `yr…`
-(the tooling reads `params.addressVersion` / `params.pqAddressVersion`, never a hard-coded prefix).
+(the tooling reads `params.addressVersion` / `params.pqAddressVersion` (one 3-byte version per scheme, keyed by
+scheme number, D-9), never a hard-coded prefix).
 
 ### A Falcon-active devnet for client work (YecWallet, YEW, lightwalletd, chain-viz, x402, hawkeye)
 
@@ -304,7 +305,7 @@ export YELLOWBACK_LWD_BIN=<lightwalletd-dd on upgrade/quantum-vaults>/lightwalle
 export YELLOWBACK_LWD_REPO=<that lightwalletd-dd tree>                                 # the walk's go test runs there
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up --role user --seed 480 --portseed 7   # Falcon live (default)
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet status      # "post-quantum: Falcon ACTIVE (falconHeight 103, -pqfalconheight 0) ..."
-../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getinfo   # params.pq, params.fees, rpcversion 8
+../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getinfo   # params.pq, params.fees, rpcversion 9
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- yed_getnewaddress          # a Falcon holder (53 chars)
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet cli --node 0 -- vault_getnewowner          # an SLH-DSA owner {scheme, keyhash, owner, address}
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet down --wipe
@@ -328,7 +329,7 @@ yellowback-devnet up --role attestor --no-heartbeat --no-walk --no-sim --seed 48
 ../.venv/bin/python contrib/yellowback/devnet/upgrade-walk
 ```
 
-- `pq`: rpcversion 8 and `params.pq`; a wallet mint's owner (ownerScheme 1, a 53-character owner address, the
+- `pq`: rpcversion 9 and `params.pq`; a wallet mint's owner (ownerScheme 1, a 53-character owner address, the
   V's owner slot `<hash> OP_1 OP_CHECKPQSIG`, a version-4 MINT) and its token holder (Falcon or P2PKH by the
   regime); the primitive with post-quantum owners: `vault_getnewowner` → `vault_lock {owner}` under the
   attestor set → `vault_ownerspend` (selector 2) with an SLH-DSA owner and, once Falcon is active, an

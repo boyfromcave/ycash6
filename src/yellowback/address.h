@@ -31,13 +31,15 @@ bool DecodeAddress(const std::string& str, const Params& params, CKeyID& keyID);
 bool IsValidAddress(const std::string& str, const Params& params);
 
 /**
- * PQ keys (quantum spec §4): Base58Check(pqAddressVersion || scheme || 32-byte keyHash), versions
- * 0x56AB / 0x571E / 0x5710, also "yb…"/"yt…"/"yr…" but 53 characters long. Empty for a scheme
- * outside the registry (crypto/pq/scheme.h).
+ * PQ keys (quantum spec §4, D-9): Base58Check(version || 32-byte keyHash), one 3-byte version per
+ * scheme (Params::pqAddressVersions), so the prefix names it: "ybf…"/"ybs…" main, "ytf…"/"yts…" test,
+ * "yrf…"/"yrs…" regtest (FN-DSA-512 / SLH-DSA-SHA2-128s), 53 characters. Empty for a scheme outside
+ * the registry (crypto/pq/scheme.h).
  */
 std::string EncodeAddress(const CPQKeyID& id, const Params& params);
 
-/** False unless the string is a PQ Yellowback address of this network with a registered scheme. */
+/** False unless the string is a PQ Yellowback address of this network with a registered scheme (the pre-D-9
+ *  2-byte-version form is refused). */
 bool DecodeAddress(const std::string& str, const Params& params, CPQKeyID& id);
 
 /** Either form: a CKeyID (35-character) or a CPQKeyID (53-character) address; false otherwise. */
