@@ -33,6 +33,11 @@ a wallet re-created from the phrase holds before it rescans.
   (c) z_exportwallet writes the vaultsetsig= lines, z_importwallet on a fresh wallet restores them (the marker
   stays set), and a conflicting line aborts the import;
   (d) a key imported before it is a set member is pending: its SET_JOIN, when it connects, sets the marker (S3).
+- PQ keys used out of chain order across the rescan's re-pass (seed-restore review H-1 for PQ keys): node 1 issues
+  SLH-DSA keys 34..93; node 0 pays key 78, then 60, then 44, each in its own block, and node 1 then spends the
+  key-78 coin whole (no change). A restore of the backup holds 31..50 after the vault of key 30: the first pass
+  finds 44, a re-pass finds 60, the next finds 78, and its spend lies past the last block at which the first
+  pass grew the lookahead: the restored wallet must not list the spent coin, and its next owner is index 79.
 
     ZCASHD=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_wallet_restore.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -195,7 +200,33 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         self.mine(1)
         assert n2.getrawtransaction(r['txid'], 1)['confirmations'] >= 1
         self.sign_once_restore()
+        self.pq_out_of_order_restore(backup)
         print('ok')
+
+    def pq_out_of_order_restore(self, backup):
+        n0, n1 = self.nodes[0], self.nodes[1]
+        print('PQ keys used out of chain order across the re-pass; a coin found by a re-pass is spent afterwards')
+        k = [n1.vault_getnewowner(SLH) for _ in range(60)]          # indices 34..93 (node 1 issued 0..33 above)
+        c78 = self.pay_pqpkh(k[44])        # held by a restore only once 60 is found (a second re-pass)
+        c60 = self.pay_pqpkh(k[26])        # held only once 44 is found (the first re-pass)
+        c44 = self.pay_pqpkh(k[10])        # in the restore's first window (31..50): found by the first pass
+        coins = [u for u in n1.listunspent(0) if (u['txid'], u['vout']) == c78]
+        assert_equal(len(coins), 1)
+        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n1.listunspent(0) if (u['txid'], u['vout']) != c78]
+        n1.lockunspent(False, others)
+        spend = n1.sendtoaddress(n0.getnewaddress(), coins[0]['amount'], '', '', True)   # whole, no change
+        n1.lockunspent(True, others)
+        self.mine(1)
+        assert_equal([vin['txid'] for vin in n1.getrawtransaction(spend, 1)['vin']], [c78[0]])
+        self.mine(3)                                                 # blocks that pay nothing to node 1
+        mine1 = {(u['txid'], u['vout']) for u in n1.listunspent(0)} & {c44, c60, c78}
+        assert_equal(mine1, {c44, c60})
+
+        n2 = self.restart_node2(extra=['-rescan'], wallet=backup)
+        mine2 = {(u['txid'], u['vout']) for u in n2.listunspent(0)} & {c44, c60, c78}
+        assert_equal(mine2, mine1)                                    # the spent key-78 coin is not listed
+        assert_equal(n2.gettransaction(spend)['txid'], spend)
+        assert_equal(n2.vault_getnewowner(SLH)['owner'], k[45]['owner'])   # one past the highest key seen on chain
 
     def restart_node2(self, extra=(), wallet=None, wipe=False):
         """Restart node 2: on a copy of `wallet`, on a new wallet (wipe), or as it is."""

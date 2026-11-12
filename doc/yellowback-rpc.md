@@ -281,12 +281,76 @@ YED form): what node operators and clients should know.**
 - **Change.** The D-4 change returns to its source address, which is in the address book, so it is listed as a
   payment to that address on both lines. `IsChange` is unchanged on this line: a post-quantum key outside the
   address book is not change.
-- **Seed-only restore (`-mnemonicfile`)** restores the seed's first legacy Sapling address and its
-  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
-  unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap
-  (`getnewaddress "" "pq"`) and running `rescanblockchain`; further Sapling addresses likewise with
-  `z_getnewaddress` before `rescanblockchain`. On an existing wallet the option is ignored when the
-  seed matches (checked by fingerprint, so a locked wallet starts too) and refused when it does not.
+- **Seed-only restore (`-mnemonicfile`)** restores the seed's transparent addresses (those
+  `getnewaddress` handed out, and its change and mining keys) **as long as no more than `-keypool`
+  (default 100) unused addresses in a row were handed out**, its first legacy Sapling address, and its
+  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond the
+  gap is not re-found. The transparent gap limit is the **restoring** node's `-keypool`: restore with
+  the original wallet's `-keypool` or larger (a wallet that ran with a larger `-keypool` can leave
+  longer runs of unused keys on its change chain). The wallet holds `-keypool` + 1 transparent keys of
+  each HD chain ahead of the last one it issued or saw paid (in memory, not in `wallet.dat`), and the
+  restore's rescan reads the scanned blocks again, to the tip, while a pass moves that window or
+  finds a transaction, so addresses paid (and coins spent) out of order are found too. The cost: the
+  restore reads the chain from genesis about twice on mainnet for a wallet that used its addresses in
+  order, three times or more when it used them out of chain order (one more read for each level of keys
+  found only by a re-read; on the 444-block test chain of `wallet_seed_restore_ecc.py`, five reads).
+  The restore files each re-found address it sees paid under `receive` in the address book, as
+  `getnewaddress` did: it cannot tell those from the addresses the original wallet kept out of the
+  book (the vault RPCs' funding change and split outputs), so these list as receiving addresses after
+  a restore; a Yellowback holder address (`yed_getnewaddress`, purpose `yellowback-receive`) is filed
+  as `receive` too, so `yed_listaddresses` with `includeEmpty` does not list it once it is empty. A
+  wallet never files an address it issued itself.
+  An interrupted restore resumes (review M-c): the restore writes a marker (`restorescan`) into the
+  new wallet file, and until a scan from genesis has completed (every re-pass included, with the node
+  out of initial block download) every start of the node scans from genesis again, whatever the
+  wallet's best block and its keys' birthday (the time of the restore); `getwalletinfo`
+  `restore_in_progress` is true meanwhile. A restore made on a node that does not have the chain yet
+  completes at the first restart after the sync; once the node has synced, `getinfo` `errors` says
+  `Wallet restore in progress: restart the node after it has synced to finish scanning for older coins`. A shutdown request stops a pass at a block boundary
+  (`Still rescanning (pass n)` in the log every minute). An older binary ignores the marker: it
+  starts from the wallet's best block and the keys' birthday, so it does not resume an unfinished
+  restore (coins not found before the interruption stay unseen there), and it leaves the marker in
+  place for this binary to resume.
+  Recover keys past a gap by issuing addresses past it (`getnewaddress`, `getnewaddress "" "pq"`,
+  `z_getnewaddress`) and restarting with `-rescan` (this line has no `rescanblockchain`). An
+  encrypted wallet holds the transparent keys past those it issued only while unlocked, and its
+  `-rescan` runs locked. Locked, it watches the next `-keypool` + 1 addresses of each HD chain by
+  their **key IDs** (the hash160 a P2PKH address encodes), which every unlocked top-up (an issued
+  address, a paid one, `walletpassphrase`, the load of an unencrypted wallet) recomputes from the seed
+  and stores in clear (`legacytlookahead`; a stored record that does not match the seed is rewritten,
+  with a warning in the log). A payment to one is the wallet's own coin, listed as watch-only
+  (`listunspent` with `spendable` false, `getbalance` with `includeWatchonly`,
+  `listtransactions` with `includeWatchonly`), never spendable or handed out while locked;
+  `walletpassphrase` derives its key, marks it and moves the window past it, and the coin is
+  spendable. A payment shown as watch-only while locked to a key ID the seed does not derive (a
+  tampered `legacytlookahead` record) disappears from the listings after the unlock, which rebuilds
+  the window from the seed; its transaction stays in `wallet.dat` with no output of the wallet's.
+  `getnewaddress` refuses while the wallet is locked (`Please enter the wallet passphrase with
+  walletpassphrase first.`), so a locked wallet hands out no transparent address at all.
+  **What the file reveals:** the wallet's next `-keypool` + 1 transparent addresses per
+  chain, nothing more: no chain code and no public key of the account or a chain is stored, so no
+  other key and no outgoing viewing key can be derived from the file, even with one exported private
+  key. (An intermediate build of this release stored the legacy account's extended public key in
+  clear, `legacytaccountpub`; with one leaked private key it gave every legacy transparent key, and
+  alone the legacy shielding OVKs. This release erases that record from the wallet's database at load,
+  logging `erased the transparent account's extended public key`, and does not force a rewrite of
+  `wallet.dat`; the erased bytes may remain in free pages of the file and in the database log until
+  the file is next rewritten or compacted, and in any copy or backup made before. No released build
+  wrote the record: anyone who ran an intermediate build on a wallet they care about should restore
+  the recovery phrase into a new wallet file.) The window cannot move while locked, so
+  `getwalletinfo` `lookahead_incomplete` is set when a payment leaves fewer than `-keypool` + 1
+  addresses the wallet holds or watches beyond it on its chain: a later payment past them (another
+  wallet of the same seed issued them) would be missed. An ordinary block, the wallet's own
+  start-up rescan and a wallet whose seed no other wallet uses set nothing. (A wallet without stored
+  key IDs, encrypted by an older release and not unlocked since, cannot tell: it is flagged by a
+  block it had not processed before with an output it cannot check.) The flag is kept in
+  `wallet.dat` and cleared by a scan from at or below that height with the wallet unlocked: an
+  import RPC with rescan run while unlocked (`importprivkey`, `importpubkey`, `importaddress`,
+  `importwallet`, `z_importkey`, `z_importviewingkey`, `z_importwallet`); an encrypted wallet's
+  start-up scan, `-rescan` included, always runs locked. Restoring the recovery phrase into a new
+  wallet file (`-wallet=<new file> -mnemonicfile=<file>`) finds the coin.
+  On an existing wallet the option is ignored when the seed matches (checked by fingerprint, so a
+  locked wallet starts too) and refused when it does not.
 - **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check
   uses the PQ spend size (`GetPQDustThreshold`), as relay policy does.
 - **Balances and addresses by type** (beta2 item 15, ported from ycash-dd #162; additions only, every existing

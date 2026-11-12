@@ -29,7 +29,8 @@
 #
 #   report rows kogany cannot follow (W9-b finding 1, "no-ycash-upgrades"): stopatheight,
 #   ycash_bootstrap, lightwalletd_only, vault_pq_wallet, vault_pq_wallet_restore, wallet_pq_address,
-#   wallet_balance_by_type, wallet_getnewaddress_type, wallet_address_matrix, wallet_pq_fee_cap, wallet_yed_ecc_token and wallet_yed_held_guard run regtest chains without the Ycash upgrades below Canopy (the framework's
+#   wallet_balance_by_type, wallet_getnewaddress_type, wallet_address_matrix, wallet_pq_fee_cap,
+#   wallet_yed_ecc_token, wallet_yed_held_guard, wallet_seed_restore_ecc and wallet_seed_lookahead_exposure run regtest chains without the Ycash upgrades below Canopy (the framework's
 #   200-block cache, or Vault alone by -nuparams); kogany follows only chains with the Ycash
 #   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
 #   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
@@ -71,6 +72,8 @@ vault    wallet_address_matrix         report  W9
 vault    wallet_pq_fee_cap             report  W9
 vault    wallet_yed_ecc_token          report  W9
 vault    wallet_yed_held_guard         report  W9
+vault    wallet_seed_restore_ecc       report  W9
+vault    wallet_seed_lookahead_exposure report W9
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
 yed      yellowback_lifecycle          gate    W5
@@ -153,6 +156,8 @@ sidecar  wallet_address_matrix         report  W9     # vault
 sidecar  wallet_pq_fee_cap             report  W9     # vault
 sidecar  wallet_yed_ecc_token          report  W9     # vault
 sidecar  wallet_yed_held_guard         report  W9     # vault
+sidecar  wallet_seed_restore_ecc       report  W9     # vault
+sidecar  wallet_seed_lookahead_exposure report W9    # vault
 sidecar  yellowback_lifecycle          report  W9     # yed
 sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
 sidecar  yellowback_reorg_restart      report  W9   mirror  # yed
@@ -222,6 +227,8 @@ pair     wallet_address_matrix         report  W9     # vault
 pair     wallet_pq_fee_cap             report  W9     # vault
 pair     wallet_yed_ecc_token          report  W9     # vault
 pair     wallet_yed_held_guard         report  W9     # vault
+pair     wallet_seed_restore_ecc       report  W9     # vault
+pair     wallet_seed_lookahead_exposure report W9    # vault
 pair     yellowback_lifecycle          report  W9     # yed
 pair     yellowback_activation_reorg   report  W9     # yed
 pair     yellowback_reorg_restart      report  W9     # yed

@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2016 The Bitcoin Core developers
 // Copyright (c) 2020-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -12,6 +13,8 @@
 
 void SetMiscWarning(const std::string& strWarning, int64_t timestamp);
 std::pair<std::string, int64_t> GetMiscWarning();
+//! A wallet restore from a recovery phrase waits for a restart after the sync (getinfo errors).
+void SetWalletRestorePending(bool flag);
 void SetfLargeWorkForkFound(bool flag);
 bool GetfLargeWorkForkFound();
 void SetfLargeWorkInvalidChainFound(bool flag);
