@@ -324,7 +324,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # The SIGKILL exit (wait_crashed) is the fault firing at the armed height, the rejected block's. Its log line is
         # written through the non-blocking log writer, whose last lines a SIGKILL can drop (seen on CI): when it is
         # there it must name this block; when it is lost, the restart below still has to judge the stored block.
-        if debug_log_contains(tmpdir, 3, 'crash before judging block '):
+        if debug_log_contains(tmpdir, 3, 'crash before judging block ', timeout=0):    # node 3 has exited
             assert debug_log_contains(tmpdir, 3, 'crash before judging block %s' % rejected), 'node 3 did not crash at the block'
         else:
             print('  (node 3\'s last log lines were lost to the SIGKILL; the crash is its exit status)')

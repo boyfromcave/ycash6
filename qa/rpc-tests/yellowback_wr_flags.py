@@ -42,6 +42,7 @@ from test_framework.yellowback_util import (
     REF_LAG,
     USER,
     YellowbackTestFramework,
+    wait_for_log,
 )
 from test_framework.yellowback_attest import ArmedModeMixin
 
@@ -110,8 +111,12 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         """Wallet transactions -deletetx has removed on node i, from its own accounting
         ("Deleted spent wtx" / "Deleted expired/conflicted wtx", one line each, -debug=deletetx)."""
         log = os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log')
-        with open(log, encoding='utf8', errors='replace') as f:
-            return len(re.findall(r'Deleted (?:spent|expired/conflicted) wtx ', f.read()))
+
+        def read():
+            with open(log, encoding='utf8', errors='replace') as f:
+                return f.read()
+        pattern = r'Deleted (?:spent|expired/conflicted) wtx '
+        return len(re.findall(pattern, wait_for_log(read, lambda text: re.search(pattern, text))))
 
     def notes(self, node, addr):
         return node.z_listunspent(0, 9999999, False, [addr])

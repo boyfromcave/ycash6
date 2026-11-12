@@ -28,6 +28,7 @@ import os
 
 from test_framework.blocktools import solve_block_from_template, txs_from_template
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_util import log_settle
 from test_framework.util import (
     BLOSSOM_BRANCH_ID,
     CANOPY_BRANCH_ID,
@@ -75,6 +76,7 @@ class ShieldedBalanceAccountingCoinbaseTest(BitcoinTestFramework):
         self.is_network_split = False
 
     def assert_no_abort(self):
+        log_settle()    # the log writer is non-blocking: let it drain before checking a line is absent
         debug_log = os.path.join(self.options.tmpdir, "node0", "regtest", "debug.log")
         with open(debug_log, encoding="utf8") as f:
             log = f.read()

@@ -33,6 +33,7 @@ restart and a -rescan restart load the same view, with the refused transaction s
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
+from test_framework.yellowback_util import wait_for_log
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     PQ_EXPIRING_COMMIT_REFUSAL,
@@ -261,9 +262,14 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
         assert_equal(n1.getreceivedbyaddress(c, 0), amount)
 
     def erased_txids(self):
+        """The erased txids node 0 has logged, once it has logged one (its log writer is non-blocking)."""
         import re
-        with open(self.options.tmpdir + '/node0/regtest/debug.log', encoding='utf-8', errors='replace') as f:
-            return re.findall(r'SendPQTransaction: erasing ([0-9a-f]{64})', f.read())
+
+        def read():
+            with open(self.options.tmpdir + '/node0/regtest/debug.log', encoding='utf-8', errors='replace') as f:
+                return f.read()
+        return re.findall(r'SendPQTransaction: erasing ([0-9a-f]{64})',
+                          wait_for_log(read, lambda log: 'SendPQTransaction: erasing ' in log))
 
 
 if __name__ == '__main__':

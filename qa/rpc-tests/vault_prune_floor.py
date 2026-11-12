@@ -62,7 +62,7 @@ from test_framework.util import (
     start_node,
     stop_node,
 )
-from test_framework.yellowback_util import ATTESTOR_SET_SPEC, YCASH_UPGRADE_ARGS, wait_yed_healthy
+from test_framework.yellowback_util import ATTESTOR_SET_SPEC, YCASH_UPGRADE_ARGS, wait_for_log, wait_yed_healthy
 
 PRUNE_AFTER = 1000            # regtest nPruneAfterHeight (src/chainparams.cpp)
 MIN_BLOCKS_TO_KEEP = 288      # src/main.h
@@ -257,8 +257,8 @@ class VaultPruneFloorTest(BitcoinTestFramework):
 
         print('the files below the floor %d are gone, every block from it is kept' % FLOOR)
         self.check_floor()
-        log = self.debug_log()
-        assert 'Prune: prune target below the vault floor: blocks from height %d are kept' % FLOOR in log
+        line = 'Prune: prune target below the vault floor: blocks from height %d are kept' % FLOOR
+        assert line in wait_for_log(self.debug_log, lambda log: line in log)
         assert self.usage_mib() > PRUNE_MIB, self.usage_mib()
         expected = self.hashes(MINER)
         assert_equal(self.hashes(PRUNED), expected)

@@ -31,6 +31,7 @@ from test_framework.util import (
     wait_and_assert_operationid_status,
 )
 from test_framework.zip317 import ZIP_317_FEE
+from test_framework.yellowback_util import wait_for_log
 from tx_expiry_helper import TestNode
 
 import os.path
@@ -135,8 +136,10 @@ class Zip239Test(BitcoinTestFramework):
 
         # Verify that we see the expected error in the debug log of node 0
         log_path = os.path.join(self.options.tmpdir, 'node0', 'regtest', 'debug.log')
-        with open(log_path, 'r', encoding='utf-8') as log_file:
-            log_content = log_file.read()
+        def read():
+            with open(log_path, 'r', encoding='utf-8') as log_file:
+                return log_file.read()
+        log_content = wait_for_log(read, lambda log: expected_msg in log)   # the log writer is non-blocking
 
         if expected_msg not in log_content:
             raise AssertionError("Expected error \"" + expected_msg + "\" not found in:\n" + log_content)

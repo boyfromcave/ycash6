@@ -51,7 +51,7 @@ from test_framework.vault_harness import (
     SCRIPT_VERIFY,
     VaultTestBase,
 )
-from test_framework.yellowback_util import kogany_pair, wif_to_secret
+from test_framework.yellowback_util import kogany_pair, log_settle, wait_for_log, wif_to_secret
 from tx_expiry_helper import TestNode
 
 PROTO = 270200          # UPGRADE_VAULT's nProtocolVersion
@@ -171,7 +171,7 @@ class VaultDoSTest(VaultTestBase):
         if off is None:
             print('  [kogany pair] %r skipped: kogany logs no per-input vault verdict' % verdict)
         else:
-            assert any(verdict in ln for ln in self.log_since(off)), 'no %r verdict in the log' % verdict
+            assert any(verdict in ln for ln in self.log_wait(off, verdict)), 'no %r verdict in the log' % verdict
         print('    ok   the verdict is the template input\'s own (input 1): the channel signature was not verified')
 
         print('g. an honest OWNER-RELEASED spend relayed from a tip where the set is released')
@@ -227,6 +227,10 @@ class VaultDoSTest(VaultTestBase):
             f.seek(off)
             return f.read().decode('utf-8', 'replace').splitlines()
 
+    def log_wait(self, off, needle):
+        """``log_since(off)`` once a line holds ``needle`` (the log writer is non-blocking), or after LOG_WAIT."""
+        return wait_for_log(lambda: self.log_since(off), lambda lines: any(needle in ln for ln in lines))
+
     def relay(self, hex_, label, banned):
         """A fresh mininode peer sends ``hex_`` as a ``tx`` message: ``banned`` -> Misbehaving 100 and
         disconnected (127.0.0.1 is a local peer, so not banned); else banscore 0 and still connected."""
@@ -258,7 +262,7 @@ class VaultDoSTest(VaultTestBase):
             while self.mininode_peer() is not None:
                 assert time.time() < deadline, '%s: the peer was not disconnected' % label
                 time.sleep(0.1)
-            lines = [ln for ln in self.log_since(off) if 'Misbehaving' in ln] if off is not None else ['(0 -> 100)']
+            lines = [ln for ln in self.log_wait(off, '(0 -> 100)') if 'Misbehaving' in ln] if off is not None else ['(0 -> 100)']
             assert any('(0 -> 100)' in ln for ln in lines), '%s: no Misbehaving 0 -> 100 line in %r' % (label, lines)
             print('    ok   %s: Misbehaving 0 -> 100, disconnected (reject %r)' % (label, rej.reason))
         else:
@@ -266,6 +270,8 @@ class VaultDoSTest(VaultTestBase):
             peer = self.mininode_peer()
             assert peer is not None, '%s: the peer was disconnected' % label
             assert_equal(peer['banscore'], 0)
+            if off is not None:
+                log_settle()
             assert off is None or not [ln for ln in self.log_since(off) if 'Misbehaving' in ln], label
             print('    ok   %s: banscore 0, still connected (reject %r)' % (label, rej.reason))
             conn.disconnect_node()
