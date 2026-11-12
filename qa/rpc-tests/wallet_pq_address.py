@@ -320,10 +320,28 @@ class WalletPQAddressTest(BitcoinTestFramework):
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not (u['txid'] == r2 and u['address'] == b)]
         n0.lockunspent(False, others)
         dest = n1.getnewaddress()
-        # sendtoaddress selects ECC coins only since beta2 audit M-1, so the PQ coin is no longer its to pick (the B-4
-        # change pricing is reached only through fundrawtransaction with a named PQ input now; not exercised here)
+        # sendtoaddress selects ECC coins only since beta2 audit M-1, so the PQ coin is no longer its to pick; the B-4
+        # change pricing is reached through fundrawtransaction with the PQ coin named as an input
         assert_raises_rpc('Insufficient funds in ordinary transparent addresses; this wallet also holds',
                           n0.sendtoaddress, dest, v - Decimal('0.00001'), '', '', True)
+        named = [{'txid': r2, 'vout': pq_coin[0]['vout']}]
+        pq_change = pqpkh_script(1, hb).hex()
+        funded = n0.fundrawtransaction(n0.createrawtransaction(named, {dest: v - Decimal('0.5')}))
+        ftx = n0.decoderawtransaction(funded['hex'])
+        assert_equal([(i['txid'], i['vout']) for i in ftx['vin']], [(r2, pq_coin[0]['vout'])])
+        change = [o for o in ftx['vout'] if o['scriptPubKey']['hex'] == pq_change]
+        assert_equal(len(change), 1)                            # -sendchangeback: the change goes back to b
+        fee = funded['fee']
+        assert_equal(change[0]['value'], Decimal('0.5') - fee)
+        # an amount that leaves 1,000 zat of change: above the P2PKH dust threshold, below the TX_PQPKH one (an
+        # SLH-DSA spend is ~8 kB), so the wallet adds it to the fee instead of creating a PQ dust output
+        amount = v - fee - Decimal('0.00001')
+        funded = n0.fundrawtransaction(n0.createrawtransaction(named, {dest: amount}))
+        ftx = n0.decoderawtransaction(funded['hex'])
+        assert_equal([(i['txid'], i['vout']) for i in ftx['vin']], [(r2, pq_coin[0]['vout'])])
+        assert_equal([o['scriptPubKey']['hex'] == pq_change for o in ftx['vout']], [False])
+        assert_equal(funded['changepos'], -1)
+        assert_equal(funded['fee'], v - amount)
         n0.lockunspent(True, others)
 
         print('z_importpqkey')
