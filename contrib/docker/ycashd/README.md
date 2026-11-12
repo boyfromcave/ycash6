@@ -41,7 +41,7 @@ The image runs as uid 2001 and holds no wallet of any user. The deployment that 
 This image builds the post-quantum vault line (`OP_CHECKPQSIG` 0xc2, SLH-DSA-SHA2-128s owners,
 FN-DSA-512 holders). The PQ code is vendored C under `src/crypto/pq/` (slhdsa-c, PQClean
 `falcon-padded-512/clean`), compiled by the ordinary autotools build: the image needs no extra
-package, Rust crate or configure flag for it. `yed_getinfo` reports `rpcversion` 8 (a compiled
+package, Rust crate or configure flag for it. `yed_getinfo` reports `rpcversion` 9 (a compiled
 constant; nothing in `ycash.conf` selects it, and YED RPCs answer only once an attestor set is
 configured). `-pqfalcon` / `-pqfalconheight` are refused off regtest, so the entrypoint writes
 `pqfalconheight` only for `YCASHD_NETWORK=regtest`.

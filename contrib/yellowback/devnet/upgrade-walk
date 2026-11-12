@@ -27,7 +27,7 @@ Steps (each can be skipped with --skip NAME[,NAME]):
              with its agent stopped and revives with a SET_HEARTBEAT when it comes back
   mint       arming (ARMED, seated), mints -> the V template (tag YED, the attestor set, CLAIM_DELAY)
   transfer   yed_send to the holder and the claimant
-  pq         the post-quantum line (quantum plan §4.9): rpcversion 8 and params.pq; a wallet mint's SLH-DSA owner (53-character
+  pq         the post-quantum line (quantum plan §4.9): rpcversion 9 and params.pq; a wallet mint's SLH-DSA owner (53-character
              owner address, the V's PQ owner slot, the v4 MINT) and its holder (P2PKH before Falcon, FN-DSA-512 after);
              the primitive with PQ owners (vault_getnewowner -> vault_lock -> vault_ownerspend: SLH-DSA, and FN-DSA-512 once
              Falcon is active); PQ holder transfers (user -> holder's PQ address -> claimant's PQ address, a PQ holder
