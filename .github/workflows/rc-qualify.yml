@@ -9,9 +9,16 @@
 # Deploying to the testnets is a separate, manual step from the private ycash-ops repository (below).
 #
 # Trigger: workflow_dispatch ON THE TAG (`gh workflow run rc-qualify.yml --ref v6.22.0-rcN`), which the
-# release workflow's `qualify` job does once the draft exists; by hand for a rerun. Any other ref is
-# refused. Inputs: the workspace ref holding releases/v<version>.yaml (default upgrade/vault) and one
-# switch per step.
+# release workflow's `qualify` job does once the draft exists; by hand for a rerun. Inputs: the
+# workspace ref holding releases/v<version>.yaml (default upgrade/vault) and one switch per step.
+#
+# Proving run (before any tag): dispatched on a BRANCH with input proving_run = the id of a green
+# workflow_dispatch run of yellowback-release.yml on that same branch at that same commit. The
+# candidate is then that run's `release-signed` artifact instead of a release (the same checks:
+# SHA256SUMS, the cosign signature, whose identity is the workflow at the branch, and the build
+# provenance), the train's ycash6 tag must be v<version> (it need not exist yet) and its ycash6
+# commit this branch's head, and the record stays a workflow artifact: nothing is written to any
+# release. A branch dispatch without proving_run is refused, as is proving_run on a tag.
 #
 # Steps (each a job; the record job collects them):
 #   candidate   the draft (or published) release of the tag: every ycashd_v*/SBOM asset matches
@@ -64,6 +71,10 @@ on:
         description: 'step 4: the launch ceremony rehearsed on regtest'
         type: boolean
         default: true
+      proving_run:
+        description: 'proving run on a branch: the run id of a green yellowback-release.yml dispatch at this commit (empty on a tag)'
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -82,6 +93,7 @@ jobs:
     permissions:
       contents: write       # read the DRAFT release (a draft is listed only to writers); nothing is written
       attestations: read    # gh attestation verify
+      actions: read         # a proving run: read the release workflow's run and download its artifact
     outputs:
       version: ${{ steps.tag.outputs.version }}
       stage: ${{ steps.tag.outputs.stage }}
@@ -92,18 +104,42 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - name: Dispatched on a release tag of this line
+      - name: Dispatched on a release tag of this line, or a proving run on a branch
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVING_RUN: ${{ inputs.proving_run }}
         run: |
           set -euo pipefail
-          [ "${GITHUB_REF_TYPE}" = tag ] || { echo "rc-qualify runs on a tag (gh workflow run rc-qualify.yml --ref v<version>), not ${GITHUB_REF}"; exit 1; }
-          version="${GITHUB_REF_NAME#v}"
-          found=$(python3 qa/yellowback-vault-params.py stage "$version") || { echo "${GITHUB_REF_NAME} is not a release tag"; exit 1; }
-          case "$found" in "6.22 "*) ;; *) echo "${GITHUB_REF_NAME} is not on the 6.22 line"; exit 1 ;; esac
+          commit=$(git rev-parse HEAD)
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            [ -z "$PROVING_RUN" ] || { echo "proving_run is for a branch dispatch; a tag qualifies its release"; exit 1; }
+            version="${GITHUB_REF_NAME#v}"
+            label="${GITHUB_REF_NAME}"
+          else
+            [ -n "$PROVING_RUN" ] || { echo "rc-qualify runs on a tag (gh workflow run rc-qualify.yml --ref v<version>), or on a branch with proving_run, not ${GITHUB_REF}"; exit 1; }
+            [[ $PROVING_RUN =~ ^[0-9]{1,20}$ ]] || { echo "proving_run is not a run id"; exit 1; }
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROVING_RUN" \
+              --jq '[.path, .event, .head_branch, .head_sha, .status, .conclusion] | @tsv' > "$RUNNER_TEMP/run.tsv"
+            IFS=$'\t' read -r rpath revent rbranch rsha rstatus rconcl < "$RUNNER_TEMP/run.tsv"
+            echo "proving run $PROVING_RUN: $rpath $revent $rbranch $rsha $rstatus $rconcl"
+            [ "$rpath" = .github/workflows/yellowback-release.yml ] || { echo "run $PROVING_RUN is not a yellowback release run"; exit 1; }
+            [ "$revent" = workflow_dispatch ] || { echo "run $PROVING_RUN is not a proving run (event $revent)"; exit 1; }
+            [ "$rbranch" = "$GITHUB_REF_NAME" ] || { echo "run $PROVING_RUN ran on $rbranch, not $GITHUB_REF_NAME"; exit 1; }
+            [ "$rsha" = "$commit" ] || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit: prove again at the head"; exit 1; }
+            [ "$rstatus/$rconcl" = completed/success ] || { echo "run $PROVING_RUN is $rstatus/$rconcl, not completed/success"; exit 1; }
+            mkdir -p cand
+            gh run download "$PROVING_RUN" -R "$GITHUB_REPOSITORY" -n release-signed -D cand
+            pkg=$(cd cand && ls ycashd_v*_linux_x86_64.tar.gz)
+            version=${pkg#ycashd_v}; version=${version%_linux_x86_64.tar.gz}
+            label="v$version (proving run $PROVING_RUN)"
+          fi
+          found=$(python3 qa/yellowback-vault-params.py stage "$version") || { echo "$label is not a release version"; exit 1; }
+          case "$found" in "6.22 "*) ;; *) echo "$label is not on the 6.22 line"; exit 1 ;; esac
           {
             echo "version=$version"
             echo "stage=${found#* }"
-            echo "commit=$(git rev-parse HEAD)"
+            echo "commit=$commit"
           } >> "$GITHUB_OUTPUT"
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -114,15 +150,20 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          draft=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft) \
-            || { echo "no release for $GITHUB_REF_NAME yet (the release workflow drafts it)"; exit 1; }
-          mkdir -p cand
-          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -D cand \
-            -p 'ycashd_v*' -p SHA256SUMS -p SHA256SUMS.cosign.bundle
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            draft=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft) \
+              || { echo "no release for $GITHUB_REF_NAME yet (the release workflow drafts it)"; exit 1; }
+            mkdir -p cand
+            gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -D cand \
+              -p 'ycashd_v*' -p SHA256SUMS -p SHA256SUMS.cosign.bundle
+          else
+            draft=proving   # the previous step downloaded the proving run's release-signed into cand/
+          fi
           cd cand
           sha256sum -c SHA256SUMS
+          # The release workflow signs at its own ref: the tag, or for a proving run the branch.
           cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
-            --certificate-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/yellowback-release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/yellowback-release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
           pkg="ycashd_v${VERSION}_linux_x86_64.tar.gz"
           gh attestation verify "$pkg" -R "$GITHUB_REPOSITORY"
@@ -175,7 +216,9 @@ jobs:
           qa/yellowback-rc-qualify.sh pins "$RUNNER_TEMP/pins.raw" > rc-train.env
           get() { sed -n "s/^$1=//p" rc-train.env; }
           [ "$(get TRAIN_YCASH6_COMMIT)" = "$COMMIT" ] || { echo "the train's ycash6 commit $(get TRAIN_YCASH6_COMMIT) is not this tag's $COMMIT"; exit 1; }
-          [ "$(get TRAIN_YCASH6_TAG)" = "$GITHUB_REF_NAME" ] || { echo "the train's ycash6 tag is $(get TRAIN_YCASH6_TAG), not $GITHUB_REF_NAME"; exit 1; }
+          # A proving run has no tag yet: the train must name the tag this commit will get.
+          want_tag="$GITHUB_REF_NAME"; [ "${GITHUB_REF_TYPE}" = tag ] || want_tag="v$VERSION"
+          [ "$(get TRAIN_YCASH6_TAG)" = "$want_tag" ] || { echo "the train's ycash6 tag is $(get TRAIN_YCASH6_TAG), not $want_tag"; exit 1; }
           echo "TRAIN_FILE_WORKSPACE_COMMIT=$ws_commit" >> rc-train.env
           cp "$file" rc-train.yaml
           {
@@ -433,6 +476,8 @@ jobs:
               "tag": os.environ["GITHUB_REF_NAME"], "version": os.environ["VERSION"], "stage": os.environ["STAGE"],
               "commit": os.environ["COMMIT"], "linux_x86_64_sha256": os.environ["PACKAGE_SHA256"],
               "draft": os.environ["DRAFT"] == "true",
+              # A proving run (a branch, before the tag) qualifies artifacts, not a release.
+              "proving_run": os.environ["DRAFT"] == "proving",
               "run": "%s/%s/actions/runs/%s" % (os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]),
               "steps": steps, "train": pins,
               # A step switched off for this run is "skipped": the record is then not a qualification.
@@ -453,6 +498,7 @@ jobs:
           name: rc-qualify
           path: rc-qualify.json
       - name: The record on the release
+        if: github.ref_type == 'tag'   # a proving run has no release; its record is the artifact above
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

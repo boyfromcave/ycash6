@@ -6,12 +6,13 @@
 # The procedure around it (version bump, tag, qualification, signing, testnet, publish) is
 # doc/yellowback-release.md.
 #
-# In plain words: when the owner pushes a version tag, this job builds the node for every platform,
-# tests each build, and puts the files on a draft release page that only the owner can see. It
+# In plain words: when the Yellowback lead architect pushes a version tag, this job builds the node
+# for every platform, tests each build, and puts the files on a draft release page that only the
+# repository's maintainers can see. It
 # also writes down, in public and tamper-evident form, that these exact files came from this exact
 # workflow run (GitHub "provenance" and a Sigstore signature), and lists what each package contains
 # (an SBOM). Then it starts the release-candidate qualification (rc-qualify.yml), which tests the
-# downloaded files with every other Yellowback program. The owner adds their own signature to the
+# downloaded files with every other Yellowback program. The lead architect adds their own signature to the
 # checksum file from a private repository, tries the release on the testnets, and only then
 # publishes it.
 #
@@ -34,9 +35,17 @@
 #                               fields on every network. Nothing here creates a tag: a tag is pushed by
 #                               hand per doc/yellowback-release.md, and this workflow refuses it while
 #                               those parameters are unset or divergent.
-#   workflow_dispatch           the same builds, smoke tests, SBOMs and signatures, artifacts only, no
-#                               release and no qualification (a proving run before tagging; its cosign
-#                               identity names the branch, so it can never pass for a tag's)
+#   workflow_dispatch           a proving run before tagging (dry run): the same version, line and
+#                               stage guards (input `strict`, default true: refused exactly as a tag
+#                               would be, compared with ycash-dd's pairing tag when it exists, else
+#                               its upgrade/vault; false: warnings only), the same builds, smoke
+#                               tests, SBOMs and signatures, then `release-dry-run`, which checks the
+#                               signed set and the notes file the draft would carry and prints the
+#                               release it would create. Artifacts only: the `release` and `qualify`
+#                               jobs run on a pushed tag only (event push), so no dispatch, on any
+#                               ref, ever creates a release or starts rc-qualify. Its cosign identity
+#                               names the branch, so it can never pass for a tag's. rc-qualify can
+#                               then be proved on these artifacts (rc-qualify.yml input proving_run).
 #
 # Signing and provenance (testnet plan §5.2, T-6):
 #   - build provenance (actions/attest-build-provenance, SLSA build level 2, GitHub OIDC) for every
@@ -45,7 +54,7 @@
 #     identity is this workflow at the tag (…/yellowback-release.yml@refs/tags/v<version>);
 #   - ycashd_v<version>_<platform>.spdx.json: an SPDX SBOM of each package (syft); listed in
 #     SHA256SUMS like the packages;
-#   - SHA256SUMS.minisig is NOT made here: the owner's minisign key (ycash-infra keys/ycash-release.pub,
+#   - SHA256SUMS.minisig is NOT made here: the lead architect's minisign key (ycash-infra keys/ycash-release.pub,
 #     key id 02C923A6C593AF18) signs SHA256SUMS from the private ycash-ops `sign-release` workflow, or
 #     by hand with its scripts/sign-release.sh, on the draft, which checks this provenance first.
 #   Reproducible builds (Guix) are a mainnet-launch item, not an rc one (T-11).
@@ -70,6 +79,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      strict:
+        description: 'refuse what a tag would refuse (version, line, stage rules, Vault parity with ycash-dd); false: warn only'
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -94,6 +108,9 @@ jobs:
           persist-credentials: false
       - name: Render the version and check the tag
         id: v
+        env:
+          # A proving run (workflow_dispatch) is strict unless the input says false; a tag always is.
+          STRICT: ${{ github.ref_type == 'tag' || inputs.strict != false }}
         # The same rendering as configure.ac's _CLIENT_VERSION_SUFFIX: BUILD < 25 is -beta<BUILD+1>,
         # 25..49 is -rc<BUILD-24>, 50 is the release, above 50 is -<BUILD-50>.
         run: |
@@ -112,12 +129,13 @@ jobs:
           fi
           # One release line per node line (upgrade plan O-7): the harden line (no src/vault/)
           # releases 6.21.x, the network-upgrade line (src/vault/ present) 6.22.x. A tag on the
-          # wrong line's version is refused; a proving run only warns.
+          # wrong line's version is refused, and so is a strict proving run's; a proving run with
+          # strict=false only warns.
           if [ -d src/vault ]; then line=upgrade; want=6.22; else line=harden; want=6.21; fi
           if [ "$maj.$min" != "$want" ]; then
             msg="the $line line releases $want.x, but configure.ac says $maj.$min.$rev"
-            if [ "${GITHUB_REF_TYPE}" = tag ]; then echo "$msg"; exit 1; fi
-            echo "::warning::$msg (not a tag: continuing)"
+            if [ "$STRICT" = true ]; then echo "$msg"; exit 1; fi
+            echo "::warning::$msg (strict=false: continuing)"
           fi
           case "$sfx" in -rc*) pre=true; stage=rc ;; -beta*) pre=true; stage=beta ;; *) pre=false; stage=final ;; esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -127,10 +145,13 @@ jobs:
       - name: Vault release parameters are set for the stage and match the ycash-dd pairing tag
         # A tag never releases unless the rules of its stage hold (qa/yellowback-release-heights.sh
         # --release-version: beta, rc or final, testnet plan §5.1) and every compared Vault field
-        # matches ycash-dd at vault-params/v<version>. A workflow_dispatch proving run only warns,
-        # and compares with ycash-dd upgrade/vault.
+        # matches ycash-dd at vault-params/v<version>. A strict workflow_dispatch proving run applies
+        # the same rules to the version configure.ac renders, against the pairing tag when it
+        # already exists, else against ycash-dd upgrade/vault (the commit that will be tagged); with
+        # strict=false it only warns.
         env:
           VERSION: ${{ steps.v.outputs.version }}
+          STRICT: ${{ github.ref_type == 'tag' || inputs.strict != false }}
         run: |
           set -euo pipefail
           url="https://github.com/boyfromcave/ycash-dd.git"
@@ -151,8 +172,28 @@ jobs:
             git fetch --depth 1 "$url" "+${ref}:refs/remotes/ycash-dd/pairing"
             python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/pairing > "$RUNNER_TEMP/vault-params-other.json"
             qa/yellowback-release-heights.sh --release-version "$VERSION" --other-json "$RUNNER_TEMP/vault-params-other.json"
+          elif [ "$STRICT" = true ]; then
+            # A strict proving run: refused exactly as the tag v${VERSION} would be today.
+            ref="refs/tags/vault-params/v${VERSION}"
+            set +e
+            git ls-remote --exit-code --tags "$url" "$ref"
+            lrc=$?
+            set -e
+            if [ "$lrc" -eq 0 ]; then
+              echo "comparing with the existing pairing tag vault-params/v${VERSION}"
+              git fetch --depth 1 "$url" "+${ref}:refs/remotes/ycash-dd/pairing"
+            elif [ "$lrc" -eq 2 ]; then
+              echo "::notice::pairing tag vault-params/v${VERSION} does not exist yet: comparing with ycash-dd upgrade/vault, and a tag push would be refused until it exists"
+              git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash-dd/pairing"
+            else
+              echo "could not look up the ycash-dd pairing tag (ls-remote exit $lrc)"
+              exit 1
+            fi
+            python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/pairing > "$RUNNER_TEMP/vault-params-other.json"
+            qa/yellowback-release-heights.sh --release-version "$VERSION" --other-json "$RUNNER_TEMP/vault-params-other.json"
           else
-            # A proving run: the version's own stage when it renders as a 6.22 release, else final.
+            # A proving run with strict=false: the version's own stage when it renders as a 6.22
+            # release, else final; warnings only.
             relver=(); python3 qa/yellowback-vault-params.py stage "$VERSION" | grep -q '^6\.22 ' && relver=(--release-version "$VERSION")
             if git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash-dd/upgrade-vault"; then
               python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/upgrade-vault > "$RUNNER_TEMP/vault-params-other.json"
@@ -435,10 +476,64 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # A proving run's stand-in for the two jobs below: everything the draft needs, checked, and the
+  # release it would create, printed. Read-only: no token that can write a release or start a
+  # workflow ever reaches it.
+  release-dry-run:
+    name: Draft release (dry run, no release)
+    needs: [version, sign]
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type != 'tag' && !cancelled() && needs.sign.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-signed
+          path: dist
+      - name: The signed set is complete, SHA256SUMS holds and the notes exist
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          [ -s SHA256SUMS.cosign.bundle ] || { echo "missing SHA256SUMS.cosign.bundle"; exit 1; }
+          for p in linux_x86_64 linux_aarch64 macos_aarch64; do
+            grep -q "  ycashd_v${VERSION}_$p.tar.gz\$" SHA256SUMS || { echo "SHA256SUMS lacks tier-1 $p"; exit 1; }
+          done
+          grep -q "  ycashd_v${VERSION}_windows.zip\$" SHA256SUMS || { echo "SHA256SUMS lacks tier-1 windows"; exit 1; }
+          ls -l
+          cd ..
+          notes=doc/release-notes/release-notes-$VERSION.md
+          [ -s "$notes" ] || { echo "missing $notes: the tag's release job would refuse (doc/yellowback-release.md step 2)"; exit 1; }
+          pre=; [ "$PRERELEASE" = true ] && pre=--prerelease
+          {
+            echo "## Dry run: the tag v$VERSION would create"
+            echo
+            echo "gh release create v$VERSION dist/* --draft $pre --verify-tag --title \"ycashd v$VERSION (Yellowback)\""
+            echo "then dispatch rc-qualify.yml on v$VERSION (prove it now: rc-qualify.yml with proving_run=$GITHUB_RUN_ID)"
+            echo
+            echo "Assets:"
+            echo
+            sed 's/^/    /' dist/SHA256SUMS
+            echo
+            echo "Notes ($notes), first lines:"
+            echo
+            head -20 "$notes" | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "dry run: no release created"
+
   release:
     name: Draft release
     needs: [version, sign]
-    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.sign.result == 'success' }}
+    # A pushed tag only: a workflow_dispatch, even on a tag ref, never writes a release.
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && !cancelled() && needs.sign.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -473,7 +568,7 @@ jobs:
           ## Verifying these files
 
           Every package, SBOM and \`SHA256SUMS\` carries GitHub build provenance, and \`SHA256SUMS\` a
-          keyless Sigstore signature (\`SHA256SUMS.cosign.bundle\`) and, once the owner has signed
+          keyless Sigstore signature (\`SHA256SUMS.cosign.bundle\`) and, once the Yellowback lead architect has signed
           it, a minisign signature (\`SHA256SUMS.minisig\`, key \`02C923A6C593AF18\`):
 
               sha256sum -c --ignore-missing SHA256SUMS
@@ -494,7 +589,7 @@ jobs:
   qualify:
     name: Start rc-qualify on the tag
     needs: [version, release]
-    if: ${{ github.ref_type == 'tag' && needs.release.result == 'success' }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && needs.release.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     permissions:
