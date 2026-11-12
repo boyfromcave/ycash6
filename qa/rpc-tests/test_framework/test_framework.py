@@ -47,7 +47,9 @@ class BitcoinTestFramework(object):
 
     def setup_chain(self):
         print("Initializing test directory "+self.options.tmpdir)
-        initialize_chain(self.options.tmpdir, self.num_nodes, self.options.cachedir, self.cache_behavior)
+        # The v4.5.0 harness's flag, set by the scripts shared byte-identical with ycash-dd (beta2): a clean chain.
+        behavior = 'clean' if getattr(self, 'setup_clean_chain', False) else self.cache_behavior
+        initialize_chain(self.options.tmpdir, self.num_nodes, self.options.cachedir, behavior)
 
     def setup_nodes(self):
         return start_nodes(self.num_nodes, self.options.tmpdir)

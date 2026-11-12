@@ -1,4 +1,5 @@
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -34,7 +35,8 @@ public:
         unsigned int anchorDepth,
         TransactionStrategy strategy,
         std::optional<CAmount> fee,
-        UniValue contextInfo = NullUniValue);
+        UniValue contextInfo = NullUniValue,
+        std::optional<CPQKeyID> pqSource = std::nullopt);
 
     virtual ~AsyncRPCOperation_sendmany();
 
@@ -61,6 +63,9 @@ private:
     unsigned int anchordepth_{nAnchorConfirmations};
     std::optional<CAmount> fee_;
     UniValue contextinfo_;     // optional data to include in return value from getStatus()
+    // A post-quantum from address (beta2 D-2; reverses quantum spec A-15): its own coins are selected by
+    // WalletTxBuilder::PreparePQTransaction, and ztxoSelector_ is only a placeholder.
+    std::optional<CPQKeyID> pqSource_;
 
     tl::expected<uint256, InputSelectionError> main_impl(CWallet& wallet);
 };
