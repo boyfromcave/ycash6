@@ -296,9 +296,9 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
     `unconfirmed_balance_pq` and `pq_by_scheme: [{pqscheme, pqschemename, balance_pq, unconfirmed_balance_pq}]`
     (numbers, as `balance` is). With `asOfHeight` the unconfirmed fields are left out, as `unconfirmed_balance` is.
     One fresh pass over the wallet computes `balance`, `unconfirmed_balance` and both splits (never from a
-    transaction's cached credit, which ignores `asOfHeight`), so an `_ecc` field is never negative.
-    `getbalance … asOfHeight` still reads that cache (an upstream defect, left unchanged in beta2), so with
-    `asOfHeight` the two can differ: a coin spent after that height is missing from `getbalance`; use `getwalletinfo`.
+    transaction's cached credit, which holds the tip's value), so an `_ecc` field is never negative.
+    `getbalance … asOfHeight` counts afresh too since beta2 (review LOW-8): upstream read that cache and wrote its
+    past-height value into it, so a later plain `getbalance` could count a coin spent since that height.
   - `z_getbalance <address>` takes a post-quantum address of either scheme (finding L-3: 6.22.0-beta1 refused it
     with "Invalid from address, should be a taddr or zaddr.") and returns what the address holds (watch-only coins
     included). **A transparent address the wallet does not hold, ECC or post-quantum** (no key and no watch-only

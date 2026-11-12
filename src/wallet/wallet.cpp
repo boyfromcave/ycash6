@@ -6164,6 +6164,14 @@ CAmount CWalletTx::GetAvailableCredit(const std::optional<int>& asOfHeight, bool
         cache_used = &fAvailableWatchCreditCached;
     }
 
+    // Beta2 (review LOW-8): the cache holds the credit at the tip. An as-of-height read neither uses it nor writes it;
+    // upstream did both, so getbalance with asOfHeight could answer the tip's value, or leave its own past value for
+    // a later plain getbalance (which then counted a coin spent since that height).
+    if (asOfHeight.has_value()) {
+        cache = nullptr;
+        cache_used = nullptr;
+    }
+
     if (fUseCache && cache_used && *cache_used) {
         return *cache;
     }
