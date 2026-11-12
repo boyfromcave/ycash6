@@ -20,6 +20,12 @@ Post-quantum addresses show their scheme (D-9, `rpcversion` 9)
   `z_importpqkey` still accepts a dump line whose `addr=`/`yecaddr=` are in the earlier form, so old dumps import.
 - **Wallets upgrade their address book once.** A wallet's post-quantum address-book entries written by an
   earlier build are rewritten under the new form at the first start (labels kept; logged once).
+- **Nothing prints the earlier form.** A wallet or data directory carried over from an earlier build shows its
+  post-quantum addresses only in the new form, in every RPC result and in the address book; the keys, coins,
+  balances and the address index are untouched (they are keyed by the key hash, not by the text). Going back to an
+  earlier build after the first start is not supported for the address book: that build cannot read the rewritten
+  entries, so it shows the post-quantum addresses (in the earlier form) without their labels, while keys and coins
+  stay spendable. Keep a backup of `wallet.dat` from before the upgrade if you may need to go back.
 - **`rpcversion` 9.** `yed_getinfo.params.pqAddressVersion` and `.params.pq.plainAddressVersion` were hex
   strings and are now objects keyed by scheme number (`{"1": "<hex>", "2": "<hex>"}`), one 3-byte version
   each. Clients that build or check post-quantum addresses must read them this way or use
