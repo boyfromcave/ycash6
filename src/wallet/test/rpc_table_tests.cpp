@@ -85,6 +85,50 @@ std::set<std::string> AllRegisteredMethods()
     return names;
 }
 
+// The arguments a method's help signature (its first help line) names: {required, optional}. A quoted string, an
+// object or an array is one argument; everything inside "( ... )" is optional. "..." (more of the same) is not counted.
+// Rows whose count differs from a help signature that is abbreviated or out of date (the help is wrong, not the row:
+// each call takes what its row says). Kept so that a new mismatch fails; each is a help defect to fix on its own.
+const std::map<std::string, std::string> HELP_SIGNATURE_DIFFERS = {
+    {"getnewaddress", "the help signature line omits an optional argument the row has"},
+    {"prioritisetransaction", "angle-bracket placeholders with spaces (<priority delta>) read as several words"},
+    {"signrawtransaction", "the help signature line omits an optional argument the row has"},
+    {"stop", "the help signature line omits an optional argument the row has"},
+    {"yed_getbalance", "the help signature line omits an optional argument the row has"},
+    {"yed_listunspent", "the help signature line omits an optional argument the row has"},
+    {"z_listoperationids", "the help signature line omits an optional argument the row has"},
+    {"zcbenchmark", "the help signature line omits an optional argument the row has"},
+};
+
+std::pair<size_t, size_t> HelpArgumentCounts(const std::string& line)
+{
+    size_t required = 0, optional = 0;
+    int parens = 0, depth = 0;
+    bool quoted = false, inToken = false, first = true;
+    for (size_t i = 0; i < line.size(); i++) {
+        const char c = line[i];
+        if (quoted) {
+            if (c == '\\') i++;
+            else if (c == '"') quoted = false;
+            continue;
+        }
+        if (depth == 0) {
+            if (c == ' ' || c == '\t') { inToken = false; continue; }
+            if (c == '(') { parens++; inToken = false; continue; }
+            if (c == ')') { parens--; inToken = false; continue; }
+            if (!inToken) {
+                inToken = true;
+                if (first) first = false;                                   // the method name
+                else if (line.compare(i, 3, "...") != 0) (parens > 0 ? optional : required)++;
+            }
+        }
+        if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') depth--;
+        else if (c == '"') quoted = true;
+    }
+    return {required, optional};
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(rpc_table_tests, WalletTestingSetup)
@@ -135,6 +179,51 @@ BOOST_AUTO_TEST_CASE(getunconfirmedbalance_is_callable)
     BOOST_CHECK_NO_THROW(result = CallRPC("getunconfirmedbalance"));
     BOOST_CHECK(result.isNum());
     BOOST_CHECK_THROW(CallRPC("getunconfirmedbalance 1"), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(walletconfirmbackup_takes_acknowledge_imports)
+{
+    // The row was {{s}, {}}, so the server refused the optional second argument ("Too many parameters") and a wallet
+    // with imported keys under -walletrequirebackup could never confirm its backup (beta2 item 14).
+    try {
+        CallRPC("walletconfirmbackup abandon true");
+    } catch (const std::runtime_error& e) {
+        BOOST_CHECK_MESSAGE(std::string(e.what()).find("parameters for method") == std::string::npos, e.what());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(table_counts_match_help_signatures)
+{
+    // The row's required and optional counts against the arguments the method's help signature names, for the
+    // methods whose help this parser reads (beta2 item 14: walletconfirmbackup's row had no optional argument).
+    CRPCTable yellowbackTable;
+    {
+        ScopedYellowbackLive live;
+        RegisterYellowbackRPCCommands(yellowbackTable);
+        RegisterYellowbackWalletRPCCommands(yellowbackTable);
+    }
+    size_t checked = 0;
+    for (const auto& [name, spec] : rpcCvtTable) {
+        const CRPCCommand* cmd = tableRPC[name];
+        if (!cmd) cmd = yellowbackTable[name];
+        if (!cmd) continue;
+        std::string help;
+        try {
+            cmd->actor(UniValue(UniValue::VARR), true);
+        } catch (const std::exception& e) {
+            help = e.what();
+        }
+        const std::string line = help.substr(0, help.find('\n'));
+        if (line.compare(0, name.size() + 1, name + " ") != 0 && line != name) continue;   // no signature line
+        if (HELP_SIGNATURE_DIFFERS.count(name)) continue;
+        const auto counts = HelpArgumentCounts(line);
+        const size_t rowTotal = spec.first.size() + spec.second.size();
+        BOOST_CHECK_MESSAGE(counts.first + counts.second == rowTotal,
+            name + ": help names " + std::to_string(counts.first) + "+" + std::to_string(counts.second) +
+            " arguments, the row " + std::to_string(spec.first.size()) + "+" + std::to_string(spec.second.size()) + ": " + line);
+        checked++;
+    }
+    BOOST_CHECK(checked > 100);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

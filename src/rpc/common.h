@@ -171,7 +171,7 @@ static const CRPCConvertTable rpcCvtTable =
     { "keypoolrefill",               {{}, {o}} },
     { "walletpassphrase",            {{s, o}, {}} },
     { "walletpassphrasechange",      {{s, s}, {}} },
-    { "walletconfirmbackup",         {{s}, {}} },
+    { "walletconfirmbackup",         {{s}, {o}} },
     { "walletlock",                  {{}, {}} },
     { "encryptwallet",               {{s}, {}} },
     { "lockunspent",                 {{o, o}, {}} },
