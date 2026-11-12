@@ -18,6 +18,12 @@ directory, as a thief with one dumpprivkey output would have them, and shows:
   either chain: so neither a parent key nor another child key can be computed from the leaked key, and no OVK;
 - the file does hold the next -keypool + 1 key IDs of each chain, and only key IDs (what the addresses would reveal).
 
+What is read: wallet.dat and every file of the database directory (database/, the Berkeley DB log) copied WHILE the
+node runs with the wallet locked (a clean shutdown removes database/, so a copy after it would check nothing; the test
+requires the log to hold the public key of a key issued in that session), then wallet.dat again after the clean
+stop. Not checked: the log of a node that crashed, free pages left by a record an intermediate build wrote and this
+release erased (no raw-byte assertion: this build never writes the record), and backups or copies made elsewhere.
+
 Run: ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_seed_lookahead_exposure.py --tmpdir=<dir> --portseed=<n>
 """
 
@@ -153,14 +159,21 @@ class WalletSeedLookaheadExposureTest(BitcoinTestFramework):
         assert_equal(int.from_bytes(b58_payload(leaked)[-33:-1], 'big'), k_leak)
         info = n.getwalletinfo()
         n.walletlock()
-        stop_node(n, 0)
         datadir = os.path.join(self.options.tmpdir, 'node0', 'regtest')
-        files = [os.path.join(datadir, 'wallet.dat')]
+        walletfile = os.path.join(datadir, 'wallet.dat')
         dbdir = os.path.join(datadir, 'database')
-        if os.path.isdir(dbdir):
-            files += [os.path.join(dbdir, x) for x in sorted(os.listdir(dbdir))]
-        blobs = {path: open(path, 'rb').read() for path in files}
-        wallet = blobs[files[0]]
+        # copied while the node runs: a clean shutdown removes database/ (the log holds every record inserted; a
+        # replaced record is logged as a byte diff)
+        logs = [os.path.join(dbdir, x) for x in sorted(os.listdir(dbdir)) if x.startswith('log.')]
+        blobs = {path + ' (running)': open(path, 'rb').read() for path in [walletfile] + logs}
+        # the log holds this session's records (the ckey record of the first key issued since the restart carries its
+        # public key), so the leg below can fail
+        k_issued, _ = ckd_priv(k_ext, c_ext, 2)
+        assert any(ser_p(point_mul(k_issued)) in blobs[path + ' (running)'] for path in logs), 'no database log to read'
+        stop_node(n, 0)
+        assert not os.path.isdir(dbdir) or not os.listdir(dbdir)   # why the log is read above
+        wallet = open(walletfile, 'rb').read()
+        blobs[walletfile + ' (stopped)'] = wallet
 
         print('no record and no bytes of the account\'s or a chain\'s extended public key, in any file')
         secrets = {'account chain code': c_acct, 'account public key': ser_p(K_acct)}
