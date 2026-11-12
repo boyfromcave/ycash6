@@ -242,7 +242,12 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `sendtoaddress`/`sendmany` are refused when the selection picked one:
   `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
   A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
-  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked.
+  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked, except a coin `vault_send` /
+  `set_sendact` sign because `allowinputs` names it (audit L-3). Where Yellowback is not live (a wallet that has
+  held YED, started with `-yellowback=0`), the same coin-selecting calls leave out every output its own payload
+  gives YED (no index is needed for that) and are refused, when they need one, with `refusing to spend an output
+  that carries YED as plain YEC while Yellowback is not live: <txid>:<n>[, <txid>:<n>…] (its YED would burn; to
+  destroy it deliberately, name the outpoint in a raw transaction)` (beta2 item 9).
   While the Yellowback index is unhealthy, every plain-YEC send or merge from a post-quantum address (and `vault_lock
   "from"`) is refused, deliberately: the coin locks are then not reconciled and cannot be trusted (the independent
   review of 2026-11-11 confirmed this). `refusing to spend as plain YEC while the Yellowback index is unhealthy

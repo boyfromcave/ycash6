@@ -9718,6 +9718,25 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
 {
     if (refusedOut) refusedOut->clear();
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw && !yellowback::g_yellowbackLive && pwalletMain && pwalletMain->IsYedHeld() && !inputs.empty()) {
+        // beta2 item 9: a wallet that has held YED, started where Yellowback is not live (-yellowback=0), has no index
+        // and no YED coin locks; what each input's own payload assigns (no index needed) still keeps it out of every
+        // coin-selecting send. Burning it takes a second, explicit act: a raw transaction that names the outpoint.
+        std::vector<COutPoint> refused;
+        {
+            LOCK2(cs_main, pwalletMain->cs_wallet);
+            for (const COutPoint& o : inputs) {
+                std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(o.hash);
+                if (it != pwalletMain->mapWallet.end() && AssignedByYellowbackPayload(it->second, o.n)) refused.push_back(o);
+            }
+        }
+        if (refused.empty()) return "";
+        if (refusedOut) *refusedOut = refused;
+        std::string list;
+        for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+        return "refusing to spend an output that carries YED as plain YEC while Yellowback is not live: " + list +
+               " (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)";
+    }
     if (!yw || !yw->Index() || inputs.empty()) return "";
     yellowback::YellowbackIndex& index = *yw->Index();
     CWallet& wallet = *yw->Wallet();

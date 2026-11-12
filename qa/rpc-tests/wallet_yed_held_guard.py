@@ -18,9 +18,12 @@ The same file runs on ycash-dd and ycash6."""
 import os
 import shutil
 import tempfile
+from decimal import Decimal
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import (assert_equal, assert_start_raises_init_error, bitcoind_processes,
-                                 initialize_datadir, start_node, stop_node)
+                                 initialize_datadir, start_node, stop_node,
+                                 wait_and_assert_operationid_status, z_sendmany_opid)
 from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import wallet_mint
 from test_framework.yellowback_util import (
@@ -117,6 +120,7 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
         self.copied_wallets()
         self.more_marker_paths(unmarked_receiver)
         self.checkpoint('has-held-YED guard')
+        self.burn_guard()
 
     def wallet_copy(self, i, name=None):
         name = name or 'walletnode%d' % i               # backupwallet writes into -exportdir (node_args)
@@ -211,6 +215,54 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
         self.restart(RECEIVER, ['-rescan'])
         assert_equal(self.nodes[RECEIVER].yed_getbalance()['confirmedCents'], 1000)
         assert_equal(held(self.nodes[RECEIVER]), True)
+
+    def burn_guard(self):
+        """beta2 item 9: with -yellowback=0 a marked wallet has no YED coin locks, yet no coin-selecting send spends
+        an output its payload gives YED; a raw transaction that names the outpoint (the second, explicit act) can."""
+        user = self.nodes[USER]
+        print('-yellowback=0: a send that selects coins never spends an output that carries YED')
+        taddr = user.getnewaddress()
+        user.yed_send(yed_form(user, taddr), 300)
+        user.sendtoaddress(taddr, 1)
+        self.sync_all()
+        self.mine(POOLS[0])
+        # the same chain and wallet without the Yellowback index: a copy of the stopped node's datadir
+        stop_node(user, USER)
+        self.nodes[USER] = None
+        datadir = os.path.join(self.options.tmpdir, 'node%d' % FRESH)
+        if os.path.isdir(datadir):
+            shutil.rmtree(datadir)
+        shutil.copytree(os.path.join(self.options.tmpdir, 'node%d' % USER), datadir)
+        shutil.rmtree(os.path.join(datadir, 'regtest', 'yellowback'))
+        self.restart(USER)
+        base = [a for a in self.node_args(UNTOUCHED) if not a.startswith('-yellowback') and a != '-experimentalfeatures']
+        with tempfile.SpooledTemporaryFile(max_size=2**16) as err:
+            node = start_node(FRESH, self.options.tmpdir, base + ['-yellowback=0'], stderr=err)
+            assert_equal(unlocked(node), True)
+            coins = node.listunspent(1, 9999999, [taddr])
+            token = [c for c in coins if c['amount'] == Decimal('0.0001')]
+            assert_equal(len(token), 1)
+            token = token[0]
+            refusal = ('refusing to spend an output that carries YED as plain YEC while Yellowback is not live: %s:%d '
+                       '(its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)'
+                       % (token['txid'], token['vout']))
+            to = node.getnewaddress()
+            # 1 YEC and the fee need the token's 0.0001 too: refused, naming it (before the fix: the YED burned)
+            try:
+                wait_and_assert_operationid_status(node, z_sendmany_opid(node, taddr, [(to, Decimal('1'))]), 'failed', refusal)
+            except JSONRPCException as e:
+                assert_equal(e.error['message'], refusal)
+            assert_equal(len(node.listunspent(1, 9999999, [taddr])), 2)
+
+            print('-yellowback=0: a raw transaction that names the outpoint destroys its YED deliberately')
+            plain = [c for c in coins if c['amount'] == Decimal('1')][0]
+            raw = node.createrawtransaction([{'txid': token['txid'], 'vout': token['vout']},
+                                             {'txid': plain['txid'], 'vout': plain['vout']}], {to: Decimal('1')})
+            signed = node.signrawtransaction(raw)
+            assert_equal(signed['complete'], True)
+            txid = node.sendrawtransaction(signed['hex'])
+            assert txid in node.getrawmempool()
+            stop_node(node, FRESH)
 
 
 if __name__ == '__main__':
