@@ -240,11 +240,14 @@ When setting them in a release:
   (`.github/workflows/yellowback-release-guard.yml`) runs `qa/yellowback-release-heights.sh` and
   refuses the tag unless the version is a 6.22.x release version and the rules of its stage hold
   (below). It also refuses any compared Vault field that differs from ycash6 (`v<V>` when that tag
-  already exists, otherwise `upgrade/vault`).
+  already exists, otherwise `upgrade/vault`). Prove it before tagging: dispatch the guard on
+  ycash-dd `upgrade/vault` with `-f release_version=<V>`; it checks that commit exactly as the tag
+  would be checked (without the input a dispatch only warns).
 - Then tag ycash6 `v<V>`. This release workflow refuses the tag when `vault-params/v<V>` is
   missing on ycash-dd, when the stage's rules fail, or when any compared Vault field differs
-  (`qa/yellowback-release-heights.sh --release-version <V>`). A `workflow_dispatch` run only
-  warns, and compares with ycash-dd `upgrade/vault`.
+  (`qa/yellowback-release-heights.sh --release-version <V>`). A `workflow_dispatch` run (the
+  proving run, `strict` by default) applies the same rules, comparing with the pairing tag when it
+  exists, else with ycash-dd `upgrade/vault`; with `strict=false` it only warns.
 
 The rules (audit W3-P-1; testnet plan §5.1, T-8):
 
