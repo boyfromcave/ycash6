@@ -58,6 +58,8 @@ from test_framework.util import (
     start_nodes,
     stop_node,
     sync_blocks,
+    wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 from test_framework.yellowback_util import pubkey_to_address
 
@@ -212,10 +214,11 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         c44 = self.pay_pqpkh(k[10])        # in the restore's first window (31..50): found by the first pass
         coins = [u for u in n1.listunspent(0) if (u['txid'], u['vout']) == c78]
         assert_equal(len(coins), 1)
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n1.listunspent(0) if (u['txid'], u['vout']) != c78]
-        n1.lockunspent(False, others)
-        spend = n1.sendtoaddress(n0.getnewaddress(), coins[0]['amount'], '', '', True)   # whole, no change
-        n1.lockunspent(True, others)
+        # whole, no change: z_sendmany from the coin's own address with an explicit fee (sendtoaddress spends ECC coins
+        # only, the beta2 decision, audit M-1)
+        fee = Decimal('0.01')
+        spend = wait_and_assert_operationid_status(
+            n1, z_sendmany_opid(n1, coins[0]['address'], [(n0.getnewaddress(), Decimal(coins[0]['amount']) - fee)], 0, fee))
         self.mine(1)
         assert_equal([vin['txid'] for vin in n1.getrawtransaction(spend, 1)['vin']], [c78[0]])
         self.mine(3)                                                 # blocks that pay nothing to node 1

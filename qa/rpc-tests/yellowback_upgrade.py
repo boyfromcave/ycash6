@@ -118,7 +118,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
         for i in range(self.num_nodes):
             self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args_for(i))
         self.connect()
-        self.sync(self.nodes)
+        # blocks only: node 0's wallet re-accepts its own unconfirmed transactions at startup (the vault RPCs record what
+        # they broadcast in the wallet, the beta2 lock-lifetime decision) without relaying them before the resend timer
+        sync_blocks(self.nodes)
 
     def two_step(self, node, method, *args):
         """A yed_mint / yed_claim with wait=false: the carrier first, then the main transaction after one block."""
@@ -175,8 +177,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
             line = ('Yellowback: attestor set %s (regtest -yellowbackattestorset)' % self.set_id if i < 3
                     else 'Yellowback: no attestor set; the YED module validates inertly')
             assert debug_log_contains(self.options.tmpdir, i, line), 'node%d debug.log lacks "%s"' % (i, line)
-        if self.set_id not in n0.getrawmempool():               # the wallet may already have re-accepted it
-            n0.sendrawtransaction(set_hex)
+        # the wallet has already re-accepted it (it records the set_create it broadcast); sendrawtransaction relays a
+        # transaction already in the mempool, and accepts it when it is not
+        n0.sendrawtransaction(set_hex)
         self.mine()
         joined = n1.set_join(self.set_id, 10, n0.getblockcount() + 300)
         assert 'txid' in joined, joined

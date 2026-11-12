@@ -18,7 +18,8 @@
 
 from decimal import Decimal
 
-from test_framework.util import assert_equal, assert_greater_than, assert_start_raises_init_error, stop_node
+from test_framework.util import (assert_equal, assert_greater_than, assert_start_raises_init_error, stop_node,
+                                 wait_and_assert_operationid_status, z_sendmany_opid)
 from test_framework.yellowback_util import COIN, POOLS, REF_LAG, USER, YellowbackTestFramework
 from test_framework.yellowback_attest import ArmedModeMixin
 
@@ -68,10 +69,8 @@ class YellowbackFeesReacceptTest(ArmedModeMixin, YellowbackTestFramework):
         user.sendtoaddress(pq_addr, 5)
         self.sync_all()
         self.mine(POOLS[2])
-        locked = [{'txid': u['txid'], 'vout': u['vout']} for u in user.listunspent(0) if u.get('address') != pq_addr]
-        user.lockunspent(False, locked)
-        txid = user.sendtoaddress(user.getnewaddress(), 1)
-        user.lockunspent(True, locked)
+        # sendtoaddress spends ECC coins only (the beta2 decision, audit M-1): the plain post-quantum send is z_sendmany
+        txid = wait_and_assert_operationid_status(user, z_sendmany_opid(user, pq_addr, [(user.getnewaddress(), Decimal('1'))]))
         fee = self.fee_of(user, txid)
         assert_greater_than(fee, 10000000)                       # above the default -maxtxfee
         assert_greater_than(10 * COIN, fee)                     # within the 10-YEC ceiling

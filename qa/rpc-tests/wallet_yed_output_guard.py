@@ -38,6 +38,7 @@ The same file runs on ycash-dd and ycash6."""
 
 import os
 import shutil
+import tempfile
 import time
 from decimal import Decimal
 
@@ -468,14 +469,20 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
         self.sync_all()
         self.mine(POOLS[0])
         self.copy_node(USER)
-        node = start_node(FRESH, self.options.tmpdir, self.not_live_args() + ['-yellowback=0'])
-        try:
-            node.generate(1)
-            print('not live, the marked wallet with -yellowback=0')
-            for what, o, a, ecc in rows:
-                self.check_row(node, what, o, a, ecc)
-        finally:
-            stop_node(node, FRESH)
+        # the marked wallet started with -yellowback=0 prints the held-YED warning on stderr (wallet_yed_held_guard.py
+        # asserts it); rpc-tests.py fails a script whose stderr is not empty, so it is read here
+        with tempfile.SpooledTemporaryFile(max_size=2**16) as err:
+            node = start_node(FRESH, self.options.tmpdir, self.not_live_args() + ['-yellowback=0'], stderr=err)
+            try:
+                node.generate(1)
+                print('not live, the marked wallet with -yellowback=0')
+                for what, o, a, ecc in rows:
+                    self.check_row(node, what, o, a, ecc)
+            finally:
+                stop_node(node, FRESH)
+            err.seek(0)
+            text = err.read().decode('utf-8', 'replace')
+            assert 'This wallet has held YED and Yellowback is not live (-yellowback=0)' in text, text
 
 
 if __name__ == '__main__':
