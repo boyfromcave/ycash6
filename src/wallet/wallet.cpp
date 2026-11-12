@@ -6627,14 +6627,34 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
     return true;
 }
 
-CAmount CWallet::PQSelectableValue() const
+CAmount CWallet::PQSelectableValue(std::string* yedRefusal) const
 {
-    // the post-quantum coins SelectCoins leaves out without coin control (confirmed, spendable; coinbase as SelectCoins)
+    // the post-quantum coins SelectCoins leaves out when it may add coins (coinbase as SelectCoins), counted only where
+    // z_sendmany from their address would spend them (review LOW-2): confirmed (its default minconf 1), Falcon coins
+    // only once Falcon is active at the next block, and no Yellowback outpoint (YellowbackInputRefusal). When every
+    // post-quantum coin is such an outpoint, *yedRefusal names them (the refusal z_sendmany would give).
+    if (yedRefusal) yedRefusal->clear();
     vector<COutput> coins;
     AvailableCoins(coins, std::nullopt, true, nullptr, false, !Params().GetConsensus().fCoinbaseMustBeShielded);
+    const bool falcon = IsPQFalconActive(Params().GetConsensus(), chainActive.Height() + 1);
+    std::vector<COutPoint> candidates;
+    std::map<COutPoint, CAmount> values;
+    for (const COutput& o : coins) {
+        const CScript& spk = o.tx->vout[o.i].scriptPubKey;
+        if (!o.fSpendable || o.nDepth < 1 || !IsPQInputScript(spk)) continue;
+        CTxDestination dest;
+        if (!falcon && ExtractDestination(spk, dest) && std::holds_alternative<CPQKeyID>(dest) &&
+            std::get<CPQKeyID>(dest).scheme == pq::SCHEME_FN_DSA_512) continue;
+        const COutPoint op(o.tx->GetHash(), o.i);
+        candidates.push_back(op);
+        values[op] = o.tx->vout[o.i].nValue;
+    }
+    std::vector<COutPoint> refused;
+    const std::string refusal = YellowbackInputRefusal(candidates, false, &refused);
     CAmount value = 0;
-    for (const COutput& o : coins)
-        if (o.fSpendable && IsPQInputScript(o.tx->vout[o.i].scriptPubKey)) value += o.tx->vout[o.i].nValue;
+    for (const COutPoint& op : candidates)
+        if (std::find(refused.begin(), refused.end(), op) == refused.end()) value += values[op];
+    if (value == 0 && yedRefusal) *yedRefusal = refusal;
     return value;
 }
 
@@ -6644,22 +6664,25 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
     vector<COutput> vCoinsNoCoinbase, vCoinsWithCoinbase;
     AvailableCoins(vCoinsNoCoinbase, std::nullopt, true, coinControl, false, false);
     AvailableCoins(vCoinsWithCoinbase, std::nullopt, true, coinControl, false, true);
+
+    // Beta2 (audit M-1, the lead architect's decision; review LOW-1): where the wallet chooses coins -- sendtoaddress,
+    // sendmany, the atomic-swap calls, and the inputs fundrawtransaction adds -- only ordinary (ECC) coins are selected.
+    // A post-quantum coin is spent by naming its address in z_sendmany, which returns the change to it and signs with
+    // no lock held; CreateTransaction would move its change to an ECC key and sign post-quantum inputs under cs_main
+    // and cs_wallet. A post-quantum input the caller names (fundrawtransaction's own inputs) stays. Filtered before the
+    // coinbase flags below, so that they do not count post-quantum coins (review LOW-3).
+    if (!coinControl || coinControl->fAllowOtherInputs) {
+        auto pqNotNamed = [coinControl](const COutput& o) {
+            return IsPQInputScript(o.tx->vout[o.i].scriptPubKey) && !(coinControl && coinControl->IsSelected(o.tx->GetHash(), o.i));
+        };
+        vCoinsNoCoinbase.erase(std::remove_if(vCoinsNoCoinbase.begin(), vCoinsNoCoinbase.end(), pqNotNamed), vCoinsNoCoinbase.end());
+        vCoinsWithCoinbase.erase(std::remove_if(vCoinsWithCoinbase.begin(), vCoinsWithCoinbase.end(), pqNotNamed), vCoinsWithCoinbase.end());
+    }
     fOnlyCoinbaseCoinsRet = vCoinsNoCoinbase.size() == 0 && vCoinsWithCoinbase.size() > 0;
 
     // If coinbase utxos can only be sent to zaddrs, exclude any coinbase utxos from coin selection.
     bool fShieldCoinbase = Params().GetConsensus().fCoinbaseMustBeShielded;
     vector<COutput> vCoins = (fShieldCoinbase) ? vCoinsNoCoinbase : vCoinsWithCoinbase;
-
-    // Beta2 (audit M-1, the lead architect's decision): without coin control -- sendtoaddress, sendmany and the
-    // atomic-swap calls -- only ordinary (ECC) coins are selected. A post-quantum coin is spent by naming its address
-    // in z_sendmany, which returns the change to it and signs with no lock held; CreateTransaction would move its
-    // change to an ECC key and sign post-quantum inputs under cs_main and cs_wallet. Coin control (fundrawtransaction,
-    // caller-named inputs) is unchanged.
-    if (!coinControl) {
-        vCoins.erase(std::remove_if(vCoins.begin(), vCoins.end(), [](const COutput& o) {
-            return IsPQInputScript(o.tx->vout[o.i].scriptPubKey);
-        }), vCoins.end());
-    }
 
     // Output parameter fNeedCoinbaseCoinsRet is set to true if coinbase utxos need to be spent to meet target amount
     if (fShieldCoinbase && vCoinsWithCoinbase.size() > vCoinsNoCoinbase.size()) {
@@ -6909,14 +6932,22 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 bool fNeedCoinbaseCoins = false;
                 if (!SelectCoins(nTotalValue, setCoins, nValueIn, fOnlyCoinbaseCoins, fNeedCoinbaseCoins, coinControl))
                 {
-                    if (fOnlyCoinbaseCoins && Params().GetConsensus().fCoinbaseMustBeShielded) {
-                        strFailReason = _("Coinbase funds can only be sent to a zaddr");
-                    } else if (fNeedCoinbaseCoins) {
-                        strFailReason = _("Insufficient funds, coinbase funds can only be spent after they have been sent to a zaddr");
-                    } else if (CAmount pqValue = coinControl ? 0 : PQSelectableValue(); pqValue > 0) {
+                    // the post-quantum coins the selection left out are named whether or not coinbase is involved (review
+                    // LOW-3: neither refusal hides the other)
+                    std::string pqYedRefusal;
+                    const CAmount pqValue = (!coinControl || coinControl->fAllowOtherInputs) ? PQSelectableValue(&pqYedRefusal) : 0;
+                    const bool coinbase = (fOnlyCoinbaseCoins && Params().GetConsensus().fCoinbaseMustBeShielded) || fNeedCoinbaseCoins;
+                    if (pqValue > 0) {
                         strFailReason = strprintf("Insufficient funds in ordinary transparent addresses; this wallet also holds %s YEC at "
                                                   "post-quantum addresses: send from one with z_sendmany, which returns the change to it",
                                                   FormatMoney(pqValue));
+                        if (coinbase) strFailReason += "; its coinbase funds can only be spent after they have been sent to a zaddr";
+                    } else if (!pqYedRefusal.empty() && !coinbase) {
+                        strFailReason = pqYedRefusal;
+                    } else if (fOnlyCoinbaseCoins && Params().GetConsensus().fCoinbaseMustBeShielded) {
+                        strFailReason = _("Coinbase funds can only be sent to a zaddr");
+                    } else if (fNeedCoinbaseCoins) {
+                        strFailReason = _("Insufficient funds, coinbase funds can only be spent after they have been sent to a zaddr");
                     } else {
                         strFailReason = _("Insufficient funds");
                     }

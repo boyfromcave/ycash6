@@ -537,10 +537,10 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         assert_raises_rpc(named, z_mergetoaddress_call, n1, [key, 'ANY_SAPLING'], back)
         assert_raises_rpc(NO_MERGE_FUNDS, z_mergetoaddress_call, n1, ['ANY_TADDR'], back)   # ECC coins only
         pay = n0.getnewaddress()
-        # sendtoaddress / sendmany select ECC coins only (beta2, audit M-1): the Falcon token is never theirs to pick
-        ecc_only = 'Insufficient funds in ordinary transparent addresses; this wallet also holds '
-        assert_raises_rpc(ecc_only, n1.sendtoaddress, pay, Decimal('0.00001'))
-        assert_raises_rpc(ecc_only, n1.sendmany, '', {pay: Decimal('0.00001')})
+        # sendtoaddress / sendmany select ECC coins only (beta2, audit M-1): the Falcon token is never theirs to pick, and
+        # with no other post-quantum coin the refusal names it, as z_sendmany's does (review LOW-2)
+        assert_raises_rpc(named, n1.sendtoaddress, pay, Decimal('0.00001'))
+        assert_raises_rpc(named, n1.sendmany, '', {pay: Decimal('0.00001')})
         n1.yed_lockcoins()
         assert locked(n1, op)
         assert_equal(yed_balances(), before)

@@ -1965,14 +1965,14 @@ UniValue sendmany(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 5)
         throw runtime_error(
             "sendmany \"\" {\"address\":amount,...} ( minconf \"comment\" [\"address\",...] )\n"
-            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
-            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             "\nSend to multiple transparent recipients, using funds from the legacy transparent\n"
             "value pool. Amounts are decimal numbers with at most 8 digits of precision.\n"
             "Payments sent using this API are visible on-chain and do not otherwise\n"
             "provide privacy protections; it should only be used in circumstances \n"
             "where it is necessary to interoperate with legacy Bitcoin infrastructure.\n"
             "Prefer to use `z_sendmany` instead.\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"dummy\"               (string, required) Must be set to \"\" for backwards compatibility.\n"
@@ -3813,6 +3813,8 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                                "ycashd has no other call for this raw-transaction step.") +
             "\nAdd transparent inputs to a transaction until it has enough in value to meet its out value.\n"
             "This will not modify existing inputs, and will add one change output to the outputs.\n"
+            "The inputs added are ordinary (ECC) coins only: a post-quantum coin is added only when the transaction already names\n"
+            "it; with too few ECC coins the call is refused, naming the post-quantum value (spend it with z_sendmany).\n"
             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
             "The inputs added will not be signed, use signrawtransaction for that.\n"
             "Note that all existing inputs must have their previous output transaction be in the wallet.\n"
