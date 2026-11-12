@@ -25,6 +25,7 @@ Beta2 wallet follow-ups, second round (one script, byte-identical on ycash-dd an
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_beta2_followups2.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
+import re
 import time
 from decimal import Decimal
 
@@ -272,6 +273,8 @@ class WalletBeta2Followups2Test(BitcoinTestFramework):
         for src in ('', a, z):
             msg = assert_raises_rpc(-4, 'insufficient-yec: the mint needs', n2.yed_mint, MINT_CENTS, LOCK_BLOCKS, src, '', False)
             assert 'nothing was sent' in msg, msg
+            # review LOW-1: the headline names the amount the dry selection checked (its trailing "need" figure)
+            assert_equal(re.search(r'the mint needs ([0-9.]+) YEC', msg).group(1), re.search(r'nothing was sent: need ([0-9.]+),', msg).group(1))
             assert_equal(n2.getrawmempool(), [])
             assert_equal(n2.listlockunspent(), locks)
         assert_raises_rpc(None, 'bad-address: from', n2.yed_mint, MINT_CENTS, LOCK_BLOCKS, n2.getnewaddress('', 'pq'), '', False)

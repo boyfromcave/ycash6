@@ -778,7 +778,8 @@ struct Context
      * selected. `only`: restrict to outputs paying that script (an s1… funding address).
      */
     CAmount SelectYec(CAmount needed, CMutableTransaction& mtx, std::vector<std::pair<CScript, CAmount>>& prevs,
-                      const CScript* only = nullptr, const std::string& onlyText = "", PQFeeFollower* follow = nullptr) const
+                      const CScript* only = nullptr, const std::string& onlyText = "", PQFeeFollower* follow = nullptr,
+                      CAmount* shortNeeded = nullptr) const
     {
         if (needed <= 0) return 0;
         yw.SettleYecLocks();   // F-1: hand back the inputs of a spender that failed
@@ -809,6 +810,7 @@ struct Context
                                                FormatMoney(pick.needed), (unsigned)MAX_YEC_INPUTS, (unsigned)MAX_YEC_INPUT_BYTES, only ? " at " + onlyText : std::string()));
         }
         if (!pick.ok) {
+            if (shortNeeded) *shortNeeded = pick.needed;   // `needed` with the fee the follower raised for the coins taken
             throw std::runtime_error(strprintf("insufficient-yec: need %s, have %s confirmed and unlocked%s",
                                                FormatMoney(pick.needed), FormatMoney(pick.selected), only ? " at " + onlyText : ""));
         }
@@ -1482,6 +1484,9 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
     follow.fee = std::max(ctx.fee, YedNetworkFee({}, std::nullopt));
     const CAmount feesTotal = (payee ? protocolFee : 0) + fees.attestFeeZat + follow.fee + ctx.fee;
     const CAmount total = collateral + TOKEN_VALUE + feesTotal;
+    // WALLET-FOLLOW-4 review LOW-1: the refusal names the amount the dry run checked, which includes the fee the
+    // follower adds for each coin it takes (the trailing "need" figure), not the total before the selection
+    CAmount checked = total;
     try {
         if (source.kind == AddressChoice::SAPLING) {
             libzcash::SaplingExtendedSpendingKey extsk;
@@ -1494,14 +1499,15 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
             std::vector<std::pair<CScript, CAmount>> prevs;
             CScript onlyScript;
             if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
-            ctx.SelectYec(total, dry, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text, &follow);
+            ctx.SelectYec(total, dry, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text, &follow, &checked);
         }
     } catch (const std::runtime_error& e) {
         const std::string what = e.what();
         const std::string prefix = "insufficient-yec: ";
         if (what.rfind(prefix, 0) != 0) throw;
+        checked = std::max(checked, total);
         throw std::runtime_error(strprintf("insufficient-yec: the mint needs %s YEC (collateral %s, fees %s with its carrier's), checked before its carrier is broadcast; nothing was sent: %s",
-                                           FormatMoney(total), FormatMoney(collateral), FormatMoney(feesTotal), what.substr(prefix.size())));
+                                           FormatMoney(checked), FormatMoney(collateral), FormatMoney(checked - collateral - TOKEN_VALUE), what.substr(prefix.size())));
     }
     return pf;
 }
