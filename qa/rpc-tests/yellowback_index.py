@@ -59,6 +59,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     debug_log_contains,
     debug_log_lines,
+    log_settle,
     mine_rejected_block,
     mint_vault_raw,
     redeem_vault_raw,
@@ -333,6 +334,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         wait_for_rejection([nodes[3]], rejected)
         assert debug_log_contains(tmpdir, 3, 'block %s at' % rejected) and debug_log_contains(tmpdir, 3, 'is invalid: vault-spend-malformed'), \
             'node 3 did not judge the stored block at restart'
+        log_settle()                                    # a negative check: let the log writer drain first
         n2 = [l for l in debug_log_lines(tmpdir, 3) if rejected in l and 'N2)' in l]
         assert not n2, 'node 3 accepted the stored block under N2: %s' % n2
         wait_for_rejection(self.enforcing_nodes(), rejected)
