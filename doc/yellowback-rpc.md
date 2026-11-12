@@ -292,23 +292,36 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   place for this binary to resume.
   Recover keys past a gap by issuing addresses past it (`getnewaddress`, `getnewaddress "" "pq"`,
   `z_getnewaddress`) and restarting with `-rescan` (this line has no `rescanblockchain`). An
-  encrypted wallet holds the transparent addresses past those it issued only while unlocked, and its
-  `-rescan` runs locked: to find coins sent to such addresses (another wallet of the same seed issued
-  them), restore the recovery phrase into a new wallet file (`-wallet=<new file> -mnemonicfile=<file>`).
-  `getwalletinfo` says when that has happened: `lookahead_incomplete` is true only when the wallet may
-  really have missed a coin. A wallet keeps its legacy transparent account's public key in clear
-  (`legacytaccountpub`, written at its first unlocked or unencrypted load; it reveals the wallet's
-  transparent addresses, not its keys). The account path is hardened but the chain and index levels
-  below it are not, so a locked wallet derives the public keys of its lookahead, watches those
-  addresses, and sets the flag when a block transaction pays one: a coin it cannot add until it holds
-  the key. An ordinary block, the wallet's own start-up rescan, and a wallet whose seed no other wallet
-  uses set nothing. (A wallet encrypted by an older release and not unlocked since has no public key
-  to watch with: it is flagged by a block it had not processed before with an output it cannot
-  check.) The flag is kept in `wallet.dat` and cleared by a scan from at or below that height with the
-  wallet unlocked: an import RPC with rescan run while unlocked (`importprivkey`, `importpubkey`,
-  `importaddress`, `importwallet`, `z_importkey`, `z_importviewingkey`, `z_importwallet`); an encrypted
-  wallet's start-up scan, `-rescan` included, always runs locked. Restoring the recovery phrase into a
-  new wallet file finds the coin.
+  encrypted wallet holds the transparent keys past those it issued only while unlocked, and its
+  `-rescan` runs locked. Locked, it watches the next `-keypool` + 1 addresses of each HD chain by
+  their **key IDs** (the hash160 a P2PKH address encodes), which every unlocked top-up (an issued
+  address, a paid one, `walletpassphrase`, the load of an unencrypted wallet) recomputes from the seed
+  and stores in clear (`legacytlookahead`; a stored record that does not match the seed is rewritten,
+  with a warning in the log). A payment to one is the wallet's own coin, listed as watch-only
+  (`listunspent` with `spendable` false, `getbalance` with `includeWatchonly`,
+  `listtransactions` with `includeWatchonly`), never spendable or handed out while locked;
+  `walletpassphrase` derives its key, marks it and moves the window past it, and the coin is
+  spendable. **What the file reveals:** the wallet's next `-keypool` + 1 transparent addresses per
+  chain, nothing more: no chain code and no public key of the account or a chain is stored, so no
+  other key and no outgoing viewing key can be derived from the file, even with one exported private
+  key. (An intermediate build of this release stored the legacy account's extended public key in
+  clear, `legacytaccountpub`; with one leaked private key it gave every legacy transparent key, and
+  alone the legacy shielding OVKs. This release erases that record at load and rewrites the wallet
+  file, logging `erased the transparent account's extended public key`; its bytes stay in the
+  database log under `database/` until the node removes its log files, at the latest at a clean
+  shutdown (which removes `database/`; after a crash, at the next clean shutdown), and in any copy or
+  backup made before.) The window cannot move while locked, so
+  `getwalletinfo` `lookahead_incomplete` is set when a payment leaves fewer than `-keypool` + 1
+  addresses the wallet holds or watches beyond it on its chain: a later payment past them (another
+  wallet of the same seed issued them) would be missed. An ordinary block, the wallet's own
+  start-up rescan and a wallet whose seed no other wallet uses set nothing. (A wallet without stored
+  key IDs, encrypted by an older release and not unlocked since, cannot tell: it is flagged by a
+  block it had not processed before with an output it cannot check.) The flag is kept in
+  `wallet.dat` and cleared by a scan from at or below that height with the wallet unlocked: an
+  import RPC with rescan run while unlocked (`importprivkey`, `importpubkey`, `importaddress`,
+  `importwallet`, `z_importkey`, `z_importviewingkey`, `z_importwallet`); an encrypted wallet's
+  start-up scan, `-rescan` included, always runs locked. Restoring the recovery phrase into a new
+  wallet file (`-wallet=<new file> -mnemonicfile=<file>`) finds the coin.
   On an existing wallet the option is ignored when the seed matches (checked by fingerprint, so a
   locked wallet starts too) and refused when it does not.
 - **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check

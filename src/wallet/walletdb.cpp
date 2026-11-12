@@ -1121,9 +1121,15 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         }
         else if (strType == "legacytaccountpub")
         {
-            uint256 seedFp;
-            ssValue >> seedFp;
-            pwallet->LoadLegacyTAccountPub(seedFp, libzcash::transparent::AccountPubKey(CChainablePubKey::Read(ssValue)));
+            // Review 3 H-1: an intermediate build of this release stored the legacy account's extended public key here
+            // (its chain code with it): never read into memory; CWallet::LoadWallet erases it from the file.
+            pwallet->fObsoleteLegacyTAccountPub = true;
+        }
+        else if (strType == "legacytlookahead")
+        {
+            CLegacyTLookahead record;
+            ssValue >> record;
+            pwallet->LoadLegacyTLookahead(record);
         }
         else if (strType == "restorescan")
         {
@@ -1674,10 +1680,16 @@ bool CWalletDB::EraseLegacyTKeyLookaheadIncomplete()
     return Erase(std::string("lookaheadincomplete"));
 }
 
-bool CWalletDB::WriteLegacyTAccountPub(const uint256& seedFp, const libzcash::transparent::AccountPubKey& pub)
+bool CWalletDB::WriteLegacyTLookahead(const CLegacyTLookahead& record)
 {
     nWalletDBUpdateCounter++;
-    return Write(std::string("legacytaccountpub"), std::make_pair(seedFp, pub.GetChainablePubKey()));
+    return Write(std::string("legacytlookahead"), record);
+}
+
+bool CWalletDB::EraseObsoleteLegacyTAccountPub()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("legacytaccountpub"));
 }
 
 bool CWalletDB::WriteRestoreScan(int nFromHeight)

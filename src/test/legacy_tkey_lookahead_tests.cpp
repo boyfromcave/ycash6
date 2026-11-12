@@ -70,6 +70,29 @@ std::pair<uint32_t, uint32_t> PoolRange(const CWallet& w)
     return {lo, hi};
 }
 
+//! The wallet database's raw record access, for writing what an intermediate build wrote and reading records back.
+class RawWalletDB : public CWalletDB
+{
+public:
+    explicit RawWalletDB(const std::string& file) : CWalletDB(file) {}
+    using CDB::Exists;
+    using CDB::Read;
+    using CDB::Write;
+};
+
+//! The record holds, per chain, the key IDs the seed derives at the counter and the -keypool + 1 indices from it.
+void CheckLookaheadRecord(const CLegacyTLookahead& r, const CWallet& w, uint32_t n)
+{
+    BOOST_CHECK(r.seedFp == LookaheadTestSeed().Fingerprint());
+    for (bool external : {false, true}) {
+        BOOST_CHECK_EQUAL(r.nStart[external], Counter(w, external));
+        BOOST_REQUIRE_EQUAL(r.vIds[external].size(), (size_t)n);
+        for (uint32_t k = 0; k < n; k += 25)
+            BOOST_CHECK(CKeyID(r.vIds[external][k]) == SeedKey(external, r.nStart[external] + k));
+        BOOST_CHECK(CKeyID(r.vIds[external][n - 1]) == SeedKey(external, r.nStart[external] + n - 1));
+    }
+}
+
 void NewSeededWallet(CWallet& w)
 {
     bool fFirstRun;
@@ -181,15 +204,10 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_CHECK(!w.IsHeldLegacyTKey(SeedKey(false, 0)) && w.HaveKey(SeedKey(false, 0)));   // pool keys are issued
         BOOST_CHECK(w.IsHeldLegacyTKey(SeedKey(false, 2 * N - 1)) && !w.HaveKey(SeedKey(false, 2 * N)));
         BOOST_CHECK(IsMine(w, GetScriptForDestination(SeedKey(true, 60))) == ISMINE_SPENDABLE);
-        // review M-b: the account's public key (kept in clear) derives the same keys as the seed: the chain and index
-        // levels under the hardened account are non-hardened, so a locked wallet can watch its lookahead's addresses
-        const std::optional<libzcash::transparent::AccountPubKey> pub = w.GetLegacyTAccountPub();
-        BOOST_REQUIRE(pub.has_value());
-        for (uint32_t i : {0U, 60U, 2 * N}) {
-            BOOST_CHECK(pub.value().DeriveExternal(i).value().GetID() == SeedKey(true, i));
-            BOOST_CHECK(pub.value().DeriveInternal(i).value().GetID() == SeedKey(false, i));
-        }
-        BOOST_CHECK(w.mapLegacyTKeyWatched.empty());   // unlocked: the secrets are held, nothing is only watched
+        // review 3 H-1: the stored key IDs are the window's, from the seed; unlocked, nothing is only watched
+        BOOST_REQUIRE(w.legacyTLookahead.has_value());
+        CheckLookaheadRecord(w.legacyTLookahead.value(), w, N);
+        BOOST_CHECK(w.mapLegacyTKeyWatched.empty());
 
         // an output paying external key 60: the counter moves to 61, keys 0..60 become issued, the window 61..161
         w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 60))));
@@ -244,7 +262,8 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
         LOCK(w.cs_wallet);
         BOOST_CHECK_EQUAL(Counter(w, true), 62U);
-        BOOST_CHECK(w.GetLegacyTAccountPub().has_value());   // review M-b: the public key is in the file
+        BOOST_REQUIRE(w.legacyTLookahead.has_value());       // review 3 H-1: the window's key IDs are in the file
+        BOOST_CHECK_EQUAL(w.legacyTLookahead.value().nStart[1], 62U);
         BOOST_CHECK(w.HaveKey(SeedKey(true, 61)) && w.HaveKey(SeedKey(true, 10)));
         BOOST_CHECK(!w.HaveKey(SeedKey(true, 62)));
         BOOST_CHECK(w.HaveKey(SeedKey(false, 160)));
@@ -315,6 +334,100 @@ BOOST_AUTO_TEST_CASE(stale_counter_after_crash)
         BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
         LOCK(w.cs_wallet);
         BOOST_CHECK_EQUAL(Counter(w, true), 73U);
+    }
+    bitdb.Flush(true);
+    bitdb.Reset();
+}
+
+BOOST_AUTO_TEST_CASE(lookahead_key_ids)
+{
+    // Review 3 H-1: the wallet stores the KEY IDs of its transparent lookahead in clear (legacytlookahead), never the
+    // legacy account's extended public key: no chain code or public key of the account or of a chain is in the record,
+    // so a copy of the file plus one leaked key gives no other key, and the file alone no shielding OVK.
+    bitdb.MakeMock();
+    const std::string file = "legacy_tkey_key_ids_test.dat";
+    const uint32_t N = LegacyTKeyLookahead(DEFAULT_KEYPOOL_SIZE);   // 101
+    CLegacyTLookahead stored;
+    {
+        CWallet w(Params(), file);
+        NewSeededWallet(w);
+        LOCK(w.cs_wallet);
+        BOOST_REQUIRE(w.legacyTLookahead.has_value());
+        stored = w.legacyTLookahead.value();
+        CheckLookaheadRecord(stored, w, N);
+        // the record's bytes hold no chain code (the account's or either chain's) and no account or chain public key
+        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        ss << stored;
+        const std::string bytes(ss.begin(), ss.end());
+        auto account = libzcash::transparent::AccountKey::ForAccount(LookaheadTestSeed(), Params().BIP44CoinType(), libzcash::ZCASH_LEGACY_ACCOUNT).value();
+        const CChainablePubKey acct = account.ToAccountPubKey().GetChainablePubKey();
+        std::vector<CChainablePubKey> secrets{acct, acct.Derive(0).value(), acct.Derive(1).value()};
+        for (const CChainablePubKey& x : secrets) {
+            const std::string cc(x.GetChainCode().begin(), x.GetChainCode().end());
+            const std::string pk(x.GetPubKey().begin(), x.GetPubKey().end());
+            BOOST_CHECK(bytes.find(cc) == std::string::npos);
+            BOOST_CHECK(bytes.find(pk) == std::string::npos);
+        }
+        // getnewaddress moves the window and the record with it
+        BOOST_CHECK(w.GenerateNewKey(true).GetID() == SeedKey(true, 0));
+        BOOST_CHECK_EQUAL(w.legacyTLookahead.value().nStart[1], 1U);
+        CheckLookaheadRecord(w.legacyTLookahead.value(), w, N);
+        stored = w.legacyTLookahead.value();
+        // the file carries a tampered record and the extended public key an intermediate build stored
+        CLegacyTLookahead tampered = stored;
+        tampered.vIds[1][3] = uint160(SeedKey(true, 900));
+        BOOST_REQUIRE(CWalletDB(file).WriteLegacyTLookahead(tampered));
+        BOOST_REQUIRE(RawWalletDB(file).Write(std::string("legacytaccountpub"),
+                                              std::make_pair(LookaheadTestSeed().Fingerprint(), acct)));
+        BOOST_REQUIRE(RawWalletDB(file).Exists(std::string("legacytaccountpub")));
+    }
+    {
+        CWallet w(Params(), file);
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        // the old record is erased at load, never read
+        BOOST_CHECK(!w.fObsoleteLegacyTAccountPub);
+        BOOST_CHECK(!RawWalletDB(file).Exists(std::string("legacytaccountpub")));
+        // the tampered record is loaded, then checked against the seed and rewritten at the first unlocked top-up
+        BOOST_REQUIRE(w.legacyTLookahead.has_value());
+        BOOST_CHECK(CKeyID(w.legacyTLookahead.value().vIds[1][3]) == SeedKey(true, 900));
+        w.TopUpLegacyTKeys();
+        BOOST_CHECK(w.legacyTLookahead.value() == stored);
+        CLegacyTLookahead reread;
+        BOOST_REQUIRE(RawWalletDB(file).Read(std::string("legacytlookahead"), reread));
+        BOOST_CHECK(reread == stored);
+        BOOST_CHECK(w.GenerateNewKey(true).GetID() == SeedKey(true, 1));   // the seed's key, whatever the record said
+    }
+    {
+        // a wallet that cannot derive (no seed: as a locked one) watches the stored IDs: a payment to one is a
+        // watch-only coin, never a key; one that leaves fewer than -keypool + 1 watched IDs beyond it sets the flag
+        CWallet w(Params(), "legacy_tkey_key_ids_watch_test.dat");
+        bool fFirstRun;
+        BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
+        LOCK(w.cs_wallet);
+        CHDChain chain(LookaheadTestSeed().Fingerprint(), 1);
+        for (uint32_t i = 0; i < stored.nStart[0]; i++)
+            chain.IncrementLegacyTKeyCounter(false);
+        for (uint32_t i = 0; i < stored.nStart[1]; i++)
+            chain.IncrementLegacyTKeyCounter(true);
+        w.SetMnemonicHDChain(chain, true);
+        w.LoadLegacyTLookahead(stored);
+        w.TopUpLegacyTKeys();
+        BOOST_CHECK_EQUAL(w.mapLegacyTKeyWatched.size(), 2U * N);
+        BOOST_CHECK_EQUAL(w.nLegacyTKeyWatchedEnd[1], 1U + N);
+        const CTxOut paid(1000, GetScriptForDestination(SeedKey(true, 5)));
+        BOOST_CHECK(w.IsMine(paid) == ISMINE_WATCH_UNSOLVABLE);
+        BOOST_CHECK(!w.HaveKey(SeedKey(true, 5)));
+        BOOST_CHECK(w.IsMine(CTxOut(1000, GetScriptForDestination(SeedKey(true, 1 + N)))) == ISMINE_NO);   // past the window
+        BOOST_CHECK(::IsMine(w, paid.scriptPubKey) == ISMINE_NO);   // validateaddress and the key store: not a key
+        BOOST_CHECK(!w.fLegacyTKeyLookaheadIncomplete);
+        w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 5))));      // in the mempool: nothing
+        BOOST_CHECK(!w.fLegacyTKeyLookaheadIncomplete);
+        w.NoteLegacyTKeysUsed(Paying(GetScriptForDestination(SeedKey(true, 5))), 9);   // mined at 9: 5 + 1 + N > 1 + N
+        BOOST_CHECK(w.fLegacyTKeyLookaheadIncomplete);
+        BOOST_CHECK_EQUAL(w.nLegacyTKeyIncompleteFrom, 9);
+        BOOST_CHECK_EQUAL(Counter(w, true), 1U);   // locked, the counter stays (the key is not held)
     }
     bitdb.Flush(true);
     bitdb.Reset();

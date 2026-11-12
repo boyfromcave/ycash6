@@ -2093,19 +2093,36 @@ public:
     bool fLegacyTKeyLookaheadIncomplete = false;
     int nLegacyTKeyIncompleteFrom = -1;
     /**
-     * Review M-b: the legacy account's public key (m/44'/coin'/0x7FFFFFFF', the parent of both chains; the chain and
-     * index levels are non-hardened, so their public keys derive from it), kept in clear ("legacytaccountpub", with the
-     * seed fingerprint; written once the wallet is unlocked or unencrypted). A locked wallet derives the PUBLIC keys of
-     * its transparent lookahead from it (mapLegacyTKeyWatched): it cannot hold their secrets, so it cannot find a coin
-     * sent to one, but it recognises the payment and sets lookahead_incomplete for exactly that case.
+     * Review 3 H-1 (replaces review M-b's stored extended public key, whose chain code gave a copy of the file plus one
+     * leaked key every legacy transparent key, and the file alone the legacy shielding OVKs): the KEY IDs of the
+     * lookahead, kept in clear ("legacytlookahead", CLegacyTLookahead), recomputed from the seed and rewritten at every
+     * unlocked top-up. A locked wallet that has not held its lookahead since it started watches these IDs
+     * (mapLegacyTKeyWatched): a payment to one is its own incoming coin, counted as watch-only (CWallet::IsMine) until
+     * walletpassphrase derives the key; it is never in the key store, never in the keypool, never handed out. The
+     * window cannot grow while locked: a payment that leaves fewer than -keypool + 1 watched or held keys beyond it on
+     * its chain sets lookahead_incomplete (a later payment past the window would be missed).
      */
-    std::optional<std::pair<uint256, libzcash::transparent::AccountPubKey>> legacyTAccountPub;
-    void LoadLegacyTAccountPub(const uint256& seedFp, const libzcash::transparent::AccountPubKey& pub) { legacyTAccountPub.emplace(seedFp, pub); }
-    //! The stored account public key, if it is this wallet's seed's.
-    std::optional<libzcash::transparent::AccountPubKey> GetLegacyTAccountPub() const;
-    //! Public-only lookahead keys of a locked wallet: id -> (external, index); never in the key store.
+    std::optional<CLegacyTLookahead> legacyTLookahead;
+    //! The loaded record is checked against the seed at the first unlocked top-up (review 3 LOW, integrity).
+    bool fLegacyTLookaheadUnverified = false;
+    void LoadLegacyTLookahead(const CLegacyTLookahead& record);
+    //! True when the stored key IDs are this wallet's seed's (what a locked wallet can watch with).
+    bool HaveLegacyTLookahead() const;
+    //! Watched key IDs: id -> (external, index); guarded by cs_KeyStore (read by IsMine without cs_wallet).
     std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyWatched;
+    //! Per chain: one past the highest watched index (0 when nothing is watched).
     uint32_t nLegacyTKeyWatchedEnd[2] = {0, 0};
+    bool fLegacyTKeyWatchedBuilt = false;
+    //! Sets mapLegacyTKeyWatched from the stored record: its IDs the key store does not hold.
+    void RebuildLegacyTKeyWatched();
+    //! A P2PKH or P2PK script paying a watched key ID.
+    bool IsLegacyTKeyWatched(const CScript& script) const;
+    //! True when ReadKeyValue met the intermediate build's "legacytaccountpub" record (erased by LoadWallet).
+    bool fObsoleteLegacyTAccountPub = false;
+    //! The (external, index) of a transparent key of this seed's legacy account: held, stored with its key path, or watched.
+    std::optional<std::pair<bool, uint32_t>> LegacyTKeyPosition(const CKeyID& id) const;
+    //! Unlocked: marks the keys of the wallet's transactions that paid a watched key while locked (review 3 H-1).
+    void NoteLegacyTKeysWatchedWhileLocked(const std::map<CKeyID, std::pair<bool, uint32_t>>& watched);
     //! The wallet's best block height at load (-1 none): blocks at or below it were processed by an earlier run.
     int nLegacyTKeyProcessedHeight = -1;
     void SetLegacyTKeyLookaheadIncomplete(int nFromHeight);
