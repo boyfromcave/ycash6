@@ -304,8 +304,8 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         fn_coin = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(1, 9999999, [self.addrs['fn']])]
         assert n0.lockunspent(False, fn_coin)
         v = self.view(locked_in={FN: Decimal(2)})
-        assert_equal((v['balance_pq'], v['balance_pq_2'], v['balance']), (2, 2, spent_confirmed['balance']))
-        assert_equal((v['z1_transparent_pq'], v['z1_pq_2'], v['fn@1'], v['fn@0']), (0, 0, 0, 0))
+        assert_equal((v['balance_pq'], v['balance_pq_2'], v['balance']), (2 + change_s, 2, spent_confirmed['balance']))
+        assert_equal((v['z1_transparent_pq'], v['z1_pq_2'], v['fn@1'], v['fn@0']), (change_s, 0, 0, 0))
         assert_equal(v['z1_transparent'], spent_confirmed['z1_transparent'] - 2)
         assert n0.lockunspent(True, fn_coin)
         assert_equal(self.view(), spent_confirmed)
@@ -354,9 +354,9 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored.dat')
         n0 = self.nodes[0]
         r = self.view()
-        assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], 0, settled['balance_pq_2']))
+        assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], change_s, settled['balance_pq_2']))
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
-                     (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
+                     (settled['z1_transparent_pq'], settled['z1_private'], 2, change_s, 1))
         # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
         # it. What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
         # none on ycash-dd (random keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds

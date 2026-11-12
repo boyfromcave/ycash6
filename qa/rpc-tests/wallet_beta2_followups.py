@@ -267,20 +267,26 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
     def allowinputs_guard(self):
         print('allowinputs_guard: a coin vault_send signs because allowinputs names it is never a YED token (audit L-3)')
         n0 = self.nodes[0]
-        tokens = [o for o in n0.listlockunspent() if o['vout'] == 1 and n0.gettxout(o['txid'], 1) is not None
-                  and D(n0.gettxout(o['txid'], 1)['value']) == Decimal('0.0001')]
-        assert_equal(len(tokens), 1)                  # the token of the MINT above (the MINT's vault is vout 0)
+        tokens = n0.yed_listunspent()
+        for _ in range(20):                           # the MINT is committed on its carrier a few blocks later
+            if tokens:
+                break
+            self.mine()
+            tokens = n0.yed_listunspent()
+        assert_equal(len(tokens), 1)                  # the token of the MINT above (the MINT's vault is its vout 0)
         token = tokens[0]
         assert n0.gettxout(token['txid'], 0) is not None
-        spend = n0.createrawtransaction([{'txid': token['txid'], 'vout': 0}, {'txid': token['txid'], 'vout': 1}],
-                                        {n0.getnewaddress(): Decimal('0.0001')})
-        named = {'allowinputs': ['%s:1' % token['txid']]}
-        refusal = ('refusing to spend a Yellowback outpoint as plain YEC: %s:1 (its YED would burn; lock it again with '
-                   'yed_lockcoins)' % token['txid'])
+        tok_value = D(n0.gettxout(token['txid'], token['vout'])['value'])
+        spend = n0.createrawtransaction([{'txid': token['txid'], 'vout': 0},
+                                         {'txid': token['txid'], 'vout': token['vout']}],
+                                        {n0.getnewaddress(): tok_value})
+        named = {'allowinputs': ['%s:%d' % (token['txid'], token['vout'])]}
+        refusal = ('refusing to spend a Yellowback outpoint as plain YEC: %s:%d (its YED would burn; lock it again with '
+                   'yed_lockcoins)' % (token['txid'], token['vout']))
         preview = n0.vault_send(spend, {'allowinputs': named['allowinputs'], 'dryrun': True})
         assert_equal(preview['wouldrefuse'], refusal)
         assert_equal(assert_raises_rpc(refusal, n0.vault_send, spend, named), refusal)
-        assert n0.gettxout(token['txid'], 1) is not None
+        assert n0.gettxout(token['txid'], token['vout']) is not None
 
     # ---- item 4 / 11: the stock sends spend ECC coins only ----------------------------------------------------------
 

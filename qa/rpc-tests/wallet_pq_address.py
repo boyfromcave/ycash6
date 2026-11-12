@@ -273,9 +273,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000, conv + 2 * MARGINAL_FEE), (fee, size, conv)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))
-        spent = {(i['txid'], i['vout']) for i in tx['vin']}
-        assert_equal(n0.getaddressbalance({'addresses': [a]})['balance'],
-                     0 if (tx_a, utx[tx_a]['vout']) in spent else zat(2))
+        # the 2 YEC coin of a is spent and the change returns to a (D-4)
+        assert (tx_a, utx[tx_a]['vout']) in {(i['txid'], i['vout']) for i in tx['vin']}
+        assert_equal(n0.getaddressbalance({'addresses': [a]})['balance'], zat(2) - zat(Decimal('1.5')) - zat(fee))
 
         print('vault_release of an intent paying the wallet PQ key: by a third party, then by the owner after a restart')
         setid = n0.set_create({'seats': 1, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
@@ -320,17 +320,11 @@ class WalletPQAddressTest(BitcoinTestFramework):
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not (u['txid'] == r2 and u['address'] == b)]
         n0.lockunspent(False, others)
         dest = n1.getnewaddress()
-        # subtractfeefromamount: the change is exactly 1,000 zat, above the P2PKH dust threshold but below the
-        # TX_PQPKH one (an SLH-DSA spend is ~8 kB); the wallet raises it to the PQ threshold, from the recipient.
-        cb = n0.sendtoaddress(dest, v - Decimal('0.00001'), '', '', True)
+        # sendtoaddress selects ECC coins only since beta2 audit M-1, so the PQ coin is no longer its to pick (the B-4
+        # change pricing is reached only through fundrawtransaction with a named PQ input now; not exercised here)
+        assert_raises_rpc('Insufficient funds in ordinary transparent addresses; this wallet also holds',
+                          n0.sendtoaddress, dest, v - Decimal('0.00001'), '', '', True)
         n0.lockunspent(True, others)
-        cbtx = n0.getrawtransaction(cb, 1)
-        change = [o for o in cbtx['vout'] if o['scriptPubKey']['hex'] == pqpkh_script(1, hb).hex()]
-        assert_equal(len(change), 1)
-        assert zat(change[0]['value']) > 1000, change
-        self.mine(1)
-        assert_equal(n0.gettransaction(cb)['confirmations'], 1)
-        assert_equal(n1.getreceivedbyaddress(dest), v - change[0]['value'] - (-n0.gettransaction(cb)['fee']))
 
         print('z_importpqkey')
         export = n0.z_exportwallet('pqexport')

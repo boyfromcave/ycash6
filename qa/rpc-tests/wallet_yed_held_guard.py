@@ -234,6 +234,7 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
             shutil.rmtree(datadir)
         shutil.copytree(os.path.join(self.options.tmpdir, 'node%d' % USER), datadir)
         shutil.rmtree(os.path.join(datadir, 'regtest', 'yellowback'))
+        initialize_datadir(self.options.tmpdir, FRESH)     # this slot's own ports, not the copied node's
         self.restart(USER)
         base = [a for a in self.node_args(UNTOUCHED) if not a.startswith('-yellowback') and a != '-experimentalfeatures']
         with tempfile.SpooledTemporaryFile(max_size=2**16) as err:
