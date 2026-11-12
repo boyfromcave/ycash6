@@ -105,7 +105,11 @@ index has not judged and whose transaction's payload may give it YED (before, an
 be burned by a raw transaction with no flag); when the amount is unknown (a claim cancel's refund before its block is
 judged) it refuses with `yed-burn-refused: this transaction spends output(s) of this wallet whose transaction the
 Yellowback index has not judged yet and whose payload may give them YED (<outpoints>); whatever YED they carry would be
-destroyed. Pass allowyedburn = true to send it anyway.`
+destroyed. Pass allowyedburn = true to send it anyway.` This check
+also acts while the Yellowback index is unhealthy (before, it then let every raw transaction through): every input
+that is an output of this wallet its transaction's payload may give YED is counted then. A transaction confirmed in
+a block below the Yellowback start height (the `UPGRADE_VAULT` activation height), which the index never evaluates,
+counts as judged with no YED: a copied payload mined before activation does not keep the coin refused.
 
 `vault_send` and `set_sendact` refuse a coin named by `allowinputs` that is a Yellowback outpoint (a YED token,
 vault or carrier of this wallet), with the Yellowback refusal; a deliberate burn goes through

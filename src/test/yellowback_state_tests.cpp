@@ -140,7 +140,6 @@ struct MapSigCache : public SigCache
     void Insert(const uint256& key, bool valid) override { entries[key] = valid; }
 };
 
-/** A synthetic chain over a MemoryStateView with the regtest parameters. */
 /**
  * The wallet's reading of a valid block the module committed (WALLET-FOLLOW-5, -6): every output the module gave YED is
  * one PayloadYedOutputs counts; every token the block's transactions created belongs to a transaction with a TxLog;
@@ -172,6 +171,7 @@ void CheckWalletReading(StateView& view, const Params& P, const CBlock& block, c
     }
 }
 
+/** A synthetic chain over a MemoryStateView with the regtest parameters. */
 struct Fixture
 {
     yellowback::Params P;

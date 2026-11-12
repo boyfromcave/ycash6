@@ -10659,7 +10659,7 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
             // assigns. A transaction the index judged without a TxLog touched no Yellowback state, so none of its outputs
             // is YED, whatever payload it carries (review 3 MEDIUM-1; IndexJudged).
             std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
-            if (it != wallet.mapWallet.end() && (!healthy || !yellowback::IndexJudged(st, it->second)) &&
+            if (it != wallet.mapWallet.end() && (!healthy || !yellowback::IndexJudged(st, index.GetParams(), it->second)) &&
                 AssignedByYellowbackPayload(it->second, o.n)) {
                 pending.push_back(o);
             }

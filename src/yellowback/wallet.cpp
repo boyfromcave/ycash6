@@ -652,7 +652,7 @@ void YellowbackWallet::PreLock(const CTransaction& tx)
     }
 }
 
-bool IndexJudged(const State& st, const CWalletTx& wtx)
+bool IndexJudged(const State& st, const Params& params, const CWalletTx& wtx)
 {
     AssertLockHeld(cs_main);
     if (st.GetTxLog(wtx.GetHash()).has_value()) return true;
@@ -660,6 +660,10 @@ bool IndexJudged(const State& st, const CWalletTx& wtx)
     BlockMap::const_iterator mi = mapBlockIndex.find(wtx.hashBlock);
     if (mi == mapBlockIndex.end() || !mi->second || !chainActive.Contains(mi->second)) return false;
     const int h = mi->second->nHeight;
+    // Below the start height the index never evaluates a block (EvaluateBlock returns first, its ConnectBlock checks
+    // and the startup replay skip it, and a changed start height wipes the index), so no output there is YED: a block
+    // of the active chain below it is judged, with nothing in it (review WALLET-STACK LOW-1).
+    if (h < params.startHeight) return true;
     std::optional<TipRecord> tip = st.GetTip();
     if (!tip.has_value() || h < 0 || h > tip->height) return false;
     std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)h);
@@ -677,7 +681,7 @@ void YellowbackWallet::ReleaseJudgedUntouched()
         for (const COutPoint& o : ourLocks) {
             if (st.GetToken(o).has_value() || st.GetVault(o).has_value() || st.GetTxLog(o.hash).has_value()) continue;   // Reconcile's
             std::map<uint256, CWalletTx>::const_iterator it = wallet->mapWallet.find(o.hash);
-            if (it != wallet->mapWallet.end() && IndexJudged(st, it->second)) release.push_back(o);
+            if (it != wallet->mapWallet.end() && IndexJudged(st, index->GetParams(), it->second)) release.push_back(o);
         }
     }
     for (COutPoint o : release) {
@@ -814,7 +818,7 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
             std::map<uint256, CWalletTx>::const_iterator it = yw.Wallet()->mapWallet.find(in.prevout.hash);
             if (it == yw.Wallet()->mapWallet.end() || in.prevout.n >= it->second.vout.size()) continue;
             const CWalletTx& prev = it->second;
-            if (healthy && IndexJudged(st, prev)) continue;
+            if (healthy && IndexJudged(st, index->GetParams(), prev)) continue;
             if (!PayloadYedOutputs(prev).count(in.prevout.n) || !yw.IsMineScript(prev.vout[in.prevout.n].scriptPubKey)) continue;
             std::optional<int64_t> stated;
             std::optional<FoundPayload> pp = FindPayload(prev);

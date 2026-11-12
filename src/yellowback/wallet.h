@@ -305,12 +305,13 @@ std::set<uint32_t> PayloadYedOutputs(const CTransaction& tx);
  * Has the index judged `wtx`? True when it has a TxLog, or when the block the wallet records for it is in the active
  * chain at a height h no higher than the index tip and the index's Snapshot(h) names that block. A Snapshot is written
  * only at the end of a complete, valid evaluation of its block, and every rule that gives an output YED also writes
- * the transaction's TxLog (handoff WALLET-FOLLOW-6, A.1); so a judged transaction without a TxLog gave no output YED,
- * and one that is not judged (unconfirmed, its block above the index tip, disconnected or below the start height) is
- * read by its payload (PayloadYedOutputs). The caller holds cs_main, the wallet's cs_wallet and cs_yellowback, and
- * the index is healthy.
+ * the transaction's TxLog (handoff WALLET-FOLLOW-6, A.1); so a judged transaction without a TxLog gave no output YED.
+ * Also true when that block is in the active chain below `params.startHeight` (the index's own parameters): the index
+ * never evaluates such a block, so nothing in it is YED. One that is not judged (unconfirmed, its block above the
+ * index tip or disconnected) is read by its payload (PayloadYedOutputs). The caller holds cs_main, the wallet's
+ * cs_wallet and cs_yellowback, and the index is healthy.
  */
-bool IndexJudged(const State& st, const CWalletTx& wtx);
+bool IndexJudged(const State& st, const Params& params, const CWalletTx& wtx);
 
 /**
  * H7: does this raw transaction destroy YED that belongs to this wallet? True when it spends a

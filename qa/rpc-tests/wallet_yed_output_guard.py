@@ -29,6 +29,10 @@ Rows produced here, on the run of yellowback_cancel_limit.py up to the cancel:
     CANCEL_COSIGN payload and spends no intent (made here from this wallet's own coin): pre-locked while unconfirmed, released once its block is judged (it
     touched no Yellowback state), and spendable by sendtoaddress, also after a restart (before: locked for good, and
     after a restart every send that selected it was refused).
+  - review WALLET-STACK LOW-1: a payment carrying a TRANSFER payload that assigns its two outputs to this wallet, mined
+    BELOW the Yellowback start height (the index never evaluates that block, so no output in it is YED): once Yellowback
+    is live it is not locked, sendtoaddress spends one output and sendrawtransaction without allowyedburn spends the other
+    (before: never judged, so refused by every send for good and refused raw without allowyedburn).
 
 The same file runs on ycash-dd and ycash6."""
 
@@ -40,7 +44,8 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import (assert_equal, initialize_datadir, start_node, stop_node, z_mergetoaddress_call,
                                  z_sendmany_opid)
-from test_framework.yellowback_util import P_MID_WINDOW, POOLS, REF_LAG, yed_params, usd_to_micro
+from test_framework.yellowback_util import P_MID_WINDOW, POOLS, REF_LAG, VAULT_ACTIVATION, yed_params, usd_to_micro
+from test_framework.yellowback_model import encode_transfer
 from test_framework.yellowback_attest import ATTESTOR_WIFS, register_and_arm, wallet_claim, wallet_notice
 
 import yellowback_cancel_limit as base
@@ -57,11 +62,19 @@ def op_key(o):
 
 class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
 
+    def create_attestor_set(self):
+        """Before the set exists (and below the start height), mine the LOW-1 payment first."""
+        if getattr(self, 'prestart', None) is None and self.nodes[USER].getblockcount() < VAULT_ACTIVATION - 1:
+            self.prestart = self.prestart_payload_payment()
+        return super().create_attestor_set()
+
     def run_test(self):
         nodes = self.nodes
         user = nodes[USER]
         self.current_quote = base.PRICE
         self.activate(POOLS, quote_usd=base.PRICE)
+        self.prestart_payment_spendable()
+        user = nodes[USER]
         self.mine_round_robin(POOLS, REF_LAG + 1)
         register_and_arm(self)
         for wif in ATTESTOR_WIFS[:3]:
@@ -217,6 +230,59 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
         assert_equal(sorted(node.getrawmempool()), mempool)
         self.assert_unspent(node, o, 'sendrawtransaction')
         return msg
+
+    def prestart_payload_payment(self):
+        """LOW-1: a plain payment to this wallet whose transaction carries a TRANSFER payload assigning both payment
+        outputs, mined below the start height (before Yellowback is live). Returns the two outpoints."""
+        user = self.nodes[USER]
+        coin = sorted([c for c in user.listunspent(1, 9999999) if Decimal(c['amount']) >= Decimal('3')],
+                      key=lambda c: c['amount'])[0]
+        a, b, dummy = user.getnewaddress(), user.getnewaddress(), user.getnewaddress()
+        raw = user.createrawtransaction([{'txid': coin['txid'], 'vout': coin['vout']}],
+                                        {a: Decimal('1'), b: Decimal('1'), dummy: Decimal('0.00012345'),
+                                         user.getnewaddress(): Decimal(coin['amount']) - Decimal('2.001')},
+                                        0, 0)            # no expiry: the default is capped below the vault upgrade, which is too soon
+        dec = user.decoderawtransaction(raw)
+        va = [o['n'] for o in dec['vout'] if a in o['scriptPubKey'].get('addresses', [])][0]
+        vb = [o['n'] for o in dec['vout'] if b in o['scriptPubKey'].get('addresses', [])][0]
+        dspk = [o for o in dec['vout'] if o['valueZat'] == 12345][0]['scriptPubKey']['hex']
+        old = '3930000000000000' + '19' + dspk
+        payload = encode_transfer([(va, 1000), (vb, 1000)])
+        assert raw.count(old) == 1 and len(payload) < 0x4c
+        raw = raw.replace(old, '0000000000000000' + ('%02x' % (len(payload) + 2)) + '6a' + ('%02x' % len(payload)) + payload.hex())
+        txid = user.sendrawtransaction(user.signrawtransaction(raw)['hex'])
+        self.sync_all()
+        self.mine(USER, blocks_only=True)
+        height = user.getblock(user.getrawtransaction(txid, 1)['blockhash'])['height']
+        print('LOW-1: a payment carrying a TRANSFER payload mined at height %d, below the start height %d' % (height, VAULT_ACTIVATION))
+        assert height < VAULT_ACTIVATION, height
+        return [(txid, va), (txid, vb)]
+
+    def prestart_payment_spendable(self):
+        """LOW-1, once Yellowback is live: the below-start payment is judged with no YED."""
+        print('live: the payment carrying a payload mined below the start height is plain YEC (LOW-1)')
+        user = self.nodes[USER]
+        first, second = self.prestart
+        for _ in range(60):                           # a pre-lock, if any, is released on the completion thread
+            if first not in self.locked(user) and second not in self.locked(user):
+                break
+            time.sleep(0.5)
+        assert first not in self.locked(user) and second not in self.locked(user), 'the below-start payment is still locked'
+        plain = sorted([c for c in user.listunspent(1, 9999999) if Decimal(c['amount']) >= Decimal('1')
+                        and c['scriptPubKey'].startswith('76a914') and (c['txid'], c['vout']) not in self.prestart],
+                       key=lambda c: c['amount'])[0]
+        self.isolate(user, [first, (plain['txid'], plain['vout'])])
+        sent = user.sendtoaddress(user.getnewaddress(), Decimal(plain['amount']) + Decimal('0.5'))
+        spent = [(i['txid'], i['vout']) for i in user.getrawtransaction(sent, 1)['vin']]
+        assert first in spent, (first, spent)
+        self.unlock_all(user)
+        raw = user.createrawtransaction([{'txid': second[0], 'vout': second[1]}], {user.getnewaddress(): Decimal('0.9999')})
+        signed = user.signrawtransaction(raw)
+        assert_equal(signed['complete'], True)
+        user.sendrawtransaction(signed['hex'])          # no allowyedburn: nothing of it is YED
+        self.sync_all()
+        self.mine(POOLS[0])
+        self.sync_all()
 
     def copied_payload_payment(self, cancel_ctx):
         """MEDIUM-1: a plain payment to this wallet in a transaction carrying a copied CANCEL_COSIGN payload (no intent
