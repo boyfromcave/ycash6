@@ -13,6 +13,8 @@
 #   rpc-cvt       every registered yed_* RPC has an exact-arity rpcCvtTable row (S1)
 #   registration  every functional script the fork added is executable in git, registered and run by
 #                 a CI job (and grouped in qa/kogany-mixed-shards.txt)
+#   attribution   The Ycash developers on every fork file and every modified upstream file with a
+#                 copyright line, no copyright line removed, no ycash6/YDollar/DigiDollar naming
 #
 # Usage: qa/yellowback-audit.sh [--report-only] [--only LEG,..] [--skip LEG,..] [base]
 #   base defaults to ycash6-baseline.
@@ -36,13 +38,13 @@ while [ $# -gt 0 ]; do
     --only=*) only="${1#--only=}"; shift ;;
     --skip) skip="${2:-}"; shift 2 ;;
     --skip=*) skip="${1#--skip=}"; shift ;;
-    -h|--help) sed -n '6,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '6,26p' "$0"; exit 0 ;;
     -*) echo "unknown argument: $1" >&2; exit 2 ;;
     *) base="$1"; shift ;;
   esac
 done
 base="${base:-ycash6-baseline}"
-LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration"
+LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution"
 for l in ${only//,/ } ${skip//,/ }; do
   case " $LEGS " in *" $l "*) ;; *) echo "unknown leg $l (one of: $LEGS)" >&2; exit 2 ;; esac
 done
@@ -210,10 +212,49 @@ leg_registration() {
   py qa/kogany_mixed_shards.py check
 }
 
+leg_attribution() {
+  # Attribution (rule 2026-10-01): every file the fork adds carries "The Ycash developers"; an upstream
+  # file the fork modifies that has a copyright block carries a Ycash line too; no existing copyright
+  # line is ever removed. Naming: the software is Ycash (no "ycash6" in src/), and no DigiDollar/ydollar
+  # naming enters the code (AGENTS.md rule 6; in code DigiDollar is allowed only in comments that cite
+  # the upstream file). Moved here from the workflow's audit step (beta2 list item 73), unchanged in
+  # what it checks; -a where grep reads the diff stream (a NUL in it made GNU grep print "binary file
+  # matches" and hide the lines).
+  local fail=0 vendored d f removed hits added
+  # Vendored third-party code (the quantum line's src/crypto/pq/falcon and src/crypto/pq/slhdsa,
+  # briefing rule 7) keeps its own notices unchanged and is exempt from the added-file rule,
+  # provided src/crypto/pq/README.md records each one's LICENSE (ycash-dd 877e49617).
+  vendored='^src/crypto/pq/(falcon|slhdsa)/'
+  if [ "$(git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -cE "$vendored")" -gt 0 ]; then
+    for d in falcon slhdsa; do
+      grep -q "$d/LICENSE" src/crypto/pq/README.md 2>/dev/null || { echo "vendored src/crypto/pq/$d without a licence record ($d/LICENSE) in src/crypto/pq/README.md"; fail=1; }
+    done
+    echo "vendored files exempt from the added-file rule (own notices): $(git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -cE "$vendored") under src/crypto/pq/{falcon,slhdsa}/"
+  fi
+  while read -r f; do
+    grep -q 'The Ycash developers' "$f" || { echo "new file without the Ycash notice: $f"; fail=1; }
+  done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/' | grep -Ev "$vendored")
+  while read -r f; do
+    if grep -q 'Copyright' "$f" && ! grep -q 'Ycash developers' "$f"; then echo "modified upstream file without a Ycash line: $f"; fail=1; fi
+  done < <(git diff --name-only --diff-filter=M "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$')
+  removed=$(git diff "$base" HEAD | grep -aE '^-[^-].*Copyright' || true)
+  [ -z "$removed" ] || { echo "copyright lines removed (never allowed):"; echo "$removed"; fail=1; }
+  hits=$(git grep -n -i 'ycash6' -- src || true)
+  [ -z "$hits" ] || { echo "'ycash6' in src/ (the software is Ycash):"; echo "$hits"; fail=1; }
+  added=$(git diff "$base" HEAD -- src qa contrib doc | grep -aE '^\+[^+]' || true)
+  hits=$(printf '%s\n' "$added" | grep -aE 'ydollar|YDollar|\byd_' || true)
+  [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; fail=1; }
+  # Code only (doc/ prose may name the retired `feature/digidollar` branch).
+  hits=$(git diff "$base" HEAD -- src qa contrib | grep -aE '^\+[^+]' | grep -aEi 'digidollar' | grep -avE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
+  [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; fail=1; }
+  return $fail
+}
+
 leg frozen leg_frozen
 leg pq-wipes leg_pq_wipes
 leg ci-guards leg_ci_guards
 leg golden leg_golden
 leg rpc-cvt leg_rpc_cvt
 leg registration leg_registration
+leg attribution leg_attribution
 exit $rc

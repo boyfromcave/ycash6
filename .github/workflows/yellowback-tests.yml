@@ -1103,12 +1103,13 @@ jobs:
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
         # the frozen and budget legs are REPORT-ONLY (upgrade plan §7 G-9, §9): they print the
         # delta and the consensus review gate (the consensus-diff artifact below, two reviewers)
-        # judges it; every other leg still fails.
+        # judges it; every other leg still fails. Attribution runs as its own step below (the same
+        # script, --only), so it shows on the run page.
         env:
           LINE: ${{ steps.line.outputs.line }}
         run: |
-          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only ycash6-baseline
-          else qa/yellowback-audit.sh ycash6-baseline; fi
+          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only --skip attribution ycash6-baseline
+          else qa/yellowback-audit.sh --skip attribution ycash6-baseline; fi
 
       - name: Consensus-diff report for the two-reviewer gate (upgrade plan §7 G-9)
         # Every changed line under the consensus paths, against this line's pristine pin
@@ -1195,37 +1196,10 @@ jobs:
         # Ycash line too; no existing copyright line is ever removed. Naming: the software is
         # Ycash (no "ycash6" in src/), and no DigiDollar/ydollar naming enters the code
         # (AGENTS.md rule 6; in code DigiDollar is allowed only in comments that cite the upstream file).
+        # The rules live in qa/yellowback-audit.sh's attribution leg (beta2 list item 73: this step held its
+        # own copy, so a local audit passed what CI failed); the step runs that leg alone.
         if: ${{ !cancelled() }}
-        run: |
-          rc=0
-          base=ycash6-baseline
-          # Vendored third-party code (the quantum line's src/crypto/pq/falcon and src/crypto/pq/slhdsa,
-          # briefing rule 7) keeps its own notices unchanged and is exempt from the added-file rule,
-          # provided src/crypto/pq/README.md records each one's LICENSE (ycash-dd 877e49617).
-          vendored='^src/crypto/pq/(falcon|slhdsa)/'
-          if git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -qE "$vendored"; then
-            for d in falcon slhdsa; do
-              grep -q "$d/LICENSE" src/crypto/pq/README.md 2>/dev/null || { echo "vendored src/crypto/pq/$d without a licence record ($d/LICENSE) in src/crypto/pq/README.md"; rc=1; }
-            done
-            echo "vendored files exempt from the added-file rule (own notices): $(git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -cE "$vendored") under src/crypto/pq/{falcon,slhdsa}/"
-          fi
-          while read -r f; do
-            grep -q 'The Ycash developers' "$f" || { echo "new file without the Ycash notice: $f"; rc=1; }
-          done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/' | grep -Ev "$vendored")
-          while read -r f; do
-            if grep -q 'Copyright' "$f" && ! grep -q 'Ycash developers' "$f"; then echo "modified upstream file without a Ycash line: $f"; rc=1; fi
-          done < <(git diff --name-only --diff-filter=M "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$')
-          removed=$(git diff "$base" HEAD | grep -E '^-[^-].*Copyright' || true)
-          [ -z "$removed" ] || { echo "copyright lines removed (never allowed):"; echo "$removed"; rc=1; }
-          hits=$(git grep -n -i 'ycash6' -- src || true)
-          [ -z "$hits" ] || { echo "'ycash6' in src/ (the software is Ycash):"; echo "$hits"; rc=1; }
-          added=$(git diff "$base" HEAD -- src qa contrib doc | grep -E '^\+[^+]' || true)
-          hits=$(printf '%s\n' "$added" | grep -E 'ydollar|YDollar|\byd_' || true)
-          [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; rc=1; }
-          # Code only (doc/ prose may name the retired `feature/digidollar` branch).
-          hits=$(git diff "$base" HEAD -- src qa contrib | grep -E '^\+[^+]' | grep -E -i 'digidollar' | grep -vE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
-          [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
-          exit $rc
+        run: qa/yellowback-audit.sh --only attribution ycash6-baseline
 
       - name: Cross-line identity (qa/yellowback-cross-line.manifest) and Vault chain parameters
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
