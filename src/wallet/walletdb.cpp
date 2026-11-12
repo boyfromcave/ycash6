@@ -161,6 +161,12 @@ bool CWalletDB::EraseVaultSignRestored()
     return Erase(std::string("vaultsignrestored"));
 }
 
+bool CWalletDB::WriteYedHeld()
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("yedheld"), (uint8_t)1);
+}
+
 bool CWalletDB::WriteVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx)
 {
     nWalletDBUpdateCounter++;
@@ -612,6 +618,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CKeyID id;
             ssKey >> id;
             pwallet->setVaultPendingKeys.insert(id);
+        }
+        else if (strType == "yedheld")
+        {
+            uint8_t v = 0;
+            ssValue >> v;
+            if (v != 0) pwallet->fYedHeld = true;
         }
         else if (strType == "vaultrecipient")
         {
@@ -1201,7 +1213,8 @@ static bool IsSalvagedType(const std::string& strType)
            strType == "pqissued" || strType == "vaultsetsig" ||
            strType == "vaultsignrestored" || strType == "vaultbuild" ||
            strType == "vaultpendingkey" || strType == "vaultrecipient" ||
-           strType == "restorescan";   // review M-c: losing it makes an unfinished restore skip the history
+           strType == "restorescan" ||   // review M-c: losing it makes an unfinished restore skip the history
+           strType == "yedheld";
 }
 
 DBErrors CWalletDB::LoadWallet(CWallet* pwallet)

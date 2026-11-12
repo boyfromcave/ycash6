@@ -30,7 +30,8 @@ class CReserveKey;
 /**
  * The Yellowback wallet layer (plan §4.5): ownership, three-stage coin
  * locking (B4, C3), balances and positions. Uses only the public CWallet
- * API; nothing is written to wallet.dat. Zero lines in src/wallet/.
+ * API; the one thing it has written to wallet.dat is the has-held-YED marker
+ * (CWallet::MarkYedHeld, beta2 item 32), the first time it locks a YED output.
  *
  * Lock order: cs_main -> cs_wallet -> cs_yellowback. The notifier-thread
  * hooks (PreLock, Reconcile) take cs_yellowback, release it, then take

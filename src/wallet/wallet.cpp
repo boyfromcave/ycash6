@@ -3759,6 +3759,19 @@ void CWallet::VaultCheckJoins(const CTransaction& tx, const CBlock* pblock)
     }
 }
 
+bool CWallet::MarkYedHeld()
+{
+    if (fYedHeld.exchange(true)) return true;
+    if (!fFileBacked) return true;
+    if (!CWalletDB(strWalletFile).WriteYedHeld()) {
+        fYedHeld = false;   // try again at the next YED output or holder key
+        LogPrintf("yellowback: could not write the has-held-YED marker to %s\n", strWalletFile);
+        return false;
+    }
+    LogPrintf("yellowback: this wallet now holds YED or a YED holder key; marker \"yedheld\" written to %s\n", strWalletFile);
+    return true;
+}
+
 bool WalletHoldsVaultMemberKey(const CWallet& wallet)
 {
     auto snap = vault::TipSnapshot();
