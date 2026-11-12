@@ -6681,8 +6681,9 @@ std::string CWallet::YedLeftOutOfSelection(const CCoinControl* coinControl) cons
     if (refused.empty()) return "";
     std::string list;
     for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
-    return strprintf("this wallet also holds %u output(s) that carry YED, which no send spends as plain YEC while Yellowback "
-                     "is not live: %s (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)",
+    return strprintf("this wallet also holds %u output(s) that may carry YED, which no send spends as plain YEC while Yellowback "
+                     "is not live: %s (its transaction's payload may give it YED, which would burn; to spend it deliberately, name "
+                     "the outpoint in a raw transaction)",
                      (unsigned)refused.size(), list);
 }
 
@@ -9779,7 +9780,8 @@ void SpendableInputs::LogInputs(const AsyncRPCOperationId& id) const {
 
 // Does the payload of `tx` give output n YED? yellowback::PayloadYedOutputs, the one list the Yellowback wallet layer's
 // stage (ii) pre-lock (YellowbackWallet::PreLock) also reads: for a transaction the index has not judged yet
-// (unconfirmed, or any transaction while the index is unhealthy) and wherever Yellowback is not live.
+// (yellowback::IndexJudged: unconfirmed, its block not judged, or any transaction while the index is unhealthy) and
+// wherever Yellowback is not live.
 static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
 {
     return yellowback::PayloadYedOutputs(tx).count(n) != 0;
@@ -9807,13 +9809,14 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
         if (refusedOut) *refusedOut = refused;
         std::string list;
         for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
-        return "refusing to spend an output that carries YED as plain YEC while Yellowback is not live: " + list +
-               " (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)";
+        return "refusing to spend an output that may carry YED as plain YEC while Yellowback is not live: " + list +
+               " (its transaction's payload may give it YED, which would burn; to spend it deliberately, name the outpoint in"
+               " a raw transaction)";
     }
     if (!yw || !yw->Index() || inputs.empty()) return "";
     yellowback::YellowbackIndex& index = *yw->Index();
     CWallet& wallet = *yw->Wallet();
-    std::vector<COutPoint> refused;
+    std::vector<COutPoint> refused, pending;
     {
         LOCK2(cs_main, wallet.cs_wallet);      // lock order (N25; 6.x): cs_main, cs_wallet, then cs_yellowback
         LOCK(index.cs_yellowback);
@@ -9826,21 +9829,45 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
         for (const COutPoint& o : inputs) {
             bool yed = false;
             if (healthy) yed = st.GetToken(o).has_value() || st.GetVault(o).has_value();
-            if (!yed && (!healthy || !st.GetTxLog(o.hash).has_value())) {
-                // not judged by the index (unconfirmed, or the index unhealthy): what its payload assigns
-                std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
-                yed = it != wallet.mapWallet.end() && AssignedByYellowbackPayload(it->second, o.n);
+            if (yed) {
+                refused.push_back(o);
+                continue;
             }
-            if (yed) refused.push_back(o);
+            // Not judged by the index (unconfirmed, its block not judged yet, or the index unhealthy): what its payload
+            // assigns. A transaction the index judged without a TxLog touched no Yellowback state, so none of its outputs
+            // is YED, whatever payload it carries (review 3 MEDIUM-1; IndexJudged).
+            std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
+            if (it != wallet.mapWallet.end() && (!healthy || !yellowback::IndexJudged(st, it->second)) &&
+                AssignedByYellowbackPayload(it->second, o.n)) {
+                pending.push_back(o);
+            }
         }
     }
     for (const COutPoint& o : inputs) {
-        if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
+        if (std::find(refused.begin(), refused.end(), o) == refused.end() && std::find(pending.begin(), pending.end(), o) == pending.end() &&
+            yw->GetCarrier(o).has_value()) {
+            refused.push_back(o);
+        }
     }
-    if (refused.empty()) return "";
-    if (refusedOut) *refusedOut = refused;
-    std::string list;
-    for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
-    return "refusing to spend a Yellowback outpoint as plain YEC: " + list +
-           " (its YED would burn; lock it again with yed_lockcoins)";
+    if (refused.empty() && pending.empty()) return "";
+    if (refusedOut) {
+        *refusedOut = refused;
+        refusedOut->insert(refusedOut->end(), pending.begin(), pending.end());
+    }
+    auto join = [](const std::vector<COutPoint>& v) {
+        std::string list;
+        for (const COutPoint& o : v) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+        return list;
+    };
+    std::string msg;
+    if (!refused.empty()) {
+        msg = "refusing to spend a Yellowback outpoint as plain YEC: " + join(refused) +
+              " (its YED would burn; lock it again with yed_lockcoins)";
+    }
+    if (!pending.empty()) {
+        msg += (msg.empty() ? "" : "; ") + std::string("refusing to spend an output that may carry YED as plain YEC before the Yellowback "
+               "index judges its transaction: ") + join(pending) + " (its transaction's payload may give it YED, which would burn;"
+               " wait for its block to be judged, or name the outpoint in a raw transaction sent with allowyedburn)";
+    }
+    return msg;
 }

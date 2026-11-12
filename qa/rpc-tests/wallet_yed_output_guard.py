@@ -21,7 +21,14 @@ Rows produced here, on the run of yellowback_cancel_limit.py up to the cancel:
     fundrawtransaction, z_sendmany from the address and from ANY_TADDR, vault fee funding (set_create, vault_lock),
     vault_lock "from" the address, then z_mergetoaddress from the address, never spend it;
   - the conservative case: the cancel's own YEC change is refused by z_sendmany and spent by a raw transaction that
-    names it (the explicit path; fundrawtransaction naming it too).
+    names it (the explicit path; fundrawtransaction naming it too);
+  - review 3 MEDIUM-2: sendrawtransaction without allowyedburn refuses a raw spend of an UNCONFIRMED (pre-locked) YED
+    output: the claim cancel's refund (amount unknown before its block is judged) and a TRANSFER's assignment (counted at
+    the payload's figure); before, both were accepted and the YED burned;
+  - review 3 MEDIUM-1: live, a third party's plain payment to this wallet in a transaction that carries a copied
+    CANCEL_COSIGN payload and spends no intent (made here from this wallet's own coin): pre-locked while unconfirmed, released once its block is judged (it
+    touched no Yellowback state), and spendable by sendtoaddress, also after a restart (before: locked for good, and
+    after a restart every send that selected it was refused).
 
 The same file runs on ycash-dd and ycash6."""
 
@@ -41,7 +48,7 @@ from wallet_yed_held_guard import yed_form
 
 USER = 0
 FRESH = 6
-NOT_LIVE = 'refusing to spend an output that carries YED as plain YEC while Yellowback is not live: '
+NOT_LIVE = 'refusing to spend an output that may carry YED as plain YEC while Yellowback is not live: '
 
 
 def op_key(o):
@@ -95,6 +102,9 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
         print('live, unconfirmed: the claim cancel\'s refund is pre-locked and no send spends it (before: both did)')
         self.wait_locked(user, [refund], 'the unconfirmed refund')
         self.live_unconfirmed_refund(user, refund, ctx['vout'][1]['scriptPubKey']['addresses'][0])
+        print('live, unconfirmed: sendrawtransaction without allowyedburn refuses a raw spend of the refund (MEDIUM-2)')
+        msg = self.raw_spend_refused(user, refund)
+        assert 'has not judged yet and whose payload may give them YED (%s:%d)' % (refund[0], refund[1]) in msg, msg
         self.sync_all()
         self.mine(POOLS[2])
         info = user.yed_gettxinfo(cancel)
@@ -105,6 +115,8 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
         assert_equal(len(change), 1)
         change = ((cancel, change[0]['n']), change[0]['scriptPubKey']['addresses'][0], change[0]['value'])
 
+        self.copied_payload_payment(ctx)
+        user = self.nodes[USER]
         self.not_live_unmarked(user, [('MINT token', mint_tokens[0]), ('claim cancel refund', refund)], change)
         self.transfer_rows()
 
@@ -189,6 +201,75 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
         self.unlock_all(node)
         assert refund in self.locked(node)
 
+    def raw_spend_refused(self, node, o):
+        """A raw transaction spending `o` (and a plain coin for the fee) without allowyedburn: refused, nothing sent."""
+        val = Decimal(node.getrawtransaction(o[0], 1)['vout'][o[1]]['value'])
+        fee = sorted([c for c in node.listunspent(1, 9999999) if Decimal(c['amount']) >= 1
+                      and c['scriptPubKey'].startswith('76a914')], key=lambda c: c['amount'])[0]
+        raw = node.createrawtransaction([{'txid': o[0], 'vout': o[1]}, {'txid': fee['txid'], 'vout': fee['vout']}],
+                                        {node.getnewaddress(): val + Decimal(fee['amount']) - Decimal('0.0001')})
+        signed = node.signrawtransaction(raw)
+        assert_equal(signed['complete'], True)
+        mempool = sorted(node.getrawmempool())
+        msg = self.refused(node, lambda: node.sendrawtransaction(signed['hex']))
+        print('  sendrawtransaction: %s' % msg)
+        assert msg.startswith('yed-burn-refused: ') and msg.endswith('Pass allowyedburn = true to send it anyway.'), msg
+        assert_equal(sorted(node.getrawmempool()), mempool)
+        self.assert_unspent(node, o, 'sendrawtransaction')
+        return msg
+
+    def copied_payload_payment(self, cancel_ctx):
+        """MEDIUM-1: a plain payment to this wallet in a transaction carrying a copied CANCEL_COSIGN payload (no intent
+        spent) is NON_YELLOWBACK: once its block is judged nothing of it is YED."""
+        print('live: a payment carrying a copied CANCEL_COSIGN payload (MEDIUM-1)')
+        user = payer = self.nodes[USER]           # the reviewer's probe pays from the same wallet (its change is listed too)
+        opret = [o for o in cancel_ctx['vout'] if o['scriptPubKey']['hex'].startswith('6a')][0]['scriptPubKey']['hex']
+        coin = sorted([c for c in payer.listunspent(1, 9999999) if Decimal(c['amount']) >= Decimal('1.5')
+                       and c['scriptPubKey'].startswith('76a914')], key=lambda c: c['amount'])[0]
+        victim = user.getnewaddress()
+        dummy = payer.getnewaddress()
+        raw = payer.createrawtransaction([{'txid': coin['txid'], 'vout': coin['vout']}],
+                                         {victim: Decimal('1'), dummy: Decimal('0.00012345'),
+                                          payer.getnewaddress(): Decimal(coin['amount']) - Decimal('1.001')})
+        dspk = [o for o in payer.decoderawtransaction(raw)['vout'] if o['valueZat'] == 12345][0]['scriptPubKey']['hex']
+        old = '3930000000000000' + '19' + dspk
+        assert raw.count(old) == 1 and len(opret) // 2 < 0xfd
+        raw = raw.replace(old, '0000000000000000' + ('%02x' % (len(opret) // 2)) + opret)
+        dec = payer.decoderawtransaction(raw)
+        vn = [o['n'] for o in dec['vout'] if victim in o['scriptPubKey'].get('addresses', [])][0]
+        g = payer.sendrawtransaction(payer.signrawtransaction(raw)['hex'])
+        grief = (g, vn)
+        self.sync_all()
+        self.wait_locked(user, [grief], 'the unconfirmed copied-payload payment (conservative until judged)')
+        self.mine(POOLS[0])
+        self.sync_all()
+        try:
+            info = user.yed_gettxinfo(g)
+        except JSONRPCException as e:
+            info = e.error['message']
+        print('  yed_gettxinfo after its block: %s' % (info,))
+        for _ in range(60):                           # ReleaseJudgedUntouched runs on the wallet's completion thread
+            if grief not in self.locked(user):
+                break
+            time.sleep(0.5)
+        assert grief not in self.locked(user), 'the judged, untouched payment %s is still locked' % op_key(grief)
+        print('  released once judged; after a restart a send that needs it spends it')
+        self.restart(USER)
+        user = self.nodes[USER]
+        assert grief not in self.locked(user)
+        plain = sorted([c for c in user.listunspent(1, 9999999) if Decimal(c['amount']) >= Decimal('1')
+                        and c['scriptPubKey'].startswith('76a914') and (c['txid'], c['vout']) != grief],
+                       key=lambda c: c['amount'])[0]
+        self.isolate(user, [grief, (plain['txid'], plain['vout'])])
+        want = Decimal(plain['amount']) + Decimal('0.5')
+        sent = user.sendtoaddress(user.getnewaddress(), want)
+        spent = [(i['txid'], i['vout']) for i in user.getrawtransaction(sent, 1)['vin']]
+        assert grief in spent, (grief, spent)
+        self.unlock_all(user)
+        self.sync_all()
+        self.mine(POOLS[0])
+        self.sync_all()
+
     def check_row(self, node, what, o, addr, ecc):
         """Every coin-selecting send against output `o` at `addr`, with a 1 YEC plain coin beside it there."""
         plain = [c for c in node.listunspent(0, 9999999, [addr]) if c['amount'] == Decimal('1')]
@@ -207,7 +288,7 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
             msg = self.refused(node, fn)
             print('  %s: %s' % (name, msg))
             if ecc:      # LOW-4: the stock refusal says why getbalance and listunspent count more
-                assert 'Insufficient funds' in msg and op_key(o) in msg and 'carry YED' in msg, msg
+                assert 'Insufficient funds' in msg and op_key(o) in msg and 'may carry YED' in msg, msg
             self.assert_unspent(node, o, name)
         msg = self.refused(node, lambda: z_sendmany_opid(node, addr, [(to, Decimal('1'))]), True)
         print('  z_sendmany from the address: %s' % msg)
@@ -301,6 +382,9 @@ class WalletYedOutputGuardTest(base.YellowbackCancelLimitTest):
             if len(locked) >= 2:
                 break
             time.sleep(0.5)
+        print('live, unconfirmed: sendrawtransaction without allowyedburn refuses a raw spend of an assignment (MEDIUM-2)')
+        msg = self.raw_spend_refused(user, locked[0])
+        assert ('%s:%d (not judged yet)' % locked[0]) in msg and 'cents of YED would be destroyed' in msg, msg
         self.sync_all()
         self.mine(POOLS[0])
         assigned = [a['vout'] for a in user.yed_gettxinfo(t)['assigned']]

@@ -34,14 +34,27 @@ the index records, so each non-zero output at index 1 or above that is the first
 cancel's own YEC change is treated as YED too). The same list pre-locks this wallet's outputs of a transaction the index
 has not judged yet where Yellowback is live (the claim cancel's refund was missing from it: an unconfirmed refund could
 be spent). The stock sends leave such an output out and, short of funds, say so: `Insufficient funds; this wallet also
-holds <n> output(s) that carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[, …] (its
-YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)`; the others refuse with `refusing
-to spend an output that carries YED as plain YEC while Yellowback is not live: <txid>:<n>[, …] (its YED would burn; to
-destroy it deliberately, name the outpoint in a raw transaction)`. Such an output is spent deliberately by a raw
-transaction, or `fundrawtransaction`, that names it. Because the check reads only the transaction, it is conservative:
-an output a payload names that the index would not have given YED (an invalid or over-assigned transfer, a payment
-from a third party in a transaction that carries a decodable payload) and a claim cancel's YEC change are also kept
-out of the coin-selecting sends where Yellowback is not live; they are spent the same deliberate way.
+holds <n> output(s) that may carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[, …]
+(its transaction's payload may give it YED, which would burn; to spend it deliberately, name the outpoint in a raw
+transaction)`; the others refuse with `refusing to spend an output that may carry YED as plain YEC while Yellowback is
+not live: <txid>:<n>[, …] (its transaction's payload may give it YED, which would burn; to spend it deliberately, name
+the outpoint in a raw transaction)`. Because the check reads only the transaction, it is conservative: an output a
+payload names that the index would not have given YED (an invalid or over-assigned transfer, a payment from a third
+party in a transaction that carries a copied payload, a claim cancel's YEC change) is kept out of every coin-selecting
+send for good where Yellowback is not live (there is no index to judge it); such an output is spent by a raw
+transaction, or `fundrawtransaction`, that names it. Where Yellowback is live the same reading applies only until the
+index judges the transaction (unconfirmed, its block above the index tip, a disconnected block, any transaction while
+the index is unhealthy): those outputs are pre-locked and refused with `refusing to spend an output that may carry YED
+as plain YEC before the Yellowback index judges its transaction: <txid>:<n>[, …] (…)`. Once the index has applied the
+transaction's block, its own records decide: an output it gave YED stays locked, and every other output is released and
+spendable, including the outputs of a transaction that carries a payload but touched no Yellowback state (before, such a
+payment stayed locked, and after a restart a send that selected it was refused). `sendrawtransaction` without
+`allowyedburn` reads the same way: besides this wallet's YED tokens it now counts an output of this wallet that the
+index has not judged and whose transaction's payload may give it YED (before, an unconfirmed incoming YED output could
+be burned by a raw transaction with no flag); when the amount is unknown (a claim cancel's refund before its block is
+judged) it refuses with `yed-burn-refused: this transaction spends output(s) of this wallet whose transaction the
+Yellowback index has not judged yet and whose payload may give them YED (<outpoints>); whatever YED they carry would be
+destroyed. Pass allowyedburn = true to send it anyway.`
 
 `vault_send` and `set_sendact` refuse a coin named by `allowinputs` that is a Yellowback outpoint (a YED token,
 vault or carrier of this wallet), with the Yellowback refusal; a deliberate burn goes through

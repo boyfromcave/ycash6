@@ -279,8 +279,9 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
                 token_unspent()
 
             print('  z_sendmany from the address: refused, naming the token')
-            refusal = ('refusing to spend an output that carries YED as plain YEC while Yellowback is not live: %s:%d '
-                       '(its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)'
+            refusal = ('refusing to spend an output that may carry YED as plain YEC while Yellowback is not live: %s:%d '
+                       '(its transaction\'s payload may give it YED, which would burn; to spend it deliberately, name the '
+                       'outpoint in a raw transaction)'
                        % (token['txid'], token['vout']))
             try:
                 wait_and_assert_operationid_status(node, z_sendmany_opid(node, taddr, [(to, Decimal('1'))]), 'failed', refusal)
@@ -343,8 +344,9 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
             token = [c for c in coins if c['amount'] == Decimal('0.0001')]
             assert_equal(len(token), 1)
             token = token[0]
-            refusal = ('refusing to spend an output that carries YED as plain YEC while Yellowback is not live: %s:%d '
-                       '(its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)'
+            refusal = ('refusing to spend an output that may carry YED as plain YEC while Yellowback is not live: %s:%d '
+                       '(its transaction\'s payload may give it YED, which would burn; to spend it deliberately, name the '
+                       'outpoint in a raw transaction)'
                        % (token['txid'], token['vout']))
             to = node.getnewaddress()
             # 1 YEC and the fee need the token's 0.0001 too: refused, naming it (before the fix: the YED burned)

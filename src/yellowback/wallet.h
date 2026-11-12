@@ -155,6 +155,12 @@ public:
     void PreLock(const CTransaction& tx);
     /** Stage (iii): reconcile locks against the index after every applied block and at startup. */
     void Reconcile();
+    /**
+     * Stage (iii), the part that needs cs_main (so it runs on the completion thread, which Reconcile wakes): release
+     * each pre-lock whose transaction the index judged (IndexJudged) without a TxLog and that holds no token or vault:
+     * a confirmed transaction that carried a payload but touched no Yellowback state (review 3 MEDIUM-1).
+     */
+    void ReleaseJudgedUntouched();
     /** Outpoints this layer has locked. */
     std::set<COutPoint> Locked() const;
     /** How many (H10: yed_getinfo.lockedOutputs). */
@@ -259,6 +265,7 @@ private:
     std::atomic<bool> stopThread;
     bool wake;
     bool startupSweepDone;
+    std::atomic<bool> releaseCheck{false};    //!< set by Reconcile: ReleaseJudgedUntouched runs on the completion thread
     std::thread thread;
 };
 
@@ -295,12 +302,26 @@ std::string ExpiredRowType(uint8_t payloadType, bool spendsForeignVault);
 std::set<uint32_t> PayloadYedOutputs(const CTransaction& tx);
 
 /**
+ * Has the index judged `wtx`? True when it has a TxLog, or when the block the wallet records for it is in the active
+ * chain at a height h no higher than the index tip and the index's Snapshot(h) names that block. A Snapshot is written
+ * only at the end of a complete, valid evaluation of its block, and every rule that gives an output YED also writes
+ * the transaction's TxLog (handoff WALLET-FOLLOW-6, A.1); so a judged transaction without a TxLog gave no output YED,
+ * and one that is not judged (unconfirmed, its block above the index tip, disconnected or below the start height) is
+ * read by its payload (PayloadYedOutputs). The caller holds cs_main, the wallet's cs_wallet and cs_yellowback, and
+ * the index is healthy.
+ */
+bool IndexJudged(const State& st, const CWalletTx& wtx);
+
+/**
  * H7: does this raw transaction destroy YED that belongs to this wallet? True when it spends a
- * `Tokens` outpoint the wallet owns and carries no payload assigning cents to any output — the
- * state machine then burns those cents. `reason` is filled with a human sentence naming the
- * outpoints and the cents at stake. False without -yellowback, without a wallet, while the index
- * is unhealthy, and for any transaction that spends none of this wallet's YED. Takes
- * cs_yellowback and cs_wallet itself; the caller holds cs_main (sendrawtransaction does).
+ * `Tokens` outpoint the wallet owns, or an output of this wallet that the index has not judged
+ * (IndexJudged) and whose transaction's payload may give it YED (PayloadYedOutputs; every input so
+ * while the index is unhealthy), and its own payload reassigns less than those cents (or their
+ * amount is unknown: a claim cancel's refund before its block is judged) -- the state machine then
+ * burns them. The same rule as YellowbackInputRefusal (review 3 MEDIUM-2). `reason` is filled
+ * with a human sentence naming the outpoints and the cents at stake. False without -yellowback
+ * or without a wallet, and for any transaction that spends none of this wallet's YED. Takes
+ * cs_main, cs_wallet and cs_yellowback itself (in that order).
  */
 bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason);
 

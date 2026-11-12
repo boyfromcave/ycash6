@@ -482,6 +482,14 @@ void YellowbackWallet::CompletionLoop()
             if (Stopping()) return;
         }
         if (Stopping()) return;
+        if (releaseCheck.exchange(false)) {
+            try {
+                ReleaseJudgedUntouched();
+            } catch (const std::exception& e) {
+                LogPrintf("yellowback: releasing judged pre-locks failed: %s\n", e.what());
+            }
+        }
+        if (Stopping()) return;
         if (onIdle) {
             try {
                 onIdle();
@@ -637,6 +645,41 @@ void YellowbackWallet::PreLock(const CTransaction& tx)
     }
 }
 
+bool IndexJudged(const State& st, const CWalletTx& wtx)
+{
+    AssertLockHeld(cs_main);
+    if (st.GetTxLog(wtx.GetHash()).has_value()) return true;
+    if (wtx.hashBlock.IsNull()) return false;
+    BlockMap::const_iterator mi = mapBlockIndex.find(wtx.hashBlock);
+    if (mi == mapBlockIndex.end() || !mi->second || !chainActive.Contains(mi->second)) return false;
+    const int h = mi->second->nHeight;
+    std::optional<TipRecord> tip = st.GetTip();
+    if (!tip.has_value() || h < 0 || h > tip->height) return false;
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)h);
+    return snap.has_value() && snap->blockHash == wtx.hashBlock;
+}
+
+void YellowbackWallet::ReleaseJudgedUntouched()
+{
+    std::vector<COutPoint> release;
+    LOCK2(cs_main, wallet->cs_wallet);       // lock order (N25): cs_main, cs_wallet, then cs_yellowback
+    {
+        LOCK(index->cs_yellowback);
+        if (!index->IsHealthy()) return;
+        State st(index->View());
+        for (const COutPoint& o : ourLocks) {
+            if (st.GetToken(o).has_value() || st.GetVault(o).has_value() || st.GetTxLog(o.hash).has_value()) continue;   // Reconcile's
+            std::map<uint256, CWalletTx>::const_iterator it = wallet->mapWallet.find(o.hash);
+            if (it != wallet->mapWallet.end() && IndexJudged(st, it->second)) release.push_back(o);
+        }
+    }
+    for (COutPoint o : release) {
+        LogPrint("yellowback", "releasing the pre-lock of %s: its transaction is judged and touched no Yellowback state\n", o.ToString());
+        wallet->UnlockCoin(o);
+        ourLocks.erase(o);
+    }
+}
+
 void YellowbackWallet::Reconcile()
 {
     // Collect under cs_yellowback, then act under cs_wallet (B15). Lock order (N25): cs_wallet is
@@ -664,6 +707,9 @@ void YellowbackWallet::Reconcile()
             if (st.GetTxLog(o.hash).has_value()) release.insert(o);
         }
     }
+    // A judged transaction with no TxLog (a payload that touched no Yellowback state, review 3 MEDIUM-1) needs cs_main to
+    // find its block: the completion thread releases it (ReleaseJudgedUntouched), woken with this layer's other work.
+    releaseCheck = true;
     {
         LOCK(wallet->cs_wallet);
         for (COutPoint o : tokensMine) {
@@ -738,21 +784,53 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
     }
 
     int64_t cents = 0;
-    std::string outpoints;
+    std::string outpoints, unknown;
     {
-        LOCK(yw.Wallet()->cs_wallet);           // lock order (N25): cs_wallet before cs_yellowback
+        LOCK2(cs_main, yw.Wallet()->cs_wallet);   // lock order (N25): cs_main, cs_wallet, then cs_yellowback
         LOCK(index->cs_yellowback);
-        if (!index->IsHealthy()) return false;
+        const bool healthy = index->IsHealthy();
         State st(index->View());
         for (const CTxIn& in : tx.vin) {
-            if (fp.has_value() && fp->payload.type == PayloadType::REDEEM && st.GetVault(in.prevout).has_value()) return false;   // a vault spend: MP-1's
-            std::optional<TokenRecord> t = st.GetToken(in.prevout);
-            if (!t.has_value()) continue;
-            if (!yw.IsMineScript(t->scriptPubKey)) continue;
-            cents += t->cents;
-            if (!outpoints.empty()) outpoints += ", ";
-            outpoints += in.prevout.ToString();
+            if (healthy) {
+                if (fp.has_value() && fp->payload.type == PayloadType::REDEEM && st.GetVault(in.prevout).has_value()) return false;   // a vault spend: MP-1's
+                std::optional<TokenRecord> t = st.GetToken(in.prevout);
+                if (t.has_value()) {
+                    if (!yw.IsMineScript(t->scriptPubKey)) continue;
+                    cents += t->cents;
+                    if (!outpoints.empty()) outpoints += ", ";
+                    outpoints += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n));
+                    continue;
+                }
+            }
+            // review 3 MEDIUM-2: an output of this wallet the index has not judged (or any, while it is unhealthy) is read
+            // by its transaction's payload, as YellowbackInputRefusal reads it
+            std::map<uint256, CWalletTx>::const_iterator it = yw.Wallet()->mapWallet.find(in.prevout.hash);
+            if (it == yw.Wallet()->mapWallet.end() || in.prevout.n >= it->second.vout.size()) continue;
+            const CWalletTx& prev = it->second;
+            if (healthy && IndexJudged(st, prev)) continue;
+            if (!PayloadYedOutputs(prev).count(in.prevout.n) || !yw.IsMineScript(prev.vout[in.prevout.n].scriptPubKey)) continue;
+            std::optional<int64_t> stated;
+            std::optional<FoundPayload> pp = FindPayload(prev);
+            if (pp.has_value() && pp->payload.type == PayloadType::MINT && in.prevout.n == 1) stated = (int64_t)pp->payload.cents;
+            if (pp.has_value() && (pp->payload.type == PayloadType::TRANSFER || pp->payload.type == PayloadType::REDEEM)) {
+                for (const Assignment& a : pp->payload.assignments) {
+                    if (a.vout == in.prevout.n) stated = (int64_t)a.cents;
+                }
+            }
+            if (stated.has_value()) {
+                cents += stated.value();
+                if (!outpoints.empty()) outpoints += ", ";
+                outpoints += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n)) + " (not judged yet)";
+            } else {
+                if (!unknown.empty()) unknown += ", ";
+                unknown += (in.prevout.hash.GetHex() + ":" + std::to_string(in.prevout.n));
+            }
         }
+    }
+    if (!unknown.empty()) {
+        reason = strprintf("this transaction spends output(s) of this wallet whose transaction the Yellowback index has not judged yet and"
+                           " whose payload may give them YED (%s); whatever YED they carry would be destroyed.", unknown);
+        return true;
     }
     if (cents <= 0 || assigned >= cents) return false;
     reason = strprintf("this transaction spends %d cents of this wallet's YED (%s) and its payload reassigns %d of them,"

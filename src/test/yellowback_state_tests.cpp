@@ -141,6 +141,37 @@ struct MapSigCache : public SigCache
 };
 
 /** A synthetic chain over a MemoryStateView with the regtest parameters. */
+/**
+ * The wallet's reading of a valid block the module committed (WALLET-FOLLOW-5, -6): every output the module gave YED is
+ * one PayloadYedOutputs counts; every token the block's transactions created belongs to a transaction with a TxLog;
+ * and the block has its Snapshot. The last two are yellowback::IndexJudged's premise: a transaction of a block whose
+ * Snapshot names it and that has no TxLog gave no output YED.
+ */
+void CheckWalletReading(StateView& view, const Params& P, const CBlock& block, const BlockEvaluation& ev, int height, const uint256& hash)
+{
+    State st(view);
+    if (height < P.startHeight) return;      // ignored completely (state.cpp:1899): no record, no Snapshot
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)height);
+    BOOST_CHECK_MESSAGE(snap.has_value() && snap->blockHash == hash, strprintf("block %d has no Snapshot naming it", height));
+    for (const CTransaction& t : block.vtx) {
+        const std::set<uint32_t> listed = PayloadYedOutputs(t);
+        bool logged = false;
+        for (const auto& l : ev.txlogs) {
+            if (l.first != t.GetHash()) continue;
+            logged = true;
+            for (const AssignedOutput& a : l.second.assigned) {
+                BOOST_CHECK_MESSAGE(listed.count(a.outpoint.n), strprintf("%s:%u gets YED (%s) but PayloadYedOutputs omits it",
+                                                                         t.GetHash().GetHex(), a.outpoint.n, l.second.verdict));
+            }
+        }
+        for (uint32_t n = 0; n < t.vout.size(); n++) {
+            if (!st.GetToken(COutPoint(t.GetHash(), n)).has_value()) continue;
+            BOOST_CHECK_MESSAGE(logged && st.GetTxLog(t.GetHash()).has_value(),
+                                strprintf("%s:%u holds a token but its transaction has no TxLog", t.GetHash().GetHex(), n));
+        }
+    }
+}
+
 struct Fixture
 {
     yellowback::Params P;
@@ -324,18 +355,7 @@ struct Fixture
                 continue;
             }
             overlay.Commit();
-            // WALLET-FOLLOW-5: every output the module gives YED is one the wallet's transaction-only list counts
-            // (PayloadYedOutputs, read where Yellowback is not live and for a transaction the index has not judged)
-            for (const CTransaction& t : block.vtx) {
-                const std::set<uint32_t> listed = PayloadYedOutputs(t);
-                for (const auto& l : ev.txlogs) {
-                    if (l.first != t.GetHash()) continue;
-                    for (const AssignedOutput& a : l.second.assigned) {
-                        BOOST_CHECK_MESSAGE(listed.count(a.outpoint.n), strprintf("%s:%u gets YED (%s) but PayloadYedOutputs omits it",
-                                                                                 t.GetHash().GetHex(), a.outpoint.n, l.second.verdict));
-                    }
-                }
-            }
+            CheckWalletReading(view, P, block, ev, height, FakeHash(height));
             undos[height] = ev.undo;
             evals[height] = ev;
             tip = height;
@@ -775,6 +795,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         UndoRecord undo;
         BOOST_REQUIRE(!ApplyBlock(view, P, block, height, hash, b["subsidyZat"].get_int64(), undo).has_value());
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
+        CheckWalletReading(view, P, block, ev, height, hash);
         undos.push_back(undo);
     }
     BOOST_CHECK_EQUAL(invalidBlocks, 22);
@@ -857,6 +878,7 @@ BOOST_AUTO_TEST_CASE(pq_vectors_chain_across_falcon)
         BOOST_CHECK_MESSAGE(!b.exists("invalid") || !b["invalid"].get_bool(), strprintf("block %d should be invalid", height));
         UndoRecord undo;
         BOOST_REQUIRE(!ApplyBlock(view, P, block, height, hash, b["subsidyZat"].get_int64(), undo).has_value());
+        CheckWalletReading(view, P, block, ev, height, hash);
         undos.push_back(undo);
     }
     BOOST_CHECK_EQUAL(invalidBlocks, expected.size());
