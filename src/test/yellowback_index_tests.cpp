@@ -1401,19 +1401,19 @@ BOOST_AUTO_TEST_CASE(sigcache_lru_and_hit_equals_cold)
 {
     // W8 / R3: the LRU holds 16,384 entries and evicts the oldest; a hit and a cold verification
     // agree (cache_hit_equals_cold) through the index's real cache; MP-1's claim-path RED-1 fills it.
-    LruSigCache small(3);
+    LruSigCache smallCache(3);
     std::vector<unsigned char> k(32, 0);
     auto key = [&](int i) { k[0] = (unsigned char)i; return uint256(k); };
-    small.Insert(key(1), true);
-    small.Insert(key(2), false);
-    small.Insert(key(3), true);
-    BOOST_CHECK_EQUAL(small.Size(), 3u);
-    BOOST_CHECK(small.Lookup(key(1)).value());                       // touches 1: 2 is now the oldest
-    small.Insert(key(4), true);
-    BOOST_CHECK(!small.Lookup(key(2)).has_value());
-    BOOST_CHECK(small.Lookup(key(1)).has_value() && small.Lookup(key(3)).has_value() && small.Lookup(key(4)).has_value());
-    BOOST_CHECK_EQUAL(small.Hits(), 4u);
-    BOOST_CHECK_EQUAL(small.Misses(), 1u);
+    smallCache.Insert(key(1), true);
+    smallCache.Insert(key(2), false);
+    smallCache.Insert(key(3), true);
+    BOOST_CHECK_EQUAL(smallCache.Size(), 3u);
+    BOOST_CHECK(smallCache.Lookup(key(1)).value());                       // touches 1: 2 is now the oldest
+    smallCache.Insert(key(4), true);
+    BOOST_CHECK(!smallCache.Lookup(key(2)).has_value());
+    BOOST_CHECK(smallCache.Lookup(key(1)).has_value() && smallCache.Lookup(key(3)).has_value() && smallCache.Lookup(key(4)).has_value());
+    BOOST_CHECK_EQUAL(smallCache.Hits(), 4u);
+    BOOST_CHECK_EQUAL(smallCache.Misses(), 1u);
     LruSigCache full;
     BOOST_CHECK_EQUAL(full.Capacity(), (size_t)SIG_CACHE_ENTRIES);
     for (int i = 0; i < (int)SIG_CACHE_ENTRIES + 1; i++) {
