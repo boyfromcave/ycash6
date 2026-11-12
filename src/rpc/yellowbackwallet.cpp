@@ -427,12 +427,36 @@ void CommitCarrier(YellowbackWallet& yw, const BuiltTx& built, CReserveKey& rese
     }
 }
 
+/** Beta2 list item 21c: the Sapling notes a Sapling-shaped build spends (BuiltTx::saplingNotes), locked in the wallet
+ *  (CWallet::LockNote, as the z_* operations and vault_lock "from" do) from selection until this call commits or fails:
+ *  the proofs run with no lock held, and a concurrent yed_mint or z_sendmany must not select the same notes meanwhile.
+ *  Released on every path. */
+struct HeldNotes
+{
+    std::vector<SaplingOutPoint> ops;
+    void Hold(const BuiltTx& built)
+    {
+        AssertLockHeld(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : built.saplingNotes) {
+            pwalletMain->LockNote(op);
+            ops.push_back(op);
+        }
+    }
+    ~HeldNotes()
+    {
+        if (ops.empty()) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : ops) pwalletMain->UnlockNote(op);
+    }
+};
+
 /** The carrier step: build, (prove,) persist the carrier record, then commit; returns its record. */
 CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>& bundle, int refHeight,
                           const std::vector<unsigned char>& selector, const std::string& from)
 {
     YellowbackIndex& index = *yw.Index();
     CReserveKey reservekey(pwalletMain);
+    HeldNotes held;
     BuiltTx built;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -442,6 +466,7 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
         EnsureHealthy(index);
         try {
             built = BuildCarrier(yw, bundle, refHeight, selector, reservekey, from);
+            held.Hold(built);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
@@ -539,6 +564,7 @@ void PushPendingCommon(UniValue& o, const CarrierRecord& c, bool pending)
 UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::string& from, const CarrierRecord& carrier, CAmount maxCollateralZat)
 {
     YellowbackIndex& index = *yw.Index();
+    HeldNotes held;
     BuiltTx built;
     CReserveKey reservekey(pwalletMain);
     uint256 txid;
@@ -551,6 +577,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
             EnsureHealthy(index);
             try {
                 built = BuildMint(yw, cents, lockBlocks, reservekey, from, carrier, maxCollateralZat);
+                held.Hold(built);
             } catch (const std::runtime_error& e) {
                 ThrowBuildError(e);
             }

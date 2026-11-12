@@ -13,6 +13,9 @@ Wallet follow-ups found during beta2 (wt list items 21, 41, 44), one case each:
 - vault_funding (list item 21b): the vault RPCs' default funding (Fund) (i) never selects a coinbase output where
   coinbase must be shielded (refused up front, naming z_shieldcoinbase), (ii) prices the fee from the size, never
   below 10,000 zat, (iii) releases the coins it locked when the broadcast is refused.
+- note_locks (list item 21c): a yed_mint funded from a Sapling address locks the notes it selected while its proofs
+  run with no lock held, so a z_sendmany from the same address meanwhile is refused for want of notes (it used to
+  select the same note, and one of the two failed late).
 
 Node 0 runs on a fresh wallet file (no coinbase of its own); node 1 mines and pays. The keys ahead of node 0's
 lookahead are issued by a copy of node 0's wallet taken before any post-quantum key was issued (same HD seed).
@@ -24,6 +27,8 @@ One file on both C++ lines (ycash-dd: BITCOIND=, ycash6: ZCASHD=).
 
 import os
 import shutil
+import threading
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -32,12 +37,17 @@ from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
     connect_nodes_bi,
+    get_rpc_proxy,
     nuparams,
+    rpc_url,
     start_node,
     start_nodes,
     stop_node,
     sync_blocks,
+    sync_mempools,
+    z_sendmany_wait,
 )
+from test_framework.yellowback_util import MIN_MINT, activate_yed_late
 
 ACTIVATION = 210
 PQ_KEY_LOOKAHEAD = 20      # src/wallet/wallet.h
@@ -67,7 +77,7 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         a = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-pqfalcon=1']
         if i == 0:
             a += ['-wallet=%s' % wallet, '-exportdir=%s' % os.path.join(self.options.tmpdir, 'export0')]
-        return a + list(extra)
+        return a + getattr(self, 'yed_args', {}).get(i, []) + list(extra)
 
     def restart(self, i, wallet='followups.dat', extra=()):
         stop_node(self.nodes[i], i)
@@ -192,10 +202,51 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         self.mine()
         self.restart(0)
 
+    # ---- item 3: yed_mint holds its Sapling notes ----------------------------------------------------------------
+
+    def note_locks(self):
+        print('note_locks: Yellowback live; a yed_mint from a Sapling address and a z_sendmany from it at the same time')
+        self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 1)   # set_create (the attestor set) funds from node 0
+        self.mine()
+        activate_yed_late(self, [1], ((0, 1),))
+        n0, n1 = self.nodes
+        taddr, z = n0.getnewaddress(), n0.z_getnewaddress('sapling')
+        n1.sendtoaddress(taddr, 21)
+        self.mine()
+        z_sendmany_wait(n0, taddr, [{'address': z, 'amount': 20}])   # one note of 20 YEC
+        self.mine()
+        result = {}
+
+        def mint():
+            try:
+                rpc = get_rpc_proxy(rpc_url(0), 0, timeout=600)
+                result['mint'] = rpc.yed_mint(MIN_MINT, 48, z, '', False)
+            except Exception as e:
+                result['error'] = e
+
+        t = threading.Thread(target=mint)
+        t.start()
+        time.sleep(0.3)
+        assert t.is_alive(), 'yed_mint returned before the second call: %r' % result   # still proving
+        err = None
+        try:
+            z_sendmany_wait(n0, z, [{'address': taddr, 'amount': 1}])
+        except (JSONRPCException, AssertionError) as e:
+            err = e.error['message'] if isinstance(e, JSONRPCException) else str(e)
+        t.join()
+        assert 'error' not in result, result
+        assert_equal(result['mint']['pending'], True)
+        assert err is not None and 'nsufficient' in err, err   # the note was held by yed_mint, not selected twice
+        sync_mempools(self.nodes)
+        assert result['mint']['carrierTxid'] in n1.getrawmempool()
+        self.mine(2)                                  # the carrier, then the MINT the wallet commits on it
+        self.mine()
+
     def run_test(self):
         self.mine(ACTIVATION - self.nodes[0].getblockcount())
         self.topup_balance()
         self.vault_funding()
+        self.note_locks()
 
 
 if __name__ == '__main__':

@@ -50,8 +50,8 @@ src/yellowback/policy.cpp 71796abe703b38f8d92526f87d4ab18e3e4307162f2312a9260460
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp 0027ac3127d61d6db80dbfcd5a5f20a7bb1b7558d64a3131023d0c94b2795187 17e24ed8365c291b8ccbf6464582335f763992a9673a175b85ab1f4b3682619f
-src/yellowback/txbuilder.h d79a3f2d14359b4015f6dfaf3e894d73155ac6cfbe3badcc5a00693677bcdba4 286ddf4962109d0198705eadae1fcf35f00ae71bc62b7e125391c39695bd0956
+src/yellowback/txbuilder.cpp df06c14c74c41642165b4a461a5758778a4a3d7709a122848525aa6c8d0b235c f29e73e25ce1d3de27472fb64cf1c7d8d21c109c9f047aff52848258f0e2bea7
+src/yellowback/txbuilder.h 9ece9173f589471a26074b2aa8cf84ee8446b4c571f4e0f9a457d39879841247 9431bb4c9f985d179a9795f9dc9dc2be144072881d64570161a37ca41356f418
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan erases through CWallet::EraseUnbroadcastTx.

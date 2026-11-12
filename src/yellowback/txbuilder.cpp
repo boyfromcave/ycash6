@@ -1550,6 +1550,7 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
             probe.vout.push_back(carrierOut);
             if (!ctx.Reprice(NetworkFee(probe, notes.size(), 1))) break;
         } while (true);
+        for (const SaplingNoteEntry& e : notes) out.saplingNotes.push_back(e.op);   // locked by the caller (list item 21c)
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
         for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
         b.AddTransparentOutput(carrierOut.scriptPubKey, carrierOut.nValue);
@@ -1671,6 +1672,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
             probe.vout = vout;
             if (!ctx.Reprice(ctx.FeeOf(probe, {}, 0, &carrier, 0, notes.size(), 1))) break;
         } while (true);
+        for (const SaplingNoteEntry& e : notes) out.saplingNotes.push_back(e.op);   // locked by the caller (list item 21c)
         TransactionBuilder& b = ctx.NewBuilder(out.builder, expiry, anchor);
         for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk, notes[i].note, witnesses[i]);
         b.AddTransparentInputUnsigned(carrier.outpoint, ctx.SpentScript(carrier.outpoint, CarrierOutput(carrier.pk, carrier.bundle, CARRIER_VALUE).scriptPubKey), CARRIER_VALUE);
