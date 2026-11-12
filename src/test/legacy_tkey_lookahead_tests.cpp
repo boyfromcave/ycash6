@@ -104,6 +104,24 @@ void NewSeededWallet(CWallet& w)
     w.TopUpLegacyTKeys();
 }
 
+/** Each case gets its own mock wallet database environment. An environment another suite left initialised (the
+ *  process is shared) is flushed and reset first, as the gtest LoadGlobalWallet does, and this case's is reset in
+ *  the destructor, so a failed requirement does not leave it initialised for the next suite. */
+struct LookaheadDbSetup : public TestingSetup
+{
+    LookaheadDbSetup()
+    {
+        bitdb.Flush(true);
+        bitdb.Reset();
+        bitdb.MakeMock();
+    }
+    ~LookaheadDbSetup()
+    {
+        bitdb.Flush(true);
+        bitdb.Reset();
+    }
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(legacy_tkey_lookahead_tests, BasicTestingSetup)
@@ -141,14 +159,13 @@ BOOST_AUTO_TEST_CASE(key_path_parser)
 
 BOOST_AUTO_TEST_SUITE_END()
 
-BOOST_FIXTURE_TEST_SUITE(legacy_tkey_lookahead_db_tests, TestingSetup)
+BOOST_FIXTURE_TEST_SUITE(legacy_tkey_lookahead_db_tests, LookaheadDbSetup)
 
 BOOST_AUTO_TEST_CASE(held_key_write_failure)
 {
     // Review L-a: a mark writes the held keys up to the paid one, then the counter. If a key write fails, the counter
     // must not move past that key (after a restart it would be below the counter and not in the file: its coins
     // unseen); the key stays held and the failure is flagged (getwalletinfo lookahead_incomplete).
-    bitdb.MakeMock();
     const std::string file = "legacy_tkey_write_failure_test.dat";
     {
         CWallet w(Params(), file);
@@ -177,13 +194,10 @@ BOOST_AUTO_TEST_CASE(held_key_write_failure)
         BOOST_CHECK_EQUAL(w.nLegacyTKeyIncompleteFrom, 7);
         BOOST_CHECK(w.HaveKey(SeedKey(true, 60)) && w.HaveKey(SeedKey(true, 50)));
     }
-    bitdb.Flush(true);
-    bitdb.Reset();
 }
 
 BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
 {
-    bitdb.MakeMock();
     const std::string file = "legacy_tkey_lookahead_test.dat";
     const uint32_t N = LegacyTKeyLookahead(DEFAULT_KEYPOOL_SIZE);   // 101
     {
@@ -281,8 +295,6 @@ BOOST_AUTO_TEST_CASE(restore_marks_and_keypool)
         BOOST_CHECK_EQUAL(w.mapKeyPoolKeyId.count(nIndex), 0U);
         BOOST_CHECK_EQUAL(w.mapKeyPoolIndex.count(keypool.vchPubKey.GetID()), 0U);
     }
-    bitdb.Flush(true);
-    bitdb.Reset();
 }
 
 BOOST_AUTO_TEST_CASE(stale_counter_after_crash)
@@ -290,7 +302,6 @@ BOOST_AUTO_TEST_CASE(stale_counter_after_crash)
     // Review L-1: a mark writes the keys up to a paid one, then the counter. A crash (or a failed write) between
     // the two leaves keys at and past the counter on disk; getnewaddress and the keypool must skip them as issued
     // (one of them was paid), not hand them out again nor try to write them again (the database refuses it).
-    bitdb.MakeMock();
     const std::string file = "legacy_tkey_stale_counter_test.dat";
     const uint32_t N = LegacyTKeyLookahead(DEFAULT_KEYPOOL_SIZE);   // 101
     uint32_t internalCounter;
@@ -335,8 +346,6 @@ BOOST_AUTO_TEST_CASE(stale_counter_after_crash)
         LOCK(w.cs_wallet);
         BOOST_CHECK_EQUAL(Counter(w, true), 73U);
     }
-    bitdb.Flush(true);
-    bitdb.Reset();
 }
 
 BOOST_AUTO_TEST_CASE(lookahead_key_ids)
@@ -344,7 +353,6 @@ BOOST_AUTO_TEST_CASE(lookahead_key_ids)
     // Review 3 H-1: the wallet stores the KEY IDs of its transparent lookahead in clear (legacytlookahead), never the
     // legacy account's extended public key: no chain code or public key of the account or of a chain is in the record,
     // so a copy of the file plus one leaked key gives no other key, and the file alone no shielding OVK.
-    bitdb.MakeMock();
     const std::string file = "legacy_tkey_key_ids_test.dat";
     const uint32_t N = LegacyTKeyLookahead(DEFAULT_KEYPOOL_SIZE);   // 101
     CLegacyTLookahead stored;
@@ -430,8 +438,6 @@ BOOST_AUTO_TEST_CASE(lookahead_key_ids)
         BOOST_CHECK_EQUAL(w.nLegacyTKeyIncompleteFrom, 9);
         BOOST_CHECK_EQUAL(Counter(w, true), 1U);   // locked, the counter stays (the key is not held)
     }
-    bitdb.Flush(true);
-    bitdb.Reset();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

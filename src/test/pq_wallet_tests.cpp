@@ -715,6 +715,9 @@ BOOST_AUTO_TEST_CASE(pre_d9_address_book_records_rewritten_at_load)
         BOOST_CHECK_EQUAL(w.mapAddressBook[c].name, "fresh");
         BOOST_CHECK_EQUAL(w.mapAddressBook.count(CNoDestination()), 0U);
     }
+    // reset the mock environment, as wallet_derivation_and_walletdb does: left initialised, a later MakeMock throws
+    bitdb.Flush(true);
+    bitdb.Reset();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
