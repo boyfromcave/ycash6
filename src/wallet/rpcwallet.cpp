@@ -1496,6 +1496,9 @@ UniValue getbalance(const UniValue& params, bool fHelp)
             "3. includeWatchonly (bool, optional, default=false) Also include balance in watchonly addresses (see 'importaddress')\n"
             "4. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
             "5. " + asOfHeightMessage(true) +
+            "\nWith asOfHeight this call reads each transaction's cached credit, which ignores the height (an upstream\n"
+            "defect, unchanged here), so a coin spent after asOfHeight is not counted; getwalletinfo asOfHeight counts\n"
+            "afresh at that height and can differ: use it for a balance at a past height.\n"
             "\nResult:\n"
             "amount              (numeric) The total amount in " + CURRENCY_UNIT + "(or " + MINOR_CURRENCY_UNIT + " if inZat is true) received.\n"
             "\nBitcoin compatibility:\n"
@@ -3312,6 +3315,8 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "Returns wallet state information.\n"
             "\nArguments:\n"
             "1. " + asOfHeightMessage(false) +
+            "\nWith asOfHeight the balance fields are counted afresh at that height; getbalance with asOfHeight reads a\n"
+            "cache that ignores the height (an upstream defect) and can differ.\n"
             "\nResult:\n"
             "{\n"
             "  \"walletversion\": xxxxx,     (numeric) the wallet version\n"
