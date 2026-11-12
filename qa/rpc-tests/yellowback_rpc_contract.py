@@ -200,7 +200,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 8)   # the fee structure (D-Q-23/24/25)
+        assert_equal(c.doc['rpcversion'], 9)   # 9: D-9 PQ address versions per scheme; 8: the fee structure (D-Q-23/24/25)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])

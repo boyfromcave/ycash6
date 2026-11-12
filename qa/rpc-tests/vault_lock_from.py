@@ -20,8 +20,8 @@ vault_lock's funding address "from" (beta2 address-interop plan, decision D-3; d
 - change below dust joins the fee; a PQ source whose coins would cross the input caps (400 coins / 75,000 bytes) is
   refused with its coins left unlocked and a smaller lock from it then works; a three-note Sapling lock and the
   20-note limit;
-- refusals: not a string, not an address, a Yellowback yr… address, another wallet's address, watch-only transparent
-  and Sapling addresses, a scheme-2 address before Falcon, empty transparent / PQ / Sapling addresses, a coinbase-only
+- refusals: not a string, not an address, a wallet PQ key in its pre-D-9 text (D-9), a Yellowback yr… address,
+  another wallet's address, watch-only transparent and Sapling addresses, a scheme-2 address before Falcon, empty transparent / PQ / Sapling addresses, a coinbase-only
   address where coinbase must be shielded (-regtestshieldcoinbase), a locked wallet (P2PKH and Sapling "from");
 - the default (no "from") is unchanged: funded from transparent P2PKH coins with change to a new address.
 
@@ -50,6 +50,7 @@ from test_framework.util import (
     sync_mempools,
     wait_and_assert_operationid_status,
 )
+from test_framework.pq_address import decode_pq_address, encode_legacy_pq_address
 from test_framework.yellowback_util import activate_yed_late, conventional_fee, mint_to_fresh_holder
 
 ACTIVATION = 205
@@ -209,7 +210,12 @@ class VaultLockFromTest(BitcoinTestFramework):
                           n0.vault_lock, self.params(1, falcon_imported))
         empty = n0.getnewaddress()
         assert_raises_rpc(-6, 'insufficient confirmed funds at %s: need 1.0001 more' % empty, n0.vault_lock, self.params(1, empty))
-        assert_raises_rpc(-6, 'insufficient confirmed funds at', n0.vault_lock, self.params(1, n0.getnewaddress('', 'pqslh')))
+        slh_empty = n0.getnewaddress('', 'pqslh')
+        assert_raises_rpc(-6, 'insufficient confirmed funds at', n0.vault_lock, self.params(1, slh_empty))
+        # D-9 clean cut: the same wallet key in its pre-D-9 text is not an address of this network
+        _, _, scheme, keyhash = decode_pq_address(slh_empty)
+        assert_raises_rpc(-5, 'bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network',
+                          n0.vault_lock, self.params(1, encode_legacy_pq_address(scheme, keyhash)))
         empty_z = n0.z_getnewaddress('sapling')
         assert_raises_rpc(-6, 'insufficient-yec: need 1.0001, have 0.00 in confirmed Sapling notes at %s' % empty_z,
                           n0.vault_lock, self.params(1, empty_z))

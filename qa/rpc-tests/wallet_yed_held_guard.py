@@ -25,6 +25,7 @@ from test_framework.util import (assert_equal, assert_start_raises_init_error, b
                                  initialize_datadir, start_node, stop_node,
                                  wait_and_assert_operationid_status, z_sendmany_opid)
 from test_framework import yellowback_model as ym
+from test_framework.pq_address import decode_pq_address, encode_pq_address
 from test_framework.yellowback_attest import wallet_mint
 from test_framework.yellowback_util import (
     POOLS,
@@ -57,13 +58,16 @@ def unlocked(node):
 
 
 def yed_form(node, plain):
-    """The YED form of one of node's plain-YEC addresses: the version bytes of a YED address of the same
-    kind (t… -> p2pkh, rq… -> pq), the rest of the plain address unchanged."""
+    """The YED form of one of node's plain-YEC addresses. P2PKH: the version bytes of a YED P2PKH address,
+    the key hash unchanged. Post-quantum (D-9): the same scheme and key hash under the YED version of that
+    scheme (test_framework/pq_address.py, from the shared vectors)."""
+    pq = decode_pq_address(plain)
+    if pq is not None:
+        network, _, scheme, keyhash = pq
+        return encode_pq_address(scheme, keyhash, network, 'yed')
     raw = ym.base58check_decode(plain)
-    if len(raw) == 22:                       # P2PKH: 2 version bytes + the key hash
-        version = ym.base58check_decode(node.yed_getnewaddress('p2pkh'))[:-20]
-    else:                                    # post-quantum: 2 version bytes + scheme + the key id
-        version = ym.base58check_decode(node.yed_getnewaddress('pq'))[:2]
+    assert len(raw) == 22, plain             # P2PKH: 2 version bytes + the key hash
+    version = ym.base58check_decode(node.yed_getnewaddress('p2pkh'))[:-20]
     return ym.base58check_encode(version + raw[len(version):])
 
 

@@ -132,7 +132,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         print('yed_getinfo rpcversion 8: params.fees, maxMintCents, supplyCap')
         info = user.yed_getinfo()
         params = info['params']
-        assert_equal(info['rpcversion'], 8)
+        assert_equal(info['rpcversion'], 9)   # 9: D-9 (additive here); 8 brought the fee structure
         assert 'feeMinZat' not in params and 'feeBps' not in params
         assert_equal(params['maxMintCents'], MAX_MINT)
         fees = params['fees']

@@ -28,7 +28,8 @@ checks live answers against it. Edit this document, then regenerate.
 - **Owners**: a vault's owner is a post-quantum key (docs/plans/yellowback-quantum-plan.md §4.3),
   named by its `pqkeyid` (`scheme || SHA256(scheme || pk)`, scheme 1 SLH-DSA-SHA2-128s or 2
   FN-DSA-512) or, as a parameter, by its PQ Yellowback address (`yb…`/`yt…`/`yr…`, 53
-  characters) or its plain-YEC PQ address (`sq…`/`tq…`/`rq…`, 53 characters, D-Q-20). The node
+  characters) or its plain-YEC PQ address (`sq…`/`tq…`/`rq…`, 53 characters, D-Q-20; the third character
+  names the scheme, D-9: `sqf…`/`ybf…` FN-DSA-512, `sqs…`/`ybs…` SLH-DSA-SHA2-128s). The node
   wallet holds post-quantum keys (`vault_getnewowner`, `getnewaddress "" "pq"`, or one imported
   with `z_importpqkey`) and signs owner spends; an external owner is named explicitly.
 - **Addresses**: every `address` parameter (recipients, `vault_release`, `vault_ownerspend`) takes
@@ -323,7 +324,7 @@ with change to a new wallet address. With it:
 | `from` | spends | fee | change |
 |---|---|---|---|
 | a transparent P2PKH address (`s1…`/`t…`) | that address's confirmed, unlocked coins, largest first | from the signed size: max(10,000 zat, the relay fee, the ZIP-317 conventional fee) | back to the same address (from 1,000 zat; less joins the fee) |
-| a plain-YEC post-quantum address (`TX_PQPKH`, scheme 1 SLH-DSA or 2 FN-DSA-512) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `z_sendmany` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
+| a plain-YEC post-quantum address (`TX_PQPKH`; `sqs…`/`tqs…`/`rqs…` scheme 1 SLH-DSA, `sqf…`/`tqf…`/`rqf…` scheme 2 FN-DSA-512, D-9) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `z_sendmany` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
 | a Sapling address (`ys1…`) | that address's confirmed notes (minimum 1 confirmation), largest first, at most 20 (the `yed_mint` selection) | max(10,000 zat, the ZIP-317 conventional fee of the shape) | a Sapling note to the same address |
 
 The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A transparent or PQ
