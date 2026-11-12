@@ -749,6 +749,9 @@ void SchedulePending(YellowbackWallet& yw, const CarrierRecord& carrier, std::fu
 
 } // namespace
 
+// beta2 item 32 (review L-1): yed_getnewaddress issues no holder key when the "yedheld" marker cannot be written
+static const char* const YED_HELD_WRITE_FAILED = "Could not record in the wallet that it has held YED; no address was issued";
+
 UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 2)
@@ -773,6 +776,8 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
         // its plain-YEC form (sq…, D-Q-20), as a P2PKH holder does, so the YEC its token outputs carry is not taken
         // for change; an owner key ("pqowner") receives no coins and stays out of it.
         EnsureWalletIsUnlocked();
+        // beta2 item 32: the marker is written before a holder key is drawn, so no key leaves without it
+        if (type == "pq" && !pwalletMain->MarkYedHeld()) throw JSONRPCError(RPC_WALLET_ERROR, YED_HELD_WRITE_FAILED);
         const uint8_t scheme = type == "pq" && falcon ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
         CPQKeyID id;
         if (!pwalletMain->GetNewPQKey(scheme, id)) throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
@@ -782,6 +787,8 @@ UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
     if (type != "p2pkh") throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqowner\"");
     // 6.20.0: no keypool draw; a fresh HD key, exactly as stock getnewaddress (needs an unlocked wallet).
     EnsureWalletIsUnlocked();
+    // beta2 item 32: the marker is written before a holder key is drawn, so no key leaves without it
+    if (!pwalletMain->MarkYedHeld()) throw JSONRPCError(RPC_WALLET_ERROR, YED_HELD_WRITE_FAILED);
     CPubKey key = pwalletMain->GenerateNewKey(true);
     pwalletMain->SetAddressBook(key.GetID(), label, YED_RECEIVE_PURPOSE);
     return EncodeAddress(key.GetID(), yw.Index()->GetParams());
