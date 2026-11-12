@@ -266,12 +266,12 @@ jobs:
           version: v1.7.1
       - name: protoc (YEW's build)
         if: matrix.leg == 'yew'
-        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+        run: qa/yellowback-ci-apt.sh protobuf-compiler
       - name: Qt's build tools and libraries (YecWallet)
         if: matrix.leg == 'yecwallet'
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q build-essential cmake ninja-build pkg-config libssl-dev \
+          qa/yellowback-ci-apt.sh build-essential cmake ninja-build pkg-config libssl-dev \
             libgl1-mesa-dev libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 libdbus-1-3 \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
       - uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1

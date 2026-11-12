@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2019-2024 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -40,6 +41,9 @@ class WalletChangeAddressesTest(BitcoinTestFramework):
 
     def run_test(self):
         self.nodes[0].generate(110)
+        # Ycash 6.20.0: the wallet catches up with new blocks asynchronously; wait for every listener
+        # to be notified before reading the coinbase outputs (listunspent was empty right after generate).
+        self.sync_all()
 
         # Obtain some transparent funds
         midAddr = self.nodes[0].z_getnewaddress('sapling')
@@ -90,10 +94,10 @@ class WalletChangeAddressesTest(BitcoinTestFramework):
 
         print()
         print('Checking z_sendmany(taddr->Sapling)')
-        check_change_taddr_reuse(saplingAddr, conventional_fee(3), 'AllowFullyTransparent')
+        check_change_taddr_reuse(saplingAddr, None, 'AllowFullyTransparent')  # Ycash: the node's conventional fee
         print()
         print('Checking z_sendmany(taddr->taddr)')
-        check_change_taddr_reuse(taddr, conventional_fee(1), 'AllowFullyTransparent')
+        check_change_taddr_reuse(taddr, None, 'AllowFullyTransparent')
 
 if __name__ == '__main__':
     WalletChangeAddressesTest().main()

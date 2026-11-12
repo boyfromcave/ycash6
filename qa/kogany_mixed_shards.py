@@ -26,7 +26,10 @@ The `sidecar` group (kogany plan W9-a) is not a sixth shard of the mixed suite b
 for scripts already in one: the wallet-needing scripts, run with KOGANY_SIDECAR=1 (every node a
 kogany plus a ycashd -connect'ed to it, test_framework/kogany.py "The ycash6 test rig"). A sidecar
 script must also be in exactly one mixed group; `--of GROUP` runs the sidecar scripts of that mixed
-group only (the nightly runs one job per mixed group).
+group only (the nightly runs one job per mixed group). Once the sidecar group has entries, every
+non-direct mixed-group script is either in it or named by an `excluded:sidecar <script> <reason>` row
+(a script that calls no wallet RPC), so a new functional script cannot silently miss the rig and no
+count has to be kept anywhere.
 
 The `pair` group (kogany plan S5, column 3 of the W9 matrix) is the third mode for the same
 wallet-needing scripts: every node kogany + yewd, no ycashd behind any node (YEWD_BIN with
@@ -88,8 +91,8 @@ def parse(text):
         f = line.split()
         if f[0].startswith('excluded:'):
             mode = f[0].split(':', 1)[1]
-            if mode != PAIR:
-                errors.append('line %d: %s: only excluded:%s is known' % (n, f[0], PAIR))
+            if mode not in SECOND_MODES:
+                errors.append('line %d: %s: only %s are known' % (n, f[0], ', '.join('excluded:' + m for m in SECOND_MODES)))
             elif len(f) < 3:
                 errors.append('line %d: %s needs a script and a reason' % (n, f[0]))
             else:
@@ -184,6 +187,18 @@ def check(entries, excluded, yellowback_scripts, known, exists):
         for s in mode:
             if s not in seen:
                 problems.append('%s is in %s but in no mixed group' % (s, g))
+    # the sidecar group is every non-direct mixed-group script less its excluded:sidecar rows
+    no_side = mode_excluded(excluded, SIDECAR)
+    for s in no_side:
+        if s in second[SIDECAR]:
+            problems.append('%s is both in %s and excluded:%s' % (s, SIDECAR, SIDECAR))
+        if s not in seen:
+            problems.append('%s is excluded:%s but in no mixed group' % (s, SIDECAR))
+    if second[SIDECAR]:
+        for e in entries:
+            if e.group in MIXED_GROUPS and not e.direct and e.script not in second[SIDECAR] and e.script not in no_side:
+                problems.append('%s is in mixed group %s but neither in %s nor excluded:%s (no wallet RPC)'
+                                % (e.script, e.group, SIDECAR, SIDECAR))
     # the pair group is the sidecar group less its excluded:pair rows
     out = mode_excluded(excluded, PAIR)
     for s in out:
