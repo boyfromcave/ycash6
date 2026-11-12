@@ -225,9 +225,9 @@ only acknowledges a leftover index or a wallet that has held YED.
   checked before its carrier is broadcast; nothing was sent: need …, have …`. It used to broadcast
   the carrier and fail at the MINT. `yed_mint` and its carrier lock the Sapling notes they spend
   until they commit or fail.
-- `vault_lock "from"`: `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2)
-  address cannot be spent before Falcon is active at the next block` now answer -5
-  (`RPC_INVALID_ADDRESS_OR_KEY`), as `z_sendmany` does (were -4 and -8).
+- `vault_lock "from"` (new in beta2): `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2)
+  address cannot be spent before Falcon is active at the next block` answer -5
+  (`RPC_INVALID_ADDRESS_OR_KEY`), as `z_sendmany` does.
 - `getbalance … asOfHeight` counts each transaction at that height and no longer reads or writes
   the per-transaction credit cache. Before, a later plain `getbalance` could count a coin spent
   since that height.
@@ -309,7 +309,6 @@ Behaviour changes for existing callers
 | `yed_getinfo` | `rpcversion` 8; `pqAddressVersion` a hex string | `rpcversion` 9; objects keyed by scheme |
 | `sendtoaddress`, `sendmany`, `sendfrom`, `fundrawtransaction` | could select post-quantum coins | ECC coins only; refused when only post-quantum coins would cover the amount |
 | `z_validateaddress <post-quantum address>` | `isvalid: false` | valid, `address_type` `"pq"` |
-| `vault_lock "from"` foreign / FN-DSA-before-Falcon | -4 / -8 | -5 |
 | a coin spent by an accepted `vault_*`/`set_*` transaction | locked until restart | spent while the transaction lives; spendable again if it drops |
 | `sendrawtransaction` spending an unjudged YED-payload output of this wallet | sent (YED burned) | `yed-burn-refused` without `allowyedburn`, also while the index is unhealthy |
 
